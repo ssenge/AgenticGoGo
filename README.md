@@ -252,15 +252,7 @@ agg send stop "done for today" # graceful stop at the next boundary
 Inner workers run in your project, so your other Claude Code plugins and MCP servers — engram,
 get-shit-done, graphify — **just work** alongside `agg`. Use them to plan; use `agg` to finish.
 
-## Status
-
-**Working today:** the loop, all three goal types + regression/invariants, script **and** LLM
-judges, the stop-condition language with budget/wall-time guards, progress summaries, the
-watchdog + heartbeat + rate-limit handling, the live TUI, the steering bus, and the `/agg:*`
-skills. Built in Rust (single binary), 34 tests.
-
-> Full architecture, the goal/judge model, and the (honest) design tradeoffs live in
-> [`DESIGN.md`](DESIGN.md).
+Full architecture and design notes live in [`DESIGN.md`](DESIGN.md).
 
 ## License
 
