@@ -1,0 +1,8 @@
+{
+  "name": "agg",
+  "description": "AgenticGoGo \u2014 a generic agent-loop harness. Runs inner Claude Code workers in a loop until a goal-based stop condition is met, with judges, heartbeats, watchdog, LLM summaries, and a live TUI.",
+  "version": "0.0.1",
+  "author": {
+    "name": "Sebastian Senge"
+  }
+}

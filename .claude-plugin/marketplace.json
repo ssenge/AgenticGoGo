@@ -1,0 +1,14 @@
+{
+  "name": "agenticgogo",
+  "owner": {
+    "name": "Sebastian Senge",
+    "email": "mail@sebastian-senge.de"
+  },
+  "plugins": [
+    {
+      "name": "agg",
+      "source": "./plugin",
+      "description": "AgenticGoGo — turn a plan/spec into an autonomous agent loop. /agg:new sets up goals + judges + stop conditions; /agg:status and /agg:supervise watch and steer the run. (The `agg` CLI itself installs via Homebrew/GitHub Releases — see the repo README.)"
+    }
+  ]
+}

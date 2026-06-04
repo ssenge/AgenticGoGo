@@ -1,0 +1,27 @@
+[package]
+name = "agg"
+version = "0.0.1"
+edition = "2021"
+description = "AgenticGoGo — a generic agent-loop harness for Claude Code workers"
+authors = ["Sebastian Senge"]
+license = "MIT"
+repository = "https://github.com/ssenge/AgenticGoGo"
+default-run = "agg"
+
+[[bin]]
+name = "agg"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"          # verdict JSON (judge contract) + dashboard state
+serde_yaml = "0.9"        # agg.yaml / goals.yaml
+clap = { version = "4", features = ["derive"] }   # CLI subcommands
+anyhow = "1"              # ergonomic error handling at the boundary
+ratatui = "0.29"          # the live TUI dashboard (Phase 4)
+crossterm = "0.28"        # terminal backend for ratatui
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true             # smaller distributable binary

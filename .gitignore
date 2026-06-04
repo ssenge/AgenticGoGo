@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+examples/**/.progress
+examples/**/AGG_RESUME.md
+.agg/
