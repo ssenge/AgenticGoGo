@@ -8,6 +8,7 @@
 mod bus;
 mod config;
 mod dashboard;
+mod doctor;
 mod engine;
 mod init;
 mod judge;
@@ -48,6 +49,8 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Diagnose your setup (claude on PATH, config parses, conditions valid, …).
+    Doctor,
     /// Evaluate every judge once and print the starting scoreboard (no worker launched).
     Plan,
     /// Print the current scoreboard (alias of plan for quick re-checks).
@@ -115,6 +118,7 @@ fn main() -> Result<()> {
 
     match &cli.cmd {
         Cmd::Init { force } => init::run(&p.dir, *force),
+        Cmd::Doctor => doctor::run(&p.dir, &p.config, &p.goals),
         Cmd::Plan | Cmd::Status => {
             no_config_hint(&p.goals)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;

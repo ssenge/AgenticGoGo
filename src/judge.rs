@@ -30,7 +30,7 @@ fn run_script(cmd: &str, timeout_secs: u64, cwd: &Path) -> Verdict {
     let mut command = Command::new("sh");
     command.arg("-c").arg(cmd);
     match run_with_timeout(command, timeout_secs, cwd) {
-        Ok(out) => parse_judge_output(&out.stdout, &out.stderr),
+        Ok(out) => parse_judge_output(&out),
         Err(e) => Verdict::failed(e),
     }
 }
@@ -94,7 +94,8 @@ fn run_llm(model: &str, rubric: &str, inputs: &[String], timeout_secs: u64, cwd:
         Err(_) => String::from_utf8_lossy(&out.stdout).into_owned(),
     };
 
-    parse_judge_output(body.as_bytes(), &out.stderr)
+    // parse the extracted model text as the verdict, carrying through exit status/stderr
+    parse_judge_output(&CmdOutput { stdout: body.into_bytes(), stderr: out.stderr, success: out.success })
 }
 
 /// Resolve the `inputs` list into a single text context block. Each input is
@@ -151,6 +152,7 @@ fn read_file(path: std::path::PathBuf) -> String {
 struct CmdOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    success: bool, // did the command exit 0?
 }
 
 /// Spawn `command` in `cwd` with piped stdout/stderr and a wall-clock timeout.
@@ -189,9 +191,13 @@ fn run_with_timeout(mut command: Command, timeout_secs: u64, cwd: &Path) -> Resu
     });
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let success;
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break,
+            Ok(Some(status)) => {
+                success = status.success();
+                break;
+            }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     kill_group(pid);
@@ -206,7 +212,7 @@ fn run_with_timeout(mut command: Command, timeout_secs: u64, cwd: &Path) -> Resu
     // child exited; the drain threads finish as the pipes hit EOF
     let stdout = out_h.join().unwrap_or_default();
     let stderr = err_h.join().unwrap_or_default();
-    Ok(CmdOutput { stdout, stderr })
+    Ok(CmdOutput { stdout, stderr, success })
 }
 
 /// SIGKILL a process group (negative pid on unix), so a timed-out judge that
@@ -228,16 +234,25 @@ fn kill_group(pid: u32) {
 
 // ---------------- shared: verdict parsing ----------------
 
-/// Parse judge output bytes into a Verdict; on failure produce a failed verdict
-/// that includes a stderr tail for debugging.
-fn parse_judge_output(stdout: &[u8], stderr: &[u8]) -> Verdict {
-    let s = String::from_utf8_lossy(stdout);
+/// Parse judge output into a Verdict. On failure, distinguish "the command itself
+/// failed" (non-zero exit — usually a wrong path / broken script, NOT an agg bug)
+/// from "the command ran but emitted bad JSON" — so the error doesn't misdirect.
+fn parse_judge_output(out: &CmdOutput) -> Verdict {
+    let s = String::from_utf8_lossy(&out.stdout);
     match parse_verdict(&s) {
         Ok(v) => v,
         Err(e) => {
-            let err = String::from_utf8_lossy(stderr);
-            let tail: String = err.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
-            Verdict::failed(format!("bad verdict JSON ({e}); stderr: {tail}"))
+            let err = String::from_utf8_lossy(&out.stderr);
+            let mut last3: Vec<&str> = err.lines().rev().take(3).collect();
+            last3.reverse();
+            let tail = last3.join(" | ");
+            let tail = if tail.is_empty() { "(no stderr)".to_string() } else { tail };
+            if !out.success {
+                // the judge COMMAND failed — lead with that, not "bad JSON"
+                Verdict::failed(format!("judge command failed (exited non-zero): {tail}"))
+            } else {
+                Verdict::failed(format!("judge ran but did not emit valid verdict JSON ({e}); stderr: {tail}"))
+            }
         }
     }
 }

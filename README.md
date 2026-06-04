@@ -132,6 +132,9 @@ agg run
 `agg init` writes a runnable starter (with comments explaining each piece) so you're
 never staring at a blank page. The walked example below shows what those files contain.
 
+Stuck? **`agg doctor`** checks everything in one shot — claude on PATH, config parses,
+stop/halt conditions valid, resume prompt present — and tells you exactly what to fix.
+
 ## Walked example: drive a project to "all tests pass"
 
 Here's the whole thing end to end on a tiny project — a Python lib with three unimplemented
