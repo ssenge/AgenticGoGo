@@ -118,6 +118,20 @@ agg --version
 > skills run *inside* Claude. A plugin can't put a binary on your shell PATH, so the CLI ships
 > on its own. See [`DESIGN.md`](DESIGN.md) §12.
 
+## Fastest start: `agg init`
+
+In any project directory:
+
+```bash
+agg init     # scaffolds goals.yaml + agg.yaml + AGG_RESUME.md + a starter judge
+agg plan     # dry-run: shows the starting scoreboard
+# edit the scaffolded files for your project, then:
+agg run
+```
+
+`agg init` writes a runnable starter (with comments explaining each piece) so you're
+never staring at a blank page. The walked example below shows what those files contain.
+
 ## Walked example: drive a project to "all tests pass"
 
 Here's the whole thing end to end on a tiny project — a Python lib with three unimplemented

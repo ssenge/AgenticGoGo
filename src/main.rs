@@ -9,6 +9,7 @@ mod bus;
 mod config;
 mod dashboard;
 mod engine;
+mod init;
 mod judge;
 mod loop_;
 mod model;
@@ -41,6 +42,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Scaffold a starter agg.yaml + goals.yaml + AGG_RESUME.md + a judge in this dir.
+    Init {
+        /// overwrite existing config files
+        #[arg(long)]
+        force: bool,
+    },
     /// Evaluate every judge once and print the starting scoreboard (no worker launched).
     Plan,
     /// Print the current scoreboard (alias of plan for quick re-checks).
@@ -107,7 +114,9 @@ fn main() -> Result<()> {
     let p = cli.paths();
 
     match &cli.cmd {
+        Cmd::Init { force } => init::run(&p.dir, *force),
         Cmd::Plan | Cmd::Status => {
+            no_config_hint(&p.goals)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
             let mut eng = engine::Engine::new(goals_cfg)?;
             eprintln!("agg: evaluating {} goal(s) once (dry run)…", eng.goals.len());
@@ -125,8 +134,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Run { max_sessions } => {
-            let agg_cfg = config::AggConfig::load(&p.config)
-                .with_context(|| "load agg.yaml (run `agg plan` if you only have goals.yaml)")?;
+            no_config_hint(&p.config)?;
+            preflight_claude()?;
+            let agg_cfg = config::AggConfig::load(&p.config)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
             let eng = engine::Engine::new(goals_cfg)?;
             loop_::run(agg_cfg, eng, &p.dir, *max_sessions)
@@ -152,4 +162,39 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// If the required config file is missing, exit with an actionable hint instead of
+/// a cryptic "No such file" — point the user at `agg init` / `/agg:new`.
+fn no_config_hint(path: &std::path::Path) -> Result<()> {
+    if !path.exists() {
+        anyhow::bail!(
+            "no {} here — this directory isn't set up yet.\n  \
+             • run `agg init` to scaffold a starter project, or\n  \
+             • in Claude Code, run `/agg:new` to generate config from your existing plans.",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("config")
+        );
+    }
+    Ok(())
+}
+
+/// Verify the Claude Code CLI is on PATH BEFORE launching the loop, so a missing
+/// `claude` fails with a clear message up front rather than a buried mid-run
+/// "FAILED to spawn claude worker".
+fn preflight_claude() -> Result<()> {
+    let ok = std::process::Command::new("claude")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        anyhow::bail!(
+            "the Claude Code CLI (`claude`) was not found on your PATH.\n  \
+             AgenticGoGo drives it to run the inner workers. Install it from\n  \
+             https://claude.com/claude-code and make sure `claude --version` works, then retry."
+        );
+    }
+    Ok(())
 }
