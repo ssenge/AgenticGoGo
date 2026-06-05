@@ -51,7 +51,10 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         "════════════════════════════════════════════════════════════\n\
          AgenticGoGo — project {}  model {}\n\
          goals {m}/{t}  stop_when: {}\n\
-         ════════════════════════════════════════════════════════════",
+         ════════════════════════════════════════════════════════════\n\
+         ▶ watch live:  run `agg dashboard` in another terminal\n\
+         ⏱ first session may take a minute — the worker is warming up, not hung\n\
+         ⏹ stop anytime: `agg stop`",
         cfg.project, cfg.model, eng.stop_when
     );
 

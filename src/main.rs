@@ -8,6 +8,7 @@
 mod bus;
 mod config;
 mod dashboard;
+mod detach;
 mod doctor;
 mod engine;
 mod init;
@@ -60,9 +61,18 @@ enum Cmd {
         /// stop after this many sessions regardless (0 = unlimited)
         #[arg(long, default_value_t = 0)]
         max_sessions: u32,
+        /// run in the background: detach, write .agg/run.pid, log to .agg/run.log.
+        #[arg(long, short = 'd')]
+        detach: bool,
     },
     /// Live TUI dashboard — tails the running loop's state. Quit with q.
     Dashboard,
+    /// Stop a running loop gracefully after its current session (alias of `send stop`).
+    Stop {
+        /// reason (recorded in the finish banner)
+        #[arg(default_value = "operator requested stop")]
+        reason: String,
+    },
     /// Send a steering command to a running loop's bus (applied at the next session boundary).
     #[command(subcommand)]
     Send(SendCmd),
@@ -137,17 +147,26 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Run { max_sessions } => {
+        Cmd::Run { max_sessions, detach } => {
             no_config_hint(&p.config)?;
             preflight_claude()?;
+            if *detach {
+                // Validate the config NOW (in the foreground) so a typo fails loudly here
+                // rather than silently in a detached child the user can't see. Then spawn
+                // the loop detached and return — the child re-runs `agg run` for real.
+                let _ = config::AggConfig::load(&p.config)?;
+                let _ = config::GoalsConfig::load(&p.goals)
+                    .and_then(engine::Engine::new)?;
+                return detach::spawn_detached(&p.dir);
+            }
             let agg_cfg = config::AggConfig::load(&p.config)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
             let eng = engine::Engine::new(goals_cfg)?;
             loop_::run(agg_cfg, eng, &p.dir, *max_sessions)
         }
         Cmd::Dashboard => dashboard::run(&p.dir),
+        Cmd::Stop { reason } => send_to_bus(&p.dir, bus::Command::Stop { reason: reason.clone() }),
         Cmd::Send(send) => {
-            let b = bus::Bus::open(&p.dir).with_context(|| "opening bus (is this a project dir?)")?;
             let cmd = match send {
                 SendCmd::Inject { text } => bus::Command::InjectInstruction { text: text.clone() },
                 SendCmd::Budget { total } => bus::Command::SetBudget { total: *total },
@@ -156,16 +175,23 @@ fn main() -> Result<()> {
                 SendCmd::Stop { reason } => bus::Command::Stop { reason: reason.clone() },
                 SendCmd::Note { text } => bus::Command::Note { text: text.clone() },
             };
-            // monotonic-ish stamp for send-order filenames (CLI context: SystemTime ok)
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| format!("{:013}", d.as_millis()))
-                .unwrap_or_else(|_| "0000000000000".into());
-            let path = b.send(&cmd, &stamp)?;
-            eprintln!("queued → {} (the loop applies it at the next session boundary)", path.display());
-            Ok(())
+            send_to_bus(&p.dir, cmd)
         }
     }
+}
+
+/// Queue one steering command onto a running loop's bus. Shared by `agg send …` and
+/// the `agg stop` convenience alias (UX-AUDIT #13).
+fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
+    let b = bus::Bus::open(dir).with_context(|| "opening bus (is this a project dir?)")?;
+    // monotonic-ish stamp for send-order filenames (CLI context: SystemTime ok)
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("{:013}", d.as_millis()))
+        .unwrap_or_else(|_| "0000000000000".into());
+    let path = b.send(&cmd, &stamp)?;
+    eprintln!("queued → {} (the loop applies it at the next session boundary)", path.display());
+    Ok(())
 }
 
 /// If the required config file is missing, exit with an actionable hint instead of

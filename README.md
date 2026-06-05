@@ -86,9 +86,19 @@ judging. No context accumulation, no runaway cost, no babysitting.
 ## Install
 
 You need the [Claude Code](https://claude.com/claude-code) CLI on your PATH (AgenticGoGo
-drives it). Then get `agg` one of two ways:
+drives it). Then get `agg` one of three ways:
 
-**A) Download a prebuilt binary** (from [Releases](https://github.com/ssenge/AgenticGoGo/releases)):
+**A) One-line install** (detects your OS/arch, downloads the right release binary, puts it on PATH):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh | sh
+```
+
+Installs to `/usr/local/bin` (or `~/.local/bin` if that's not writable). Pin a version with
+`AGG_VERSION=v0.0.2`, or choose the dir with `AGG_INSTALL_DIR=~/bin`. macOS + Linux x86_64;
+Windows users grab the `.exe` from Releases (option B).
+
+**B) Download a prebuilt binary** (from [Releases](https://github.com/ssenge/AgenticGoGo/releases)):
 
 ```bash
 # macOS (Apple Silicon) — adjust the asset name for your platform
@@ -97,7 +107,7 @@ chmod +x agg && sudo mv agg /usr/local/bin/
 agg --version
 ```
 
-**B) Build from source** (needs the Rust toolchain):
+**C) Build from source** (needs the Rust toolchain):
 
 ```bash
 git clone https://github.com/ssenge/AgenticGoGo.git
@@ -244,7 +254,19 @@ is **session-granular** — queued and applied at the next boundary:
 agg send inject "focus on the auth module next; it's the blocker"
 agg send budget 8000000        # change the token ceiling
 agg send pause                 # hold; `agg send resume` to continue
-agg send stop "done for today" # graceful stop at the next boundary
+agg stop "done for today"      # graceful stop at the next boundary (alias of `send stop`)
+```
+
+### Run it in the background
+
+A long loop should outlive your terminal. `--detach` forks it off, writes a pidfile, and
+logs to `.agg/run.log` — no `nohup` incantation to remember:
+
+```bash
+agg run --detach        # or: agg run -d
+tail -f .agg/run.log    # follow it
+agg dashboard           # …or watch the live TUI
+agg stop                # graceful stop
 ```
 
 ## Compatible with your stack
