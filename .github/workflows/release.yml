@@ -24,8 +24,11 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-apple-darwin
             os: macos-latest        # Apple Silicon
+          # Intel Mac: cross-compiled ON the Apple-Silicon runner (just add the target).
+          # Avoids the scarce free-tier macos-13 runner queue that left v0.0.1's Intel
+          # binary stuck. macos-latest can build both Apple targets.
           - target: x86_64-apple-darwin
-            os: macos-13            # Intel Mac
+            os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
