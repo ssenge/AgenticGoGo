@@ -4,6 +4,7 @@
 //! watchdog is simpler and race-free.
 
 use crate::config::AggConfig;
+use crate::state::{ActivityEvent, LiveState};
 use crate::stream::{self, ActivityTracker};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -35,6 +36,7 @@ pub fn run_session(
     dir: &std::path::Path,
     session: u32,
     resume_id: Option<&str>,
+    live: &LiveState,
 ) -> SessionOutcome {
     let start = Instant::now();
 
@@ -102,12 +104,17 @@ pub fn run_session(
         let last_thought = last_thought.clone();
         let rate_limited = rate_limited.clone();
         let output_tokens = output_tokens.clone();
+        let live = live.clone();
+        // throttle disk writes of the live stream so we don't rewrite state.json on
+        // every token. The in-memory snapshot still updates on every event; only the
+        // atomic file write (and seq bump) is rate-limited to ~once a second.
+        let throttle = Duration::from_millis(800);
         std::thread::spawn(move || {
             let mut tracker = ActivityTracker::default();
             let mut session_id: Option<String> = None;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(ev) = stream::format_event(&line) {
-                    // print to the live log (Phase 4 TUI tails this)
+                    // print to the live log (the plain stdout stream — source of truth)
                     println!("{} | {}", hhmmss(), ev.display);
                     if !ev.is_result {
                         last_activity.store(now_epoch(), Ordering::Relaxed);
@@ -115,6 +122,14 @@ pub fn run_session(
                     if let Some(thought) = &ev.thought {
                         *last_thought.lock().unwrap() = thought.clone();
                     }
+                    // push the event into the shared dashboard state so the TUI's
+                    // Activity tail reflects the foreground stream in REAL TIME (the
+                    // bug this fixes: now/think/recent were empty mid-session).
+                    let act = ActivityEvent { ts: hhmmss(), kind: ev.kind.tag().to_string(), text: ev.text.clone() };
+                    live.update_throttled(throttle, |s| {
+                        s.idle_secs = 0;
+                        s.push_event(act);
+                    });
                     tracker.observe(&ev);
                 }
                 // capture the session_id (for optional --resume continuity)
@@ -141,6 +156,7 @@ pub fn run_session(
         let last_thought = last_thought.clone();
         let done = done.clone();
         let interval = cfg.heartbeat_secs;
+        let live = live.clone();
         std::thread::spawn(move || {
             while !done.load(Ordering::Relaxed) {
                 sleep_secs(interval, &done);
@@ -158,6 +174,9 @@ pub fn run_session(
                     up % 60,
                     truncate(&thought, 140)
                 );
+                // keep the dashboard's idle indicator live between stream events — a
+                // quiet worker (long tool, deep think) still ticks idle upward here.
+                live.update(|s| s.idle_secs = idle);
             }
         })
     };

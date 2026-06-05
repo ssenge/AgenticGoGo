@@ -11,7 +11,7 @@
 use crate::bus::{Bus, Command};
 use crate::config::AggConfig;
 use crate::engine::{Engine, RunState};
-use crate::state::DashboardState;
+use crate::state::{DashboardState, LiveState};
 use crate::summary;
 use crate::worker;
 use anyhow::{Context, Result};
@@ -65,28 +65,52 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         wall_hours: loop_start.elapsed().as_secs_f64() / 3600.0,
     };
 
-    // ---- dashboard state (Phase 4): the loop publishes a compact snapshot to
+    // ---- dashboard state (Phase 4): the loop + worker publish a compact snapshot to
     //      .agg/state.json; `agg dashboard` renders it. Two-stream discipline:
-    //      the stdout log above stays the source of truth; this is just a view. ----
+    //      the stdout log above stays the source of truth; this is just a view.
+    //
+    //      Single-writer-under-lock: ONE shared `LiveState` is mutated by both the loop
+    //      (boundary updates: phase/session/goals/summaries) and the worker's reader
+    //      thread (live updates: now/think/recent/idle, mid-session). `dash` below is
+    //      the loop's working copy of the fields IT owns; `publish!` folds those into
+    //      the shared state without clobbering the worker-owned live fields. ----
     let mut dash = DashboardState {
         project: cfg.project.clone(),
+        model: cfg.model.clone(),
         stop_when: eng.stop_when.clone(),
+        halt_when: eng.halt_when.clone().unwrap_or_default(),
         budget_total: cfg.budget.total,
         phase: "starting".into(),
         ..Default::default()
     };
-    let mut seq = 0u64;
+    let live = LiveState::new(dir, loop_start, dash.clone());
     macro_rules! publish {
         () => {{
-            seq += 1;
-            dash.seq = seq;
             dash.up_secs = loop_start.elapsed().as_secs();
             dash.tokens_spent = tokens_spent;
             let (m, t) = eng.tally();
             dash.goals_met = m;
             dash.goals_total = t;
             dash.goals = DashboardState::goals_from_engine(&eng, &dash.goals);
-            let _ = dash.write(dir);
+            // fold the loop-owned fields into the shared snapshot; leave the
+            // worker-owned live fields (now/think/recent/idle_secs) untouched.
+            live.update(|s| {
+                s.project = dash.project.clone();
+                s.model = dash.model.clone();
+                s.stop_when = dash.stop_when.clone();
+                s.halt_when = dash.halt_when.clone();
+                s.tokens_spent = dash.tokens_spent;
+                s.budget_total = dash.budget_total;
+                s.session = dash.session;
+                s.phase = dash.phase.clone();
+                s.goals_met = dash.goals_met;
+                s.goals_total = dash.goals_total;
+                s.goals = dash.goals.clone();
+                s.summary_cumulative = dash.summary_cumulative.clone();
+                s.summary_windowed = dash.summary_windowed.clone();
+                s.finished = dash.finished;
+                s.finish_reason = dash.finish_reason.clone();
+            });
         }};
     }
     publish!();
@@ -191,13 +215,11 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         // --resume continuity (opt-in): continue the prior session's context. Default
         // is fresh-context-per-session (the core no-runaway-cost discipline).
         let resume_id = if cfg.resume_sessions { last_session_id.as_deref() } else { None };
-        let outcome = worker::run_session(&cfg, &effective_prompt, dir, session, resume_id);
+        let outcome = worker::run_session(&cfg, &effective_prompt, dir, session, resume_id, &live);
         last_session_id = outcome.session_id.clone();
         tokens_spent += outcome.output_tokens;
-        // surface the worker's last thought as the dashboard "think" line
-        if let Some(last) = outcome.thoughts.last() {
-            dash.think = last.clone();
-        }
+        // (the worker's reader thread already streamed `now`/`think`/`recent` into the
+        // shared state live during the session — no post-hoc assignment needed here.)
         eprintln!(
             "  session #{session} exited (code {:?}) after {}s{}  (+{} out-tok, {} total)",
             outcome.exit_code,

@@ -5,10 +5,38 @@
 
 use serde_json::Value;
 
+/// Category of a formatted event — drives the dashboard's per-line coloring and the
+/// `now`/`think` split. Mirrors the leading glyph in `display`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    Tool,       // 🔧
+    Think,      // 💬
+    ToolResult, // ↳
+    Result,     // ✅
+    Init,       // ▶
+}
+
+impl EventKind {
+    /// Stable string tag stored in the serialized dashboard state.
+    pub fn tag(self) -> &'static str {
+        match self {
+            EventKind::Tool => "tool",
+            EventKind::Think => "think",
+            EventKind::ToolResult => "tool_result",
+            EventKind::Result => "result",
+            EventKind::Init => "init",
+        }
+    }
+}
+
 /// A formatted stream event.
 pub struct Event {
-    /// human-readable one-liner for the log
+    /// human-readable one-liner for the log (carries the leading glyph)
     pub display: String,
+    /// category of the event (for the dashboard tail coloring + now/think split)
+    pub kind: EventKind,
+    /// `display` with the leading glyph/indent stripped — what the dashboard tail shows
+    pub text: String,
     /// true if this is a terminal `result` event (don't count as "activity")
     pub is_result: bool,
     /// assistant thought text, if this event was a `💬` message (drives heartbeat)
@@ -44,15 +72,24 @@ pub fn format_event(line: &str) -> Option<Event> {
                     Some("text") => {
                         let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
                         let clean = clean(text);
+                        let shown = truncate(&clean, 220);
                         return Some(Event {
-                            display: format!("💬 {}", truncate(&clean, 220)),
+                            display: format!("💬 {shown}"),
+                            kind: EventKind::Think,
+                            text: shown,
                             is_result: false,
                             thought: Some(clean),
                         });
                     }
                     Some("tool_use") => {
                         let label = tool_label(block);
-                        return Some(Event { display: format!("🔧 {label}"), is_result: false, thought: None });
+                        return Some(Event {
+                            display: format!("🔧 {label}"),
+                            kind: EventKind::Tool,
+                            text: label,
+                            is_result: false,
+                            thought: None,
+                        });
                     }
                     _ => {}
                 }
@@ -64,9 +101,11 @@ pub fn format_event(line: &str) -> Option<Event> {
             let content = v.get("message")?.get("content")?.as_array()?;
             for block in content {
                 if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                    let body = tool_result_text(block);
+                    let body = truncate(&clean(&tool_result_text(block)), 160);
                     return Some(Event {
-                        display: format!("   ↳ {}", truncate(&clean(&body), 160)),
+                        display: format!("   ↳ {body}"),
+                        kind: EventKind::ToolResult,
+                        text: body,
                         is_result: false,
                         thought: None,
                     });
@@ -78,8 +117,11 @@ pub fn format_event(line: &str) -> Option<Event> {
             let dur = v.get("duration_ms").and_then(|x| x.as_u64()).unwrap_or(0);
             let turns = v.get("num_turns").and_then(|x| x.as_u64()).unwrap_or(0);
             let result = v.get("result").and_then(|x| x.as_str()).unwrap_or("");
+            let body = format!("RESULT ({dur}ms, {turns} turns): {}", truncate(&clean(result), 300));
             Some(Event {
-                display: format!("✅ RESULT ({dur}ms, {turns} turns): {}", truncate(&clean(result), 300)),
+                display: format!("✅ {body}"),
+                kind: EventKind::Result,
+                text: body,
                 is_result: true,
                 thought: None,
             })
@@ -87,7 +129,14 @@ pub fn format_event(line: &str) -> Option<Event> {
         "system" => {
             if v.get("subtype").and_then(|s| s.as_str()) == Some("init") {
                 let model = v.get("model").and_then(|m| m.as_str()).unwrap_or("?");
-                Some(Event { display: format!("▶ session init (model {model})"), is_result: false, thought: None })
+                let body = format!("session init (model {model})");
+                Some(Event {
+                    display: format!("▶ {body}"),
+                    kind: EventKind::Init,
+                    text: body,
+                    is_result: false,
+                    thought: None,
+                })
             } else {
                 None
             }
