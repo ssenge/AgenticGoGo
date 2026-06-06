@@ -1,0 +1,30 @@
+# Showcase goals for "prove P != NP" — every agg feature on one famous problem.
+# ⚠️ This loop will NOT solve P != NP. It demonstrates the machinery: measurable partial
+# progress (Lean-verified lemmas), a mechanical check that can't be faked, a soundness guard
+# that halts on cheating (sorry), an LLM-judged paper, hooks, and a budget.
+goals:
+  # the (unreachable) prize: Lean verifies the FULL proof, no gaps
+  - id: proof_verified
+    type: binary
+    judge: { kind: script, cmd: "./judges/verify_proof.sh", timeout: 1800 }
+
+  # MEASURABLE PARTIAL PROGRESS: count of Lean-checked supporting lemmas
+  - id: lemmas_verified
+    type: cardinal
+    target: 20
+    judge: { kind: script, cmd: "./judges/count_lemmas.sh", timeout: 1800 }
+
+  # qualitative deliverable → an LLM (haiku) judge with a rubric; latched once written
+  - id: paper_written
+    type: binary
+    recheck: once_met
+    judge: { kind: llm, model: haiku, rubric: "rubrics/paper.md", inputs: ["PAPER.md"] }
+
+  # SOUNDNESS GUARD (invariant): no sorry/admit/stray axiom — ever
+  - id: no_sorry
+    type: binary
+    invariant: true
+    judge: { kind: script, cmd: "./judges/no_sorry.sh" }
+
+stop_when: "proof_verified AND paper_written"   # the prize (don't hold your breath)
+halt_when: "not no_sorry"                        # stop instantly if it smuggles in a gap
