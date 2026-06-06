@@ -145,6 +145,52 @@ never staring at a blank page. The walked example below shows what those files c
 Stuck? **`agg doctor`** checks everything in one shot — claude on PATH, config parses,
 stop/halt conditions valid, resume prompt present — and tells you exactly what to fix.
 
+## Hello, agg — the smallest possible loop
+
+The whole idea in four tiny files: a worker does a task, a **judge** (any script that prints
+one line of JSON `{"met": …}`) checks it, and the loop repeats until the judge says met.
+
+We start with a *broken* `add.py` so you can watch the correction loop happen.
+
+```python
+# add.py  — starts WRONG on purpose (prints 3, not 2)
+print(1 + 1 + 1)
+```
+```bash
+# check.sh  — the judge: print one JSON line. That's the whole contract.
+#!/usr/bin/env bash
+[ "$(python3 add.py 2>/dev/null)" = "2" ] \
+  && echo '{"met":true}' \
+  || echo '{"met":false,"rationale":"add.py did not print 2"}'
+```
+```
+# AGG_RESUME.md  — the worker's standing instruction (one line)
+Fix add.py so that running `python3 add.py` prints exactly: 2
+```
+```yaml
+# goals.yaml
+goals:
+  - id: prints_two
+    type: binary
+    judge: { kind: script, cmd: "./check.sh" }
+stop_when: prints_two
+```
+```yaml
+# agg.yaml
+project: hello-agg
+model: claude-haiku-4-5-20251001     # haiku — this costs next to nothing to try
+resume_prompt: AGG_RESUME.md
+```
+
+```bash
+chmod +x check.sh
+agg run
+```
+
+The judge rejects `3`, the worker edits `add.py` to `print(1 + 1)`, the judge sees `2` →
+`met:true` → the loop stops. That's the entire model. Everything below is just more goals,
+smarter judges, and guardrails on top of this.
+
 ## Walked example: drive a project to "all tests pass"
 
 Here's the whole thing end to end on a tiny project — a Python lib with three unimplemented
@@ -232,6 +278,86 @@ just run the skill inside Claude Code:
 
 It **translates** whatever plan exists into goals + judges (it doesn't replicate your spec
 tooling) and asks only about genuine gaps. Then exit Claude and `agg run`.
+
+## Showcase: "prove P ≠ NP" — every feature on one famous problem
+
+> ⚠️ **This loop will not solve P ≠ NP. That's the point.** It's a showcase of the full
+> machinery on a hard, open-ended research problem — measurable *partial* progress, a
+> mechanical check that **cannot be faked**, a soundness guard that halts on cheating, and a
+> paper. Point the same structure at *your* research problem; swap the checker for your domain.
+
+The trick that makes this honest rather than theatre: the proof is written in **[Lean 4](https://lean-lang.org/)**
+— the formal proof assistant used by working mathematicians today (its `Mathlib` library is
+the largest formal math corpus in existence, used from undergrad courses to Fields medalists).
+Lean's kernel mechanically rejects any proof with a gap, so **"verified" literally cannot be
+faked** — and `sorry` (Lean's "I gave up here" placeholder) is caught by a soundness invariant
+that halts the loop. The worker won't finish P≠NP (nobody has), but it produces *verified
+supporting lemmas* — real, checkable progress — and a paper. *(Needs the Lean toolchain;
+wired in via an `on_start` hook.)*
+
+**`goals.yaml`** — multiple goal types, an LLM judge, invariants, sticky re-checking:
+```yaml
+goals:
+  - id: proof_verified            # the (unreachable) prize: Lean checks the full proof
+    type: binary
+    judge: { kind: script, cmd: "./judges/verify_proof.sh", timeout: 1800 }
+
+  - id: lemmas_verified           # MEASURABLE PARTIAL PROGRESS: N Lean-checked lemmas
+    type: cardinal
+    target: 20
+    judge: { kind: script, cmd: "./judges/count_lemmas.sh", timeout: 1800 }
+
+  - id: paper_written             # qualitative → an LLM (haiku) judge with a rubric
+    type: binary
+    recheck: once_met             # latch it: don't re-judge the paper every cycle
+    judge: { kind: llm, model: haiku, rubric: "rubrics/paper.md", inputs: ["PAPER.md"] }
+
+  - id: no_sorry                  # SOUNDNESS GUARD: no `sorry`/`admit`/stray axiom — ever
+    type: binary
+    invariant: true
+    judge: { kind: script, cmd: "./judges/no_sorry.sh" }
+
+stop_when: "proof_verified AND paper_written"     # the prize (don't hold your breath)
+halt_when: "not no_sorry"                         # stop instantly if it smuggles in a gap
+```
+
+**`judges/verify_proof.sh`** — the real, uncheatable check (Lean compiles, no `sorry`):
+```bash
+#!/usr/bin/env bash
+out="$(lake build 2>&1)"; rc=$?
+if [ $rc -eq 0 ] && ! grep -rq "sorry" proof/; then
+  echo '{"met":true,"rationale":"Lean verified the full proof — no sorry"}'
+else
+  echo "{\"met\":false,\"rationale\":\"Lean does not accept the proof yet (rc=$rc)\"}"
+fi
+```
+
+**`judges/no_sorry.sh`** — the soundness invariant (the anti-cheating showpiece):
+```bash
+#!/usr/bin/env bash
+if grep -rqE '\bsorry\b|\badmit\b' proof/; then
+  echo '{"met":false,"rationale":"a proof file contains sorry/admit — gap, not a proof"}'
+else
+  echo '{"met":true,"rationale":"no sorry/admit anywhere"}'
+fi
+```
+
+**`agg.yaml`** — wires the Lean toolchain via a hook (agg stays tool-agnostic; *you* supply it):
+```yaml
+project: p-vs-np
+model: "claude-opus-4-8[1m]"
+resume_prompt: AGG_RESUME.md
+budget: { total: 50000000 }              # a hard ceiling — this one could run forever
+hooks:
+  on_start: ["lake build || true"]        # fetch/build the Lean project + Mathlib once
+summary: { enabled: true, model: haiku }
+```
+
+What you get even though the prize is unreachable: a steadily-growing count of
+**Lean-verified lemmas** (real progress on the dashboard), a paper, a loop that **halts the
+moment it tries to cheat** (`sorry`), and a hard token ceiling so a hopeless run can't bankrupt
+you. That's the full feature set — cardinal/binary/LLM goals, script + LLM judges, invariants,
+`halt_when`, `recheck`, hooks, budget — on a problem everyone recognizes.
 
 ## The judge contract
 
