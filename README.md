@@ -126,7 +126,7 @@ agg --version
 
 > Why two installs? `agg` runs in *your* terminal (it launches Claude workers); the `/agg:*`
 > skills run *inside* Claude. A plugin can't put a binary on your shell PATH, so the CLI ships
-> on its own. See [`DESIGN.md`](DESIGN.md) §12.
+> on its own.
 
 ## Fastest start: `agg init`
 
@@ -316,8 +316,6 @@ no fragile env-reading).
 
 Inner workers run in your project, so your other Claude Code plugins and MCP servers — engram,
 get-shit-done, graphify — **just work** alongside `agg`. Use them to plan; use `agg` to finish.
-
-Full architecture and design notes live in [`DESIGN.md`](DESIGN.md).
 
 ## License
 

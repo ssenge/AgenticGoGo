@@ -1,4 +1,4 @@
-//! `agg run --detach` — run the loop in the background (UX-AUDIT #10).
+//! `agg run --detach` — run the loop in the background.
 //!
 //! Long loops want to outlive the terminal. Rather than make the user remember
 //! `nohup agg run > .agg/run.log 2>&1 &`, `--detach` does it for them: it re-execs

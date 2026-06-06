@@ -1,6 +1,6 @@
 #!/bin/sh
 # AgenticGoGo (`agg`) installer — collapses the "download the right binary + chmod +
-# put it on PATH" dance into one line (UX-AUDIT #1):
+# put it on PATH" dance into one line:
 #
 #   curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh | sh
 #

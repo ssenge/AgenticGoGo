@@ -183,7 +183,7 @@ fn main() -> Result<()> {
 }
 
 /// Queue one steering command onto a running loop's bus. Shared by `agg send …` and
-/// the `agg stop` convenience alias (UX-AUDIT #13).
+/// the `agg stop` convenience alias.
 fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
     let b = bus::Bus::open(dir).with_context(|| "opening bus (is this a project dir?)")?;
     // monotonic-ish stamp for send-order filenames (CLI context: SystemTime ok)
