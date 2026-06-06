@@ -41,6 +41,9 @@ pub struct GoalView {
     pub delta: f64,          // change in value since last cycle (for ▲+N)
     pub rationale: String,
     pub judge_kind: String,  // "script" | "llm:<model>"
+    /// true when a `recheck: once_met` goal is latched — judge no longer re-runs.
+    #[serde(default)]
+    pub latched: bool,
 }
 
 /// One formatted activity line for the real-time tail. `kind` is the leading glyph
@@ -119,6 +122,7 @@ impl DashboardState {
                     delta: value - prev_value,
                     rationale: g.last_verdict.as_ref().map(|v| v.rationale.clone()).unwrap_or_default(),
                     judge_kind,
+                    latched: g.latched,
                 }
             })
             .collect()

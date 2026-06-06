@@ -251,6 +251,15 @@ pub fn run_session(
     let _ = heartbeat.join();
     let _ = watchdog.join();
 
+    // Final straggler sweep: the worker is its own process-group leader, so its pid IS the
+    // group id. Reap any process still in that group — orphaned `nohup`/`--watch`/detached
+    // grandchildren that survived the one-shot `kill(pid)` above. Env-free + cross-platform
+    // (pgid is queryable everywhere, unlike a hardened process's environment on macOS).
+    let reaped = crate::reap::reap_pgid(pid);
+    if reaped > 0 {
+        eprintln!("  reaped {reaped} straggler process(es) from the worker group");
+    }
+
     SessionOutcome {
         exit_code: status.and_then(|s| s.code()),
         duration_secs: start.elapsed().as_secs(),

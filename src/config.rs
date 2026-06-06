@@ -32,6 +32,41 @@ pub struct AggConfig {
     /// runs where carrying context across sessions genuinely helps and won't balloon.
     #[serde(default)]
     pub resume_sessions: bool,
+    /// Generic lifecycle hooks — shell commands agg runs at defined moments. TOOL-AGNOSTIC:
+    /// agg knows nothing about what they do. Use them to wire in YOUR tools (a code-graph
+    /// builder, a memory-cache refresh, a linter, …). See [`Hooks`].
+    #[serde(default)]
+    pub hooks: Hooks,
+    /// Files whose contents are prepended to every worker prompt (after any operator
+    /// instruction, before the resume prompt). Compose reusable tooling/guidance fragments
+    /// here instead of baking them into agg. Paths are relative to the project dir.
+    #[serde(default)]
+    pub prompt_includes: Vec<String>,
+}
+
+/// Generic lifecycle hooks. Each is a list of shell commands run (in order) at that moment,
+/// from the project dir. agg is tool-agnostic — these are whatever YOU put in them.
+///
+/// `background` commands are long-lived (e.g. a file watcher): agg spawns them at loop start
+/// in the worker's reaping domain and they are cleaned up by the straggler reaper, so a
+/// `--watch`-style process can't leak.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Hooks {
+    /// run once, at loop startup (before the first session). e.g. build a code graph.
+    #[serde(default)]
+    pub on_start: Vec<String>,
+    /// run before each worker session. e.g. incremental refresh of a cache/graph.
+    #[serde(default)]
+    pub on_session_start: Vec<String>,
+    /// run after each session's judging. e.g. persist a memory note, update an index.
+    #[serde(default)]
+    pub on_session_end: Vec<String>,
+    /// run once, when the loop stops (success/halt/bus-stop). e.g. teardown, final export.
+    #[serde(default)]
+    pub on_stop: Vec<String>,
+    /// long-lived commands spawned at loop start (e.g. a `--watch`). Reaped on stop.
+    #[serde(default)]
+    pub background: Vec<String>,
 }
 
 /// LLM-summary settings (Phase 3). After each cycle (or every N secs), a cheap

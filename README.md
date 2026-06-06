@@ -95,7 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh 
 ```
 
 Installs to `/usr/local/bin` (or `~/.local/bin` if that's not writable). Pin a version with
-`AGG_VERSION=v0.0.3`, or choose the dir with `AGG_INSTALL_DIR=~/bin`. macOS + Linux x86_64;
+`AGG_VERSION=v0.0.4`, or choose the dir with `AGG_INSTALL_DIR=~/bin`. macOS + Linux x86_64;
 Windows users grab the `.exe` from Releases (option B).
 
 **B) Download a prebuilt binary** (from [Releases](https://github.com/ssenge/AgenticGoGo/releases)):
@@ -268,6 +268,49 @@ tail -f .agg/run.log    # follow it
 agg dashboard           # …or watch the live TUI
 agg stop                # graceful stop
 ```
+
+## Tuning & extension
+
+**Don't re-check a finished goal (`recheck:`)** — by default every goal's judge runs each
+cycle. For a goal whose status can't change once achieved (a written report, a completed
+study) that wastes work — especially with an LLM judge. Set a recheck policy in `goals.yaml`:
+
+```yaml
+- id: report_written
+  recheck: once_met        # judge until first met, then LATCH — never re-judged (shown 🔒)
+  judge: { kind: llm, model: haiku, rubric: "judges/report.md", inputs: ["REPORT.md"] }
+
+- id: artifact_valid
+  recheck: on_change       # re-judge only when a declared input changes (by content hash)
+  recheck_inputs: ["build/out.json"]
+  judge: { kind: script, cmd: "./judges/validate.sh" }
+```
+
+`always` (default) is required for invariants — their status can regress, so agg rejects
+`once_met` on an `invariant: true` goal.
+
+**Wire in your own tooling (generic hooks).** agg is tool-agnostic: it runs *your* shell
+commands at lifecycle moments and prepends *your* text to the worker prompt. Use this for a
+code-graph builder, a memory cache, a linter — whatever you use. Nothing is hardcoded.
+
+```yaml
+hooks:
+  on_start:         ["mytool build ."]      # once at startup
+  on_session_start: ["mytool refresh ."]    # before each worker session
+  on_session_end:   ["mytool persist ."]    # after each session's judging
+  on_stop:          ["mytool export ."]     # once when the loop stops
+  background:       ["mytool --watch ."]    # long-lived; reaped automatically on stop
+prompt_includes:
+  - "AGG_TOOLING.md"                        # your text, prepended to every worker prompt
+```
+
+A failing hook is logged, never fatal. `background` processes are spawned in the loop's
+reaping domain, so a `--watch` can't leak (see below).
+
+**No orphaned compute.** The worker runs in its own process group; when a session ends (or
+the loop stops), agg sweeps the whole group and kills any straggler — even a `nohup … &` or
+`--watch` child that escaped. Works on Linux, macOS, and Windows (process-group / tree kill,
+no fragile env-reading).
 
 ## Compatible with your stack
 

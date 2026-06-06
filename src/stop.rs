@@ -343,9 +343,13 @@ mod tests {
             weight: 1.0,
             invariant,
             description: String::new(),
+            recheck: crate::model::RecheckPolicy::Always,
+            recheck_inputs: vec![],
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,
+            latched: false,
+            recheck_sig: None,
         };
         goal.apply(Verdict {
             met,

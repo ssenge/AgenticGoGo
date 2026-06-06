@@ -41,9 +41,32 @@ fn wait_for_resume(bus: &Bus) {
     }
 }
 
+/// Runs `on_stop` hooks exactly once, on ANY exit from the loop (success, halt, bus-stop,
+/// max-sessions, or an early `?` error) — via Drop, so we don't have to thread it through
+/// every return site.
+struct StopHooks<'a> {
+    cmds: Vec<String>,
+    dir: &'a Path,
+}
+impl Drop for StopHooks<'_> {
+    fn drop(&mut self) {
+        if !self.cmds.is_empty() {
+            crate::hooks::run("on_stop", &self.cmds, self.dir);
+        }
+    }
+}
+
 pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Result<()> {
     let resume_prompt = std::fs::read_to_string(dir.join(&cfg.resume_prompt))
         .with_context(|| format!("reading resume prompt {}", cfg.resume_prompt))?;
+
+    // ---- lifecycle hooks (tool-agnostic): on_start once, background watchers spawned now,
+    //      on_stop guaranteed on any exit via the Drop guard. ----
+    crate::hooks::run("on_start", &cfg.hooks.on_start, dir);
+    crate::hooks::spawn_background(&cfg.hooks.background, dir);
+    let _stop_hooks = StopHooks { cmds: cfg.hooks.on_stop.clone(), dir };
+    // prompt-include fragments, composed once (the resume prompt is read once at launch too).
+    let prompt_prefix = crate::hooks::gather_prompt_includes(&cfg.prompt_includes, dir);
 
     let loop_start = Instant::now();
     let (m, t) = eng.tally();
@@ -204,14 +227,23 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
             eng.tally().1
         );
 
-        // 1) build the effective prompt: prepend any operator-injected instruction
-        //    (consumed once), then launch the worker (streams/heartbeat/watchdog).
+        // on_session_start hooks (e.g. incremental refresh of a code graph / cache).
+        crate::hooks::run("on_session_start", &cfg.hooks.on_session_start, dir);
+
+        // 1) build the effective prompt: [operator instruction] + [prompt_includes] + resume.
+        //    The operator instruction (if any) is consumed once; the prompt_includes prefix is
+        //    the user's reusable tooling/guidance fragments (agg adds no tool-specific text).
+        let base = if prompt_prefix.is_empty() {
+            resume_prompt.clone()
+        } else {
+            format!("{prompt_prefix}\n\n{resume_prompt}")
+        };
         let effective_prompt = match pending_instruction.take() {
             Some(instr) => format!(
                 "═══ HIGH-PRIORITY OPERATOR INSTRUCTION (act on this FIRST, it overrides the default plan) ═══\n\
-                 {instr}\n\n{resume_prompt}"
+                 {instr}\n\n{base}"
             ),
-            None => resume_prompt.clone(),
+            None => base,
         };
         dash.phase = "running".into();
         publish!();
@@ -221,8 +253,8 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         let outcome = worker::run_session(&cfg, &effective_prompt, dir, session, resume_id, &live);
         last_session_id = outcome.session_id.clone();
         tokens_spent += outcome.output_tokens;
-        // (the worker's reader thread already streamed `now`/`think`/`recent` into the
-        // shared state live during the session — no post-hoc assignment needed here.)
+        // (run_session now reaps any straggler in the worker's process group on exit, and the
+        // worker's reader thread already streamed `now`/`think`/`recent` live — nothing to do here.)
         eprintln!(
             "  session #{session} exited (code {:?}) after {}s{}  (+{} out-tok, {} total)",
             outcome.exit_code,
@@ -249,6 +281,10 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         let res = eng.evaluate_cycle(dir, &run_state(tokens_spent, budget_total));
         eprint!("{}", indent(&eng.scoreboard()));
         publish!();
+
+        // on_session_end hooks run AFTER judging, so they see the post-cycle state (e.g.
+        // persist a memory note, update an index, refresh a graph for the next session).
+        crate::hooks::run("on_session_end", &cfg.hooks.on_session_end, dir);
 
         // 4) LLM summary (cumulative + windowed), rate-limited by min_interval_secs.
         //    Best-effort: a summarizer failure NEVER breaks the loop.

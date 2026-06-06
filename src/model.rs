@@ -86,6 +86,26 @@ impl Verdict {
     }
 }
 
+/// How often a goal's judge should run. Lets a goal whose status CANNOT change once
+/// achieved (a written paper, a completed study) skip its (possibly expensive, e.g. LLM)
+/// judge on later cycles — instead of re-judging every cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecheckPolicy {
+    /// Re-judge every cycle (the default; required for invariants — their status can regress).
+    Always,
+    /// Re-judge until the goal is first `Met`, then LATCH it: skip the judge forever after,
+    /// treating it as met. For terminal deliverables that can't un-happen.
+    OnceMet,
+    /// Re-judge only when a declared input (see `recheck_inputs`) changes — by content hash.
+    /// Cheaper than `always`, but catches the worker editing the artifact again (unlike `once_met`).
+    OnChange,
+}
+
+fn default_recheck() -> RecheckPolicy {
+    RecheckPolicy::Always
+}
+
 /// A goal as declared in `goals.yaml`, plus runtime lifecycle state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Goal {
@@ -103,6 +123,12 @@ pub struct Goal {
     pub invariant: bool,
     #[serde(default)]
     pub description: String,
+    /// when to re-run this goal's judge (default `always`). See [`RecheckPolicy`].
+    #[serde(default = "default_recheck")]
+    pub recheck: RecheckPolicy,
+    /// for `recheck: on_change`: file globs/paths whose content gates re-judging. Relative to cwd.
+    #[serde(default)]
+    pub recheck_inputs: Vec<String>,
 
     // ---- runtime state (not deserialized from goals.yaml) ----
     #[serde(skip, default = "default_lifecycle")]
@@ -112,6 +138,12 @@ pub struct Goal {
     /// has this goal EVER been met during this run? (drives regression detection)
     #[serde(skip)]
     pub ever_met: bool,
+    /// `once_met`: set true once first met → judge skipped thereafter. `on_change`: holds the
+    /// last-judged input signature (hash) so we re-judge only when it changes.
+    #[serde(skip)]
+    pub latched: bool,
+    #[serde(skip)]
+    pub recheck_sig: Option<u64>,
 }
 
 fn default_lifecycle() -> Lifecycle {
@@ -206,9 +238,13 @@ mod tests {
             weight: 1.0,
             invariant: false,
             description: String::new(),
+            recheck: RecheckPolicy::Always,
+            recheck_inputs: vec![],
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,
+            latched: false,
+            recheck_sig: None,
         }
     }
 

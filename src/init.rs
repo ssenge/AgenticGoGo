@@ -119,6 +119,20 @@ ratelimit_backoff_secs: 1800      # back off this long on a real usage limit
 budget: { total: null }           # output-token ceiling (null = unlimited)
 summary: { enabled: true, model: haiku, min_interval_secs: 300 }  # progress summaries
 resume_sessions: false            # fresh context per session (recommended)
+
+# ── Optional: generic lifecycle hooks (agg just runs these shell commands; it is
+#    tool-agnostic — wire in whatever YOU use). Uncomment + edit as needed. ──
+# hooks:
+#   on_start:         []   # once at startup — e.g. build a code graph: ["graphify . --no-viz"]
+#   on_session_start: []   # before each worker session — e.g. incremental refresh
+#   on_session_end:   []   # after each session's judging — e.g. persist a memory note
+#   on_stop:          []   # once when the loop stops — e.g. teardown / final export
+#   background:       []   # long-lived, reaped on stop — e.g. ["graphify . --watch"]
+#
+# ── Optional: files prepended to every worker prompt (reusable tooling/guidance you
+#    author — agg adds NO tool-specific text). e.g. tell the worker to use your tools. ──
+# prompt_includes:
+#   - "AGG_TOOLING.md"
 "#;
 
 const RESUME_MD: &str = r#"<!-- AGG_RESUME.md — the prompt fed to EVERY fresh worker session.

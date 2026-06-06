@@ -327,6 +327,8 @@ fn goal_detail_line(g: &GoalView) -> Line<'static> {
         String::new()
     };
     let guard = if g.invariant { "  [guard]" } else { "" };
+    // 🔒 = latched (recheck: once_met, judge no longer re-runs — saves tokens)
+    let lock = if g.latched { "  🔒" } else { "" };
     Line::from(vec![
         Span::styled(format!("{glyph} "), Style::default().fg(color)),
         Span::styled(format!("{:<20}", truncate(&g.id, 20)), Style::default().fg(color).bold()),
@@ -336,6 +338,7 @@ fn goal_detail_line(g: &GoalView) -> Line<'static> {
         Span::styled(format!("w{:<4}", fmt_num(g.weight)), Style::default().fg(Color::DarkGray)),
         Span::styled(format!("judge:{}", g.judge_kind), Style::default().fg(Color::Blue)),
         Span::styled(guard.to_string(), Style::default().fg(Color::Yellow)),
+        Span::styled(lock.to_string(), Style::default().fg(Color::Cyan)),
     ])
 }
 
@@ -593,6 +596,7 @@ mod tests {
                                 instances that need the conflict-analysis bound-climb lever to land."
                         .into(),
                     judge_kind: "script".into(),
+                    latched: false,
                 },
                 GoalView {
                     id: "no_regressions".into(),
@@ -606,6 +610,7 @@ mod tests {
                     delta: 0.0,
                     rationale: "build green".into(),
                     judge_kind: "script".into(),
+                    latched: true,
                 },
             ],
             now: "🔧 $ Run the test suite".into(),
