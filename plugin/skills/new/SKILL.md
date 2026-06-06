@@ -48,6 +48,13 @@ From the plans, derive a small set of **concrete, checkable goals** (aim for 3�
 Mark any **soundness/invariant** goal with `invariant: true` (things that must STAY true —
 "never break the build", "no wrong results"). These can guard the loop via `halt_when`.
 
+**Set a `recheck` policy to avoid re-judging finished goals** (saves tokens, esp. with LLM
+judges). Default is `always` (re-judge every cycle — REQUIRED for invariants). For a goal
+whose status can't change once achieved (a written doc, a completed study), use
+`recheck: once_met` — it latches after first met and its judge never runs again. For a goal
+gated on a specific artifact, use `recheck: on_change` with `recheck_inputs: [files]` — it
+re-judges only when those files change. (agg rejects `once_met` on an invariant.)
+
 ## Step 3 — Pick a judge per goal
 
 Every goal needs a **judge** that emits a verdict JSON:
@@ -92,6 +99,45 @@ goal ids (→ their met bool), `all_goals`, `count_met`, `total`, `met_fraction`
 Add a **`halt_when`** guard if there are invariants or you want a budget brake:
 `halt_when: "any_regressed(invariants) OR over_budget OR wall_hours >= 8"`
 
+## Step 4.5 — Detect the user's tools and offer to wire them in (NO hardcoded tool list)
+
+agg the binary is tool-agnostic — it only runs generic lifecycle hooks. But the worker
+runs in THIS user's environment and inherits whatever tools the session has. A worker that
+USES those tools (a code graph instead of grepping, a memory tool to recall state across
+sessions) is cheaper and smarter. So: **enumerate the tools that are actually active in this
+session, then ASK the user which to wire into the loop.** Do NOT assume any specific tool
+exists — discover them.
+
+**Enumerate (do all three; report only what's actually present):**
+1. **MCP servers** — run `claude mcp list`. Each line that shows `✓ Connected` is a live MCP
+   server the worker will also inherit; its tools appear as `mcp__<server>__<tool>`.
+2. **Skills** — list `~/.claude/skills/` and any plugin skill dirs; also note skills you can
+   see in your own available-tools list. Each is a `/<name>` capability the worker inherits.
+3. **Hooks** — check `~/.claude/settings.json` for a `"hooks"` block (e.g. a command-rewrite
+   proxy). These are auto-inherited by `claude -p`; they need NO agg wiring — just note them.
+
+**Then, for each tool that plausibly helps a long autonomous loop, ASK the user (one
+`AskUserQuestion`) whether to wire it in — and infer HOW from the tool's own purpose:**
+- A **code-graph / indexer** tool → offer: `hooks.on_start` to build it, `hooks.on_session_end`
+  (or `background`) to keep it fresh, and a `prompt_includes` line telling the worker to query
+  it instead of grepping. (Refresh matters: the graph must track code changes between sessions.)
+- A **memory tool** (persistent across sessions) → offer a `prompt_includes` line telling the
+  worker to recall state at session start and save a handoff note at session end (cheaper than
+  re-deriving every fresh session).
+- A **token/cost proxy hook** already in global settings → just inform the user it's inherited
+  automatically; nothing to configure.
+- **Anything else** (a linter, a test-cache warmer, a custom CLI) → ask if they want a hook,
+  and let them name the command. The mechanism is identical regardless of the tool.
+
+**Rules:** never invent a tool that isn't present; only offer what you actually detected.
+Phrase each offer concretely ("Wire `<tool>`? I'd add `on_start: [<cmd>]` and a prompt note
+to use it"). Only write hooks the user confirms. If the user declines all, write no hooks —
+that's fine. The exact hook command depends on the tool's own CLI; read its `--help` or skill
+doc if unsure, and don't guess a flag — ask the user for the command if you can't determine it.
+
+The result goes into `agg.yaml` (`hooks:` + `prompt_includes:`) and, for prompt guidance, a
+small `AGG_TOOLING.md` you reference from `prompt_includes`.
+
 ## Step 5 — Ask ONLY what's missing
 
 Use `AskUserQuestion` (or plain questions) ONLY for genuine gaps you couldn't infer, e.g.:
@@ -129,6 +175,12 @@ watchdog: { idle_secs: 900, cpu_grace: 180 }
 ratelimit_backoff_secs: 1800
 budget: { total: <tokens or null> }
 summary: { enabled: true, model: haiku, min_interval_secs: 300 }
+# hooks + prompt_includes: ONLY if Step 4.5 wired tools the user confirmed. Omit otherwise.
+# hooks:
+#   on_start:       ["<build-graph-cmd>"]      # whatever the detected tool needs
+#   on_session_end: ["<refresh-cmd>"]
+#   background:     ["<watch-cmd>"]            # reaped automatically on stop
+# prompt_includes: ["AGG_TOOLING.md"]
 ```
 
 ### `AGG_RESUME.md` (the fat resume prompt — this is the worker's standing instructions)
@@ -159,11 +211,15 @@ If a judge errors, fix its command/rubric before finishing.
 Setup complete. Starting scoreboard above.
 
 To run the loop:
-  agg run                              # foreground, watch it live
-  nohup agg run > agg.log 2>&1 &       # detached
+  agg run                # foreground, watch it live
+  agg run --detach       # background (pidfile + .agg/run.log), survives the terminal
 
 To watch the dashboard (second terminal):
   agg dashboard
+
+To stop / steer:
+  agg stop               # graceful stop at the next session boundary
+  agg send inject "…"    # high-priority instruction for the next session
 
 The loop stops when:  <stop_when>
 ```
