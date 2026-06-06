@@ -95,7 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh 
 ```
 
 Installs to `/usr/local/bin` (or `~/.local/bin` if that's not writable). Pin a version with
-`AGG_VERSION=v0.0.4`, or choose the dir with `AGG_INSTALL_DIR=~/bin`. macOS + Linux x86_64;
+`AGG_VERSION=v0.0.5`, or choose the dir with `AGG_INSTALL_DIR=~/bin`. macOS + Linux x86_64;
 Windows users grab the `.exe` from Releases (option B).
 
 **B) Download a prebuilt binary** (from [Releases](https://github.com/ssenge/AgenticGoGo/releases)):
