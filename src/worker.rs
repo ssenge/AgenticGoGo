@@ -241,7 +241,19 @@ pub fn run_session(
     // any lingering pipe holder, so the reader sees EOF promptly. (No-op if the group
     // is already gone.) Then collect the reader with a BOUNDED join so a stuck pipe can
     // never wedge the loop — the exact production-hang class this harness guards against.
-    kill(pid);
+    //
+    // EXCEPTION: if a registered `agg spawn` long task is still inside the worker's group
+    // (it didn't detach into its own group), a blind group SIGKILL would kill legitimate
+    // background work. Spare protected pgids — a properly-spawned task has its OWN group
+    // and its own log (not the worker pipe), so this only matters for the edge case, and
+    // there the per-pid protected sweep below releases any real pipe-holder anyway.
+    let protected = crate::spawns::protected_pgids(dir);
+    if protected.is_empty() {
+        kill(pid);
+    } else {
+        // protected tasks present: do a protected-aware sweep instead of a blind group kill.
+        let _ = crate::reap::reap_pgid_except(pid, &protected);
+    }
     // bounded collect: if the reader is still blocked on a held-open pipe after the
     // group kill, give up after 10s with whatever we have (the thread dies on its own
     // when the pipe finally closes; it's detached).
@@ -255,7 +267,11 @@ pub fn run_session(
     // group id. Reap any process still in that group — orphaned `nohup`/`--watch`/detached
     // grandchildren that survived the one-shot `kill(pid)` above. Env-free + cross-platform
     // (pgid is queryable everywhere, unlike a hardened process's environment on macOS).
-    let reaped = crate::reap::reap_pgid(pid);
+    //
+    // BUT spare registered `agg spawn` long tasks: a worker may have deliberately left a
+    // multi-hour sim running to poll next session. Their pgids are PROTECTED so the sweep
+    // kills real leaks but not intentional background work. (`protected` computed above.)
+    let reaped = crate::reap::reap_pgid_except(pid, &protected);
     if reaped > 0 {
         eprintln!("  reaped {reaped} straggler process(es) from the worker group");
     }

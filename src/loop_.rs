@@ -56,7 +56,24 @@ impl Drop for StopHooks<'_> {
     }
 }
 
+/// Clears `.agg/run.pid` on any loop exit (clean, error, or panic) so a later `agg stop`
+/// never targets a dead pid and the double-run guard never falsely reports a live loop.
+struct RunPidGuard<'a> {
+    dir: &'a Path,
+}
+impl Drop for RunPidGuard<'_> {
+    fn drop(&mut self) {
+        crate::detach::clear_run_pid(self.dir);
+    }
+}
+
 pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Result<()> {
+    // Record THIS process as the live loop so `agg stop` / the double-run guard read a
+    // current pid. Covers BOTH foreground `agg run` and the detached child (which re-runs
+    // `agg run` for real) — the child overwrites the launcher's pid with its own.
+    crate::detach::write_run_pid(dir);
+    let _run_pid_guard = RunPidGuard { dir };
+
     let resume_prompt = std::fs::read_to_string(dir.join(&cfg.resume_prompt))
         .with_context(|| format!("reading resume prompt {}", cfg.resume_prompt))?;
 
@@ -230,13 +247,27 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         // on_session_start hooks (e.g. incremental refresh of a code graph / cache).
         crate::hooks::run("on_session_start", &cfg.hooks.on_session_start, dir);
 
-        // 1) build the effective prompt: [operator instruction] + [prompt_includes] + resume.
-        //    The operator instruction (if any) is consumed once; the prompt_includes prefix is
-        //    the user's reusable tooling/guidance fragments (agg adds no tool-specific text).
+        // Layer-3 spawn scanner: flip finished long-tasks to "done", prune stale entries.
+        // Runs every boundary (the harness's natural tick) — autonomous-safe, only updates
+        // liveness of tasks WE registered; never kills a process it can't prove is ours.
+        if let Some(change) = crate::spawns::scan(dir) {
+            eprintln!("  [spawn] {change}");
+        }
+
+        // 1) build the effective prompt: [operator instruction] + [spawn status] +
+        //    [prompt_includes] + resume. The operator instruction (if any) is consumed once;
+        //    the spawn status tells this session about background tasks left running by a
+        //    prior session (so it polls instead of relaunching); the prompt_includes prefix
+        //    is the user's reusable tooling/guidance fragments.
         let base = if prompt_prefix.is_empty() {
             resume_prompt.clone()
         } else {
             format!("{prompt_prefix}\n\n{resume_prompt}")
+        };
+        // prepend any tracked background-task status so the worker sees what is pending + why.
+        let base = match crate::spawns::summary_for_prompt(dir) {
+            Some(status) => format!("{status}\n{base}"),
+            None => base,
         };
         let effective_prompt = match pending_instruction.take() {
             Some(instr) => format!(

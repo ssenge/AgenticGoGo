@@ -17,6 +17,7 @@ mod judge;
 mod loop_;
 mod model;
 mod reap;
+mod spawns;
 mod state;
 mod stop;
 mod stream;
@@ -74,6 +75,29 @@ enum Cmd {
         /// reason (recorded in the finish banner)
         #[arg(default_value = "operator requested stop")]
         reason: String,
+    },
+    /// Prepend a high-priority instruction to the next worker session (alias of `send inject`).
+    Inject {
+        /// the instruction text
+        text: String,
+    },
+    /// Pause the loop before the next session (alias of `send pause`).
+    Pause,
+    /// Resume a paused loop (alias of `send resume`).
+    Resume,
+    /// Launch a long-running task that OUTLIVES the worker session, tracked so the straggler
+    /// reaper spares it and the next session knows it is running (and why). Use this instead
+    /// of a hand-rolled `nohup` for any sim/build that takes longer than a single turn.
+    Spawn {
+        /// short unique handle for the task, e.g. "scaling-20q".
+        #[arg(long)]
+        name: String,
+        /// WHY it is running — surfaced to the next worker so it polls instead of relaunching.
+        #[arg(long)]
+        reason: String,
+        /// the command to run (everything after `--`), e.g. `-- python -m qcbn.scaling 20`.
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
     },
     /// Send a steering command to a running loop's bus (applied at the next session boundary).
     #[command(subcommand)]
@@ -168,6 +192,11 @@ fn main() -> Result<()> {
         }
         Cmd::Dashboard => dashboard::run(&p.dir),
         Cmd::Stop { reason } => send_to_bus(&p.dir, bus::Command::Stop { reason: reason.clone() }),
+        // top-level aliases for the most-used bus verbs (consistency with `agg stop`):
+        Cmd::Inject { text } => send_to_bus(&p.dir, bus::Command::InjectInstruction { text: text.clone() }),
+        Cmd::Pause => send_to_bus(&p.dir, bus::Command::Pause),
+        Cmd::Resume => send_to_bus(&p.dir, bus::Command::Resume),
+        Cmd::Spawn { name, reason, cmd } => spawn_task(&p.dir, name, reason, cmd),
         Cmd::Send(send) => {
             let cmd = match send {
                 SendCmd::Inject { text } => bus::Command::InjectInstruction { text: text.clone() },
@@ -194,6 +223,90 @@ fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
     let path = b.send(&cmd, &stamp)?;
     eprintln!("queued → {} (the loop applies it at the next session boundary)", path.display());
     Ok(())
+}
+
+/// Launch a long-running task detached, in its OWN process group, with its own log file,
+/// and register it so (a) the straggler reaper spares its pgid and (b) the next worker
+/// session is told it is running and why. This is the blessed alternative to a hand-rolled
+/// `nohup` — agg launches it, so agg knows its pid/pgid directly (no env marker needed,
+/// which is good because macOS blocks reading a process's env).
+fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -> Result<()> {
+    use std::process::{Command, Stdio};
+    if cmd.is_empty() {
+        anyhow::bail!("nothing to spawn — pass the command after `--`, e.g. `agg spawn --name x --reason y -- sleep 60`");
+    }
+    let log_dir = spawns::Registry::log_dir(dir);
+    std::fs::create_dir_all(&log_dir).with_context(|| "creating .agg/spawns log dir")?;
+    let log_path = log_dir.join(format!("{name}.log"));
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening spawn log {}", log_path.display()))?;
+    let log_err = log.try_clone().with_context(|| "duplicating spawn log handle")?;
+
+    let mut c = Command::new(&cmd[0]);
+    c.args(&cmd[1..])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    // OWN session (and therefore its own process group, as leader): decoupled from the
+    // worker so the worker's post-session group-kill never touches it, AND it survives the
+    // launching shell/worker exiting. `setsid()` alone does both — do NOT also call
+    // `process_group(0)`, which would make the child a group leader first and then make
+    // `setsid()` fail with EPERM (a group leader can't start a new session).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            c.pre_exec(|| {
+                // new session → new process group (child is leader) → no controlling tty.
+                if libc_setsid_main() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let child = c.spawn().with_context(|| format!("spawning `{}`", cmd.join(" ")))?;
+    let pid = child.id();
+    // The child is its own group leader, so pgid == pid.
+    let pgid = pid;
+    // Detach: we do not wait. The child runs on; the registry + next session own its fate.
+    std::mem::forget(child);
+
+    // Read the session count from state.json so the breadcrumb says "since session N".
+    let started_session = state::DashboardState::read(dir).map(|s| s.session).unwrap_or(0);
+
+    spawns::Registry::register(dir, spawns::SpawnEntry {
+        name: name.to_string(),
+        pgid,
+        pid,
+        reason: reason.to_string(),
+        cmd: cmd.join(" "),
+        log: log_path.to_string_lossy().into_owned(),
+        started_session,
+        status: "running".into(),
+    })
+    .with_context(|| "registering spawn in .agg/spawns.json")?;
+
+    eprintln!(
+        "▶ spawned `{name}` (pid {pid}, pgid {pgid}) — survives session boundaries.\n  \
+         reason: {reason}\n  \
+         log:    {}\n  \
+         poll:   tail -f {}\n  \
+         it is now PROTECTED from the straggler reaper and announced to the next session.",
+        log_path.display(),
+        log_path.display(),
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "setsid"]
+    fn libc_setsid_main() -> i32;
 }
 
 /// If the required config file is missing, exit with an actionable hint instead of

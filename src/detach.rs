@@ -18,6 +18,21 @@ use std::process::{Command, Stdio};
 fn pid_path(dir: &Path) -> std::path::PathBuf {
     dir.join(".agg").join("run.pid")
 }
+
+/// Record THIS process as the live loop. Called by every `agg run` (foreground OR detached)
+/// so `agg stop` and the double-run guard always read a current pid — previously only the
+/// `--detach` path wrote run.pid, so a foreground / `nohup agg run` left it pointing at a
+/// stale (often dead) pid, and `agg stop` would target the wrong process.
+pub fn write_run_pid(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir.join(".agg"));
+    let _ = std::fs::write(pid_path(dir), std::process::id().to_string());
+}
+
+/// Remove run.pid (best-effort) when the loop exits, so a later `agg stop` doesn't act on a
+/// dead pid and the double-run guard doesn't falsely report a live loop.
+pub fn clear_run_pid(dir: &Path) {
+    let _ = std::fs::remove_file(pid_path(dir));
+}
 fn log_path(dir: &Path) -> std::path::PathBuf {
     dir.join(".agg").join("run.log")
 }
