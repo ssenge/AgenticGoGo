@@ -14,6 +14,7 @@ mod engine;
 mod hooks;
 mod init;
 mod judge;
+mod localtime;
 mod loop_;
 mod model;
 mod reap;

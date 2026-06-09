@@ -493,17 +493,16 @@ fn fmt_dur(secs: u64) -> String {
     }
 }
 
-/// Absolute local wall-clock for the loop's start, as `HH:MM:SS`. We avoid a chrono
-/// dependency: epoch → seconds-of-day, displayed in UTC. (The Info block also shows
-/// "up", which is what most users actually read; this is the absolute anchor.)
+/// Absolute local wall-clock for the loop's start, as `HH:MM:SS <zone>`. We
+/// avoid a chrono dependency: the local UTC offset comes from libc's
+/// `localtime_r` (cached once) so a user in CEST sees their wall clock, not UTC.
+/// The zone label (e.g. `UTC+2`) names what's being shown.
 fn fmt_started(epoch: u64) -> String {
     if epoch == 0 {
         return "—".to_string();
     }
-    let s = epoch % 60;
-    let m = (epoch / 60) % 60;
-    let h = (epoch / 3600) % 24;
-    format!("{h:02}:{m:02}:{s:02} UTC")
+    let (h, m, s) = crate::localtime::local_hms(epoch);
+    format!("{h:02}:{m:02}:{s:02} {}", crate::localtime::offset_label())
 }
 
 fn human(n: u64) -> String {

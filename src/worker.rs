@@ -299,12 +299,9 @@ fn now_epoch() -> u64 {
 }
 
 fn hhmmss() -> String {
-    // lightweight local HH:MM:SS without pulling chrono; good enough for logs.
-    let secs = now_epoch();
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    format!("{h:02}:{m:02}:{s:02}")
+    // local HH:MM:SS via the cached libc offset (no chrono dependency) so the
+    // dashboard's Activity tail matches the user's wall clock, not UTC.
+    crate::localtime::hhmmss(now_epoch())
 }
 
 /// Sleep up to `secs`, waking early in 1s steps if `done` flips.
