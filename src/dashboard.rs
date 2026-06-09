@@ -228,7 +228,17 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         Span::styled(project.to_string(), Style::default().bold()),
         sep(),
         label("session "),
-        Span::styled(format!("#{}", s.session), Style::default().bold()),
+        // "#<this-run>" plus the cumulative lifetime total when it differs (i.e. the
+        // project has run across more than one `agg run`), so a restart no longer
+        // looks like the work started over: e.g. "#4 (of 23)".
+        Span::styled(
+            if s.lifetime_session > s.session {
+                format!("#{} (of {})", s.session, s.lifetime_session)
+            } else {
+                format!("#{}", s.session)
+            },
+            Style::default().bold(),
+        ),
         sep(),
         label("phase "),
         phase,
@@ -574,6 +584,7 @@ mod tests {
             started_at_epoch: 1_700_000_000,
             up_secs: 11520,
             session: 7,
+            lifetime_session: 7,
             phase: "running".into(),
             idle_secs: 12,
             tokens_spent: 2_100_000,

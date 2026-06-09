@@ -71,7 +71,12 @@ pub struct DashboardState {
     /// epoch secs the loop started (for an absolute "started at" in the Info block)
     pub started_at_epoch: u64,
     pub up_secs: u64,
+    /// session number WITHIN the current `agg run` invocation (resets to 0 each run).
     pub session: u32,
+    /// cumulative session count across ALL `agg run` invocations for this project
+    /// (persisted in `.agg/sessions.count`). Survives restarts so the dashboard can
+    /// show "how many sessions has this project ever run", not just this invocation.
+    pub lifetime_session: u32,
     pub phase: String,       // "running" | "judging" | "backoff" | "done" | ...
     pub idle_secs: u64,
     pub tokens_spent: u64,

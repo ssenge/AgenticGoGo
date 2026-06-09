@@ -194,9 +194,25 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
     let mut last_session_id: Option<String> = None;      // for optional --resume continuity
 
     let mut session = 0u32;
+    // Persistent project run-history ledger (.agg/project.json): append an
+    // in-flight record for THIS run, finalized on any exit via the Drop guard
+    // below. The lifetime session total (shown on the dashboard so a restart
+    // doesn't look like the work started over) is derived from prior runs in the
+    // ledger; `session` (per-run) still drives --resume/labels.
+    let mut ledger = crate::project::RunLedger::begin(
+        dir,
+        &cfg.project,
+        std::process::id(),
+        now_epoch(),
+    );
+    let lifetime_base = ledger.prior_lifetime_sessions();
+    dash.lifetime_session = lifetime_base;
     loop {
         if max_sessions != 0 && session >= max_sessions {
             eprintln!("→ reached max_sessions={max_sessions}; stopping (goals not all met).");
+            let (gm, gt) = eng.tally();
+            ledger.update(session, tokens_spent, gm, gt);
+            ledger.finish(now_epoch(), "max-sessions");
             break;
         }
 
@@ -225,6 +241,9 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
                         dash.phase = "done".into();
                         dash.finished = true;
                         dash.finish_reason = format!("stopped via bus: {reason}");
+                        let (gm, gt) = eng.tally();
+                        ledger.update(session, tokens_spent, gm, gt);
+                        ledger.finish(now_epoch(), "stopped");
                         publish!();
                         return Ok(());
                     }
@@ -235,9 +254,15 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
 
         session += 1;
         dash.session = session;
+        // bump + persist this run's record so a later `agg run` continues the count
+        // and the dashboard's lifetime total stays live across restarts.
+        dash.lifetime_session = lifetime_base + session;
+        let (gm, gt) = eng.tally();
+        ledger.update(session, tokens_spent, gm, gt);
         let up = loop_start.elapsed().as_secs();
         eprintln!(
-            "\n──── session #{session}  (up {}h{:02}m)  goals {}/{} ────",
+            "\n──── session #{session} (#{} lifetime)  (up {}h{:02}m)  goals {}/{} ────",
+            dash.lifetime_session,
             up / 3600,
             (up % 3600) / 60,
             eng.tally().0,
@@ -347,6 +372,9 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
             dash.phase = "done".into();
             dash.finished = true;
             dash.finish_reason = format!("HALT: {reason}");
+            let (gm, gt) = eng.tally();
+            ledger.update(session, tokens_spent, gm, gt);
+            ledger.finish(now_epoch(), &format!("halt:{reason}"));
             publish!();
             break;
         }
@@ -356,6 +384,8 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
             dash.phase = "done".into();
             dash.finished = true;
             dash.finish_reason = format!("{mt}/{tt} goals met after {session} session(s)");
+            ledger.update(session, tokens_spent, mt, tt);
+            ledger.finish(now_epoch(), "goals-met");
             publish!();
             break;
         }
@@ -365,4 +395,11 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
 
 fn indent(s: &str) -> String {
     s.lines().map(|l| format!("    {l}\n")).collect()
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

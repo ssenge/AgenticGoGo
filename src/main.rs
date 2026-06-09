@@ -17,6 +17,7 @@ mod judge;
 mod localtime;
 mod loop_;
 mod model;
+mod project;
 mod reap;
 mod spawns;
 mod state;
