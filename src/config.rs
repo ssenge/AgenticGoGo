@@ -14,6 +14,14 @@ pub struct AggConfig {
     /// model id for the inner worker
     #[serde(default = "default_model")]
     pub model: String,
+    /// `--effort` level passed to each headless worker (`claude -p`). Valid CLI
+    /// values: low | medium | high | xhigh | max. Defaults to `max` — the top of
+    /// the `-p` flag enum (the interactive-only `ultracode` tier is NOT reachable
+    /// from `-p`; workers opt into multi-agent orchestration via the prompt instead,
+    /// see `worker_prompt_prefix`). An unrecognized value makes the CLI fall back to
+    /// its default effort (with a warning), so keep it to the valid set.
+    #[serde(default = "default_effort")]
+    pub effort: String,
     /// path to the fat resume prompt fed to each worker (`-p` argument)
     pub resume_prompt: String,
     #[serde(default = "default_heartbeat")]
@@ -131,6 +139,9 @@ pub struct GoalsConfig {
 // ---- defaults ----
 fn default_model() -> String {
     "claude-opus-4-8[1m]".into()
+}
+fn default_effort() -> String {
+    "max".into()
 }
 fn default_heartbeat() -> u64 {
     30

@@ -301,6 +301,16 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
             ),
             None => base,
         };
+        // Opt the worker into multi-agent orchestration: the leading `ultracode`
+        // keyword lets the worker spawn subagents / run Workflows for the deep,
+        // parallelizable work (HiGHS source reads, multi-file ports). `ultracode`
+        // is interactive-only as an `--effort` level, but as a prompt opt-in it is
+        // exactly the multi-agent trigger — so a headless `-p` worker still gets
+        // subagent fan-out. Kept as the very first line so it is unmissable.
+        let effective_prompt = format!(
+            "ultracode — you are authorized to spawn subagents and run multi-agent \
+             Workflows for substantive, parallelizable work this session.\n\n{effective_prompt}"
+        );
         dash.phase = "running".into();
         publish!();
         // --resume continuity (opt-in): continue the prior session's context. Default

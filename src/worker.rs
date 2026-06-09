@@ -48,6 +48,13 @@ pub fn run_session(
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose");
+    // Max thinking effort for the headless worker (configurable via agg.yaml
+    // `effort:`; default "max"). `ultracode` is interactive-only and not a valid
+    // `-p` flag value, so workers get the highest effort reachable from `-p` here
+    // and opt into subagent orchestration through the prompt prefix instead.
+    if !cfg.effort.is_empty() {
+        command.arg("--effort").arg(&cfg.effort);
+    }
     if let Some(id) = resume_id {
         command.arg("--resume").arg(id);
     }
