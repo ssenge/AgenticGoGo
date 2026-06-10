@@ -207,6 +207,37 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
     );
     let lifetime_base = ledger.prior_lifetime_sessions();
     dash.lifetime_session = lifetime_base;
+
+    // ── per-session git isolation (opt-in) ────────────────────────────────────────────────
+    // Capture the base branch ONCE at startup. Each session runs on its own branch off this
+    // base and is merged back UNLESS the worker vetoed it (red file). Disabled cleanly if the
+    // repo isn't in a usable state (not a repo / detached HEAD / dirty tree) — isolation is an
+    // enhancement, never a correctness requirement.
+    let iso = &cfg.session_isolation;
+    let iso_base: Option<String> = if iso.enabled {
+        if !crate::git::is_repo(dir) {
+            eprintln!("  [iso] session_isolation enabled but not a git repo — running on current branch");
+            None
+        } else if !crate::git::is_clean(dir) {
+            eprintln!("  [iso] session_isolation enabled but work tree has tracked changes — commit/stash first; running on current branch");
+            None
+        } else {
+            // keep agg's runtime state out of git so it never lands on session branches / base.
+            crate::git::ensure_agg_gitignored(dir);
+            let base = if iso.base_branch.is_empty() {
+                crate::git::current_branch(dir)
+            } else {
+                Some(iso.base_branch.clone())
+            };
+            match &base {
+                Some(b) => eprintln!("  [iso] per-session branch isolation ON — base branch '{b}', merge unless '{}' present", iso.red_file),
+                None => eprintln!("  [iso] session_isolation enabled but HEAD is detached — running on current branch"),
+            }
+            base
+        }
+    } else {
+        None
+    };
     loop {
         if max_sessions != 0 && session >= max_sessions {
             eprintln!("→ reached max_sessions={max_sessions}; stopping (goals not all met).");
@@ -269,6 +300,24 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
             eng.tally().1
         );
 
+        // ── isolation: cut this session's branch off the base + clear any stale red veto ──
+        // `session_branch` is Some(name) only when isolation is active AND the branch was
+        // created cleanly; otherwise the session runs on the current branch as before.
+        let session_branch: Option<String> = match &iso_base {
+            Some(base) => {
+                let br = crate::git::session_branch(&iso.branch_prefix, &cfg.project, session);
+                crate::git::remove_file(dir, &iso.red_file); // clear stale veto before the run
+                if crate::git::create_branch(dir, &br, base) {
+                    eprintln!("  [iso] session #{session} on branch {br} (off {base})");
+                    Some(br)
+                } else {
+                    eprintln!("  [iso] could not create session branch — running on {base}");
+                    None
+                }
+            }
+            None => None,
+        };
+
         // on_session_start hooks (e.g. incremental refresh of a code graph / cache).
         crate::hooks::run("on_session_start", &cfg.hooks.on_session_start, dir);
 
@@ -326,6 +375,32 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
             outcome.output_tokens,
             tokens_spent,
         );
+
+        // ── isolation: resolve the session branch (DEFAULT MERGE, unless the worker vetoed) ──
+        // The worker committed to `session_branch`. Default is to merge it back into the base.
+        // If the worker wrote the red file, it vetoed this session ⇒ discard the branch, base
+        // untouched. A crashed/killed worker that never wrote the red file still merges its
+        // partial commits (default-merge). Judges below then run on the resolved base state.
+        if let (Some(base), Some(br)) = (&iso_base, &session_branch) {
+            let vetoed = crate::git::file_exists(dir, &iso.red_file);
+            // back to base before merge/discard (git ops require not being on the branch we delete).
+            let on_base = crate::git::checkout(dir, base);
+            if !on_base {
+                eprintln!("  [iso] WARNING could not checkout base '{base}'; leaving session branch {br} in place");
+            } else if vetoed {
+                eprintln!("  [iso] session #{session} VETOED (worker wrote {}) → discarding branch {br}", iso.red_file);
+                crate::git::remove_file(dir, &iso.red_file); // don't let the veto persist on base
+                crate::git::delete_branch(dir, br);
+            } else {
+                let msg = format!("agg: merge session #{session} ({br})");
+                if crate::git::merge_no_ff(dir, br, &msg) {
+                    eprintln!("  [iso] session #{session} merged → {base}");
+                    crate::git::delete_branch(dir, br);
+                } else {
+                    eprintln!("  [iso] session #{session} merge FAILED (conflict) — branch {br} kept for inspection, base unchanged");
+                }
+            }
+        }
 
         // 2) rate-limit backoff (exit-code + terminal-event gated).
         if outcome.rate_limited {

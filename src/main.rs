@@ -11,6 +11,7 @@ mod dashboard;
 mod detach;
 mod doctor;
 mod engine;
+mod git;
 mod hooks;
 mod init;
 mod judge;

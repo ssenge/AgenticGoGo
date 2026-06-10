@@ -50,6 +50,47 @@ pub struct AggConfig {
     /// here instead of baking them into agg. Paths are relative to the project dir.
     #[serde(default)]
     pub prompt_includes: Vec<String>,
+    /// Per-session git branch isolation. When enabled, each worker session runs on its own
+    /// branch and is merged back to the base ONLY if the worker did not veto it. See
+    /// [`SessionIsolation`].
+    #[serde(default)]
+    pub session_isolation: SessionIsolation,
+}
+
+/// Per-session git isolation. Each session runs on `<branch_prefix>/<project>/session-<N>`
+/// branched from `base_branch`. After the session, agg merges that branch back into the base
+/// — DEFAULT = merge — UNLESS the worker wrote the `red_file` (a veto), in which case the
+/// session branch is discarded and the base is left untouched. A crashed/killed worker that
+/// never wrote the red file still merges its partial commits (default-merge). The worker is
+/// the authority on green/red; agg only acts on the veto file.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionIsolation {
+    /// master switch (default OFF — existing projects keep committing to the current branch).
+    #[serde(default)]
+    pub enabled: bool,
+    /// branch name prefix; full name is `<prefix>/<project>/session-<N>`.
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
+    /// base branch sessions are cut from + merged into. Empty = whatever branch agg was
+    /// launched on (captured at startup).
+    #[serde(default)]
+    pub base_branch: String,
+    /// the worker's veto file (relative to project dir). Present after a session ⇒ DO NOT
+    /// merge (discard the session branch). agg deletes it before each session so a stale
+    /// veto never blocks a later merge.
+    #[serde(default = "default_red_file")]
+    pub red_file: String,
+}
+
+impl Default for SessionIsolation {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            branch_prefix: default_branch_prefix(),
+            base_branch: String::new(),
+            red_file: default_red_file(),
+        }
+    }
 }
 
 /// Generic lifecycle hooks. Each is a list of shell commands run (in order) at that moment,
@@ -142,6 +183,12 @@ fn default_model() -> String {
 }
 fn default_effort() -> String {
     "max".into()
+}
+fn default_branch_prefix() -> String {
+    "agg".into()
+}
+fn default_red_file() -> String {
+    ".agg_red".into()
 }
 fn default_heartbeat() -> u64 {
     30
