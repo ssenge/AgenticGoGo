@@ -14,11 +14,23 @@ context, or quietly stop one step short — leaving you to babysit a terminal?
 
 **Then the AgenticGoGo harness is for you.**
 
-AgenticGoGo (`agg`) wraps your agent in a proper loop that runs **fresh Claude Code workers,
-one after another, until your goals are actually met** — judged by scripts and LLMs, not by
-vibes. It heartbeats, watchdogs hung sessions, summarizes progress in plain English, shows
-you a live dashboard, and lets you steer it from your phone. You set the finish line; it runs
-to it.
+AgenticGoGo (`agg`) is a **[Ralph loop](https://ghuntley.com/ralph/)** — the technique, coined
+by Geoffrey Huntley, of re-launching a **fresh** coding-agent session over and over until a
+spec is actually fulfilled, with the **filesystem as the source of truth** between iterations
+rather than a single, degrading conversation. There's a whole family of these tools
+([snarktank/ralph](https://github.com/snarktank/ralph), Anthropic's
+[`ralph-wiggum`](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum)
+plugin, [vercel-labs/ralph-loop-agent](https://github.com/vercel-labs/ralph-loop-agent),
+Steve Yegge's [Gas Town](https://github.com/steveyegge/gastown), and more); `agg` is the
+**operationally-hardened single-machine** one.
+
+Concretely: `agg` runs **fresh Claude Code workers, one after another, until your goals are
+actually met** — judged by scripts and LLMs, not by vibes. It heartbeats, watchdogs hung
+sessions, summarizes progress in plain English, shows you a live dashboard, and lets you steer
+it from your phone. You set the finish line; it runs to it.
+
+> 🔍 **New to the Ralph loop, or wondering how `agg` differs from the other tools?** See
+> **[COMPARISON.md](COMPARISON.md)** for a feature-by-feature breakdown.
 
 ```
 ┌─ AgenticGoGo · my-project · up 3h12m · stop: all_goals ─────────────────────┐
@@ -46,10 +58,24 @@ A single agent session is **bounded** — by context, by attention, by the human
 For genuinely long work (a refactor, a benchmark chase, a milestone) you end up hand-cranking
 it: *go… go… go…*. Spec tools help you **plan**, but planning isn't **finishing**.
 
-AgenticGoGo is the missing **finishing** layer. The insight (learned the hard way driving an
-agent through a long, repetitive build): keep the loop **dumb and cheap** — a plain program
-that relaunches fresh, context-free workers — and reserve the LLM for the actual work and the
-judging. No context accumulation, no runaway cost, no babysitting.
+The Ralph loop is the answer the field converged on: keep the loop **dumb and cheap** — a plain
+program that relaunches fresh, context-free workers — and reserve the LLM for the actual work
+and the judging. No context accumulation, no runaway cost, no babysitting. (Huntley's purest
+form is literally `while :; do cat PROMPT.md | claude-code ; done`.) AgenticGoGo is the missing
+**finishing** layer built on that idea — but where most Ralph implementations stop at the bare
+loop, `agg` adds the parts you actually need to leave a multi-hour run unattended:
+
+- a **typed multi-goal scoreboard** with **regression detection** (a met goal that breaks again
+  is a first-class signal) and **invariant guards** that halt the moment the worker cheats;
+- **LLM-as-judge** as a shipped feature, not a self-asserted "done";
+- a **two-signal watchdog** (silent *and* CPU-flat), **rate-limit backoff**, and **process-group
+  reaping** so a hung or runaway worker can't wedge the loop or leak compute;
+- a **safe stop-condition language** (not `eval`), **per-session git isolation**, and **live +
+  mobile steering**.
+
+That combination is what distinguishes it from the lighter members of the family — see
+[COMPARISON.md](COMPARISON.md). For *parallel-fleet* scale (20–30 agents at once) rather than a
+hardened single-machine loop, look at Gas Town instead; `agg` is deliberately sequential.
 
 ## How it works
 
@@ -66,12 +92,18 @@ judging. No context accumulation, no runaway cost, no babysitting.
             ▲ agg dashboard (live TUI)     ▲ agg send (steer it)
 ```
 
+This is the canonical Ralph shape: a **dumb outer loop** (no tokens) wraps a **fresh-context
+inner worker** (the real cost). Each session starts clean — Huntley's *"one context window, one
+activity, one goal"* — so the loop never compacts or degrades; state carries across sessions via
+the **filesystem** (your code, git, the resume prompt), not a growing conversation.
+
 - **Goals** come in three flavors — `binary` (done y/n), `percentage` (≥ a target),
   `cardinal` (N of M) — with **regression detection** (a goal that breaks again is loud) and
   **invariant guards** (“never ship a wrong result” can halt the loop).
-- **Judges** decide if a goal is met. A **script** judge runs a command (test suite,
-  benchmark, linter) → verdict. An **LLM** judge scores artifacts against a **rubric** →
-  verdict. Both emit the same tiny JSON contract.
+- **Judges** are the loop's **backpressure** — the verification gates that reject not-yet-good
+  work so the next session redoes it. A **script** judge runs a command (test suite, benchmark,
+  linter) → verdict. An **LLM** judge scores artifacts against a **rubric** → verdict (Ralph's
+  prescribed answer for subjective criteria). Both emit the same tiny JSON contract.
 - **Stop conditions** are a safe little expression language — `all_goals`,
   `met_fraction >= 0.75`, `count_met >= 3`, `goal_a OR goal_b`,
   `any_regressed(invariants) OR over_budget` — *not* `eval`.
@@ -442,6 +474,26 @@ no fragile env-reading).
 
 Inner workers run in your project, so your other Claude Code plugins and MCP servers — engram,
 get-shit-done, graphify — **just work** alongside `agg`. Use them to plan; use `agg` to finish.
+
+## Where AGG fits in the Ralph family
+
+`agg` didn't invent the loop — it's one of many [Ralph-loop](https://ghuntley.com/ralph/)
+implementations, and it stands on Huntley's pattern and the tools that came before it. What it
+adds is **operational completeness for an unattended single-machine run**: typed goals +
+regression detection + invariant halt-on-cheating + a safe stop-condition DSL (a combination no
+other tool in the family has), plus a shipped LLM judge, a two-signal watchdog, rate-limit
+backoff, process reaping, per-session git isolation, and mobile steering.
+
+Quick orientation:
+
+| Tool | Best at | `agg` vs it |
+|---|---|---|
+| [snarktank/ralph](https://github.com/snarktank/ralph) | The popular, simple PRD-driven loop | `agg` adds the safety/observability rails it lacks (watchdog, budgets, LLM judge, invariants, steering) |
+| [`ralph-wiggum`](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum) (Anthropic) | One-command in-session "keep going" | `agg` runs **fresh** sessions instead of one that compacts/degrades |
+| [vercel-labs/ralph-loop-agent](https://github.com/vercel-labs/ralph-loop-agent) | AI-SDK lib with a `$` cost cap | `agg` is a real harness (watchdog, dashboard, git isolation); vercel has a literal dollar ceiling `agg` doesn't |
+| [Gas Town](https://github.com/steveyegge/gastown) (Yegge) | **Parallel** 20–30-agent fleets | A different class — `agg` is the lighter, cheaper, single-operator sequential loop |
+
+The full feature-by-feature matrix, honest gaps, and sources are in **[COMPARISON.md](COMPARISON.md)**.
 
 ## License
 
