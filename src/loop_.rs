@@ -368,10 +368,11 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         // (run_session now reaps any straggler in the worker's process group on exit, and the
         // worker's reader thread already streamed `now`/`think`/`recent` live — nothing to do here.)
         eprintln!(
-            "  session #{session} exited (code {:?}) after {}s{}  (+{} out-tok, {} total)",
+            "  session #{session} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total)",
             outcome.exit_code,
             outcome.duration_secs,
             if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
+            if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
             outcome.output_tokens,
             tokens_spent,
         );

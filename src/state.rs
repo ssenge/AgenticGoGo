@@ -235,12 +235,6 @@ impl LiveState {
         s.started_at_epoch = self.started_at_epoch;
         let _ = s.write(&self.dir);
     }
-
-    /// A consistent clone of the current snapshot (for tests / one-off reads).
-    #[allow(dead_code)]
-    pub fn snapshot(&self) -> DashboardState {
-        self.inner.lock().unwrap().clone()
-    }
 }
 
 fn now_epoch() -> u64 {

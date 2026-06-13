@@ -254,12 +254,6 @@ impl GoalsConfig {
         anyhow::ensure!(!cfg.goals.is_empty(), "goals.yaml has no goals");
         Ok(cfg)
     }
-
-    /// Goal ids tagged `invariant: true`.
-    #[allow(dead_code)]
-    pub fn invariant_ids(&self) -> Vec<String> {
-        self.goals.iter().filter(|g| g.invariant).map(|g| g.id.clone()).collect()
-    }
 }
 
 fn env_u64(key: &str) -> Option<u64> {

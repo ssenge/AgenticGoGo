@@ -39,7 +39,6 @@ pub enum Command {
 
 /// Resolve the bus directories under a project dir, creating them if needed.
 pub struct Bus {
-    #[allow(dead_code)] pub root: PathBuf, // bus dir root (kept for tooling)
     pub inbox: PathBuf,
     pub outbox: PathBuf,
     pub log: PathBuf,
@@ -52,7 +51,7 @@ impl Bus {
         let outbox = root.join("out");
         std::fs::create_dir_all(&inbox)?;
         std::fs::create_dir_all(&outbox)?;
-        Ok(Bus { log: root.join("log.jsonl"), root, inbox, outbox })
+        Ok(Bus { log: root.join("log.jsonl"), inbox, outbox })
     }
 
     /// Send a command into `in/`. The filename is `{stamp}-{pid}-{seq}.json` — the

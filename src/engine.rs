@@ -1,8 +1,7 @@
 //! The cycle engine: run all judges, fold verdicts into goals, evaluate stop/halt.
 //!
 //! This is the goal logic the loop calls once per cycle (after a worker exits).
-//! Phase 1 keeps the loop itself minimal; `agg plan` exercises this engine for a
-//! single dry-run cycle, which is the walking skeleton's testable core.
+//! `agg plan` exercises this engine for a single dry-run cycle.
 
 use crate::config::GoalsConfig;
 use crate::judge;
@@ -10,6 +9,19 @@ use crate::model::{Goal, Lifecycle, RecheckPolicy};
 use crate::stop::{self, StopContext};
 use anyhow::Result;
 use std::path::Path;
+
+/// Evaluate a stop/halt expression, treating an evaluation error as "not satisfied" but
+/// logging it once so a loop that never stops (or never halts) is diagnosable. Parse-time
+/// errors are already caught by `Engine::new`; a runtime Err here is a genuine surprise.
+fn eval_or_log(expr: &str, ctx: &StopContext, which: &str) -> bool {
+    match stop::evaluate(expr, ctx) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("  ⚠ {which} `{expr}` failed to evaluate this cycle ({e}) — treating as false");
+            false
+        }
+    }
+}
 
 /// Reject configs that would silently break correctness:
 /// - `once_met` on an invariant (a latched invariant can't detect its own regression).
@@ -191,12 +203,6 @@ impl Engine {
         self.conditions_with_deltas(run, deltas)
     }
 
-    /// Evaluate stop/halt against the CURRENT goal states (no re-judging, no deltas).
-    #[allow(dead_code)]
-    pub fn conditions(&self, run: &RunState) -> CycleResult {
-        self.conditions_with_deltas(run, vec![])
-    }
-
     fn conditions_with_deltas(&self, run: &RunState, deltas: Vec<GoalDelta>) -> CycleResult {
         let ctx = StopContext {
             goals: &self.goals,
@@ -204,10 +210,14 @@ impl Engine {
             budget_total: run.budget_total,
             wall_hours: run.wall_hours,
         };
-        let stop = stop::evaluate(&self.stop_when, &ctx).unwrap_or(false);
+        // A malformed expression is rejected at config load (Engine::new validates), so an
+        // Err here means a runtime surprise (e.g. a judge emitted a non-finite value feeding a
+        // comparison). Treat it as "not satisfied" — but LOG it, so a loop that never stops is
+        // debuggable instead of silently evaluating to false forever.
+        let stop = eval_or_log(&self.stop_when, &ctx, "stop_when");
         let (halt, halt_reason) = match &self.halt_when {
             Some(expr) => {
-                let h = stop::evaluate(expr, &ctx).unwrap_or(false);
+                let h = eval_or_log(expr, &ctx, "halt_when");
                 (h, if h { Some(expr.clone()) } else { None })
             }
             None => (false, None),
@@ -219,11 +229,6 @@ impl Engine {
     pub fn tally(&self) -> (usize, usize) {
         let met = self.goals.iter().filter(|g| g.met()).count();
         (met, self.goals.len())
-    }
-
-    #[allow(dead_code)]
-    pub fn any_regressed(&self) -> bool {
-        self.goals.iter().any(|g| g.state == Lifecycle::Regressed)
     }
 
     /// Plain-text scoreboard (Phase 1 output; the TUI replaces this in Phase 4).

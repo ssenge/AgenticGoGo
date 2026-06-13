@@ -16,8 +16,8 @@ pub struct SessionOutcome {
     pub exit_code: Option<i32>,
     pub duration_secs: u64,
     pub rate_limited: bool,
-    /// the loop doesn't branch on this yet, but it's part of the outcome surface
-    #[allow(dead_code)]
+    /// the watchdog SIGKILLed this session (stream-idle + cpu-flat) — surfaced on the
+    /// session-exit log line so a hung worker is visible, not silently swallowed.
     pub killed_by_watchdog: bool,
     /// output-side tokens this session reported on its result event (for the budget)
     pub output_tokens: u64,
