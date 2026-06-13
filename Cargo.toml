@@ -8,6 +8,12 @@ license = "MIT"
 repository = "https://github.com/ssenge/AgenticGoGo"
 default-run = "agg"
 
+# The harness is a library (`agg`) so integration tests in tests/ can drive the pure cores
+# directly; the binary is a thin CLI over it.
+[lib]
+name = "agg"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agg"
 path = "src/main.rs"
@@ -18,8 +24,12 @@ serde_json = "1"          # verdict JSON (judge contract) + dashboard state
 serde_yaml = "0.9"        # agg.yaml / goals.yaml
 clap = { version = "4", features = ["derive"] }   # CLI subcommands
 anyhow = "1"              # ergonomic error handling at the boundary
-ratatui = "0.29"          # the live TUI dashboard (Phase 4)
+ratatui = "0.29"          # the live TUI dashboard
 crossterm = "0.28"        # terminal backend for ratatui
+
+[dev-dependencies]
+assert_cmd = "2"          # drive the built `agg` binary in integration tests
+tempfile = "3"            # throwaway project dirs for integration tests
 
 [profile.release]
 opt-level = 3

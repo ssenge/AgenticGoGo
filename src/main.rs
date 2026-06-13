@@ -5,30 +5,9 @@
 //!   agg status  — same as plan but intended for quick re-checks
 //!   agg run     — the loop: launch worker → judge → check stop → repeat
 
-mod bus;
-mod config;
-mod dashboard;
-mod detach;
-mod doctor;
-mod engine;
-mod git;
-mod hooks;
-mod init;
-mod judge;
-mod localtime;
-mod loop_;
-mod model;
-mod paths;
-mod proc;
-mod project;
-mod reap;
-mod spawns;
-mod state;
-mod stop;
-mod stream;
-mod summary;
-mod util;
-mod worker;
+// The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
+// modules the CLI actually touches are imported here.
+use agg::{bus, config, dashboard, detach, doctor, engine, init, loop_, proc, spawns, state};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
