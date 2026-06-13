@@ -127,7 +127,7 @@ pub fn run_session(
                         last_activity.store(now_epoch(), Ordering::Relaxed);
                     }
                     if let Some(thought) = &ev.thought {
-                        *last_thought.lock().unwrap() = thought.clone();
+                        *last_thought.lock().unwrap_or_else(|e| e.into_inner()) = thought.clone();
                     }
                     // push the event into the shared dashboard state so the TUI's
                     // Activity tail reflects the foreground stream in REAL TIME (the
@@ -172,7 +172,7 @@ pub fn run_session(
                 }
                 let idle = now_epoch().saturating_sub(last_activity.load(Ordering::Relaxed));
                 let up = start.elapsed().as_secs();
-                let thought = last_thought.lock().unwrap().clone();
+                let thought = last_thought.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 let flag = if idle >= 240 { format!(" ⚠IDLE{idle}s") } else { String::new() };
                 eprintln!(
                     "[HB {}] sess#{session} +{}m{:02}s | idle {idle}s{flag} | now: {}",

@@ -202,7 +202,7 @@ impl LiveState {
     /// Mutate the snapshot under lock, then publish (bump seq, refresh time, write).
     pub fn update<F: FnOnce(&mut DashboardState)>(&self, f: F) {
         {
-            let mut s = self.inner.lock().unwrap();
+            let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             f(&mut s);
         }
         self.publish();
@@ -214,10 +214,10 @@ impl LiveState {
     /// so we don't write the file on every single token.
     pub fn update_throttled<F: FnOnce(&mut DashboardState)>(&self, min_interval: std::time::Duration, f: F) {
         {
-            let mut s = self.inner.lock().unwrap();
+            let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             f(&mut s);
         }
-        let mut last = self.last_publish.lock().unwrap();
+        let mut last = self.last_publish.lock().unwrap_or_else(|e| e.into_inner());
         if last.elapsed() >= min_interval {
             *last = Instant::now();
             drop(last);
@@ -229,7 +229,7 @@ impl LiveState {
     /// the last live event is never stuck behind the throttle window). Bumps `seq` and
     /// refreshes `up_secs`; `idle_secs` is set by callers (the worker knows it).
     pub fn publish(&self) {
-        let mut s = self.inner.lock().unwrap();
+        let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         s.seq += 1;
         s.up_secs = self.loop_start.elapsed().as_secs();
         s.started_at_epoch = self.started_at_epoch;
