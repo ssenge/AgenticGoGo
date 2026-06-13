@@ -399,25 +399,9 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         // If the worker wrote the red file, it vetoed this session ⇒ discard the branch, base
         // untouched. A crashed/killed worker that never wrote the red file still merges its
         // partial commits (default-merge). Judges below then run on the resolved base state.
+        // The decision/I-O live in `git::resolve_session`; its truth table is unit-tested there.
         if let (Some(base), Some(br)) = (&iso_base, &session_branch) {
-            let vetoed = crate::git::file_exists(dir, &iso.red_file);
-            // back to base before merge/discard (git ops require not being on the branch we delete).
-            let on_base = crate::git::checkout(dir, base);
-            if !on_base {
-                eprintln!("  [iso] WARNING could not checkout base '{base}'; leaving session branch {br} in place");
-            } else if vetoed {
-                eprintln!("  [iso] session #{session} VETOED (worker wrote {}) → discarding branch {br}", iso.red_file);
-                crate::git::remove_file(dir, &iso.red_file); // don't let the veto persist on base
-                crate::git::delete_branch(dir, br);
-            } else {
-                let msg = format!("agg: merge session #{session} ({br})");
-                if crate::git::merge_no_ff(dir, br, &msg) {
-                    eprintln!("  [iso] session #{session} merged → {base}");
-                    crate::git::delete_branch(dir, br);
-                } else {
-                    eprintln!("  [iso] session #{session} merge FAILED (conflict) — branch {br} kept for inspection, base unchanged");
-                }
-            }
+            crate::git::resolve_session(dir, base, br, &iso.red_file, session);
         }
 
         // 2) rate-limit backoff (exit-code + terminal-event gated).
