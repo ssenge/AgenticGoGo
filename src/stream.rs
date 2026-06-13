@@ -1,5 +1,4 @@
-//! Stream-json event formatting — the Rust port of a prior harness's jq
-//! `tool_label` formatter. Turns one raw stream-json line into a readable log
+//! Stream-json event formatting. Turns one raw stream-json line into a readable log
 //! line (`🔧 $ <description>`, `🔧 read <path>`, `💬 <thought>`, `✅ RESULT …`),
 //! never the raw input JSON soup.
 
@@ -43,8 +42,8 @@ pub struct Event {
     pub thought: Option<String>,
 }
 
-/// Tracks rolling activity for summaries (Phase 3 will consume this; Phase 1 keeps
-/// it minimal so the worker can record the last thought).
+/// Tracks rolling activity (the worker's `💬` thoughts) so the LLM summarizer has raw
+/// material at the session boundary.
 #[derive(Default)]
 pub struct ActivityTracker {
     pub thoughts: Vec<String>,
@@ -146,7 +145,7 @@ pub fn format_event(line: &str) -> Option<Event> {
 }
 
 /// Readable label for a tool_use block — pick the human field per tool, NEVER the
-/// raw input JSON (that produced the mid-quote "echo..." soup in the prior harness).
+/// raw input JSON (which renders as unreadable mid-quote "echo..." soup).
 fn tool_label(block: &Value) -> String {
     let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
     let input = block.get("input").cloned().unwrap_or(Value::Null);
@@ -187,8 +186,9 @@ fn tool_result_text(block: &Value) -> String {
 }
 
 /// True if a stream-json line is a terminal `result` event reporting a real
-/// rate-limit / usage-limit error. Mirrors the prior harness's GATE 2: only the terminal
-/// result event is scanned, with tight API-error patterns (not prose).
+/// rate-limit / usage-limit error. GATE: only the terminal result event is scanned, with
+/// tight API-error patterns (not prose) — so a tool_result that merely mentions "429" or
+/// "rate_limit_error" in passing never trips a false backoff.
 pub fn line_is_rate_limited_result(line: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
     if v.get("type").and_then(|t| t.as_str()) != Some("result") {

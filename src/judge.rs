@@ -1,7 +1,7 @@
 //! Judge execution. A judge yields a [`Verdict`].
 //!
-//! - `script` judge (Phase 1): run a command, parse its stdout as verdict JSON.
-//! - `llm` judge (Phase 2): build a prompt from a rubric + inputs, call
+//! - `script` judge: run a command, parse its stdout as verdict JSON.
+//! - `llm` judge: build a prompt from a rubric + inputs, call
 //!   `claude -p --bare --model <m> --output-format json`, extract the verdict
 //!   JSON from the model's result. `--bare` = no plugins/hooks/CLAUDE.md → fast,
 //!   cheap, deterministic.
@@ -63,7 +63,7 @@ fn run_llm(model: &str, rubric: &str, inputs: &[String], timeout_secs: u64, cwd:
 
     // 4) call claude headless with json output.
     //
-    // NOTE (verified Phase 2): we deliberately do NOT pass `--bare`. `--bare` skips
+    // NOTE (verified the hard way): we deliberately do NOT pass `--bare`. `--bare` skips
     // keychain reads, so the judge call fails with "Not logged in" — it cannot
     // authenticate. We instead keep a normal headless call (which authenticates) and
     // isolate it with --strict-mcp-config (+ no --mcp-config) so NO MCP servers load,

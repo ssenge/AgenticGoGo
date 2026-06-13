@@ -231,7 +231,8 @@ impl Engine {
         (met, self.goals.len())
     }
 
-    /// Plain-text scoreboard (Phase 1 output; the TUI replaces this in Phase 4).
+    /// Plain-text scoreboard, printed by `agg plan`/`status` and in the loop's stdout log.
+    /// (The live TUI dashboard renders the same goal state separately from `state.json`.)
     pub fn scoreboard(&self) -> String {
         let (met, total) = self.tally();
         let mut out = format!("Goals: {met}/{total}   stop_when: {}\n", self.stop_when);

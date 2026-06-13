@@ -1,7 +1,7 @@
 //! Inner worker session: spawn `claude -p`, stream + format its events, run a
-//! heartbeat and a watchdog, detect rate-limits. Port of a prior bespoke harness's
-//! worker block — but Rust gives us the child PID and threads directly, so the
-//! watchdog is simpler and race-free.
+//! heartbeat and a watchdog, detect rate-limits. Owning the child PID and the threads
+//! directly keeps the watchdog simple; the pid-reuse window is narrowed (a `done` re-check
+//! right before the kill) rather than fully eliminated.
 
 use crate::config::AggConfig;
 use crate::proc;
@@ -288,7 +288,7 @@ pub fn run_session(
     SessionOutcome {
         exit_code: status.and_then(|s| s.code()),
         duration_secs: start.elapsed().as_secs(),
-        // a clean exit 0 is never a rate-limit (the prior harness GATE 1)
+        // GATE: a clean exit 0 is never a rate-limit, even if a transient event looked like one.
         rate_limited: rate_limited.load(Ordering::Relaxed)
             && status.and_then(|s| s.code()).unwrap_or(0) != 0,
         killed_by_watchdog: killed.load(Ordering::Relaxed),

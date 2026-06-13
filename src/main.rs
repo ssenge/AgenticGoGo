@@ -1,9 +1,8 @@
-//! AgenticGoGo (`agg`) — a generic agent-loop harness for Claude Code workers.
+//! AgenticGoGo (`agg`) — the CLI entry point.
 //!
-//! Phase 1 walking skeleton. Subcommands:
-//!   agg plan    — evaluate every judge once, print the starting scoreboard (dry run)
-//!   agg status  — same as plan but intended for quick re-checks
-//!   agg run     — the loop: launch worker → judge → check stop → repeat
+//! A thin clap front-end over the `agg` library: it parses subcommands (init/doctor/plan/
+//! status/run/dashboard/stop/inject/pause/resume/spawn/send), resolves the project paths, and
+//! dispatches into the harness. The orchestration itself lives in the library crate.
 
 // The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.

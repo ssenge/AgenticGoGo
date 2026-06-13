@@ -118,7 +118,7 @@ pub struct Hooks {
     pub background: Vec<String>,
 }
 
-/// LLM-summary settings (Phase 3). After each cycle (or every N secs), a cheap
+/// LLM-summary settings. After each cycle (or every N secs), a cheap
 /// model condenses recent worker thoughts + goal deltas into a cumulative + a
 /// windowed one-liner.
 #[derive(Debug, Clone, Deserialize)]

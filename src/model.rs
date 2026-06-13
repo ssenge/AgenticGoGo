@@ -160,7 +160,7 @@ pub enum JudgeSpec {
         #[serde(default = "default_timeout")]
         timeout: u64,
     },
-    /// A cheap `claude -p --bare` call with a rubric prompt (Phase 2).
+    /// A cheap `claude -p` call that scores artifacts against a rubric prompt.
     Llm {
         #[serde(default = "default_model")]
         model: String,

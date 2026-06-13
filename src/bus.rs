@@ -1,4 +1,4 @@
-//! The message bus (Phase 6) — session-granular bidirectional comms.
+//! The message bus — session-granular bidirectional comms.
 //!
 //! Honest platform truth: you CANNOT inject a message into a running headless
 //! `claude -p` worker mid-session (Channels don't work in `-p`). So steering is

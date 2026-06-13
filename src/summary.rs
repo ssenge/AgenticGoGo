@@ -1,11 +1,11 @@
-//! LLM summaries (Phase 3) — condense a session's worker thoughts + the cycle's
-//! goal deltas into two human one-liners:
+//! LLM summaries — condense a session's worker thoughts + the cycle's goal deltas into two
+//! human one-liners:
 //!   - **cumulative**: the story so far (fed the previous cumulative summary), and
 //!   - **windowed**: just this session/window, independent.
 //!
-//! One cheap Claude call per cycle returns BOTH (as JSON) to minimize cost. The
-//! call is auth-safe (NOT `--bare`, which breaks login; `--strict-mcp-config` to
-//! stay lean) — same lesson as the LLM judge in Phase 2.
+//! One cheap Claude call per cycle returns BOTH (as JSON) to minimize cost. The call is
+//! auth-safe (NOT `--bare`, which breaks login; `--strict-mcp-config` to stay lean) — the same
+//! lesson as the LLM judge.
 
 use crate::engine::GoalDelta;
 use crate::proc;

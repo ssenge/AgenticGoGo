@@ -1,16 +1,14 @@
 //! Dashboard state — the serializable snapshot the loop writes and the TUI reads.
 //!
-//! Two-stream discipline (the hard lesson from a prior harness): the line-oriented log
-//! on stdout stays the source of truth (greppable, tailable). The TUI is a *view*
-//! rendered from this compact state file, never the only output. The loop writes
-//! `.agg/state.json` atomically after each meaningful change; `agg dashboard`
-//! polls it and repaints in place.
+//! Two-stream discipline: the line-oriented log on stdout stays the source of truth
+//! (greppable, tailable). The TUI is a *view* rendered from this compact state file, never
+//! the only output. The loop writes `.agg/state.json` atomically after each meaningful change;
+//! `agg dashboard` polls it and repaints in place.
 //!
-//! Single-writer-under-lock: both the loop (boundary updates) and the worker's reader
-//! thread (live activity, mid-session) mutate ONE `Arc<Mutex<DashboardState>>` and
-//! publish through [`LiveState`]. That removes the dual-writer `seq`/torn-file race the
-//! old design had (the loop published only at session boundaries, so `now`/`think` were
-//! empty during a session).
+//! Single-writer-under-lock: both the loop (boundary updates) and the worker's reader thread
+//! (live activity, mid-session) mutate ONE `Arc<Mutex<DashboardState>>` and publish through
+//! [`LiveState`]. A single writer under the lock is what keeps the `seq`/file write consistent
+//! and the live `now`/`think` fields populated mid-session.
 
 use crate::engine::Engine;
 use crate::model::{GoalType, Lifecycle};

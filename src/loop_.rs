@@ -4,9 +4,8 @@
 //! (readable formatter) with a heartbeat and a watchdog → on exit, run all judges
 //! → fold verdicts → check stop/halt → repeat or stop.
 //!
-//! This is the Rust port of a proven prior bespoke harness. The principle
-//! "keep the LLM out of the loop" holds: the loop is plain code, the worker is a
-//! fresh-context subprocess, judges are scripts/cheap LLM calls.
+//! The guiding principle — "keep the LLM out of the loop" — holds throughout: the loop is
+//! plain code, the worker is a fresh-context subprocess, judges are scripts/cheap LLM calls.
 
 use crate::bus::{Bus, Command};
 use crate::config::AggConfig;
@@ -125,7 +124,7 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         wall_hours: loop_start.elapsed().as_secs_f64() / 3600.0,
     };
 
-    // ---- dashboard state (Phase 4): the loop + worker publish a compact snapshot to
+    // ---- dashboard state: the loop + worker publish a compact snapshot to
     //      .agg/state.json; `agg dashboard` renders it. Two-stream discipline:
     //      the stdout log above stays the source of truth; this is just a view.
     //
@@ -204,8 +203,8 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
     let mut cumulative = String::new();
     let mut last_summary = Instant::now() - std::time::Duration::from_secs(cfg.summary.min_interval_secs);
 
-    // ---- bus (Phase 6): operator/outer-Claude steering, drained at each session
-    //      boundary (the only safe injection point for headless workers). ----
+    // ---- bus: operator/outer-Claude steering, drained at each session boundary
+    //      (the only safe injection point for headless workers). ----
     let bus = Bus::open(dir).ok();
     let mut pending_instruction: Option<String> = None; // prepended to next prompt
     let mut last_session_id: Option<String> = None;      // for optional --resume continuity
