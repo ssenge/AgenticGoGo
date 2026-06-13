@@ -341,7 +341,7 @@ fn goal_detail_line(g: &GoalView) -> Line<'static> {
     let lock = if g.latched { "  🔒" } else { "" };
     Line::from(vec![
         Span::styled(format!("{glyph} "), Style::default().fg(color)),
-        Span::styled(format!("{:<20}", truncate(&g.id, 20)), Style::default().fg(color).bold()),
+        Span::styled(format!("{:<20}", fit(&g.id, 20)), Style::default().fg(color).bold()),
         Span::raw(format!("{:<11}", g.goal_type)),
         Span::styled(format!("{:<11}", measure), Style::default().fg(color)),
         Span::styled(format!("{:<8}", delta), Style::default().fg(Color::Green)),
@@ -397,7 +397,7 @@ fn draw_activity(f: &mut Frame, area: Rect, s: &DashboardState, ui: &mut Dashboa
 fn activity_line(ev: &ActivityEvent, width: usize) -> Line<'static> {
     let (glyph, color) = activity_glyph(&ev.kind);
     let prefix_len = 9 + 2; // "HH:MM:SS " + "<glyph> "
-    let text = truncate(&ev.text, width.saturating_sub(prefix_len));
+    let text = fit(&ev.text, width.saturating_sub(prefix_len));
     Line::from(vec![
         Span::styled(format!("{} ", ev.ts), Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{glyph} "), Style::default().fg(color)),
@@ -534,7 +534,10 @@ fn fmt_num(n: f64) -> String {
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
+/// Fit `s` into a fixed column `n`, where the `…` counts toward the width (unlike
+/// `util::truncate`, whose ellipsis overflows by one). The TUI needs exact-width fitting so
+/// a cell never bleeds past its column; the off-by-one is deliberate, hence a separate fn.
+fn fit(s: &str, n: usize) -> String {
     if n == 0 || s.chars().count() <= n {
         s.to_string()
     } else {

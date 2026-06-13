@@ -56,7 +56,7 @@ pub struct Project {
 
 impl Project {
     pub fn path(dir: &Path) -> PathBuf {
-        dir.join(".agg").join("project.json")
+        crate::paths::project_json(dir)
     }
 
     /// Load the ledger, or a fresh empty one if absent/unreadable/corrupt.
@@ -179,12 +179,7 @@ impl Drop for RunLedger {
     }
 }
 
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+use crate::util::now_epoch;
 
 #[cfg(test)]
 mod tests {

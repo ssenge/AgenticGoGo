@@ -18,6 +18,8 @@ mod judge;
 mod localtime;
 mod loop_;
 mod model;
+mod paths;
+mod proc;
 mod project;
 mod reap;
 mod spawns;
@@ -25,6 +27,7 @@ mod state;
 mod stop;
 mod stream;
 mod summary;
+mod util;
 mod worker;
 
 use anyhow::{Context, Result};
@@ -262,14 +265,9 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // new session → new process group (child is leader) → no controlling tty.
         unsafe {
-            c.pre_exec(|| {
-                // new session → new process group (child is leader) → no controlling tty.
-                if libc_setsid_main() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+            c.pre_exec(|| proc::setsid());
         }
     }
     let child = c.spawn().with_context(|| format!("spawning `{}`", cmd.join(" ")))?;
@@ -304,12 +302,6 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
         log_path.display(),
     );
     Ok(())
-}
-
-#[cfg(unix)]
-extern "C" {
-    #[link_name = "setsid"]
-    fn libc_setsid_main() -> i32;
 }
 
 /// If the required config file is missing, exit with an actionable hint instead of

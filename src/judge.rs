@@ -10,9 +10,10 @@
 //! yields `Verdict::failed(...)` rather than panicking.
 
 use crate::model::{JudgeSpec, Verdict};
+use crate::proc::{self, Captured};
+use crate::util::last_json_object;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 /// Run the judge for a goal and return its verdict.
 pub fn run(spec: &JudgeSpec, cwd: &Path) -> Verdict {
@@ -28,8 +29,8 @@ pub fn run(spec: &JudgeSpec, cwd: &Path) -> Verdict {
 
 fn run_script(cmd: &str, timeout_secs: u64, cwd: &Path) -> Verdict {
     let mut command = Command::new("sh");
-    command.arg("-c").arg(cmd);
-    match run_with_timeout(command, timeout_secs, cwd) {
+    command.arg("-c").arg(cmd).current_dir(cwd);
+    match proc::run_with_timeout(command, timeout_secs) {
         Ok(out) => parse_judge_output(&out),
         Err(e) => Verdict::failed(e),
     }
@@ -76,9 +77,10 @@ fn run_llm(model: &str, rubric: &str, inputs: &[String], timeout_secs: u64, cwd:
         .arg("--output-format")
         .arg("json")
         .arg("--strict-mcp-config") // judge runs with no MCP servers
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .current_dir(cwd);
 
-    let out = match run_with_timeout(command, timeout_secs, cwd) {
+    let out = match proc::run_with_timeout(command, timeout_secs) {
         Ok(o) => o,
         Err(e) => return Verdict::failed(format!("llm judge: {e}")),
     };
@@ -95,7 +97,7 @@ fn run_llm(model: &str, rubric: &str, inputs: &[String], timeout_secs: u64, cwd:
     };
 
     // parse the extracted model text as the verdict, carrying through exit status/stderr
-    parse_judge_output(&CmdOutput { stdout: body.into_bytes(), stderr: out.stderr, success: out.success })
+    parse_judge_output(&Captured { stdout: body.into_bytes(), stderr: out.stderr, success: out.success })
 }
 
 /// Resolve the `inputs` list into a single text context block. Each input is
@@ -147,97 +149,14 @@ fn read_file(path: std::path::PathBuf) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| format!("(could not read {}: {e})", path.display()))
 }
 
-// ---------------- shared: timeout-aware command runner ----------------
-
-struct CmdOutput {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    success: bool, // did the command exit 0?
-}
-
-/// Spawn `command` in `cwd` with piped stdout/stderr and a wall-clock timeout.
-/// Returns Err(reason) on spawn failure or timeout (the child is killed).
-///
-/// stdout/stderr are drained on background threads WHILE we wait, so a judge that
-/// emits more than the OS pipe buffer (~64KB) doesn't block on write and get
-/// false-killed at the timeout. On timeout the whole process group is SIGKILLed so
-/// a judge that shelled out doesn't leave orphan grandchildren running.
-fn run_with_timeout(mut command: Command, timeout_secs: u64, cwd: &Path) -> Result<CmdOutput, String> {
-    command.current_dir(cwd).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0); // own group so we can kill the whole tree on timeout
-    }
-    let mut child = command.spawn().map_err(|e| format!("spawn: {e}"))?;
-    let pid = child.id();
-
-    // drain both pipes concurrently so the child never blocks on a full pipe
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    let out_h = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = std::io::Read::read_to_end(p, &mut buf);
-        }
-        buf
-    });
-    let err_h = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = std::io::Read::read_to_end(p, &mut buf);
-        }
-        buf
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let success;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                success = status.success();
-                break;
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    kill_group(pid);
-                    let _ = child.wait();
-                    return Err(format!("timed out after {timeout_secs}s"));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(format!("wait: {e}")),
-        }
-    }
-    // child exited; the drain threads finish as the pipes hit EOF
-    let stdout = out_h.join().unwrap_or_default();
-    let stderr = err_h.join().unwrap_or_default();
-    Ok(CmdOutput { stdout, stderr, success })
-}
-
-/// SIGKILL a process group (negative pid on unix), so a timed-out judge that
-/// shelled out takes its grandchildren with it.
-#[cfg(unix)]
-fn kill_group(pid: u32) {
-    extern "C" {
-        #[link_name = "kill"]
-        fn libc_kill(pid: i32, sig: i32) -> i32;
-    }
-    unsafe {
-        libc_kill(-(pid as i32), 9);
-    }
-}
-#[cfg(not(unix))]
-fn kill_group(pid: u32) {
-    let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
-}
-
 // ---------------- shared: verdict parsing ----------------
+// (The timeout-aware command runner + group-kill now live in `crate::proc`; the JSON-object
+// extractor in `crate::util`.)
 
 /// Parse judge output into a Verdict. On failure, distinguish "the command itself
 /// failed" (non-zero exit — usually a wrong path / broken script, NOT an agg bug)
 /// from "the command ran but emitted bad JSON" — so the error doesn't misdirect.
-fn parse_judge_output(out: &CmdOutput) -> Verdict {
+fn parse_judge_output(out: &Captured) -> Verdict {
     let s = String::from_utf8_lossy(&out.stdout);
     match parse_verdict(&s) {
         Ok(v) => v,
@@ -271,26 +190,6 @@ fn parse_verdict(text: &str) -> Result<Verdict, String> {
         return serde_json::from_str::<Verdict>(block).map_err(|e| e.to_string());
     }
     Err("no JSON object found".into())
-}
-
-/// Return the last top-level `{...}` substring (brace-balanced), if any.
-fn last_json_object(s: &str) -> Option<&str> {
-    let bytes = s.as_bytes();
-    let end = (0..bytes.len()).rev().find(|&i| bytes[i] == b'}')?;
-    let mut depth = 0i32;
-    for i in (0..=end).rev() {
-        match bytes[i] {
-            b'}' => depth += 1,
-            b'{' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&s[i..=end]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -365,11 +264,5 @@ mod tests {
         assert!(v.met);
         assert_eq!(v.value, 90.0);
         assert_eq!(v.rationale, "clean");
-    }
-
-    #[test]
-    fn last_json_object_picks_trailing_block() {
-        let s = "prose {not: valid} more\nthen {\"met\":false,\"value\":1}";
-        assert_eq!(last_json_object(s), Some(r#"{"met":false,"value":1}"#));
     }
 }

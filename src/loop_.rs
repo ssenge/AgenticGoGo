@@ -480,9 +480,4 @@ fn indent(s: &str) -> String {
     s.lines().map(|l| format!("    {l}\n")).collect()
 }
 
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+use crate::util::now_epoch;

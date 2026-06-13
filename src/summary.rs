@@ -8,9 +8,10 @@
 //! stay lean) — same lesson as the LLM judge in Phase 2.
 
 use crate::engine::GoalDelta;
+use crate::proc;
+use crate::util::last_json_object;
 use serde::Deserialize;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 /// The two summary lines produced per cycle.
 #[derive(Debug, Clone, Default)]
@@ -78,11 +79,10 @@ pub fn summarize(
         .arg("--output-format")
         .arg("json")
         .arg("--strict-mcp-config")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdin(Stdio::null());
 
-    let out = run_with_timeout(command, timeout_secs)?;
+    // best-effort: any failure (spawn/timeout) → None, never breaks the loop.
+    let out = proc::run_with_timeout(command, timeout_secs).ok()?.stdout;
     // unwrap the claude json envelope -> the model's text
     let body = serde_json::from_slice::<serde_json::Value>(&out)
         .ok()
@@ -102,87 +102,7 @@ fn parse_summaries(text: &str) -> Option<RawSummaries> {
     let block = last_json_object(trimmed)?;
     serde_json::from_str::<RawSummaries>(block).ok()
 }
-
-fn last_json_object(s: &str) -> Option<&str> {
-    let bytes = s.as_bytes();
-    let end = (0..bytes.len()).rev().find(|&i| bytes[i] == b'}')?;
-    let mut depth = 0i32;
-    for i in (0..=end).rev() {
-        match bytes[i] {
-            b'}' => depth += 1,
-            b'{' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&s[i..=end]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Run a command with a wall-clock timeout; return stdout bytes, or None on any failure.
-/// stdout is drained on a background thread while waiting, so a large JSON envelope
-/// (the claude `--output-format json` result) can't fill the pipe and force a timeout.
-fn run_with_timeout(mut command: Command, timeout_secs: u64) -> Option<Vec<u8>> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().ok()?;
-    let pid = child.id();
-    let mut out_pipe = child.stdout.take();
-    let out_h = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = std::io::Read::read_to_end(p, &mut buf);
-        }
-        buf
-    });
-    // also drain stderr so it can't fill and block the child
-    let mut err_pipe = child.stderr.take();
-    let err_h = std::thread::spawn(move || {
-        if let Some(p) = err_pipe.as_mut() {
-            let mut sink = Vec::new();
-            let _ = std::io::Read::read_to_end(p, &mut sink);
-        }
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    kill_group(pid);
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(_) => return None,
-        }
-    }
-    let _ = err_h.join();
-    out_h.join().ok()
-}
-
-#[cfg(unix)]
-fn kill_group(pid: u32) {
-    extern "C" {
-        #[link_name = "kill"]
-        fn libc_kill(pid: i32, sig: i32) -> i32;
-    }
-    unsafe {
-        libc_kill(-(pid as i32), 9);
-    }
-}
-#[cfg(not(unix))]
-fn kill_group(pid: u32) {
-    let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
-}
+// (The timeout-aware runner + group-kill live in `crate::proc`; `last_json_object` in `crate::util`.)
 
 #[cfg(test)]
 mod tests {

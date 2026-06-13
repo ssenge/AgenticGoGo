@@ -101,7 +101,7 @@ pub struct DashboardState {
 impl DashboardState {
     /// Path to the state file under a project dir.
     pub fn path(dir: &Path) -> PathBuf {
-        dir.join(".agg").join("state.json")
+        crate::paths::state_json(dir)
     }
 
     /// Snapshot the current goal set from the engine into goal views.
@@ -237,12 +237,7 @@ impl LiveState {
     }
 }
 
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+use crate::util::now_epoch;
 
 fn type_str(t: GoalType) -> String {
     match t {

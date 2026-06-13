@@ -27,6 +27,7 @@
 //! latter is restricted on current macOS and returns nothing, which silently defeats an
 //! env-marker scheme. pgid avoids that trap entirely.)
 
+use crate::proc::{group_of, kill_group, kill_pid, pid_alive, pids_in_group};
 use std::collections::HashSet;
 
 /// Kill every process in process group `pgid` (other than `self_pid`). Best-effort: a process
@@ -59,7 +60,7 @@ pub fn reap_pgid_except(pgid: u32, protected: &HashSet<u32>) -> usize {
     let mut n = 0;
     if protected.is_empty() {
         // Fast path: no exemptions → a single group-level SIGKILL is correct and atomic.
-        group_kill(pgid);
+        kill_group(pgid);
     }
     // Per-pid kill (the only correct path when exemptions exist: a group_kill cannot spare
     // a member). Idempotent with the group_kill above when protected is empty.
@@ -72,101 +73,8 @@ pub fn reap_pgid_except(pgid: u32, protected: &HashSet<u32>) -> usize {
     n
 }
 
-/// pgid of a single process, or None if it's gone. Used to honor the protected set per-pid.
-#[cfg(unix)]
-fn group_of(pid: u32) -> Option<u32> {
-    let o = std::process::Command::new("ps")
-        .args(["-o", "pgid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&o.stdout).trim().parse().ok()
-}
-#[cfg(not(unix))]
-fn group_of(_pid: u32) -> Option<u32> {
-    None
-}
-
-// ---------------- list pids in a process group ----------------
-
-#[cfg(unix)]
-fn pids_in_group(pgid: u32) -> Vec<u32> {
-    // `ps -o pid=,pgid=` → one "pid pgid" line per process. Match the group.
-    let mut out = Vec::new();
-    let Ok(o) = std::process::Command::new("ps").args(["-A", "-o", "pid=,pgid="]).output() else {
-        return out;
-    };
-    for line in String::from_utf8_lossy(&o.stdout).lines() {
-        let mut it = line.split_whitespace();
-        let (Some(pid), Some(pg)) = (it.next(), it.next()) else { continue };
-        if let (Ok(pid), Ok(pg)) = (pid.parse::<u32>(), pg.parse::<u32>()) {
-            if pg == pgid {
-                out.push(pid);
-            }
-        }
-    }
-    out
-}
-
-#[cfg(not(unix))]
-fn pids_in_group(pgid: u32) -> Vec<u32> {
-    // Windows has no POSIX process groups. We model a "group" as the job started under the
-    // worker; `taskkill /T` (tree kill on the worker pid) does the real reaping there, so this
-    // returns empty and `group_kill` handles it via the tree.
-    let _ = pgid;
-    Vec::new()
-}
-
-// ---------------- kill a whole group ----------------
-
-#[cfg(unix)]
-fn group_kill(pgid: u32) {
-    // kill(-pgid, SIGKILL): signal the entire process group at once.
-    unsafe {
-        libc_kill(-(pgid as i32), 9);
-    }
-}
-
-#[cfg(not(unix))]
-fn group_kill(pgid: u32) {
-    // On Windows pgid carries the worker pid; /T kills the whole process tree.
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &pgid.to_string(), "/T", "/F"])
-        .output();
-}
-
-// ---------------- single-pid helpers ----------------
-
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    unsafe { libc_kill(pid as i32, 0) == 0 }
-}
-#[cfg(unix)]
-fn kill_pid(pid: u32) -> bool {
-    unsafe { libc_kill(pid as i32, 9) == 0 }
-}
-
-#[cfg(not(unix))]
-fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-        .unwrap_or(false)
-}
-#[cfg(not(unix))]
-fn kill_pid(pid: u32) -> bool {
-    std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(unix)]
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
-}
+// (The process primitives `group_of` / `pids_in_group` / `kill_group` / `kill_pid` /
+// `pid_alive` now live in `crate::proc` — see the imports at the top.)
 
 #[cfg(test)]
 mod tests {
@@ -189,7 +97,7 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "nohup sleep 60 >/dev/null 2>&1 & echo $!; exit 0"])
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        unsafe { cmd.pre_exec(|| { libc_setsid_safe(); Ok(()) }); }
+        unsafe { cmd.pre_exec(|| crate::proc::setsid()); }
         let out = cmd.output().expect("spawn worker");
         let child_pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
         assert!(child_pid > 0, "couldn't read straggler pid");
@@ -201,12 +109,6 @@ mod tests {
         assert!(n >= 1, "should have reaped >=1 straggler in the group");
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(!pid_alive(child_pid), "straggler {child_pid} must be dead after reap_pgid");
-    }
-
-    #[cfg(unix)]
-    fn group_of(pid: u32) -> Option<u32> {
-        let o = std::process::Command::new("ps").args(["-o", "pgid=", "-p", &pid.to_string()]).output().ok()?;
-        String::from_utf8_lossy(&o.stdout).trim().parse().ok()
     }
 
     #[cfg(unix)]
@@ -228,7 +130,7 @@ mod tests {
             let mut cmd = Command::new("sh");
             cmd.args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
                 .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-            unsafe { cmd.pre_exec(|| { libc_setsid_safe(); Ok(()) }); }
+            unsafe { cmd.pre_exec(|| crate::proc::setsid()); }
             let mut child = cmd.spawn().expect("spawn sh launcher");
             let mut s = String::new();
             child.stdout.take().unwrap().read_to_string(&mut s).ok();
@@ -250,15 +152,5 @@ mod tests {
         assert!(!pid_alive(worker_pid), "unprotected worker-group leader must be reaped");
         assert!(pid_alive(prot_pid), "PROTECTED long-task must SURVIVE the sweep");
         kill_pid(prot_pid); // cleanup the spared one
-    }
-
-    #[cfg(unix)]
-    fn libc_setsid_safe() {
-        unsafe { libc_setsid(); }
-    }
-    #[cfg(unix)]
-    extern "C" {
-        #[link_name = "setsid"]
-        fn libc_setsid() -> i32;
     }
 }

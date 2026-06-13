@@ -259,14 +259,7 @@ fn clean(s: &str) -> String {
     out.trim().to_string()
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(n).collect();
-        format!("{t}…")
-    }
-}
+use crate::util::truncate;
 
 #[cfg(test)]
 mod tests {

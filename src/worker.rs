@@ -4,8 +4,10 @@
 //! watchdog is simpler and race-free.
 
 use crate::config::AggConfig;
+use crate::proc;
 use crate::state::{ActivityEvent, LiveState};
 use crate::stream::{self, ActivityTracker};
+use crate::util::{now_epoch, truncate};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -227,7 +229,7 @@ pub fn run_session(
                         eprintln!(
                             "⚠ WATCHDOG: worker pid={pid} hung (stream-idle {idle}s + cpu-flat {flat}s) — SIGKILL"
                         );
-                        kill(pid);
+                        proc::kill_group(pid);
                         killed.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -256,7 +258,7 @@ pub fn run_session(
     // there the per-pid protected sweep below releases any real pipe-holder anyway.
     let protected = crate::spawns::protected_pgids(dir);
     if protected.is_empty() {
-        kill(pid);
+        proc::kill_group(pid);
     } else {
         // protected tasks present: do a protected-aware sweep instead of a blind group kill.
         let _ = crate::reap::reap_pgid_except(pid, &protected);
@@ -297,13 +299,6 @@ pub fn run_session(
 }
 
 // ---------------- small platform helpers ----------------
-
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 fn hhmmss() -> String {
     // local HH:MM:SS via the cached libc offset (no chrono dependency) so the
@@ -352,36 +347,6 @@ fn parse_ps_time(s: &str) -> Option<i64> {
         _ => return None,
     };
     Some(days * 86400 + hms)
-}
-
-#[cfg(unix)]
-fn kill(pid: u32) {
-    // SIGKILL the worker's whole PROCESS GROUP (negative pid). The worker is its own
-    // group leader (process_group(0) at spawn), so this reaps it AND every tool
-    // subprocess it spawned — a bare kill(pid) would orphan grandchildren.
-    unsafe {
-        libc_kill(-(pid as i32), 9);
-    }
-}
-#[cfg(not(unix))]
-fn kill(pid: u32) {
-    // /T kills the whole process tree on Windows.
-    let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
-}
-
-#[cfg(unix)]
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(n).collect();
-        format!("{t}…")
-    }
 }
 
 #[cfg(test)]

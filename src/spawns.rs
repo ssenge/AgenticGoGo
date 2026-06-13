@@ -31,6 +31,7 @@
 //! agg at spawn time while it still owns the process, is the stable, provable, cross-platform
 //! "this is ours" key.
 
+use crate::proc::pid_alive;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -71,7 +72,7 @@ pub struct Registry {
 
 impl Registry {
     pub fn path(dir: &Path) -> PathBuf {
-        dir.join(".agg").join("spawns.json")
+        crate::paths::spawns_json(dir)
     }
 
     /// Read the registry, or an empty one if missing/unparseable (never fails the loop).
@@ -104,7 +105,7 @@ impl Registry {
 
     /// Directory holding per-spawn logs.
     pub fn log_dir(dir: &Path) -> PathBuf {
-        dir.join(".agg").join("spawns")
+        crate::paths::spawns_log_dir(dir)
     }
 }
 
@@ -193,30 +194,7 @@ pub fn summary_for_prompt(dir: &Path) -> Option<String> {
     Some(s)
 }
 
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    unsafe { libc_kill(pid as i32, 0) == 0 }
-}
-#[cfg(not(unix))]
-fn pid_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-        .unwrap_or(false)
-}
-
-#[cfg(unix)]
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
-}
+// (`pid_alive` lives in `crate::proc` — imported at the top.)
 
 #[cfg(test)]
 mod tests {

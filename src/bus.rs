@@ -46,7 +46,7 @@ pub struct Bus {
 
 impl Bus {
     pub fn open(dir: &Path) -> std::io::Result<Bus> {
-        let root = dir.join(".agg").join("bus");
+        let root = crate::paths::bus_dir(dir);
         let inbox = root.join("in");
         let outbox = root.join("out");
         std::fs::create_dir_all(&inbox)?;
