@@ -68,6 +68,23 @@ impl Drop for RunPidGuard<'_> {
 }
 
 pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Result<()> {
+    // ── double-run guard (BOTH foreground and detached) ──────────────────────────────────
+    // Refuse to start a second loop over the same project: two loops would launch competing
+    // workers that fight over the repo, and `agg stop` could only target one. `live_pid`
+    // returns Some(pid) only if run.pid names a process that is actually alive (a stale
+    // pidfile from a crashed loop is cleaned up and ignored). We exempt our OWN pid because
+    // the detached child re-runs `agg run` after `spawn_detached` already wrote the child's
+    // pid to run.pid — so the child legitimately finds its own pid here and must NOT bail.
+    if let Some(pid) = crate::detach::live_pid(dir) {
+        if pid != std::process::id() {
+            anyhow::bail!(
+                "a loop is already running in this project (pid {pid}).\n  \
+                 watch it:   agg dashboard\n  \
+                 stop it:    agg stop\n  \
+                 (if you're sure it's dead, remove .agg/run.pid and retry.)"
+            );
+        }
+    }
     // Record THIS process as the live loop so `agg stop` / the double-run guard read a
     // current pid. Covers BOTH foreground `agg run` and the detached child (which re-runs
     // `agg run` for real) — the child overwrites the launcher's pid with its own.

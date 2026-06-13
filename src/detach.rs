@@ -108,3 +108,48 @@ pub fn live_pid(dir: &Path) -> Option<u32> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "agg-detach-{}-{}-{}",
+            std::process::id(),
+            tag,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(agg_dir(&d)).unwrap();
+        d
+    }
+
+    #[test]
+    fn live_pid_none_when_no_pidfile() {
+        let d = tmpdir("nopid");
+        assert_eq!(live_pid(&d), None);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn live_pid_reports_our_own_live_process() {
+        let d = tmpdir("self");
+        write_run_pid(&d); // writes OUR pid, which is alive
+        assert_eq!(live_pid(&d), Some(std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn live_pid_cleans_up_a_stale_pidfile() {
+        let d = tmpdir("stale");
+        // pid 0 is never a live process → live_pid must return None AND delete the file,
+        // so the double-run guard treats a crashed loop's leftover as "no loop running".
+        std::fs::write(run_pid(&d), "0").unwrap();
+        assert_eq!(live_pid(&d), None);
+        assert!(!run_pid(&d).exists(), "stale pidfile should be removed");
+        std::fs::remove_dir_all(&d).ok();
+    }
+}
