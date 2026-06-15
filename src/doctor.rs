@@ -3,11 +3,18 @@
 
 use crate::config::{AggConfig, GoalsConfig};
 use crate::engine::Engine;
+use crate::model::JudgeSpec;
 use anyhow::Result;
 use std::path::Path;
 
-pub fn run(dir: &Path, config: &Path, goals: &Path) -> Result<()> {
+pub fn run(dir: &Path, config_base: &Path, config: &Path, goals: &Path) -> Result<()> {
     eprintln!("agg doctor — checking your setup in {}\n", dir.display());
+    // report which layout is in effect, so a surprising path resolution is visible up front.
+    if config_base == dir {
+        eprintln!("  config dir: project root");
+    } else {
+        eprintln!("  config dir: {}/ (the optional config folder)", crate::paths::CONFIG_DIR);
+    }
     let mut fail = 0;
 
     // 1) claude CLI present
@@ -54,6 +61,20 @@ pub fn run(dir: &Path, config: &Path, goals: &Path) -> Result<()> {
 
     if let Some(gc) = goals_cfg {
         let n = gc.goals.len();
+        // 3a) referenced LLM-judge rubric files exist (resolved against config_base, like the
+        //     loop does) — the most common real failure after a parse error. Script-judge cmds
+        //     are not path-checked here (they may be inline shell, not a file).
+        for g in &gc.goals {
+            if let JudgeSpec::Llm { rubric, .. } = &g.judge {
+                let rp = config_base.join(rubric);
+                check(
+                    rp.exists(),
+                    &format!("goal `{}`: rubric `{rubric}` exists", g.id),
+                    "create the rubric file (its path is relative to your config dir)",
+                    &mut fail,
+                );
+            }
+        }
         // Engine::new validates stop_when + halt_when
         match Engine::new(gc) {
             Ok(_) => check(true, &format!("stop/halt conditions valid ({n} goal(s))"), "", &mut fail),
@@ -61,9 +82,9 @@ pub fn run(dir: &Path, config: &Path, goals: &Path) -> Result<()> {
         }
     }
 
-    // 4) resume prompt exists (named in agg.yaml)
+    // 4) resume prompt exists (named in agg.yaml, resolved against the config dir)
     if let Some(c) = &agg_cfg {
-        let rp = dir.join(&c.resume_prompt);
+        let rp = config_base.join(&c.resume_prompt);
         check(rp.exists(), &format!("resume prompt `{}` exists", c.resume_prompt),
               "create it (or run `agg init`); it's the prompt fed to every worker", &mut fail);
     }

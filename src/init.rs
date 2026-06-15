@@ -3,15 +3,30 @@
 //! Kills the blank-page problem: instead of authoring agg.yaml + goals.yaml + a
 //! judge + the make-or-break AGG_RESUME.md from scratch, the user runs ONE command
 //! and gets a runnable starter that `agg plan` accepts immediately.
+//!
+//! `--folder` scaffolds into an `agg/` config subdir (config-adjacent files — goals/agg/
+//! resume/judges — kept out of the project root); `agg run` auto-detects either layout. The
+//! only layout-dependent value is the judge `cmd` path, which is relative to the PROJECT ROOT
+//! (scripts always run there), so the foldered judge is `./agg/judges/tests.sh`.
 
 use anyhow::{bail, Result};
 use std::path::Path;
 
-/// Scaffold the four starter files into `dir`. Refuses to clobber existing config
-/// unless `force` is set, so re-running init never silently destroys real work.
-pub fn run(dir: &Path, force: bool) -> Result<()> {
+/// Scaffold the four starter files. With `folder`, they go under `<dir>/agg/`; otherwise into
+/// `<dir>` directly. Refuses to clobber existing config unless `force` is set, so re-running
+/// init never silently destroys real work.
+pub fn run(dir: &Path, force: bool, folder: bool) -> Result<()> {
+    // config_base = where the config files land; judge_cmd = how goals.yaml refers to the judge
+    // (relative to the PROJECT ROOT, since judge scripts run there regardless of layout).
+    let (base, judge_cmd) = if folder {
+        (dir.join(crate::paths::CONFIG_DIR), "./agg/judges/tests.sh")
+    } else {
+        (dir.to_path_buf(), "./judges/tests.sh")
+    };
+    let goals_yaml = GOALS_YAML.replace("./judges/tests.sh", judge_cmd);
+
     let files: [(&str, &str, bool); 4] = [
-        ("goals.yaml", GOALS_YAML, false),
+        ("goals.yaml", goals_yaml.as_str(), false),
         ("agg.yaml", AGG_YAML, false),
         ("AGG_RESUME.md", RESUME_MD, false),
         ("judges/tests.sh", JUDGE_SH, true), // true = chmod +x
@@ -22,7 +37,7 @@ pub fn run(dir: &Path, force: bool) -> Result<()> {
         let existing: Vec<&str> = files
             .iter()
             .map(|(name, _, _)| *name)
-            .filter(|name| dir.join(name).exists())
+            .filter(|name| base.join(name).exists())
             .collect();
         if !existing.is_empty() {
             bail!(
@@ -33,7 +48,7 @@ pub fn run(dir: &Path, force: bool) -> Result<()> {
     }
 
     for (name, contents, executable) in files {
-        let path = dir.join(name);
+        let path = base.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -41,7 +56,8 @@ pub fn run(dir: &Path, force: bool) -> Result<()> {
         if executable {
             make_executable(&path);
         }
-        eprintln!("  created {}", name);
+        let shown = if folder { format!("{}/{}", crate::paths::CONFIG_DIR, name) } else { name.to_string() };
+        eprintln!("  created {shown}");
     }
 
     eprintln!(
@@ -53,7 +69,7 @@ pub fn run(dir: &Path, force: bool) -> Result<()> {
          4. agg run             # launch the loop until your goals are met\n  \
          5. agg dashboard       # (optional, another terminal) live TUI\n\n\
          Tip: in Claude Code, `/agg:new` can generate these FROM your existing plans instead.",
-        dir.display()
+        base.display()
     );
     Ok(())
 }
@@ -184,19 +200,54 @@ printf '{"met":%s,"value":%s,"max":%s,"target":%s,"rationale":"%s/%s tests pass 
 mod tests {
     use super::*;
 
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "agg-init-{}-{}-{}",
+            std::process::id(),
+            tag,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
     #[test]
     fn scaffold_parses_with_real_loaders() {
-        let dir = std::env::temp_dir().join(format!("agg-init-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        run(&dir, false).unwrap();
+        let dir = tmpdir("root");
+        run(&dir, false, false).unwrap();
         // the generated config must load with the ACTUAL loaders (no schema drift)
         crate::config::AggConfig::load(&dir.join("agg.yaml")).expect("scaffolded agg.yaml must parse");
         let g = crate::config::GoalsConfig::load(&dir.join("goals.yaml")).expect("scaffolded goals.yaml must parse");
         crate::engine::Engine::new(g).expect("scaffolded goals must build an engine (stop_when valid)");
         // refuses to clobber without force
-        assert!(run(&dir, false).is_err());
-        assert!(run(&dir, true).is_ok());
+        assert!(run(&dir, false, false).is_err());
+        assert!(run(&dir, true, false).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn folder_scaffold_lands_under_agg_and_resolves() {
+        let dir = tmpdir("folder");
+        run(&dir, false, true).unwrap();
+        // files land under agg/, NOT the root
+        assert!(dir.join("agg/agg.yaml").exists(), "foldered agg.yaml under agg/");
+        assert!(dir.join("agg/goals.yaml").exists());
+        assert!(dir.join("agg/judges/tests.sh").exists());
+        assert!(!dir.join("agg.yaml").exists(), "root must stay clean in folder mode");
+        // the resolver finds the foldered config, and it loads + builds an engine
+        assert_eq!(crate::paths::config_base(&dir), dir.join("agg"));
+        let cfg = crate::paths::config_file(&dir, "goals.yaml");
+        assert_eq!(cfg, dir.join("agg/goals.yaml"));
+        let g = crate::config::GoalsConfig::load(&cfg).expect("foldered goals.yaml must parse");
+        // the judge cmd points at the project-root-relative path
+        assert!(
+            format!("{:?}", g.goals[0].judge).contains("./agg/judges/tests.sh"),
+            "foldered judge cmd should be root-relative: {:?}", g.goals[0].judge
+        );
+        crate::engine::Engine::new(g).expect("foldered goals must build an engine");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

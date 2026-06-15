@@ -164,10 +164,14 @@ impl Engine {
         Ok(Engine { goals: cfg.goals, stop_when: cfg.stop_when, halt_when: cfg.halt_when })
     }
 
-    /// Run every goal's judge in `cwd`, fold verdicts in, and evaluate conditions
-    /// against the current run-state (tokens/budget/wall-time). Computes per-goal
-    /// deltas (before vs after) for the summarizer.
-    pub fn evaluate_cycle(&mut self, cwd: &Path, run: &RunState) -> CycleResult {
+    /// Run every goal's judge and fold verdicts in, then evaluate conditions against the
+    /// current run-state (tokens/budget/wall-time). Computes per-goal deltas for the summarizer.
+    ///
+    /// `cwd` is the project root: judge scripts run there, `inputs`/`recheck_inputs` resolve
+    /// there. `config_base` is where config-adjacent files live (root, or the `agg/` folder):
+    /// LLM-judge rubric files resolve against it. They're equal unless the `agg/` config folder
+    /// is in use.
+    pub fn evaluate_cycle(&mut self, cwd: &Path, config_base: &Path, run: &RunState) -> CycleResult {
         // snapshot before
         let before: Vec<(f64, Lifecycle)> = self
             .goals
@@ -181,7 +185,7 @@ impl Engine {
                 // expensive) judge. `last_verdict`/`state` are left intact.
                 continue;
             }
-            let verdict = judge::run(&goal.judge, cwd);
+            let verdict = judge::run(&goal.judge, cwd, config_base);
             goal.apply(verdict);
             update_recheck_state(goal, cwd);
         }
@@ -292,9 +296,9 @@ mod tests {
             goals: vec![g], stop_when: "paper".into(), halt_when: None,
         }).unwrap();
         let rs = RunState::default();
-        eng.evaluate_cycle(&dir, &rs);  // cycle 1: judges (count=1), latches
-        eng.evaluate_cycle(&dir, &rs);  // cycle 2: skipped
-        eng.evaluate_cycle(&dir, &rs);  // cycle 3: skipped
+        eng.evaluate_cycle(&dir, &dir, &rs);  // cycle 1: judges (count=1), latches
+        eng.evaluate_cycle(&dir, &dir, &rs);  // cycle 2: skipped
+        eng.evaluate_cycle(&dir, &dir, &rs);  // cycle 3: skipped
         assert_eq!(run_count(&dir, "paper"), 1, "once_met judge must run exactly once then latch");
         assert!(eng.goals[0].latched);
         assert!(eng.goals[0].met()); // still reported met after skipping
@@ -309,7 +313,7 @@ mod tests {
             goals: vec![g], stop_when: "tests".into(), halt_when: None,
         }).unwrap();
         let rs = RunState::default();
-        for _ in 0..3 { eng.evaluate_cycle(&dir, &rs); }
+        for _ in 0..3 { eng.evaluate_cycle(&dir, &dir, &rs); }
         assert_eq!(run_count(&dir, "tests"), 3, "always must re-judge every cycle");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -324,11 +328,11 @@ mod tests {
             goals: vec![g], stop_when: "artifact_ok".into(), halt_when: None,
         }).unwrap();
         let rs = RunState::default();
-        eng.evaluate_cycle(&dir, &rs);                 // cycle 1: judges (count=1), records sig
-        eng.evaluate_cycle(&dir, &rs);                 // cycle 2: input unchanged → skip
+        eng.evaluate_cycle(&dir, &dir, &rs);                 // cycle 1: judges (count=1), records sig
+        eng.evaluate_cycle(&dir, &dir, &rs);                 // cycle 2: input unchanged → skip
         assert_eq!(run_count(&dir, "artifact_ok"), 1, "unchanged input → no re-judge");
         std::fs::write(&watched, "v2-changed").unwrap();
-        eng.evaluate_cycle(&dir, &rs);                 // cycle 3: input changed → re-judge
+        eng.evaluate_cycle(&dir, &dir, &rs);                 // cycle 3: input changed → re-judge
         assert_eq!(run_count(&dir, "artifact_ok"), 2, "changed input → re-judge");
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -2,9 +2,9 @@
 //!
 //! - `script` judge: run a command, parse its stdout as verdict JSON.
 //! - `llm` judge: build a prompt from a rubric + inputs, call
-//!   `claude -p --bare --model <m> --output-format json`, extract the verdict
-//!   JSON from the model's result. `--bare` = no plugins/hooks/CLAUDE.md → fast,
-//!   cheap, deterministic.
+//!   `claude -p --model <m> --output-format json --strict-mcp-config`, extract the verdict
+//!   JSON from the model's result. `--strict-mcp-config` loads no MCP servers → lean and
+//!   deterministic, without `--bare` (which breaks keychain auth — see the note in run_llm).
 //!
 //! Both kinds are crash-safe: any failure (spawn, timeout, malformed output)
 //! yields `Verdict::failed(...)` rather than panicking.
@@ -16,11 +16,16 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Run the judge for a goal and return its verdict.
-pub fn run(spec: &JudgeSpec, cwd: &Path) -> Verdict {
+///
+/// `cwd` is the project root: scripts run there and `inputs` (diff/status/log/file paths)
+/// resolve there. `config_base` is where config-adjacent files live (root, or the `agg/`
+/// folder) — the LLM judge's `rubric` file resolves against it, since rubrics live next to
+/// goals.yaml. The two are equal unless the `agg/` config folder is in use.
+pub fn run(spec: &JudgeSpec, cwd: &Path, config_base: &Path) -> Verdict {
     match spec {
         JudgeSpec::Script { cmd, timeout } => run_script(cmd, *timeout, cwd),
         JudgeSpec::Llm { model, rubric, inputs, timeout } => {
-            run_llm(model, rubric, inputs, *timeout, cwd)
+            run_llm(model, rubric, inputs, *timeout, cwd, config_base)
         }
     }
 }
@@ -38,9 +43,17 @@ fn run_script(cmd: &str, timeout_secs: u64, cwd: &Path) -> Verdict {
 
 // ---------------- llm judge ----------------
 
-fn run_llm(model: &str, rubric: &str, inputs: &[String], timeout_secs: u64, cwd: &Path) -> Verdict {
-    // 1) read the rubric (the judge's prompt body)
-    let rubric_path = cwd.join(rubric);
+fn run_llm(
+    model: &str,
+    rubric: &str,
+    inputs: &[String],
+    timeout_secs: u64,
+    cwd: &Path,
+    config_base: &Path,
+) -> Verdict {
+    // 1) read the rubric (the judge's prompt body) — it lives next to goals.yaml, so it
+    //    resolves against config_base (the `agg/` folder when in use, else the project root).
+    let rubric_path = config_base.join(rubric);
     let rubric_text = match std::fs::read_to_string(&rubric_path) {
         Ok(t) => t,
         Err(e) => return Verdict::failed(format!("reading rubric {}: {e}", rubric_path.display())),
@@ -203,7 +216,7 @@ mod tests {
             cmd: r#"echo '{"met":true,"value":28,"max":28,"target":28}'"#.into(),
             timeout: 10,
         };
-        let v = run(&spec, Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."));
         assert!(v.met);
         assert_eq!(v.value, 28.0);
         assert!(v.error.is_none());
@@ -217,7 +230,7 @@ mod tests {
             cmd: r#"for i in $(seq 1 4000); do echo "noisy log line padding padding padding padding $i"; done; echo '{"met":true,"value":1,"max":1,"target":1}'"#.into(),
             timeout: 15,
         };
-        let v = run(&spec, Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."));
         assert!(v.met, "verdict should parse despite huge preceding output; got {:?}", v.error);
         assert!(v.error.is_none());
     }
@@ -228,7 +241,7 @@ mod tests {
             cmd: r#"echo 'building...'; echo 'done'; echo '{"met":false,"value":18,"max":28}'"#.into(),
             timeout: 10,
         };
-        let v = run(&spec, Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."));
         assert!(!v.met);
         assert_eq!(v.value, 18.0);
     }
@@ -236,7 +249,7 @@ mod tests {
     #[test]
     fn malformed_judge_yields_failed_verdict() {
         let spec = JudgeSpec::Script { cmd: "echo not-json".into(), timeout: 10 };
-        let v = run(&spec, Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."));
         assert!(!v.met);
         assert!(v.error.is_some());
     }
@@ -244,7 +257,7 @@ mod tests {
     #[test]
     fn script_judge_times_out() {
         let spec = JudgeSpec::Script { cmd: "sleep 5".into(), timeout: 1 };
-        let v = run(&spec, Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."));
         assert!(v.error.as_deref().unwrap().contains("timed out"));
     }
 

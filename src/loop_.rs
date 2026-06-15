@@ -66,7 +66,13 @@ impl Drop for RunPidGuard<'_> {
     }
 }
 
-pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Result<()> {
+pub fn run(
+    cfg: AggConfig,
+    mut eng: Engine,
+    dir: &Path,
+    config_base: &Path,
+    max_sessions: u32,
+) -> Result<()> {
     // ── double-run guard (BOTH foreground and detached) ──────────────────────────────────
     // Refuse to start a second loop over the same project: two loops would launch competing
     // workers that fight over the repo, and `agg stop` could only target one. `live_pid`
@@ -90,7 +96,9 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
     crate::detach::write_run_pid(dir);
     let _run_pid_guard = RunPidGuard { dir };
 
-    let resume_prompt = std::fs::read_to_string(dir.join(&cfg.resume_prompt))
+    // the resume prompt sits next to agg.yaml → resolve against config_base (the `agg/` folder
+    // when in use, else the project root).
+    let resume_prompt = std::fs::read_to_string(config_base.join(&cfg.resume_prompt))
         .with_context(|| format!("reading resume prompt {}", cfg.resume_prompt))?;
 
     // ---- lifecycle hooks (tool-agnostic): on_start once, background watchers spawned now,
@@ -179,7 +187,7 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
     eprintln!("  baseline: running judges once before the first session…");
     dash.phase = "judging".into();
     publish!();
-    let pre = eng.evaluate_cycle(dir, &run_state(tokens_spent, budget_total));
+    let pre = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total));
     eprint!("{}", indent(&eng.scoreboard()));
     publish!();
     if pre.halt {
@@ -417,7 +425,7 @@ pub fn run(cfg: AggConfig, mut eng: Engine, dir: &Path, max_sessions: u32) -> Re
         eprintln!("  running judges…");
         dash.phase = "judging".into();
         publish!();
-        let res = eng.evaluate_cycle(dir, &run_state(tokens_spent, budget_total));
+        let res = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total));
         eprint!("{}", indent(&eng.scoreboard()));
         publish!();
 

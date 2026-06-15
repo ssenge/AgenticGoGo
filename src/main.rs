@@ -36,6 +36,10 @@ enum Cmd {
         /// overwrite existing config files
         #[arg(long)]
         force: bool,
+        /// scaffold into an `agg/` config folder instead of the project root (keeps the root
+        /// tidy when you have judges/ + rubrics/). `agg run` auto-detects either layout.
+        #[arg(long)]
+        folder: bool,
     },
     /// Diagnose your setup (claude on PATH, config parses, conditions valid, …).
     Doctor,
@@ -118,7 +122,11 @@ enum SendCmd {
 }
 
 struct Paths {
+    /// project root (cwd for judges + worker; runtime state lives in `<dir>/.agg/`).
     dir: PathBuf,
+    /// where user inputs live: `<dir>/agg/` if that folder exists, else `<dir>`. The resume
+    /// prompt and LLM-judge rubric files resolve against this base.
+    config_base: PathBuf,
     config: PathBuf,
     goals: PathBuf,
 }
@@ -126,9 +134,11 @@ struct Paths {
 impl Cli {
     fn paths(&self) -> Paths {
         let dir = self.dir.clone().unwrap_or_else(|| PathBuf::from("."));
-        let config = self.config.clone().unwrap_or_else(|| dir.join("agg.yaml"));
-        let goals = self.goals.clone().unwrap_or_else(|| dir.join("goals.yaml"));
-        Paths { dir, config, goals }
+        let config_base = agg::paths::config_base(&dir);
+        // An explicit --config/--goals wins; otherwise honour the optional `agg/` folder.
+        let config = self.config.clone().unwrap_or_else(|| agg::paths::config_file(&dir, "agg.yaml"));
+        let goals = self.goals.clone().unwrap_or_else(|| agg::paths::config_file(&dir, "goals.yaml"));
+        Paths { dir, config_base, config, goals }
     }
 }
 
@@ -137,15 +147,15 @@ fn main() -> Result<()> {
     let p = cli.paths();
 
     match &cli.cmd {
-        Cmd::Init { force } => init::run(&p.dir, *force),
-        Cmd::Doctor => doctor::run(&p.dir, &p.config, &p.goals),
+        Cmd::Init { force, folder } => init::run(&p.dir, *force, *folder),
+        Cmd::Doctor => doctor::run(&p.dir, &p.config_base, &p.config, &p.goals),
         Cmd::Plan | Cmd::Status => {
             no_config_hint(&p.goals)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
             let mut eng = engine::Engine::new(goals_cfg)?;
             eprintln!("agg: evaluating {} goal(s) once (dry run)…", eng.goals.len());
             // dry run: no budget/wall-time accounting (default RunState)
-            let res = eng.evaluate_cycle(&p.dir, &engine::RunState::default());
+            let res = eng.evaluate_cycle(&p.dir, &p.config_base, &engine::RunState::default());
             print!("{}", eng.scoreboard());
             if res.halt {
                 println!("\n⚠ HALT condition is already true: {}", res.halt_reason.unwrap_or_default());
@@ -172,7 +182,7 @@ fn main() -> Result<()> {
             let agg_cfg = config::AggConfig::load(&p.config)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
             let eng = engine::Engine::new(goals_cfg)?;
-            loop_::run(agg_cfg, eng, &p.dir, *max_sessions)
+            loop_::run(agg_cfg, eng, &p.dir, &p.config_base, *max_sessions)
         }
         Cmd::Dashboard => dashboard::run(&p.dir),
         Cmd::Stop { reason } => send_to_bus(&p.dir, bus::Command::Stop { reason: reason.clone() }),

@@ -92,6 +92,50 @@ fn init_then_plan_shows_scoreboard() {
 }
 
 #[test]
+fn config_lives_in_the_optional_agg_folder() {
+    // Put ALL user config under `agg/` and prove the loop finds + uses it: agg.yaml,
+    // goals.yaml, the resume prompt, and the judge all resolve through config_base, while the
+    // judge SCRIPT still runs from the project root (so `did_work` lands where the next judge
+    // looks for it). This is the end-to-end proof of the opt-in config folder.
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+
+    // judge lives under agg/judges/ and checks a root-level marker the worker creates.
+    write(
+        dir,
+        "agg/judges/check.sh",
+        "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n",
+    );
+    chmod_x(&dir.join("agg/judges/check.sh"));
+    // the judge cmd path is relative to the PROJECT ROOT (scripts run there), hence agg/judges/…
+    write(
+        dir,
+        "agg/goals.yaml",
+        "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./agg/judges/check.sh\" }\nstop_when: worked\n",
+    );
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: folded\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n",
+    );
+    // resume prompt resolves against config_base (the agg/ folder), so it sits inside it.
+    write(dir, "agg/AGG_RESUME.md", "create the file did_work\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "foldered agg run failed:\n{combined}");
+    assert!(dir.join("did_work").exists(), "worker should create did_work at the project root");
+    assert!(
+        combined.contains("STOP condition satisfied"),
+        "foldered config should drive the loop to its stop condition, got:\n{combined}"
+    );
+}
+
+#[test]
 fn run_drives_a_correction_loop_to_stop() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
