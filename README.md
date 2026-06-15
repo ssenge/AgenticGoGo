@@ -174,8 +174,16 @@ agg run
 `agg init` writes a runnable starter (with comments explaining each piece) so you're
 never staring at a blank page. The walked example below shows what those files contain.
 
+**Prefer a tidy root?** `agg init --folder` puts everything in an optional **`agg/` config
+folder** (`agg/agg.yaml`, `agg/goals.yaml`, `agg/AGG_RESUME.md`, `agg/judges/`, `agg/rubrics/`)
+instead of the project root. `agg run` auto-detects either layout — no flag needed at run time.
+Inside the folder, the resume prompt and rubric files resolve relative to `agg/`; judge `cmd`s
+still run from the project root (so a foldered judge is `cmd: "./agg/judges/x.sh"`). Runtime
+state always lives in `.agg/` (note the dot) regardless.
+
 Stuck? **`agg doctor`** checks everything in one shot — claude on PATH, config parses,
-stop/halt conditions valid, resume prompt present — and tells you exactly what to fix.
+stop/halt conditions valid, resume prompt + rubric files present, and which config layout it
+found — and tells you exactly what to fix.
 
 ## Hello, agg — the smallest possible loop
 

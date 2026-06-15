@@ -150,7 +150,17 @@ Show the user the proposed `goals.yaml` and let them approve or edit before writ
 
 ## Step 6 — Write the three files
 
-Write to the **project directory** (where the user invoked this):
+Write to the **project directory** (where the user invoked this) — OR, to keep the root tidy,
+into an optional **`agg/` config folder**. `agg run` auto-detects either: if `<project>/agg/`
+exists, it reads `agg/agg.yaml`, `agg/goals.yaml`, the resume prompt, and `agg/judges/`,
+`agg/rubrics/` from there; otherwise it reads them from the root. Prefer the folder when you're
+generating several judges and/or rubrics (it stops them cluttering the project root); keep the
+root for a tiny 1-judge setup. Two rules if you use the folder:
+- **resume prompt + rubric files resolve against `agg/`** (put them inside it, reference them
+  by name as today, e.g. `rubric: "rubrics/<id>.md"` → `agg/rubrics/<id>.md`).
+- **judge `cmd` + `inputs` resolve against the PROJECT ROOT** (scripts run there). So a foldered
+  judge is `cmd: "./agg/judges/<id>.sh"` — root-relative, with the `agg/` prefix.
+You can also scaffold the folder layout directly with `agg init --folder`.
 
 ### `goals.yaml`
 ```yaml
