@@ -58,7 +58,11 @@ enum Cmd {
         detach: bool,
     },
     /// Live TUI dashboard — tails the running loop's state. Quit with q.
-    Dashboard,
+    Dashboard {
+        /// print a one-shot text snapshot to stdout and exit (for headless/CI/SSH — no TUI).
+        #[arg(long)]
+        once: bool,
+    },
     /// Stop a running loop gracefully after its current session (alias of `send stop`).
     Stop {
         /// reason (recorded in the finish banner)
@@ -190,7 +194,15 @@ fn main() -> Result<()> {
             let eng = engine::Engine::new(goals_cfg)?;
             loop_::run(agg_cfg, eng, &p.dir, &p.config_base, *max_sessions)
         }
-        Cmd::Dashboard => dashboard::run(&p.dir),
+        Cmd::Dashboard { once } => {
+            if *once {
+                // headless one-shot: the same snapshot the TUI renders, to stdout, then exit.
+                print!("{}", status::render(&p.dir));
+                Ok(())
+            } else {
+                dashboard::run(&p.dir)
+            }
+        }
         Cmd::Stop { reason } => send_to_bus(&p.dir, bus::Command::Stop { reason: reason.clone() }),
         // top-level aliases for the most-used bus verbs (consistency with `agg stop`):
         Cmd::Inject { text } => send_to_bus(&p.dir, bus::Command::InjectInstruction { text: text.clone() }),

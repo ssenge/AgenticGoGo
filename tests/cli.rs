@@ -180,6 +180,18 @@ fi
         combined.contains("STOP condition satisfied"),
         "loop should reach its stop condition, got:\n{combined}"
     );
+
+    // `agg status` and `dashboard --once` must read the snapshot the run just published —
+    // showing the met goal — WITHOUT re-running judges. (Both go through status::render.)
+    for args in [vec!["status"], vec!["dashboard", "--once"]] {
+        let snap = agg(dir, &path).args(&args).output().unwrap();
+        let text = String::from_utf8_lossy(&snap.stdout).into_owned();
+        assert!(snap.status.success(), "`agg {args:?}` failed");
+        assert!(
+            text.contains("itest") && text.contains("worked"),
+            "`agg {args:?}` should render the published snapshot (project + goal), got:\n{text}"
+        );
+    }
 }
 
 #[test]
