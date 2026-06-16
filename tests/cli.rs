@@ -254,3 +254,29 @@ fn doctor_flags_a_broken_setup() {
     let out = agg(dir, &path).arg("doctor").output().unwrap();
     assert!(!out.status.success(), "doctor on an empty dir should report failures");
 }
+
+#[test]
+fn judge_runs_one_goal_and_prints_raw_verdict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let path = std::env::var("PATH").unwrap_or_default(); // no worker → real PATH is fine
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: ok\n    type: binary\n    judge: { kind: script, cmd: \"echo '{\\\"met\\\":true,\\\"rationale\\\":\\\"fine\\\"}'\" }\nstop_when: ok\n",
+    );
+    write(dir, "agg.yaml", "project: jt\nresume_prompt: AGG_RESUME.md\n");
+    write(dir, "AGG_RESUME.md", "noop\n");
+
+    // a known goal: raw verdict JSON on stdout
+    let out = agg(dir, &path).args(["judge", "ok"]).output().unwrap();
+    assert!(out.status.success(), "judge ok failed: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"met\":true"), "stdout should be the raw verdict, got: {stdout}");
+
+    // an unknown goal: error that lists the available ids
+    let out = agg(dir, &path).args(["judge", "nope"]).output().unwrap();
+    assert!(!out.status.success(), "unknown goal id must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no goal `nope`") && err.contains("ok"), "should list available ids, got: {err}");
+}

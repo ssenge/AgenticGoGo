@@ -6,7 +6,7 @@
 
 // The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.
-use agg::{bus, config, dashboard, detach, doctor, engine, init, loop_, project, spawns, state, status};
+use agg::{bus, config, dashboard, detach, doctor, engine, init, judge, loop_, project, spawns, state, status};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -56,6 +56,12 @@ enum Cmd {
         /// run in the background: detach, write .agg/run.pid, log to .agg/run.log.
         #[arg(long, short = 'd')]
         detach: bool,
+    },
+    /// Run ONE goal's judge once and print its raw verdict JSON + a human line — for authoring
+    /// or debugging a single judge without running the whole `plan`.
+    Judge {
+        /// the goal id whose judge to run
+        id: String,
     },
     /// Show this project's run history (every `agg run`, newest first) + lifetime totals.
     History,
@@ -186,6 +192,28 @@ fn main() -> Result<()> {
         }
         Cmd::History => {
             print!("{}", project::Project::load(&p.dir).render_history());
+            Ok(())
+        }
+        Cmd::Judge { id } => {
+            no_config_hint(&p.goals)?;
+            let goals_cfg = config::GoalsConfig::load(&p.goals)?;
+            let goal = goals_cfg.goals.iter().find(|g| &g.id == id).ok_or_else(|| {
+                let ids: Vec<&str> = goals_cfg.goals.iter().map(|g| g.id.as_str()).collect();
+                anyhow::anyhow!("no goal `{id}` in goals.yaml. available: {}", ids.join(", "))
+            })?;
+            // run the one judge exactly as the loop would (scripts from the project root,
+            // rubric from the config dir).
+            let verdict = judge::run(&goal.judge, &p.dir, &p.config_base);
+            // raw verdict JSON (the judge contract), then a one-line human summary.
+            println!("{}", serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".into()));
+            let mark = if verdict.met { "✔ met" } else { "✖ not met" };
+            eprintln!(
+                "  {mark} — {} (value {} / target {}{})",
+                if verdict.rationale.is_empty() { "(no rationale)" } else { &verdict.rationale },
+                verdict.value,
+                verdict.target,
+                verdict.error.as_ref().map(|e| format!("; ERROR: {e}")).unwrap_or_default(),
+            );
             Ok(())
         }
         Cmd::Run { max_sessions, detach } => {
