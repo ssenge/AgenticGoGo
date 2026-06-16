@@ -6,7 +6,7 @@
 
 // The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.
-use agg::{bus, config, dashboard, detach, doctor, engine, init, loop_, proc, spawns, state};
+use agg::{bus, config, dashboard, detach, doctor, engine, init, loop_, spawns, state};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -255,7 +255,7 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
         use std::os::unix::process::CommandExt;
         // new session → new process group (child is leader) → no controlling tty.
         unsafe {
-            c.pre_exec(|| proc::setsid());
+            c.pre_exec(|| agg::proc::setsid());
         }
     }
     let child = c.spawn().with_context(|| format!("spawning `{}`", cmd.join(" ")))?;

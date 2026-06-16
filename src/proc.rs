@@ -27,6 +27,7 @@ extern "C" {
     fn libc_setsid() -> i32;
 }
 
+#[cfg(unix)]
 const SIGKILL: i32 = 9;
 
 // ---------------- liveness + single-pid / group kills ----------------

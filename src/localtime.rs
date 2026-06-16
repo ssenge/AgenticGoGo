@@ -13,16 +13,19 @@
 //! first use; a process that straddles a DST boundary keeps the offset it
 //! started with (acceptable for a dashboard — it never silently shows UTC).
 
+#[cfg(unix)]
 use std::sync::OnceLock;
 
 /// `time_t` / `long` on the LP64 Unix targets we ship for
 /// (aarch64/x86_64 macOS + linux-gnu). 64-bit on all of them.
+#[cfg(unix)]
 #[allow(non_camel_case_types)]
 type time_t = i64;
 
 // `struct tm` layout per POSIX. We only read `tm_gmtoff`; the rest are present
 // so the struct size matches what libc writes into. `tm_zone` is a trailing
 // pointer on glibc/macOS.
+#[cfg(unix)]
 #[repr(C)]
 struct Tm {
     tm_sec: i32,
@@ -38,15 +41,17 @@ struct Tm {
     tm_zone: *const i8,
 }
 
+#[cfg(unix)]
 extern "C" {
     // localtime_r(const time_t *timep, struct tm *result) -> struct tm *
+    // POSIX-only; Windows has no localtime_r (it's localtime_s, with reversed args).
     fn localtime_r(timep: *const time_t, result: *mut Tm) -> *mut Tm;
 }
 
-/// Local UTC offset in seconds (east of UTC, so CEST = +7200). Computed once
-/// from the current instant and cached. Falls back to 0 (i.e. UTC, the old
-/// behaviour) only if `localtime_r` ever fails — never panics on the display
-/// path.
+/// Local UTC offset in seconds (east of UTC, so CEST = +7200). Computed once from the current
+/// instant and cached. Falls back to 0 (i.e. UTC, the old behaviour) if `localtime_r` ever
+/// fails — never panics on the display path.
+#[cfg(unix)]
 fn local_offset_secs() -> i64 {
     static OFFSET: OnceLock<i64> = OnceLock::new();
     *OFFSET.get_or_init(|| {
@@ -64,6 +69,15 @@ fn local_offset_secs() -> i64 {
             tm.tm_gmtoff
         }
     })
+}
+
+/// Windows has no `localtime_r`, and the WinAPI offset call (`GetDynamicTimeZoneInformation`)
+/// isn't worth a dependency or hand-rolled FFI for a cosmetic dashboard timestamp. Fall back to
+/// UTC (offset 0) — the same well-defined fallback Unix uses when the syscall fails. The
+/// dashboard then shows UTC times labelled `UTC`, never a wrong "local" time and never a crash.
+#[cfg(not(unix))]
+fn local_offset_secs() -> i64 {
+    0
 }
 
 /// Format a UTC epoch as a local `HH:MM:SS` string (no date, no zone suffix).
