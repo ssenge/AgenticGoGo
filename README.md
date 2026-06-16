@@ -473,10 +473,15 @@ prompt_includes:
 A failing hook is logged, never fatal. `background` processes are spawned in the loop's
 reaping domain, so a `--watch` can't leak (see below).
 
-**No orphaned compute.** The worker runs in its own process group; when a session ends (or
-the loop stops), agg sweeps the whole group and kills any straggler — even a `nohup … &` or
-`--watch` child that escaped. Works on Linux, macOS, and Windows (process-group / tree kill,
-no fragile env-reading).
+**No orphaned compute** *(macOS + Linux)*. The worker runs in its own process group; when a
+session ends (or the loop stops), agg sweeps the whole group and kills any straggler — even a
+`nohup … &` or `--watch` child that escaped (POSIX process groups, no fragile env-reading).
+
+> **Platform note.** AgenticGoGo is **unix-first** (macOS + Linux). The Windows binary builds
+> and the **core loop runs** (launch → judge → stop, steering, dashboard), but two safety
+> features are **not** implemented there: the **CPU-flat half of the watchdog** (so a wedged
+> worker is caught only by `max_sessions` / `agg stop`) and **process-group spawn-protection /
+> reaping**. `agg run` prints a one-line notice on Windows so this is never a surprise.
 
 ## Compatible with your stack
 

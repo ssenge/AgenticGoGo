@@ -100,6 +100,19 @@ pub fn run(
     // when in use, else the project root).
     let resume_prompt = read_resume_prompt(config_base, &cfg.resume_prompt)?;
 
+    // Honesty notice: AgenticGoGo is unix-first. On Windows the core loop (launch → judge →
+    // stop) works, but two safety features degrade and we say so rather than pretend otherwise:
+    //   • the watchdog can't detect a CPU-flat hang (no `ps -o time`), so a wedged worker is
+    //     only caught by max-sessions / your own stop, not the idle+cpu-flat watchdog;
+    //   • `agg spawn` protection + straggler reaping rely on POSIX process groups, which
+    //     Windows lacks — a leaked background child may not be swept.
+    #[cfg(not(unix))]
+    eprintln!(
+        "  ⚠ Windows: unix-first build — the CPU-flat watchdog and process-group spawn\n    \
+         protection/reaping are NOT active here. The core loop runs; use `max_sessions` and\n    \
+         `agg stop` as your guards. (Full Windows support is not implemented.)"
+    );
+
     // ---- lifecycle hooks (tool-agnostic): on_start once, background watchers spawned now,
     //      on_stop guaranteed on any exit via the Drop guard. ----
     crate::hooks::run("on_start", &cfg.hooks.on_start, dir);
