@@ -87,6 +87,36 @@ pub fn hhmmss(epoch_utc: u64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
+/// Format a UTC epoch as a local `YYYY-MM-DD HH:MM` string. Used by `agg history`, where runs
+/// span days so a date is needed (unlike the time-only `hhmmss`). 0 → "—" (no timestamp).
+pub fn ymd_hms(epoch_utc: u64) -> String {
+    if epoch_utc == 0 {
+        return "—".to_string();
+    }
+    let local = epoch_utc as i64 + local_offset_secs();
+    let days = local.div_euclid(86_400);
+    let tod = local.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let (h, min) = (tod / 3600, (tod % 3600) / 60);
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}")
+}
+
+/// Convert a count of days since the Unix epoch (1970-01-01) to a (year, month, day) civil
+/// date. Howard Hinnant's `civil_from_days` — exact, branch-light, dependency-free, valid for
+/// the full range we care about. `days` may be negative (pre-1970), though we never pass that.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468; // shift epoch to 0000-03-01
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    (y + i64::from(m <= 2), m, d)
+}
+
 /// Local hour/min/sec for a UTC epoch, applying the cached offset.
 pub fn local_hms(epoch_utc: u64) -> (u64, u64, u64) {
     // shift into local seconds, wrapping safely across the day boundary.
@@ -129,5 +159,32 @@ mod tests {
     fn offset_label_is_well_formed() {
         let l = offset_label();
         assert!(l.starts_with("UTC"));
+    }
+
+    #[test]
+    fn civil_from_days_known_dates() {
+        // day 0 = 1970-01-01 (Unix epoch).
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        // 2000-01-01 is 10957 days after the epoch.
+        assert_eq!(civil_from_days(10_957), (2000, 1, 1));
+        // a leap day: 2020-02-29 is 18321 days after the epoch.
+        assert_eq!(civil_from_days(18_321), (2020, 2, 29));
+    }
+
+    #[test]
+    fn ymd_hms_zero_is_dash() {
+        assert_eq!(ymd_hms(0), "—");
+    }
+
+    #[test]
+    fn ymd_hms_is_well_formed() {
+        // 1_700_000_000 = 2023-11-14 ~22:13 UTC. Local offset shifts it, but the SHAPE is fixed.
+        let s = ymd_hms(1_700_000_000);
+        // YYYY-MM-DD HH:MM
+        assert_eq!(s.len(), 16, "got {s:?}");
+        assert_eq!(&s[4..5], "-");
+        assert_eq!(&s[7..8], "-");
+        assert_eq!(&s[10..11], " ");
+        assert_eq!(&s[13..14], ":");
     }
 }

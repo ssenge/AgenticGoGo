@@ -6,7 +6,7 @@
 
 // The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.
-use agg::{bus, config, dashboard, detach, doctor, engine, init, loop_, spawns, state, status};
+use agg::{bus, config, dashboard, detach, doctor, engine, init, loop_, project, spawns, state, status};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -57,6 +57,8 @@ enum Cmd {
         #[arg(long, short = 'd')]
         detach: bool,
     },
+    /// Show this project's run history (every `agg run`, newest first) + lifetime totals.
+    History,
     /// Live TUI dashboard — tails the running loop's state. Quit with q.
     Dashboard {
         /// print a one-shot text snapshot to stdout and exit (for headless/CI/SSH — no TUI).
@@ -180,6 +182,10 @@ fn main() -> Result<()> {
         // Cheap read of the published snapshot — never re-runs judges (that's `plan`).
         Cmd::Status => {
             print!("{}", status::render(&p.dir));
+            Ok(())
+        }
+        Cmd::History => {
+            print!("{}", project::Project::load(&p.dir).render_history());
             Ok(())
         }
         Cmd::Run { max_sessions, detach } => {

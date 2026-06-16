@@ -75,17 +75,67 @@ impl Project {
     }
 
     /// Cumulative session count across ALL prior completed/in-flight runs.
-    /// (Consumed by tests today; the natural consumer is a future `agg history`
-    /// summary command — kept here so the ledger is the single source of truth.)
-    #[allow(dead_code)]
+    /// Surfaced by `agg history`; kept here so the ledger is the single source of truth.
     pub fn lifetime_sessions(&self) -> u32 {
         self.runs.iter().map(|r| r.sessions).sum()
     }
 
     /// Cumulative output tokens across all runs.
-    #[allow(dead_code)]
     pub fn lifetime_tokens(&self) -> u64 {
         self.runs.iter().map(|r| r.tokens).sum()
+    }
+
+    /// Human-readable run-history report for `agg history`: one line per run (newest first)
+    /// plus a lifetime total. Pure (no I/O) so it's unit-testable.
+    pub fn render_history(&self) -> String {
+        if self.runs.is_empty() {
+            return "no run history yet (.agg/project.json is empty).\n  \
+                    run `agg run` at least once — each invocation appends a record here."
+                .to_string();
+        }
+        let mut out = String::new();
+        out.push_str(&format!(
+            "{} — {} run(s), {} lifetime session(s), {} lifetime output-token(s)\n\n",
+            if self.name.is_empty() { "(unnamed project)" } else { &self.name },
+            self.runs.len(),
+            self.lifetime_sessions(),
+            self.lifetime_tokens(),
+        ));
+        // header
+        out.push_str(&format!(
+            "{:<4} {:<19} {:<8} {:>9} {:>9} {:>7} {}\n",
+            "run", "started", "dur", "sessions", "tokens", "goals", "outcome"
+        ));
+        // newest first
+        for r in self.runs.iter().rev() {
+            let dur = if r.ended_at_epoch >= r.started_at_epoch && r.ended_at_epoch > 0 {
+                fmt_dur(r.ended_at_epoch - r.started_at_epoch)
+            } else {
+                "—".to_string()
+            };
+            out.push_str(&format!(
+                "{:<4} {:<19} {:<8} {:>9} {:>9} {:>7} {}\n",
+                r.run,
+                crate::localtime::ymd_hms(r.started_at_epoch),
+                dur,
+                r.sessions,
+                r.tokens,
+                format!("{}/{}", r.goals_met, r.goals_total),
+                r.end_reason,
+            ));
+        }
+        out
+    }
+}
+
+fn fmt_dur(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
     }
 }
 
@@ -218,6 +268,39 @@ mod tests {
         assert_eq!(proj.created_at_epoch, 1_000);
         assert_eq!(proj.runs[0].end_reason, "stopped");
         assert_eq!(proj.runs[1].end_reason, "goals-met");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_history_empty_is_a_hint() {
+        let p = Project::default();
+        let out = p.render_history();
+        assert!(out.contains("no run history yet"));
+    }
+
+    #[test]
+    fn render_history_lists_runs_newest_first_with_totals() {
+        let dir = tmpdir("hist");
+        {
+            let mut l = RunLedger::begin(&dir, "demo", 1, 1_000);
+            l.update(4, 400, 1, 3);
+            l.finish(1_600, "stopped");
+        }
+        {
+            let mut l = RunLedger::begin(&dir, "demo", 2, 2_000);
+            l.update(3, 300, 3, 3);
+            l.finish(2_300, "goals-met");
+        }
+        let out = Project::load(&dir).render_history();
+        assert!(out.contains("demo — 2 run(s)"));
+        assert!(out.contains("7 lifetime session(s)"));
+        assert!(out.contains("700 lifetime output-token(s)"));
+        assert!(out.contains("goals-met"));
+        assert!(out.contains("stopped"));
+        // newest first: run 2 line appears before run 1 line
+        let p2 = out.find("goals-met").unwrap();
+        let p1 = out.find("stopped").unwrap();
+        assert!(p2 < p1, "newest run should be listed first");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

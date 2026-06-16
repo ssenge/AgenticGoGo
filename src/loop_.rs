@@ -194,6 +194,22 @@ pub fn run(
     }
     publish!();
 
+    // Persistent project run-history ledger (.agg/project.json): append an in-flight record for
+    // THIS run, finalized on any exit via the Drop guard below. Created BEFORE the baseline
+    // evaluation so that even a run that is already-satisfied (or halts) at launch still leaves
+    // a history record — `agg history` would otherwise miss zero-session runs. The lifetime
+    // session total (shown on the dashboard so a restart doesn't look like the work started
+    // over) is derived from prior runs; `session` (per-run) still drives --resume/labels.
+    let mut session = 0u32;
+    let mut ledger = crate::project::RunLedger::begin(
+        dir,
+        &cfg.project,
+        std::process::id(),
+        now_epoch(),
+    );
+    let lifetime_base = ledger.prior_lifetime_sessions();
+    dash.lifetime_session = lifetime_base;
+
     // Evaluate the goals ONCE up front (run the judges) — maybe we're already done,
     // or an invariant is already broken, before burning a single session.
     eprintln!("  baseline: running judges once before the first session…");
@@ -206,7 +222,10 @@ pub fn run(
         eprintln!("⚠ HALT at baseline — guard already true: {}", pre.halt_reason.clone().unwrap_or_default());
         dash.phase = "done".into();
         dash.finished = true;
-        dash.finish_reason = format!("HALT at baseline: {}", pre.halt_reason.unwrap_or_default());
+        dash.finish_reason = format!("HALT at baseline: {}", pre.halt_reason.clone().unwrap_or_default());
+        let (gm, gt) = eng.tally();
+        ledger.update(0, 0, gm, gt);
+        ledger.finish(now_epoch(), &format!("halt-at-baseline:{}", pre.halt_reason.unwrap_or_default()));
         publish!();
         return Ok(());
     }
@@ -215,6 +234,9 @@ pub fn run(
         dash.phase = "done".into();
         dash.finished = true;
         dash.finish_reason = "already satisfied at launch".into();
+        let (gm, gt) = eng.tally();
+        ledger.update(0, 0, gm, gt);
+        ledger.finish(now_epoch(), "already-satisfied");
         publish!();
         return Ok(());
     }
@@ -228,21 +250,6 @@ pub fn run(
     let bus = Bus::open(dir).ok();
     let mut pending_instruction: Option<String> = None; // prepended to next prompt
     let mut last_session_id: Option<String> = None;      // for optional --resume continuity
-
-    let mut session = 0u32;
-    // Persistent project run-history ledger (.agg/project.json): append an
-    // in-flight record for THIS run, finalized on any exit via the Drop guard
-    // below. The lifetime session total (shown on the dashboard so a restart
-    // doesn't look like the work started over) is derived from prior runs in the
-    // ledger; `session` (per-run) still drives --resume/labels.
-    let mut ledger = crate::project::RunLedger::begin(
-        dir,
-        &cfg.project,
-        std::process::id(),
-        now_epoch(),
-    );
-    let lifetime_base = ledger.prior_lifetime_sessions();
-    dash.lifetime_session = lifetime_base;
 
     // ── per-session git isolation (opt-in) ────────────────────────────────────────────────
     // Capture the base branch ONCE at startup. Each session runs on its own branch off this
