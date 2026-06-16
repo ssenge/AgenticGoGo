@@ -6,7 +6,7 @@
 
 // The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.
-use agg::{bus, config, dashboard, detach, doctor, engine, init, loop_, spawns, state};
+use agg::{bus, config, dashboard, detach, doctor, engine, init, loop_, spawns, state, status};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -43,9 +43,10 @@ enum Cmd {
     },
     /// Diagnose your setup (claude on PATH, config parses, conditions valid, …).
     Doctor,
-    /// Evaluate every judge once and print the starting scoreboard (no worker launched).
+    /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
     Plan,
-    /// Print the current scoreboard (alias of plan for quick re-checks).
+    /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
+    /// re-run judges; reads .agg/state.json, same as the /agg:status skill).
     Status,
     /// Run the loop until the stop condition is met (or halt fires).
     Run {
@@ -149,7 +150,7 @@ fn main() -> Result<()> {
     match &cli.cmd {
         Cmd::Init { force, folder } => init::run(&p.dir, *force, *folder),
         Cmd::Doctor => doctor::run(&p.dir, &p.config_base, &p.config, &p.goals),
-        Cmd::Plan | Cmd::Status => {
+        Cmd::Plan => {
             no_config_hint(&p.goals)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
             let mut eng = engine::Engine::new(goals_cfg)?;
@@ -165,6 +166,11 @@ fn main() -> Result<()> {
                 let (met, total) = eng.tally();
                 println!("\n→ {met}/{total} met; loop would continue. Run `agg run` to start.");
             }
+            Ok(())
+        }
+        // Cheap read of the published snapshot — never re-runs judges (that's `plan`).
+        Cmd::Status => {
+            print!("{}", status::render(&p.dir));
             Ok(())
         }
         Cmd::Run { max_sessions, detach } => {

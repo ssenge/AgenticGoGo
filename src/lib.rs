@@ -24,6 +24,7 @@ pub mod project;
 pub mod reap;
 pub mod spawns;
 pub mod state;
+pub mod status;
 pub mod stop;
 pub mod stream;
 pub mod summary;
