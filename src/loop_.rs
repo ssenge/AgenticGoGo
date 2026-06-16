@@ -13,7 +13,7 @@ use crate::engine::{Engine, RunState};
 use crate::state::{DashboardState, LiveState};
 use crate::summary;
 use crate::worker;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -98,8 +98,7 @@ pub fn run(
 
     // the resume prompt sits next to agg.yaml → resolve against config_base (the `agg/` folder
     // when in use, else the project root).
-    let resume_prompt = std::fs::read_to_string(config_base.join(&cfg.resume_prompt))
-        .with_context(|| format!("reading resume prompt {}", cfg.resume_prompt))?;
+    let resume_prompt = read_resume_prompt(config_base, &cfg.resume_prompt)?;
 
     // ---- lifecycle hooks (tool-agnostic): on_start once, background watchers spawned now,
     //      on_stop guaranteed on any exit via the Drop guard. ----
@@ -488,4 +487,74 @@ fn indent(s: &str) -> String {
     s.lines().map(|l| format!("    {l}\n")).collect()
 }
 
+/// Read the resume prompt from `base`. If it's missing but a sibling `<name>.template` exists
+/// (the convention the bundled examples ship — the real prompt is gitignored so the user
+/// personalises it), fail with the EXACT `cp` to run rather than a bare "No such file". This
+/// is the example-footgun fix: `cd examples/hello-agg && agg run` used to fail cryptically.
+fn read_resume_prompt(base: &Path, name: &str) -> Result<String> {
+    let path = base.join(name);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let template = base.join(format!("{name}.template"));
+            if template.exists() {
+                anyhow::bail!(
+                    "resume prompt `{name}` is missing, but `{name}.template` is here.\n  \
+                     copy it and edit for your run:\n    cp {} {}\n  \
+                     (the real prompt is gitignored on purpose — it's yours to personalise.)",
+                    template.display(),
+                    path.display()
+                );
+            }
+            Err(anyhow::Error::new(e).context(format!("reading resume prompt {name}")))
+        }
+    }
+}
+
 use crate::util::now_epoch;
+
+#[cfg(test)]
+mod tests {
+    use super::read_resume_prompt;
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "agg-loop-{}-{}-{}",
+            std::process::id(),
+            tag,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn reads_an_existing_resume_prompt() {
+        let d = tmpdir("present");
+        std::fs::write(d.join("AGG_RESUME.md"), "do the thing").unwrap();
+        assert_eq!(read_resume_prompt(&d, "AGG_RESUME.md").unwrap(), "do the thing");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn missing_with_template_gives_cp_hint() {
+        let d = tmpdir("template");
+        std::fs::write(d.join("AGG_RESUME.md.template"), "starter").unwrap();
+        let err = read_resume_prompt(&d, "AGG_RESUME.md").unwrap_err().to_string();
+        assert!(err.contains(".template"), "should mention the template: {err}");
+        assert!(err.contains("cp "), "should give a cp command: {err}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn missing_without_template_is_a_plain_error() {
+        let d = tmpdir("absent");
+        let err = read_resume_prompt(&d, "AGG_RESUME.md").unwrap_err().to_string();
+        assert!(err.contains("reading resume prompt"), "plain read error: {err}");
+        assert!(!err.contains("cp "), "no spurious cp hint when no template: {err}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+}

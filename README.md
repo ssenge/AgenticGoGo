@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" width="200" alt="AgenticGoGo — a pole-dancing robot that keeps your agent going going">
+  <img src="assets/logo.png" width="200" alt="AgenticGoGo — a pole-dancing robot that keeps your agent going going">
 </p>
 
 <h1 align="center">AgenticGoGo</h1>
