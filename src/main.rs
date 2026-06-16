@@ -78,6 +78,11 @@ enum Cmd {
     Pause,
     /// Resume a paused loop (alias of `send resume`).
     Resume,
+    /// Change the token budget for a running loop (omit value for unlimited; alias of `send budget`).
+    Budget {
+        /// total output-token ceiling
+        total: Option<u64>,
+    },
     /// Launch a long-running task that OUTLIVES the worker session, tracked so the straggler
     /// reaper spares it and the next session knows it is running (and why). Use this instead
     /// of a hand-rolled `nohup` for any sim/build that takes longer than a single turn.
@@ -208,6 +213,7 @@ fn main() -> Result<()> {
         Cmd::Inject { text } => send_to_bus(&p.dir, bus::Command::InjectInstruction { text: text.clone() }),
         Cmd::Pause => send_to_bus(&p.dir, bus::Command::Pause),
         Cmd::Resume => send_to_bus(&p.dir, bus::Command::Resume),
+        Cmd::Budget { total } => send_to_bus(&p.dir, bus::Command::SetBudget { total: *total }),
         Cmd::Spawn { name, reason, cmd } => spawn_task(&p.dir, name, reason, cmd),
         Cmd::Send(send) => {
             let cmd = match send {
