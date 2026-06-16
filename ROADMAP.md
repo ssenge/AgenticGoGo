@@ -44,6 +44,7 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 | 2 | P1 | M | **Dollar-denominated budget** (`cost.total: $N`) | `agg`'s budget is output-tokens today. Add a `$` ceiling with a per-model pricing table, atop the existing `tokens_spent` plumbing + the `over_budget` stop term. *(vercel-labs has this; we don't.)* |
 | 3 | P2 | M | **Self-updating institutional memory** | A built-in convention/file the loop manages so a worker persists "gotchas" across fresh sessions (vs. leaving it entirely to `AGG_RESUME.md` discipline). *(snarktank ships `AGENTS.md`/`progress.txt`.)* |
 | 10 | P2 | M | **Structured run output (`--json`)** | Machine-readable status/result for scripting + a future web dashboard. |
+| 5 | P3 | M | **In-iteration context summarization** | *Deferred, not rejected.* Auto-summarize a long session as context fills, feeding the digest into the worker (vs. our current human-facing dashboard summaries). Less critical given fresh-context-per-session, but wanted eventually. *(vercel-labs' `RalphContextManager`.)* |
 
 ### Tier C — large (need their own scoping conversation)
 | # | Pri | Effort | Item | Notes |
@@ -52,14 +53,10 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 | 8 | P2 | L | **Richer judges** | Judge result caching; judge parallelism (judges run sequentially today); a larger bundled judge/rubric library; weighted/composite goals. A cluster. |
 | 4 | P2 | L | **Web dashboard** | Remote-accessible vs. the local TUI. Lower priority — `/agg:supervise` (mobile) partly covers the need. |
 
-### 🚫 Decided against (kept so we don't re-litigate)
-| # | Item | Why not |
-|---|------|---------|
-| 5 | **In-iteration context summarization** | Fresh-context-per-session (the core Ralph discipline) makes it unnecessary by design — it's a patch for the single-session-degradation problem `agg` doesn't have. Our `summary.rs` is human-facing digests, a different category. |
-
 ---
 
 ## Notes
-- Tiers A→C are roughly ordered by value/effort. Tier A is the immediate work.
+- Tiers A→C are roughly ordered by value/effort.
 - Items 1 and 8 are **clusters** — each needs its own breakdown before implementation.
+- Item 5 is **deferred** (wanted, just not now), not decided against — kept in Tier B at P3.
 - Every shipped item lands with tests; the full suite + clippy + a Windows cross-check gate each release.
