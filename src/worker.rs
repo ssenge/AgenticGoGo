@@ -1,7 +1,11 @@
 //! Inner worker session: spawn `claude -p`, stream + format its events, run a
 //! heartbeat and a watchdog, detect rate-limits. Owning the child PID and the threads
-//! directly keeps the watchdog simple; the pid-reuse window is narrowed (a `done` re-check
-//! right before the kill) rather than fully eliminated.
+//! directly keeps the watchdog simple. The watchdog kills by pid, so it must not fire after
+//! the main thread reaps the child (the pid could be recycled): it refuses to kill once either
+//! `done` or `reaping` is set, and `reaping` is raised the instant `child.wait()` returns —
+//! before the post-exit group sweep — so the kill-vs-reap race is closed in practice. (The
+//! post-exit group-kill itself is safe by construction: a process *group* outlives its leader
+//! pid until its last member exits, and an empty group makes `kill(-pgid)` a harmless no-op.)
 
 use crate::config::AggConfig;
 use crate::proc;
@@ -101,6 +105,13 @@ pub fn run_session(
     let output_tokens = Arc::new(AtomicU64::new(0));
     let done = Arc::new(AtomicBool::new(false));
     let killed = Arc::new(AtomicBool::new(false));
+    // Ownership-handoff gate that fully closes the watchdog's pid-reuse window. The main thread
+    // sets this true BEFORE it calls `child.wait()` (which reaps the pid and lets the OS recycle
+    // it); the watchdog refuses to kill once it's set. Because it's set strictly before the
+    // reap, there is no instant where the watchdog can SIGKILL a pid the main thread has already
+    // freed (and the OS handed to someone else). `done` (set AFTER wait) only handled the common
+    // case; this handles the race.
+    let reaping = Arc::new(AtomicBool::new(false));
 
     // ---- reader thread: format the stream, update activity + rate-limit + tokens ----
     // It sends its result on a channel (not via join) so the main thread can collect
@@ -194,6 +205,7 @@ pub fn run_session(
     let watchdog = {
         let last_activity = last_activity.clone();
         let done = done.clone();
+        let reaping = reaping.clone();
         let killed = killed.clone();
         let idle_thresh = cfg.watchdog.idle_secs;
         let cpu_grace = cfg.watchdog.cpu_grace;
@@ -221,9 +233,12 @@ pub fn run_session(
                     let since = *cpu_flat_since.get_or_insert(now_epoch());
                     let flat = now_epoch().saturating_sub(since);
                     if flat >= cpu_grace {
-                        // re-check `done` right before killing: the main thread may have
-                        // reaped the child in the up-to-30s gap, and the pid could be reused.
-                        if done.load(Ordering::Relaxed) {
+                        // Refuse to kill if the main thread is done OR has begun reaping: once
+                        // `reaping` is set (strictly BEFORE child.wait() frees the pid), the pid
+                        // may be recycled at any moment, so a kill here could hit an unrelated
+                        // process. This fully closes the pid-reuse window the bare `done` check
+                        // only narrowed.
+                        if done.load(Ordering::Relaxed) || reaping.load(Ordering::Relaxed) {
                             break;
                         }
                         eprintln!(
@@ -242,6 +257,11 @@ pub fn run_session(
 
     // ---- wait for the worker, then tear down the helper threads ----
     let status = child.wait().ok();
+    // The child is now reaped — its pid is free and the OS may recycle it at any moment. Set
+    // BOTH flags before the post-exit group-kill below so the watchdog (which kills by pid) can
+    // never fire on a recycled pid: `done` ends its loop, `reaping` is the belt-and-braces guard
+    // it also checks right before killing.
+    reaping.store(true, Ordering::Relaxed);
     done.store(true, Ordering::Relaxed);
 
     // The immediate worker has exited. If it spawned a tool subprocess that inherited
