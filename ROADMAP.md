@@ -28,18 +28,15 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 - Windows scoped honestly (unix-first; degraded watchdog/spawn-protection disclosed at runtime + README)
 - watchdog pid-reuse race closed with a `reaping` handoff gate
 
+### v0.0.9 — Tier A small items
+- **`agg history`** — run-history ledger surfaced (newest-first runs + lifetime totals); also fixed a
+  latent gap where already-satisfied/halted-at-baseline runs recorded nothing
+- **Doctor checks script-judge files** exist + are executable (with an exact `chmod +x` hint)
+- **`agg judge <id>`** — run one judge, print its raw verdict (raw JSON to stdout, human line to stderr)
+
 ---
 
 ## ⬜ Open
-
-### Tier A — small, high-value (next up)
-These are cheap and self-contained — the immediate work.
-
-| # | Pri | Effort | Item | Notes |
-|---|-----|--------|------|-------|
-| 6 | P1 | S | **`agg history`** — surface the run-history ledger | `.agg/project.json` already records lifetime sessions/tokens per run; the `Project::lifetime_sessions`/`lifetime_tokens` accessors exist but are unsurfaced. Add a command that prints prior runs + a simple trend. |
-| 7 | P1 | S | **Doctor: check judge *script* files exist / are executable** | `agg doctor` already checks rubric files; a broken script `cmd:` path is the most common post-parse failure and currently goes undiagnosed. (Skip inline-shell cmds; only path-like cmds.) |
-| 9 | P1 | S | **`agg judge <id>` — run one judge, print its raw verdict** | For authoring/debugging a judge without a full `plan` (which runs them all). Prints the verdict JSON + a human line. |
 
 ### Tier B — medium
 | # | Pri | Effort | Item | Notes |
