@@ -62,17 +62,36 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path, goals: &Path) -> Resul
     if let Some(gc) = goals_cfg {
         let n = gc.goals.len();
         // 3a) referenced LLM-judge rubric files exist (resolved against config_base, like the
-        //     loop does) — the most common real failure after a parse error. Script-judge cmds
-        //     are not path-checked here (they may be inline shell, not a file).
+        //     loop does) — a common failure after a parse error. And 3b) script-judge cmds that
+        //     LOOK like a script path (`./judges/x.sh`, not inline shell) point at a file that
+        //     exists and is executable — the single most common real failure after parse.
         for g in &gc.goals {
-            if let JudgeSpec::Llm { rubric, .. } = &g.judge {
-                let rp = config_base.join(rubric);
-                check(
-                    rp.exists(),
-                    &format!("goal `{}`: rubric `{rubric}` exists", g.id),
-                    "create the rubric file (its path is relative to your config dir)",
-                    &mut fail,
-                );
+            match &g.judge {
+                JudgeSpec::Llm { rubric, .. } => {
+                    let rp = config_base.join(rubric);
+                    check(
+                        rp.exists(),
+                        &format!("goal `{}`: rubric `{rubric}` exists", g.id),
+                        "create the rubric file (its path is relative to your config dir)",
+                        &mut fail,
+                    );
+                }
+                JudgeSpec::Script { cmd, .. } => {
+                    // judge scripts run from the PROJECT ROOT (dir), so resolve there.
+                    if let Some(script) = script_cmd_path(cmd) {
+                        let path = dir.join(&script);
+                        if !path.exists() {
+                            check(false, &format!("goal `{}`: judge script `{script}` exists", g.id),
+                                  "the cmd looks like a script path but no such file (relative to the project root)", &mut fail);
+                        } else if !is_executable(&path) {
+                            check(false, &format!("goal `{}`: judge script `{script}` is executable", g.id),
+                                  &format!("chmod +x {script}"), &mut fail);
+                        } else {
+                            check(true, &format!("goal `{}`: judge script `{script}` ok", g.id), "", &mut fail);
+                        }
+                    }
+                    // inline shell / bare commands (echo …, pytest, …) are not path-checkable — skip.
+                }
             }
         }
         // Engine::new validates stop_when + halt_when
@@ -108,5 +127,58 @@ fn check(ok: bool, label: &str, hint: &str, fail: &mut u32) {
         } else {
             eprintln!("  ✗ {label}\n      → {hint}");
         }
+    }
+}
+
+/// If a script-judge `cmd` is a checkable SCRIPT PATH, return it; otherwise None (inline shell
+/// like `echo '...'` / a piped command, or a bare PATH command like `pytest`, can't be
+/// file-checked). We treat the cmd as a path iff it's a SINGLE token (no shell metacharacters)
+/// that either starts with `./`, `../`, `/`, or ends in a known script extension.
+fn script_cmd_path(cmd: &str) -> Option<String> {
+    let t = cmd.trim();
+    // any shell metacharacter ⇒ it's a command line, not a lone path → don't guess.
+    if t.is_empty() || t.split_whitespace().count() != 1
+        || t.contains(['|', '&', ';', '>', '<', '$', '`', '(', ')', '\'', '"', '*'])
+    {
+        return None;
+    }
+    let looks_like_path = t.starts_with("./")
+        || t.starts_with("../")
+        || t.starts_with('/')
+        || [".sh", ".py", ".rb", ".js", ".ts", ".pl", ".bash"].iter().any(|e| t.ends_with(e));
+    looks_like_path.then(|| t.to_string())
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+}
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    // Windows has no x-bit; existence is the best we can check.
+    path.exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::script_cmd_path;
+
+    #[test]
+    fn detects_script_paths() {
+        assert_eq!(script_cmd_path("./judges/x.sh").as_deref(), Some("./judges/x.sh"));
+        assert_eq!(script_cmd_path("/abs/check.py").as_deref(), Some("/abs/check.py"));
+        assert_eq!(script_cmd_path("../tools/run.bash").as_deref(), Some("../tools/run.bash"));
+        assert_eq!(script_cmd_path("judges/x.sh").as_deref(), Some("judges/x.sh")); // ext match
+    }
+
+    #[test]
+    fn skips_inline_shell_and_bare_commands() {
+        assert_eq!(script_cmd_path(r#"echo '{"met":true}'"#), None); // inline shell
+        assert_eq!(script_cmd_path("pytest -q"), None); // multi-token bare command
+        assert_eq!(script_cmd_path("pytest"), None); // bare command, no path markers
+        assert_eq!(script_cmd_path("a && b"), None); // shell metachar
+        assert_eq!(script_cmd_path("cat x | jq ."), None); // pipe
+        assert_eq!(script_cmd_path(""), None);
     }
 }
