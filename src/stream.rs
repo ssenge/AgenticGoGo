@@ -240,6 +240,18 @@ pub fn output_tokens_from_result(line: &str) -> u64 {
     get("output_tokens") + get("cache_creation_input_tokens")
 }
 
+/// Extract the session's dollar cost from a terminal `result` event, if present.
+/// Claude computes the price itself and reports `total_cost_usd` on the result — correctly
+/// per-model (including the `[1m]` variant), cache-aware, no pricing table needed on our side.
+/// We just read it. Returns 0.0 if the line is not a result or carries no cost.
+pub fn cost_usd_from_result(line: &str) -> f64 {
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return 0.0 };
+    if v.get("type").and_then(|t| t.as_str()) != Some("result") {
+        return 0.0;
+    }
+    v.get("total_cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+
 fn clean(s: &str) -> String {
     // collapse newlines/tabs/runs of spaces to single spaces
     let mut out = String::with_capacity(s.len());
@@ -316,6 +328,21 @@ mod tests {
         let ev = format_event(line).unwrap();
         assert!(ev.is_result);
         assert!(ev.display.starts_with("✅ RESULT"));
+    }
+
+    #[test]
+    fn cost_extracted_from_result_only() {
+        // a terminal result with total_cost_usd → that float
+        let result = r#"{"type":"result","subtype":"success","total_cost_usd":0.246815,"result":"done"}"#;
+        assert_eq!(cost_usd_from_result(result), 0.246815);
+        // a non-result line (even with the field) → 0.0
+        let other = r#"{"type":"assistant","total_cost_usd":9.99,"message":{"content":[]}}"#;
+        assert_eq!(cost_usd_from_result(other), 0.0);
+        // a result with no cost field → 0.0 (not a panic)
+        let no_cost = r#"{"type":"result","subtype":"success","result":"done"}"#;
+        assert_eq!(cost_usd_from_result(no_cost), 0.0);
+        // garbage → 0.0
+        assert_eq!(cost_usd_from_result("not json"), 0.0);
     }
 
     #[test]
