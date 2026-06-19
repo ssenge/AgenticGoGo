@@ -27,6 +27,9 @@ pub struct SessionOutcome {
     pub killed_by_watchdog: bool,
     /// output-side tokens this session reported on its result event (for the budget)
     pub output_tokens: u64,
+    /// dollar cost this session reported on its result event (`total_cost_usd`, for the
+    /// `cost.total` ceiling). Claude prices it; we just read the final cumulative value.
+    pub cost_usd: f64,
     /// the worker's `💬` thoughts this session (raw material for the LLM summarizer)
     pub thoughts: Vec<String>,
     /// this session's claude session_id (for optional `--resume` continuity)
@@ -91,6 +94,7 @@ pub fn run_session(
                 rate_limited: false,
                 killed_by_watchdog: false,
                 output_tokens: 0,
+                cost_usd: 0.0,
                 thoughts: vec![],
                 session_id: None,
             };
@@ -103,6 +107,10 @@ pub fn run_session(
     let last_thought = Arc::new(std::sync::Mutex::new(String::from("session start")));
     let rate_limited = Arc::new(AtomicBool::new(false));
     let output_tokens = Arc::new(AtomicU64::new(0));
+    // dollar cost: a result event carries the FINAL cumulative cost for the session, so we
+    // SET it (not accumulate). f64 has no atomic, so a tiny Mutex — matches the project's
+    // `.unwrap_or_else(|e| e.into_inner())` poison-recovery style used elsewhere here.
+    let cost_usd = Arc::new(std::sync::Mutex::new(0.0f64));
     let done = Arc::new(AtomicBool::new(false));
     let killed = Arc::new(AtomicBool::new(false));
     // Ownership-handoff gate that fully closes the watchdog's pid-reuse window. The main thread
@@ -124,6 +132,7 @@ pub fn run_session(
         let last_thought = last_thought.clone();
         let rate_limited = rate_limited.clone();
         let output_tokens = output_tokens.clone();
+        let cost_usd = cost_usd.clone();
         let live = live.clone();
         // throttle disk writes of the live stream so we don't rewrite state.json on
         // every token. The in-memory snapshot still updates on every event; only the
@@ -164,6 +173,12 @@ pub fn run_session(
                 let toks = stream::output_tokens_from_result(&line);
                 if toks > 0 {
                     output_tokens.fetch_add(toks, Ordering::Relaxed);
+                }
+                // record the session's dollar cost (result carries the FINAL cumulative
+                // value, so SET it, don't add). 0.0 on non-result lines → left untouched.
+                let c = stream::cost_usd_from_result(&line);
+                if c > 0.0 {
+                    *cost_usd.lock().unwrap_or_else(|e| e.into_inner()) = c;
                 }
             }
             let _ = reader_tx.send((tracker.thoughts, session_id)); // ok if receiver timed out
@@ -305,6 +320,9 @@ pub fn run_session(
         eprintln!("  reaped {reaped} straggler process(es) from the worker group");
     }
 
+    // copy the cost out of the guard into a plain f64 before building the outcome (the
+    // MutexGuard temporary can't outlive the returned struct).
+    let cost = *cost_usd.lock().unwrap_or_else(|e| e.into_inner());
     SessionOutcome {
         exit_code: status.and_then(|s| s.code()),
         duration_secs: start.elapsed().as_secs(),
@@ -313,6 +331,7 @@ pub fn run_session(
             && status.and_then(|s| s.code()).unwrap_or(0) != 0,
         killed_by_watchdog: killed.load(Ordering::Relaxed),
         output_tokens: output_tokens.load(Ordering::Relaxed),
+        cost_usd: cost,
         thoughts,
         session_id,
     }
