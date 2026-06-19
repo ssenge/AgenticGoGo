@@ -20,6 +20,19 @@ pub fn render(dir: &Path) -> String {
     }
 }
 
+/// Render the current run snapshot as pretty JSON (the full `DashboardState`) for scripting.
+/// Errors with an actionable hint if no snapshot exists yet, so `agg status --json` in a
+/// fresh project fails loud rather than emitting misleading empty JSON.
+pub fn render_json(dir: &Path) -> anyhow::Result<String> {
+    match DashboardState::read(dir) {
+        Some(s) => Ok(serde_json::to_string_pretty(&s)?),
+        None => anyhow::bail!(
+            "no run snapshot yet (.agg/state.json not found) — run `agg run` first \
+             (it publishes state as it goes)."
+        ),
+    }
+}
+
 /// Pure renderer over a snapshot — separated so it's unit-testable without touching disk.
 fn render_state(s: &DashboardState) -> String {
     let mut out = String::new();
@@ -34,6 +47,16 @@ fn render_state(s: &DashboardState) -> String {
         out.push_str(&format!("tokens {} / {} ({:.0}%)\n", s.tokens_spent, total, pct(s.tokens_spent, total)));
     } else {
         out.push_str(&format!("tokens {} (no budget)\n", s.tokens_spent));
+    }
+    // cost line — shown whenever a dollar cap is set or any spend is recorded, so a
+    // token-only run stays uncluttered but a $-capped run always sees its money.
+    match s.cost_limit {
+        Some(limit) => out.push_str(&format!(
+            "cost   ${:.2} / ${:.2} ({:.0}%)\n",
+            s.cost_spent, limit, pctf(s.cost_spent, limit)
+        )),
+        None if s.cost_spent > 0.0 => out.push_str(&format!("cost   ${:.2} (no cap)\n", s.cost_spent)),
+        None => {}
     }
     out.push('\n');
     // per-goal lines
@@ -84,6 +107,10 @@ fn pct(n: u64, d: u64) -> f64 {
     if d == 0 { 0.0 } else { (n as f64 / d as f64) * 100.0 }
 }
 
+fn pctf(n: f64, d: f64) -> f64 {
+    if d == 0.0 { 0.0 } else { (n / d) * 100.0 }
+}
+
 fn fmt_dur(secs: u64) -> String {
     let (h, m) = (secs / 3600, (secs % 3600) / 60);
     if h > 0 { format!("{h}h{m:02}m") } else { format!("{m}m") }
@@ -102,6 +129,8 @@ mod tests {
             phase: "running".into(),
             tokens_spent: 2_100_000,
             budget_total: Some(5_000_000),
+            cost_spent: 1.25,
+            cost_limit: Some(5.0),
             goals_met: 1,
             goals_total: 2,
             goals: vec![
@@ -148,6 +177,7 @@ mod tests {
         assert!(out.contains("session #7 (#11 lifetime)"));
         assert!(out.contains("up 3h12m"));
         assert!(out.contains("tokens 2100000 / 5000000 (42%)"));
+        assert!(out.contains("cost   $1.25 / $5.00 (25%)"));
         assert!(out.contains("✔ tests_pass"));
         assert!(out.contains("◑ coverage"));
         assert!(out.contains("▲+5"));
@@ -161,6 +191,24 @@ mod tests {
         s.budget_total = None;
         let out = render_state(&s);
         assert!(out.contains("tokens 2100000 (no budget)"));
+    }
+
+    #[test]
+    fn cost_line_hidden_when_no_cap_and_no_spend() {
+        let mut s = sample();
+        s.cost_limit = None;
+        s.cost_spent = 0.0;
+        let out = render_state(&s);
+        assert!(!out.contains("cost"), "no cost line when uncapped + nothing spent: {out}");
+    }
+
+    #[test]
+    fn cost_line_shows_spend_even_without_cap() {
+        let mut s = sample();
+        s.cost_limit = None;
+        s.cost_spent = 2.40;
+        let out = render_state(&s);
+        assert!(out.contains("cost   $2.40 (no cap)"), "uncapped spend still shown: {out}");
     }
 
     #[test]

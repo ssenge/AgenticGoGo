@@ -220,6 +220,13 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         Some(t) => format!("{} / {}", human(s.tokens_spent), human(t)),
         None => human(s.tokens_spent),
     };
+    // cost string, shown on the info line only when a cap is set or any spend exists
+    // (so a token-only run keeps the line uncluttered). Mirrors the `agg status` rule.
+    let cost = match s.cost_limit {
+        Some(t) => Some(format!("${:.2} / ${:.2}", s.cost_spent, t)),
+        None if s.cost_spent > 0.0 => Some(format!("${:.2}", s.cost_spent)),
+        None => None,
+    };
     let halt = if s.halt_when.is_empty() { "—".to_string() } else { s.halt_when.clone() };
     let phase = Span::styled(s.phase.clone(), Style::default().fg(phase_color(&s.phase)).bold());
 
@@ -250,12 +257,19 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         Span::raw(fmt_started(s.started_at_epoch)),
     ]);
     let idle_color = if s.idle_secs >= 240 { Color::Red } else { Color::DarkGray };
-    let line2 = Line::from(vec![
+    let mut line2_spans = vec![
         label("model "),
         Span::raw(model.to_string()),
         sep(),
         label("tokens "),
         Span::raw(tokens),
+    ];
+    if let Some(cost) = cost {
+        line2_spans.push(sep());
+        line2_spans.push(label("cost "));
+        line2_spans.push(Span::styled(cost, Style::default().fg(Color::Magenta)));
+    }
+    line2_spans.extend(vec![
         sep(),
         label("idle "),
         Span::styled(format!("{}s", s.idle_secs), Style::default().fg(idle_color)),
@@ -266,6 +280,7 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         label("halt "),
         Span::styled(halt, Style::default().fg(Color::Yellow)),
     ]);
+    let line2 = Line::from(line2_spans);
 
     let p = Paragraph::new(vec![line1, line2]).block(title_block(" Info "));
     f.render_widget(p, area);
@@ -592,6 +607,8 @@ mod tests {
             idle_secs: 12,
             tokens_spent: 2_100_000,
             budget_total: Some(5_000_000),
+            cost_spent: 1.25,
+            cost_limit: Some(5.0),
             goals_met: 1,
             goals_total: 2,
             goals: vec![

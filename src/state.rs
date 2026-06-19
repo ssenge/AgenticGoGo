@@ -79,6 +79,10 @@ pub struct DashboardState {
     pub idle_secs: u64,
     pub tokens_spent: u64,
     pub budget_total: Option<u64>,
+    /// cumulative dollars spent this run (`total_cost_usd` summed); 0.0 when unknown.
+    pub cost_spent: f64,
+    /// the dollar ceiling (`cost.total`), if configured.
+    pub cost_limit: Option<f64>,
     pub goals_met: usize,
     pub goals_total: usize,
     pub goals: Vec<GoalView>,
