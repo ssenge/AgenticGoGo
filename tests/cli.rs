@@ -51,8 +51,9 @@ for a in "$@"; do
   if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
 done
 # a -p run: do the "work" (create the file the judge checks), emit one result event.
+# the result carries total_cost_usd so the dollar-budget plumbing has real data to sum.
 : > did_work
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.05}'
 exit 0
 "#,
     );
@@ -279,4 +280,92 @@ fn judge_runs_one_goal_and_prints_raw_verdict() {
     assert!(!out.status.success(), "unknown goal id must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("no goal `nope`") && err.contains("ok"), "should list available ids, got: {err}");
+}
+
+#[test]
+fn dollar_budget_halts_the_loop() {
+    // End-to-end proof of #2: the worker reports total_cost_usd=0.05 per session; with a
+    // cost cap of 0 and `halt_when: over_cost`, the FIRST session blows the cap and the loop
+    // halts (the goal never gets a chance to be met). This exercises the whole chain:
+    // stub result → cost_usd_from_result → SessionOutcome → loop accumulation → over_cost.
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+
+    // a goal that can never be met (judge always reports not-met), so ONLY the cost guard
+    // can end the loop — if cost weren't wired, the loop would run to max_sessions instead.
+    write(dir, "judges/never.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    chmod_x(&dir.join("judges/never.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: impossible\n    type: binary\n    judge: { kind: script, cmd: \"./judges/never.sh\" }\nstop_when: impossible\nhalt_when: over_cost\n",
+    );
+    // cost.total: 0 → any spend (the stub's $0.05) is over budget.
+    write(
+        dir,
+        "agg.yaml",
+        "project: itest\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\ncost: { total: 0 }\n",
+    );
+    write(dir, "AGG_RESUME.md", "spend money\n");
+
+    // generous session cap so the HALT (not the cap) is what stops us.
+    let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "agg run failed:\n{combined}");
+    assert!(
+        combined.contains("HALT") && combined.contains("over_cost"),
+        "over_cost should halt the loop after the first spend, got:\n{combined}"
+    );
+    // it must NOT have run to the session cap — the dollar guard stops it early.
+    assert!(
+        !combined.contains("reached max_sessions"),
+        "the cost guard, not max_sessions, should end the run:\n{combined}"
+    );
+}
+
+#[test]
+fn status_and_history_json_are_machine_readable() {
+    // #10: `--json` on status + history emits parseable JSON of the existing serde types.
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    write(
+        dir,
+        "judges/check.sh",
+        "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n",
+    );
+    chmod_x(&dir.join("judges/check.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: jsonproj\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\ncost: { total: 5.0 }\n",
+    );
+    write(dir, "AGG_RESUME.md", "create the file did_work\n");
+
+    // run once so both the snapshot (state.json) and the ledger (project.json) exist.
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // status --json: valid JSON, carries the project + the cost fields we added.
+    let snap = agg(dir, &path).args(["status", "--json"]).output().unwrap();
+    assert!(snap.status.success(), "status --json failed: {}", String::from_utf8_lossy(&snap.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&snap.stdout).expect("status --json must be valid JSON");
+    assert_eq!(v["project"], "jsonproj");
+    assert_eq!(v["cost_limit"], 5.0, "cost_limit should round-trip into the snapshot JSON");
+    assert!(v["cost_spent"].as_f64().unwrap() > 0.0, "cost_spent should reflect the stub's spend");
+
+    // history --json: valid JSON with a runs array containing at least our run.
+    let hist = agg(dir, &path).args(["history", "--json"]).output().unwrap();
+    assert!(hist.status.success(), "history --json failed: {}", String::from_utf8_lossy(&hist.stderr));
+    let h: serde_json::Value = serde_json::from_slice(&hist.stdout).expect("history --json must be valid JSON");
+    assert_eq!(h["name"], "jsonproj");
+    assert!(h["runs"].as_array().map(|a| !a.is_empty()).unwrap_or(false), "history should have at least one run");
 }
