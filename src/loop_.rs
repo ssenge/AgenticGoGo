@@ -134,13 +134,21 @@ pub fn run(
         cfg.project, cfg.model, eng.stop_when
     );
 
-    // run-level accounting for budget/wall-time guards. `budget_total` is mutable:
-    // the bus `set-budget` command can change it mid-run.
+    // run-level accounting for the ceiling guards. `budget_total`/`cost_limit` are mutable so
+    // a future bus command could steer them mid-run (budget already has `set-budget`). The
+    // iteration cap is `max_sessions` (0 = unlimited → None so `over_iterations` never trips).
     let mut tokens_spent: u64 = 0;
+    let mut cost_spent: f64 = 0.0;
     let mut budget_total = cfg.budget.total;
-    let run_state = |toks: u64, budget: Option<u64>| RunState {
+    let cost_limit = cfg.cost.total;
+    let max_iter = if max_sessions == 0 { None } else { Some(max_sessions) };
+    let run_state = |toks: u64, budget: Option<u64>, cost: f64, sessions: u32| RunState {
         tokens_spent: toks,
         budget_total: budget,
+        cost_spent: cost,
+        cost_limit,
+        sessions_done: sessions,
+        max_sessions: max_iter,
         wall_hours: loop_start.elapsed().as_secs_f64() / 3600.0,
     };
 
@@ -159,6 +167,7 @@ pub fn run(
         stop_when: eng.stop_when.clone(),
         halt_when: eng.halt_when.clone().unwrap_or_default(),
         budget_total: cfg.budget.total,
+        cost_limit: cfg.cost.total,
         phase: "starting".into(),
         ..Default::default()
     };
@@ -167,6 +176,7 @@ pub fn run(
         () => {{
             dash.up_secs = loop_start.elapsed().as_secs();
             dash.tokens_spent = tokens_spent;
+            dash.cost_spent = cost_spent;
             let (m, t) = eng.tally();
             dash.goals_met = m;
             dash.goals_total = t;
@@ -180,6 +190,8 @@ pub fn run(
                 s.halt_when = dash.halt_when.clone();
                 s.tokens_spent = dash.tokens_spent;
                 s.budget_total = dash.budget_total;
+                s.cost_spent = dash.cost_spent;
+                s.cost_limit = dash.cost_limit;
                 s.session = dash.session;
                 s.phase = dash.phase.clone();
                 s.goals_met = dash.goals_met;
@@ -215,7 +227,7 @@ pub fn run(
     eprintln!("  baseline: running judges once before the first session…");
     dash.phase = "judging".into();
     publish!();
-    let pre = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total));
+    let pre = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total, cost_spent, session));
     eprint!("{}", indent(&eng.scoreboard()));
     publish!();
     if pre.halt {
@@ -408,16 +420,19 @@ pub fn run(
         let outcome = worker::run_session(&cfg, &effective_prompt, dir, session, resume_id, &live);
         last_session_id = outcome.session_id.clone();
         tokens_spent += outcome.output_tokens;
+        cost_spent += outcome.cost_usd;
         // (run_session now reaps any straggler in the worker's process group on exit, and the
         // worker's reader thread already streamed `now`/`think`/`recent` live — nothing to do here.)
         eprintln!(
-            "  session #{session} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total)",
+            "  session #{session} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
             outcome.exit_code,
             outcome.duration_secs,
             if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
             if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
             outcome.output_tokens,
             tokens_spent,
+            outcome.cost_usd,
+            cost_spent,
         );
 
         // ── isolation: resolve the session branch (DEFAULT MERGE, unless the worker vetoed) ──
@@ -444,7 +459,7 @@ pub fn run(
         eprintln!("  running judges…");
         dash.phase = "judging".into();
         publish!();
-        let res = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total));
+        let res = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total, cost_spent, session));
         eprint!("{}", indent(&eng.scoreboard()));
         publish!();
 
