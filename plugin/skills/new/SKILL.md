@@ -89,15 +89,18 @@ Two kinds:
 
 `stop_when` is a whitelisted expression over goals (NOT arbitrary code). Available terms:
 goal ids (→ their met bool), `all_goals`, `count_met`, `total`, `met_fraction`,
-`weighted_fraction`, `any_regressed(invariants)`, and run guards `over_budget`,
-`tokens_spent`, `wall_hours`.
+`weighted_fraction`, `any_regressed(invariants)`, `wall_hours`, and three **ceiling guards**:
+- `over_budget` — output **tokens** exceed `budget.total` (agg.yaml)
+- `over_cost` — **dollars** exceed `cost.total` (agg.yaml; Claude reports the price, agg sums it)
+- `over_iterations` — **sessions** reach the `--max-sessions` cap
 
 - Default: `stop_when: "all_goals"`
 - Statistical: `stop_when: "met_fraction >= 0.75"` or `"count_met >= 3"`
 - Boolean: `stop_when: "goal_a OR goal_b"`
 
-Add a **`halt_when`** guard if there are invariants or you want a budget brake:
-`halt_when: "any_regressed(invariants) OR over_budget OR wall_hours >= 8"`
+Add a **`halt_when`** guard if there are invariants or you want a ceiling brake. The ceilings
+OR together — the loop halts the moment ANY one trips:
+`halt_when: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 8"`
 
 ## Step 4.5 — Detect the user's tools and offer to wire them in (NO hardcoded tool list)
 
@@ -183,7 +186,8 @@ resume_prompt: "AGG_RESUME.md"
 heartbeat_secs: 30
 watchdog: { idle_secs: 900, cpu_grace: 180 }
 ratelimit_backoff_secs: 1800
-budget: { total: <tokens or null> }
+budget: { total: <tokens or null> }   # token ceiling  → over_budget
+cost:   { total: <dollars or null> }  # dollar ceiling → over_cost
 summary: { enabled: true, model: haiku, min_interval_secs: 300 }
 # hooks + prompt_includes: ONLY if Step 4.5 wired tools the user confirmed. Omit otherwise.
 # hooks:

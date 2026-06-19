@@ -34,6 +34,17 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 - **Doctor checks script-judge files** exist + are executable (with an exact `chmod +x` hint)
 - **`agg judge <id>`** — run one judge, print its raw verdict (raw JSON to stdout, human line to stderr)
 
+### Unreleased — Tier B #2 dollar budget + #10 `--json`
+- **#2 Dollar-denominated budget** (`cost.total: $N` → `over_cost`). **No pricing table** — the
+  original plan assumed one, but `claude -p` already emits `total_cost_usd` on each session's
+  result event (correct per-model, `[1m]`-variant- and cache-aware), so agg just sums that float.
+  Mirrors the token plumbing exactly (`cost_spent`/`cost_limit`/`over_cost` alongside
+  `tokens_spent`/`budget_total`/`over_budget`). Also exposed **`over_iterations`** (sessions cap,
+  backed by `--max-sessions`) so all three ceilings — tokens, dollars, sessions — read uniformly
+  as `over_*` and OR together in `halt_when`.
+- **#10 Structured output (`--json`)** — `agg status --json` (full `DashboardState` snapshot) and
+  `agg history --json` (full `Project` ledger), reusing the existing serde types.
+
 ---
 
 ## ⬜ Open
@@ -41,9 +52,7 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 ### Tier B — medium
 | # | Pri | Effort | Item | Notes |
 |---|-----|--------|------|-------|
-| 2 | P1 | M | **Dollar-denominated budget** (`cost.total: $N`) | `agg`'s budget is output-tokens today. Add a `$` ceiling with a per-model pricing table, atop the existing `tokens_spent` plumbing + the `over_budget` stop term. *(vercel-labs has this; we don't.)* |
 | 3 | P2 | M | **Self-updating institutional memory** | A built-in convention/file the loop manages so a worker persists "gotchas" across fresh sessions (vs. leaving it entirely to `AGG_RESUME.md` discipline). *(snarktank ships `AGENTS.md`/`progress.txt`.)* |
-| 10 | P2 | M | **Structured run output (`--json`)** | Machine-readable status/result for scripting + a future web dashboard. |
 | 5 | P3 | M | **In-iteration context summarization** | *Deferred, not rejected.* Auto-summarize a long session as context fills, feeding the digest into the worker (vs. our current human-facing dashboard summaries). Less critical given fresh-context-per-session, but wanted eventually. *(vercel-labs' `RalphContextManager`.)* |
 
 ### Tier C — large (need their own scoping conversation)

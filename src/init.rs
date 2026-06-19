@@ -116,11 +116,14 @@ goals:
 
 # Stop the loop when this expression is true (a safe mini-language, NOT eval).
 # Terms: goal ids, all_goals, count_met, met_fraction, any_regressed(invariants),
-#        over_budget, tokens_spent, wall_hours.
+#        and three ceiling guards — over_budget (tokens), over_cost ($), over_iterations
+#        (sessions) — plus wall_hours. Set the ceilings in agg.yaml (budget/cost) and via
+#        --max-sessions; each `over_*` trips when its ceiling is exceeded.
 stop_when: "tests_pass"
 
-# Optional emergency brake — stop immediately if an invariant breaks or budget/time blows.
-halt_when: "any_regressed(invariants) OR wall_hours >= 4"
+# Optional emergency brake — stop immediately if an invariant breaks, OR any ceiling blows.
+# (Money, tokens, sessions, and time are all OR-ed: hit ANY one and the loop halts.)
+halt_when: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 4"
 "#;
 
 const AGG_YAML: &str = r#"# agg.yaml — harness configuration.
@@ -132,7 +135,8 @@ heartbeat_secs: 30                # a status line at least this often
 watchdog: { idle_secs: 900, cpu_grace: 180 }   # kill a worker silent AND cpu-flat this long
 ratelimit_backoff_secs: 1800      # back off this long on a real usage limit
 
-budget: { total: null }           # output-token ceiling (null = unlimited)
+budget: { total: null }           # output-token ceiling (null = unlimited) → over_budget
+cost:   { total: null }           # dollar ceiling, e.g. 5.0 (null = unlimited) → over_cost
 summary: { enabled: true, model: haiku, min_interval_secs: 300 }  # progress summaries
 resume_sessions: false            # fresh context per session (recommended)
 

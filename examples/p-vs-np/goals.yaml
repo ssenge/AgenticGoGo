@@ -27,4 +27,4 @@ goals:
     judge: { kind: script, cmd: "./judges/no_sorry.sh" }
 
 stop_when: "proof_verified AND paper_written"   # the prize (don't hold your breath)
-halt_when: "not no_sorry"                        # stop instantly if it smuggles in a gap
+halt_when: "not no_sorry OR over_cost"           # bail if it smuggles in a gap OR burns past $100

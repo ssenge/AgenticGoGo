@@ -106,7 +106,10 @@ the **filesystem** (your code, git, the resume prompt), not a growing conversati
   prescribed answer for subjective criteria). Both emit the same tiny JSON contract.
 - **Stop conditions** are a safe little expression language — `all_goals`,
   `met_fraction >= 0.75`, `count_met >= 3`, `goal_a OR goal_b`,
-  `any_regressed(invariants) OR over_budget` — *not* `eval`.
+  `any_regressed(invariants) OR over_budget` — *not* `eval`. Three ceiling guards stop a
+  runaway: **`over_budget`** (tokens), **`over_cost`** (dollars — Claude reports the price,
+  agg just sums it), **`over_iterations`** (sessions). OR them together and the loop halts the
+  moment any one trips.
 - **Summaries** — one cheap call per cycle turns the worker's raw thoughts + the goal deltas
   into a *cumulative* “story so far” and a *windowed* “last cycle” line.
 - **Watchdog** — kills a worker that's gone silent **and** CPU-flat (born from a real multi-hour worker
@@ -278,7 +281,8 @@ halt_when: "wall_hours >= 0.5"
 project: calc
 model: "claude-opus-4-8[1m]"
 resume_prompt: "AGG_RESUME.md"
-budget: { total: 2000000 }
+budget: { total: 2000000 }       # token ceiling  → over_budget
+cost:   { total: 5.0 }           # dollar ceiling → over_cost  (Claude prices it; agg sums it)
 summary: { enabled: true, model: haiku, min_interval_secs: 1 }
 ```
 
@@ -503,7 +507,7 @@ Quick orientation:
 |---|---|---|
 | [snarktank/ralph](https://github.com/snarktank/ralph) | The popular, simple PRD-driven loop | `agg` adds the safety/observability rails it lacks (watchdog, budgets, LLM judge, invariants, steering) |
 | [`ralph-wiggum`](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum) (Anthropic) | One-command in-session "keep going" | `agg` runs **fresh** sessions instead of one that compacts/degrades |
-| [vercel-labs/ralph-loop-agent](https://github.com/vercel-labs/ralph-loop-agent) | AI-SDK lib with a `$` cost cap | `agg` is a real harness (watchdog, dashboard, git isolation); vercel has a literal dollar ceiling `agg` doesn't |
+| [vercel-labs/ralph-loop-agent](https://github.com/vercel-labs/ralph-loop-agent) | AI-SDK lib with a `$` cost cap | `agg` is a real harness (watchdog, dashboard, git isolation) and now has the dollar ceiling too (`cost.total` → `over_cost`) |
 | [Gas Town](https://github.com/steveyegge/gastown) (Yegge) | **Parallel** 20–30-agent fleets | A different class — `agg` is the lighter, cheaper, single-operator sequential loop |
 
 The full feature-by-feature matrix, honest gaps, and sources are in **[COMPARISON.md](COMPARISON.md)**.
