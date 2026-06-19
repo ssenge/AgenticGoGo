@@ -47,7 +47,11 @@ enum Cmd {
     Plan,
     /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
     /// re-run judges; reads .agg/state.json, same as the /agg:status skill).
-    Status,
+    Status {
+        /// emit the raw snapshot as JSON (the full DashboardState) for scripting/piping.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the loop until the stop condition is met (or halt fires).
     Run {
         /// stop after this many sessions regardless (0 = unlimited)
@@ -64,7 +68,11 @@ enum Cmd {
         id: String,
     },
     /// Show this project's run history (every `agg run`, newest first) + lifetime totals.
-    History,
+    History {
+        /// emit the raw history ledger as JSON (the full Project record) for scripting/piping.
+        #[arg(long)]
+        json: bool,
+    },
     /// Live TUI dashboard — tails the running loop's state. Quit with q.
     Dashboard {
         /// print a one-shot text snapshot to stdout and exit (for headless/CI/SSH — no TUI).
@@ -186,12 +194,21 @@ fn main() -> Result<()> {
             Ok(())
         }
         // Cheap read of the published snapshot — never re-runs judges (that's `plan`).
-        Cmd::Status => {
-            print!("{}", status::render(&p.dir));
+        Cmd::Status { json } => {
+            if *json {
+                println!("{}", status::render_json(&p.dir)?);
+            } else {
+                print!("{}", status::render(&p.dir));
+            }
             Ok(())
         }
-        Cmd::History => {
-            print!("{}", project::Project::load(&p.dir).render_history());
+        Cmd::History { json } => {
+            let proj = project::Project::load(&p.dir);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&proj)?);
+            } else {
+                print!("{}", proj.render_history());
+            }
             Ok(())
         }
         Cmd::Judge { id } => {
