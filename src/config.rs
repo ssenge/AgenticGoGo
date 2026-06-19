@@ -33,6 +33,8 @@ pub struct AggConfig {
     #[serde(default)]
     pub budget: Budget,
     #[serde(default)]
+    pub cost: Cost,
+    #[serde(default)]
     pub summary: Summary,
     /// Continue each session from the previous one's context (`--resume`) instead of
     /// a fresh context. DEFAULT false: fresh-context-per-session is the core discipline
@@ -165,6 +167,17 @@ pub struct Budget {
     pub total: Option<u64>,
 }
 
+/// Dollar-spend ceiling (`cost.total`). Distinct from [`Budget`] (tokens): this is the
+/// real money cap. We don't price anything ourselves — Claude reports `total_cost_usd`
+/// on each session's result event (correctly per-model, `[1m]`-variant- and cache-aware)
+/// and we just sum it. The `over_cost` stop term trips once the sum exceeds `total`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Cost {
+    /// total dollar ceiling; `None` = unlimited
+    #[serde(default)]
+    pub total: Option<f64>,
+}
+
 /// Goals file (`goals.yaml`): the goal list + stop/halt conditions.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GoalsConfig {
@@ -242,6 +255,10 @@ impl AggConfig {
         if let Some(v) = env_u64("AGG_RATELIMIT_BACKOFF") {
             self.ratelimit_backoff_secs = v;
         }
+        // CI safety knob: clamp the dollar ceiling without editing agg.yaml.
+        if let Some(v) = env_f64("AGG_COST_TOTAL") {
+            self.cost.total = Some(v);
+        }
     }
 }
 
@@ -257,5 +274,9 @@ impl GoalsConfig {
 }
 
 fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok()?.parse().ok()
+}
+
+fn env_f64(key: &str) -> Option<f64> {
     std::env::var(key).ok()?.parse().ok()
 }
