@@ -28,6 +28,14 @@ pub struct StopContext<'a> {
     pub tokens_spent: u64,
     /// budget ceiling, if configured (`budget.total`)
     pub budget_total: Option<u64>,
+    /// cumulative dollars spent this run (backs `over_cost`)
+    pub cost_spent: f64,
+    /// dollar ceiling, if configured (`cost.total`)
+    pub cost_limit: Option<f64>,
+    /// sessions completed so far this run (backs `over_iterations`)
+    pub sessions_done: u32,
+    /// the `max_sessions` cap, if any (backs `over_iterations`)
+    pub max_sessions: Option<u32>,
     /// wall-clock hours since the loop started
     pub wall_hours: f64,
 }
@@ -35,7 +43,16 @@ pub struct StopContext<'a> {
 impl<'a> StopContext<'a> {
     /// Convenience for callers that only have goals (plan/validate paths).
     pub fn from_goals(goals: &'a [Goal]) -> Self {
-        StopContext { goals, tokens_spent: 0, budget_total: None, wall_hours: 0.0 }
+        StopContext {
+            goals,
+            tokens_spent: 0,
+            budget_total: None,
+            cost_spent: 0.0,
+            cost_limit: None,
+            sessions_done: 0,
+            max_sessions: None,
+            wall_hours: 0.0,
+        }
     }
 }
 
@@ -311,13 +328,33 @@ impl<'a> Parser<'a> {
             }
             "weighted_fraction" => Val::Num(c.weighted_fraction()),
             "any_regressed" => Val::Bool(c.count_regressed(invariants_only) > 0.0),
-            // run-level guards (budget #5)
+            // ── run-level ceiling guards ──────────────────────────────────────────────
+            // Each ceiling has ONE user-facing predicate: over_budget (tokens),
+            // over_cost (dollars), over_iterations (sessions). Same `over_<noun>` shape;
+            // that trio is all a user needs to memorize. The raw counters below back them
+            // and stay available for custom comparisons (e.g. `cost_spent > 3.5`).
             "tokens_spent" => Val::Num(c.tokens_spent as f64),
             "budget_total" => Val::Num(c.budget_total.map(|t| t as f64).unwrap_or(f64::INFINITY)),
             "wall_hours" => Val::Num(c.wall_hours),
             "over_budget" => Val::Bool(match c.budget_total {
                 Some(t) => c.tokens_spent > t,
                 None => false, // no budget set => never over
+            }),
+            // dollar-cost ceiling (#2). Claude prices each session; we sum total_cost_usd.
+            "cost_spent" => Val::Num(c.cost_spent),
+            "cost_limit" => Val::Num(c.cost_limit.unwrap_or(f64::INFINITY)),
+            "over_cost" => Val::Bool(match c.cost_limit {
+                Some(t) => c.cost_spent > t,
+                None => false, // no cost cap set => never over
+            }),
+            // iteration ceiling: trips once sessions reach the max_sessions cap. `>=`
+            // (not `>`) mirrors the loop's own `session >= max_sessions` stop check, so
+            // `halt_when: ... OR over_iterations` and the hard cap fire on the same session.
+            "iterations" => Val::Num(c.sessions_done as f64),
+            "max_iterations" => Val::Num(c.max_sessions.map(|t| t as f64).unwrap_or(f64::INFINITY)),
+            "over_iterations" => Val::Bool(match c.max_sessions {
+                Some(t) => t > 0 && c.sessions_done >= t,
+                None => false, // no cap (0/unset) => never over
             }),
             // otherwise: a goal id -> its met bool
             other => match c.goal_met(other) {
@@ -376,18 +413,23 @@ mod tests {
     }
 
     fn ev_run(expr: &str, goals: &[Goal], tokens: u64, budget: Option<u64>, hours: f64) -> bool {
-        let ctx = StopContext { goals, tokens_spent: tokens, budget_total: budget, wall_hours: hours };
+        let ctx = StopContext {
+            tokens_spent: tokens,
+            budget_total: budget,
+            wall_hours: hours,
+            ..StopContext::from_goals(goals)
+        };
         evaluate(expr, &ctx).unwrap()
     }
 
     #[test]
     fn nan_comparison_is_an_error_not_a_silent_invert() {
         // wall_hours = NaN: `wall_hours >= 8` must ERROR, not silently return false/true.
-        let ctx = StopContext { goals: &[], tokens_spent: 0, budget_total: None, wall_hours: f64::NAN };
+        let ctx = StopContext { wall_hours: f64::NAN, ..StopContext::from_goals(&[]) };
         assert!(evaluate("wall_hours >= 8", &ctx).is_err());
         assert!(evaluate("wall_hours != 0", &ctx).is_err()); // the dangerous `!=` case
         // infinity is well-defined for ordering and must NOT error
-        let ctx2 = StopContext { goals: &[], tokens_spent: 5, budget_total: None, wall_hours: 0.0 };
+        let ctx2 = StopContext { tokens_spent: 5, ..StopContext::from_goals(&[]) };
         assert!(!ev_run_ctx(&ctx2, "tokens_spent > budget_total")); // budget_total = inf when unset
     }
 
@@ -408,6 +450,70 @@ mod tests {
         assert!(ev_run("wall_hours >= 8", &goals, 0, None, 8.5));
         // compound halt guard: goals not met but budget blown
         assert!(ev_run("all_goals OR over_budget", &goals, 600, Some(500), 0.0));
+    }
+
+    #[test]
+    fn over_cost_guard() {
+        let goals = [g("a", false, false)];
+        let cost = |spent: f64, limit: Option<f64>| StopContext {
+            cost_spent: spent,
+            cost_limit: limit,
+            ..StopContext::from_goals(&goals)
+        };
+        // under the dollar cap → not over
+        assert!(!evaluate("over_cost", &cost(3.50, Some(5.0))).unwrap());
+        // past the cap → over
+        assert!(evaluate("over_cost", &cost(5.01, Some(5.0))).unwrap());
+        // no cap set → never over (even at a huge spend)
+        assert!(!evaluate("over_cost", &cost(1000.0, None)).unwrap());
+        // raw counter is usable in a custom comparison
+        assert!(evaluate("cost_spent > 4.99", &cost(5.0, None)).unwrap());
+        // compound halt guard: goals not met but money blown
+        assert!(evaluate("all_goals OR over_cost", &cost(9.0, Some(5.0))).unwrap());
+    }
+
+    #[test]
+    fn over_iterations_guard() {
+        let goals = [g("a", false, false)];
+        let iter = |done: u32, max: Option<u32>| StopContext {
+            sessions_done: done,
+            max_sessions: max,
+            ..StopContext::from_goals(&goals)
+        };
+        // below the cap → not over
+        assert!(!evaluate("over_iterations", &iter(3, Some(5))).unwrap());
+        // AT the cap → over (>=, matches the loop's own session>=max check)
+        assert!(evaluate("over_iterations", &iter(5, Some(5))).unwrap());
+        assert!(evaluate("over_iterations", &iter(6, Some(5))).unwrap());
+        // no cap (None) → never over
+        assert!(!evaluate("over_iterations", &iter(9999, None)).unwrap());
+        // a 0 cap means "unlimited" (matches max_sessions==0 convention) → never over
+        assert!(!evaluate("over_iterations", &iter(10, Some(0))).unwrap());
+        // raw counter usable directly
+        assert!(evaluate("iterations >= 5", &iter(5, None)).unwrap());
+    }
+
+    #[test]
+    fn all_three_ceilings_compose_in_one_halt() {
+        // the canonical user expression: stop on success OR any ceiling.
+        let goals = [g("a", false, false)];
+        let expr = "all_goals OR over_budget OR over_cost OR over_iterations";
+        // a fresh "nothing tripped" context; callers override the one field they're testing.
+        let base = |cost_spent: f64, sessions_done: u32| StopContext {
+            tokens_spent: 10,
+            budget_total: Some(1000),
+            cost_spent,
+            cost_limit: Some(5.0),
+            sessions_done,
+            max_sessions: Some(20),
+            ..StopContext::from_goals(&goals)
+        };
+        // nothing tripped yet → keep going
+        assert!(!evaluate(expr, &base(1.0, 1)).unwrap());
+        // only the dollar cap blown → halt
+        assert!(evaluate(expr, &base(6.0, 1)).unwrap());
+        // only the iteration cap reached → halt
+        assert!(evaluate(expr, &base(1.0, 20)).unwrap());
     }
 
     #[test]

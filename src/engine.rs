@@ -138,11 +138,21 @@ impl GoalDelta {
     }
 }
 
-/// Run-level facts the stop/halt expressions can reference (budget #5).
+/// Run-level facts the stop/halt expressions can reference (budget #5, dollar-cost #2,
+/// iteration cap). Each ceiling exposes one `over_*` predicate to the user (over_budget /
+/// over_cost / over_iterations); the raw counters back those predicates.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunState {
     pub tokens_spent: u64,
     pub budget_total: Option<u64>,
+    /// cumulative dollars spent this run (`total_cost_usd` summed across sessions)
+    pub cost_spent: f64,
+    /// dollar ceiling, if configured (`cost.total`) — backs `over_cost`
+    pub cost_limit: Option<f64>,
+    /// sessions completed so far this run — backs `over_iterations`
+    pub sessions_done: u32,
+    /// the `max_sessions` cap, if any (0/None = unlimited) — backs `over_iterations`
+    pub max_sessions: Option<u32>,
     pub wall_hours: f64,
 }
 
@@ -212,6 +222,10 @@ impl Engine {
             goals: &self.goals,
             tokens_spent: run.tokens_spent,
             budget_total: run.budget_total,
+            cost_spent: run.cost_spent,
+            cost_limit: run.cost_limit,
+            sessions_done: run.sessions_done,
+            max_sessions: run.max_sessions,
             wall_hours: run.wall_hours,
         };
         // A malformed expression is rejected at config load (Engine::new validates), so an
