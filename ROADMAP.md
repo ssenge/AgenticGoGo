@@ -34,7 +34,8 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 - **Doctor checks script-judge files** exist + are executable (with an exact `chmod +x` hint)
 - **`agg judge <id>`** — run one judge, print its raw verdict (raw JSON to stdout, human line to stderr)
 
-### Unreleased — Tier B #2 dollar budget + #3 institutional memory + #10 `--json`
+### v0.0.10 — dollar budget + institutional memory + `--json` + rollback gate
+*(#2 dollar budget + `over_iterations`, #3 institutional memory, #10 `--json`, #11 Phase 1 rollback gate)*
 - **#3 Institutional memory** — built-in, agg-managed cross-session learning, on by default with
   zero setup. A durable, committable **`AGG_MEMORY.md`** at the project root holds rolled-up
   learnings. **Enforced, never trusting the worker:** agg writes memory itself after *every*
