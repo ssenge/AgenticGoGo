@@ -269,6 +269,11 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         line2_spans.push(label("cost "));
         line2_spans.push(Span::styled(cost, Style::default().fg(Color::Magenta)));
     }
+    if s.memory_bytes > 0 {
+        line2_spans.push(sep());
+        line2_spans.push(label("memory "));
+        line2_spans.push(Span::styled(human_bytes(s.memory_bytes), Style::default().fg(Color::Cyan)));
+    }
     line2_spans.extend(vec![
         sep(),
         label("idle "),
@@ -540,6 +545,15 @@ fn human(n: u64) -> String {
     }
 }
 
+/// Compact byte size for the memory indicator, e.g. "1.2 KB" / "640 B".
+fn human_bytes(n: usize) -> String {
+    if n >= 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
 /// Compact a weight like 1.0 → "1", 1.5 → "1.5".
 fn fmt_num(n: f64) -> String {
     if (n - n.round()).abs() < 1e-9 {
@@ -609,6 +623,7 @@ mod tests {
             budget_total: Some(5_000_000),
             cost_spent: 1.25,
             cost_limit: Some(5.0),
+            memory_bytes: 2048,
             goals_met: 1,
             goals_total: 2,
             goals: vec![

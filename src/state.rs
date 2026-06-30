@@ -93,6 +93,11 @@ pub struct DashboardState {
     pub recent: Vec<ActivityEvent>,
     pub summary_cumulative: String,
     pub summary_windowed: String,
+    /// size (bytes) of the durable `AGG_MEMORY.md` after the last fold — surfaces "how much
+    /// institutional memory has accumulated" (and how close to the cap) on the dashboard/status.
+    /// 0 when memory is empty or a write failed. Named `_bytes` (not `_chars`) because it is a
+    /// byte length, displayed as B/KB.
+    pub memory_bytes: usize,
     /// monotonically increasing; lets the dashboard detect updates
     pub seq: u64,
     /// terminal flag — dashboard shows the final banner and can exit

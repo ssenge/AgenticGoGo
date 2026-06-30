@@ -58,6 +58,10 @@ fn render_state(s: &DashboardState) -> String {
         None if s.cost_spent > 0.0 => out.push_str(&format!("cost   ${:.2} (no cap)\n", s.cost_spent)),
         None => {}
     }
+    // memory line — shown only once the durable file has content, so a fresh run stays clean.
+    if s.memory_bytes > 0 {
+        out.push_str(&format!("memory {} (AGG_MEMORY.md)\n", human_bytes(s.memory_bytes)));
+    }
     out.push('\n');
     // per-goal lines
     if s.goals.is_empty() {
@@ -111,6 +115,15 @@ fn pctf(n: f64, d: f64) -> f64 {
     if d == 0.0 { 0.0 } else { (n / d) * 100.0 }
 }
 
+/// Compact byte size, e.g. "1.2 KB" / "640 B". Used for the memory line.
+fn human_bytes(n: usize) -> String {
+    if n >= 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
 fn fmt_dur(secs: u64) -> String {
     let (h, m) = (secs / 3600, (secs % 3600) / 60);
     if h > 0 { format!("{h}h{m:02}m") } else { format!("{m}m") }
@@ -131,6 +144,7 @@ mod tests {
             budget_total: Some(5_000_000),
             cost_spent: 1.25,
             cost_limit: Some(5.0),
+            memory_bytes: 2048,
             goals_met: 1,
             goals_total: 2,
             goals: vec![
@@ -178,6 +192,7 @@ mod tests {
         assert!(out.contains("up 3h12m"));
         assert!(out.contains("tokens 2100000 / 5000000 (42%)"));
         assert!(out.contains("cost   $1.25 / $5.00 (25%)"));
+        assert!(out.contains("memory 2.0 KB"));
         assert!(out.contains("✔ tests_pass"));
         assert!(out.contains("◑ coverage"));
         assert!(out.contains("▲+5"));
