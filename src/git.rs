@@ -87,6 +87,49 @@ pub fn merge_no_ff(dir: &Path, branch: &str, message: &str) -> bool {
     true
 }
 
+/// Outcome of staging a merge (the first half of the rollback gate). `Staged` means the merge
+/// applied cleanly but is NOT yet committed — the caller must re-test the working tree and then
+/// call `commit_merge` (keep) or `abort_merge` (roll back). `Conflict` means the merge couldn't
+/// apply and was already aborted (nothing staged).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedMerge {
+    Staged,
+    Conflict,
+}
+
+/// Stage `branch` into the current branch WITHOUT committing (`merge --no-ff --no-commit`), so the
+/// caller can re-test the merged working tree before deciding to keep or roll back. On a conflict
+/// the merge is aborted and `Conflict` is returned (base untouched, no half-merge left behind).
+/// `--no-ff` so a clean merge still stages a merge commit (consistent with `merge_no_ff`); even a
+/// fast-forwardable merge leaves the index/worktree at the merged state for the re-test.
+pub fn stage_merge(dir: &Path, branch: &str) -> StagedMerge {
+    let (ok, _, err) = git(dir, &["merge", "--no-ff", "--no-commit", branch]);
+    if !ok {
+        eprintln!("  [git] merge of {branch} hit a conflict/error ({err}); aborting merge");
+        let _ = git(dir, &["merge", "--abort"]);
+        return StagedMerge::Conflict;
+    }
+    StagedMerge::Staged
+}
+
+/// Commit a previously-`stage_merge`d merge (the keep path of the rollback gate). Returns true on
+/// success. NOTE: a `--no-commit` merge that fast-forwards or is empty leaves nothing staged; we
+/// pass `--no-ff`/`--allow-empty` so the merge commit is always created for a uniform history.
+pub fn commit_merge(dir: &Path, message: &str) -> bool {
+    git(dir, &["commit", "--no-edit", "-m", message]).0
+}
+
+/// Abort/roll back a staged (uncommitted) merge — the rollback path of the gate, used when the
+/// post-merge re-test regresses. Restores the working tree + index to the pre-merge base state.
+/// `merge --abort` handles the normal staged-merge case; `reset --hard HEAD` is a belt-and-braces
+/// fallback if the merge state was already resolved (e.g. an empty/ff merge with nothing to abort).
+pub fn abort_merge(dir: &Path) -> bool {
+    if git(dir, &["merge", "--abort"]).0 {
+        return true;
+    }
+    git(dir, &["reset", "--hard", "HEAD"]).0
+}
+
 /// Delete a branch unconditionally (-D). Used to discard a vetoed/merged session branch.
 pub fn delete_branch(dir: &Path, branch: &str) -> bool {
     git(dir, &["branch", "-D", branch]).0
