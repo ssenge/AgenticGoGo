@@ -57,6 +57,17 @@ Architecture-review P0/P1 cleanup and the optional config folder:
   as `over_*` and OR together in `halt_when`.
 - **#10 Structured output (`--json`)** — `agg status --json` (full `DashboardState` snapshot) and
   `agg history --json` (full `Project` ledger), reusing the existing serde types.
+- **#11 Post-merge rollback gate** (Phase 1 of the salvaged #1 hardening). Fixes a LIVE bug: the
+  loop merges + commits a session before judging, so a red post-merge judge used to leave the bad
+  merge on base with no rollback. Now (when `session_isolation.rollback_on_regression` is on —
+  default) agg STAGES the merge (`merge --no-ff --no-commit`), re-runs the judges against the
+  merged tree, then COMMITS it (keep) or ABORTS it (roll back — base stays pristine, branch kept
+  for inspection) based on whether a previously-met goal **regressed**. A judge that merely
+  *couldn't run* (timeout/spawn-fail/rate-limit/bad-JSON) never triggers rollback — only a real
+  met→not-met regression does. Also fixed: judge `"diff"` inputs now resolve to `HEAD^..HEAD` when
+  the tree is clean (post-commit), so a `diff`-input goal isn't silently empty. New git primitives
+  `stage_session`/`finalize_session`; rate-limit check moved before merge. *(Phase 0 — worktree
+  isolation — still open in Tier B #11.)*
 
 ---
 
@@ -65,7 +76,7 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 ### Tier B — medium
 | # | Pri | Effort | Item | Notes |
 |---|-----|--------|------|-------|
-| 11 | P1 | M | **Isolation + rollback hardening** (the salvaged value of #1) | Two N=1 sequential-loop wins that fell out of the #1 scoping. **Phase 0:** git-**worktree** isolation so a running session never mutates the operator's working tree / `.git/HEAD` (today it does — branch-checkout in one tree). **Phase 1:** a **post-merge rollback gate** — fixes a LIVE bug: today `merge_no_ff` commits immediately and judges run post-merge, so a red post-merge judge leaves the bad merge on base with no rollback. Split into `merge --no-commit` → re-test → `commit | abort`; re-point judge `"diff"` inputs to `base..HEAD`; force `recheck: always` on the gate; never roll back on a *can't-run* judge (only on a real regression). See the scoping under 🚫 #1. |
+| 11 | P2 | M | **Worktree isolation** (Phase 0 of the #1 hardening; Phase 1 rollback gate SHIPPED — see Unreleased) | git-**worktree** isolation so a running session never mutates the operator's working tree / `.git/HEAD` (today it's branch-checkout in one tree). New `worktree.rs`; rewrite `resolve_session`/`stage_session`'s checkout-into-base into merge-into-base-worktree; split the worker's single-`dir` contract into base-dir vs worktree-dir. A robustness win (operator can inspect base mid-run; cleaner crash recovery), and the prerequisite if N>1 were ever reconsidered. Lower priority now that the live rollback bug (Phase 1) is fixed. See the scoping under 🚫 #1. |
 
 > **#3 Institutional memory shipped** — see the **Unreleased** entry above for what landed
 > (enforced 4-layer write, durable `AGG_MEMORY.md`, the `inject_kb` / `max_kb` caps, dashboard
