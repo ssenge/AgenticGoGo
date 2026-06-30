@@ -492,17 +492,9 @@ pub fn run(
             publish!();
         }
 
-        // ── isolation: resolve the session branch (DEFAULT MERGE, unless the worker vetoed) ──
-        // The worker committed to `session_branch`. Default is to merge it back into the base.
-        // If the worker wrote the red file, it vetoed this session ⇒ discard the branch, base
-        // untouched. A crashed/killed worker that never wrote the red file still merges its
-        // partial commits (default-merge). Judges below then run on the resolved base state.
-        // The decision/I-O live in `git::resolve_session`; its truth table is unit-tested there.
-        if let (Some(base), Some(br)) = (&iso_base, &session_branch) {
-            crate::git::resolve_session(dir, base, br, &iso.red_file, session);
-        }
-
-        // 2) rate-limit backoff (exit-code + terminal-event gated).
+        // 2) rate-limit backoff (exit-code + terminal-event gated). NOTE: checked BEFORE merging —
+        //    a rate-limited session is incomplete, so we don't resolve/merge its branch at all
+        //    (it stays for the next attempt). (In the eager path below, resolve happens after this.)
         if outcome.rate_limited {
             let secs = cfg.ratelimit_backoff_secs;
             eprintln!("  rate limit detected — backing off {secs}s");
@@ -517,13 +509,48 @@ pub fn run(
             continue; // don't judge on a rate-limited (incomplete) session
         }
 
-        // 3) run judges, fold verdicts, evaluate conditions (incl. budget/wall guards).
+        // ── isolation: resolve the session branch ────────────────────────────────────────────
+        // Default is merge-back-to-base unless the worker vetoed (red file). With the ROLLBACK
+        // GATE on (rollback_on_regression, default), we STAGE the merge (uncommitted) here, judge
+        // the merged tree below, then commit or roll back based on whether a goal REGRESSED. With
+        // the gate off, we eager-commit here exactly as before.
+        let staged = match (&iso_base, &session_branch) {
+            (Some(base), Some(br)) if iso.rollback_on_regression => {
+                Some((br.clone(), crate::git::stage_session(dir, base, br, &iso.red_file)))
+            }
+            (Some(base), Some(br)) => {
+                crate::git::resolve_session(dir, base, br, &iso.red_file, session);
+                None
+            }
+            _ => None,
+        };
+
+        // 3) run judges, fold verdicts, evaluate conditions (incl. budget/wall guards). When a
+        //    merge is staged, the judges re-test the MERGED (uncommitted) working tree — the gate.
         eprintln!("  running judges…");
         dash.phase = "judging".into();
         publish!();
         let res = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total, cost_spent, session));
         eprint!("{}", indent(&eng.scoreboard()));
         publish!();
+
+        // ── rollback gate: keep the staged merge unless it caused a regression ────────────────
+        // A goal REGRESSED if a delta went from a met state to a not-met state this cycle AND the
+        // judge actually RAN (a judge that merely couldn't run — error set — is NOT a regression,
+        // so a transient flake never discards good work). Only a staged merge is finalized here.
+        if let Some((br, crate::git::StagedSession::Staged)) = &staged {
+            let regressed = res.deltas.iter().any(|d| {
+                d.before_state == crate::model::Lifecycle::Met
+                    && d.after_state != crate::model::Lifecycle::Met
+            }) || eng.goals.iter().any(|g| {
+                // a goal the engine itself flagged Regressed this cycle, with a judge that ran.
+                g.state == crate::model::Lifecycle::Regressed
+                    && g.last_verdict.as_ref().map(|v| v.error.is_none()).unwrap_or(false)
+            });
+            let keep = !regressed;
+            crate::git::finalize_session(dir, br, session, keep);
+            publish!();
+        }
 
         // on_session_end hooks run AFTER judging, so they see the post-cycle state (e.g.
         // persist a memory note, update an index, refresh a graph for the next session).

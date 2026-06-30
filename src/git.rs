@@ -216,6 +216,9 @@ pub fn decide_session(vetoed: bool, on_base: bool, merge_ok: impl FnOnce() -> bo
 /// Resolve a finished session's branch: run the decision, perform its git side-effects, and
 /// return the resolution (for logging). `base`/`branch` are the base + session branch names;
 /// `red_file` is the worker's veto marker. Drives `checkout`/`merge_no_ff`/`delete_branch`.
+///
+/// This is the EAGER-COMMIT path (no rollback gate): a clean merge is committed immediately. Used
+/// when `rollback_on_regression` is off. For the gated path see `stage_session` + `finalize_session`.
 pub fn resolve_session(
     dir: &Path,
     base: &str,
@@ -246,6 +249,68 @@ pub fn resolve_session(
         }
     }
     res
+}
+
+/// What the loop is mid-way through after `stage_session`, so `finalize_session` knows what to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagedSession {
+    /// Couldn't checkout base — nothing staged; branch left in place (mirror of CheckoutFailed).
+    CheckoutFailed,
+    /// Worker vetoed — branch already discarded, nothing staged.
+    Vetoed,
+    /// Merge couldn't apply — already aborted, branch kept for inspection, base unchanged.
+    Conflict,
+    /// Merge applied and is STAGED (uncommitted). The loop must judge the merged tree, then call
+    /// `finalize_session` to commit (keep) or roll back. `branch` carried for the keep/discard.
+    Staged,
+}
+
+/// First half of the ROLLBACK GATE: get onto base, then STAGE the session's merge without
+/// committing (so the loop can re-test the merged working tree before keeping it). Mirrors
+/// `resolve_session`'s veto/checkout decision but stops at a staged (uncommitted) merge on the
+/// merge path. The companion `finalize_session` commits or rolls back.
+pub fn stage_session(dir: &Path, base: &str, branch: &str, red_file: &str) -> StagedSession {
+    let vetoed = file_exists(dir, red_file);
+    if !checkout(dir, base) {
+        eprintln!("  [iso] WARNING could not checkout base '{base}'; leaving session branch {branch} in place");
+        return StagedSession::CheckoutFailed;
+    }
+    if vetoed {
+        eprintln!("  [iso] session VETOED (worker wrote {red_file}) → discarding branch {branch}");
+        remove_file(dir, red_file);
+        delete_branch(dir, branch);
+        return StagedSession::Vetoed;
+    }
+    match stage_merge(dir, branch) {
+        StagedMerge::Staged => StagedSession::Staged,
+        StagedMerge::Conflict => {
+            eprintln!("  [iso] merge of {branch} FAILED (conflict) — branch {branch} kept for inspection, base unchanged");
+            StagedSession::Conflict
+        }
+    }
+}
+
+/// Second half of the ROLLBACK GATE: after judging a staged merge, KEEP it (commit + delete the
+/// branch) or ROLL IT BACK (abort the staged merge, leave base untouched, keep the branch for
+/// inspection). Only meaningful after `stage_session` returned `Staged`.
+pub fn finalize_session(dir: &Path, branch: &str, session: u32, keep: bool) -> SessionResolution {
+    if keep {
+        let merge_msg = format!("agg: merge session #{session} ({branch})");
+        if commit_merge(dir, &merge_msg) {
+            eprintln!("  [iso] session #{session} merged → kept (post-merge re-test passed)");
+            delete_branch(dir, branch);
+            SessionResolution::Merge
+        } else {
+            // committing a staged, conflict-free merge should not fail; if it does, roll back to be safe.
+            eprintln!("  [iso] session #{session} commit of staged merge FAILED — rolling back, branch {branch} kept");
+            abort_merge(dir);
+            SessionResolution::MergeConflict
+        }
+    } else {
+        eprintln!("  [iso] session #{session} ROLLED BACK (post-merge re-test regressed) — base unchanged, branch {branch} kept for inspection");
+        abort_merge(dir);
+        SessionResolution::MergeConflict
+    }
 }
 
 #[cfg(test)]
@@ -290,5 +355,83 @@ mod tests {
     #[test]
     fn decide_merge_conflict_keeps_branch() {
         assert_eq!(decide_session(false, true, || false), SessionResolution::MergeConflict);
+    }
+
+    // ── rollback gate: real-git tests for stage_session / finalize_session ──────────────────────
+    use std::process::Command;
+
+    fn git_t(dir: &Path, args: &[&str]) {
+        Command::new("git").args(args).current_dir(dir).output().unwrap();
+    }
+
+    /// A fresh repo with a `main` base commit + a session branch that adds a line. Returns the dir.
+    fn repo_with_session_branch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("agg-git-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git_t(&d, &["init", "-q", "-b", "main"]);
+        git_t(&d, &["config", "user.email", "t@t"]);
+        git_t(&d, &["config", "user.name", "t"]);
+        std::fs::write(d.join("f.txt"), "base\n").unwrap();
+        git_t(&d, &["add", "-A"]);
+        git_t(&d, &["commit", "-qm", "base"]);
+        // session branch adds a line + commits.
+        git_t(&d, &["checkout", "-q", "-b", "agg/p/session-1"]);
+        std::fs::write(d.join("f.txt"), "base\nsession-work\n").unwrap();
+        git_t(&d, &["add", "-A"]);
+        git_t(&d, &["commit", "-qm", "session work"]);
+        git_t(&d, &["checkout", "-q", "main"]);
+        d
+    }
+
+    fn head_commit_count(dir: &Path) -> usize {
+        let o = Command::new("git").args(["rev-list", "--count", "HEAD"]).current_dir(dir).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0)
+    }
+
+    #[test]
+    fn stage_then_keep_lands_the_work() {
+        let d = repo_with_session_branch("keep");
+        let before = head_commit_count(&d);
+        let staged = stage_session(&d, "main", "agg/p/session-1", ".agg_red");
+        assert_eq!(staged, StagedSession::Staged);
+        // staged but not committed: the merged content is in the working tree, no new commit yet.
+        assert!(std::fs::read_to_string(d.join("f.txt")).unwrap().contains("session-work"));
+        assert_eq!(head_commit_count(&d), before, "no commit while merely staged");
+        // keep → commit lands it (a merge commit).
+        let res = finalize_session(&d, "agg/p/session-1", 1, true);
+        assert_eq!(res, SessionResolution::Merge);
+        assert!(head_commit_count(&d) > before, "kept merge adds a commit");
+        assert!(std::fs::read_to_string(d.join("f.txt")).unwrap().contains("session-work"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stage_then_rollback_leaves_base_pristine() {
+        let d = repo_with_session_branch("rollback");
+        let before_count = head_commit_count(&d);
+        let before_content = std::fs::read_to_string(d.join("f.txt")).unwrap();
+        let staged = stage_session(&d, "main", "agg/p/session-1", ".agg_red");
+        assert_eq!(staged, StagedSession::Staged);
+        // roll back → base must be byte-for-byte pristine, no new commit, work NOT present.
+        let res = finalize_session(&d, "agg/p/session-1", 1, false);
+        assert_eq!(res, SessionResolution::MergeConflict);
+        assert_eq!(head_commit_count(&d), before_count, "rollback adds no commit");
+        assert_eq!(std::fs::read_to_string(d.join("f.txt")).unwrap(), before_content, "base content pristine after rollback");
+        assert!(!std::fs::read_to_string(d.join("f.txt")).unwrap().contains("session-work"));
+        // the session branch is kept for inspection.
+        let branches = Command::new("git").args(["branch", "--list", "agg/p/session-1"]).current_dir(&d).output().unwrap();
+        assert!(String::from_utf8_lossy(&branches.stdout).contains("session-1"), "branch kept after rollback");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stage_respects_veto() {
+        let d = repo_with_session_branch("veto");
+        std::fs::write(d.join(".agg_red"), "").unwrap(); // worker vetoed
+        let staged = stage_session(&d, "main", "agg/p/session-1", ".agg_red");
+        assert_eq!(staged, StagedSession::Vetoed);
+        assert!(!std::fs::read_to_string(d.join("f.txt")).unwrap().contains("session-work"), "veto: no merge");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

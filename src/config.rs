@@ -85,6 +85,13 @@ pub struct SessionIsolation {
     /// veto never blocks a later merge.
     #[serde(default = "default_red_file")]
     pub red_file: String,
+    /// ROLLBACK GATE (#11): stage the session's merge, re-run the judges against the merged tree,
+    /// and ROLL BACK the merge if a previously-met goal regressed because of it (base stays put,
+    /// the branch is kept for inspection). DEFAULT on when isolation is on — it can only prevent a
+    /// known-bad merge from landing. A judge that merely *couldn't run* (timeout/spawn-fail/
+    /// rate-limit/bad-JSON) never triggers rollback — only a real regression does.
+    #[serde(default = "default_true")]
+    pub rollback_on_regression: bool,
 }
 
 impl Default for SessionIsolation {
@@ -94,6 +101,7 @@ impl Default for SessionIsolation {
             branch_prefix: default_branch_prefix(),
             base_branch: String::new(),
             red_file: default_red_file(),
+            rollback_on_regression: default_true(),
         }
     }
 }
