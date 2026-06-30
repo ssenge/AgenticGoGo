@@ -134,7 +134,19 @@ fn gather_inputs(inputs: &[String], cwd: &Path) -> String {
 
 fn resolve_input(inp: &str, cwd: &Path) -> (String, String) {
     if inp == "diff" {
-        return ("git diff".into(), git(&["diff"], cwd));
+        // The session's changes. Judging runs AFTER the session's commit/merge lands (the loop
+        // resolves the session branch before judging), so the working tree is typically CLEAN and
+        // a bare `git diff` would be EMPTY — the judge would see nothing to evaluate. So: use the
+        // working-tree diff when there ARE uncommitted changes (judging a dirty tree, e.g. a
+        // staged-but-uncommitted merge under the rollback gate), and otherwise fall back to the
+        // last commit's diff (`HEAD^..HEAD` — for a merge commit this is everything just merged in,
+        // first-parent). This makes `"diff"` mean "what this session changed" in both timings,
+        // with no goals.yaml migration.
+        let working = git(&["diff"], cwd);
+        if !working.trim().is_empty() {
+            return ("git diff".into(), working);
+        }
+        return ("git diff HEAD^..HEAD".into(), git(&["diff", "HEAD^..HEAD"], cwd));
     }
     if let Some(rev) = inp.strip_prefix("diff:") {
         return (format!("git diff {rev}"), git(&["diff", rev], cwd));
@@ -220,6 +232,39 @@ mod tests {
         assert!(v.met);
         assert_eq!(v.value, 28.0);
         assert!(v.error.is_none());
+    }
+
+    #[test]
+    fn diff_input_resolves_post_commit_via_head_range() {
+        // The live-bug fix (#11): after a session's change is COMMITTED (clean working tree), a
+        // bare `git diff` is empty — `"diff"` must fall back to HEAD^..HEAD so the judge still sees
+        // what changed. And while the tree is DIRTY (uncommitted), it uses the working diff.
+        use std::process::Command;
+        let d = std::env::temp_dir().join(format!("agg-judge-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let g = |args: &[&str]| { Command::new("git").args(args).current_dir(&d).output().unwrap(); };
+        g(&["init", "-q"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        std::fs::write(d.join("f.txt"), "one\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+
+        // dirty working tree → working-tree diff is used.
+        std::fs::write(d.join("f.txt"), "one\ntwo-uncommitted\n").unwrap();
+        let (label, body) = resolve_input("diff", &d);
+        assert_eq!(label, "git diff");
+        assert!(body.contains("two-uncommitted"), "dirty tree uses working diff: {body}");
+
+        // commit it → clean tree → falls back to HEAD^..HEAD showing the just-committed change.
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "change"]);
+        let (label, body) = resolve_input("diff", &d);
+        assert_eq!(label, "git diff HEAD^..HEAD");
+        assert!(body.contains("two-uncommitted"), "clean tree falls back to last commit's diff: {body}");
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
