@@ -460,3 +460,70 @@ exit 0
     // the scratch note is cleaned up after folding.
     assert!(!dir.join(".agg/memory/session-1.md").exists(), "scratch note deleted after fold");
 }
+
+#[test]
+fn rollback_gate_unlands_a_regressing_merge() {
+    // #11 Phase 1 end-to-end: with session_isolation + rollback_on_regression on, a worker change
+    // that makes a previously-met goal REGRESS must be rolled back — base stays pristine.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // fake claude: on a -p run, append a line to tracked.txt + COMMIT it on the session branch
+    // (the worker's "work"). It also writes a marker so the judge can flip met→not-met after it runs.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+printf 'broke-it\n' >> tracked.txt
+touch .regressed
+git add -A >/dev/null 2>&1
+git commit -qm "worker change" >/dev/null 2>&1
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    // a clean git repo on `main` with one committed file — isolation requires a clean repo.
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    write(dir, "tracked.txt", "ok\n");
+    // build_ok (invariant): met at baseline, REGRESSES once the worker drops `.regressed`.
+    write(dir, "judges/build.sh", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"broke the build\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    chmod_x(&dir.join("judges/build.sh"));
+    // feature: never met (so the loop actually launches a worker rather than stopping at baseline).
+    write(dir, "judges/feature.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    chmod_x(&dir.join("judges/feature.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  \
+         - id: build_ok\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: \"./judges/build.sh\" }\n  \
+         - id: feature\n    type: binary\n    judge: { kind: script, cmd: \"./judges/feature.sh\" }\nstop_when: feature\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: rbk\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: true }\n",
+    );
+    write(dir, "AGG_RESUME.md", "do work\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "agg run failed:\n{combined}");
+    assert!(combined.contains("ROLLED BACK"), "the regressing merge must be rolled back:\n{combined}");
+    // base must be pristine: the worker's "broke-it" line must NOT be on main.
+    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();
+    let content = String::from_utf8_lossy(&on_main.stdout);
+    assert!(!content.contains("broke-it"), "base must NOT contain the rolled-back change, got: {content:?}");
+    assert!(content.contains("ok"), "base keeps its original content");
+}
