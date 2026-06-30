@@ -60,6 +60,15 @@ pub fn run(dir: &Path, force: bool, folder: bool) -> Result<()> {
         eprintln!("  created {shown}");
     }
 
+    // Ensure `.agg/` (runtime state incl. transient memory scratch) is gitignored even when git
+    // isolation is OFF — memory works without isolation, so we can't lean on the isolation path.
+    // Guarded: `ensure_agg_gitignored` writes `.gitignore` + runs `git rm --cached` and is NOT a
+    // safe no-op outside a repo, so only call it inside one. (`AGG_MEMORY.md` lives at the project
+    // root and is intentionally NOT ignored — it's meant to be committed.)
+    if crate::git::is_repo(dir) {
+        crate::git::ensure_agg_gitignored(dir);
+    }
+
     eprintln!(
         "\n✔ Scaffolded an AgenticGoGo starter in {}.\n\n\
          Next steps:\n  \
@@ -138,6 +147,7 @@ ratelimit_backoff_secs: 1800      # back off this long on a real usage limit
 budget: { total: null }           # output-token ceiling (null = unlimited) → over_budget
 cost:   { total: null }           # dollar ceiling, e.g. 5.0 (null = unlimited) → over_cost
 summary: { enabled: true, model: haiku, min_interval_secs: 300 }  # progress summaries
+memory:  { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md; inject newest 8 KB/prompt
 resume_sessions: false            # fresh context per session (recommended)
 
 # ── Optional: generic lifecycle hooks (agg just runs these shell commands; it is
@@ -182,6 +192,18 @@ Make all the project's tests pass.
   Then EXIT. A later session is told about it and polls its log (`.agg/spawns/<id>.log`) —
   consuming the result when it finishes — instead of starting over. One spawn per task; check
   the BACKGROUND TASKS block at the top of your prompt before launching anything.
+
+# Memory (OPTIONAL — agg captures memory either way)
+- agg keeps durable cross-session learnings in `AGG_MEMORY.md` at the project root and injects a
+  recent slice of it (plus a LAST SESSION block) at the BOTTOM of this prompt, as lower-priority
+  context. READ it — it's what prior sessions learned. You do NOT maintain it; agg folds a note
+  after every session automatically (even if you crash or get killed mid-task).
+- If you have a crisp, durable learning worth carrying forward (a gotcha, a decision, the exact
+  next step), you MAY write it to `.agg/memory/session-<N>.md`, where `<N>` is THIS session number
+  from the "session #N" banner agg printed when it launched you (e.g. `.agg/memory/session-7.md`).
+  agg prefers your note on a clean session. This is OPTIONAL — skipping it loses nothing; agg
+  still records a mechanical note from the goal scoreboard and your visible progress. Keep it
+  short and plain; agg sanitizes and size-caps it.
 
 <!-- If your project uses a spec/plan tool (get-shit-done, a ROADMAP, etc.), paste the
      relevant execution steps HERE — skills are NOT invocable in headless `agg run`. -->
