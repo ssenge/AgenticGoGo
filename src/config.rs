@@ -36,6 +36,9 @@ pub struct AggConfig {
     pub cost: Cost,
     #[serde(default)]
     pub summary: Summary,
+    /// Institutional memory (#3) — durable cross-session learnings. See [`Memory`].
+    #[serde(default)]
+    pub memory: Memory,
     /// Continue each session from the previous one's context (`--resume`) instead of
     /// a fresh context. DEFAULT false: fresh-context-per-session is the core discipline
     /// (no context accumulation = no runaway cost). Enable only for short, tightly-scoped
@@ -178,6 +181,37 @@ pub struct Cost {
     pub total: Option<f64>,
 }
 
+/// Institutional-memory settings (#3). agg maintains a durable `AGG_MEMORY.md` at the project
+/// root (rolled-up learnings) and injects a BOUNDED slice of it + a last-session block into every
+/// worker prompt. ENFORCED — agg writes memory itself even if the worker crashes / is killed /
+/// ignores it. Two independent caps: `max_kb` bounds the file on disk; `inject_kb` bounds how
+/// much is injected per prompt (token-cost control — a large audit file must not balloon prompts).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Memory {
+    /// master switch (DEFAULT on — memory is a core continuity feature).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// on-disk cap for `AGG_MEMORY.md`; when exceeded the OLDEST entries drop first.
+    /// `None` = no cap. `AGG_MEMORY_MAX_KB` overrides (0 ⇒ uncapped).
+    #[serde(default = "default_memory_max_kb")]
+    pub max_kb: Option<u64>,
+    /// READ-side cap: only the NEWEST `inject_kb` of the durable file is injected into each
+    /// prompt, independent of `max_kb`. Bounds per-prompt input tokens. `None` = inject all
+    /// (NOT recommended). `AGG_MEMORY_INJECT_KB` overrides (0 ⇒ inject all).
+    #[serde(default = "default_memory_inject_kb")]
+    pub inject_kb: Option<u64>,
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+        Memory {
+            enabled: default_true(),
+            max_kb: default_memory_max_kb(),
+            inject_kb: default_memory_inject_kb(),
+        }
+    }
+}
+
 /// Goals file (`goals.yaml`): the goal list + stop/halt conditions.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GoalsConfig {
@@ -227,6 +261,12 @@ fn default_summary_model() -> String {
 fn default_summary_interval() -> u64 {
     300
 }
+fn default_memory_max_kb() -> Option<u64> {
+    Some(64) // 64 KB on disk — generous for rolled-up learnings, bounded so it can't balloon.
+}
+fn default_memory_inject_kb() -> Option<u64> {
+    Some(8) // 8 KB into each prompt (~2k tokens) — keeps memory from undermining the budget.
+}
 
 impl AggConfig {
     pub fn load(path: &Path) -> Result<Self> {
@@ -258,6 +298,13 @@ impl AggConfig {
         // CI safety knob: clamp the dollar ceiling without editing agg.yaml.
         if let Some(v) = env_f64("AGG_COST_TOTAL") {
             self.cost.total = Some(v);
+        }
+        // memory caps (CI / quick experiments): 0 ⇒ uncapped/inject-all.
+        if let Some(v) = env_u64("AGG_MEMORY_MAX_KB") {
+            self.memory.max_kb = if v == 0 { None } else { Some(v) };
+        }
+        if let Some(v) = env_u64("AGG_MEMORY_INJECT_KB") {
+            self.memory.inject_kb = if v == 0 { None } else { Some(v) };
         }
     }
 }
