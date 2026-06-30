@@ -199,6 +199,7 @@ pub fn run(
                 s.goals = dash.goals.clone();
                 s.summary_cumulative = dash.summary_cumulative.clone();
                 s.summary_windowed = dash.summary_windowed.clone();
+                s.memory_bytes = dash.memory_bytes;
                 s.finished = dash.finished;
                 s.finish_reason = dash.finish_reason.clone();
             });
@@ -256,6 +257,18 @@ pub fn run(
     // summarizer state: the rolling cumulative summary + last-summary timestamp.
     let mut cumulative = String::new();
     let mut last_summary = Instant::now() - std::time::Duration::from_secs(cfg.summary.min_interval_secs);
+
+    // institutional memory (#3): the LAST SESSION block carried into the NEXT prompt's READ
+    // injection (prior cycle's deltas + scoreboard). Empty on session 1 of THIS invocation; the
+    // durable file's newest entry is the cross-RUN carry. Make memory work WITHOUT git isolation
+    // by creating `.agg/memory/` ourselves (not via the isolation-only gitignore path).
+    let mut last_session = String::new();
+    if cfg.memory.enabled {
+        crate::memory::ensure_scratch_dir(dir);
+        // sweep any scratch notes left by a prior run (crash / forged filename) — the durable
+        // AGG_MEMORY.md is the only legitimate cross-run carrier, so they are all stale.
+        crate::memory::sweep_scratch(dir);
+    }
 
     // ---- bus: operator/outer-Claude steering, drained at each session boundary
     //      (the only safe injection point for headless workers). ----
@@ -398,6 +411,20 @@ pub fn run(
             Some(status) => format!("{status}\n{base}"),
             None => base,
         };
+        // institutional memory (#3): APPEND the bounded durable slice + LAST SESSION block as the
+        // LOWEST-priority tail of `base` (below the operator instruction, spawn status, and
+        // prompt_includes — those keep their position). Pure code, runs every prompt, never an LLM
+        // call. Empty string when there's nothing yet (fresh project), so the prompt is unchanged.
+        let base = if cfg.memory.enabled {
+            let mem = crate::memory::read_block(dir, &last_session, cfg.memory.inject_kb);
+            if mem.is_empty() {
+                base
+            } else {
+                format!("{base}\n\n{mem}")
+            }
+        } else {
+            base
+        };
         let effective_prompt = match pending_instruction.take() {
             Some(instr) => format!(
                 "═══ HIGH-PRIORITY OPERATOR INSTRUCTION (act on this FIRST, it overrides the default plan) ═══\n\
@@ -417,6 +444,11 @@ pub fn run(
         // --resume continuity (opt-in): continue the prior session's context. Default
         // is fresh-context-per-session (the core no-runaway-cost discipline).
         let resume_id = if cfg.resume_sessions { last_session_id.as_deref() } else { None };
+        // memory: clear any stale scratch note for THIS session number left by a prior run, so a
+        // worker note from a different run can never be folded as this session's learning.
+        if cfg.memory.enabled {
+            crate::memory::clear_scratch(dir, session);
+        }
         let outcome = worker::run_session(&cfg, &effective_prompt, dir, session, resume_id, &live);
         last_session_id = outcome.session_id.clone();
         tokens_spent += outcome.output_tokens;
@@ -435,6 +467,31 @@ pub fn run(
             cost_spent,
         );
 
+        // ── institutional memory (#3): ENFORCED early fold ─────────────────────────────────────
+        // Fold a mechanical "session-start" floor entry RIGHT NOW, before judging/summary, so the
+        // session's facts survive even if a later step in this cycle panics. This is the
+        // enforcement floor: no I/O needed to produce content, no worker cooperation. The
+        // post-judge step (below) SUPERSEDES this same entry in place with goal deltas + the
+        // optional worker note — so a normally-completing session leaves exactly ONE entry.
+        // Skipped on a rate-limited session: that session is incomplete (we `continue` without
+        // judging just below), so it must not leave a durable learning entry.
+        let mut mem_folded = false;
+        if cfg.memory.enabled && !outcome.rate_limited {
+            let scoreboard_now = eng.scoreboard();
+            let body = crate::memory::mechanical_note(
+                outcome.exit_code,
+                outcome.killed_by_watchdog,
+                outcome.rate_limited,
+                outcome.duration_secs,
+                &scoreboard_now,
+                &[], // no deltas yet — judging hasn't run; superseded below if we get there.
+            );
+            dash.memory_bytes =
+                crate::memory::append_entry(dir, session, "session-start", &body, cfg.memory.max_kb);
+            mem_folded = true;
+            publish!();
+        }
+
         // ── isolation: resolve the session branch (DEFAULT MERGE, unless the worker vetoed) ──
         // The worker committed to `session_branch`. Default is to merge it back into the base.
         // If the worker wrote the red file, it vetoed this session ⇒ discard the branch, base
@@ -450,6 +507,11 @@ pub fn run(
             let secs = cfg.ratelimit_backoff_secs;
             eprintln!("  rate limit detected — backing off {secs}s");
             dash.phase = "backoff".into();
+            // memory: a rate-limited session is incomplete — no durable entry was written (the
+            // early fold skips when rate_limited). Just clean up any scratch the worker left.
+            if cfg.memory.enabled {
+                crate::memory::clear_scratch(dir, session);
+            }
             publish!();
             std::thread::sleep(std::time::Duration::from_secs(secs));
             continue; // don't judge on a rate-limited (incomplete) session
@@ -466,6 +528,10 @@ pub fn run(
         // on_session_end hooks run AFTER judging, so they see the post-cycle state (e.g.
         // persist a memory note, update an index, refresh a graph for the next session).
         crate::hooks::run("on_session_end", &cfg.hooks.on_session_end, dir);
+
+        // DATA-C1: only reuse the windowed summary for memory if it was FRESHLY computed this
+        // cycle — never the stale persistent `dash.summary_windowed` from an earlier cycle.
+        let mut summarized_this_cycle = false;
 
         // 4) LLM summary (cumulative + windowed), rate-limited by min_interval_secs.
         //    Best-effort: a summarizer failure NEVER breaks the loop.
@@ -485,8 +551,55 @@ pub fn run(
                 dash.summary_cumulative = s.cumulative;
                 dash.summary_windowed = s.windowed;
                 last_summary = Instant::now();
+                summarized_this_cycle = true;
                 publish!();
             }
+        }
+
+        // 5) institutional memory (#3) — post-judge REFINEMENT of this session's entry. The early
+        //    fold (above) already guaranteed a mechanical note exists; here we add the richer,
+        //    delta-aware entry (and the optional worker note). First tier that yields content
+        //    wins. All I/O best-effort. Skipped only if memory is disabled or somehow not yet
+        //    folded (defensive — `mem_folded` is set whenever memory is enabled and we reached
+        //    here without a rate-limit `continue`).
+        if cfg.memory.enabled && mem_folded {
+            let scoreboard = eng.scoreboard();
+            // the mechanical fact is ALWAYS recorded — the worker note (if any) is appended as a
+            // clearly-fenced, lower-trust hint, never allowed to stand alone (so a poisoned or
+            // over-confident note can't masquerade as the authoritative session record).
+            let mech = crate::memory::mechanical_note(
+                outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
+                outcome.duration_secs, &scoreboard, &res.deltas,
+            );
+            // 3a: optional worker note (sanitized + size-capped + de-fanged in read_worker_note);
+            //     here we additionally FENCE it so its body can never be read as live markdown.
+            let worker_note = crate::memory::read_worker_note(dir, session);
+            let (source, body) = match worker_note {
+                Some(note) => (
+                    "mechanical+worker",
+                    format!(
+                        "{mech}\n\n[worker note — UNTRUSTED hint, not authoritative]\n```text\n{note}\n```"
+                    ),
+                ),
+                // 3b: reuse the windowed summary ONLY if freshly computed this cycle (no LLM call).
+                None if summarized_this_cycle && !dash.summary_windowed.trim().is_empty() => (
+                    "mechanical+summary",
+                    format!("{mech}\n\nsummary: {}", dash.summary_windowed.trim()),
+                ),
+                // 3c: mechanical facts alone — cannot fail to produce content.
+                None => ("mechanical", mech),
+            };
+            // SUPERSEDE the early "session-start" floor entry in place → exactly ONE entry per
+            // completed session (no double-fold).
+            dash.memory_bytes =
+                crate::memory::fold_entry(dir, session, source, &body, cfg.memory.max_kb, true);
+            // delete the scratch note now that it's folded (bounds `.agg/memory/` growth; prevents
+            // a cross-run re-fold).
+            crate::memory::clear_scratch(dir, session);
+            // carry the always-on LAST SESSION block into the NEXT prompt's READ block.
+            last_session = crate::memory::last_session_block(&res.deltas, &scoreboard);
+            eprintln!("  [memory] session #{session} folded ({source}); AGG_MEMORY.md {} B", dash.memory_bytes);
+            publish!();
         }
 
         if res.halt {
