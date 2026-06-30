@@ -112,6 +112,13 @@ the **filesystem** (your code, git, the resume prompt), not a growing conversati
   moment any one trips.
 - **Summaries** — one cheap call per cycle turns the worker's raw thoughts + the goal deltas
   into a *cumulative* “story so far” and a *windowed* “last cycle” line.
+- **Institutional memory** — cross-session learning, on by default with zero setup. agg keeps a
+  durable, committable `AGG_MEMORY.md` of rolled-up learnings and **enforces** the write itself
+  after every session (a folded worker note if present, else the windowed summary, else the
+  mechanical facts) — it never trusts a crashed or skipping worker. Every fresh worker reads it
+  back, plus an always-on “last session” block, so a brand-new context isn't amnesiac. Two
+  independent caps keep it cheap — `inject_kb` bounds per-prompt injection, `max_kb` bounds the
+  file on disk (oldest entries drop first).
 - **Watchdog** — kills a worker that's gone silent **and** CPU-flat (born from a real multi-hour worker
   hang), and auto-relaunches.
 - **Steer it live** — `agg send inject "focus on X"` / `budget …` / `pause` / `stop`, applied
@@ -284,6 +291,7 @@ resume_prompt: "AGG_RESUME.md"
 budget: { total: 2000000 }       # token ceiling  → over_budget
 cost:   { total: 5.0 }           # dollar ceiling → over_cost  (Claude prices it; agg sums it)
 summary: { enabled: true, model: haiku, min_interval_secs: 1 }
+memory: { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md, on by default
 ```
 
 **5. `AGG_RESUME.md`** — the prompt fed to *every* fresh worker session:

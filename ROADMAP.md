@@ -34,7 +34,20 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 - **Doctor checks script-judge files** exist + are executable (with an exact `chmod +x` hint)
 - **`agg judge <id>`** — run one judge, print its raw verdict (raw JSON to stdout, human line to stderr)
 
-### Unreleased — Tier B #2 dollar budget + #10 `--json`
+### Unreleased — Tier B #2 dollar budget + #3 institutional memory + #10 `--json`
+- **#3 Institutional memory** — built-in, agg-managed cross-session learning, on by default with
+  zero setup. A durable, committable **`AGG_MEMORY.md`** at the project root holds rolled-up
+  learnings. **Enforced, never trusting the worker:** agg writes memory itself after *every*
+  session (even a crashed/killed/ignoring worker) via a 4-layer design — (3a) fold an optional
+  worker-written `.agg/memory/session-<N>.md` note on a clean session; (3b) else the freshly
+  computed windowed summary; (3c) else the mechanical facts (exit/scoreboard/goal-deltas) as the
+  always-produces-content floor — plus an always-on `=== LAST SESSION ===` read-back block
+  (prior cycle's goal deltas + scoreboard) prepended to every worker prompt. Two independent
+  caps keep it token-safe: **`inject_kb`** (default 8 KB) bounds per-prompt injection
+  independently of **`max_kb`** (default 64 KB on disk, oldest entries drop first); env overrides
+  `AGG_MEMORY_INJECT_KB` / `AGG_MEMORY_MAX_KB` (0 = uncapped). Configured via
+  `memory: { enabled, max_kb, inject_kb }`; dashboard/status show a `memory <size>` indicator
+  once the file has content.
 - **#2 Dollar-denominated budget** (`cost.total: $N` → `over_cost`). **No pricing table** — the
   original plan assumed one, but `claude -p` already emits `total_cost_usd` on each session's
   result event (correct per-model, `[1m]`-variant- and cache-aware), so agg just sums that float.
@@ -52,8 +65,11 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 ### Tier B — medium
 | # | Pri | Effort | Item | Notes |
 |---|-----|--------|------|-------|
-| 3 | P2 | M | **Self-updating institutional memory** | A built-in convention/file the loop manages so a worker persists "gotchas" across fresh sessions (vs. leaving it entirely to `AGG_RESUME.md` discipline). *(snarktank ships `AGENTS.md`/`progress.txt`.)* |
-| 5 | P3 | M | **In-iteration context summarization** | *Deferred, not rejected.* Auto-summarize a long session as context fills, feeding the digest into the worker (vs. our current human-facing dashboard summaries). Less critical given fresh-context-per-session, but wanted eventually. *(vercel-labs' `RalphContextManager`.)* |
+| 5 | P3 | M | **In-iteration context summarization** | *LOW VALUE — deferred, not required today.* vercel's `RalphContextManager` summarizes a session's context mid-run as it fills (~70%) and feeds the digest BACK into the same long-running session. agg's existing summaries are between-session + outward-only (to the dashboard), never fed back to the worker — and that's by design: fresh-context-per-session means when context would fill, the session just ENDS and a fresh one starts. #5 mostly solves a problem our architecture designs away; only worth revisiting if we ever want individual sessions to run much longer before resetting. *(vercel-labs' `RalphContextManager`.)* |
+
+> **#3 Institutional memory shipped** — see the **Unreleased** entry above for what landed
+> (enforced 4-layer write, durable `AGG_MEMORY.md`, the `inject_kb` / `max_kb` caps, dashboard
+> indicator).
 
 ### Tier C — large (need their own scoping conversation)
 | # | Pri | Effort | Item | Notes |
@@ -67,5 +83,8 @@ Architecture-review P0/P1 cleanup and the optional config folder:
 ## Notes
 - Tiers A→C are roughly ordered by value/effort.
 - Items 1 and 8 are **clusters** — each needs its own breakdown before implementation.
-- Item 5 is **deferred** (wanted, just not now), not decided against — kept in Tier B at P3.
+- Item 5 is **low value + deferred** — it mostly solves a problem our fresh-context-per-session
+  architecture designs away (see its row). Not required today; kept in Tier B at P3.
+- Item 3 **shipped** (see Unreleased): enforced read-injection (`AGG_MEMORY.md` + always-on
+  `=== LAST SESSION ===` block) plus a 4-layer write-degradation floor, both token-capped.
 - Every shipped item lands with tests; the full suite + clippy + a Windows cross-check gate each release.
