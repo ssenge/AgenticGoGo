@@ -369,3 +369,94 @@ fn status_and_history_json_are_machine_readable() {
     assert_eq!(h["name"], "jsonproj");
     assert!(h["runs"].as_array().map(|a| !a.is_empty()).unwrap_or(false), "history should have at least one run");
 }
+
+#[test]
+fn institutional_memory_is_written_without_worker_cooperation() {
+    // #3 ENFORCEMENT FLOOR: the default fake worker writes NO memory note, yet agg must still
+    // produce AGG_MEMORY.md from mechanical facts — the worker is never trusted to persist.
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    // a goal that never meets, so the loop runs the full max_sessions and folds memory each time.
+    write(dir, "judges/never.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    chmod_x(&dir.join("judges/never.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: impossible\n    type: binary\n    judge: { kind: script, cmd: \"./judges/never.sh\" }\nstop_when: impossible\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: memproj\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: true, max_kb: 64, inject_kb: 8 }\n",
+    );
+    write(dir, "AGG_RESUME.md", "do work\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "agg run failed:\n{combined}");
+
+    // the durable memory file must exist at the PROJECT ROOT, with a folded mechanical entry.
+    let mem = dir.join("AGG_MEMORY.md");
+    assert!(mem.exists(), "AGG_MEMORY.md must be written even when the worker writes no note");
+    let text = fs::read_to_string(&mem).unwrap();
+    assert!(text.contains("## session 1"), "session 1 folded into memory, got:\n{text}");
+    assert!(text.contains("exited cleanly") || text.contains("Goals:"), "mechanical facts recorded:\n{text}");
+    // the loop logs the fold.
+    assert!(combined.contains("[memory] session #1 folded"), "fold should be logged:\n{combined}");
+}
+
+#[test]
+fn worker_written_memory_note_is_folded() {
+    // #3 Tier 3a: when the worker writes .agg/memory/session-<N>.md on a clean session, agg folds
+    // that note (preferred over the mechanical fallback) into the durable AGG_MEMORY.md.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // a stub that, on a -p run, writes a worker memory note for session 1 then exits cleanly.
+    let claude = bin.join("claude");
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+mkdir -p .agg/memory
+printf 'GOTCHA: the frobnicator needs a warm cache before the second pass\n' > .agg/memory/session-1.md
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    );
+    chmod_x(&claude);
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    write(dir, "judges/never.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    chmod_x(&dir.join("judges/never.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: impossible\n    type: binary\n    judge: { kind: script, cmd: \"./judges/never.sh\" }\nstop_when: impossible\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: memproj2\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: true }\n",
+    );
+    write(dir, "AGG_RESUME.md", "do work\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "agg run failed:\n{combined}");
+
+    let text = fs::read_to_string(dir.join("AGG_MEMORY.md")).unwrap();
+    assert!(text.contains("GOTCHA: the frobnicator"), "worker note folded into memory, got:\n{text}");
+    // the worker note is appended as a fenced, lower-trust hint after the mechanical fact —
+    // never standing alone — so the fold source is 'mechanical+worker'.
+    assert!(combined.contains("folded (mechanical+worker)"), "fold source should be 'mechanical+worker':\n{combined}");
+    assert!(text.contains("UNTRUSTED hint"), "worker note flagged as untrusted hint:\n{text}");
+    // exactly ONE entry for session 1 (the early floor was superseded, not double-folded).
+    assert_eq!(text.matches("## session 1 (").count(), 1, "single entry per session, got:\n{text}");
+    // the scratch note is cleaned up after folding.
+    assert!(!dir.join(".agg/memory/session-1.md").exists(), "scratch note deleted after fold");
+}
