@@ -17,6 +17,7 @@ pub mod init;
 pub mod judge;
 pub mod localtime;
 pub mod loop_;
+pub mod memory;
 pub mod model;
 pub mod paths;
 pub mod proc;

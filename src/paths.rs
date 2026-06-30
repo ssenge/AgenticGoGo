@@ -6,14 +6,17 @@
 //! convention is defined in exactly one place.
 //!
 //! ```text
-//! <project>/.agg/
-//!   state.json        live dashboard snapshot (loop writes, `agg dashboard` reads)
-//!   project.json      persistent run-history ledger (lifetime sessions/tokens)
-//!   spawns.json       long-task registry (`agg spawn`)
-//!   spawns/<name>.log per-spawn combined stdout+stderr
-//!   bus/{in,out}/     operator↔loop command bus; bus/log.jsonl audit
-//!   run.pid           the live loop's pid (double-run guard + `agg stop` target)
-//!   run.log           detached-loop log (`agg run --detach`)
+//! <project>/
+//!   AGG_MEMORY.md       durable institutional memory (#3) — committable, user-visible (NOT in .agg/)
+//!   .agg/
+//!     state.json        live dashboard snapshot (loop writes, `agg dashboard` reads)
+//!     project.json      persistent run-history ledger (lifetime sessions/tokens)
+//!     memory/           transient per-session worker memory scratch (session-<N>.md)
+//!     spawns.json       long-task registry (`agg spawn`)
+//!     spawns/<name>.log per-spawn combined stdout+stderr
+//!     bus/{in,out}/     operator↔loop command bus; bus/log.jsonl audit
+//!     run.pid           the live loop's pid (double-run guard + `agg stop` target)
+//!     run.log           detached-loop log (`agg run --detach`)
 //! ```
 
 use std::path::{Path, PathBuf};
