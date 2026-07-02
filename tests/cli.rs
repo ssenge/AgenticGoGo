@@ -527,3 +527,70 @@ exit 0
     assert!(!content.contains("broke-it"), "base must NOT contain the rolled-back change, got: {content:?}");
     assert!(content.contains("ok"), "base keeps its original content");
 }
+
+#[test]
+fn rollback_gate_keeps_merge_when_a_judge_merely_flakes() {
+    // Regression test for the delta-clause bug: a previously-MET goal whose judge FAILS transiently
+    // (rate-limit/timeout/error → Verdict::failed, error set → Goal marks it Regressed) must NOT
+    // trigger a rollback. A flake is "judge couldn't run", not "the work regressed" — discarding a
+    // good session's merge because a judge flaked is the bug. The good work must be KEPT.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // worker: does clean, GOOD work on its session branch (adds a wanted line + commits).
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+printf 'good-work\n' >> tracked.txt
+touch .flake
+git add -A >/dev/null 2>&1
+git commit -qm "worker change" >/dev/null 2>&1
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    write(dir, "tracked.txt", "ok\n");
+    // build_ok (invariant): met at baseline; once the worker drops `.flake`, the judge ERRORS —
+    // exits non-zero with no verdict JSON → Verdict::failed (error set), NOT a clean not-met.
+    write(dir, "judges/build.sh", "#!/bin/sh\nif [ -f .flake ]; then echo 'transient judge failure' >&2; exit 3; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    chmod_x(&dir.join("judges/build.sh"));
+    // feature: never met, so the loop actually runs a session (doesn't stop at baseline).
+    write(dir, "judges/feature.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    chmod_x(&dir.join("judges/feature.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  \
+         - id: build_ok\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: \"./judges/build.sh\" }\n  \
+         - id: feature\n    type: binary\n    judge: { kind: script, cmd: \"./judges/feature.sh\" }\nstop_when: feature\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: flake\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: true }\n",
+    );
+    write(dir, "AGG_RESUME.md", "do work\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "agg run failed:\n{combined}");
+    // the flake must NOT have rolled anything back — the good work is KEPT on main.
+    assert!(!combined.contains("ROLLED BACK"), "a transient judge flake must NOT trigger rollback:\n{combined}");
+    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();
+    let content = String::from_utf8_lossy(&on_main.stdout);
+    assert!(content.contains("good-work"), "the worker's good work must be KEPT despite the judge flake, got: {content:?}");
+}

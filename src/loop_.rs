@@ -536,12 +536,25 @@ pub fn run(
 
         // ── rollback gate: keep the staged merge unless it caused a regression ────────────────
         // A goal REGRESSED if a delta went from a met state to a not-met state this cycle AND the
-        // judge actually RAN (a judge that merely couldn't run — error set — is NOT a regression,
-        // so a transient flake never discards good work). Only a staged merge is finalized here.
+        // judge actually RAN. The "judge ran" gate is LOAD-BEARING: a judge that merely couldn't
+        // run (rate-limited/timeout/spawn-fail/bad-JSON → Verdict::failed with error:Some →
+        // Goal::apply marks a previously-met goal Regressed) must NOT count as a regression, or a
+        // transient flake would discard a good session's work. Both the delta clause AND the
+        // engine-state clause are error-gated (by the goal's current verdict) for exactly this
+        // reason. Only a staged merge is finalized here.
         if let Some((br, crate::git::StagedSession::Staged)) = &staged {
+            let judge_ran = |id: &str| {
+                eng.goals
+                    .iter()
+                    .find(|g| g.id == id)
+                    .and_then(|g| g.last_verdict.as_ref())
+                    .map(|v| v.error.is_none())
+                    .unwrap_or(false)
+            };
             let regressed = res.deltas.iter().any(|d| {
                 d.before_state == crate::model::Lifecycle::Met
                     && d.after_state != crate::model::Lifecycle::Met
+                    && judge_ran(&d.id)
             }) || eng.goals.iter().any(|g| {
                 // a goal the engine itself flagged Regressed this cycle, with a judge that ran.
                 g.state == crate::model::Lifecycle::Regressed
