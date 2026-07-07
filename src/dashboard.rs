@@ -145,6 +145,115 @@ fn scroll(ui: &mut DashboardUi, delta: i32) {
     }
 }
 
+/// Render the dashboard headlessly to a ratatui [`Buffer`](ratatui::buffer::Buffer) at a fixed
+/// size, using the REAL `draw()` path — so a captured image can never drift from what the live
+/// TUI shows. Used by `examples/dashboard_svg.rs` to generate the README screenshot.
+#[doc(hidden)]
+pub fn render_buffer(state: &DashboardState, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    use ratatui::backend::TestBackend;
+    let backend = TestBackend::new(w, h);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut ui = DashboardUi::default();
+    term.draw(|f| draw(f, Path::new("."), Some(state), &mut ui)).unwrap();
+    term.backend().buffer().clone()
+}
+
+/// A representative snapshot for documentation/screenshots — a mid-run P≠NP showcase loop with a
+/// cardinal goal climbing, a latched paper goal, and a soundness invariant holding.
+#[doc(hidden)]
+pub fn sample_state() -> DashboardState {
+    DashboardState {
+        project: "prove-p-vs-np".into(),
+        model: "claude-opus-4-8".into(),
+        stop_when: "proof_verified AND paper_written".into(),
+        halt_when: "not no_sorry OR over_cost".into(),
+        started_at_epoch: 1_751_000_000,
+        up_secs: 11_520, // 3h12m
+        session: 7,
+        lifetime_session: 23,
+        phase: "judging".into(),
+        idle_secs: 4,
+        tokens_spent: 2_100_000,
+        budget_total: Some(5_000_000),
+        cost_spent: 12.40,
+        cost_limit: Some(100.0),
+        goals_met: 2,
+        goals_total: 4,
+        goals: vec![
+            GoalView {
+                id: "lemmas_verified".into(),
+                goal_type: "cardinal".into(),
+                state: "in_progress".into(),
+                invariant: false,
+                value: 14.0,
+                max: 20.0,
+                target: 20.0,
+                weight: 1.0,
+                delta: 3.0,
+                rationale: "14 Lean-verified supporting lemmas (sorry-free, project builds)".into(),
+                judge_kind: "script".into(),
+                latched: false,
+            },
+            GoalView {
+                id: "paper_written".into(),
+                goal_type: "binary".into(),
+                state: "met".into(),
+                invariant: false,
+                value: 1.0,
+                max: 1.0,
+                target: 1.0,
+                weight: 1.0,
+                delta: 0.0,
+                rationale: "PAPER.md covers the approach, results, and limitations".into(),
+                judge_kind: "llm:haiku".into(),
+                latched: true,
+            },
+            GoalView {
+                id: "no_sorry".into(),
+                goal_type: "binary".into(),
+                state: "met".into(),
+                invariant: true,
+                value: 1.0,
+                max: 1.0,
+                target: 1.0,
+                weight: 2.0,
+                delta: 0.0,
+                rationale: "no gap, no smuggled axiom, no unsound decide anywhere in proof/".into(),
+                judge_kind: "script".into(),
+                latched: false,
+            },
+            GoalView {
+                id: "proof_verified".into(),
+                goal_type: "binary".into(),
+                state: "in_progress".into(),
+                invariant: false,
+                value: 0.0,
+                max: 1.0,
+                target: 1.0,
+                weight: 1.0,
+                delta: 0.0,
+                rationale: "Lean does not accept the full proof yet — 6 lemmas to go".into(),
+                judge_kind: "script".into(),
+                latched: false,
+            },
+        ],
+        now: "🔧 $ lake build".into(),
+        think: "the pigeonhole bound tightens the reduction; wiring it into lemma 14".into(),
+        recent: vec![
+            ActivityEvent { ts: "14:07:01".into(), kind: "tool".into(), text: "$ lake build".into() },
+            ActivityEvent { ts: "14:07:22".into(), kind: "tool_result".into(), text: "Build completed successfully (14 lemmas)".into() },
+            ActivityEvent { ts: "14:07:24".into(), kind: "think".into(), text: "lemma 14 verified — the counting argument holds".into() },
+            ActivityEvent { ts: "14:07:26".into(), kind: "tool".into(), text: "$ ./judges/count_lemmas.sh".into() },
+        ],
+        summary_cumulative: "Formalizing the separation: 14/20 supporting lemmas verified, paper drafted, soundness invariant holding — no sorry, no smuggled axioms.".into(),
+        summary_windowed: "Landed lemma 14 (the counting bound); lemma count 11→14 this session.".into(),
+        memory_bytes: 9216,
+        seq: 42,
+        finished: false,
+        finish_reason: String::new(),
+    }
+}
+
 fn draw(f: &mut Frame, dir: &Path, state: Option<&DashboardState>, ui: &mut DashboardUi) {
     let area = f.area();
     let Some(s) = state else {

@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="805" height="610" viewBox="0 0 805 610" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="13.5">
+<rect x="0" y="0" width="805" height="610" rx="10" fill="#0d1117"/>
+<text x="360.40" y="28.24" fill="#39c5cf" xml:space="preserve">AgenticGoGo</text>
+<text x="16.00" y="45.24" fill="#c9d1d9" xml:space="preserve">┌ Info ────────────────────────────────────────────────────────────────────────────────────┐</text>
+<text x="16.00" y="62.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="62.24" fill="#6e7681" xml:space="preserve">project </text>
+<text x="91.60" y="62.24" fill="#c9d1d9" xml:space="preserve">prove-p-vs-np  </text>
+<text x="217.60" y="62.24" fill="#6e7681" xml:space="preserve">session </text>
+<text x="284.80" y="62.24" fill="#c9d1d9" xml:space="preserve">#7 (of 23)  </text>
+<text x="385.60" y="62.24" fill="#6e7681" xml:space="preserve">phase </text>
+<text x="436.00" y="62.24" fill="#39c5cf" xml:space="preserve">judging</text>
+<text x="511.60" y="62.24" fill="#6e7681" xml:space="preserve">up </text>
+<text x="536.80" y="62.24" fill="#c9d1d9" xml:space="preserve">3h12m  </text>
+<text x="595.60" y="62.24" fill="#6e7681" xml:space="preserve">started </text>
+<text x="662.80" y="62.24" fill="#c9d1d9" xml:space="preserve">06:53:20 UTC+2│</text>
+<text x="16.00" y="79.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="79.24" fill="#6e7681" xml:space="preserve">model </text>
+<text x="74.80" y="79.24" fill="#c9d1d9" xml:space="preserve">claude-opus-4-8  </text>
+<text x="217.60" y="79.24" fill="#6e7681" xml:space="preserve">tokens </text>
+<text x="276.40" y="79.24" fill="#c9d1d9" xml:space="preserve">2.1M / 5.0M  </text>
+<text x="385.60" y="79.24" fill="#6e7681" xml:space="preserve">cost </text>
+<text x="427.60" y="79.24" fill="#bc8cff" xml:space="preserve">$12.40 / $100.00</text>
+<text x="578.80" y="79.24" fill="#6e7681" xml:space="preserve">memory </text>
+<text x="637.60" y="79.24" fill="#39c5cf" xml:space="preserve">9.0 KB</text>
+<text x="704.80" y="79.24" fill="#6e7681" xml:space="preserve">idle 4s</text>
+<text x="763.60" y="79.24" fill="#c9d1d9" xml:space="preserve">  │</text>
+<text x="16.00" y="96.24" fill="#c9d1d9" xml:space="preserve">└──────────────────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="16.00" y="113.24" fill="#c9d1d9" xml:space="preserve">┌ Progress ────────────────────────────────────────────────────────────────────────────────┐</text>
+<text x="16.00" y="130.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="130.24" fill="#d29922" xml:space="preserve">█████████████████████████████████████</text>
+<text x="335.20" y="130.24" fill="#6e7681" xml:space="preserve">░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░</text>
+<text x="637.60" y="130.24" fill="#d29922" xml:space="preserve"> 2/4 goals · 50%</text>
+<text x="772.00" y="130.24" fill="#c9d1d9" xml:space="preserve"> │</text>
+<text x="16.00" y="147.24" fill="#c9d1d9" xml:space="preserve">└──────────────────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="16.00" y="164.24" fill="#c9d1d9" xml:space="preserve">┌  Goals ──────────────────────────────────────────────────────────────────────────────────┐</text>
+<text x="16.00" y="181.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="181.24" fill="#d29922" xml:space="preserve">◑ lemmas_verified     </text>
+<text x="209.20" y="181.24" fill="#c9d1d9" xml:space="preserve">cardinal   </text>
+<text x="301.60" y="181.24" fill="#d29922" xml:space="preserve">14/20      </text>
+<text x="394.00" y="181.24" fill="#3fb950" xml:space="preserve">  ▲+3   </text>
+<text x="461.20" y="181.24" fill="#6e7681" xml:space="preserve">w1   </text>
+<text x="503.20" y="181.24" fill="#58a6ff" xml:space="preserve">judge:script</text>
+<text x="604.00" y="181.24" fill="#c9d1d9" xml:space="preserve">                     │</text>
+<text x="16.00" y="198.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="198.24" fill="#6e7681" xml:space="preserve">    ↳ 14 Lean-verified supporting lemmas (sorry-free, project builds)</text>
+<text x="604.00" y="198.24" fill="#c9d1d9" xml:space="preserve">                     │</text>
+<text x="16.00" y="215.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="215.24" fill="#3fb950" xml:space="preserve">✔ paper_written       </text>
+<text x="209.20" y="215.24" fill="#c9d1d9" xml:space="preserve">binary     </text>
+<text x="301.60" y="215.24" fill="#3fb950" xml:space="preserve">yes                </text>
+<text x="461.20" y="215.24" fill="#6e7681" xml:space="preserve">w1   </text>
+<text x="503.20" y="215.24" fill="#58a6ff" xml:space="preserve">judge:llm:haiku</text>
+<text x="629.20" y="215.24" fill="#39c5cf" xml:space="preserve">  🔒</text>
+<text x="654.40" y="215.24" fill="#c9d1d9" xml:space="preserve">               │</text>
+<text x="16.00" y="232.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="232.24" fill="#6e7681" xml:space="preserve">    ↳ PAPER.md covers the approach, results, and limitations</text>
+<text x="528.40" y="232.24" fill="#c9d1d9" xml:space="preserve">                              │</text>
+<text x="16.00" y="249.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="249.24" fill="#3fb950" xml:space="preserve">✔ no_sorry            </text>
+<text x="209.20" y="249.24" fill="#c9d1d9" xml:space="preserve">binary     </text>
+<text x="301.60" y="249.24" fill="#3fb950" xml:space="preserve">yes                </text>
+<text x="461.20" y="249.24" fill="#6e7681" xml:space="preserve">w2   </text>
+<text x="503.20" y="249.24" fill="#58a6ff" xml:space="preserve">judge:script</text>
+<text x="604.00" y="249.24" fill="#d29922" xml:space="preserve">  [guard]</text>
+<text x="679.60" y="249.24" fill="#c9d1d9" xml:space="preserve">            │</text>
+<text x="16.00" y="266.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="266.24" fill="#6e7681" xml:space="preserve">    ↳ no gap, no smuggled axiom, no unsound decide anywhere in proof/</text>
+<text x="604.00" y="266.24" fill="#c9d1d9" xml:space="preserve">                     │</text>
+<text x="16.00" y="283.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="283.24" fill="#d29922" xml:space="preserve">◑ proof_verified      </text>
+<text x="209.20" y="283.24" fill="#c9d1d9" xml:space="preserve">binary     </text>
+<text x="301.60" y="283.24" fill="#d29922" xml:space="preserve">no         </text>
+<text x="461.20" y="283.24" fill="#6e7681" xml:space="preserve">w1   </text>
+<text x="503.20" y="283.24" fill="#58a6ff" xml:space="preserve">judge:script</text>
+<text x="604.00" y="283.24" fill="#c9d1d9" xml:space="preserve">                     │</text>
+<text x="16.00" y="300.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="300.24" fill="#6e7681" xml:space="preserve">    ↳ Lean does not accept the full proof yet — 6 lemmas to go</text>
+<text x="545.20" y="300.24" fill="#c9d1d9" xml:space="preserve">                            │</text>
+<text x="16.00" y="317.24" fill="#c9d1d9" xml:space="preserve">│                                                                                          │</text>
+<text x="16.00" y="334.24" fill="#c9d1d9" xml:space="preserve">└──────────────────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="16.00" y="351.24" fill="#39c5cf" xml:space="preserve">┌▸ Activity  [⏵live]  4 events ────────────────────────────────────────────────────────────┐</text>
+<text x="16.00" y="368.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="24.40" y="368.24" fill="#6e7681" xml:space="preserve">14:07:01 </text>
+<text x="100.00" y="368.24" fill="#39c5cf" xml:space="preserve">🔧</text>
+<text x="116.80" y="368.24" fill="#39c5cf" xml:space="preserve"> $ lake build</text>
+<text x="780.40" y="368.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="16.00" y="385.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="24.40" y="385.24" fill="#6e7681" xml:space="preserve">14:07:22 ↳ Build completed successfully (14 lemmas)</text>
+<text x="780.40" y="385.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="16.00" y="402.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="24.40" y="402.24" fill="#6e7681" xml:space="preserve">14:07:24 </text>
+<text x="100.00" y="402.24" fill="#bc8cff" xml:space="preserve">💬</text>
+<text x="116.80" y="402.24" fill="#bc8cff" xml:space="preserve"> lemma 14 verified — the counting argument holds</text>
+<text x="780.40" y="402.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="16.00" y="419.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="24.40" y="419.24" fill="#6e7681" xml:space="preserve">14:07:26 </text>
+<text x="100.00" y="419.24" fill="#39c5cf" xml:space="preserve">🔧</text>
+<text x="116.80" y="419.24" fill="#39c5cf" xml:space="preserve"> $ ./judges/count_lemmas.sh</text>
+<text x="780.40" y="419.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="16.00" y="436.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="780.40" y="436.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="16.00" y="453.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="780.40" y="453.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="16.00" y="470.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="780.40" y="470.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="16.00" y="487.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="780.40" y="487.24" fill="#39c5cf" xml:space="preserve">│</text>
+<text x="16.00" y="504.24" fill="#39c5cf" xml:space="preserve">└──────────────────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="16.00" y="521.24" fill="#c9d1d9" xml:space="preserve">┌ Summary   (Tab=focus · ↑↓=scroll · f=follow · q=quit) ───────────────────────────────────┐</text>
+<text x="16.00" y="538.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="538.24" fill="#3fb950" xml:space="preserve">story:  </text>
+<text x="91.60" y="538.24" fill="#c9d1d9" xml:space="preserve">Formalizing the separation: 14/20 supporting lemmas verified, paper drafted,      │</text>
+<text x="16.00" y="555.24" fill="#c9d1d9" xml:space="preserve">│soundness invariant holding — no sorry, no smuggled axioms.                               │</text>
+<text x="16.00" y="572.24" fill="#c9d1d9" xml:space="preserve">│</text>
+<text x="24.40" y="572.24" fill="#58a6ff" xml:space="preserve">recent: </text>
+<text x="91.60" y="572.24" fill="#c9d1d9" xml:space="preserve">Landed lemma 14 (the counting bound); lemma count 11→14 this session.             │</text>
+<text x="16.00" y="589.24" fill="#c9d1d9" xml:space="preserve">└──────────────────────────────────────────────────────────────────────────────────────────┘</text>
+</svg>

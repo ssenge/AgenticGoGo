@@ -32,23 +32,11 @@ it from your phone. You set the finish line; it runs to it.
 > 🔍 **New to the Ralph loop, or wondering how `agg` differs from the other tools?** See
 > **[COMPARISON.md](COMPARISON.md)** for a feature-by-feature breakdown.
 
-```
-┌─ AgenticGoGo · my-project · up 3h12m · stop: all_goals ─────────────────────┐
-│ ██████████████████████████████ Goals 7/10  70%                              │
-├─ Goals ─────────────────────────────────────────────────────────────────────┤
-│ ✔ tests_pass        cardinal   42/42      ▲+5              judge:script      │
-│ ◑ coverage          percentage 81/90%                      judge:script      │
-│ ✔ no_regressions    binary     yes        (guard)          judge:script      │
-│ ✖ code_quality      percentage 72/85%                      judge:llm:haiku   │
-├─ Activity ──────────────────────────────────────────────────────────────────┤
-│ session #7  running  idle 12s  tokens 2.1M / 5.0M                            │
-│ now:   🔧 $ Run the test suite                                               │
-│ think: implementing the remaining edge cases in the parser                  │
-├─ Summary  (q to quit) ───────────────────────────────────────────────────────┤
-│ story: Building the parser; tests green, coverage at 81%, quality lagging.   │
-│ recent: Fixed the nested-group case; the suite is fully green now.           │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/dashboard.png" alt="The agg dashboard — a live TUI showing the Info, Progress, Goals, Activity, and Summary panels for a running loop" width="820">
+</p>
+
+<p align="center"><sub><code>agg dashboard</code> — the live TUI (rendered from the real dashboard code; regenerate with <code>cargo run --example dashboard_svg</code>).</sub></p>
 
 ---
 
