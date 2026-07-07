@@ -65,44 +65,6 @@ That combination is what distinguishes it from the lighter members of the family
 [COMPARISON.md](COMPARISON.md). For *parallel-fleet* scale (20–30 agents at once) rather than a
 hardened single-machine loop, look at Gas Town instead; `agg` is deliberately sequential.
 
-## Why not just `/goal` or `/loop`?
-
-Claude Code now ships native `/goal` and `/loop`, and they're great for what they are — so it's
-worth being precise about where `agg` is different. **The difference is who decides "done."**
-
-**`/goal`** keeps one session working until a condition is met — but per the
-[official docs](https://code.claude.com/docs/en/goal), the completion check *"doesn't run
-commands or read files independently, so write the condition as something Claude's own output can
-demonstrate."* The evaluator is a small model reading the **conversation transcript**. It judges
-**what the agent said it did** — which the agent can get wrong, or overstate. Ask it to make the
-tests pass and it stops when Claude *reports* they pass.
-
-`agg`'s judges are the opposite: **`agg` runs them itself, against the filesystem, after the
-worker exits.** `cargo test` really runs; `lake build` really compiles; a script really greps the
-tree. The worker never produces the verdict, so it **cannot fake it**. That's the entire premise
-of the Ralph loop — *check the work, don't trust the narration* — and it's the one thing a
-transcript-reading evaluator structurally can't do.
-
-| | native `/goal` | `agg` |
-|---|---|---|
-| **"Done" decided by** | a model reading the chat transcript | scripts/LLM-judges **`agg` runs on the filesystem** |
-| **Runs your test suite / build as the check?** | no — reads what Claude prints into chat | yes — that's the normal case |
-| **Goals** | one free-text condition per session | many **typed** goals (bool / % / count) on one scoreboard |
-| **Regression** (a met goal breaking again) | not detected | first-class signal |
-| **Invariants** (halt the run the instant the build breaks) | prose in the condition only | native `halt_when` guard |
-| **Context per iteration** | one accumulating session | **fresh** each session (the Ralph discipline) |
-| **Ceilings that *halt*** | token spend is shown; "stop after N turns" | dollar **and** token **and** iteration ceilings that stop the loop |
-
-**`/loop`** is a *scheduler*, not a goal loop: it re-runs a prompt on an **interval** (every 5m,
-or self-paced) until you stop it — it isn't gated on a check passing. So it doesn't overlap with
-what `agg` does at all. (`/batch` is one-shot parallel codebase changes — also a different tool.)
-
-**When native is the right call:** you want zero install, a quick "keep going until it looks
-done," and you trust the agent's self-report. **When `agg` earns its keep:** the cost of a
-*fabricated* ✅ is real — formal proofs, regression-sensitive refactors, a multi-hour unattended
-run you can't watch — and you want "done" to mean *a command you control said so*, not *the agent
-said so*.
-
 ## How it works
 
 ```
