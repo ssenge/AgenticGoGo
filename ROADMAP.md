@@ -70,6 +70,38 @@ Architecture-review P0/P1 cleanup and the optional config folder:
   `stage_session`/`finalize_session`; rate-limit check moved before merge. *(Phase 0 — worktree
   isolation — still open in Tier B #11.)*
 
+### v0.0.11 — security & correctness hardening (post-review P0/P1)
+*(from the Fable-5 full review: close the fakeable-moat findings, fix the rollback-gate defects,
+and land the respectability table-stakes.)*
+- **Judge moat hardened.** The LLM judge no longer loads the worker-mutated repo's config: it runs
+  with `--setting-sources user` (only the operator's own settings/hooks, never the repo's
+  `.claude/settings.json`), and every untrusted judge input (file contents / `git diff`) is wrapped
+  in a per-invocation **nonce fence** with a de-instruction preamble, and any forged fence marker in
+  the content is neutralized — so a worker can't inject a verdict by writing to a judged file. Same
+  isolation applied to the summarizer. *(Residual: CLAUDE.md auto-discovery in the judge's cwd still
+  needs worktree isolation — Tier B #11 Phase 0.)*
+- **P≠NP demo judges made sound.** `verify_proof.sh`/`no_sorry.sh` now reject smuggled `axiom`
+  declarations and unsound escape hatches (`sorryAx`, `native_decide`/`ofReduceBool`), not just
+  `sorry`; `count_lemmas.sh` no longer counts trivial `: True` padding. The false "uncheatable"
+  comments are corrected.
+- **Rollback-gate defects fixed.** (1) A no-commit session resolves as a new `NoChanges` outcome
+  instead of entering the commit/abort path whose fallback ran `reset --hard` and destroyed a
+  worker's uncommitted work. (2) The sticky-`Regressed` clause is deleted — the gate now keys only
+  on a judge-ran per-cycle delta, so one regression no longer vetoes every future merge. (3) On a
+  rollback the engine state is snapshot-restored to base truth and stop/halt is recomputed, so the
+  loop never reports success on discarded work or poisons memory with phantom deltas; the memory
+  entry is stamped "session ROLLED BACK". (4) Judge `"diff"` inputs use `git diff HEAD`, so a staged
+  merge is scored — not the previous session's diff.
+- **Meaningful exit codes.** `agg run` returns 0 (goals-met / operator-stop), 3 (halt), 4
+  (max-sessions), 1 (error) so automation can branch on the outcome; the paused-stop path no longer
+  `process::exit`s past the Drop guards, and the max-sessions exit now publishes its finished state.
+- **`worker_args`** — pass extra `claude` flags (e.g. `--allowedTools`) to constrain the otherwise
+  unrestricted worker; the permission bypass is now documented in the README.
+- **Table-stakes.** MIT `LICENSE` file added; a `ci.yml` runs clippy `-D warnings` + the full test
+  suite (ubuntu/macos) + a Windows cross-check on every push/PR; the false Homebrew install claims
+  and the stale `HANDOFF.md` are removed; the `grep_count.sh` plugin judge is hardened against
+  option-injection and invalid-JSON-on-quote.
+
 ---
 
 ## ⬜ Open

@@ -31,6 +31,12 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
+/// Assert `agg run` ended with a specific exit code. Codes: 0 goals-met/stopped, 3 halt,
+/// 4 max-sessions, 1 hard error. (A run that reaches the session cap with goals unmet exits 4.)
+fn assert_exit(out: &std::process::Output, code: i32, combined: &str) {
+    assert_eq!(out.status.code(), Some(code), "expected exit {code}:\n{combined}");
+}
+
 /// Build a throwaway directory holding a fake `claude` on a private `bin/`, and return
 /// (project_dir, PATH-with-fake-claude-prepended). The fake claude, when invoked, writes a
 /// marker file `did_work` into the project dir and emits one stream-json result line.
@@ -315,7 +321,8 @@ fn dollar_budget_halts_the_loop() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(out.status.success(), "agg run failed:\n{combined}");
+    // a HALT is exit code 3 (a guard fired — NOT success), so automation can branch on it.
+    assert_eq!(out.status.code(), Some(3), "a HALT must exit 3:\n{combined}");
     assert!(
         combined.contains("HALT") && combined.contains("over_cost"),
         "over_cost should halt the loop after the first spend, got:\n{combined}"
@@ -393,7 +400,7 @@ fn institutional_memory_is_written_without_worker_cooperation() {
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "agg run failed:\n{combined}");
+    assert_exit(&out, 4, &combined); // goal is `impossible` → reaches the session cap unmet.
 
     // the durable memory file must exist at the PROJECT ROOT, with a folded mechanical entry.
     let mem = dir.join("AGG_MEMORY.md");
@@ -447,7 +454,7 @@ exit 0
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "agg run failed:\n{combined}");
+    assert_exit(&out, 4, &combined); // goal is `impossible` → reaches the session cap unmet.
 
     let text = fs::read_to_string(dir.join("AGG_MEMORY.md")).unwrap();
     assert!(text.contains("GOTCHA: the frobnicator"), "worker note folded into memory, got:\n{text}");
@@ -519,7 +526,7 @@ exit 0
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "agg run failed:\n{combined}");
+    assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     assert!(combined.contains("ROLLED BACK"), "the regressing merge must be rolled back:\n{combined}");
     // base must be pristine: the worker's "broke-it" line must NOT be on main.
     let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();
@@ -587,7 +594,7 @@ exit 0
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "agg run failed:\n{combined}");
+    assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     // the flake must NOT have rolled anything back — the good work is KEPT on main.
     assert!(!combined.contains("ROLLED BACK"), "a transient judge flake must NOT trigger rollback:\n{combined}");
     let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();

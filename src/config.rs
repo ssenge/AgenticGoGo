@@ -55,6 +55,14 @@ pub struct AggConfig {
     /// here instead of baking them into agg. Paths are relative to the project dir.
     #[serde(default)]
     pub prompt_includes: Vec<String>,
+    /// Extra flags appended to every worker `claude -p` invocation. The worker ALWAYS runs with
+    /// `--dangerously-skip-permissions` (a headless `-p` worker cannot answer permission prompts,
+    /// so it needs full host access — see the README "What the worker can do"). Use this to
+    /// constrain it: e.g. `worker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "src"]`, or
+    /// to add any other `claude` flag agg doesn't manage. Applied after agg's own flags, before
+    /// `-p <prompt>`. Empty by default.
+    #[serde(default)]
+    pub worker_args: Vec<String>,
     /// Per-session git branch isolation. When enabled, each worker session runs on its own
     /// branch and is merged back to the base ONLY if the worker did not veto it. See
     /// [`SessionIsolation`].

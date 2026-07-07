@@ -162,6 +162,16 @@ pub struct Engine {
     pub halt_when: Option<String>,
 }
 
+/// A snapshot of one goal's per-cycle runtime state (see [`Engine::snapshot_goal_state`]).
+#[derive(Debug, Clone)]
+pub struct GoalRuntime {
+    pub state: Lifecycle,
+    pub last_verdict: Option<crate::model::Verdict>,
+    pub ever_met: bool,
+    pub latched: bool,
+    pub recheck_sig: Option<u64>,
+}
+
 impl Engine {
     pub fn new(cfg: GoalsConfig) -> Result<Self> {
         // validate the stop/halt expressions up front so a typo fails at load,
@@ -215,6 +225,46 @@ impl Engine {
             .collect();
 
         self.conditions_with_deltas(run, deltas)
+    }
+
+    /// Snapshot every goal's per-cycle RUNTIME state (everything `apply`/`update_recheck_state`
+    /// mutate). Paired with [`restore_goal_state`] to undo a cycle's judging — used by the
+    /// rollback gate: when a staged merge is discarded, the engine must be reset to base truth so
+    /// it never reports success on discarded work, never poisons memory with phantom deltas, and
+    /// never spuriously rolls back the NEXT session (W4/W5). Captured in goal order.
+    pub fn snapshot_goal_state(&self) -> Vec<GoalRuntime> {
+        self.goals
+            .iter()
+            .map(|g| GoalRuntime {
+                state: g.state,
+                last_verdict: g.last_verdict.clone(),
+                ever_met: g.ever_met,
+                latched: g.latched,
+                recheck_sig: g.recheck_sig,
+            })
+            .collect()
+    }
+
+    /// Restore a snapshot taken by [`snapshot_goal_state`]. No-op if the shape doesn't match
+    /// (goal count changed — impossible within a run, but defensive).
+    pub fn restore_goal_state(&mut self, snap: &[GoalRuntime]) {
+        if snap.len() != self.goals.len() {
+            return;
+        }
+        for (g, s) in self.goals.iter_mut().zip(snap) {
+            g.state = s.state;
+            g.last_verdict = s.last_verdict.clone();
+            g.ever_met = s.ever_met;
+            g.latched = s.latched;
+            g.recheck_sig = s.recheck_sig;
+        }
+    }
+
+    /// Re-evaluate stop/halt against the CURRENT goal state without running any judges (no LLM
+    /// cost). Used after a rollback restores base truth, so `res.stop`/`res.halt` reflect what
+    /// actually landed on base — not the discarded merge. Returns empty deltas.
+    pub fn conditions_only(&self, run: &RunState) -> CycleResult {
+        self.conditions_with_deltas(run, Vec::new())
     }
 
     fn conditions_with_deltas(&self, run: &RunState, deltas: Vec<GoalDelta>) -> CycleResult {

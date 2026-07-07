@@ -142,7 +142,8 @@ pub fn read_block(dir: &Path, last_session: &str, inject_kb: Option<u64>) -> Str
 ///   - de-fanged of any line mimicking agg's own structural markers (entry sentinel, file
 ///     header, the READ-block banners) so a worker can't forge institutional truth or a fake
 ///     operator instruction that the next session reads as real.
-/// The caller additionally FENCES it and (on a failed session) never lets it stand alone (§7.4).
+///
+/// The caller additionally FENCES it and (on a failed session) never lets it stand alone.
 pub fn read_worker_note(dir: &Path, n: u32) -> Option<String> {
     let raw = std::fs::read_to_string(scratch_path(dir, n)).ok()?;
     let cleaned = sanitize_worker_note(&raw);

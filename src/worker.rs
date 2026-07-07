@@ -67,6 +67,12 @@ pub fn run_session(
     if let Some(id) = resume_id {
         command.arg("--resume").arg(id);
     }
+    // Operator-supplied extra flags (agg.yaml `worker_args`) — e.g. --allowedTools/--add-dir to
+    // constrain the otherwise-unrestricted worker, or any claude flag agg doesn't manage. Applied
+    // after agg's own flags, before -p, so they can extend but not clobber the invocation shape.
+    for a in &cfg.worker_args {
+        command.arg(a);
+    }
     // Own process group (pgid == pid) so the watchdog can SIGKILL the WHOLE tree —
     // the worker AND every tool subprocess it spawned. A bare kill(pid) leaves
     // orphan grandchildren (a runaway build/sleep) running, which is exactly the

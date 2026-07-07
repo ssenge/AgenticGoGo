@@ -238,5 +238,5 @@ To stop / steer:
 The loop stops when:  <stop_when>
 ```
 
-(If `agg` is not on PATH, tell them to install it — Homebrew/GitHub Releases — since the
-plugin ships only these skills, not the CLI binary.)
+(If `agg` is not on PATH, tell them to install it — the install script or GitHub Releases, see
+the repo README — since the plugin ships only these skills, not the CLI binary.)

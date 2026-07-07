@@ -11,6 +11,7 @@ use agg::{bus, config, dashboard, detach, doctor, engine, init, judge, loop_, pr
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(name = "agg", version, about = "AgenticGoGo — a generic agent-loop harness")]
@@ -168,7 +169,21 @@ impl Cli {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run_cli() {
+        Ok(code) => code,
+        Err(e) => {
+            // hard error (a `?` path): print the chain and exit 1 — distinct from the loop's
+            // outcome codes (0 goals-met/stopped, 3 halt, 4 max-sessions).
+            eprintln!("error: {e:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// The real CLI body. `agg run` maps its [`loop_::RunOutcome`] to an exit code so automation can
+/// branch on the result; every other subcommand exits 0 on success (errors bubble up as 1).
+fn run_cli() -> Result<ExitCode> {
     let cli = Cli::parse();
     let p = cli.paths();
 
@@ -239,16 +254,19 @@ fn main() -> Result<()> {
             if *detach {
                 // Validate the config NOW (in the foreground) so a typo fails loudly here
                 // rather than silently in a detached child the user can't see. Then spawn
-                // the loop detached and return — the child re-runs `agg run` for real.
+                // the loop detached and return — the child re-runs `agg run` for real. A
+                // detached run returns before the outcome exists, so consumers poll
+                // `agg status --json` / `agg history --json` for the end reason instead.
                 let _ = config::AggConfig::load(&p.config)?;
                 let _ = config::GoalsConfig::load(&p.goals)
                     .and_then(engine::Engine::new)?;
-                return detach::spawn_detached(&p.dir);
+                return detach::spawn_detached(&p.dir).map(|_| ExitCode::SUCCESS);
             }
             let agg_cfg = config::AggConfig::load(&p.config)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
             let eng = engine::Engine::new(goals_cfg)?;
-            loop_::run(agg_cfg, eng, &p.dir, &p.config_base, *max_sessions)
+            let outcome = loop_::run(agg_cfg, eng, &p.dir, &p.config_base, *max_sessions)?;
+            return Ok(ExitCode::from(outcome.exit_code()));
         }
         Cmd::Dashboard { once } => {
             if *once {
@@ -278,6 +296,9 @@ fn main() -> Result<()> {
             send_to_bus(&p.dir, cmd)
         }
     }
+    // Every non-`run` subcommand yields `()` on success → exit 0. `agg run` returns its outcome
+    // code earlier via an explicit `return`, so it never reaches here.
+    .map(|()| ExitCode::SUCCESS)
 }
 
 /// Queue one steering command onto a running loop's bus. Shared by `agg send …` and

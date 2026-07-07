@@ -17,22 +17,49 @@ use anyhow::Result;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// How the loop ended — mapped to a process exit code in `main` so automation can branch on the
+/// outcome (`agg run && deploy` must NOT proceed after a HALT). See [`RunOutcome::exit_code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The success stop condition was met (or was already satisfied at launch).
+    GoalsMet,
+    /// A guard fired (invariant regressed, budget/cost/iteration/wall ceiling) — NOT success.
+    Halt,
+    /// The `--max-sessions` cap was reached with goals not all met.
+    MaxSessions,
+    /// The operator stopped the run (`agg stop`, incl. while paused).
+    Stopped,
+}
+
+impl RunOutcome {
+    /// The process exit code. 0 = success; non-zero = "did not reach the goal", with distinct
+    /// codes so scripts can tell WHY. Avoids clap's usage-error code 2. Hard errors (the `?`
+    /// paths) are surfaced by `main` as 1, separately.
+    pub fn exit_code(self) -> u8 {
+        match self {
+            RunOutcome::GoalsMet => 0,
+            RunOutcome::Stopped => 0, // an operator stop is a clean, intended end
+            RunOutcome::Halt => 3,
+            RunOutcome::MaxSessions => 4,
+        }
+    }
+}
+
 /// Block until a `resume` or `stop` command arrives on the bus (poll every 2s).
-/// A `stop` returns so the caller's next drain sees it and exits.
-fn wait_for_resume(bus: &Bus) {
+/// Returns `None` on resume, `Some(reason)` if a `stop` arrived while paused — the caller then
+/// takes its normal graceful-stop path so the Drop guards (on_stop hooks, run.pid, ledger) run.
+fn wait_for_resume(bus: &Bus) -> Option<String> {
     loop {
         std::thread::sleep(Duration::from_secs(2));
         for cmd in bus.drain() {
             match cmd {
                 Command::Resume => {
                     eprintln!("  [bus] resume → continuing");
-                    return;
+                    return None;
                 }
                 Command::Stop { reason } => {
                     eprintln!("  [bus] stop while paused → {reason}");
-                    // re-queue a stop is not possible (drained); signal via a note file
-                    let _ = bus.emit("stop", &reason, "paused-stop");
-                    std::process::exit(0);
+                    return Some(reason);
                 }
                 other => eprintln!("  [bus] (paused) ignoring {other:?} until resume"),
             }
@@ -72,7 +99,7 @@ pub fn run(
     dir: &Path,
     config_base: &Path,
     max_sessions: u32,
-) -> Result<()> {
+) -> Result<RunOutcome> {
     // ── double-run guard (BOTH foreground and detached) ──────────────────────────────────
     // Refuse to start a second loop over the same project: two loops would launch competing
     // workers that fight over the repo, and `agg stop` could only target one. `live_pid`
@@ -240,7 +267,7 @@ pub fn run(
         ledger.update(0, 0, gm, gt);
         ledger.finish(now_epoch(), &format!("halt-at-baseline:{}", pre.halt_reason.unwrap_or_default()));
         publish!();
-        return Ok(());
+        return Ok(RunOutcome::Halt);
     }
     if pre.stop {
         eprintln!("✔ stop condition already satisfied at launch — nothing to do.");
@@ -251,7 +278,7 @@ pub fn run(
         ledger.update(0, 0, gm, gt);
         ledger.finish(now_epoch(), "already-satisfied");
         publish!();
-        return Ok(());
+        return Ok(RunOutcome::GoalsMet);
     }
 
     // summarizer state: the rolling cumulative summary + last-summary timestamp.
@@ -309,10 +336,16 @@ pub fn run(
     loop {
         if max_sessions != 0 && session >= max_sessions {
             eprintln!("→ reached max_sessions={max_sessions}; stopping (goals not all met).");
+            // set the finished state + publish so `agg status`/the dashboard reflect the outcome
+            // (previously this path broke without updating either — a never-"finished" run).
             let (gm, gt) = eng.tally();
+            dash.phase = "done".into();
+            dash.finished = true;
+            dash.finish_reason = format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)");
             ledger.update(session, tokens_spent, gm, gt);
             ledger.finish(now_epoch(), "max-sessions");
-            break;
+            publish!();
+            return Ok(RunOutcome::MaxSessions);
         }
 
         // ── drain the bus at the session boundary; apply steering commands ──
@@ -332,7 +365,21 @@ pub fn run(
                     }
                     Command::Pause => {
                         eprintln!("  [bus] pause → waiting for resume/stop…");
-                        wait_for_resume(bus);
+                        // A stop-while-paused returns the reason here so we take the SAME graceful
+                        // stop path as an unpaused stop — running the Drop guards (on_stop hooks,
+                        // run.pid cleanup, ledger finalize). (Previously this branch called
+                        // std::process::exit(0), which skipped all of them.)
+                        if let Some(reason) = wait_for_resume(bus) {
+                            eprintln!("  [bus] stop → {reason}");
+                            dash.phase = "done".into();
+                            dash.finished = true;
+                            dash.finish_reason = format!("stopped via bus: {reason}");
+                            let (gm, gt) = eng.tally();
+                            ledger.update(session, tokens_spent, gm, gt);
+                            ledger.finish(now_epoch(), "stopped");
+                            publish!();
+                            return Ok(RunOutcome::Stopped);
+                        }
                     }
                     Command::Resume => { /* a stray resume with no pause: ignore */ }
                     Command::Stop { reason } => {
@@ -344,7 +391,7 @@ pub fn run(
                         ledger.update(session, tokens_spent, gm, gt);
                         ledger.finish(now_epoch(), "stopped");
                         publish!();
-                        return Ok(());
+                        return Ok(RunOutcome::Stopped);
                     }
                     Command::Note { text } => eprintln!("  [bus] note: {text}"),
                 }
@@ -527,21 +574,29 @@ pub fn run(
 
         // 3) run judges, fold verdicts, evaluate conditions (incl. budget/wall guards). When a
         //    merge is staged, the judges re-test the MERGED (uncommitted) working tree — the gate.
+        //    Snapshot goal state FIRST: if the gate rolls the merge back, we restore this so the
+        //    engine reflects base truth and never reports success on discarded work (W5).
         eprintln!("  running judges…");
         dash.phase = "judging".into();
         publish!();
-        let res = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total, cost_spent, session));
+        let pre_cycle_goals = eng.snapshot_goal_state();
+        let mut res = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total, cost_spent, session));
         eprint!("{}", indent(&eng.scoreboard()));
         publish!();
 
-        // ── rollback gate: keep the staged merge unless it caused a regression ────────────────
-        // A goal REGRESSED if a delta went from a met state to a not-met state this cycle AND the
+        // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
+        // A goal REGRESSED this cycle iff a delta went from a met state to a not-met state AND the
         // judge actually RAN. The "judge ran" gate is LOAD-BEARING: a judge that merely couldn't
         // run (rate-limited/timeout/spawn-fail/bad-JSON → Verdict::failed with error:Some →
         // Goal::apply marks a previously-met goal Regressed) must NOT count as a regression, or a
-        // transient flake would discard a good session's work. Both the delta clause AND the
-        // engine-state clause are error-gated (by the goal's current verdict) for exactly this
-        // reason. Only a staged merge is finalized here.
+        // transient flake would discard a good session's work.
+        //
+        // We rely ONLY on the per-cycle delta — NOT on `g.state == Regressed`. `Regressed` is
+        // sticky (recomputed every cycle while unmet), so an engine-state clause vetoed every
+        // future merge after one regression and cascaded after a rollback (W4). The delta clause,
+        // gated on judge-ran, is necessary and sufficient once engine state is kept base-true
+        // (which the rollback branch below now guarantees).
+        let mut rolled_back = false;
         if let Some((br, crate::git::StagedSession::Staged)) = &staged {
             let judge_ran = |id: &str| {
                 eng.goals
@@ -555,13 +610,28 @@ pub fn run(
                 d.before_state == crate::model::Lifecycle::Met
                     && d.after_state != crate::model::Lifecycle::Met
                     && judge_ran(&d.id)
-            }) || eng.goals.iter().any(|g| {
-                // a goal the engine itself flagged Regressed this cycle, with a judge that ran.
-                g.state == crate::model::Lifecycle::Regressed
-                    && g.last_verdict.as_ref().map(|v| v.error.is_none()).unwrap_or(false)
             });
             let keep = !regressed;
             crate::git::finalize_session(dir, br, session, keep);
+            if !keep {
+                // W5: the merged tree was discarded. Restore engine state to pre-cycle (base)
+                // truth so we never (a) report success on discarded work, (b) latch a once_met
+                // goal that was only met on the discarded tree, or (c) show a phantom Met→Regressed
+                // next cycle that would roll back the NEXT session. Then recompute stop/halt
+                // against base — cheaply, no judges re-run — and blank the deltas so the memory
+                // fold below records the regression fact without phantom "met" deltas.
+                rolled_back = true;
+                eng.restore_goal_state(&pre_cycle_goals);
+                eprint!("{}", indent(&eng.scoreboard()));
+                let recomputed =
+                    eng.conditions_only(&run_state(tokens_spent, budget_total, cost_spent, session));
+                res = crate::engine::CycleResult {
+                    stop: recomputed.stop,
+                    halt: recomputed.halt,
+                    halt_reason: recomputed.halt_reason,
+                    deltas: Vec::new(),
+                };
+            }
             publish!();
         }
 
@@ -607,10 +677,18 @@ pub fn run(
             // the mechanical fact is ALWAYS recorded — the worker note (if any) is appended as a
             // clearly-fenced, lower-trust hint, never allowed to stand alone (so a poisoned or
             // over-confident note can't masquerade as the authoritative session record).
-            let mech = crate::memory::mechanical_note(
+            let mut mech = crate::memory::mechanical_note(
                 outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
                 outcome.duration_secs, &scoreboard, &res.deltas,
             );
+            // W5: if the merge was rolled back, the work is NOT on base — say so, so the durable
+            // record (which the worker is told to trust) can't be read as "this landed".
+            if rolled_back {
+                mech = format!(
+                    "session ROLLED BACK — a goal regressed on the staged merge; the work below is \
+                     NOT on the base branch (kept on the session branch for inspection).\n{mech}"
+                );
+            }
             // 3a: optional worker note (sanitized + size-capped + de-fanged in read_worker_note);
             //     here we additionally FENCE it so its body can never be read as live markdown.
             let worker_note = crate::memory::read_worker_note(dir, session);
@@ -654,7 +732,7 @@ pub fn run(
             ledger.update(session, tokens_spent, gm, gt);
             ledger.finish(now_epoch(), &format!("halt:{reason}"));
             publish!();
-            break;
+            return Ok(RunOutcome::Halt);
         }
         if res.stop {
             let (mt, tt) = eng.tally();
@@ -665,10 +743,9 @@ pub fn run(
             ledger.update(session, tokens_spent, mt, tt);
             ledger.finish(now_epoch(), "goals-met");
             publish!();
-            break;
+            return Ok(RunOutcome::GoalsMet);
         }
     }
-    Ok(())
 }
 
 fn indent(s: &str) -> String {

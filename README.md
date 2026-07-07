@@ -485,6 +485,24 @@ prompt_includes:
 A failing hook is logged, never fatal. `background` processes are spawned in the loop's
 reaping domain, so a `--watch` can't leak (see below).
 
+**What the worker can do — and constraining it.** Each session runs
+`claude -p --dangerously-skip-permissions`: a headless `-p` worker can't answer permission
+prompts, so it needs full tool access to make progress — which means **the worker runs with
+your user's full host access** (it can read/write/execute anything you can). agg's rails
+(watchdog, budget/cost ceilings, git isolation, the rollback gate) guard the *loop*; they do
+not sandbox the worker itself. For unattended overnight runs, prefer running agg in a
+container/VM you're willing to hand to an autonomous agent.
+
+To narrow what the worker may do, pass extra `claude` flags via `worker_args` in `agg.yaml`:
+
+```yaml
+worker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "src"]   # or --disallowedTools, etc.
+```
+
+These are appended to every worker invocation (the judge and summarizer sessions run
+separately, without `--dangerously-skip-permissions`, and load only *your* settings — never the
+worker-mutated repo's `.claude/` config).
+
 **No orphaned compute** *(macOS + Linux)*. The worker runs in its own process group; when a
 session ends (or the loop stops), agg sweeps the whole group and kills any straggler — even a
 `nohup … &` or `--watch` child that escaped (POSIX process groups, no fragile env-reading).

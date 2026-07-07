@@ -113,21 +113,33 @@ pub fn stage_merge(dir: &Path, branch: &str) -> StagedMerge {
 }
 
 /// Commit a previously-`stage_merge`d merge (the keep path of the rollback gate). Returns true on
-/// success. NOTE: a `--no-commit` merge that fast-forwards or is empty leaves nothing staged; we
-/// pass `--no-ff`/`--allow-empty` so the merge commit is always created for a uniform history.
+/// success. A real staged `--no-ff --no-commit` merge always leaves `MERGE_HEAD` + a staged tree,
+/// so a plain commit succeeds; the no-commits-to-merge case is filtered out earlier by
+/// `stage_session` (→ `NoChanges`) and never reaches here.
 pub fn commit_merge(dir: &Path, message: &str) -> bool {
     git(dir, &["commit", "--no-edit", "-m", message]).0
 }
 
+/// True when `branch` has no commits beyond `base` (`git rev-list --count base..branch == 0`) — a
+/// session where the worker committed nothing. Under the gate, merging such a branch is a no-op
+/// (`Already up to date`) that leaves NOTHING staged, so it must be handled as `NoChanges` rather
+/// than a stageable merge (otherwise `commit_merge` fails and the old fallback ran `reset --hard`,
+/// which would destroy any uncommitted work in the tree).
+pub fn branch_has_no_new_commits(dir: &Path, base: &str, branch: &str) -> bool {
+    let (ok, out, _) = git(dir, &["rev-list", "--count", &format!("{base}..{branch}")]);
+    ok && out.trim() == "0"
+}
+
 /// Abort/roll back a staged (uncommitted) merge — the rollback path of the gate, used when the
 /// post-merge re-test regresses. Restores the working tree + index to the pre-merge base state.
-/// `merge --abort` handles the normal staged-merge case; `reset --hard HEAD` is a belt-and-braces
-/// fallback if the merge state was already resolved (e.g. an empty/ff merge with nothing to abort).
+///
+/// A `--no-ff --no-commit` merge that actually staged anything always leaves `MERGE_HEAD`, so
+/// `git merge --abort` is sufficient and precise. We deliberately do NOT fall back to
+/// `reset --hard HEAD`: the only way to reach that fallback is the nothing-was-staged case, where
+/// a hard reset can ONLY destroy unrelated uncommitted work in the tree (the exact W3 data-loss
+/// bug). The no-op case is filtered earlier by `stage_session` → `NoChanges`, so it never gets here.
 pub fn abort_merge(dir: &Path) -> bool {
-    if git(dir, &["merge", "--abort"]).0 {
-        return true;
-    }
-    git(dir, &["reset", "--hard", "HEAD"]).0
+    git(dir, &["merge", "--abort"]).0
 }
 
 /// Delete a branch unconditionally (-D). Used to discard a vetoed/merged session branch.
@@ -260,6 +272,10 @@ pub enum StagedSession {
     Vetoed,
     /// Merge couldn't apply — already aborted, branch kept for inspection, base unchanged.
     Conflict,
+    /// The worker committed nothing (no commits beyond base) — there is nothing to stage, judge,
+    /// or commit. The branch is discarded and base is left exactly as-is. Treated like `Vetoed`:
+    /// no merge, no rollback, no `finalize_session` call.
+    NoChanges,
     /// Merge applied and is STAGED (uncommitted). The loop must judge the merged tree, then call
     /// `finalize_session` to commit (keep) or roll back. `branch` carried for the keep/discard.
     Staged,
@@ -280,6 +296,14 @@ pub fn stage_session(dir: &Path, base: &str, branch: &str, red_file: &str) -> St
         remove_file(dir, red_file);
         delete_branch(dir, branch);
         return StagedSession::Vetoed;
+    }
+    // No commits beyond base → nothing to merge. Merging would be a no-op that stages nothing,
+    // so we must NOT enter the stage/commit path (commit would fail and the old rollback fallback
+    // ran `reset --hard`, destroying any uncommitted work — W3). Discard the empty branch cleanly.
+    if branch_has_no_new_commits(dir, base, branch) {
+        eprintln!("  [iso] session made no commits → discarding empty branch {branch}, base unchanged");
+        delete_branch(dir, branch);
+        return StagedSession::NoChanges;
     }
     match stage_merge(dir, branch) {
         StagedMerge::Staged => StagedSession::Staged,
@@ -372,6 +396,9 @@ mod tests {
         git_t(&d, &["init", "-q", "-b", "main"]);
         git_t(&d, &["config", "user.email", "t@t"]);
         git_t(&d, &["config", "user.name", "t"]);
+        // isolate from the contributor's global git config (gpgsign/hooks would flake commits).
+        git_t(&d, &["config", "commit.gpgsign", "false"]);
+        git_t(&d, &["config", "core.hooksPath", "/dev/null"]);
         std::fs::write(d.join("f.txt"), "base\n").unwrap();
         git_t(&d, &["add", "-A"]);
         git_t(&d, &["commit", "-qm", "base"]);
@@ -432,6 +459,52 @@ mod tests {
         let staged = stage_session(&d, "main", "agg/p/session-1", ".agg_red");
         assert_eq!(staged, StagedSession::Vetoed);
         assert!(!std::fs::read_to_string(d.join("f.txt")).unwrap().contains("session-work"), "veto: no merge");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// W3: a session whose worker committed NOTHING must resolve as `NoChanges` — never enter the
+    /// stage/commit path (whose old failure fallback ran `reset --hard`, destroying uncommitted
+    /// work). Base is left exactly as-is and the empty branch is discarded.
+    #[test]
+    fn empty_session_resolves_as_no_changes_and_preserves_uncommitted_work() {
+        let d = std::env::temp_dir().join(format!("agg-git-{}-nochanges", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git_t(&d, &["init", "-q", "-b", "main"]);
+        git_t(&d, &["config", "user.email", "t@t"]);
+        git_t(&d, &["config", "user.name", "t"]);
+        git_t(&d, &["config", "commit.gpgsign", "false"]);
+        git_t(&d, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(d.join("f.txt"), "base\n").unwrap();
+        git_t(&d, &["add", "-A"]);
+        git_t(&d, &["commit", "-qm", "base"]);
+        // a session branch off base with NO new commits (worker did nothing).
+        git_t(&d, &["branch", "agg/p/session-1"]);
+        // the operator (or a killed worker) has some UNCOMMITTED work in the tree.
+        std::fs::write(d.join("precious.txt"), "do not delete me\n").unwrap();
+
+        let staged = stage_session(&d, "main", "agg/p/session-1", ".agg_red");
+        assert_eq!(staged, StagedSession::NoChanges, "no-commit session must be NoChanges");
+        // the uncommitted work must survive (the old reset --hard would have wiped it).
+        assert_eq!(
+            std::fs::read_to_string(d.join("precious.txt")).unwrap(),
+            "do not delete me\n",
+            "uncommitted work must be preserved on a no-op session"
+        );
+        // the empty branch is gone.
+        let branches = Command::new("git").args(["branch", "--list", "agg/p/session-1"]).current_dir(&d).output().unwrap();
+        assert!(!String::from_utf8_lossy(&branches.stdout).contains("session-1"), "empty branch discarded");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn branch_has_no_new_commits_detects_empty() {
+        let d = repo_with_session_branch("nonew");
+        // session-1 HAS a commit beyond main.
+        assert!(!branch_has_no_new_commits(&d, "main", "agg/p/session-1"));
+        // a fresh branch off main has none.
+        git_t(&d, &["branch", "agg/p/session-2"]);
+        assert!(branch_has_no_new_commits(&d, "main", "agg/p/session-2"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

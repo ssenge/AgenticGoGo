@@ -3,3 +3,5 @@
 examples/**/.progress
 examples/**/AGG_RESUME.md
 .agg/
+# internal scratch / working notes, never public
+HANDOFF.md
