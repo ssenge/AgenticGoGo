@@ -413,6 +413,37 @@ fn institutional_memory_is_written_without_worker_cooperation() {
 }
 
 #[test]
+fn lifetime_session_is_published_to_state_json() {
+    // Regression for the publish!-macro bug: `lifetime_session` was never copied into state.json,
+    // so `agg status`/the dashboard always showed "#0 lifetime" and the "(of N)" total never
+    // rendered. A run that completes 2 sessions must publish lifetime_session >= 2.
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    write(dir, "judges/never.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    chmod_x(&dir.join("judges/never.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: impossible\n    type: binary\n    judge: { kind: script, cmd: \"./judges/never.sh\" }\nstop_when: impossible\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: lifeproj\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n",
+    );
+    write(dir, "AGG_RESUME.md", "do work\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined);
+
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join(".agg/state.json")).unwrap()).unwrap();
+    let lifetime = state["lifetime_session"].as_u64().unwrap_or(0);
+    assert!(lifetime >= 2, "lifetime_session must be published (was the publish! bug); got {lifetime}\nstate: {state}");
+}
+
+#[test]
 fn worker_written_memory_note_is_folded() {
     // #3 Tier 3a: when the worker writes .agg/memory/session-<N>.md on a clean session, agg folds
     // that note (preferred over the mechanical fallback) into the durable AGG_MEMORY.md.

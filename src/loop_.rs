@@ -208,27 +208,24 @@ pub fn run(
             dash.goals_met = m;
             dash.goals_total = t;
             dash.goals = DashboardState::goals_from_engine(&eng, &dash.goals);
-            // fold the loop-owned fields into the shared snapshot; leave the
-            // worker-owned live fields (now/think/recent/idle_secs) untouched.
+            // Publish ALL loop-owned fields by assigning `dash` wholesale, preserving only the
+            // worker-owned live fields (now/think/recent/idle_secs) that the reader thread writes
+            // between publishes. Inverting the copy this way means a new loop-owned field is
+            // published automatically instead of being silently dropped (the old hand-copied list
+            // had already lost `lifetime_session`, so `agg status`/the dashboard showed "#0
+            // lifetime" — that class of bug is now structurally impossible).
             live.update(|s| {
-                s.project = dash.project.clone();
-                s.model = dash.model.clone();
-                s.stop_when = dash.stop_when.clone();
-                s.halt_when = dash.halt_when.clone();
-                s.tokens_spent = dash.tokens_spent;
-                s.budget_total = dash.budget_total;
-                s.cost_spent = dash.cost_spent;
-                s.cost_limit = dash.cost_limit;
-                s.session = dash.session;
-                s.phase = dash.phase.clone();
-                s.goals_met = dash.goals_met;
-                s.goals_total = dash.goals_total;
-                s.goals = dash.goals.clone();
-                s.summary_cumulative = dash.summary_cumulative.clone();
-                s.summary_windowed = dash.summary_windowed.clone();
-                s.memory_bytes = dash.memory_bytes;
-                s.finished = dash.finished;
-                s.finish_reason = dash.finish_reason.clone();
+                let now = std::mem::take(&mut s.now);
+                let think = std::mem::take(&mut s.think);
+                let recent = std::mem::take(&mut s.recent);
+                let idle_secs = s.idle_secs;
+                let seq = s.seq; // monotonic; `publish()` bumps it — don't reset from stale `dash`
+                *s = dash.clone();
+                s.now = now;
+                s.think = think;
+                s.recent = recent;
+                s.idle_secs = idle_secs;
+                s.seq = seq;
             });
         }};
     }
