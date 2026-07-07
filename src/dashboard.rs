@@ -27,7 +27,7 @@ use std::path::Path;
 use std::time::Duration;
 
 /// Which scrollable pane currently has the keyboard focus.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Goals,
     Activity,
@@ -93,39 +93,56 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, dir: &Path) -> Result<()> {
         // poll input ~4x/sec; repaint regardless to pick up state changes.
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(k) = event::read()? {
-                match k.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Tab => {
-                        ui.focus = match ui.focus {
-                            Focus::Goals => Focus::Activity,
-                            Focus::Activity => Focus::Goals,
-                        };
-                    }
-                    KeyCode::Char('f') => {
-                        ui.activity_follow = !ui.activity_follow;
-                    }
-                    KeyCode::Up => scroll(&mut ui, -1),
-                    KeyCode::Down => scroll(&mut ui, 1),
-                    KeyCode::PageUp => scroll(&mut ui, -10),
-                    KeyCode::PageDown => scroll(&mut ui, 10),
-                    KeyCode::Char('g') | KeyCode::Home => match ui.focus {
-                        Focus::Goals => ui.goals_scroll = 0,
-                        Focus::Activity => {
-                            ui.activity_scroll = 0;
-                            ui.activity_follow = false;
-                        }
-                    },
-                    KeyCode::Char('G') | KeyCode::End => match ui.focus {
-                        Focus::Goals => ui.goals_scroll = u16::MAX, // clamped at draw time
-                        Focus::Activity => ui.activity_follow = true,
-                    },
-                    _ => {}
+                if handle_key(&mut ui, k.code) == KeyAction::Quit {
+                    break;
                 }
             }
         }
         // if the run finished, keep showing the final frame but allow q to exit.
     }
     Ok(())
+}
+
+/// Whether a handled key asked the dashboard to quit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAction {
+    Continue,
+    Quit,
+}
+
+/// Apply one keypress to the UI state. Pure over `(ui, code)` — no terminal I/O — so the whole
+/// interaction model (focus switching, scrolling, follow-mode, quit) is unit-testable without a
+/// real TTY. The event loop just reads keys and calls this.
+fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => return KeyAction::Quit,
+        KeyCode::Tab => {
+            ui.focus = match ui.focus {
+                Focus::Goals => Focus::Activity,
+                Focus::Activity => Focus::Goals,
+            };
+        }
+        KeyCode::Char('f') => {
+            ui.activity_follow = !ui.activity_follow;
+        }
+        KeyCode::Up => scroll(ui, -1),
+        KeyCode::Down => scroll(ui, 1),
+        KeyCode::PageUp => scroll(ui, -10),
+        KeyCode::PageDown => scroll(ui, 10),
+        KeyCode::Char('g') | KeyCode::Home => match ui.focus {
+            Focus::Goals => ui.goals_scroll = 0,
+            Focus::Activity => {
+                ui.activity_scroll = 0;
+                ui.activity_follow = false;
+            }
+        },
+        KeyCode::Char('G') | KeyCode::End => match ui.focus {
+            Focus::Goals => ui.goals_scroll = u16::MAX, // clamped at draw time
+            Focus::Activity => ui.activity_follow = true,
+        },
+        _ => {}
+    }
+    KeyAction::Continue
 }
 
 /// Apply a relative scroll to the focused pane. Scrolling the Activity pane up
@@ -894,5 +911,71 @@ mod tests {
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         // the newest event must be visible; an early one scrolled off.
         assert!(text.contains("event 39"));
+    }
+
+    // ── interaction model: handle_key is pure, so every keypress is unit-testable ──────────────
+
+    #[test]
+    fn q_and_esc_quit() {
+        let mut ui = DashboardUi::default();
+        assert_eq!(handle_key(&mut ui, KeyCode::Char('q')), KeyAction::Quit);
+        assert_eq!(handle_key(&mut ui, KeyCode::Esc), KeyAction::Quit);
+        // a non-quit key continues.
+        assert_eq!(handle_key(&mut ui, KeyCode::Char('x')), KeyAction::Continue);
+    }
+
+    #[test]
+    fn tab_toggles_focus_between_goals_and_activity() {
+        let mut ui = DashboardUi::default(); // starts on Activity
+        assert_eq!(ui.focus, Focus::Activity);
+        handle_key(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.focus, Focus::Goals);
+        handle_key(&mut ui, KeyCode::Tab);
+        assert_eq!(ui.focus, Focus::Activity);
+    }
+
+    #[test]
+    fn f_toggles_activity_follow() {
+        let mut ui = DashboardUi::default(); // follow = true
+        handle_key(&mut ui, KeyCode::Char('f'));
+        assert!(!ui.activity_follow);
+        handle_key(&mut ui, KeyCode::Char('f'));
+        assert!(ui.activity_follow);
+    }
+
+    #[test]
+    fn scrolling_activity_up_drops_follow_then_end_restores_it() {
+        let mut ui = DashboardUi::default(); // Activity focus, follow = true
+        handle_key(&mut ui, KeyCode::Up); // look back → leave follow
+        assert!(!ui.activity_follow, "scrolling up must leave follow-mode");
+        assert_eq!(ui.activity_scroll, 0, "already at top, clamped at 0");
+        // scroll down a few, then G/End re-pins to the newest.
+        handle_key(&mut ui, KeyCode::PageDown);
+        assert_eq!(ui.activity_scroll, 10);
+        handle_key(&mut ui, KeyCode::Char('G'));
+        assert!(ui.activity_follow, "End/G must re-enable follow on the Activity pane");
+    }
+
+    #[test]
+    fn goals_pane_scrolls_and_clamps_at_top() {
+        let mut ui = DashboardUi::default();
+        handle_key(&mut ui, KeyCode::Tab); // focus Goals
+        handle_key(&mut ui, KeyCode::Down);
+        handle_key(&mut ui, KeyCode::Down);
+        assert_eq!(ui.goals_scroll, 2);
+        handle_key(&mut ui, KeyCode::PageUp); // -10, clamped at 0
+        assert_eq!(ui.goals_scroll, 0, "scroll must never go negative");
+        handle_key(&mut ui, KeyCode::Char('G')); // jump to bottom (clamped at draw time)
+        assert_eq!(ui.goals_scroll, u16::MAX);
+        handle_key(&mut ui, KeyCode::Char('g')); // back to top
+        assert_eq!(ui.goals_scroll, 0);
+    }
+
+    #[test]
+    fn scroll_targets_only_the_focused_pane() {
+        let mut ui = DashboardUi::default(); // Activity focus
+        handle_key(&mut ui, KeyCode::Down);
+        assert_eq!(ui.activity_scroll, 1);
+        assert_eq!(ui.goals_scroll, 0, "goals pane untouched while Activity is focused");
     }
 }
