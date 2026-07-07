@@ -186,10 +186,15 @@ pub struct Budget {
     pub total: Option<u64>,
 }
 
-/// Dollar-spend ceiling (`cost.total`). Distinct from [`Budget`] (tokens): this is the
-/// real money cap. We don't price anything ourselves — Claude reports `total_cost_usd`
-/// on each session's result event (correctly per-model, `[1m]`-variant- and cache-aware)
-/// and we just sum it. The `over_cost` stop term trips once the sum exceeds `total`.
+/// Dollar-spend ceiling (`cost.total`). Distinct from [`Budget`] (tokens). We don't price
+/// anything ourselves — Claude reports `total_cost_usd` on each session's result event
+/// (correctly per-model, `[1m]`-variant- and cache-aware) and we just sum it. The `over_cost`
+/// stop term trips once the sum exceeds `total`.
+///
+/// NOTE: `total_cost_usd` is the API-EQUIVALENT list price of the work, not necessarily money
+/// billed. On a Max/Pro **subscription** the user is not charged per token, so this is a usage
+/// proxy — the dashboard/`agg status` label it `(API-eq)`. It's still a valid runaway ceiling
+/// (relative spend); users wanting a plan-agnostic cap should use `over_budget`/`over_iterations`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Cost {
     /// total dollar ceiling; `None` = unlimited

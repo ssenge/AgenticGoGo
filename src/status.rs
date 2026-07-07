@@ -48,14 +48,15 @@ fn render_state(s: &DashboardState) -> String {
     } else {
         out.push_str(&format!("tokens {} (no budget)\n", s.tokens_spent));
     }
-    // cost line — shown whenever a dollar cap is set or any spend is recorded, so a
-    // token-only run stays uncluttered but a $-capped run always sees its money.
+    // usage line — the API-equivalent price Claude reports (`total_cost_usd`), NOT a subscription
+    // charge; on a Max/Pro plan it's a usage proxy, not money billed. Shown whenever a dollar cap
+    // is set or any spend is recorded, so a token-only run stays uncluttered.
     match s.cost_limit {
         Some(limit) => out.push_str(&format!(
-            "cost   ${:.2} / ${:.2} ({:.0}%)\n",
+            "usage  ${:.2} / ${:.2} ({:.0}%, API-equiv)\n",
             s.cost_spent, limit, pctf(s.cost_spent, limit)
         )),
-        None if s.cost_spent > 0.0 => out.push_str(&format!("cost   ${:.2} (no cap)\n", s.cost_spent)),
+        None if s.cost_spent > 0.0 => out.push_str(&format!("usage  ${:.2} (API-equiv, no cap)\n", s.cost_spent)),
         None => {}
     }
     // memory line — shown only once the durable file has content, so a fresh run stays clean.
@@ -191,7 +192,7 @@ mod tests {
         assert!(out.contains("session #7 (#11 lifetime)"));
         assert!(out.contains("up 3h12m"));
         assert!(out.contains("tokens 2100000 / 5000000 (42%)"));
-        assert!(out.contains("cost   $1.25 / $5.00 (25%)"));
+        assert!(out.contains("usage  $1.25 / $5.00 (25%, API-equiv)"));
         assert!(out.contains("memory 2.0 KB"));
         assert!(out.contains("✔ tests_pass"));
         assert!(out.contains("◑ coverage"));
@@ -214,7 +215,7 @@ mod tests {
         s.cost_limit = None;
         s.cost_spent = 0.0;
         let out = render_state(&s);
-        assert!(!out.contains("cost"), "no cost line when uncapped + nothing spent: {out}");
+        assert!(!out.contains("usage"), "no usage line when uncapped + nothing spent: {out}");
     }
 
     #[test]
@@ -223,7 +224,7 @@ mod tests {
         s.cost_limit = None;
         s.cost_spent = 2.40;
         let out = render_state(&s);
-        assert!(out.contains("cost   $2.40 (no cap)"), "uncapped spend still shown: {out}");
+        assert!(out.contains("usage  $2.40 (API-equiv, no cap)"), "uncapped spend still shown: {out}");
     }
 
     #[test]

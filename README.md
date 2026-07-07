@@ -95,9 +95,9 @@ the **filesystem** (your code, git, the resume prompt), not a growing conversati
 - **Stop conditions** are a safe little expression language — `all_goals`,
   `met_fraction >= 0.75`, `count_met >= 3`, `goal_a OR goal_b`,
   `any_regressed(invariants) OR over_budget` — *not* `eval`. Three ceiling guards stop a
-  runaway: **`over_budget`** (tokens), **`over_cost`** (dollars — Claude reports the price,
-  agg just sums it), **`over_iterations`** (sessions). OR them together and the loop halts the
-  moment any one trips.
+  runaway: **`over_budget`** (tokens), **`over_cost`** (dollars — API-equivalent usage Claude
+  reports, *not* a subscription charge; see the note below), **`over_iterations`** (sessions).
+  OR them together and the loop halts the moment any one trips.
 - **Summaries** — one cheap call per cycle turns the worker's raw thoughts + the goal deltas
   into a *cumulative* “story so far” and a *windowed* “last cycle” line.
 - **Institutional memory** — cross-session learning, on by default with zero setup. agg keeps a
@@ -277,10 +277,19 @@ project: calc
 model: "claude-opus-4-8[1m]"
 resume_prompt: "AGG_RESUME.md"
 budget: { total: 2000000 }       # token ceiling  → over_budget
-cost:   { total: 5.0 }           # dollar ceiling → over_cost  (Claude prices it; agg sums it)
+cost:   { total: 5.0 }           # $ ceiling → over_cost (API-equivalent price Claude reports;
+                                 #   a usage proxy, NOT a subscription charge — see note below)
 summary: { enabled: true, model: haiku, min_interval_secs: 1 }
 memory: { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md, on by default
 ```
+
+> **A note on `cost` / `over_cost`.** The dollar figure is `total_cost_usd` as reported by the
+> `claude` CLI — the **API-equivalent list price** of the work. On a **Max/Pro subscription you are
+> not billed per token**, so this is a **usage proxy, not money charged to you**; the dashboard and
+> `agg status` label it `(API-eq)` for that reason. It's still a useful ceiling (`over_cost` halts a
+> runaway loop by relative spend), but read it as "how much work" not "how much money" unless you're
+> actually on pay-as-you-go API billing. Prefer `over_budget` (tokens) or `over_iterations` if you
+> want a plan-agnostic cap.
 
 **5. `AGG_RESUME.md`** — the prompt fed to *every* fresh worker session:
 

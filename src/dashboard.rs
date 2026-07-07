@@ -346,11 +346,13 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         Some(t) => format!("{} / {}", human(s.tokens_spent), human(t)),
         None => human(s.tokens_spent),
     };
-    // cost string, shown on the info line only when a cap is set or any spend exists
-    // (so a token-only run keeps the line uncluttered). Mirrors the `agg status` rule.
+    // usage string ($ = the API-equivalent price Claude reports as `total_cost_usd`, NOT a
+    // subscription charge — on a Max/Pro plan this is a usage proxy, not money billed). Shown on
+    // the info line only when a cap is set or any spend exists (so a token-only run stays
+    // uncluttered). Mirrors the `agg status` rule.
     let cost = match s.cost_limit {
-        Some(t) => Some(format!("${:.2} / ${:.2}", s.cost_spent, t)),
-        None if s.cost_spent > 0.0 => Some(format!("${:.2}", s.cost_spent)),
+        Some(t) => Some(format!("${:.2} / ${:.2} (API-eq)", s.cost_spent, t)),
+        None if s.cost_spent > 0.0 => Some(format!("${:.2} (API-eq)", s.cost_spent)),
         None => None,
     };
     let halt = if s.halt_when.is_empty() { "—".to_string() } else { s.halt_when.clone() };
@@ -392,7 +394,7 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
     ];
     if let Some(cost) = cost {
         line2_spans.push(sep());
-        line2_spans.push(label("cost "));
+        line2_spans.push(label("usage "));
         line2_spans.push(Span::styled(cost, Style::default().fg(Color::Magenta)));
     }
     if s.memory_bytes > 0 {
