@@ -97,10 +97,10 @@ and land the respectability table-stakes.)*
   `process::exit`s past the Drop guards, and the max-sessions exit now publishes its finished state.
 - **`worker_args`** — pass extra `claude` flags (e.g. `--allowedTools`) to constrain the otherwise
   unrestricted worker; the permission bypass is now documented in the README.
-- **Table-stakes.** MIT `LICENSE` file added; a `ci.yml` runs clippy `-D warnings` + the full test
-  suite (ubuntu/macos) + a Windows cross-check on every push/PR; the false Homebrew install claims
-  and the stale `HANDOFF.md` are removed; the `grep_count.sh` plugin judge is hardened against
-  option-injection and invalid-JSON-on-quote.
+- **Table-stakes.** MIT `LICENSE` file added; the false Homebrew install claims and the stale
+  `HANDOFF.md` are removed; the `grep_count.sh` plugin judge is hardened against option-injection
+  and invalid-JSON-on-quote. *(The verification gate — clippy `-D warnings` + full test suite +
+  Windows cross-check — stays a local pre-release step; no per-push CI, by choice.)*
 
 ---
 
