@@ -87,37 +87,28 @@ fn main() {
         }
     }
 
-    // Second pass: glyphs, one <text> run per row grouping same-color cells to keep the file small.
+    // Second pass: one <text> per cell, anchored at the CENTER of its exact grid column
+    // (text-anchor=middle). This is the whole point — a terminal is a fixed grid, so every glyph
+    // (including double-width emoji like 🔧/💬 and every box-drawing border │) MUST sit at its
+    // true column. Batching cells into a run and letting the browser flow them shifts everything
+    // after a wide glyph, which is what made the right-hand borders ragged. Per-cell placement
+    // snaps every character back to the grid regardless of its rendered width.
     for y in 0..area.height {
         let baseline = PAD + y as f32 * CH + CH * 0.72;
-        let mut run = String::new();
-        let mut run_fg = String::new();
-        let mut run_x0 = 0.0f32;
-        let flush = |svg: &mut String, run: &str, fg: &str, x0: f32| {
-            if run.trim().is_empty() {
-                return;
-            }
-            svg.push_str(&format!(
-                "<text x=\"{x0:.2}\" y=\"{baseline:.2}\" fill=\"{fg}\" xml:space=\"preserve\">{}</text>\n",
-                xml_escape(run)
-            ));
-        };
         for x in 0..area.width {
             let cell = &buf[(x, y)];
             let sym = cell.symbol();
+            if sym == " " || sym.is_empty() {
+                continue;
+            }
             let fg = color_hex(cell.fg, FG);
-            let px = PAD + x as f32 * CW;
-            if fg != run_fg && !run.is_empty() {
-                flush(&mut svg, &run, &run_fg, run_x0);
-                run.clear();
-            }
-            if run.is_empty() {
-                run_x0 = px;
-                run_fg = fg;
-            }
-            run.push_str(sym);
+            let cx = PAD + x as f32 * CW + CW / 2.0; // center of the cell
+            svg.push_str(&format!(
+                "<text x=\"{cx:.2}\" y=\"{baseline:.2}\" fill=\"{fg}\" text-anchor=\"middle\" \
+                 xml:space=\"preserve\">{}</text>\n",
+                xml_escape(sym)
+            ));
         }
-        flush(&mut svg, &run, &run_fg, run_x0);
     }
 
     svg.push_str("</svg>\n");
