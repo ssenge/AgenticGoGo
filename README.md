@@ -67,18 +67,11 @@ hardened single-machine loop, look at Gas Town instead; `agg` is deliberately se
 
 ## How it works
 
-```
-   you ── /agg:new ──►  goals.yaml + agg.yaml + AGG_RESUME.md
-                              │
-                              ▼
-   agg run  ── loop ─────────────────────────────────────────────┐
-     │  launch a FRESH `claude -p` worker  (one chunk of work)    │
-     │  …stream it readably, heartbeat, watchdog a hung session   │
-     │  on exit → run JUDGES → update GOALS → check STOP          │  repeat until
-     │  every cycle → a 1-line progress SUMMARY                   │  goals met
-     └────────────────────────────────────────────────────────────┘
-            ▲ agg dashboard (live TUI)     ▲ agg send (steer it)
-```
+<p align="center">
+  <img src="assets/how-it-works.png" alt="How agg works: /agg:new creates goals.yaml + agg.yaml + AGG_RESUME.md; a baseline judge runs once; then the agg run loop, each cycle — drain the steering bus, build the prompt (inject memory), launch a fresh claude -p worker with heartbeat + two-signal watchdog, rate-limit check, stage the merge under git isolation, run judges and update goals, the rollback gate, fold memory and summarize, check STOP/HALT — repeating until goals are met or a guard halts. agg dashboard, agg send/stop, and agg spawn sit alongside." width="960">
+</p>
+
+<p align="center"><sub>Each cycle in full — a dumb outer loop wrapping a fresh worker, with judges, a rollback gate, enforced memory, and steering. (Regenerate with <code>cargo run --example how_it_works_svg</code>.)</sub></p>
 
 This is the canonical Ralph shape: a **dumb outer loop** (no tokens) wraps a **fresh-context
 inner worker** (the real cost). Each session starts clean — Huntley's *"one context window, one

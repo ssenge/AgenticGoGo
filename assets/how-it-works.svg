@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1470" height="1010" viewBox="0 0 1470 1010">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker></defs>
+<rect x="0" y="0" width="1470" height="1010" rx="9" fill="#0d1117" stroke="#0d1117" stroke-width="1.5"/>
+<text x="40" y="46" fill="#39c5cf" font-size="18" font-weight="700" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">you</text>
+<text x="40" y="68" fill="#8b949e" font-size="14" font-weight="400" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">/agg:new</text>
+<line x1="150" y1="40" x2="250" y2="40" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="260" y="16" width="470" height="52" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="260" y="16" width="5" height="52" rx="2" fill="#3fb950"/>
+<text x="278" y="42" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">goals.yaml · agg.yaml · AGG_RESUME.md</text>
+<text x="278" y="63" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">typed goals + judges, ceilings, the resume prompt</text>
+<line x1="495" y1="68" x2="495" y2="96" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="300" y="96" width="390" height="52" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="300" y="96" width="5" height="52" rx="2" fill="#d29922"/>
+<text x="318" y="122" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">baseline judge (once)</text>
+<text x="318" y="143" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">already done? invariant already broken? bail early</text>
+<rect x="40" y="176" width="1070" height="756" rx="9" fill="#0f141b" stroke="#39c5cf" stroke-width="1.5"/>
+<text x="60" y="210" fill="#39c5cf" font-size="18" font-weight="700" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">agg run</text>
+<text x="160" y="210" fill="#8b949e" font-size="14" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">— the loop (fresh worker every cycle)</text>
+<rect x="74" y="232" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="232" width="5" height="58" rx="2" fill="#bc8cff"/>
+<text x="92" y="258" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">drain steering bus</text>
+<text x="92" y="279" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">apply inject / pause / resume / budget / stop from you (or /agg:supervise on your phone)</text>
+<line x1="544" y1="290" x2="544" y2="308" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="74" y="308" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="308" width="5" height="58" rx="2" fill="#3fb950"/>
+<text x="92" y="334" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">build the prompt</text>
+<text x="92" y="355" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">inject AGG_MEMORY.md + last-session block + your instruction, prepend prompt_includes</text>
+<line x1="544" y1="366" x2="544" y2="384" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="74" y="384" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="384" width="5" height="58" rx="2" fill="#39c5cf"/>
+<text x="92" y="410" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">launch a FRESH claude -p worker</text>
+<text x="92" y="431" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">own process group · stream readably · heartbeat · two-signal watchdog (silent AND cpu-flat)</text>
+<line x1="544" y1="442" x2="544" y2="460" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="74" y="460" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="460" width="5" height="58" rx="2" fill="#d29922"/>
+<text x="92" y="486" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">worker exits → rate-limit check</text>
+<text x="92" y="507" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">429 / limit → back off and retry the session (no judging on an incomplete run)</text>
+<line x1="544" y1="518" x2="544" y2="536" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="74" y="536" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="536" width="5" height="58" rx="2" fill="#c9d1d9"/>
+<text x="92" y="562" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">stage the merge (git isolation)</text>
+<text x="92" y="583" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">merge the session branch --no-commit onto base, uncommitted, so judges test the MERGED tree</text>
+<line x1="544" y1="594" x2="544" y2="612" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="74" y="612" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="612" width="5" height="58" rx="2" fill="#3fb950"/>
+<text x="92" y="638" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">run JUDGES → update GOALS</text>
+<text x="92" y="659" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">scripts + LLM judges agg runs on the filesystem → met / in-progress / REGRESSED, invariants checked</text>
+<line x1="544" y1="670" x2="544" y2="688" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="74" y="688" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="688" width="5" height="58" rx="2" fill="#ff7b72"/>
+<text x="92" y="714" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">rollback gate</text>
+<text x="92" y="735" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">a regression on the staged merge → abort it, base stays pristine, branch kept; else commit it</text>
+<line x1="544" y1="746" x2="544" y2="764" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="74" y="764" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="764" width="5" height="58" rx="2" fill="#bc8cff"/>
+<text x="92" y="790" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">fold memory + summarize</text>
+<text x="92" y="811" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">enforced entry into AGG_MEMORY.md (even if the worker wrote nothing) + a 1-line progress summary</text>
+<line x1="544" y1="822" x2="544" y2="840" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="74" y="840" width="940" height="58" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="74" y="840" width="5" height="58" rx="2" fill="#39c5cf"/>
+<text x="92" y="866" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">check STOP / HALT</text>
+<text x="92" y="887" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">all_goals?  OR  over_budget / over_cost / over_iterations / wall_hours?  OR  an invariant regressed?</text>
+<path d="M 1014 869 H 1088 V 261 H 1014" fill="none" stroke="#d29922" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="1068" y="559" fill="#d29922" font-size="13" font-weight="600" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="end">not yet</text>
+<text x="1068" y="577" fill="#d29922" font-size="13" font-weight="600" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="end">↻ repeat</text>
+<line x1="544" y1="898" x2="544" y2="926" stroke="#3fb950" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="575" y="962" fill="#3fb950" font-size="16" font-weight="600" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="middle">goals met (or a guard HALTs) → the loop stops, base is clean</text>
+<rect x="1146" y="246" width="300" height="64" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="1146" y="246" width="5" height="64" rx="2" fill="#39c5cf"/>
+<text x="1164" y="272" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">agg dashboard</text>
+<text x="1164" y="293" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">live TUI — goals, usage, activity, memory</text>
+<rect x="1146" y="342" width="300" height="64" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="1146" y="342" width="5" height="64" rx="2" fill="#bc8cff"/>
+<text x="1164" y="368" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">agg send / stop</text>
+<text x="1164" y="389" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">steer or stop it mid-run, from anywhere</text>
+<rect x="1146" y="438" width="300" height="64" rx="9" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+<rect x="1146" y="438" width="5" height="64" rx="2" fill="#3fb950"/>
+<text x="1164" y="464" fill="#c9d1d9" font-size="17" font-weight="600" font-family="SFMono-Regular,Menlo,Consolas,monospace" text-anchor="start">agg spawn</text>
+<text x="1164" y="485" fill="#8b949e" font-size="13" font-weight="400" font-family="-apple-system,Segoe UI,Roboto,sans-serif" text-anchor="start">track long side-tasks across sessions</text>
+<line x1="1110" y1="278" x2="1146" y2="278" stroke="#8b949e" stroke-width="2" stroke-dasharray="5 4"/>
+<line x1="1110" y1="374" x2="1146" y2="374" stroke="#8b949e" stroke-width="2" stroke-dasharray="5 4"/>
+</svg>
