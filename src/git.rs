@@ -55,6 +55,38 @@ pub fn is_clean(dir: &Path) -> bool {
     .is_empty()
 }
 
+/// Is a merge in progress in `dir` (MERGE_HEAD present)? The rollback gate stages a merge with
+/// `merge --no-ff --no-commit` and only finalizes it AFTER the (minutes-long) judging phase — so
+/// a crash/Ctrl-C/kill in that window leaves the repo mid-merge. On the next run that makes
+/// `is_clean` false, which would silently disable isolation and let the next worker build on a
+/// half-merged tree.
+pub fn merge_in_progress(dir: &Path) -> bool {
+    // `git rev-parse -q --verify MERGE_HEAD` exits 0 iff a merge is in progress.
+    git(dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).0
+}
+
+/// If a leftover staged merge from a crashed rollback-gate cycle is present, abort it so the repo
+/// returns to a clean base. Only aborts an agg-owned merge (one whose branch heads under the
+/// session branch prefix exist / whose MERGE_MSG names an agg session) — a merge the USER started
+/// by hand is left untouched and reported. Call at loop startup, BEFORE the is_clean check.
+/// Returns true if it aborted something (for logging). Best-effort.
+pub fn recover_stranded_merge(dir: &Path, branch_prefix: &str) -> bool {
+    if !merge_in_progress(dir) {
+        return false;
+    }
+    // Is this agg's merge? Check MERGE_MSG for our merge-commit signature or the session prefix.
+    let msg = std::fs::read_to_string(dir.join(".git").join("MERGE_MSG")).unwrap_or_default();
+    let is_aggs = msg.contains("agg: merge session") || msg.contains(branch_prefix);
+    if is_aggs {
+        eprintln!("  [iso] found a leftover staged merge from an interrupted session — aborting it to restore a clean base");
+        let _ = git(dir, &["merge", "--abort"]);
+        true
+    } else {
+        eprintln!("  [iso] WARNING a merge is in progress that agg did not start (MERGE_HEAD present) — leaving it alone; resolve it, then re-run");
+        false
+    }
+}
+
 /// Create + checkout `branch` from `base`. Returns true on success.
 pub fn create_branch(dir: &Path, branch: &str, base: &str) -> bool {
     // delete a stale same-named branch first (a prior crashed session) so -b doesn't fail.
@@ -73,6 +105,28 @@ pub fn checkout(dir: &Path, branch: &str) -> bool {
         eprintln!("  [git] failed to checkout {branch}: {err}");
     }
     ok
+}
+
+/// Discard the CURRENT branch's uncommitted modifications to TRACKED files, so they don't leak
+/// onto base at the next `checkout base` and get judged as a real result. Called on the session
+/// branch after the worker exits: the worker was told to commit its work, so anything still
+/// uncommitted is not a durable result (the exact out-of-context-stop case). Only tracked
+/// modifications are reset (`git checkout -- .`) — untracked files (build artifacts a judge may
+/// read) are left, and `.agg/` runtime state is never touched. Returns true if there was
+/// something to discard (for logging).
+pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
+    let dirty = !git(
+        dir,
+        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude).agg", ":(exclude).agg/**"],
+    )
+    .1
+    .is_empty();
+    if dirty {
+        // restore tracked files to HEAD of the (session) branch; pathspec form leaves untracked
+        // files and can't over-reach into base — we are still ON the session branch here.
+        let _ = git(dir, &["checkout", "--", ".", ":(exclude).agg", ":(exclude).agg/**"]);
+    }
+    dirty
 }
 
 /// Merge `branch` into the currently-checked-out branch (no-ff so each session is one merge
@@ -239,6 +293,11 @@ pub fn resolve_session(
     session: u32,
 ) -> SessionResolution {
     let vetoed = file_exists(dir, red_file);
+    // Discard the session's uncommitted tracked edits BEFORE leaving the branch — otherwise git
+    // carries them onto base at checkout and they'd be judged/merged as if they were committed work.
+    if discard_uncommitted_tracked(dir) {
+        eprintln!("  [iso] session #{session} left uncommitted edits — discarding (commit your work to keep it)");
+    }
     // back to base before merge/discard (git ops require not being on the branch we delete).
     let on_base = checkout(dir, base);
     let merge_msg = format!("agg: merge session #{session} ({branch})");
@@ -287,6 +346,12 @@ pub enum StagedSession {
 /// merge path. The companion `finalize_session` commits or rolls back.
 pub fn stage_session(dir: &Path, base: &str, branch: &str, red_file: &str) -> StagedSession {
     let vetoed = file_exists(dir, red_file);
+    // Discard the session's uncommitted tracked edits BEFORE leaving the branch — otherwise git
+    // carries them onto base at checkout and the judges would score them as a real (merged) result
+    // even though the branch has no commits (→ NoChanges). Uncommitted == not a durable result.
+    if discard_uncommitted_tracked(dir) {
+        eprintln!("  [iso] session left uncommitted edits — discarding (commit your work to keep it)");
+    }
     if !checkout(dir, base) {
         eprintln!("  [iso] WARNING could not checkout base '{base}'; leaving session branch {branch} in place");
         return StagedSession::CheckoutFailed;
@@ -505,6 +570,84 @@ mod tests {
         // a fresh branch off main has none.
         git_t(&d, &["branch", "agg/p/session-2"]);
         assert!(branch_has_no_new_commits(&d, "main", "agg/p/session-2"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Blocker 2: a worker that EDITS a tracked file but never commits must not have those edits
+    /// leak onto base at `checkout base` and be judged as a real result. stage_session must
+    /// discard them → NoChanges, base pristine.
+    #[test]
+    fn uncommitted_tracked_edits_do_not_leak_onto_base() {
+        let d = std::env::temp_dir().join(format!("agg-git-{}-leak", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git_t(&d, &["init", "-q", "-b", "main"]);
+        git_t(&d, &["config", "user.email", "t@t"]);
+        git_t(&d, &["config", "user.name", "t"]);
+        git_t(&d, &["config", "commit.gpgsign", "false"]);
+        git_t(&d, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(d.join("f.txt"), "base\n").unwrap();
+        git_t(&d, &["add", "-A"]);
+        git_t(&d, &["commit", "-qm", "base"]);
+        // session branch, worker EDITS the tracked file but never commits.
+        git_t(&d, &["checkout", "-q", "-b", "agg/p/session-1"]);
+        std::fs::write(d.join("f.txt"), "base\nWORKER-UNCOMMITTED-EDIT\n").unwrap();
+
+        let staged = stage_session(&d, "main", "agg/p/session-1", ".agg_red");
+        assert_eq!(staged, StagedSession::NoChanges, "no commits → NoChanges");
+        // base's working tree must NOT carry the worker's uncommitted edit.
+        assert_eq!(
+            std::fs::read_to_string(d.join("f.txt")).unwrap(),
+            "base\n",
+            "base must be pristine — the uncommitted edit must not leak/merge"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn discard_uncommitted_tracked_leaves_untracked() {
+        let d = repo_with_session_branch("discard");
+        git_t(&d, &["checkout", "-q", "agg/p/session-1"]);
+        std::fs::write(d.join("f.txt"), "base\nsession-work\nEDIT\n").unwrap(); // modify tracked
+        std::fs::write(d.join("new_untracked.txt"), "keep me\n").unwrap();     // untracked
+        assert!(discard_uncommitted_tracked(&d), "should report there was something to discard");
+        // tracked file reverted to the branch's committed state, untracked preserved.
+        assert!(std::fs::read_to_string(d.join("f.txt")).unwrap().contains("session-work"));
+        assert!(!std::fs::read_to_string(d.join("f.txt")).unwrap().contains("EDIT"), "tracked edit discarded");
+        assert!(d.join("new_untracked.txt").exists(), "untracked file preserved");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Blocker 4: a merge stranded by a crash mid-rollback-gate (MERGE_HEAD present) must be
+    /// detected and aborted at startup so isolation isn't silently disabled.
+    #[test]
+    fn recover_stranded_merge_aborts_an_agg_merge() {
+        let d = repo_with_session_branch("stranded");
+        // leave a staged agg merge in progress (the crash window).
+        let staged = stage_merge(&d, "agg/p/session-1");
+        assert_eq!(staged, StagedMerge::Staged);
+        assert!(merge_in_progress(&d), "MERGE_HEAD present after stage_merge");
+        // recovery aborts it (MERGE_MSG names an agg session branch).
+        assert!(recover_stranded_merge(&d, "agg"), "should abort agg's stranded merge");
+        assert!(!merge_in_progress(&d), "merge aborted — MERGE_HEAD cleared");
+        assert!(is_clean(&d), "base clean after recovery");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn recover_leaves_a_non_agg_merge_alone() {
+        let d = repo_with_session_branch("usermerge");
+        // a merge the USER started by hand (a differently-named branch).
+        git_t(&d, &["checkout", "-q", "-b", "my-feature", "main"]);
+        std::fs::write(d.join("g.txt"), "feature\n").unwrap();
+        git_t(&d, &["add", "-A"]);
+        git_t(&d, &["commit", "-qm", "feature work"]);
+        git_t(&d, &["checkout", "-q", "main"]);
+        git_t(&d, &["merge", "--no-ff", "--no-commit", "my-feature"]);
+        assert!(merge_in_progress(&d));
+        // agg must NOT touch a merge it didn't start.
+        assert!(!recover_stranded_merge(&d, "agg"), "must not abort a user's own merge");
+        assert!(merge_in_progress(&d), "user's merge left intact");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

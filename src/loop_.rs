@@ -123,6 +123,11 @@ pub fn run(
     crate::detach::write_run_pid(dir);
     let _run_pid_guard = RunPidGuard { dir };
 
+    // Install SIGINT/SIGTERM handling: a Ctrl-C now kills the worker's process group (no orphan)
+    // and lets the loop return through its Drop guards instead of dying uncleaned. Checked at the
+    // phase boundaries below via signals::interrupted().
+    crate::signals::install();
+
     // the resume prompt sits next to agg.yaml → resolve against config_base (the `agg/` folder
     // when in use, else the project root).
     let resume_prompt = read_resume_prompt(config_base, &cfg.resume_prompt)?;
@@ -307,6 +312,12 @@ pub fn run(
     // enhancement, never a correctness requirement.
     let iso = &cfg.session_isolation;
     let iso_base: Option<String> = if iso.enabled {
+        // Recover a staged merge stranded by an interrupted previous run (Ctrl-C/crash/kill during
+        // the rollback-gate judging window) BEFORE the is_clean check — otherwise the leftover
+        // MERGE_HEAD makes is_clean false and silently disables isolation. No-op if not a repo.
+        if crate::git::is_repo(dir) {
+            crate::git::recover_stranded_merge(dir, &iso.branch_prefix);
+        }
         if !crate::git::is_repo(dir) {
             eprintln!("  [iso] session_isolation enabled but not a git repo — running on current branch");
             None
@@ -497,6 +508,21 @@ pub fn run(
         last_session_id = outcome.session_id.clone();
         tokens_spent += outcome.output_tokens;
         cost_spent += outcome.cost_usd;
+
+        // A SIGINT/SIGTERM during the session already killed the worker's group. Nothing is staged
+        // yet (isolation resolves below), so return gracefully NOW — through the Drop guards
+        // (run.pid cleared, on_stop hooks, ledger finalized) — instead of judging a killed session.
+        if crate::signals::interrupted() {
+            eprintln!("\n⚠ interrupted (SIGINT/SIGTERM) — stopping after the current session; worker killed, base untouched.");
+            dash.phase = "done".into();
+            dash.finished = true;
+            dash.finish_reason = "interrupted (SIGINT/SIGTERM)".into();
+            let (gm, gt) = eng.tally();
+            ledger.update(session, tokens_spent, gm, gt);
+            ledger.finish(now_epoch(), "interrupted");
+            publish!();
+            return Ok(RunOutcome::Stopped);
+        }
         // (run_session now reaps any straggler in the worker's process group on exit, and the
         // worker's reader thread already streamed `now`/`think`/`recent` live — nothing to do here.)
         eprintln!(

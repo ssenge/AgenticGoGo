@@ -108,6 +108,10 @@ pub fn run_session(
     };
 
     let pid = child.id();
+    // Register the worker's process group (pgid == pid, since we set process_group(0)) so a
+    // SIGINT/SIGTERM on `agg run` kills the worker's whole tree instead of orphaning it, and lets
+    // the loop unwind through its Drop guards. Cleared right after child.wait() below.
+    crate::signals::set_worker_pgid(pid);
     // shared state between reader thread, heartbeat thread, and watchdog thread
     let last_activity = Arc::new(AtomicU64::new(now_epoch())); // epoch secs of last stream event
     let last_thought = Arc::new(std::sync::Mutex::new(String::from("session start")));
@@ -278,6 +282,9 @@ pub fn run_session(
 
     // ---- wait for the worker, then tear down the helper threads ----
     let status = child.wait().ok();
+    // The session's process is done — a later signal must not target this (about-to-be-recycled)
+    // pgid. The loop checks signals::interrupted() after we return.
+    crate::signals::clear_worker_pgid();
     // The child is now reaped — its pid is free and the OS may recycle it at any moment. Set
     // BOTH flags before the post-exit group-kill below so the watchdog (which kills by pid) can
     // never fire on a recycled pid: `done` ends its loop, `reaping` is the belt-and-braces guard

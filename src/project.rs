@@ -67,10 +67,20 @@ impl Project {
             .unwrap_or_default()
     }
 
-    /// Best-effort persist (pretty-printed for human inspection).
+    /// Best-effort persist (pretty-printed for human inspection). ATOMIC (write tmp, rename) —
+    /// like state.json/spawns.json: a kill/power-loss mid-write must never leave a truncated file,
+    /// because `load` falls back to an EMPTY ledger on a parse error, which would silently erase
+    /// the entire run history (and reset the lifetime counter to 0).
     pub fn save(&self, dir: &Path) {
+        let dest = Self::path(dir);
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(Self::path(dir), s);
+            let tmp = dest.with_extension("json.tmp");
+            if std::fs::write(&tmp, s).is_ok() {
+                let _ = std::fs::rename(&tmp, &dest);
+            }
         }
     }
 
@@ -276,6 +286,30 @@ mod tests {
         let p = Project::default();
         let out = p.render_history();
         assert!(out.contains("no run history yet"));
+    }
+
+    /// Blocker 1: save() must be atomic (tmp+rename) so a torn write can't erase the ledger.
+    /// We can't easily simulate a crash mid-write, but we CAN assert the atomic mechanics: after
+    /// a save the destination parses and no leftover `.tmp` sibling remains, and that a
+    /// pre-existing GOOD file is never truncated in place (a torn write would leave `.tmp`, not a
+    /// half-written destination).
+    #[test]
+    fn save_is_atomic_no_tmp_leftover() {
+        let dir = tmpdir("atomic");
+        let mut p = Project::default();
+        p.runs.push(RunRecord {
+            run: 1, started_at_epoch: 1, ended_at_epoch: 2, pid: 1,
+            sessions: 3, tokens: 30, goals_met: 1, goals_total: 2, end_reason: "stopped".into(),
+        });
+        p.save(&dir);
+        // destination exists and parses back to the same content.
+        let loaded = Project::load(&dir);
+        assert_eq!(loaded.runs.len(), 1);
+        assert_eq!(loaded.runs[0].sessions, 3);
+        // no leftover tmp file (the rename consumed it).
+        let tmp = Project::path(&dir).with_extension("json.tmp");
+        assert!(!tmp.exists(), "atomic save must leave no .tmp sibling");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
