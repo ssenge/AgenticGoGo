@@ -26,6 +26,7 @@ clap = { version = "4", features = ["derive"] }   # CLI subcommands
 anyhow = "1"              # ergonomic error handling at the boundary
 ratatui = "0.29"          # the live TUI dashboard
 crossterm = "0.28"        # terminal backend for ratatui
+tiny_http = "0.12"        # `agg serve` — the thin JSON API for the standalone web UI (sync, no tokio)
 
 [dev-dependencies]
 assert_cmd = "2"          # drive the built `agg` binary in integration tests

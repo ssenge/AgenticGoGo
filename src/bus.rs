@@ -37,6 +37,20 @@ pub enum Command {
     Note { text: String },
 }
 
+/// Queue a steering command onto a project's bus with a send-ordered filename. Shared by the CLI
+/// (`agg send`) and the web API (`POST /api/send`) so both write the bus identically (atomically,
+/// same filename scheme). Returns the queued file path. Does NOT check loop liveness — the caller
+/// decides what to do when no loop is running (the CLI warns; the API returns 409).
+pub fn queue_command(dir: &Path, cmd: &Command) -> std::io::Result<PathBuf> {
+    let b = Bus::open(dir)?;
+    // monotonic-ish millis stamp for send-order filenames.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| format!("{:013}", d.as_millis()))
+        .unwrap_or_else(|_| "0000000000000".into());
+    b.send(cmd, &stamp)
+}
+
 /// Resolve the bus directories under a project dir, creating them if needed.
 pub struct Bus {
     pub inbox: PathBuf,
@@ -64,7 +78,14 @@ impl Bus {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let file = self.inbox.join(format!("{stamp}-{}-{seq:06}.json", std::process::id()));
-        std::fs::write(&file, serde_json::to_string_pretty(cmd).unwrap_or_default())?;
+        // ATOMIC: write to a sibling tmp path, then rename INTO the drained inbox. A plain write
+        // makes the file visible in `in/` the instant it's created, so `drain()` (which picks up
+        // any *.json) could read a half-written command — a real race for a programmatic sender
+        // like the web API. rename(2) within the same dir is atomic, so drain only ever sees a
+        // complete file. The `.tmp` suffix is not `.json`, so a mid-write tmp is never drained.
+        let tmp = self.inbox.join(format!(".{stamp}-{}-{seq:06}.json.tmp", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_string_pretty(cmd).unwrap_or_default())?;
+        std::fs::rename(&tmp, &file)?;
         Ok(file)
     }
 

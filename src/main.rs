@@ -74,6 +74,21 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Serve a thin JSON HTTP API over this project's live state, for the standalone web UI.
+    /// Read-only endpoints (/api/state, /api/history, /api/health) + control (POST /api/send).
+    Serve {
+        /// port to bind on 127.0.0.1 (the web tool proxies to it)
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+        /// CORS origin allowed to call the API (the web tool's URL). Defaults to the SvelteKit
+        /// dev server (http://localhost:5173).
+        #[arg(long, default_value = "")]
+        cors_origin: String,
+        /// bearer token required on every request (empty = no auth, the local default). Set this
+        /// when exposing the API beyond localhost.
+        #[arg(long, default_value = "")]
+        token: String,
+    },
     /// Live TUI dashboard — tails the running loop's state. Quit with q.
     Dashboard {
         /// print a one-shot text snapshot to stdout and exit (for headless/CI/SSH — no TUI).
@@ -268,6 +283,15 @@ fn run_cli() -> Result<ExitCode> {
             let outcome = loop_::run(agg_cfg, eng, &p.dir, &p.config_base, *max_sessions)?;
             return Ok(ExitCode::from(outcome.exit_code()));
         }
+        Cmd::Serve { port, cors_origin, token } => {
+            agg::serve::run(agg::serve::ServeConfig {
+                dir: p.dir.clone(),
+                port: *port,
+                cors_origin: cors_origin.clone(),
+                token: token.clone(),
+            })?;
+            Ok(())
+        }
         Cmd::Dashboard { once } => {
             if *once {
                 // headless one-shot: the same snapshot the TUI renders, to stdout, then exit.
@@ -304,14 +328,20 @@ fn run_cli() -> Result<ExitCode> {
 /// Queue one steering command onto a running loop's bus. Shared by `agg send …` and
 /// the `agg stop` convenience alias.
 fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
-    let b = bus::Bus::open(dir).with_context(|| "opening bus (is this a project dir?)")?;
-    // monotonic-ish stamp for send-order filenames (CLI context: SystemTime ok)
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| format!("{:013}", d.as_millis()))
-        .unwrap_or_else(|_| "0000000000000".into());
-    let path = b.send(&cmd, &stamp)?;
-    eprintln!("queued → {} (the loop applies it at the next session boundary)", path.display());
+    let live = agg::detach::live_pid(dir).is_some();
+    let path = agg::bus::queue_command(dir, &cmd)?;
+    if live {
+        eprintln!("queued → {} (the loop applies it at the next session boundary)", path.display());
+    } else {
+        // Liveness guard: no loop is running here. Still queue (pre-arming before `agg run` is a
+        // legitimate use), but say so — a `stop` queued now would fire at the NEXT run's startup.
+        eprintln!(
+            "queued → {} — but NO loop is running in this dir right now.\n  \
+             it will apply when one starts (a queued `stop` fires immediately at the next `agg run`;\n  \
+             delete .agg/bus/in/*.json to cancel).",
+            path.display()
+        );
+    }
     Ok(())
 }
 

@@ -23,6 +23,7 @@ pub mod paths;
 pub mod proc;
 pub mod project;
 pub mod reap;
+pub mod serve;
 pub mod signals;
 pub mod spawns;
 pub mod state;
