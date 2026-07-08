@@ -65,6 +65,30 @@ That combination is what distinguishes it from the lighter members of the family
 [COMPARISON.md](COMPARISON.md). For *parallel-fleet* scale (20–30 agents at once) rather than a
 hardened single-machine loop, look at Gas Town instead; `agg` is deliberately sequential.
 
+## A deterministic outer loop around a stochastic inner loop
+
+This is the whole idea in one line. `agg` is the **outer loop** — plain code, four stages a cycle:
+
+```
+INJECT  state + steering → the worker's prompt   (resume prompt + AGG_MEMORY.md + your bus commands)
+RUN     a fresh `claude -p` worker               ← the ONE stochastic step: an opaque black box
+VERIFY  agg runs the judges itself, externally, against the filesystem
+GATE    keep or roll back · check stop/halt · carry state forward → repeat
+```
+
+The outer loop's **control flow is deterministic**: no model decides what happens next — given the
+verdicts, the same code path always runs. The **inner loop** is whatever the worker does inside
+`RUN` — plan, act, observe, reason. Pick your framework for that part: **ReAct**, NVIDIA's
+**Context–Observe–Reason–Act**, a **DISCOVER→PLAN→EXECUTE** cycle — it's **stochastic**, and `agg`
+treats it as a black box. "*Keep the LLM out of the loop*" means exactly this: the model lives
+inside `RUN` only; `INJECT` / `VERIFY` / `GATE` are code.
+
+Why the split matters: a deterministic outer loop is only trustworthy if **`VERIFY` is
+deterministic too** — judges that execute against the filesystem, never the agent grading its own
+homework. That's `agg`'s moat, and it's the one thing the inner-loop frameworks have no concept of:
+they describe how *one agent thinks*; `agg` is the machine that runs a stochastic agent **safely,
+on repeat, until the work is actually done.**
+
 ## How it works
 
 <p align="center">

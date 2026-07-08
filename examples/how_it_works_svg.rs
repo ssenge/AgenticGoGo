@@ -25,7 +25,7 @@ const AMBER: &str = "#d29922";
 const PURPLE: &str = "#bc8cff";
 const RED: &str = "#ff7b72";
 
-const W: f32 = 1470.0;
+const W: f32 = 1520.0;
 const H: f32 = 1010.0;
 
 struct Svg(String);
@@ -102,23 +102,25 @@ fn main() {
     let lx = 40.0;
     let ly = 176.0;
 
-    // pipeline stages (title, sub). Height is derived from these so nothing is ever clipped.
-    let steps: &[(&str, &str, &str)] = &[
-        (PURPLE, "drain steering bus", "apply inject / pause / resume / budget / stop from you (or /agg:supervise on your phone)"),
-        (GREEN, "build the prompt", "inject AGG_MEMORY.md + last-session block + your instruction, prepend prompt_includes"),
-        (CYAN, "launch a FRESH claude -p worker", "own process group · stream readably · heartbeat · two-signal watchdog (silent AND cpu-flat)"),
-        (AMBER, "worker exits → rate-limit check", "429 / limit → back off and retry the session (no judging on an incomplete run)"),
-        (FG, "stage the merge (git isolation)", "merge the session branch --no-commit onto base, uncommitted, so judges test the MERGED tree"),
-        (GREEN, "run JUDGES → update GOALS", "scripts + LLM judges agg runs on the filesystem → met / in-progress / REGRESSED, invariants checked"),
-        (RED, "rollback gate", "a regression on the staged merge → abort it, base stays pristine, branch kept; else commit it"),
-        (PURPLE, "fold memory + summarize", "enforced entry into AGG_MEMORY.md (even if the worker wrote nothing) + a 1-line progress summary"),
+    // pipeline stages: (stage, accent, title, sub). `stage` groups them under the 4 deterministic
+    // outer-loop phases (INJECT/RUN/VERIFY/GATE); RUN is the single stochastic step. Height is
+    // derived from these so nothing is ever clipped.
+    let steps: &[(&str, &str, &str, &str)] = &[
+        ("INJECT", PURPLE, "drain steering bus", "apply inject / pause / resume / budget / stop from you (or /agg:supervise on your phone)"),
+        ("INJECT", GREEN, "build the prompt", "inject AGG_MEMORY.md + last-session block + your instruction, prepend prompt_includes"),
+        ("RUN", CYAN, "a FRESH claude -p worker  ·  STOCHASTIC", "the black box: it plans/acts/observes however it likes (ReAct, COAR, …) · heartbeat · two-signal watchdog"),
+        ("VERIFY", AMBER, "worker exits → rate-limit check", "429 / limit → back off and retry the session (no judging on an incomplete run)"),
+        ("VERIFY", FG, "stage the merge (git isolation)", "merge the session branch --no-commit onto base, uncommitted, so judges test the MERGED tree"),
+        ("VERIFY", GREEN, "run JUDGES → update GOALS", "scripts + LLM judges agg runs on the filesystem → met / in-progress / REGRESSED, invariants checked"),
+        ("GATE", RED, "rollback gate", "a regression on the staged merge → abort it, base stays pristine, branch kept; else commit it"),
+        ("GATE", PURPLE, "fold memory + summarize", "enforced entry into AGG_MEMORY.md (even if the worker wrote nothing) + a 1-line progress summary"),
     ];
 
     // ── geometry (all derived, so the card always contains its contents) ──
     let sh = 58.0;          // stage box height
     let gap = 18.0;         // vertical gap between stages
     let gutter = 96.0;      // right gutter inside the card for the loop-back arrow + its label
-    let sx = lx + 34.0;     // stage x
+    let sx = lx + 84.0;     // stage x (left margin holds the INJECT/RUN/VERIFY/GATE band labels)
     let sw = 940.0;         // stage width
     let hdr = 56.0;         // card header height
     let n_boxes = steps.len() as f32 + 1.0; // stages + the check box
@@ -128,11 +130,21 @@ fn main() {
 
     s.rect(lx, ly, lw, lh, "#0f141b", CYAN);
     s.text(lx + 20.0, ly + 34.0, "agg run", CYAN, 18.0, "700", "start", true);
-    s.text(lx + 120.0, ly + 34.0, "— the loop (fresh worker every cycle)", MUTED, 14.0, "400", "start", false);
+    s.text(lx + 118.0, ly + 34.0, "— the DETERMINISTIC outer loop (plain code, no model in the control path)", MUTED, 13.5, "400", "start", false);
 
-    // stages top→bottom
+    // stages top→bottom, with a left-margin band label whenever the outer stage changes.
     let mut y = ly + hdr;
-    for (accent, title, sub) in steps {
+    let mut prev_stage = "";
+    for (st, accent, title, sub) in steps {
+        if *st != prev_stage {
+            // stage band label to the LEFT of the boxes (inside the card's left padding)
+            let c = if *st == "RUN" { AMBER } else { CYAN };
+            s.text(lx + 16.0, y + 20.0, st, c, 12.0, "700", "start", true);
+            if *st == "RUN" {
+                s.text(lx + 16.0, y + 36.0, "stochastic", AMBER, 10.0, "600", "start", false);
+            }
+            prev_stage = st;
+        }
         stage(&mut s, sx, y, sw, sh, accent, title, sub);
         let ny = y + sh;
         s.line(sx + sw / 2.0, ny, sx + sw / 2.0, ny + gap, MUTED, true, false);

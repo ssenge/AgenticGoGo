@@ -1,11 +1,26 @@
 //! The harness loop: `agg run`.
 //!
-//! Each cycle: launch a fresh `claude -p` worker → stream its events to the log
-//! (readable formatter) with a heartbeat and a watchdog → on exit, run all judges
-//! → fold verdicts → check stop/halt → repeat or stop.
+//! # A deterministic outer loop around a stochastic inner loop
 //!
-//! The guiding principle — "keep the LLM out of the loop" — holds throughout: the loop is
-//! plain code, the worker is a fresh-context subprocess, judges are scripts/cheap LLM calls.
+//! agg is the OUTER loop. It is plain Rust, and its control flow is DETERMINISTIC: no model
+//! decides what happens next — given the same state and the same verdicts, the same code path
+//! always runs. Four stages per cycle:
+//!
+//! ```text
+//!   INJECT  state + steering → the worker's prompt (resume prompt + AGG_MEMORY.md + bus commands)
+//!   RUN     the fresh `claude -p` worker — the ONE stochastic step, an opaque black box
+//!   VERIFY  agg runs the judges itself, externally, against the filesystem
+//!   GATE    keep or roll back the merge · check stop/halt · carry state forward → repeat
+//! ```
+//!
+//! The INNER loop is whatever the worker does inside RUN — plan, act, observe, reason; ReAct,
+//! NVIDIA's Context–Observe–Reason–Act, a DISCOVER→PLAN→EXECUTE cycle — it is STOCHASTIC and agg
+//! neither sees nor cares. "Keep the LLM out of the loop" means exactly this: the LLM lives inside
+//! RUN only; INJECT/VERIFY/GATE are code.
+//!
+//! Why this split is the whole thesis: a deterministic outer loop is only trustworthy if VERIFY is
+//! deterministic too — judges that execute against the filesystem, never the agent grading its own
+//! homework. The determinism of the GATE is what makes it safe to trust a stochastic worker.
 
 use crate::bus::{Bus, Command};
 use crate::config::AggConfig;
