@@ -1,0 +1,117 @@
+/* AgenticGoGo web — design tokens + base. Dark-first (matches the TUI); light mode supported.
+   Status colors are the validated dataviz status palette (never themed, always paired with an
+   icon/label). One brand accent (cyan) for identity/interactive. */
+
+:root {
+  /* surfaces + ink (dark-first) */
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-2: #1c2230;
+  --border: #2a313c;
+  --border-strong: #3a4250;
+  --ink: #e6edf3;
+  --ink-2: #adb7c2;
+  --ink-3: #7d8894;
+
+  /* brand accent */
+  --accent: #39c5cf;
+  --accent-dim: #2b8f96;
+
+  /* validated status palette (dataviz) — dark surface */
+  --good: #3fb950;      /* met (brightened for the dark surface) */
+  --warning: #d29922;   /* in-progress */
+  --serious: #ec835a;   /* backoff / rate-limited */
+  --critical: #f0645a;  /* regressed / halt */
+  --muted: #6e7681;     /* pending */
+
+  /* accent chart fills */
+  --progress: #d29922;
+  --progress-track: #262c36;
+
+  --radius: 10px;
+  --radius-sm: 7px;
+  --font-mono: 'SFMono-Regular', ui-monospace, 'Menlo', 'Consolas', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f8fa;
+    --surface: #ffffff;
+    --surface-2: #f0f3f6;
+    --border: #d8dee4;
+    --border-strong: #c2cad2;
+    --ink: #1c2128;
+    --ink-2: #4a535e;
+    --ink-3: #6e7681;
+    --accent: #1a9aa3;
+    --accent-dim: #147880;
+    --good: #0ca30c;
+    --warning: #b8860b;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+    --muted: #8b949e;
+    --progress: #c99414;
+    --progress-track: #e6e9ee;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 6px 20px rgba(0, 0, 0, 0.08);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+h1, h2, h3 { margin: 0; font-weight: 600; }
+a { color: var(--accent); }
+
+.mono { font-family: var(--font-mono); }
+
+/* card */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* buttons */
+button {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+}
+button:hover:not(:disabled) { background: var(--border); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.primary { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { background: var(--accent); }
+button.danger { border-color: var(--critical); color: var(--critical); }
+button.danger:hover:not(:disabled) { background: var(--critical); color: #fff; }
+
+input, textarea {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  width: 100%;
+}
+input:focus, textarea:focus { outline: none; border-color: var(--accent); }
