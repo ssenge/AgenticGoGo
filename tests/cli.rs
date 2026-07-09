@@ -632,3 +632,184 @@ exit 0
     let content = String::from_utf8_lossy(&on_main.stdout);
     assert!(content.contains("good-work"), "the worker's good work must be KEPT despite the judge flake, got: {content:?}");
 }
+
+/// The four deterministic outer-loop stages must be OBSERVABLE, in order, in `.agg/state.json`
+/// while the loop runs — the TUI's `phase_color` and the web UI's `phaseStatus` key off these
+/// exact strings, and nothing else asserts them.
+///
+/// We don't poll (a race); instead each stage records the phase the loop had published at the
+/// moment that stage invoked it, through agg's OWN extension points:
+///   `on_session_start` → INJECT · the worker → RUN · the judge → VERIFY · `on_session_end` → GATE
+fn record_phase_stub(dir: &Path) -> String {
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+
+    // append "<TAG>=<the phase the loop has published right now>" to trace.txt
+    write(
+        &bin,
+        "rec",
+        r#"#!/bin/sh
+printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' .agg/state.json)" >> trace.txt
+"#,
+    );
+    chmod_x(&bin.join("rec"));
+
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+sh bin/rec RUN
+: > did_work
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.0}'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())
+}
+
+#[test]
+fn phase_names_the_four_outer_loop_stages() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let path = record_phase_stub(dir);
+
+    write(
+        dir,
+        "judges/check.sh",
+        r#"#!/bin/sh
+sh bin/rec VERIFY
+if [ -f did_work ]; then
+  echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"did_work present"}'
+else
+  echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
+fi
+"#,
+    );
+    chmod_x(&dir.join("judges/check.sh"));
+
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: phases\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n\
+         hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
+    );
+    write(dir, "AGG_RESUME.md", "create the file did_work\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_exit(&out, 0, &combined);
+
+    let trace = fs::read_to_string(dir.join("trace.txt")).expect("stages should have recorded");
+    let seq: Vec<&str> = trace.lines().collect();
+
+    // baseline VERIFY (judges run once before the first session) → one full cycle → stop.
+    assert_eq!(
+        seq,
+        ["VERIFY=verify", "INJECT=inject", "RUN=run", "VERIFY=verify", "GATE=gate"],
+        "each stage must publish its own name before handing control to user code:\n{trace}\n{combined}"
+    );
+
+    // and the run must settle on the terminal phase.
+    let state = fs::read_to_string(dir.join(".agg/state.json")).unwrap();
+    assert!(state.contains(r#""phase":"done""#), "finished run should publish phase=done:\n{state}");
+}
+
+/// An interrupted session is never judged and never logs a session-exit line: the SIGINT check
+/// sits between the worker returning and that log, so a killed session leaves no trace of having
+/// "exited" normally. It still exits 0 (an operator stop is a clean end) through the Drop guards.
+#[test]
+fn interrupt_during_run_skips_verify_and_the_exit_log() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let path = record_phase_stub(dir);
+
+    // a worker that records RUN and then hangs, giving us a window to signal the loop.
+    write(
+        &dir.join("bin"),
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+sh bin/rec RUN
+sleep 30
+"#,
+    );
+    chmod_x(&dir.join("bin/claude"));
+
+    write(
+        dir,
+        "judges/check.sh",
+        r#"#!/bin/sh
+sh bin/rec VERIFY
+echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
+"#,
+    );
+    chmod_x(&dir.join("judges/check.sh"));
+
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: intr\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n\
+         hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
+    );
+    write(dir, "AGG_RESUME.md", "work\n");
+
+    let log = dir.join("run.log");
+    let mut child = agg(dir, &path)
+        .args(["run", "--max-sessions", "2"])
+        .stdout(std::process::Stdio::from(fs::File::create(&log).unwrap()))
+        .stderr(std::process::Stdio::from(fs::File::create(dir.join("run.err")).unwrap()))
+        .spawn()
+        .unwrap();
+
+    // wait (bounded) until the worker has actually started, then Ctrl-C the loop.
+    let trace_path = dir.join("trace.txt");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if fs::read_to_string(&trace_path).map(|t| t.contains("RUN=run")).unwrap_or(false) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "worker never reached RUN");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // no libc dep: this file is already unix-only and shells out freely.
+    Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
+    let status = child.wait().unwrap();
+
+    let err = fs::read_to_string(dir.join("run.err")).unwrap_or_default();
+    assert_eq!(status.code(), Some(0), "an operator interrupt is a clean stop:\n{err}");
+
+    let trace = fs::read_to_string(&trace_path).unwrap();
+    let seq: Vec<&str> = trace.lines().collect();
+    assert_eq!(
+        seq,
+        ["VERIFY=verify", "INJECT=inject", "RUN=run"],
+        "an interrupted session must NOT be staged, judged or gated:\n{trace}\n{err}"
+    );
+    assert!(err.contains("interrupted (SIGINT/SIGTERM)"), "should report the interrupt:\n{err}");
+    assert!(
+        !err.contains("exited (code"),
+        "an interrupted session must not log a normal session-exit line:\n{err}"
+    );
+    assert!(!dir.join(".agg/run.pid").exists(), "the Drop guard must clear run.pid");
+}
