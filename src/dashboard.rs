@@ -124,6 +124,13 @@ fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
         }
         KeyCode::Char('f') => {
             ui.activity_follow = !ui.activity_follow;
+            // "pinned to the bottom" and "paused" are contradictory: `draw_activity` re-enables
+            // follow for anything sitting at max_scroll (that's how scrolling back down resumes
+            // it). Without stepping one line back, an explicit `f` pause was silently undone by
+            // the very next repaint — `f` did nothing at all in the default, pinned state.
+            if !ui.activity_follow {
+                ui.activity_scroll = ui.activity_scroll.saturating_sub(1);
+            }
         }
         KeyCode::Up => scroll(ui, -1),
         KeyCode::Down => scroll(ui, 1),
@@ -946,6 +953,38 @@ mod tests {
         assert!(!ui.activity_follow);
         handle_key(&mut ui, KeyCode::Char('f'));
         assert!(ui.activity_follow);
+    }
+
+    /// `handle_key` alone can't catch this: the pause has to survive the NEXT repaint. It did
+    /// not — `draw_activity` re-pins anything sitting at max_scroll, so pressing `f` in the
+    /// default (bottom-pinned) state toggled follow off and straight back on, and the live TUI
+    /// never showed `[paused]`.
+    #[test]
+    fn f_pause_survives_the_next_repaint() {
+        let mut s = demo_state();
+        s.recent = (0..50)
+            .map(|i| ActivityEvent { ts: "00:00:00".into(), kind: "think".into(), text: format!("event {i}") })
+            .collect();
+        let backend = TestBackend::new(120, 40);
+        let mut term = Terminal::new(backend).unwrap();
+        let mut ui = DashboardUi::default(); // Activity focused, follow = true
+
+        term.draw(|f| draw(f, Path::new("."), Some(&s), &mut ui)).unwrap();
+        assert!(ui.activity_follow, "starts pinned to the newest event");
+
+        handle_key(&mut ui, KeyCode::Char('f'));
+        term.draw(|f| draw(f, Path::new("."), Some(&s), &mut ui)).unwrap();
+        assert!(!ui.activity_follow, "an explicit `f` pause must survive the repaint");
+
+        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("paused"), "the Activity title must read [paused]");
+
+        // and `f` again re-pins to the newest event
+        handle_key(&mut ui, KeyCode::Char('f'));
+        term.draw(|f| draw(f, Path::new("."), Some(&s), &mut ui)).unwrap();
+        assert!(ui.activity_follow);
+        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("live"), "the Activity title must read [⏵live] again");
     }
 
     #[test]

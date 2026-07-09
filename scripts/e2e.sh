@@ -375,6 +375,197 @@ has "…memory is INJECTed into the NEXT run's prompt" "$MEM2/prompt_latest.txt"
 has "…carrying the prior session's record across runs" "$MEM2/prompt_latest.txt" "session 1"
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9b. git session isolation + the rollback GATE"
+# NOTE: agg discards a session branch that has UNCOMMITTED edits ("commit your work to keep it"),
+# so the worker must commit — that is the real contract with the worker, not a test artifact.
+# The repo must also be clean when `agg run` starts, so every fixture file is committed first.
+mkrepo() { # mkrepo <dir>  — commit everything the fixture made so far
+  ( cd "$1" && git init -q && git config user.email e@e && git config user.name e \
+    && printf 'did_work\ntrace.txt\nprompt*.txt\n.sess\nJUDGE_FAIL\nrun.log\nAGG_MEMORY.md\n' > .gitignore \
+    && echo base > tracked.txt && git add -A && git commit -qm init )
+}
+
+GI="$(mkproj iso)"
+cat > "$GI/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+echo worker-edit > tracked.txt
+git add -A && git commit -qm "worker: session work"   # the worker commits on its session branch
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$GI/bin/claude"
+printf 'project: iso\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true }\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$GI/agg.yaml"
+mkrepo "$GI"
+agg_do "$GI" run --max-sessions 1 > "$GI/run.log" 2>&1
+has "isolation cuts a per-session branch off the base"  "$GI/run.log" "[iso] session #1 on branch"
+has "…and a green session is MERGED back"               "$GI/run.log" "merged → kept"
+is  "…so the worker's commit is on base" \
+    "$( cd "$GI" && git show HEAD:tracked.txt 2>/dev/null )" "worker-edit"
+
+# now regress a previously-met goal → the GATE must roll the merge back.
+# a second, never-met goal keeps the loop alive past session 1.
+GR="$(mkproj rollback)"
+cat > "$GR/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
+echo "sess-$n" > tracked.txt
+git add -A && git commit -qm "worker: session $n"
+: > did_work
+[ "$n" -ge 2 ] && : > JUDGE_FAIL   # session 2 REGRESSES the goal session 1 had met
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$GR/bin/claude"
+cat > "$GR/judges/never.sh" <<'EOF'
+#!/bin/sh
+echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
+EOF
+chmod +x "$GR/judges/never.sh"
+printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\n  - id: endless\n    type: binary\n    judge: { kind: script, cmd: "./judges/never.sh" }\nstop_when: endless\n' > "$GR/goals.yaml"
+printf 'project: rollback\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: true }\n' > "$GR/agg.yaml"
+mkrepo "$GR"
+agg_do "$GR" run --max-sessions 2 > "$GR/run.log" 2>&1
+has "session 1 (green) is merged onto base"          "$GR/run.log" "session #1 merged → kept"
+has "session 2 (regressing) is ROLLED BACK"          "$GR/run.log" "session #2 ROLLED BACK"
+is  "…and its work NEVER lands on base (base still holds session 1)" \
+    "$( cd "$GR" && git show HEAD:tracked.txt 2>/dev/null )" "sess-1"
+has "…the durable memory says the work is NOT on base" "$GR/AGG_MEMORY.md" "NOT on the base branch"
+has "…and the session branch is kept for inspection"   "$GR/run.log" "kept for inspection"
+
+# the worker's own veto: writing the red file discards the session, merged or not
+GV="$(mkproj veto)"
+cat > "$GV/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+echo vetoed-work > tracked.txt
+git add -A && git commit -qm "worker: work I do not trust"
+: > AGG_RED            # the worker vetoes its own session
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$GV/bin/claude"
+printf 'project: veto\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, red_file: "AGG_RED" }\n' > "$GV/agg.yaml"
+mkrepo "$GV"
+agg_do "$GV" run --max-sessions 1 > "$GV/run.log" 2>&1
+has "a worker that writes the red file VETOES its own session" "$GV/run.log" "VETOED"
+is  "…and none of its work reaches base" \
+    "$( cd "$GV" && git show HEAD:tracked.txt 2>/dev/null )" "base"
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9c. worker-failure paths (rate-limit backoff · hung-worker watchdog)"
+RL="$(mkproj ratelimit)"
+# `worker.rs`: "a clean exit 0 is never a rate-limit, even if a transient event looked like one" —
+# detection is exit-code AND terminal-event gated, so the stub must also exit non-zero.
+cat > "$RL/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+printf '{"type":"result","subtype":"error","is_error":true,"result":"rate_limit_error: slow down","usage":{"output_tokens":0},"total_cost_usd":0}\n'
+exit 1
+EOF
+chmod +x "$RL/bin/claude"
+printf 'project: ratelimit\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nratelimit_backoff_secs: 1\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$RL/agg.yaml"
+agg_do "$RL" run --max-sessions 2 > "$RL/run.log" 2>&1
+has "a rate-limited session backs off"        "$RL/run.log" "rate limit detected"
+has "…and is flagged on the exit line"        "$RL/run.log" "[RATE-LIMITED]"
+hasnt "…and is NEVER judged"                  "$RL/run.log" "running judges…"
+absent "…and leaves NO durable memory entry"  "$RL/AGG_MEMORY.md"
+is "…the trace shows no VERIFY/GATE after RUN" \
+   "$(tr '\n' ' ' < "$RL/trace.txt")" "VERIFY=verify INJECT=inject RUN=run INJECT=inject RUN=run "
+
+# The watchdog polls every 30s, so even with idle_secs=3 the kill lands ~90s in. This is the
+# check that caught `parse_ps_time` rejecting macOS's fractional `ps` TIME ("0:00.00"), which made
+# cpu_jiffies() return -1 forever and silently disabled the CPU-flat detector on every mac.
+WD="$(mkproj watchdog)"
+cat > "$WD/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+sleep 300      # stream-idle and cpu-flat: exactly the hang the watchdog exists to kill
+EOF
+chmod +x "$WD/bin/claude"
+printf 'project: watchdog\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nwatchdog: { idle_secs: 3, cpu_grace: 2 }\n' > "$WD/agg.yaml"
+: > "$WD/NO_WORK"
+WDS=$(date +%s)
+agg_do "$WD" run --max-sessions 1 > "$WD/run.log" 2>&1
+is "a hung worker is SIGKILLed and the loop survives (exit 4)" "$?" "4"
+has "…the watchdog announces the SIGKILL"    "$WD/run.log" "WATCHDOG: worker pid"
+has "…and flags it on the session exit line" "$WD/run.log" "WATCHDOG-KILLED"
+[ $(( $(date +%s) - WDS )) -lt 200 ] \
+  && ok "…and it fires promptly, not after the worker finishes on its own" \
+  || bad "watchdog did not fire (the worker ran to completion)"
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9d. prompt composition (prompt_includes · --resume) and lifecycle hooks"
+PI="$(mkproj promptinc)"; : > "$PI/NO_WORK"
+echo "TOOLING_FRAGMENT_ZZZ" > "$PI/frag.md"
+cat > "$PI/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+prev=""; for a in "$@"; do
+  [ "$prev" = "-p" ] && printf '%s' "$a" > prompt_latest.txt
+  [ "$prev" = "--resume" ] && echo "$a" >> resumed_with.txt
+  prev="$a"
+done
+sh bin/rec RUN
+printf '{"type":"result","subtype":"success","is_error":false,"session_id":"sess-abc-123","result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$PI/bin/claude"
+printf 'project: promptinc\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nresume_sessions: true\nprompt_includes: ["frag.md"]\nhooks:\n  on_start: ["echo HOOK_ON_START"]\n  on_stop: ["echo HOOK_ON_STOP"]\n  background: ["sleep 30"]\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$PI/agg.yaml"
+agg_do "$PI" run --max-sessions 2 > "$PI/run.log" 2>&1
+has "prompt_includes are prepended to every prompt" "$PI/prompt_latest.txt" "TOOLING_FRAGMENT_ZZZ"
+has "…above the resume prompt"                      "$PI/prompt_latest.txt" "create the file did_work"
+has "resume_sessions passes --resume <session_id>"  "$PI/resumed_with.txt" "sess-abc-123"
+has "on_start hook runs once at launch"             "$PI/run.log" "HOOK_ON_START"
+has "on_stop hook runs on exit (Drop guard)"        "$PI/run.log" "HOOK_ON_STOP"
+has "background hook is spawned"                    "$PI/run.log" "[hook:background]"
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9e. LLM-backed pieces (llm judge · summarizer) against a stubbed model"
+LJ="$(mkproj llmjudge)"
+# `--output-format json` marks the judge/summary calls; the worker uses stream-json.
+cat > "$LJ/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+fmt=""; prompt=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--output-format" ] && fmt="$a"
+  [ "$prev" = "-p" ] && prompt="$a"
+  prev="$a"
+done
+if [ "$fmt" = "json" ]; then
+  case "$prompt" in
+    *cumulative*) printf '{"result":"{\\"cumulative\\":\\"CUMULATIVE_SUMMARY_X\\",\\"windowed\\":\\"WINDOWED_SUMMARY_Y\\"}"}\n' ;;
+    # the llm judge must be NOT-met at baseline, else the loop stops before running a session
+    *) if [ -f did_work ]; then
+         printf '{"result":"{\\"met\\":true,\\"value\\":1,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"LLM_JUDGE_SAYS_OK\\"}"}\n'
+       else
+         printf '{"result":"{\\"met\\":false,\\"value\\":0,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"LLM_JUDGE_SAYS_NOT_YET\\"}"}\n'
+       fi ;;
+  esac
+  exit 0
+fi
+sh bin/rec RUN
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$LJ/bin/claude"
+echo "Decide whether the work is done." > "$LJ/rubric.md"
+printf 'goals:\n  - id: reviewed\n    type: binary\n    judge: { kind: llm, model: fake, rubric: "rubric.md", inputs: [] }\nstop_when: reviewed\n' > "$LJ/goals.yaml"
+printf 'project: llmjudge\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: true, model: fake, min_interval_secs: 0 }\n' > "$LJ/agg.yaml"
+agg_do "$LJ" run --max-sessions 2 > "$LJ/run.log" 2>&1
+is  "an llm judge drives the loop to its stop condition (exit 0)" "$?" "0"
+has "…it reports not-met at baseline"          "$LJ/run.log" "LLM_JUDGE_SAYS_NOT_YET"
+has "…then met after the worker ran"           "$LJ/run.log" "LLM_JUDGE_SAYS_OK"
+has "the summarizer runs and logs a cumulative summary" "$LJ/run.log" "CUMULATIVE_SUMMARY_X"
+has "…and a windowed summary"                           "$LJ/run.log" "WINDOWED_SUMMARY_Y"
+is  "…and the summary is published to state.json" "$(snap "$LJ" summary_cumulative)" "CUMULATIVE_SUMMARY_X"
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "10. agg serve — the JSON API the web UI depends on"
 PORT=$(free_port)
 SV="$(mkproj serve)"; : > "$SV/NO_WORK"; echo 3 > "$SV/WORKER_SLEEP"
@@ -467,24 +658,81 @@ if [ "$TUI" = "0" ]; then
   skip "interactive TUI" "--no-tui"
 else
   DRIVE="$ROOT/scripts/tui_drive.py"   # `script(1)` gives no window size → ratatui paints 0 cells
-  T="$(mkproj tuidemo)"; agg_do "$T" run --max-sessions 1 > "$T/run.log" 2>&1
+  T="$(mkproj tuidemo)"
+  # the Activity pane must OVERFLOW, or there is nothing to scroll and follow-mode is moot:
+  # emit ~60 `assistant` text events so max_scroll > 0.
+  cat > "$T/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+i=1; while [ $i -le 60 ]; do
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"thinking step %s"}]}}\n' "$i"
+  i=$((i+1))
+done
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+  chmod +x "$T/bin/claude"
+  agg_do "$T" run --max-sessions 1 > "$T/run.log" 2>&1
 
-  ( cd "$T" && python3 "$DRIVE" --key q --after 1.5 --timeout 25 -- "$AGG" dashboard > tui.raw 2>&1 )
+  # drive <name> <key-script> <timeout>  → runs the TUI, leaves the de-ANSI'd frames in $T/<name>.txt
+  drive() { ( cd "$T" && python3 "$DRIVE" --seq "$2" --timeout "$3" -- "$AGG" dashboard > "$1.raw" 2>&1 ); local r=$?; deansi "$T/$1.raw" "$T/$1.txt"; return $r; }
+
+  # NOTE on grepping a pty capture: ratatui re-emits only CHANGED cells. Going from `[⏵live]` to
+  # `[paused]` leaves the shared `e` untouched, so the stream holds `paus`…`d` and the word never
+  # appears contiguously. `RESIZE` (a pseudo-key in tui_drive.py) resizes the pty, which makes
+  # ratatui repaint in FULL — put it after the keys under test and before `q`.
+  drive base "2.0:q" 25
   is "TUI launches on a pty and quits on 'q'" "$?" "0"
-  deansi "$T/tui.raw" "$T/tui.txt"
-  has "…paints the project name" "$T/tui.txt" "tuidemo"
-  has "…paints the goal"         "$T/tui.txt" "worked"
-  has "…paints the phase field"  "$T/tui.txt" "phase"
-  has "…paints the finished banner" "$T/tui.txt" "FINISHED"
+  has "…paints the project name"    "$T/base.txt" "tuidemo"
+  has "…paints the goal"            "$T/base.txt" "worked"
+  has "…paints the phase field"     "$T/base.txt" "phase"
+  has "…paints the worker's activity stream" "$T/base.txt" "thinking step"
+  has "…paints the finished banner" "$T/base.txt" "FINISHED"
+  has "…paints the keybinding help" "$T/base.txt" "q=quit"
+  # focus starts on Activity, follow-mode starts on
+  has "…Activity starts focused (▸)"        "$T/base.txt" "▸ Activity"
+  has "…and auto-follow starts on (⏵live)"  "$T/base.txt" "⏵live"
+  hasnt "…Goals is not focused to begin with" "$T/base.txt" "▸ Goals"
+  hasnt "…and follow is not paused"           "$T/base.txt" "paused"
 
-  ( cd "$T" && python3 "$DRIVE" --key x --after 1.0 --timeout 8 -- "$AGG" dashboard > /dev/null 2>&1 )
-  is "…and does NOT quit on some other key" "$?" "124"
+  # a user presses Tab to move focus, f to toggle follow, arrows to scroll
+  drive tab "1.5:Tab,0.6:RESIZE,0.8:q" 25
+  is  "Tab is accepted and the TUI still quits" "$?" "0"
+  has "…Tab moves focus to Goals (▸ Goals)"     "$T/tab.txt" "▸ Goals"
+
+  # `f` at the bottom used to be a no-op: draw_activity re-pinned anything at max_scroll,
+  # so the pause was undone by the very next repaint.
+  drive follow "1.5:f,0.6:RESIZE,0.8:q" 25
+  is  "f is accepted" "$?" "0"
+  has "…f pauses auto-follow, and the pause survives the repaint" "$T/follow.txt" "Activity  [paused]"
+
+  drive refollow "1.5:f,0.4:f,0.6:RESIZE,0.8:q" 25
+  is    "…and f again resumes it" "$?" "0"
+  has   "…back to ⏵live"          "$T/refollow.txt" "Activity  [⏵live]"
+  hasnt "…and not left paused"    "$T/refollow.txt" "Activity  [paused]"
+
+  drive up "1.5:Up,0.6:RESIZE,0.8:q" 25
+  is  "Up leaves follow-mode" "$?" "0"
+  has "…and the pane reads paused" "$T/up.txt" "Activity  [paused]"
+
+  drive gG "1.5:g,0.4:G,0.6:RESIZE,0.8:q" 25
+  is  "g jumps to the oldest event, G re-pins to the newest" "$?" "0"
+  has "…and G restores ⏵live" "$T/gG.txt" "Activity  [⏵live]"
+
+  drive scroll "1.5:Down,0.2:Down,0.2:Up,0.2:PageDown,0.2:G,0.2:g,0.6:q" 25
+  is "arrows/PageDown/g/G scroll without crashing, and 'q' still quits" "$?" "0"
+
+  drive esc "1.5:Esc" 25
+  is "Esc quits too" "$?" "0"
+
+  drive ignore "1.0:x" 8
+  is "…and an unbound key does NOT quit" "$?" "124"
 
   # a LIVE loop must render one of the four stage names, not the old vocabulary
   TL="$(mkproj tuilive)"; : > "$TL/NO_WORK"; echo 5 > "$TL/WORKER_SLEEP"
   agg_bg TLP "$TL" run.log run --max-sessions 3
   waitfor 30 "live loop for the TUI" grep -q "RUN=run" "$TL/trace.txt"
-  ( cd "$TL" && python3 "$DRIVE" --key q --after 1.5 --timeout 25 -- "$AGG" dashboard > tui.raw 2>&1 )
+  ( cd "$TL" && python3 "$DRIVE" --seq "2.0:q" --timeout 25 -- "$AGG" dashboard > tui.raw 2>&1 )
   deansi "$TL/tui.raw" "$TL/tui.txt"
   grep -Eq "phase +(inject|run|verify|gate)" "$TL/tui.txt" \
     && ok "…a live loop renders a four-stage phase (inject/run/verify/gate)" \
@@ -538,26 +786,30 @@ assert d['phase'] in ('inject','run','verify','gate'), d['phase']" \
   curl -sf "http://127.0.0.1:$WPORT/api/history" -o "$W/hi.json"
   python3 -c "import json;json.load(open('$W/hi.json'))" && ok "BFF /api/history proxies the ledger" || bad "BFF history malformed"
 
-  # the Controls.svelte buttons post exactly these bodies
-  C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WPORT/api/send" -H 'content-type: application/json' -d '{"cmd":"inject","text":"WEB_UI_MARKER"}')
-  is "web ✎ Inject → BFF → agg (200)" "$C" "200"
-  waitfor 40 "…reaches the worker's next prompt" grep -q "WEB_UI_MARKER" "$W/prompt_latest.txt"
+  # ── REAL BROWSER: Chromium clicks the actual buttons ─────────────────────────────────
+  # Everything above only proves the BFF proxies JSON. This drives the DOM the way a user
+  # does — Pause / Resume / Inject… / Budget… / Stop, including the confirm() dialog — and
+  # then checks the effect landed in the real loop's log and the next worker's prompt.
+  if ! python3 -c "import playwright" 2>/dev/null; then
+    skip "browser click-through" "pip install playwright && playwright install chromium"
+  else
+    python3 "$ROOT/scripts/web_e2e.py" --url "http://127.0.0.1:$WPORT" --project "$W" \
+            --shots "$W/shots" > "$W/browser.log" 2>&1
+    BRC=$?
+    sed -n 's/^  /  /p' "$W/browser.log" | grep -E '✔|✘' || true
+    BP=$(grep -c '✔' "$W/browser.log" || true); BF=$(grep -c '✘' "$W/browser.log" || true)
+    PASS=$((PASS + BP)); FAIL=$((FAIL + BF))
+    if [ "$BF" -gt 0 ]; then
+      while IFS= read -r l; do FAILED+=("browser: $l"); done < <(grep -oE '•.*' "$W/browser.log" | sed 's/^• //')
+    fi
+    [ "$BRC" = "0" ] || [ "$BF" -gt 0 ] || bad "browser click-through crashed" "$(tail -3 "$W/browser.log")"
+    exists "…screenshots captured for inspection" "$W/shots/01-live.png"
+  fi
 
-  C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WPORT/api/send" -H 'content-type: application/json' -d '{"cmd":"pause"}')
-  is "web ⏸ Pause → 200" "$C" "200"
-  waitfor 30 "…the loop parks" grep -q "pause → waiting" "$W/run.log"
-  C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WPORT/api/send" -H 'content-type: application/json' -d '{"cmd":"resume"}')
-  is "web ▶ Resume → 200" "$C" "200"
-  waitfor 30 "…the loop continues" grep -q "resume → continuing" "$W/run.log"
-
-  C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WPORT/api/send" -H 'content-type: application/json' -d '{"cmd":"budget","total":null}')
-  is "web ◫ Budget (unlimited) → 200" "$C" "200"
-
-  C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$WPORT/api/send" -H 'content-type: application/json' -d '{"cmd":"stop","reason":"stopped from web"}')
-  is "web ⏹ Stop → 200" "$C" "200"
-  waitfor 40 "…the loop really stops" bash -c "! kill -0 $WLOOP 2>/dev/null"
+  # the browser test ends by clicking Stop, so the loop must be gone
+  waitfor 40 "…the loop really stopped after the browser clicked ⏹ Stop" bash -c "! kill -0 $WLOOP 2>/dev/null"
   wait $WLOOP; is "…exit 0" "$?" "0"
-  is "…with the web's reason" "$(finish_reason "$W")" "stopped via bus: stopped from web"
+  is "…with the reason the browser sent" "$(finish_reason "$W")" "stopped via bus: stopped from web"
 
   waitfor 20 "BFF /api/health → running:false after the stop" bash -c "curl -sf http://127.0.0.1:$WPORT/api/health | grep -q '\"running\":false'"
 

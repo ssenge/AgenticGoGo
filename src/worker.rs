@@ -384,14 +384,24 @@ fn cpu_jiffies(pid: u32) -> i64 {
 }
 
 /// Parse a `ps` TIME field like `MM:SS`, `HH:MM:SS`, or `DD-HH:MM:SS` to seconds.
-/// Returns None on ANY malformed field — never a fake 0, which could read as
+///
+/// macOS prints FRACTIONAL seconds (`0:00.00`); Linux does not (`00:00:00`). We truncate at the
+/// `.` rather than reject: a `None` here makes `cpu_jiffies` return -1, which the watchdog reads
+/// as "CPU unknown" and so it never accumulates flat-time — that silently disabled the CPU-flat
+/// hang detector on every mac.
+///
+/// Still returns None on ANY otherwise-malformed field — never a fake 0, which could read as
 /// "CPU flat" and contribute to a false-positive watchdog kill.
 fn parse_ps_time(s: &str) -> Option<i64> {
     let (days, rest) = match s.split_once('-') {
         Some((d, r)) => (d.parse::<i64>().ok()?, r),
         None => (0, s),
     };
-    let parts: Vec<i64> = rest.split(':').map(|p| p.parse::<i64>()).collect::<Result<_, _>>().ok()?;
+    let parts: Vec<i64> = rest
+        .split(':')
+        .map(|p| p.split('.').next().unwrap_or(p).parse::<i64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
     let hms = match parts.as_slice() {
         [h, m, sec] => h * 3600 + m * 60 + sec,
         [m, sec] => m * 60 + sec,
@@ -410,9 +420,17 @@ mod tests {
         assert_eq!(parse_ps_time("8:29"), Some(8 * 60 + 29));
         assert_eq!(parse_ps_time("1:02:03"), Some(3723));
         assert_eq!(parse_ps_time("2-01:00:00"), Some(2 * 86400 + 3600));
+        // macOS prints fractional seconds — truncate, don't reject. Rejecting made
+        // cpu_jiffies() return -1 forever, which silently disabled the CPU-flat watchdog
+        // on every mac (the loop never accumulated flat-time, so it never SIGKILLed a hang).
+        assert_eq!(parse_ps_time("0:00.00"), Some(0));
+        assert_eq!(parse_ps_time("0:12.34"), Some(12));
+        assert_eq!(parse_ps_time("3:07.99"), Some(3 * 60 + 7));
+        assert_eq!(parse_ps_time("1:02:03.50"), Some(3723));
         // malformed → None (not a fake 0)
         assert_eq!(parse_ps_time("garbage"), None);
         assert_eq!(parse_ps_time("1:2:3:4"), None);
         assert_eq!(parse_ps_time(""), None);
+        assert_eq!(parse_ps_time("1:x.5"), None);
     }
 }
