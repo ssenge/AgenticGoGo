@@ -108,9 +108,126 @@ impl Drop for RunPidGuard<'_> {
     }
 }
 
+/// Everything one cycle of the loop reads and writes.
+///
+/// The four stages all mutate the same handful of values — counters, ceilings, the carry-forward
+/// strings, the engine, the dashboard/ledger handles. Threading those as a dozen locals is what
+/// made `run()` a single 700-line function; owning them here lets each stage be a method that
+/// takes `&mut self` instead of twelve parameters.
+///
+/// **Borrow discipline** — the one rule this shape rests on: never write an expression that both
+/// `&mut`-borrows a field and `&`-borrows `self` through a method. Bind first, then call:
+///
+/// ```ignore
+/// let rs = self.run_state();                              // &self released here
+/// let res = self.eng.evaluate_cycle(dir, cb, &rs);        // &mut self.eng only
+/// ```
+///
+/// [`LoopState::publish`] applies the same rule: it clones `dash` into a local before handing it
+/// to `live.update`, so `&self.dash` and `&self.live` are never live at once.
+struct LoopState<'a> {
+    // ── borrowed inputs (one shared lifetime; all read-only) ──
+    cfg: &'a AggConfig,
+    dir: &'a Path,
+    config_base: &'a Path,
+    /// read once at launch, re-used to build every prompt
+    resume_prompt: String,
+    /// `prompt_includes` fragments, composed once at launch
+    prompt_prefix: String,
+
+    // ── owned engine + handles ──
+    eng: Engine,
+    /// the loop's working copy of the dashboard fields IT owns; `publish()` folds them into `live`
+    dash: DashboardState,
+    live: LiveState,
+    ledger: crate::project::RunLedger,
+    bus: Option<Bus>,
+
+    // ── ceilings (`budget_total` is steerable mid-run via the bus) ──
+    budget_total: Option<u64>,
+    cost_limit: Option<f64>,
+    /// `None` when `max_sessions == 0` (unlimited), so `over_iterations` never trips
+    max_iter: Option<u32>,
+    max_sessions: u32,
+
+    // ── clock + lifetime base ──
+    loop_start: Instant,
+    lifetime_base: u32,
+
+    // ── counters ──
+    session: u32,
+    tokens_spent: u64,
+    cost_spent: f64,
+
+    // ── carry-forward (written in one cycle, read in the next) ──
+    pending_instruction: Option<String>,
+    last_session: String,
+    last_session_id: Option<String>,
+    cumulative: String,
+    last_summary: Instant,
+
+    // ── per-session git isolation ──
+    iso_base: Option<String>,
+    session_branch: Option<String>,
+}
+
+impl LoopState<'_> {
+    /// Publish ALL loop-owned dashboard fields to the shared `LiveState`.
+    ///
+    /// Single-writer-under-lock: ONE shared `LiveState` is mutated by both the loop (boundary
+    /// updates: phase/session/goals/summaries) and the worker's reader thread (live updates:
+    /// now/think/recent/idle, mid-session). We assign `dash` wholesale and preserve only the
+    /// worker-owned live fields, so a NEW loop-owned field is published automatically instead of
+    /// being silently dropped (the old hand-copied list had already lost `lifetime_session`, so
+    /// `agg status`/the dashboard showed "#0 lifetime" — that class of bug is now structurally
+    /// impossible).
+    ///
+    /// What it publishes depends on WHERE it is called: it reads `tokens_spent`/`cost_spent`/`eng`
+    /// live. Moving a `publish()` across a mutation changes what lands in `state.json`.
+    fn publish(&mut self) {
+        self.dash.up_secs = self.loop_start.elapsed().as_secs();
+        self.dash.tokens_spent = self.tokens_spent;
+        self.dash.cost_spent = self.cost_spent;
+        let (m, t) = self.eng.tally();
+        self.dash.goals_met = m;
+        self.dash.goals_total = t;
+        self.dash.goals = DashboardState::goals_from_engine(&self.eng, &self.dash.goals);
+        // bind the snapshot first: the closure must not hold `&self.dash` while `self.live` is
+        // borrowed (see the borrow discipline on the struct).
+        let snapshot = self.dash.clone();
+        self.live.update(|s| {
+            let now = std::mem::take(&mut s.now);
+            let think = std::mem::take(&mut s.think);
+            let recent = std::mem::take(&mut s.recent);
+            let idle_secs = s.idle_secs;
+            let seq = s.seq; // monotonic; `publish()` bumps it — don't reset from stale `dash`
+            *s = snapshot;
+            s.now = now;
+            s.think = think;
+            s.recent = recent;
+            s.idle_secs = idle_secs;
+            s.seq = seq;
+        });
+    }
+
+    /// The run-level accounting the engine's ceiling guards evaluate against. Returns an OWNED
+    /// `RunState` so it never holds a borrow of `self` past the binding.
+    fn run_state(&self) -> RunState {
+        RunState {
+            tokens_spent: self.tokens_spent,
+            budget_total: self.budget_total,
+            cost_spent: self.cost_spent,
+            cost_limit: self.cost_limit,
+            sessions_done: self.session,
+            max_sessions: self.max_iter,
+            wall_hours: self.loop_start.elapsed().as_secs_f64() / 3600.0,
+        }
+    }
+}
+
 pub fn run(
     cfg: AggConfig,
-    mut eng: Engine,
+    eng: Engine,
     dir: &Path,
     config_base: &Path,
     max_sessions: u32,
@@ -181,34 +298,10 @@ pub fn run(
         cfg.project, cfg.model, eng.stop_when
     );
 
-    // run-level accounting for the ceiling guards. `budget_total`/`cost_limit` are mutable so
-    // a future bus command could steer them mid-run (budget already has `set-budget`). The
-    // iteration cap is `max_sessions` (0 = unlimited → None so `over_iterations` never trips).
-    let mut tokens_spent: u64 = 0;
-    let mut cost_spent: f64 = 0.0;
-    let mut budget_total = cfg.budget.total;
-    let cost_limit = cfg.cost.total;
-    let max_iter = if max_sessions == 0 { None } else { Some(max_sessions) };
-    let run_state = |toks: u64, budget: Option<u64>, cost: f64, sessions: u32| RunState {
-        tokens_spent: toks,
-        budget_total: budget,
-        cost_spent: cost,
-        cost_limit,
-        sessions_done: sessions,
-        max_sessions: max_iter,
-        wall_hours: loop_start.elapsed().as_secs_f64() / 3600.0,
-    };
-
     // ---- dashboard state: the loop + worker publish a compact snapshot to
     //      .agg/state.json; `agg dashboard` renders it. Two-stream discipline:
-    //      the stdout log above stays the source of truth; this is just a view.
-    //
-    //      Single-writer-under-lock: ONE shared `LiveState` is mutated by both the loop
-    //      (boundary updates: phase/session/goals/summaries) and the worker's reader
-    //      thread (live updates: now/think/recent/idle, mid-session). `dash` below is
-    //      the loop's working copy of the fields IT owns; `publish!` folds those into
-    //      the shared state without clobbering the worker-owned live fields. ----
-    let mut dash = DashboardState {
+    //      the stdout log above stays the source of truth; this is just a view. ----
+    let dash = DashboardState {
         project: cfg.project.clone(),
         model: cfg.model.clone(),
         stop_when: eng.stop_when.clone(),
@@ -219,94 +312,92 @@ pub fn run(
         ..Default::default()
     };
     let live = LiveState::new(dir, loop_start, dash.clone());
-    macro_rules! publish {
-        () => {{
-            dash.up_secs = loop_start.elapsed().as_secs();
-            dash.tokens_spent = tokens_spent;
-            dash.cost_spent = cost_spent;
-            let (m, t) = eng.tally();
-            dash.goals_met = m;
-            dash.goals_total = t;
-            dash.goals = DashboardState::goals_from_engine(&eng, &dash.goals);
-            // Publish ALL loop-owned fields by assigning `dash` wholesale, preserving only the
-            // worker-owned live fields (now/think/recent/idle_secs) that the reader thread writes
-            // between publishes. Inverting the copy this way means a new loop-owned field is
-            // published automatically instead of being silently dropped (the old hand-copied list
-            // had already lost `lifetime_session`, so `agg status`/the dashboard showed "#0
-            // lifetime" — that class of bug is now structurally impossible).
-            live.update(|s| {
-                let now = std::mem::take(&mut s.now);
-                let think = std::mem::take(&mut s.think);
-                let recent = std::mem::take(&mut s.recent);
-                let idle_secs = s.idle_secs;
-                let seq = s.seq; // monotonic; `publish()` bumps it — don't reset from stale `dash`
-                *s = dash.clone();
-                s.now = now;
-                s.think = think;
-                s.recent = recent;
-                s.idle_secs = idle_secs;
-                s.seq = seq;
-            });
-        }};
-    }
-    publish!();
 
     // Persistent project run-history ledger (.agg/project.json): append an in-flight record for
-    // THIS run, finalized on any exit via the Drop guard below. Created BEFORE the baseline
-    // evaluation so that even a run that is already-satisfied (or halts) at launch still leaves
-    // a history record — `agg history` would otherwise miss zero-session runs. The lifetime
-    // session total (shown on the dashboard so a restart doesn't look like the work started
-    // over) is derived from prior runs; `session` (per-run) still drives --resume/labels.
-    let mut session = 0u32;
-    let mut ledger = crate::project::RunLedger::begin(
-        dir,
-        &cfg.project,
-        std::process::id(),
-        now_epoch(),
-    );
+    // THIS run, finalized on any exit via its Drop guard. Created BEFORE the baseline evaluation
+    // so that even a run that is already-satisfied (or halts) at launch still leaves a history
+    // record — `agg history` would otherwise miss zero-session runs. The lifetime session total
+    // (shown on the dashboard so a restart doesn't look like the work started over) is derived
+    // from prior runs; `session` (per-run) still drives --resume/labels.
+    let ledger =
+        crate::project::RunLedger::begin(dir, &cfg.project, std::process::id(), now_epoch());
     let lifetime_base = ledger.prior_lifetime_sessions();
-    dash.lifetime_session = lifetime_base;
+
+    // `st` is declared AFTER `_stop_hooks`/`_run_pid_guard` so it drops FIRST: the ledger's Drop
+    // (which finalizes the run record) must fire before the on_stop hooks and the run.pid clear,
+    // exactly as it did when these were separate locals.
+    let mut st = LoopState {
+        cfg: &cfg,
+        dir,
+        config_base,
+        resume_prompt,
+        prompt_prefix,
+        eng,
+        dash,
+        live,
+        ledger,
+        bus: None, // opened after the baseline evaluation, below
+        // run-level accounting for the ceiling guards. The iteration cap is `max_sessions`
+        // (0 = unlimited → None so `over_iterations` never trips).
+        budget_total: cfg.budget.total,
+        cost_limit: cfg.cost.total,
+        max_iter: if max_sessions == 0 { None } else { Some(max_sessions) },
+        max_sessions,
+        loop_start,
+        lifetime_base,
+        session: 0,
+        tokens_spent: 0,
+        cost_spent: 0.0,
+        pending_instruction: None,
+        last_session: String::new(),
+        last_session_id: None,
+        cumulative: String::new(),
+        last_summary: loop_start, // real value set below, after the baseline evaluation
+        iso_base: None,
+        session_branch: None,
+    };
+    st.publish();
+    st.dash.lifetime_session = lifetime_base;
 
     // Evaluate the goals ONCE up front (run the judges) — maybe we're already done,
     // or an invariant is already broken, before burning a single session.
     eprintln!("  baseline: running judges once before the first session…");
-    dash.phase = "judging".into();
-    publish!();
-    let pre = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total, cost_spent, session));
-    eprint!("{}", indent(&eng.scoreboard()));
-    publish!();
+    st.dash.phase = "judging".into();
+    st.publish();
+    let rs = st.run_state();
+    let pre = st.eng.evaluate_cycle(dir, config_base, &rs);
+    eprint!("{}", indent(&st.eng.scoreboard()));
+    st.publish();
     if pre.halt {
         eprintln!("⚠ HALT at baseline — guard already true: {}", pre.halt_reason.clone().unwrap_or_default());
-        dash.phase = "done".into();
-        dash.finished = true;
-        dash.finish_reason = format!("HALT at baseline: {}", pre.halt_reason.clone().unwrap_or_default());
-        let (gm, gt) = eng.tally();
-        ledger.update(0, 0, gm, gt);
-        ledger.finish(now_epoch(), &format!("halt-at-baseline:{}", pre.halt_reason.unwrap_or_default()));
-        publish!();
+        st.dash.phase = "done".into();
+        st.dash.finished = true;
+        st.dash.finish_reason = format!("HALT at baseline: {}", pre.halt_reason.clone().unwrap_or_default());
+        let (gm, gt) = st.eng.tally();
+        st.ledger.update(0, 0, gm, gt);
+        st.ledger.finish(now_epoch(), &format!("halt-at-baseline:{}", pre.halt_reason.unwrap_or_default()));
+        st.publish();
         return Ok(RunOutcome::Halt);
     }
     if pre.stop {
         eprintln!("✔ stop condition already satisfied at launch — nothing to do.");
-        dash.phase = "done".into();
-        dash.finished = true;
-        dash.finish_reason = "already satisfied at launch".into();
-        let (gm, gt) = eng.tally();
-        ledger.update(0, 0, gm, gt);
-        ledger.finish(now_epoch(), "already-satisfied");
-        publish!();
+        st.dash.phase = "done".into();
+        st.dash.finished = true;
+        st.dash.finish_reason = "already satisfied at launch".into();
+        let (gm, gt) = st.eng.tally();
+        st.ledger.update(0, 0, gm, gt);
+        st.ledger.finish(now_epoch(), "already-satisfied");
+        st.publish();
         return Ok(RunOutcome::GoalsMet);
     }
 
     // summarizer state: the rolling cumulative summary + last-summary timestamp.
-    let mut cumulative = String::new();
-    let mut last_summary = Instant::now() - std::time::Duration::from_secs(cfg.summary.min_interval_secs);
+    st.last_summary = Instant::now() - Duration::from_secs(cfg.summary.min_interval_secs);
 
     // institutional memory (#3): the LAST SESSION block carried into the NEXT prompt's READ
     // injection (prior cycle's deltas + scoreboard). Empty on session 1 of THIS invocation; the
     // durable file's newest entry is the cross-RUN carry. Make memory work WITHOUT git isolation
     // by creating `.agg/memory/` ourselves (not via the isolation-only gitignore path).
-    let mut last_session = String::new();
     if cfg.memory.enabled {
         crate::memory::ensure_scratch_dir(dir);
         // sweep any scratch notes left by a prior run (crash / forged filename) — the durable
@@ -316,9 +407,7 @@ pub fn run(
 
     // ---- bus: operator/outer-Claude steering, drained at each session boundary
     //      (the only safe injection point for headless workers). ----
-    let bus = Bus::open(dir).ok();
-    let mut pending_instruction: Option<String> = None; // prepended to next prompt
-    let mut last_session_id: Option<String> = None;      // for optional --resume continuity
+    st.bus = Bus::open(dir).ok();
 
     // ── per-session git isolation (opt-in) ────────────────────────────────────────────────
     // Capture the base branch ONCE at startup. Each session runs on its own branch off this
@@ -326,7 +415,7 @@ pub fn run(
     // repo isn't in a usable state (not a repo / detached HEAD / dirty tree) — isolation is an
     // enhancement, never a correctness requirement.
     let iso = &cfg.session_isolation;
-    let iso_base: Option<String> = if iso.enabled {
+    st.iso_base = if iso.enabled {
         // Recover a staged merge stranded by an interrupted previous run (Ctrl-C/crash/kill during
         // the rollback-gate judging window) BEFORE the is_clean check — otherwise the leftover
         // MERGE_HEAD makes is_clean false and silently disables isolation. No-op if not a repo.
@@ -357,96 +446,106 @@ pub fn run(
         None
     };
     loop {
-        if max_sessions != 0 && session >= max_sessions {
+        if st.max_sessions != 0 && st.session >= st.max_sessions {
             eprintln!("→ reached max_sessions={max_sessions}; stopping (goals not all met).");
             // set the finished state + publish so `agg status`/the dashboard reflect the outcome
             // (previously this path broke without updating either — a never-"finished" run).
-            let (gm, gt) = eng.tally();
-            dash.phase = "done".into();
-            dash.finished = true;
-            dash.finish_reason = format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)");
-            ledger.update(session, tokens_spent, gm, gt);
-            ledger.finish(now_epoch(), "max-sessions");
-            publish!();
+            let (gm, gt) = st.eng.tally();
+            st.dash.phase = "done".into();
+            st.dash.finished = true;
+            st.dash.finish_reason = format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)");
+            st.ledger.update(st.session, st.tokens_spent, gm, gt);
+            st.ledger.finish(now_epoch(), "max-sessions");
+            st.publish();
             return Ok(RunOutcome::MaxSessions);
         }
 
         // ── drain the bus at the session boundary; apply steering commands ──
-        if let Some(bus) = &bus {
-            for cmd in bus.drain() {
-                match cmd {
-                    Command::InjectInstruction { text } => {
-                        eprintln!("  [bus] inject-instruction → prepended to next session");
-                        pending_instruction = Some(match pending_instruction.take() {
-                            Some(prev) => format!("{prev}\n\n{text}"),
-                            None => text,
-                        });
-                    }
-                    Command::SetBudget { total } => {
-                        eprintln!("  [bus] set-budget → {:?}", total);
-                        budget_total = total;
-                    }
-                    Command::Pause => {
-                        eprintln!("  [bus] pause → waiting for resume/stop…");
-                        // A stop-while-paused returns the reason here so we take the SAME graceful
-                        // stop path as an unpaused stop — running the Drop guards (on_stop hooks,
-                        // run.pid cleanup, ledger finalize). (Previously this branch called
-                        // std::process::exit(0), which skipped all of them.)
-                        if let Some(reason) = wait_for_resume(bus) {
-                            eprintln!("  [bus] stop → {reason}");
-                            dash.phase = "done".into();
-                            dash.finished = true;
-                            dash.finish_reason = format!("stopped via bus: {reason}");
-                            let (gm, gt) = eng.tally();
-                            ledger.update(session, tokens_spent, gm, gt);
-                            ledger.finish(now_epoch(), "stopped");
-                            publish!();
-                            return Ok(RunOutcome::Stopped);
-                        }
-                    }
-                    Command::Resume => { /* a stray resume with no pause: ignore */ }
-                    Command::Stop { reason } => {
+        // `drain()` hands back an owned Vec, so the `&self.bus` borrow ends here and the arms
+        // below are free to take `&mut st` (publish/ledger).
+        let cmds = match &st.bus {
+            Some(bus) => bus.drain(),
+            None => Vec::new(),
+        };
+        for cmd in cmds {
+            match cmd {
+                Command::InjectInstruction { text } => {
+                    eprintln!("  [bus] inject-instruction → prepended to next session");
+                    st.pending_instruction = Some(match st.pending_instruction.take() {
+                        Some(prev) => format!("{prev}\n\n{text}"),
+                        None => text,
+                    });
+                }
+                Command::SetBudget { total } => {
+                    eprintln!("  [bus] set-budget → {:?}", total);
+                    st.budget_total = total;
+                }
+                Command::Pause => {
+                    eprintln!("  [bus] pause → waiting for resume/stop…");
+                    // A stop-while-paused returns the reason here so we take the SAME graceful
+                    // stop path as an unpaused stop — running the Drop guards (on_stop hooks,
+                    // run.pid cleanup, ledger finalize). (Previously this branch called
+                    // std::process::exit(0), which skipped all of them.)
+                    let stopped = match &st.bus {
+                        Some(bus) => wait_for_resume(bus),
+                        None => None,
+                    };
+                    if let Some(reason) = stopped {
                         eprintln!("  [bus] stop → {reason}");
-                        dash.phase = "done".into();
-                        dash.finished = true;
-                        dash.finish_reason = format!("stopped via bus: {reason}");
-                        let (gm, gt) = eng.tally();
-                        ledger.update(session, tokens_spent, gm, gt);
-                        ledger.finish(now_epoch(), "stopped");
-                        publish!();
+                        st.dash.phase = "done".into();
+                        st.dash.finished = true;
+                        st.dash.finish_reason = format!("stopped via bus: {reason}");
+                        let (gm, gt) = st.eng.tally();
+                        st.ledger.update(st.session, st.tokens_spent, gm, gt);
+                        st.ledger.finish(now_epoch(), "stopped");
+                        st.publish();
                         return Ok(RunOutcome::Stopped);
                     }
-                    Command::Note { text } => eprintln!("  [bus] note: {text}"),
                 }
+                Command::Resume => { /* a stray resume with no pause: ignore */ }
+                Command::Stop { reason } => {
+                    eprintln!("  [bus] stop → {reason}");
+                    st.dash.phase = "done".into();
+                    st.dash.finished = true;
+                    st.dash.finish_reason = format!("stopped via bus: {reason}");
+                    let (gm, gt) = st.eng.tally();
+                    st.ledger.update(st.session, st.tokens_spent, gm, gt);
+                    st.ledger.finish(now_epoch(), "stopped");
+                    st.publish();
+                    return Ok(RunOutcome::Stopped);
+                }
+                Command::Note { text } => eprintln!("  [bus] note: {text}"),
             }
         }
 
-        session += 1;
-        dash.session = session;
+        st.session += 1;
+        st.dash.session = st.session;
         // bump + persist this run's record so a later `agg run` continues the count
         // and the dashboard's lifetime total stays live across restarts.
-        dash.lifetime_session = lifetime_base + session;
-        let (gm, gt) = eng.tally();
-        ledger.update(session, tokens_spent, gm, gt);
-        let up = loop_start.elapsed().as_secs();
+        st.dash.lifetime_session = st.lifetime_base + st.session;
+        let (gm, gt) = st.eng.tally();
+        st.ledger.update(st.session, st.tokens_spent, gm, gt);
+        let up = st.loop_start.elapsed().as_secs();
         eprintln!(
-            "\n──── session #{session} (#{} lifetime)  (up {}h{:02}m)  goals {}/{} ────",
-            dash.lifetime_session,
+            "\n──── session #{} (#{} lifetime)  (up {}h{:02}m)  goals {}/{} ────",
+            st.session,
+            st.dash.lifetime_session,
             up / 3600,
             (up % 3600) / 60,
-            eng.tally().0,
-            eng.tally().1
+            st.eng.tally().0,
+            st.eng.tally().1
         );
 
         // ── isolation: cut this session's branch off the base + clear any stale red veto ──
         // `session_branch` is Some(name) only when isolation is active AND the branch was
         // created cleanly; otherwise the session runs on the current branch as before.
-        let session_branch: Option<String> = match &iso_base {
+        let iso = &st.cfg.session_isolation;
+        let session_branch: Option<String> = match &st.iso_base {
             Some(base) => {
-                let br = crate::git::session_branch(&iso.branch_prefix, &cfg.project, session);
-                crate::git::remove_file(dir, &iso.red_file); // clear stale veto before the run
-                if crate::git::create_branch(dir, &br, base) {
-                    eprintln!("  [iso] session #{session} on branch {br} (off {base})");
+                let br = crate::git::session_branch(&iso.branch_prefix, &st.cfg.project, st.session);
+                crate::git::remove_file(st.dir, &iso.red_file); // clear stale veto before the run
+                if crate::git::create_branch(st.dir, &br, base) {
+                    eprintln!("  [iso] session #{} on branch {br} (off {base})", st.session);
                     Some(br)
                 } else {
                     eprintln!("  [iso] could not create session branch — running on {base}");
@@ -455,14 +554,15 @@ pub fn run(
             }
             None => None,
         };
+        st.session_branch = session_branch;
 
         // on_session_start hooks (e.g. incremental refresh of a code graph / cache).
-        crate::hooks::run("on_session_start", &cfg.hooks.on_session_start, dir);
+        crate::hooks::run("on_session_start", &st.cfg.hooks.on_session_start, st.dir);
 
         // Layer-3 spawn scanner: flip finished long-tasks to "done", prune stale entries.
         // Runs every boundary (the harness's natural tick) — autonomous-safe, only updates
         // liveness of tasks WE registered; never kills a process it can't prove is ours.
-        if let Some(change) = crate::spawns::scan(dir) {
+        if let Some(change) = crate::spawns::scan(st.dir) {
             eprintln!("  [spawn] {change}");
         }
 
@@ -471,13 +571,13 @@ pub fn run(
         //    the spawn status tells this session about background tasks left running by a
         //    prior session (so it polls instead of relaunching); the prompt_includes prefix
         //    is the user's reusable tooling/guidance fragments.
-        let base = if prompt_prefix.is_empty() {
-            resume_prompt.clone()
+        let base = if st.prompt_prefix.is_empty() {
+            st.resume_prompt.clone()
         } else {
-            format!("{prompt_prefix}\n\n{resume_prompt}")
+            format!("{}\n\n{}", st.prompt_prefix, st.resume_prompt)
         };
         // prepend any tracked background-task status so the worker sees what is pending + why.
-        let base = match crate::spawns::summary_for_prompt(dir) {
+        let base = match crate::spawns::summary_for_prompt(st.dir) {
             Some(status) => format!("{status}\n{base}"),
             None => base,
         };
@@ -485,8 +585,8 @@ pub fn run(
         // LOWEST-priority tail of `base` (below the operator instruction, spawn status, and
         // prompt_includes — those keep their position). Pure code, runs every prompt, never an LLM
         // call. Empty string when there's nothing yet (fresh project), so the prompt is unchanged.
-        let base = if cfg.memory.enabled {
-            let mem = crate::memory::read_block(dir, &last_session, cfg.memory.inject_kb);
+        let base = if st.cfg.memory.enabled {
+            let mem = crate::memory::read_block(st.dir, &st.last_session, st.cfg.memory.inject_kb);
             if mem.is_empty() {
                 base
             } else {
@@ -495,7 +595,7 @@ pub fn run(
         } else {
             base
         };
-        let effective_prompt = match pending_instruction.take() {
+        let effective_prompt = match st.pending_instruction.take() {
             Some(instr) => format!(
                 "═══ HIGH-PRIORITY OPERATOR INSTRUCTION (act on this FIRST, it overrides the default plan) ═══\n\
                  {instr}\n\n{base}"
@@ -509,47 +609,48 @@ pub fn run(
         // idle ~0% CPU until the watchdog killed it — a pure delegate-and-wait stall
         // for zero output. The work here is single-instance + sequential and does
         // not need fan-out, so the worker does it DIRECTLY (inline) instead.
-        dash.phase = "running".into();
-        publish!();
+        st.dash.phase = "running".into();
+        st.publish();
         // --resume continuity (opt-in): continue the prior session's context. Default
         // is fresh-context-per-session (the core no-runaway-cost discipline).
-        let resume_id = if cfg.resume_sessions { last_session_id.as_deref() } else { None };
+        let resume_id = if st.cfg.resume_sessions { st.last_session_id.as_deref() } else { None };
         // memory: clear any stale scratch note for THIS session number left by a prior run, so a
         // worker note from a different run can never be folded as this session's learning.
-        if cfg.memory.enabled {
-            crate::memory::clear_scratch(dir, session);
+        if st.cfg.memory.enabled {
+            crate::memory::clear_scratch(st.dir, st.session);
         }
-        let outcome = worker::run_session(&cfg, &effective_prompt, dir, session, resume_id, &live);
-        last_session_id = outcome.session_id.clone();
-        tokens_spent += outcome.output_tokens;
-        cost_spent += outcome.cost_usd;
+        let outcome = worker::run_session(st.cfg, &effective_prompt, st.dir, st.session, resume_id, &st.live);
+        st.last_session_id = outcome.session_id.clone();
+        st.tokens_spent += outcome.output_tokens;
+        st.cost_spent += outcome.cost_usd;
 
         // A SIGINT/SIGTERM during the session already killed the worker's group. Nothing is staged
         // yet (isolation resolves below), so return gracefully NOW — through the Drop guards
         // (run.pid cleared, on_stop hooks, ledger finalized) — instead of judging a killed session.
         if crate::signals::interrupted() {
             eprintln!("\n⚠ interrupted (SIGINT/SIGTERM) — stopping after the current session; worker killed, base untouched.");
-            dash.phase = "done".into();
-            dash.finished = true;
-            dash.finish_reason = "interrupted (SIGINT/SIGTERM)".into();
-            let (gm, gt) = eng.tally();
-            ledger.update(session, tokens_spent, gm, gt);
-            ledger.finish(now_epoch(), "interrupted");
-            publish!();
+            st.dash.phase = "done".into();
+            st.dash.finished = true;
+            st.dash.finish_reason = "interrupted (SIGINT/SIGTERM)".into();
+            let (gm, gt) = st.eng.tally();
+            st.ledger.update(st.session, st.tokens_spent, gm, gt);
+            st.ledger.finish(now_epoch(), "interrupted");
+            st.publish();
             return Ok(RunOutcome::Stopped);
         }
         // (run_session now reaps any straggler in the worker's process group on exit, and the
         // worker's reader thread already streamed `now`/`think`/`recent` live — nothing to do here.)
         eprintln!(
-            "  session #{session} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
+            "  session #{} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
+            st.session,
             outcome.exit_code,
             outcome.duration_secs,
             if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
             if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
             outcome.output_tokens,
-            tokens_spent,
+            st.tokens_spent,
             outcome.cost_usd,
-            cost_spent,
+            st.cost_spent,
         );
 
         // ── institutional memory (#3): ENFORCED early fold ─────────────────────────────────────
@@ -561,8 +662,8 @@ pub fn run(
         // Skipped on a rate-limited session: that session is incomplete (we `continue` without
         // judging just below), so it must not leave a durable learning entry.
         let mut mem_folded = false;
-        if cfg.memory.enabled && !outcome.rate_limited {
-            let scoreboard_now = eng.scoreboard();
+        if st.cfg.memory.enabled && !outcome.rate_limited {
+            let scoreboard_now = st.eng.scoreboard();
             let body = crate::memory::mechanical_note(
                 outcome.exit_code,
                 outcome.killed_by_watchdog,
@@ -571,26 +672,26 @@ pub fn run(
                 &scoreboard_now,
                 &[], // no deltas yet — judging hasn't run; superseded below if we get there.
             );
-            dash.memory_bytes =
-                crate::memory::append_entry(dir, session, "session-start", &body, cfg.memory.max_kb);
+            st.dash.memory_bytes =
+                crate::memory::append_entry(st.dir, st.session, "session-start", &body, st.cfg.memory.max_kb);
             mem_folded = true;
-            publish!();
+            st.publish();
         }
 
         // 2) rate-limit backoff (exit-code + terminal-event gated). NOTE: checked BEFORE merging —
         //    a rate-limited session is incomplete, so we don't resolve/merge its branch at all
         //    (it stays for the next attempt). (In the eager path below, resolve happens after this.)
         if outcome.rate_limited {
-            let secs = cfg.ratelimit_backoff_secs;
+            let secs = st.cfg.ratelimit_backoff_secs;
             eprintln!("  rate limit detected — backing off {secs}s");
-            dash.phase = "backoff".into();
+            st.dash.phase = "backoff".into();
             // memory: a rate-limited session is incomplete — no durable entry was written (the
             // early fold skips when rate_limited). Just clean up any scratch the worker left.
-            if cfg.memory.enabled {
-                crate::memory::clear_scratch(dir, session);
+            if st.cfg.memory.enabled {
+                crate::memory::clear_scratch(st.dir, st.session);
             }
-            publish!();
-            std::thread::sleep(std::time::Duration::from_secs(secs));
+            st.publish();
+            std::thread::sleep(Duration::from_secs(secs));
             continue; // don't judge on a rate-limited (incomplete) session
         }
 
@@ -599,12 +700,13 @@ pub fn run(
         // GATE on (rollback_on_regression, default), we STAGE the merge (uncommitted) here, judge
         // the merged tree below, then commit or roll back based on whether a goal REGRESSED. With
         // the gate off, we eager-commit here exactly as before.
-        let staged = match (&iso_base, &session_branch) {
+        let iso = &st.cfg.session_isolation;
+        let staged = match (&st.iso_base, &st.session_branch) {
             (Some(base), Some(br)) if iso.rollback_on_regression => {
-                Some((br.clone(), crate::git::stage_session(dir, base, br, &iso.red_file)))
+                Some((br.clone(), crate::git::stage_session(st.dir, base, br, &iso.red_file)))
             }
             (Some(base), Some(br)) => {
-                crate::git::resolve_session(dir, base, br, &iso.red_file, session);
+                crate::git::resolve_session(st.dir, base, br, &iso.red_file, st.session);
                 None
             }
             _ => None,
@@ -615,12 +717,13 @@ pub fn run(
         //    Snapshot goal state FIRST: if the gate rolls the merge back, we restore this so the
         //    engine reflects base truth and never reports success on discarded work (W5).
         eprintln!("  running judges…");
-        dash.phase = "judging".into();
-        publish!();
-        let pre_cycle_goals = eng.snapshot_goal_state();
-        let mut res = eng.evaluate_cycle(dir, config_base, &run_state(tokens_spent, budget_total, cost_spent, session));
-        eprint!("{}", indent(&eng.scoreboard()));
-        publish!();
+        st.dash.phase = "judging".into();
+        st.publish();
+        let pre_cycle_goals = st.eng.snapshot_goal_state();
+        let rs = st.run_state();
+        let mut res = st.eng.evaluate_cycle(st.dir, st.config_base, &rs);
+        eprint!("{}", indent(&st.eng.scoreboard()));
+        st.publish();
 
         // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
         // A goal REGRESSED this cycle iff a delta went from a met state to a not-met state AND the
@@ -637,7 +740,8 @@ pub fn run(
         let mut rolled_back = false;
         if let Some((br, crate::git::StagedSession::Staged)) = &staged {
             let judge_ran = |id: &str| {
-                eng.goals
+                st.eng
+                    .goals
                     .iter()
                     .find(|g| g.id == id)
                     .and_then(|g| g.last_verdict.as_ref())
@@ -650,7 +754,7 @@ pub fn run(
                     && judge_ran(&d.id)
             });
             let keep = !regressed;
-            crate::git::finalize_session(dir, br, session, keep);
+            crate::git::finalize_session(st.dir, br, st.session, keep);
             if !keep {
                 // W5: the merged tree was discarded. Restore engine state to pre-cycle (base)
                 // truth so we never (a) report success on discarded work, (b) latch a once_met
@@ -659,10 +763,10 @@ pub fn run(
                 // against base — cheaply, no judges re-run — and blank the deltas so the memory
                 // fold below records the regression fact without phantom "met" deltas.
                 rolled_back = true;
-                eng.restore_goal_state(&pre_cycle_goals);
-                eprint!("{}", indent(&eng.scoreboard()));
-                let recomputed =
-                    eng.conditions_only(&run_state(tokens_spent, budget_total, cost_spent, session));
+                st.eng.restore_goal_state(&pre_cycle_goals);
+                eprint!("{}", indent(&st.eng.scoreboard()));
+                let rs = st.run_state();
+                let recomputed = st.eng.conditions_only(&rs);
                 res = crate::engine::CycleResult {
                     stop: recomputed.stop,
                     halt: recomputed.halt,
@@ -670,12 +774,12 @@ pub fn run(
                     deltas: Vec::new(),
                 };
             }
-            publish!();
+            st.publish();
         }
 
         // on_session_end hooks run AFTER judging, so they see the post-cycle state (e.g.
         // persist a memory note, update an index, refresh a graph for the next session).
-        crate::hooks::run("on_session_end", &cfg.hooks.on_session_end, dir);
+        crate::hooks::run("on_session_end", &st.cfg.hooks.on_session_end, st.dir);
 
         // DATA-C1: only reuse the windowed summary for memory if it was FRESHLY computed this
         // cycle — never the stale persistent `dash.summary_windowed` from an earlier cycle.
@@ -683,24 +787,24 @@ pub fn run(
 
         // 4) LLM summary (cumulative + windowed), rate-limited by min_interval_secs.
         //    Best-effort: a summarizer failure NEVER breaks the loop.
-        if cfg.summary.enabled
-            && last_summary.elapsed().as_secs() >= cfg.summary.min_interval_secs
+        if st.cfg.summary.enabled
+            && st.last_summary.elapsed().as_secs() >= st.cfg.summary.min_interval_secs
         {
             if let Some(s) = summary::summarize(
-                &cfg.summary.model,
-                &cumulative,
+                &st.cfg.summary.model,
+                &st.cumulative,
                 &outcome.thoughts,
                 &res.deltas,
                 120,
             ) {
                 eprintln!("  [SUMMARY cumulative] {}", s.cumulative);
                 eprintln!("  [SUMMARY windowed]   {}", s.windowed);
-                cumulative = s.cumulative.clone();
-                dash.summary_cumulative = s.cumulative;
-                dash.summary_windowed = s.windowed;
-                last_summary = Instant::now();
+                st.cumulative = s.cumulative.clone();
+                st.dash.summary_cumulative = s.cumulative;
+                st.dash.summary_windowed = s.windowed;
+                st.last_summary = Instant::now();
                 summarized_this_cycle = true;
-                publish!();
+                st.publish();
             }
         }
 
@@ -710,8 +814,8 @@ pub fn run(
         //    wins. All I/O best-effort. Skipped only if memory is disabled or somehow not yet
         //    folded (defensive — `mem_folded` is set whenever memory is enabled and we reached
         //    here without a rate-limit `continue`).
-        if cfg.memory.enabled && mem_folded {
-            let scoreboard = eng.scoreboard();
+        if st.cfg.memory.enabled && mem_folded {
+            let scoreboard = st.eng.scoreboard();
             // the mechanical fact is ALWAYS recorded — the worker note (if any) is appended as a
             // clearly-fenced, lower-trust hint, never allowed to stand alone (so a poisoned or
             // over-confident note can't masquerade as the authoritative session record).
@@ -729,7 +833,7 @@ pub fn run(
             }
             // 3a: optional worker note (sanitized + size-capped + de-fanged in read_worker_note);
             //     here we additionally FENCE it so its body can never be read as live markdown.
-            let worker_note = crate::memory::read_worker_note(dir, session);
+            let worker_note = crate::memory::read_worker_note(st.dir, st.session);
             let (source, body) = match worker_note {
                 Some(note) => (
                     "mechanical+worker",
@@ -738,24 +842,24 @@ pub fn run(
                     ),
                 ),
                 // 3b: reuse the windowed summary ONLY if freshly computed this cycle (no LLM call).
-                None if summarized_this_cycle && !dash.summary_windowed.trim().is_empty() => (
+                None if summarized_this_cycle && !st.dash.summary_windowed.trim().is_empty() => (
                     "mechanical+summary",
-                    format!("{mech}\n\nsummary: {}", dash.summary_windowed.trim()),
+                    format!("{mech}\n\nsummary: {}", st.dash.summary_windowed.trim()),
                 ),
                 // 3c: mechanical facts alone — cannot fail to produce content.
                 None => ("mechanical", mech),
             };
             // SUPERSEDE the early "session-start" floor entry in place → exactly ONE entry per
             // completed session (no double-fold).
-            dash.memory_bytes =
-                crate::memory::fold_entry(dir, session, source, &body, cfg.memory.max_kb, true);
+            st.dash.memory_bytes =
+                crate::memory::fold_entry(st.dir, st.session, source, &body, st.cfg.memory.max_kb, true);
             // delete the scratch note now that it's folded (bounds `.agg/memory/` growth; prevents
             // a cross-run re-fold).
-            crate::memory::clear_scratch(dir, session);
+            crate::memory::clear_scratch(st.dir, st.session);
             // carry the always-on LAST SESSION block into the NEXT prompt's READ block.
-            last_session = crate::memory::last_session_block(&res.deltas, &scoreboard);
-            eprintln!("  [memory] session #{session} folded ({source}); AGG_MEMORY.md {} B", dash.memory_bytes);
-            publish!();
+            st.last_session = crate::memory::last_session_block(&res.deltas, &scoreboard);
+            eprintln!("  [memory] session #{} folded ({source}); AGG_MEMORY.md {} B", st.session, st.dash.memory_bytes);
+            st.publish();
         }
 
         if res.halt {
@@ -763,24 +867,24 @@ pub fn run(
             eprintln!(
                 "\n⚠ HALT — guard condition true: {reason}\n  stopping the loop (this is a guard, not success)."
             );
-            dash.phase = "done".into();
-            dash.finished = true;
-            dash.finish_reason = format!("HALT: {reason}");
-            let (gm, gt) = eng.tally();
-            ledger.update(session, tokens_spent, gm, gt);
-            ledger.finish(now_epoch(), &format!("halt:{reason}"));
-            publish!();
+            st.dash.phase = "done".into();
+            st.dash.finished = true;
+            st.dash.finish_reason = format!("HALT: {reason}");
+            let (gm, gt) = st.eng.tally();
+            st.ledger.update(st.session, st.tokens_spent, gm, gt);
+            st.ledger.finish(now_epoch(), &format!("halt:{reason}"));
+            st.publish();
             return Ok(RunOutcome::Halt);
         }
         if res.stop {
-            let (mt, tt) = eng.tally();
-            eprintln!("\n✔ STOP condition satisfied — {mt}/{tt} goals met. Done after {session} session(s).");
-            dash.phase = "done".into();
-            dash.finished = true;
-            dash.finish_reason = format!("{mt}/{tt} goals met after {session} session(s)");
-            ledger.update(session, tokens_spent, mt, tt);
-            ledger.finish(now_epoch(), "goals-met");
-            publish!();
+            let (mt, tt) = st.eng.tally();
+            eprintln!("\n✔ STOP condition satisfied — {mt}/{tt} goals met. Done after {} session(s).", st.session);
+            st.dash.phase = "done".into();
+            st.dash.finished = true;
+            st.dash.finish_reason = format!("{mt}/{tt} goals met after {} session(s)", st.session);
+            st.ledger.update(st.session, st.tokens_spent, mt, tt);
+            st.ledger.finish(now_epoch(), "goals-met");
+            st.publish();
             return Ok(RunOutcome::GoalsMet);
         }
     }
