@@ -11,9 +11,13 @@
 # phase agg had published when the worker started, and then `exec`s the real binary. Nothing
 # about the model's behaviour is faked.
 #
-#   ./scripts/e2e_real.sh                          # ~1 min, a few cents on haiku
+#   ./scripts/e2e_real.sh                          # ~1 min
 #   ./scripts/e2e_real.sh --model claude-sonnet-5
 #   KEEP=1 ./scripts/e2e_real.sh                   # keep the workspace
+#
+# The `usage (API-eq)` figure it prints is `total_cost_usd` as the CLI reports it: the
+# API-equivalent list price of the work. On a Max/Pro subscription you are NOT charged it —
+# it is the same number `cost.total` / `over_cost` gate on. See README "usage (API-eq)".
 #
 # Exits 0 only if every check passed.
 set -uo pipefail
@@ -42,7 +46,7 @@ REAL_CLAUDE="$(command -v claude || true)"
 
 printf '\033[1mAgenticGoGo — REAL-model e2e\033[0m\n'
 printf 'model: %s   claude: %s\nworkspace: %s\n' "$MODEL" "$REAL_CLAUDE" "$WS"
-printf '\033[33mthis spends real tokens.\033[0m\n'
+printf '\033[33mthis spends real subscription usage (not dollars).\033[0m\n'
 ( cd "$ROOT" && cargo build --quiet ) || { bad "cargo build"; exit 1; }
 
 # ── fixture: a passthrough-instrumented `claude` + a deterministic external judge ─────────
@@ -110,12 +114,14 @@ is "baseline VERIFY → INJECT → RUN → VERIFY → GATE" \
 is "the run settles on phase=done" "$(snap "$A" phase)" "done"
 
 sec "3. real worker accounting (what a stub can never prove)"
+# `cost_spent` is the CLI's `total_cost_usd`: the API-EQUIVALENT list price of the work, which
+# the CLI reports on a subscription too. It is NOT a charge — it is what `over_cost` gates on.
 TOK=$(snap "$A" tokens_spent); COST=$(snap "$A" cost_spent)
-printf '  tokens_spent=%s  cost_spent=$%s\n' "$TOK" "$COST"
+printf '  output tokens=%s   usage (API-eq)=$%s\n' "$TOK" "$COST"
 [ "${TOK:-0}" -gt 0 ] 2>/dev/null && ok "output tokens parsed from the real result event" \
   || bad "tokens_spent is 0 — real usage.output_tokens not read"
 python3 -c "import sys;sys.exit(0 if float('${COST:-0}') > 0 else 1)" \
-  && ok "dollar cost parsed from the real total_cost_usd" \
+  && ok "usage (API-eq) parsed from the real total_cost_usd — what over_cost gates on" \
   || bad "cost_spent is 0 — real total_cost_usd not read"
 has "…and the session-exit line reports both" "$A/out.log" "out-tok"
 
@@ -201,7 +207,7 @@ has "…and the prior session's record was INJECTed into session 2's prompt" "$B
 
 TOTAL=$(python3 -c "print(round(float('$(snap "$A" cost_spent)') + float('$(snap "$B" cost_spent)'), 4))" 2>/dev/null)
 printf '\n\033[1m══ summary ══\033[0m\n  passed: \033[32m%d\033[0m   failed: \033[31m%d\033[0m\n' "$PASS" "$FAIL"
-printf '  real spend: $%s   wall: %ss\n' "${TOTAL:-?}" "$((E1 + E2))"
+printf '  usage (API-eq, NOT a subscription charge): $%s   wall: %ss\n' "${TOTAL:-?}" "$((E1 + E2))"
 if [ "$FAIL" -gt 0 ]; then
   printf '\n\033[31mfailures:\033[0m\n'; for f in "${FAILED[@]}"; do printf '  • %s\n' "$f"; done
   exit 1
