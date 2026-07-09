@@ -297,6 +297,11 @@ impl LoopState<'_> {
     /// `prompt_includes`, resume prompt, then the durable memory block as the lowest-priority
     /// tail. Nothing here calls a model.
     fn inject(&mut self) -> Injected {
+        // Publish the stage BEFORE the drain: a `pause` blocks in here, and a paused loop that
+        // still reads "verify" would be lying about where it is waiting.
+        self.dash.phase = "inject".into();
+        self.publish();
+
         // ── drain the bus at the session boundary; apply steering commands ──
         // `drain()` hands back an owned Vec, so the `&self.bus` borrow ends here and the arms
         // below are free to take `&mut self` (publish/ledger).
@@ -426,7 +431,7 @@ impl LoopState<'_> {
         // idle ~0% CPU until the watchdog killed it — a pure delegate-and-wait stall
         // for zero output. The work here is single-instance + sequential and does
         // not need fan-out, so the worker does it DIRECTLY (inline) instead.
-        self.dash.phase = "running".into();
+        self.dash.phase = "run".into();
         self.publish();
         // memory: clear any stale scratch note for THIS session number left by a prior run, so a
         // worker note from a different run can never be folded as this session's learning.
@@ -561,7 +566,7 @@ impl LoopState<'_> {
         // Snapshot goal state FIRST: if the gate rolls the merge back, we restore this so the
         // engine reflects base truth and never reports success on discarded work (W5).
         eprintln!("  running judges…");
-        self.dash.phase = "judging".into();
+        self.dash.phase = "verify".into();
         self.publish();
         let pre_cycle_goals = self.eng.snapshot_goal_state();
         let rs = self.run_state();
@@ -579,6 +584,12 @@ impl LoopState<'_> {
     /// summary, stop/halt) sees the post-gate truth.
     fn gate(&mut self, v: Verified, outcome: &SessionOutcome) -> GateDecision {
         let Verified { mut res, staged, pre_cycle_goals, mem_folded } = v;
+
+        // GATE's own publish: the summarizer below can take seconds, and every publish after this
+        // point is conditional — without this the dashboard would sit on "verify" through the
+        // whole gate.
+        self.dash.phase = "gate".into();
+        self.publish();
 
         // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
         // A goal REGRESSED this cycle iff a delta went from a met state to a not-met state AND the
@@ -883,7 +894,7 @@ pub fn run(
     // Evaluate the goals ONCE up front (run the judges) — maybe we're already done,
     // or an invariant is already broken, before burning a single session.
     eprintln!("  baseline: running judges once before the first session…");
-    st.dash.phase = "judging".into();
+    st.dash.phase = "verify".into();
     st.publish();
     let rs = st.run_state();
     let pre = st.eng.evaluate_cycle(dir, config_base, &rs);

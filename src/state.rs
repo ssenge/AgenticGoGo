@@ -75,7 +75,9 @@ pub struct DashboardState {
     /// (persisted in `.agg/sessions.count`). Survives restarts so the dashboard can
     /// show "how many sessions has this project ever run", not just this invocation.
     pub lifetime_session: u32,
-    pub phase: String,       // "running" | "judging" | "backoff" | "done" | ...
+    /// the outer loop's current stage: "inject" | "run" | "verify" | "gate",
+    /// plus "starting" | "backoff" | "done"
+    pub phase: String,
     pub idle_secs: u64,
     pub tokens_spent: u64,
     pub budget_total: Option<u64>,

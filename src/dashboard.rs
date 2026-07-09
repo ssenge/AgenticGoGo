@@ -188,7 +188,7 @@ pub fn sample_state() -> DashboardState {
         up_secs: 11_520, // 3h12m
         session: 7,
         lifetime_session: 23,
-        phase: "judging".into(),
+        phase: "verify".into(),
         idle_secs: 4,
         tokens_spent: 2_100_000,
         budget_total: Some(5_000_000),
@@ -624,10 +624,13 @@ fn activity_glyph(kind: &str) -> (&'static str, Color) {
     }
 }
 
+/// The four deterministic outer-loop stages, plus the two terminal-ish phases.
 fn phase_color(phase: &str) -> Color {
     match phase {
-        "running" => Color::Green,
-        "judging" => Color::Cyan,
+        "inject" => Color::Blue,
+        "run" => Color::Green,
+        "verify" => Color::Cyan,
+        "gate" => Color::Magenta,
         "backoff" => Color::Yellow,
         "done" => Color::Green,
         _ => Color::Gray,
@@ -745,7 +748,7 @@ mod tests {
             up_secs: 11520,
             session: 7,
             lifetime_session: 7,
-            phase: "running".into(),
+            phase: "run".into(),
             idle_secs: 12,
             tokens_spent: 2_100_000,
             budget_total: Some(5_000_000),

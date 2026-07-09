@@ -12,11 +12,14 @@ export function goalStatus(state) {
   }
 }
 
-/** Map the loop phase to a status color for the header dot. */
+/** Map the loop phase to a status color for the header dot. The four outer-loop stages are
+ *  inject / run / verify / gate; only RUN has a worker burning tokens, so only it reads 'good'. */
 export function phaseStatus(phase) {
   switch (phase) {
-    case 'running':  return 'good';
-    case 'judging':  return 'accent';
+    case 'run':      return 'good';
+    case 'inject':
+    case 'verify':
+    case 'gate':     return 'accent';
     case 'backoff':  return 'serious';
     case 'done':     return 'muted';
     default:         return 'accent';

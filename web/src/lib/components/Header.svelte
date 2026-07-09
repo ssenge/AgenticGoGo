@@ -6,7 +6,7 @@
     health.api_offline ? 'muted' : health.running ? phaseStatus(state?.phase) : 'muted'
   );
   const statusText = $derived(
-    health.api_offline ? 'agg serve offline' : health.running ? (state?.phase ?? 'running') : 'idle'
+    health.api_offline ? 'agg serve offline' : health.running ? (state?.phase ?? 'run') : 'idle'
   );
 </script>
 
