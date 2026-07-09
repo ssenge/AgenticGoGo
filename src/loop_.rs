@@ -13,6 +13,10 @@
 //!   GATE    keep or roll back the merge · check stop/halt · carry state forward → repeat
 //! ```
 //!
+//! Those four stages are [`LoopState::inject`], [`LoopState::run`], [`LoopState::verify`] and
+//! [`LoopState::gate`] — one method each, in that order, and the body of [`run`] is little more
+//! than the four calls.
+//!
 //! The INNER loop is whatever the worker does inside RUN — plan, act, observe, reason; ReAct,
 //! NVIDIA's Context–Observe–Reason–Act, a DISCOVER→PLAN→EXECUTE cycle — it is STOCHASTIC and agg
 //! neither sees nor cares. "Keep the LLM out of the loop" means exactly this: the LLM lives inside
@@ -24,10 +28,10 @@
 
 use crate::bus::{Bus, Command};
 use crate::config::AggConfig;
-use crate::engine::{Engine, RunState};
+use crate::engine::{CycleResult, Engine, GoalRuntime, RunState};
 use crate::state::{DashboardState, LiveState};
 use crate::summary;
-use crate::worker;
+use crate::worker::{self, SessionOutcome};
 use anyhow::Result;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -58,6 +62,32 @@ impl RunOutcome {
             RunOutcome::MaxSessions => 4,
         }
     }
+}
+
+/// What INJECT produced: the prompt for this session, or a graceful end (the operator stopped the
+/// run over the bus — possibly while it was paused — before any worker was launched).
+enum Injected {
+    Prompt(String),
+    Stop(RunOutcome),
+}
+
+/// What VERIFY produced: the judged cycle, plus everything GATE needs to keep or undo it.
+struct Verified {
+    /// the judges' verdicts folded into stop/halt + this cycle's goal deltas. GATE may REPLACE
+    /// this wholesale when it rolls the merge back.
+    res: CycleResult,
+    /// `Some` only on the rollback-gate path: the session branch + whether its merge is staged.
+    staged: Option<(String, crate::git::StagedSession)>,
+    /// pre-cycle (base) goal truth, taken BEFORE the judges ran, so a rollback can restore it (W5).
+    pre_cycle_goals: Vec<GoalRuntime>,
+    /// the enforced early memory fold happened, so GATE's post-judge fold may supersede it.
+    mem_folded: bool,
+}
+
+/// What GATE decided: go round again, or end the run with this outcome.
+enum GateDecision {
+    Loop,
+    Stop(RunOutcome),
 }
 
 /// Block until a `resume` or `stop` command arrives on the bus (poll every 2s).
@@ -168,6 +198,7 @@ struct LoopState<'a> {
 
     // ── per-session git isolation ──
     iso_base: Option<String>,
+    /// cut by INJECT, resolved by VERIFY
     session_branch: Option<String>,
 }
 
@@ -222,6 +253,496 @@ impl LoopState<'_> {
             max_sessions: self.max_iter,
             wall_hours: self.loop_start.elapsed().as_secs_f64() / 3600.0,
         }
+    }
+
+    /// The `--max-sessions` cap, measured on the PRE-increment session count at the top of every
+    /// cycle (before INJECT bumps it). `Some` = the cap is reached and the run is over.
+    fn over_max_sessions(&mut self) -> Option<RunOutcome> {
+        if self.max_sessions == 0 || self.session < self.max_sessions {
+            return None;
+        }
+        let max_sessions = self.max_sessions;
+        eprintln!("→ reached max_sessions={max_sessions}; stopping (goals not all met).");
+        // set the finished state + publish so `agg status`/the dashboard reflect the outcome
+        // (previously this path broke without updating either — a never-"finished" run).
+        let (gm, gt) = self.eng.tally();
+        self.dash.phase = "done".into();
+        self.dash.finished = true;
+        self.dash.finish_reason = format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)");
+        self.ledger.update(self.session, self.tokens_spent, gm, gt);
+        self.ledger.finish(now_epoch(), "max-sessions");
+        self.publish();
+        Some(RunOutcome::MaxSessions)
+    }
+
+    /// The one graceful bus-stop path, shared by `stop` and `stop`-while-`pause`d. Returns through
+    /// the caller so the Drop guards (on_stop hooks, run.pid cleanup, ledger finalize) all run —
+    /// this used to be a `std::process::exit(0)`, which skipped every one of them.
+    fn stopped_via_bus(&mut self, reason: String) -> RunOutcome {
+        eprintln!("  [bus] stop → {reason}");
+        self.dash.phase = "done".into();
+        self.dash.finished = true;
+        self.dash.finish_reason = format!("stopped via bus: {reason}");
+        let (gm, gt) = self.eng.tally();
+        self.ledger.update(self.session, self.tokens_spent, gm, gt);
+        self.ledger.finish(now_epoch(), "stopped");
+        self.publish();
+        RunOutcome::Stopped
+    }
+
+    /// **INJECT** — state + steering → the worker's prompt.
+    ///
+    /// Drains the bus (the only safe injection point for a headless worker), opens the session,
+    /// cuts its isolation branch, and layers the prompt: operator instruction, spawn status,
+    /// `prompt_includes`, resume prompt, then the durable memory block as the lowest-priority
+    /// tail. Nothing here calls a model.
+    fn inject(&mut self) -> Injected {
+        // ── drain the bus at the session boundary; apply steering commands ──
+        // `drain()` hands back an owned Vec, so the `&self.bus` borrow ends here and the arms
+        // below are free to take `&mut self` (publish/ledger).
+        let cmds = match &self.bus {
+            Some(bus) => bus.drain(),
+            None => Vec::new(),
+        };
+        for cmd in cmds {
+            match cmd {
+                Command::InjectInstruction { text } => {
+                    eprintln!("  [bus] inject-instruction → prepended to next session");
+                    self.pending_instruction = Some(match self.pending_instruction.take() {
+                        Some(prev) => format!("{prev}\n\n{text}"),
+                        None => text,
+                    });
+                }
+                Command::SetBudget { total } => {
+                    eprintln!("  [bus] set-budget → {:?}", total);
+                    self.budget_total = total;
+                }
+                Command::Pause => {
+                    eprintln!("  [bus] pause → waiting for resume/stop…");
+                    // bind first: `wait_for_resume` borrows `self.bus`, `stopped_via_bus` needs
+                    // `&mut self`. A `None` here means "resumed" — fall through and keep draining.
+                    let stopped = match &self.bus {
+                        Some(bus) => wait_for_resume(bus),
+                        None => None,
+                    };
+                    if let Some(reason) = stopped {
+                        return Injected::Stop(self.stopped_via_bus(reason));
+                    }
+                }
+                Command::Resume => { /* a stray resume with no pause: ignore */ }
+                Command::Stop { reason } => return Injected::Stop(self.stopped_via_bus(reason)),
+                Command::Note { text } => eprintln!("  [bus] note: {text}"),
+            }
+        }
+
+        self.session += 1;
+        self.dash.session = self.session;
+        // bump + persist this run's record so a later `agg run` continues the count
+        // and the dashboard's lifetime total stays live across restarts.
+        self.dash.lifetime_session = self.lifetime_base + self.session;
+        let (gm, gt) = self.eng.tally();
+        self.ledger.update(self.session, self.tokens_spent, gm, gt);
+        let up = self.loop_start.elapsed().as_secs();
+        eprintln!(
+            "\n──── session #{} (#{} lifetime)  (up {}h{:02}m)  goals {}/{} ────",
+            self.session,
+            self.dash.lifetime_session,
+            up / 3600,
+            (up % 3600) / 60,
+            self.eng.tally().0,
+            self.eng.tally().1
+        );
+
+        // ── isolation: cut this session's branch off the base + clear any stale red veto ──
+        // `session_branch` is Some(name) only when isolation is active AND the branch was
+        // created cleanly; otherwise the session runs on the current branch as before.
+        let iso = &self.cfg.session_isolation;
+        let session_branch: Option<String> = match &self.iso_base {
+            Some(base) => {
+                let br = crate::git::session_branch(&iso.branch_prefix, &self.cfg.project, self.session);
+                crate::git::remove_file(self.dir, &iso.red_file); // clear stale veto before the run
+                if crate::git::create_branch(self.dir, &br, base) {
+                    eprintln!("  [iso] session #{} on branch {br} (off {base})", self.session);
+                    Some(br)
+                } else {
+                    eprintln!("  [iso] could not create session branch — running on {base}");
+                    None
+                }
+            }
+            None => None,
+        };
+        self.session_branch = session_branch;
+
+        // on_session_start hooks (e.g. incremental refresh of a code graph / cache).
+        crate::hooks::run("on_session_start", &self.cfg.hooks.on_session_start, self.dir);
+
+        // Layer-3 spawn scanner: flip finished long-tasks to "done", prune stale entries.
+        // Runs every boundary (the harness's natural tick) — autonomous-safe, only updates
+        // liveness of tasks WE registered; never kills a process it can't prove is ours.
+        if let Some(change) = crate::spawns::scan(self.dir) {
+            eprintln!("  [spawn] {change}");
+        }
+
+        // build the effective prompt: [operator instruction] + [spawn status] +
+        // [prompt_includes] + resume. The operator instruction (if any) is consumed once;
+        // the spawn status tells this session about background tasks left running by a
+        // prior session (so it polls instead of relaunching); the prompt_includes prefix
+        // is the user's reusable tooling/guidance fragments.
+        let base = if self.prompt_prefix.is_empty() {
+            self.resume_prompt.clone()
+        } else {
+            format!("{}\n\n{}", self.prompt_prefix, self.resume_prompt)
+        };
+        // prepend any tracked background-task status so the worker sees what is pending + why.
+        let base = match crate::spawns::summary_for_prompt(self.dir) {
+            Some(status) => format!("{status}\n{base}"),
+            None => base,
+        };
+        // institutional memory (#3): APPEND the bounded durable slice + LAST SESSION block as the
+        // LOWEST-priority tail of `base` (below the operator instruction, spawn status, and
+        // prompt_includes — those keep their position). Pure code, runs every prompt, never an LLM
+        // call. Empty string when there's nothing yet (fresh project), so the prompt is unchanged.
+        let base = if self.cfg.memory.enabled {
+            let mem = crate::memory::read_block(self.dir, &self.last_session, self.cfg.memory.inject_kb);
+            if mem.is_empty() {
+                base
+            } else {
+                format!("{base}\n\n{mem}")
+            }
+        } else {
+            base
+        };
+        let effective_prompt = match self.pending_instruction.take() {
+            Some(instr) => format!(
+                "═══ HIGH-PRIORITY OPERATOR INSTRUCTION (act on this FIRST, it overrides the default plan) ═══\n\
+                 {instr}\n\n{base}"
+            ),
+            None => base,
+        };
+        // NOTE: an `ultracode` prompt prefix was tried (to let the headless worker
+        // spawn subagent Workflows) and REMOVED 2026-06-10. In `claude -p` headless
+        // mode the worker fired an async Workflow then PARKED itself waiting for a
+        // re-invoke that never comes (Workflow returns a task-id immediately), going
+        // idle ~0% CPU until the watchdog killed it — a pure delegate-and-wait stall
+        // for zero output. The work here is single-instance + sequential and does
+        // not need fan-out, so the worker does it DIRECTLY (inline) instead.
+        self.dash.phase = "running".into();
+        self.publish();
+        // memory: clear any stale scratch note for THIS session number left by a prior run, so a
+        // worker note from a different run can never be folded as this session's learning.
+        if self.cfg.memory.enabled {
+            crate::memory::clear_scratch(self.dir, self.session);
+        }
+        Injected::Prompt(effective_prompt)
+    }
+
+    /// **RUN** — the fresh `claude -p` worker. The ONE stochastic step; agg treats it as an opaque
+    /// black box and only records what it spent.
+    ///
+    /// `None` = a SIGINT/SIGTERM landed during the session (the worker's process group is already
+    /// killed). The caller must return via [`LoopState::finish_interrupted`] — nothing is staged
+    /// yet, so the base branch is untouched and there is nothing to judge. The token/cost
+    /// accumulation is the ONLY thing that happens between the worker returning and that check,
+    /// so the interrupted run still reports what this session spent.
+    fn run(&mut self, prompt: &str) -> Option<SessionOutcome> {
+        // --resume continuity (opt-in): continue the prior session's context. Default
+        // is fresh-context-per-session (the core no-runaway-cost discipline).
+        let resume_id = if self.cfg.resume_sessions { self.last_session_id.as_deref() } else { None };
+        let outcome = worker::run_session(self.cfg, prompt, self.dir, self.session, resume_id, &self.live);
+        self.last_session_id = outcome.session_id.clone();
+        self.tokens_spent += outcome.output_tokens;
+        self.cost_spent += outcome.cost_usd;
+
+        if crate::signals::interrupted() {
+            return None;
+        }
+        // (run_session now reaps any straggler in the worker's process group on exit, and the
+        // worker's reader thread already streamed `now`/`think`/`recent` live — nothing to do here.)
+        eprintln!(
+            "  session #{} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
+            self.session,
+            outcome.exit_code,
+            outcome.duration_secs,
+            if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
+            if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
+            outcome.output_tokens,
+            self.tokens_spent,
+            outcome.cost_usd,
+            self.cost_spent,
+        );
+        Some(outcome)
+    }
+
+    /// The graceful SIGINT/SIGTERM exit, taken straight after RUN. Returns through the caller so
+    /// the Drop guards run (run.pid cleared, on_stop hooks, ledger finalized) instead of the loop
+    /// dying uncleaned — and so a killed session is never judged.
+    fn finish_interrupted(&mut self) -> RunOutcome {
+        eprintln!("\n⚠ interrupted (SIGINT/SIGTERM) — stopping after the current session; worker killed, base untouched.");
+        self.dash.phase = "done".into();
+        self.dash.finished = true;
+        self.dash.finish_reason = "interrupted (SIGINT/SIGTERM)".into();
+        let (gm, gt) = self.eng.tally();
+        self.ledger.update(self.session, self.tokens_spent, gm, gt);
+        self.ledger.finish(now_epoch(), "interrupted");
+        self.publish();
+        RunOutcome::Stopped
+    }
+
+    /// **VERIFY** — agg runs the judges itself, externally, against the filesystem. The worker
+    /// never grades its own homework; this is the whole moat.
+    ///
+    /// Folds the enforced memory floor first (so the session's facts survive a later panic),
+    /// stages the session merge so the judges test the MERGED tree, then evaluates the cycle.
+    ///
+    /// `None` = the session was rate-limited, i.e. incomplete: it is NOT staged, NOT merged and
+    /// NOT judged, it leaves no durable memory entry, and the caller simply starts the next cycle.
+    fn verify(&mut self, outcome: &SessionOutcome) -> Option<Verified> {
+        // ── institutional memory (#3): ENFORCED early fold ─────────────────────────────────────
+        // Fold a mechanical "session-start" floor entry RIGHT NOW, before judging/summary, so the
+        // session's facts survive even if a later step in this cycle panics. This is the
+        // enforcement floor: no I/O needed to produce content, no worker cooperation. GATE's
+        // post-judge fold SUPERSEDES this same entry in place with goal deltas + the optional
+        // worker note — so a normally-completing session leaves exactly ONE entry.
+        // Skipped on a rate-limited session: that session is incomplete (we bail without judging
+        // just below), so it must not leave a durable learning entry.
+        let mut mem_folded = false;
+        if self.cfg.memory.enabled && !outcome.rate_limited {
+            let scoreboard_now = self.eng.scoreboard();
+            let body = crate::memory::mechanical_note(
+                outcome.exit_code,
+                outcome.killed_by_watchdog,
+                outcome.rate_limited,
+                outcome.duration_secs,
+                &scoreboard_now,
+                &[], // no deltas yet — judging hasn't run; superseded below if we get there.
+            );
+            self.dash.memory_bytes =
+                crate::memory::append_entry(self.dir, self.session, "session-start", &body, self.cfg.memory.max_kb);
+            mem_folded = true;
+            self.publish();
+        }
+
+        // rate-limit backoff (exit-code + terminal-event gated). NOTE: checked BEFORE merging —
+        // a rate-limited session is incomplete, so we don't resolve/merge its branch at all
+        // (it stays for the next attempt). (In the eager path below, resolve happens after this.)
+        if outcome.rate_limited {
+            let secs = self.cfg.ratelimit_backoff_secs;
+            eprintln!("  rate limit detected — backing off {secs}s");
+            self.dash.phase = "backoff".into();
+            // memory: a rate-limited session is incomplete — no durable entry was written (the
+            // early fold skips when rate_limited). Just clean up any scratch the worker left.
+            if self.cfg.memory.enabled {
+                crate::memory::clear_scratch(self.dir, self.session);
+            }
+            self.publish();
+            std::thread::sleep(Duration::from_secs(secs));
+            return None; // don't judge on a rate-limited (incomplete) session
+        }
+
+        // ── isolation: resolve the session branch ────────────────────────────────────────────
+        // Default is merge-back-to-base unless the worker vetoed (red file). With the ROLLBACK
+        // GATE on (rollback_on_regression, default), we STAGE the merge (uncommitted) here, GATE
+        // judges the merged tree and then commits or rolls back based on whether a goal
+        // REGRESSED. With the gate off, we eager-commit here exactly as before.
+        let iso = &self.cfg.session_isolation;
+        let staged = match (&self.iso_base, &self.session_branch) {
+            (Some(base), Some(br)) if iso.rollback_on_regression => {
+                Some((br.clone(), crate::git::stage_session(self.dir, base, br, &iso.red_file)))
+            }
+            (Some(base), Some(br)) => {
+                crate::git::resolve_session(self.dir, base, br, &iso.red_file, self.session);
+                None
+            }
+            _ => None,
+        };
+
+        // run judges, fold verdicts, evaluate conditions (incl. budget/wall guards). When a
+        // merge is staged, the judges re-test the MERGED (uncommitted) working tree — the gate.
+        // Snapshot goal state FIRST: if the gate rolls the merge back, we restore this so the
+        // engine reflects base truth and never reports success on discarded work (W5).
+        eprintln!("  running judges…");
+        self.dash.phase = "judging".into();
+        self.publish();
+        let pre_cycle_goals = self.eng.snapshot_goal_state();
+        let rs = self.run_state();
+        let res = self.eng.evaluate_cycle(self.dir, self.config_base, &rs);
+        eprint!("{}", indent(&self.eng.scoreboard()));
+        self.publish();
+
+        Some(Verified { res, staged, pre_cycle_goals, mem_folded })
+    }
+
+    /// **GATE** — keep or roll back the merge · check stop/halt · carry state forward.
+    ///
+    /// The deterministic decision that makes it safe to trust a stochastic worker: a staged merge
+    /// is committed only if THIS cycle regressed no goal, and everything downstream (memory,
+    /// summary, stop/halt) sees the post-gate truth.
+    fn gate(&mut self, v: Verified, outcome: &SessionOutcome) -> GateDecision {
+        let Verified { mut res, staged, pre_cycle_goals, mem_folded } = v;
+
+        // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
+        // A goal REGRESSED this cycle iff a delta went from a met state to a not-met state AND the
+        // judge actually RAN. The "judge ran" gate is LOAD-BEARING: a judge that merely couldn't
+        // run (rate-limited/timeout/spawn-fail/bad-JSON → Verdict::failed with error:Some →
+        // Goal::apply marks a previously-met goal Regressed) must NOT count as a regression, or a
+        // transient flake would discard a good session's work.
+        //
+        // We rely ONLY on the per-cycle delta — NOT on `g.state == Regressed`. `Regressed` is
+        // sticky (recomputed every cycle while unmet), so an engine-state clause vetoed every
+        // future merge after one regression and cascaded after a rollback (W4). The delta clause,
+        // gated on judge-ran, is necessary and sufficient once engine state is kept base-true
+        // (which the rollback branch below now guarantees).
+        let mut rolled_back = false;
+        if let Some((br, crate::git::StagedSession::Staged)) = &staged {
+            let judge_ran = |id: &str| {
+                self.eng
+                    .goals
+                    .iter()
+                    .find(|g| g.id == id)
+                    .and_then(|g| g.last_verdict.as_ref())
+                    .map(|v| v.error.is_none())
+                    .unwrap_or(false)
+            };
+            let regressed = res.deltas.iter().any(|d| {
+                d.before_state == crate::model::Lifecycle::Met
+                    && d.after_state != crate::model::Lifecycle::Met
+                    && judge_ran(&d.id)
+            });
+            let keep = !regressed;
+            crate::git::finalize_session(self.dir, br, self.session, keep);
+            if !keep {
+                // W5: the merged tree was discarded. Restore engine state to pre-cycle (base)
+                // truth so we never (a) report success on discarded work, (b) latch a once_met
+                // goal that was only met on the discarded tree, or (c) show a phantom Met→Regressed
+                // next cycle that would roll back the NEXT session. Then recompute stop/halt
+                // against base — cheaply, no judges re-run — and blank the deltas so the memory
+                // fold below records the regression fact without phantom "met" deltas.
+                rolled_back = true;
+                self.eng.restore_goal_state(&pre_cycle_goals);
+                eprint!("{}", indent(&self.eng.scoreboard()));
+                let rs = self.run_state();
+                let recomputed = self.eng.conditions_only(&rs);
+                res = CycleResult {
+                    stop: recomputed.stop,
+                    halt: recomputed.halt,
+                    halt_reason: recomputed.halt_reason,
+                    deltas: Vec::new(),
+                };
+            }
+            self.publish();
+        }
+
+        // on_session_end hooks run AFTER judging, so they see the post-cycle state (e.g.
+        // persist a memory note, update an index, refresh a graph for the next session).
+        crate::hooks::run("on_session_end", &self.cfg.hooks.on_session_end, self.dir);
+
+        // DATA-C1: only reuse the windowed summary for memory if it was FRESHLY computed this
+        // cycle — never the stale persistent `dash.summary_windowed` from an earlier cycle.
+        let mut summarized_this_cycle = false;
+
+        // LLM summary (cumulative + windowed), rate-limited by min_interval_secs.
+        // Best-effort: a summarizer failure NEVER breaks the loop.
+        if self.cfg.summary.enabled
+            && self.last_summary.elapsed().as_secs() >= self.cfg.summary.min_interval_secs
+        {
+            if let Some(s) = summary::summarize(
+                &self.cfg.summary.model,
+                &self.cumulative,
+                &outcome.thoughts,
+                &res.deltas,
+                120,
+            ) {
+                eprintln!("  [SUMMARY cumulative] {}", s.cumulative);
+                eprintln!("  [SUMMARY windowed]   {}", s.windowed);
+                self.cumulative = s.cumulative.clone();
+                self.dash.summary_cumulative = s.cumulative;
+                self.dash.summary_windowed = s.windowed;
+                self.last_summary = Instant::now();
+                summarized_this_cycle = true;
+                self.publish();
+            }
+        }
+
+        // institutional memory (#3) — post-judge REFINEMENT of this session's entry. VERIFY's
+        // early fold already guaranteed a mechanical note exists; here we add the richer,
+        // delta-aware entry (and the optional worker note). First tier that yields content
+        // wins. All I/O best-effort. Skipped only if memory is disabled or somehow not yet
+        // folded (defensive — `mem_folded` is set whenever memory is enabled and VERIFY did
+        // not bail on a rate limit).
+        if self.cfg.memory.enabled && mem_folded {
+            let scoreboard = self.eng.scoreboard();
+            // the mechanical fact is ALWAYS recorded — the worker note (if any) is appended as a
+            // clearly-fenced, lower-trust hint, never allowed to stand alone (so a poisoned or
+            // over-confident note can't masquerade as the authoritative session record).
+            let mut mech = crate::memory::mechanical_note(
+                outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
+                outcome.duration_secs, &scoreboard, &res.deltas,
+            );
+            // W5: if the merge was rolled back, the work is NOT on base — say so, so the durable
+            // record (which the worker is told to trust) can't be read as "this landed".
+            if rolled_back {
+                mech = format!(
+                    "session ROLLED BACK — a goal regressed on the staged merge; the work below is \
+                     NOT on the base branch (kept on the session branch for inspection).\n{mech}"
+                );
+            }
+            // 3a: optional worker note (sanitized + size-capped + de-fanged in read_worker_note);
+            //     here we additionally FENCE it so its body can never be read as live markdown.
+            let worker_note = crate::memory::read_worker_note(self.dir, self.session);
+            let (source, body) = match worker_note {
+                Some(note) => (
+                    "mechanical+worker",
+                    format!(
+                        "{mech}\n\n[worker note — UNTRUSTED hint, not authoritative]\n```text\n{note}\n```"
+                    ),
+                ),
+                // 3b: reuse the windowed summary ONLY if freshly computed this cycle (no LLM call).
+                None if summarized_this_cycle && !self.dash.summary_windowed.trim().is_empty() => (
+                    "mechanical+summary",
+                    format!("{mech}\n\nsummary: {}", self.dash.summary_windowed.trim()),
+                ),
+                // 3c: mechanical facts alone — cannot fail to produce content.
+                None => ("mechanical", mech),
+            };
+            // SUPERSEDE the early "session-start" floor entry in place → exactly ONE entry per
+            // completed session (no double-fold).
+            self.dash.memory_bytes =
+                crate::memory::fold_entry(self.dir, self.session, source, &body, self.cfg.memory.max_kb, true);
+            // delete the scratch note now that it's folded (bounds `.agg/memory/` growth; prevents
+            // a cross-run re-fold).
+            crate::memory::clear_scratch(self.dir, self.session);
+            // carry the always-on LAST SESSION block into the NEXT prompt's READ block.
+            self.last_session = crate::memory::last_session_block(&res.deltas, &scoreboard);
+            eprintln!("  [memory] session #{} folded ({source}); AGG_MEMORY.md {} B", self.session, self.dash.memory_bytes);
+            self.publish();
+        }
+
+        if res.halt {
+            let reason = res.halt_reason.unwrap_or_default();
+            eprintln!(
+                "\n⚠ HALT — guard condition true: {reason}\n  stopping the loop (this is a guard, not success)."
+            );
+            self.dash.phase = "done".into();
+            self.dash.finished = true;
+            self.dash.finish_reason = format!("HALT: {reason}");
+            let (gm, gt) = self.eng.tally();
+            self.ledger.update(self.session, self.tokens_spent, gm, gt);
+            self.ledger.finish(now_epoch(), &format!("halt:{reason}"));
+            self.publish();
+            return GateDecision::Stop(RunOutcome::Halt);
+        }
+        if res.stop {
+            let (mt, tt) = self.eng.tally();
+            eprintln!("\n✔ STOP condition satisfied — {mt}/{tt} goals met. Done after {} session(s).", self.session);
+            self.dash.phase = "done".into();
+            self.dash.finished = true;
+            self.dash.finish_reason = format!("{mt}/{tt} goals met after {} session(s)", self.session);
+            self.ledger.update(self.session, self.tokens_spent, mt, tt);
+            self.ledger.finish(now_epoch(), "goals-met");
+            self.publish();
+            return GateDecision::Stop(RunOutcome::GoalsMet);
+        }
+        GateDecision::Loop
     }
 }
 
@@ -445,447 +966,35 @@ pub fn run(
     } else {
         None
     };
+
+    // ── the deterministic outer loop ──────────────────────────────────────────────────────
+    // Four stages, in order, every cycle. The `max_sessions` cap is a pre-check on the
+    // pre-increment count, so it fires before INJECT opens another session.
     loop {
-        if st.max_sessions != 0 && st.session >= st.max_sessions {
-            eprintln!("→ reached max_sessions={max_sessions}; stopping (goals not all met).");
-            // set the finished state + publish so `agg status`/the dashboard reflect the outcome
-            // (previously this path broke without updating either — a never-"finished" run).
-            let (gm, gt) = st.eng.tally();
-            st.dash.phase = "done".into();
-            st.dash.finished = true;
-            st.dash.finish_reason = format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)");
-            st.ledger.update(st.session, st.tokens_spent, gm, gt);
-            st.ledger.finish(now_epoch(), "max-sessions");
-            st.publish();
-            return Ok(RunOutcome::MaxSessions);
+        if let Some(outcome) = st.over_max_sessions() {
+            return Ok(outcome);
         }
 
-        // ── drain the bus at the session boundary; apply steering commands ──
-        // `drain()` hands back an owned Vec, so the `&self.bus` borrow ends here and the arms
-        // below are free to take `&mut st` (publish/ledger).
-        let cmds = match &st.bus {
-            Some(bus) => bus.drain(),
-            None => Vec::new(),
-        };
-        for cmd in cmds {
-            match cmd {
-                Command::InjectInstruction { text } => {
-                    eprintln!("  [bus] inject-instruction → prepended to next session");
-                    st.pending_instruction = Some(match st.pending_instruction.take() {
-                        Some(prev) => format!("{prev}\n\n{text}"),
-                        None => text,
-                    });
-                }
-                Command::SetBudget { total } => {
-                    eprintln!("  [bus] set-budget → {:?}", total);
-                    st.budget_total = total;
-                }
-                Command::Pause => {
-                    eprintln!("  [bus] pause → waiting for resume/stop…");
-                    // A stop-while-paused returns the reason here so we take the SAME graceful
-                    // stop path as an unpaused stop — running the Drop guards (on_stop hooks,
-                    // run.pid cleanup, ledger finalize). (Previously this branch called
-                    // std::process::exit(0), which skipped all of them.)
-                    let stopped = match &st.bus {
-                        Some(bus) => wait_for_resume(bus),
-                        None => None,
-                    };
-                    if let Some(reason) = stopped {
-                        eprintln!("  [bus] stop → {reason}");
-                        st.dash.phase = "done".into();
-                        st.dash.finished = true;
-                        st.dash.finish_reason = format!("stopped via bus: {reason}");
-                        let (gm, gt) = st.eng.tally();
-                        st.ledger.update(st.session, st.tokens_spent, gm, gt);
-                        st.ledger.finish(now_epoch(), "stopped");
-                        st.publish();
-                        return Ok(RunOutcome::Stopped);
-                    }
-                }
-                Command::Resume => { /* a stray resume with no pause: ignore */ }
-                Command::Stop { reason } => {
-                    eprintln!("  [bus] stop → {reason}");
-                    st.dash.phase = "done".into();
-                    st.dash.finished = true;
-                    st.dash.finish_reason = format!("stopped via bus: {reason}");
-                    let (gm, gt) = st.eng.tally();
-                    st.ledger.update(st.session, st.tokens_spent, gm, gt);
-                    st.ledger.finish(now_epoch(), "stopped");
-                    st.publish();
-                    return Ok(RunOutcome::Stopped);
-                }
-                Command::Note { text } => eprintln!("  [bus] note: {text}"),
-            }
-        }
-
-        st.session += 1;
-        st.dash.session = st.session;
-        // bump + persist this run's record so a later `agg run` continues the count
-        // and the dashboard's lifetime total stays live across restarts.
-        st.dash.lifetime_session = st.lifetime_base + st.session;
-        let (gm, gt) = st.eng.tally();
-        st.ledger.update(st.session, st.tokens_spent, gm, gt);
-        let up = st.loop_start.elapsed().as_secs();
-        eprintln!(
-            "\n──── session #{} (#{} lifetime)  (up {}h{:02}m)  goals {}/{} ────",
-            st.session,
-            st.dash.lifetime_session,
-            up / 3600,
-            (up % 3600) / 60,
-            st.eng.tally().0,
-            st.eng.tally().1
-        );
-
-        // ── isolation: cut this session's branch off the base + clear any stale red veto ──
-        // `session_branch` is Some(name) only when isolation is active AND the branch was
-        // created cleanly; otherwise the session runs on the current branch as before.
-        let iso = &st.cfg.session_isolation;
-        let session_branch: Option<String> = match &st.iso_base {
-            Some(base) => {
-                let br = crate::git::session_branch(&iso.branch_prefix, &st.cfg.project, st.session);
-                crate::git::remove_file(st.dir, &iso.red_file); // clear stale veto before the run
-                if crate::git::create_branch(st.dir, &br, base) {
-                    eprintln!("  [iso] session #{} on branch {br} (off {base})", st.session);
-                    Some(br)
-                } else {
-                    eprintln!("  [iso] could not create session branch — running on {base}");
-                    None
-                }
-            }
-            None => None,
-        };
-        st.session_branch = session_branch;
-
-        // on_session_start hooks (e.g. incremental refresh of a code graph / cache).
-        crate::hooks::run("on_session_start", &st.cfg.hooks.on_session_start, st.dir);
-
-        // Layer-3 spawn scanner: flip finished long-tasks to "done", prune stale entries.
-        // Runs every boundary (the harness's natural tick) — autonomous-safe, only updates
-        // liveness of tasks WE registered; never kills a process it can't prove is ours.
-        if let Some(change) = crate::spawns::scan(st.dir) {
-            eprintln!("  [spawn] {change}");
-        }
-
-        // 1) build the effective prompt: [operator instruction] + [spawn status] +
-        //    [prompt_includes] + resume. The operator instruction (if any) is consumed once;
-        //    the spawn status tells this session about background tasks left running by a
-        //    prior session (so it polls instead of relaunching); the prompt_includes prefix
-        //    is the user's reusable tooling/guidance fragments.
-        let base = if st.prompt_prefix.is_empty() {
-            st.resume_prompt.clone()
-        } else {
-            format!("{}\n\n{}", st.prompt_prefix, st.resume_prompt)
-        };
-        // prepend any tracked background-task status so the worker sees what is pending + why.
-        let base = match crate::spawns::summary_for_prompt(st.dir) {
-            Some(status) => format!("{status}\n{base}"),
-            None => base,
-        };
-        // institutional memory (#3): APPEND the bounded durable slice + LAST SESSION block as the
-        // LOWEST-priority tail of `base` (below the operator instruction, spawn status, and
-        // prompt_includes — those keep their position). Pure code, runs every prompt, never an LLM
-        // call. Empty string when there's nothing yet (fresh project), so the prompt is unchanged.
-        let base = if st.cfg.memory.enabled {
-            let mem = crate::memory::read_block(st.dir, &st.last_session, st.cfg.memory.inject_kb);
-            if mem.is_empty() {
-                base
-            } else {
-                format!("{base}\n\n{mem}")
-            }
-        } else {
-            base
-        };
-        let effective_prompt = match st.pending_instruction.take() {
-            Some(instr) => format!(
-                "═══ HIGH-PRIORITY OPERATOR INSTRUCTION (act on this FIRST, it overrides the default plan) ═══\n\
-                 {instr}\n\n{base}"
-            ),
-            None => base,
-        };
-        // NOTE: an `ultracode` prompt prefix was tried (to let the headless worker
-        // spawn subagent Workflows) and REMOVED 2026-06-10. In `claude -p` headless
-        // mode the worker fired an async Workflow then PARKED itself waiting for a
-        // re-invoke that never comes (Workflow returns a task-id immediately), going
-        // idle ~0% CPU until the watchdog killed it — a pure delegate-and-wait stall
-        // for zero output. The work here is single-instance + sequential and does
-        // not need fan-out, so the worker does it DIRECTLY (inline) instead.
-        st.dash.phase = "running".into();
-        st.publish();
-        // --resume continuity (opt-in): continue the prior session's context. Default
-        // is fresh-context-per-session (the core no-runaway-cost discipline).
-        let resume_id = if st.cfg.resume_sessions { st.last_session_id.as_deref() } else { None };
-        // memory: clear any stale scratch note for THIS session number left by a prior run, so a
-        // worker note from a different run can never be folded as this session's learning.
-        if st.cfg.memory.enabled {
-            crate::memory::clear_scratch(st.dir, st.session);
-        }
-        let outcome = worker::run_session(st.cfg, &effective_prompt, st.dir, st.session, resume_id, &st.live);
-        st.last_session_id = outcome.session_id.clone();
-        st.tokens_spent += outcome.output_tokens;
-        st.cost_spent += outcome.cost_usd;
-
-        // A SIGINT/SIGTERM during the session already killed the worker's group. Nothing is staged
-        // yet (isolation resolves below), so return gracefully NOW — through the Drop guards
-        // (run.pid cleared, on_stop hooks, ledger finalized) — instead of judging a killed session.
-        if crate::signals::interrupted() {
-            eprintln!("\n⚠ interrupted (SIGINT/SIGTERM) — stopping after the current session; worker killed, base untouched.");
-            st.dash.phase = "done".into();
-            st.dash.finished = true;
-            st.dash.finish_reason = "interrupted (SIGINT/SIGTERM)".into();
-            let (gm, gt) = st.eng.tally();
-            st.ledger.update(st.session, st.tokens_spent, gm, gt);
-            st.ledger.finish(now_epoch(), "interrupted");
-            st.publish();
-            return Ok(RunOutcome::Stopped);
-        }
-        // (run_session now reaps any straggler in the worker's process group on exit, and the
-        // worker's reader thread already streamed `now`/`think`/`recent` live — nothing to do here.)
-        eprintln!(
-            "  session #{} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
-            st.session,
-            outcome.exit_code,
-            outcome.duration_secs,
-            if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
-            if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
-            outcome.output_tokens,
-            st.tokens_spent,
-            outcome.cost_usd,
-            st.cost_spent,
-        );
-
-        // ── institutional memory (#3): ENFORCED early fold ─────────────────────────────────────
-        // Fold a mechanical "session-start" floor entry RIGHT NOW, before judging/summary, so the
-        // session's facts survive even if a later step in this cycle panics. This is the
-        // enforcement floor: no I/O needed to produce content, no worker cooperation. The
-        // post-judge step (below) SUPERSEDES this same entry in place with goal deltas + the
-        // optional worker note — so a normally-completing session leaves exactly ONE entry.
-        // Skipped on a rate-limited session: that session is incomplete (we `continue` without
-        // judging just below), so it must not leave a durable learning entry.
-        let mut mem_folded = false;
-        if st.cfg.memory.enabled && !outcome.rate_limited {
-            let scoreboard_now = st.eng.scoreboard();
-            let body = crate::memory::mechanical_note(
-                outcome.exit_code,
-                outcome.killed_by_watchdog,
-                outcome.rate_limited,
-                outcome.duration_secs,
-                &scoreboard_now,
-                &[], // no deltas yet — judging hasn't run; superseded below if we get there.
-            );
-            st.dash.memory_bytes =
-                crate::memory::append_entry(st.dir, st.session, "session-start", &body, st.cfg.memory.max_kb);
-            mem_folded = true;
-            st.publish();
-        }
-
-        // 2) rate-limit backoff (exit-code + terminal-event gated). NOTE: checked BEFORE merging —
-        //    a rate-limited session is incomplete, so we don't resolve/merge its branch at all
-        //    (it stays for the next attempt). (In the eager path below, resolve happens after this.)
-        if outcome.rate_limited {
-            let secs = st.cfg.ratelimit_backoff_secs;
-            eprintln!("  rate limit detected — backing off {secs}s");
-            st.dash.phase = "backoff".into();
-            // memory: a rate-limited session is incomplete — no durable entry was written (the
-            // early fold skips when rate_limited). Just clean up any scratch the worker left.
-            if st.cfg.memory.enabled {
-                crate::memory::clear_scratch(st.dir, st.session);
-            }
-            st.publish();
-            std::thread::sleep(Duration::from_secs(secs));
-            continue; // don't judge on a rate-limited (incomplete) session
-        }
-
-        // ── isolation: resolve the session branch ────────────────────────────────────────────
-        // Default is merge-back-to-base unless the worker vetoed (red file). With the ROLLBACK
-        // GATE on (rollback_on_regression, default), we STAGE the merge (uncommitted) here, judge
-        // the merged tree below, then commit or roll back based on whether a goal REGRESSED. With
-        // the gate off, we eager-commit here exactly as before.
-        let iso = &st.cfg.session_isolation;
-        let staged = match (&st.iso_base, &st.session_branch) {
-            (Some(base), Some(br)) if iso.rollback_on_regression => {
-                Some((br.clone(), crate::git::stage_session(st.dir, base, br, &iso.red_file)))
-            }
-            (Some(base), Some(br)) => {
-                crate::git::resolve_session(st.dir, base, br, &iso.red_file, st.session);
-                None
-            }
-            _ => None,
+        let prompt = match st.inject() {
+            // INJECT
+            Injected::Prompt(p) => p,
+            Injected::Stop(outcome) => return Ok(outcome), // `agg stop`, incl. while paused
         };
 
-        // 3) run judges, fold verdicts, evaluate conditions (incl. budget/wall guards). When a
-        //    merge is staged, the judges re-test the MERGED (uncommitted) working tree — the gate.
-        //    Snapshot goal state FIRST: if the gate rolls the merge back, we restore this so the
-        //    engine reflects base truth and never reports success on discarded work (W5).
-        eprintln!("  running judges…");
-        st.dash.phase = "judging".into();
-        st.publish();
-        let pre_cycle_goals = st.eng.snapshot_goal_state();
-        let rs = st.run_state();
-        let mut res = st.eng.evaluate_cycle(st.dir, st.config_base, &rs);
-        eprint!("{}", indent(&st.eng.scoreboard()));
-        st.publish();
+        let Some(outcome) = st.run(&prompt) else {
+            // RUN
+            return Ok(st.finish_interrupted()); // SIGINT/SIGTERM — nothing staged, nothing judged
+        };
 
-        // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
-        // A goal REGRESSED this cycle iff a delta went from a met state to a not-met state AND the
-        // judge actually RAN. The "judge ran" gate is LOAD-BEARING: a judge that merely couldn't
-        // run (rate-limited/timeout/spawn-fail/bad-JSON → Verdict::failed with error:Some →
-        // Goal::apply marks a previously-met goal Regressed) must NOT count as a regression, or a
-        // transient flake would discard a good session's work.
-        //
-        // We rely ONLY on the per-cycle delta — NOT on `g.state == Regressed`. `Regressed` is
-        // sticky (recomputed every cycle while unmet), so an engine-state clause vetoed every
-        // future merge after one regression and cascaded after a rollback (W4). The delta clause,
-        // gated on judge-ran, is necessary and sufficient once engine state is kept base-true
-        // (which the rollback branch below now guarantees).
-        let mut rolled_back = false;
-        if let Some((br, crate::git::StagedSession::Staged)) = &staged {
-            let judge_ran = |id: &str| {
-                st.eng
-                    .goals
-                    .iter()
-                    .find(|g| g.id == id)
-                    .and_then(|g| g.last_verdict.as_ref())
-                    .map(|v| v.error.is_none())
-                    .unwrap_or(false)
-            };
-            let regressed = res.deltas.iter().any(|d| {
-                d.before_state == crate::model::Lifecycle::Met
-                    && d.after_state != crate::model::Lifecycle::Met
-                    && judge_ran(&d.id)
-            });
-            let keep = !regressed;
-            crate::git::finalize_session(st.dir, br, st.session, keep);
-            if !keep {
-                // W5: the merged tree was discarded. Restore engine state to pre-cycle (base)
-                // truth so we never (a) report success on discarded work, (b) latch a once_met
-                // goal that was only met on the discarded tree, or (c) show a phantom Met→Regressed
-                // next cycle that would roll back the NEXT session. Then recompute stop/halt
-                // against base — cheaply, no judges re-run — and blank the deltas so the memory
-                // fold below records the regression fact without phantom "met" deltas.
-                rolled_back = true;
-                st.eng.restore_goal_state(&pre_cycle_goals);
-                eprint!("{}", indent(&st.eng.scoreboard()));
-                let rs = st.run_state();
-                let recomputed = st.eng.conditions_only(&rs);
-                res = crate::engine::CycleResult {
-                    stop: recomputed.stop,
-                    halt: recomputed.halt,
-                    halt_reason: recomputed.halt_reason,
-                    deltas: Vec::new(),
-                };
-            }
-            st.publish();
-        }
+        let Some(verified) = st.verify(&outcome) else {
+            // VERIFY
+            continue; // rate-limited: incomplete session, not judged — just go round again
+        };
 
-        // on_session_end hooks run AFTER judging, so they see the post-cycle state (e.g.
-        // persist a memory note, update an index, refresh a graph for the next session).
-        crate::hooks::run("on_session_end", &st.cfg.hooks.on_session_end, st.dir);
-
-        // DATA-C1: only reuse the windowed summary for memory if it was FRESHLY computed this
-        // cycle — never the stale persistent `dash.summary_windowed` from an earlier cycle.
-        let mut summarized_this_cycle = false;
-
-        // 4) LLM summary (cumulative + windowed), rate-limited by min_interval_secs.
-        //    Best-effort: a summarizer failure NEVER breaks the loop.
-        if st.cfg.summary.enabled
-            && st.last_summary.elapsed().as_secs() >= st.cfg.summary.min_interval_secs
-        {
-            if let Some(s) = summary::summarize(
-                &st.cfg.summary.model,
-                &st.cumulative,
-                &outcome.thoughts,
-                &res.deltas,
-                120,
-            ) {
-                eprintln!("  [SUMMARY cumulative] {}", s.cumulative);
-                eprintln!("  [SUMMARY windowed]   {}", s.windowed);
-                st.cumulative = s.cumulative.clone();
-                st.dash.summary_cumulative = s.cumulative;
-                st.dash.summary_windowed = s.windowed;
-                st.last_summary = Instant::now();
-                summarized_this_cycle = true;
-                st.publish();
-            }
-        }
-
-        // 5) institutional memory (#3) — post-judge REFINEMENT of this session's entry. The early
-        //    fold (above) already guaranteed a mechanical note exists; here we add the richer,
-        //    delta-aware entry (and the optional worker note). First tier that yields content
-        //    wins. All I/O best-effort. Skipped only if memory is disabled or somehow not yet
-        //    folded (defensive — `mem_folded` is set whenever memory is enabled and we reached
-        //    here without a rate-limit `continue`).
-        if st.cfg.memory.enabled && mem_folded {
-            let scoreboard = st.eng.scoreboard();
-            // the mechanical fact is ALWAYS recorded — the worker note (if any) is appended as a
-            // clearly-fenced, lower-trust hint, never allowed to stand alone (so a poisoned or
-            // over-confident note can't masquerade as the authoritative session record).
-            let mut mech = crate::memory::mechanical_note(
-                outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
-                outcome.duration_secs, &scoreboard, &res.deltas,
-            );
-            // W5: if the merge was rolled back, the work is NOT on base — say so, so the durable
-            // record (which the worker is told to trust) can't be read as "this landed".
-            if rolled_back {
-                mech = format!(
-                    "session ROLLED BACK — a goal regressed on the staged merge; the work below is \
-                     NOT on the base branch (kept on the session branch for inspection).\n{mech}"
-                );
-            }
-            // 3a: optional worker note (sanitized + size-capped + de-fanged in read_worker_note);
-            //     here we additionally FENCE it so its body can never be read as live markdown.
-            let worker_note = crate::memory::read_worker_note(st.dir, st.session);
-            let (source, body) = match worker_note {
-                Some(note) => (
-                    "mechanical+worker",
-                    format!(
-                        "{mech}\n\n[worker note — UNTRUSTED hint, not authoritative]\n```text\n{note}\n```"
-                    ),
-                ),
-                // 3b: reuse the windowed summary ONLY if freshly computed this cycle (no LLM call).
-                None if summarized_this_cycle && !st.dash.summary_windowed.trim().is_empty() => (
-                    "mechanical+summary",
-                    format!("{mech}\n\nsummary: {}", st.dash.summary_windowed.trim()),
-                ),
-                // 3c: mechanical facts alone — cannot fail to produce content.
-                None => ("mechanical", mech),
-            };
-            // SUPERSEDE the early "session-start" floor entry in place → exactly ONE entry per
-            // completed session (no double-fold).
-            st.dash.memory_bytes =
-                crate::memory::fold_entry(st.dir, st.session, source, &body, st.cfg.memory.max_kb, true);
-            // delete the scratch note now that it's folded (bounds `.agg/memory/` growth; prevents
-            // a cross-run re-fold).
-            crate::memory::clear_scratch(st.dir, st.session);
-            // carry the always-on LAST SESSION block into the NEXT prompt's READ block.
-            st.last_session = crate::memory::last_session_block(&res.deltas, &scoreboard);
-            eprintln!("  [memory] session #{} folded ({source}); AGG_MEMORY.md {} B", st.session, st.dash.memory_bytes);
-            st.publish();
-        }
-
-        if res.halt {
-            let reason = res.halt_reason.unwrap_or_default();
-            eprintln!(
-                "\n⚠ HALT — guard condition true: {reason}\n  stopping the loop (this is a guard, not success)."
-            );
-            st.dash.phase = "done".into();
-            st.dash.finished = true;
-            st.dash.finish_reason = format!("HALT: {reason}");
-            let (gm, gt) = st.eng.tally();
-            st.ledger.update(st.session, st.tokens_spent, gm, gt);
-            st.ledger.finish(now_epoch(), &format!("halt:{reason}"));
-            st.publish();
-            return Ok(RunOutcome::Halt);
-        }
-        if res.stop {
-            let (mt, tt) = st.eng.tally();
-            eprintln!("\n✔ STOP condition satisfied — {mt}/{tt} goals met. Done after {} session(s).", st.session);
-            st.dash.phase = "done".into();
-            st.dash.finished = true;
-            st.dash.finish_reason = format!("{mt}/{tt} goals met after {} session(s)", st.session);
-            st.ledger.update(st.session, st.tokens_spent, mt, tt);
-            st.ledger.finish(now_epoch(), "goals-met");
-            st.publish();
-            return Ok(RunOutcome::GoalsMet);
+        match st.gate(verified, &outcome) {
+            // GATE
+            GateDecision::Loop => continue,
+            GateDecision::Stop(outcome) => return Ok(outcome),
         }
     }
 }
