@@ -5,3 +5,6 @@ examples/**/AGG_RESUME.md
 .agg/
 # internal scratch / working notes, never public
 HANDOFF.md
+REFACTOR_PLAN_four_stages.md
+Analysis_Fable5.md
+WEB_UI_SCOPE.md
