@@ -3,6 +3,24 @@
 Every key in `agg.yaml` and `goals.yaml`. The README lists only the knobs most runs touch.
 
 
+**Stopping: `stop_when` vs `halt_when`.** Both live in `goals.yaml`, both are **optional**, and both
+use the same mini-language (goal ids joined with `and` / `or` / `not`, plus aggregates like
+`met_fraction`, `any_regressed(invariants)`, and guards like `over_budget` / `over_cost` /
+`over_iterations` / `wall_hours`). The difference is only what happens when the expression is true:
+
+- **`stop_when`** — the **success** condition. When true, the loop stops and exits **0**. Default:
+  `all_goals` (stop once every goal is met). This is the one nearly every run sets; the README's
+  examples use only this.
+- **`halt_when`** — an optional **guard**. When true, the loop aborts as a **failure** and exits
+  **3**, so CI/automation can tell a guardrail bail (budget blown, an invariant regressed) apart from
+  a real win. Default: none. Typical value:
+  `any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 4`.
+
+You can't fold the guards into `stop_when` — putting `over_budget` there would report a budget blowout
+as *success*. That exit-code distinction is the only thing `halt_when` adds; if you don't need it
+(most interactive runs don't), just omit it.
+
+
 **Don't re-check a finished goal (`recheck:`)** — by default `VERIFY` runs every goal's judge each
 cycle. For a goal whose status can't change once achieved (a written report, a completed study)
 that wastes work — especially with an LLM judge. Set a recheck policy in `goals.yaml`:
