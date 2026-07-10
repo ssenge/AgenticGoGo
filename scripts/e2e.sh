@@ -379,9 +379,9 @@ sec "9b. git session isolation + the rollback GATE"
 # NOTE: agg discards a session branch that has UNCOMMITTED edits ("commit your work to keep it"),
 # so the worker must commit — that is the real contract with the worker, not a test artifact.
 # The repo must also be clean when `agg run` starts, so every fixture file is committed first.
-mkrepo() { # mkrepo <dir>  — commit everything the fixture made so far
-  ( cd "$1" && git init -q && git config user.email e@e && git config user.name e \
-    && printf 'did_work\ntrace.txt\nprompt*.txt\n.sess\nJUDGE_FAIL\nrun.log\nAGG_MEMORY.md\n' > .gitignore \
+mkrepo() { # mkrepo <dir>  — commit everything the fixture made so far, on `main`
+  ( cd "$1" && git init -q -b main && git config user.email e@e && git config user.name e \
+    && printf 'did_work\ntrace.txt\nprompt*.txt\nargv.txt\n.sess\n.n\nNO_WORK\nWORKER_SLEEP\nWORKER_TOKENS\nWORKER_COST\nJUDGE_FAIL\nrun.log\nAGG_MEMORY.md\nAGG_RED\n' > .gitignore \
     && echo base > tracked.txt && git add -A && git commit -qm init )
 }
 
@@ -480,6 +480,9 @@ is "…the trace shows no VERIFY/GATE after RUN" \
 # The watchdog polls every 30s, so even with idle_secs=3 the kill lands ~90s in. This is the
 # check that caught `parse_ps_time` rejecting macOS's fractional `ps` TIME ("0:00.00"), which made
 # cpu_jiffies() return -1 forever and silently disabled the CPU-flat detector on every mac.
+if [ -n "${SKIP_SLOW:-}" ]; then
+  skip "hung-worker watchdog" "SKIP_SLOW=1 (it must wait ~90s for the 30s watchdog poll)"
+else
 WD="$(mkproj watchdog)"
 cat > "$WD/bin/claude" <<'EOF'
 #!/bin/sh
@@ -498,6 +501,7 @@ has "…and flags it on the session exit line" "$WD/run.log" "WATCHDOG-KILLED"
 [ $(( $(date +%s) - WDS )) -lt 200 ] \
   && ok "…and it fires promptly, not after the worker finishes on its own" \
   || bad "watchdog did not fire (the worker ran to completion)"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 sec "9d. prompt composition (prompt_includes · --resume) and lifecycle hooks"
@@ -564,6 +568,218 @@ has "…then met after the worker ran"           "$LJ/run.log" "LLM_JUDGE_SAYS_O
 has "the summarizer runs and logs a cumulative summary" "$LJ/run.log" "CUMULATIVE_SUMMARY_X"
 has "…and a windowed summary"                           "$LJ/run.log" "WINDOWED_SUMMARY_Y"
 is  "…and the summary is published to state.json" "$(snap "$LJ" summary_cumulative)" "CUMULATIVE_SUMMARY_X"
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9f. worker_args · goal types · over_iterations · wall_hours"
+
+# ── worker_args: extra flags agg must hand the worker, in the right POSITION ──────────────
+# There is NO agg log line for worker_args (worker.rs:73 just appends them), so the only
+# honest observation channel is the worker recording its own argv. Asserting on run.log
+# would pass for the wrong reason.
+WA="$(mkproj workerargs)"
+cat > "$WA/bin/claude" <<'EOF'
+#!/bin/sh
+# the --version preflight must exit BEFORE we record, or it overwrites argv.txt with 1 token
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+: > argv.txt; for a in "$@"; do printf '%s\n' "$a" >> argv.txt; done
+sh bin/rec RUN
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$WA/bin/claude"
+printf 'project: workerargs\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nworker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "SENTINEL_SRC"]\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$WA/agg.yaml"
+agg_do "$WA" run --max-sessions 2 > "$WA/run.log" 2>&1
+is  "worker_args: the run still succeeds" "$?" "0"
+has "…--allowedTools reached the worker" "$WA/argv.txt" "--allowedTools"
+has "…with its value"                    "$WA/argv.txt" "Edit,Bash"
+has "…--add-dir reached the worker"      "$WA/argv.txt" "SENTINEL_SRC"
+# POSITION is the real contract: after agg's own flags, before -p (else claude folds them
+# into the prompt). Anchor to --output-format, not --verbose: `--effort` sits in between.
+python3 - "$WA/argv.txt" <<'PY'
+import sys
+a = open(sys.argv[1]).read().split("\n")
+i_fmt, i_wa, i_p = a.index("--output-format"), a.index("--allowedTools"), a.index("-p")
+sys.exit(0 if i_fmt < i_wa < i_p else 1)
+PY
+[ $? -eq 0 ] && ok "…and they sit AFTER agg's flags and BEFORE -p" \
+             || bad "worker_args are in the wrong argv position"
+
+# ── percentage + cardinal goal types ─────────────────────────────────────────────────────
+# `met` comes from the judge's verdict (model.rs:185); `value` only decides InProgress vs
+# Pending. So the judge must report met:false with a rising value, then met:true at target.
+GT="$(mkproj goaltypes)"
+cat > "$GT/judges/pct.sh" <<'EOF'
+#!/bin/sh
+sh bin/rec VERIFY
+n=$(cat .n 2>/dev/null || echo 0)
+if [ "$n" -ge 1 ]; then echo '{"met":true,"value":100,"max":100,"target":100,"rationale":"done"}'
+else echo '{"met":false,"value":50,"max":100,"target":100,"rationale":"halfway"}'; fi
+EOF
+cat > "$GT/judges/card.sh" <<'EOF'
+#!/bin/sh
+n=$(cat .n 2>/dev/null || echo 0)
+if [ "$n" -ge 1 ]; then echo '{"met":true,"value":28,"max":28,"target":28,"rationale":"all 28"}'
+else echo '{"met":false,"value":18,"max":28,"target":28,"rationale":"18 of 28"}'; fi
+EOF
+chmod +x "$GT/judges/pct.sh" "$GT/judges/card.sh"
+cat > "$GT/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+echo 1 > .n
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$GT/bin/claude"
+printf 'goals:\n  - id: coverage\n    type: percentage\n    target: 100\n    judge: { kind: script, cmd: "./judges/pct.sh" }\n  - id: solved\n    type: cardinal\n    target: 28\n    judge: { kind: script, cmd: "./judges/card.sh" }\nstop_when: coverage AND solved\n' > "$GT/goals.yaml"
+printf 'project: goaltypes\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$GT/agg.yaml"
+agg_do "$GT" run --max-sessions 3 > "$GT/run.log" 2>&1
+is  "percentage+cardinal goals drive the loop to stop (exit 0)" "$?" "0"
+has "…baseline renders the percentage measure" "$GT/run.log" "50/100%"
+has "…and the cardinal measure"                "$GT/run.log" "18/28"
+has "…the percentage goal reaches target"      "$GT/run.log" "100/100%"
+has "…and the cardinal goal reaches target"    "$GT/run.log" "28/28"
+has "…the compound stop_when (AND) fires"      "$GT/run.log" "2/2 goals met"
+
+# ── over_iterations: a GUARD (exit 3), distinct from the max-sessions cap (exit 4) ───────
+# stop.rs:355 — sessions_done >= max_sessions. It is evaluated in GATE, so it halts BEFORE
+# the loop's own top-of-cycle max-sessions pre-check ever fires.
+OI="$(mkproj overiter)"; : > "$OI/NO_WORK"
+printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: worked\nhalt_when: over_iterations\n' > "$OI/goals.yaml"
+agg_do "$OI" run --max-sessions 2 > "$OI/run.log" 2>&1
+is    "over_iterations HALTS the loop (exit 3, a guard — not the exit-4 cap)" "$?" "3"
+has   "…and names the guard"                 "$OI/run.log" "over_iterations"
+hasnt "…the max-sessions cap never fired"    "$OI/run.log" "reached max_sessions"
+
+# ── wall_hours: a raw counter usable in any halt expression (stop.rs:338) ────────────────
+WH="$(mkproj wallhours)"; : > "$WH/NO_WORK"; echo 4 > "$WH/WORKER_SLEEP"
+# baseline sits at ~0.00001h; one 4s session puts wall_hours at ~0.0012h.
+printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: worked\nhalt_when: wall_hours >= 0.0005\n' > "$WH/goals.yaml"
+agg_do "$WH" run --max-sessions 5 > "$WH/run.log" 2>&1
+is    "a wall_hours ceiling HALTS the loop (exit 3)" "$?" "3"
+has   "…and names the expression"                    "$WH/run.log" "wall_hours"
+hasnt "…it did not simply run out of sessions"       "$WH/run.log" "reached max_sessions"
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9g. the git paths the rollback gate does NOT take (eager merge · conflict · recovery)"
+
+# ── eager merge: rollback_on_regression:false → resolve_session commits BEFORE judging ───
+EM="$(mkproj eager)"
+cat > "$EM/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
+echo "sess-$n" > tracked.txt
+git add -A && git commit -qm "worker: session $n"
+: > did_work
+[ "$n" -ge 2 ] && : > JUDGE_FAIL     # session 2 regresses — but there is NO gate to catch it
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$EM/bin/claude"
+cat > "$EM/judges/never.sh" <<'EOF'
+#!/bin/sh
+echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
+EOF
+chmod +x "$EM/judges/never.sh"
+printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\n  - id: endless\n    type: binary\n    judge: { kind: script, cmd: "./judges/never.sh" }\nstop_when: endless\n' > "$EM/goals.yaml"
+printf 'project: eager\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: false }\n' > "$EM/agg.yaml"
+mkrepo "$EM"
+agg_do "$EM" run --max-sessions 2 > "$EM/run.log" 2>&1
+has   "eager path merges without a post-merge re-test"  "$EM/run.log" "session #1 merged → "
+hasnt "…and never takes the rollback-gate wording"      "$EM/run.log" "merged → kept"
+hasnt "…so a regressing session is NOT rolled back"     "$EM/run.log" "ROLLED BACK"
+is    "…and session 2's regressing work LANDS on base (that is the trade-off)" \
+      "$( cd "$EM" && git show HEAD:tracked.txt 2>/dev/null )" "sess-2"
+
+# ── merge conflict: base moved under the session branch ──────────────────────────────────
+MC="$(mkproj conflict)"
+cat > "$MC/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+BR=$(git rev-parse --abbrev-ref HEAD)
+echo branch-side > tracked.txt && git commit -qam "branch edit"
+git checkout -q main && echo base-side > tracked.txt && git commit -qam "base moved"
+git checkout -q "$BR"          # leave HEAD where agg expects it
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$MC/bin/claude"
+printf 'project: conflict\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: false }\n' > "$MC/agg.yaml"
+mkrepo "$MC"
+agg_do "$MC" run --max-sessions 1 > "$MC/run.log" 2>&1
+has "a conflicting merge FAILS loudly"              "$MC/run.log" "merge FAILED (conflict)"
+has "…and the branch is kept for inspection"        "$MC/run.log" "kept for inspection"
+is  "…base is left exactly as it was"               "$( cd "$MC" && git show main:tracked.txt 2>/dev/null )" "base-side"
+( cd "$MC" && git rev-parse -q --verify MERGE_HEAD >/dev/null ) \
+  && bad "the failed merge left MERGE_HEAD behind" \
+  || ok "…and no MERGE_HEAD is stranded (the merge was aborted)"
+
+# ── startup recovery of a merge stranded by an interrupted run ───────────────────────────
+# The discriminator is .git/MERGE_MSG (git.rs:79): agg's own merge names the branch_prefix.
+# GOTCHA: baseline stop runs BEFORE recovery, so the goal must NOT be met at launch.
+strand() { # strand <dir> <branch-name>  → leaves a conflicted, uncommitted merge
+  # both sides must differ from mkrepo's committed "base", or `git commit` finds nothing to do
+  # and the `&&` chain dies before the merge ever runs.
+  ( cd "$1" && git checkout -q -b "$2" && echo branch-side > tracked.txt && git commit -qam b \
+     && git checkout -q main && echo main-side > tracked.txt && git commit -qam m \
+     && git merge --no-commit "$2" >/dev/null 2>&1; true )
+}
+SR="$(mkproj recover)"
+printf 'project: recover\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true }\n' > "$SR/agg.yaml"
+mkrepo "$SR"; strand "$SR" "agg/recover/session-1"      # name contains the `agg` branch_prefix
+( cd "$SR" && git rev-parse -q --verify MERGE_HEAD >/dev/null ) && ok "fixture: a merge is genuinely stranded" || bad "fixture failed to strand a merge"
+agg_do "$SR" run --max-sessions 1 > "$SR/run.log" 2>&1
+has "agg recovers its OWN stranded merge at startup" "$SR/run.log" "found a leftover staged merge from an interrupted session"
+has "…so isolation still turns ON"                   "$SR/run.log" "per-session branch isolation ON"
+( cd "$SR" && git rev-parse -q --verify MERGE_HEAD >/dev/null ) \
+  && bad "MERGE_HEAD survived recovery" || ok "…and MERGE_HEAD is cleared"
+
+SU="$(mkproj unrelated)"; : > "$SU/NO_WORK"   # baseline must NOT be met, or recovery never runs
+printf 'project: unrelated\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true }\n' > "$SU/agg.yaml"
+mkrepo "$SU"; strand "$SU" "hotfix/urgent"              # no `agg` anywhere in the merge message
+agg_do "$SU" run --max-sessions 1 > "$SU/run.log" 2>&1
+has "a merge agg did NOT start is left alone, with a warning" "$SU/run.log" "WARNING a merge is in progress that agg did not start"
+has "…and isolation disables itself rather than trample it"   "$SU/run.log" "running on current branch"
+( cd "$SU" && git rev-parse -q --verify MERGE_HEAD >/dev/null ) \
+  && ok "…and the user's merge is still there, untouched" || bad "agg destroyed a merge it did not start"
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9h. memory caps (max_kb on disk · inject_kb per prompt)"
+MK="$(mkproj memcap)"; : > "$MK/NO_WORK"
+# a worker that leaves a big scratch note → the folded entries blow past a 1 KB cap
+cat > "$MK/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s' "$a" > prompt_latest.txt; prev="$a"; done
+sh bin/rec RUN
+n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
+mkdir -p .agg/memory
+i=0; while [ $i -lt 40 ]; do printf 'padding line %s for session %s\n' "$i" "$n" >> ".agg/memory/session-$n.md"; i=$((i+1)); done
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$MK/bin/claude"
+printf 'project: memcap\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: true, max_kb: 1, inject_kb: 1 }\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$MK/agg.yaml"
+agg_do "$MK" run --max-sessions 4 > "$MK/run.log" 2>&1
+exists "AGG_MEMORY.md exists after 4 sessions" "$MK/AGG_MEMORY.md"
+SZ=$(wc -c < "$MK/AGG_MEMORY.md" | tr -d ' ')
+printf '  AGG_MEMORY.md = %s bytes (cap = 1 KB)\n' "$SZ"
+[ "$SZ" -le 1100 ] && ok "…and max_kb=1 caps the durable file (${SZ}B)" \
+                   || bad "max_kb not enforced" "${SZ}B > 1 KB"
+has "…dropping the OLDEST entries, and saying so" "$MK/AGG_MEMORY.md" "older entries dropped"
+has "…the newest session survives the rotation"   "$MK/AGG_MEMORY.md" "session 4"
+# inject_kb bounds the per-prompt slice independently of the on-disk file
+PB=$(python3 - "$MK/prompt_latest.txt" <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+i = t.find("--- INSTITUTIONAL MEMORY")
+print(0 if i < 0 else len(t[i:]))
+PY
+)
+printf '  injected memory block = %s bytes (inject_kb = 1 KB)\n' "$PB"
+[ "$PB" -gt 0 ] && ok "the durable slice is INJECTed into the prompt" || bad "no memory block in the prompt"
+[ "$PB" -le 2200 ] && ok "…and inject_kb bounds it (${PB}B, incl. the LAST SESSION block)" \
+                   || bad "inject_kb not enforced" "${PB}B"
 
 # ═══════════════════════════════════════════════════════════════════════════
 sec "10. agg serve — the JSON API the web UI depends on"
