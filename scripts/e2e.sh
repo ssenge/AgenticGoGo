@@ -782,6 +782,174 @@ printf '  injected memory block = %s bytes (inject_kb = 1 KB)\n' "$PB"
                    || bad "inject_kb not enforced" "${PB}B"
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9i. the rest of the surface (effort · base_branch · invariants · recheck · flags)"
+
+# ── effort: passed through to the worker as `--effort <value>` (worker.rs:64) ────────────
+EF="$(mkproj effort)"
+cat > "$EF/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+: > argv.txt; for a in "$@"; do printf '%s\n' "$a" >> argv.txt; done
+sh bin/rec RUN; : > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$EF/bin/claude"
+printf 'project: effort\nmodel: fake\neffort: low\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$EF/agg.yaml"
+agg_do "$EF" run --max-sessions 2 > "$EF/run.log" 2>&1
+has "effort is handed to the worker as --effort" "$EF/argv.txt" "--effort"
+has "…with the configured value"                 "$EF/argv.txt" "low"
+
+# ── session_isolation.base_branch: cut sessions from a branch that is NOT the current one ─
+BB="$(mkproj basebranch)"
+printf 'project: basebranch\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, base_branch: "trunk" }\n' > "$BB/agg.yaml"
+mkrepo "$BB"
+( cd "$BB" && git branch trunk )
+agg_do "$BB" run --max-sessions 1 > "$BB/run.log" 2>&1
+has "base_branch overrides the launch branch" "$BB/run.log" "base branch 'trunk'"
+has "…and sessions are cut off it"            "$BB/run.log" "(off trunk)"
+
+# ── invariants + any_regressed(invariants) ───────────────────────────────────────────────
+IV="$(mkproj invariant)"
+cat > "$IV/judges/safe.sh" <<'EOF'
+#!/bin/sh
+if [ -f BREAK ]; then echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"safety broke"}'
+else echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"safe"}'; fi
+EOF
+cat > "$IV/judges/never.sh" <<'EOF'
+#!/bin/sh
+echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
+EOF
+chmod +x "$IV/judges/safe.sh" "$IV/judges/never.sh"
+cat > "$IV/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN; : > BREAK      # the worker breaks the invariant it was told to preserve
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$IV/bin/claude"
+printf 'goals:\n  - id: safe\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: "./judges/safe.sh" }\n  - id: endless\n    type: binary\n    judge: { kind: script, cmd: "./judges/never.sh" }\nstop_when: endless\nhalt_when: any_regressed(invariants)\n' > "$IV/goals.yaml"
+agg_do "$IV" run --max-sessions 3 > "$IV/run.log" 2>&1
+is    "a regressed INVARIANT halts the loop (exit 3)"  "$?" "3"
+has   "…naming the guard"                              "$IV/run.log" "any_regressed"
+hasnt "…and it is not the session cap"                 "$IV/run.log" "reached max_sessions"
+
+# ── recheck: once_met  → the judge LATCHES and is never run again ────────────────────────
+OM="$(mkproj oncemet)"
+cat > "$OM/judges/counted.sh" <<'EOF'
+#!/bin/sh
+n=$(cat .judged 2>/dev/null || echo 0); echo $((n+1)) > .judged
+echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"done once"}'
+EOF
+cat > "$OM/judges/never.sh" <<'EOF'
+#!/bin/sh
+echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"alive"}'
+EOF
+chmod +x "$OM/judges/counted.sh" "$OM/judges/never.sh"
+printf 'goals:\n  - id: latched\n    type: binary\n    recheck: once_met\n    judge: { kind: script, cmd: "./judges/counted.sh" }\n  - id: endless\n    type: binary\n    judge: { kind: script, cmd: "./judges/never.sh" }\nstop_when: endless\n' > "$OM/goals.yaml"
+agg_do "$OM" run --max-sessions 2 > "$OM/run.log" 2>&1
+is "recheck: once_met judges exactly ONCE, then latches (baseline only)" \
+   "$(cat "$OM/.judged" 2>/dev/null)" "1"
+
+# ── recheck: on_change → re-judged only when a declared input changes ────────────────────
+OC="$(mkproj onchange)"
+cat > "$OC/judges/counted.sh" <<'EOF'
+#!/bin/sh
+n=$(cat .judged 2>/dev/null || echo 0); echo $((n+1)) > .judged
+echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
+EOF
+chmod +x "$OC/judges/counted.sh"
+echo original > "$OC/watched.txt"
+cat > "$OC/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
+[ "$n" = "2" ] && echo changed > watched.txt   # only session 2 touches the watched input
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$OC/bin/claude"
+printf 'goals:\n  - id: gated\n    type: binary\n    recheck: on_change\n    recheck_inputs: ["watched.txt"]\n    judge: { kind: script, cmd: "./judges/counted.sh" }\nstop_when: gated\n' > "$OC/goals.yaml"
+agg_do "$OC" run --max-sessions 2 > "$OC/run.log" 2>&1
+is "recheck: on_change re-judges only when the input changed (baseline + session 2)" \
+   "$(cat "$OC/.judged" 2>/dev/null)" "2"
+
+# ── validate_recheck rejects a latched invariant (it could never see its own regression) ──
+BAD="$(mkproj badrecheck)"
+printf 'goals:\n  - id: safe\n    type: binary\n    invariant: true\n    recheck: once_met\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: safe\n' > "$BAD/goals.yaml"
+agg_do "$BAD" run --max-sessions 1 > "$BAD/run.log" 2>&1
+[ $? -ne 0 ] && ok "an invariant with recheck: once_met is REJECTED, not silently latched" \
+             || bad "a latched invariant was accepted"
+has "…with an actionable message" "$BAD/run.log" "invariants must"
+
+# ── a hanging judge is killed by its timeout; the loop survives (judges are crash-safe) ──
+JT="$(mkproj judgetimeout)"; : > "$JT/NO_WORK"
+cat > "$JT/judges/slow.sh" <<'EOF'
+#!/bin/sh
+sleep 30
+echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"never gets here"}'
+EOF
+chmod +x "$JT/judges/slow.sh"
+printf 'goals:\n  - id: slow\n    type: binary\n    judge: { kind: script, cmd: "./judges/slow.sh", timeout: 1 }\nstop_when: slow\n' > "$JT/goals.yaml"
+JTS=$(date +%s)
+agg_do "$JT" run --max-sessions 1 > "$JT/run.log" 2>&1
+is "a judge that hangs does not hang the loop (exit 4, the cap)" "$?" "4"
+[ $(( $(date +%s) - JTS )) -lt 25 ] && ok "…the judge timeout fired instead of waiting it out" \
+                                    || bad "the judge ran to completion; timeout ignored"
+hasnt "…and the hung judge never reports met" "$JT/run.log" "never gets here"
+
+# ── AGG_MEMORY_MAX_KB env override (config.rs:324) ───────────────────────────────────────
+EV="$(mkproj memenv)"; : > "$EV/NO_WORK"
+cat > "$EV/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
+mkdir -p .agg/memory
+i=0; while [ $i -lt 200 ]; do printf 'padding line %s of session %s\n' "$i" "$n" >> ".agg/memory/session-$n.md"; i=$((i+1)); done
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$EV/bin/claude"
+# CONTROL first: without the override the file must exceed 1 KB, or the assertion below is
+# vacuous (it would "pass" simply because nothing was ever big enough to cap).
+( cd "$EV" && PATH="$EV/bin:$PATH" "$AGG" run --max-sessions 4 > uncapped.log 2>&1 )
+RAW=$(wc -c < "$EV/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
+[ "${RAW:-0}" -gt 1100 ] && ok "control: uncapped memory really does exceed 1 KB (${RAW}B)" \
+                         || bad "control failed — the memcap assertion would be vacuous" "${RAW}B"
+rm -f "$EV/AGG_MEMORY.md" "$EV/.sess"; rm -rf "$EV/.agg"
+( cd "$EV" && PATH="$EV/bin:$PATH" AGG_MEMORY_MAX_KB=1 "$AGG" run --max-sessions 4 > run.log 2>&1 )
+SZ=$(wc -c < "$EV/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
+[ "${SZ:-99999}" -le 1100 ] && ok "AGG_MEMORY_MAX_KB=1 overrides the config default (${RAW}B → ${SZ}B)" \
+                            || bad "the env override was ignored" "${SZ}B"
+has "…and the rotation notice proves the cap actually fired" "$EV/AGG_MEMORY.md" "older entries dropped"
+
+# ── global flags: --dir, --config, --goals ───────────────────────────────────────────────
+GF="$(mkproj globalflags)"
+( cd "$WS" && PATH="$GF/bin:$PATH" "$AGG" --dir "$GF" run --max-sessions 2 > "$GF/dirrun.log" 2>&1 )
+is  "--dir runs the loop in another directory (exit 0)" "$?" "0"
+exists "…and the worker really worked there"           "$GF/did_work"
+
+GC="$(mkproj cfgflags)"
+mv "$GC/agg.yaml" "$GC/custom.yaml"; mv "$GC/goals.yaml" "$GC/custom-goals.yaml"
+agg_do "$GC" --config "$GC/custom.yaml" --goals "$GC/custom-goals.yaml" run --max-sessions 2 > "$GC/run.log" 2>&1
+is  "--config/--goals accept non-default filenames (exit 0)" "$?" "0"
+has "…and the run really reached its goal"                   "$GC/run.log" "STOP condition satisfied"
+
+# ── `agg send …` subcommands (the aliases the web UI mirrors) ────────────────────────────
+SN="$(mkproj sendcmds)"; : > "$SN/NO_WORK"; echo 2 > "$SN/WORKER_SLEEP"
+agg_bg SNL "$SN" run.log run --max-sessions 8
+waitfor 30 "live loop for the send-alias tests" grep -q "RUN=run" "$SN/trace.txt"
+agg_do "$SN" send pause > /dev/null 2>&1
+waitfor 30 "agg send pause parks the loop" grep -q "pause → waiting" "$SN/run.log"
+agg_do "$SN" send resume > /dev/null 2>&1
+waitfor 30 "agg send resume continues it" grep -q "resume → continuing" "$SN/run.log"
+agg_do "$SN" send budget 999999 > /dev/null 2>&1
+waitfor 30 "agg send budget is applied" grep -q "set-budget" "$SN/run.log"
+agg_do "$SN" send stop "via send" > /dev/null 2>&1
+waitfor 40 "agg send stop ends the loop" bash -c "! kill -0 $SNL 2>/dev/null"
+wait $SNL; is "…exit 0" "$?" "0"
+is "…with the reason that send stop gave" "$(finish_reason "$SN")" "stopped via bus: via send"
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "10. agg serve — the JSON API the web UI depends on"
 PORT=$(free_port)
 SV="$(mkproj serve)"; : > "$SV/NO_WORK"; echo 3 > "$SV/WORKER_SLEEP"
