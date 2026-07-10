@@ -27,7 +27,7 @@ inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading 
 compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two and tests_pass`) to
 say exactly what "done" means.
 
-> **Claude Code only.** `agg` drives `claude -p` as its inner agent. No other coding agent is
+> **So far, Claude Code only.** `agg` drives `claude -p` as its inner agent. No other coding agent is
 > supported today.
 
 <p align="center">
@@ -41,8 +41,8 @@ say exactly what "done" means.
 | **`VERIFY`** | `agg` runs your **judges** itself. The agent is never asked to grade its own homework. | code |
 | **`GATE`** | Keeps or rolls back the work, checks `stop_when`, carries state forward — or stops. | code |
 
-Three of the four stages are deterministic code; the `RUN` stage is a stochastic coding agent. The
-loop continues until all goals are met — potentially for hours, days, weeks (watch your token
+Three of the four stages are deterministic code; only the `RUN` stage is a stochastic coding agent.
+The loop continues until all goals are met — potentially for hours, days, weeks (watch your token
 consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate that decides it's done.
 
 ## Quick start
@@ -58,6 +58,10 @@ if __name__ == "__main__":
     print(add(1, 1))        # prints 1; should print 2
 ```
 
+*(A deliberately trivial example — a one-line fix where `agg` buys you nothing over just doing it
+yourself. It's here to show the mechanics; the real payoff is long, multi-hour work you'd otherwise
+have to babysit.)*
+
 **0 — Install.** The binary, then the `/agg:*` skills (inside Claude Code):
 
 ```bash
@@ -71,10 +75,17 @@ curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh 
 `claude` CLI already uses. Full options (prebuilt binaries, from source, version pinning) →
 **[docs/INSTALL.md](docs/INSTALL.md)**.
 
-**1 — Let Claude set the loop up.** In a Claude Code session, in your project, run `/agg:new`. It
-reads whatever planning material you have — a PRD, a ROADMAP, `.planning/`, a README, or just the
-code — and if there's nothing to read, it simply **asks you**. Then it shows what it intends to write
-and writes the config into `agg/`:
+**1 — Prerequisite: Claude Code.** `agg` drives Claude Code headlessly, so make sure it's installed
+and authenticated — `claude -p "hello"` should print a reply. A subscription or an API key both work.
+
+**2 — Let Claude set up the loop.** `/agg:new` is a short conversation, not magic: it turns *your*
+definition of "done" into config. Point it at a spec you already have (a PRD, ROADMAP, README,
+`.planning/`), or just say what you want in the chat — e.g.
+
+> `/agg:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes; don't weaken the tests.
+
+It reads that plus your code, shows the `goals.yaml` it proposes, and lets you edit before writing it
+into `agg/`:
 
 ```yaml
 # agg/goals.yaml — what "done" means, and who decides
@@ -98,7 +109,8 @@ resume_prompt: AGG_RESUME.md
 `AGG_RESUME.md` is the standing instruction `INJECT`ed into *every* session — "fix `calc.py` so
 `python3 calc.py` prints 2 and the tests pass; don't weaken the tests."
 
-**2 — Have Claude write the judge.** A judge is any command that prints one line of JSON. Ask for it:
+**3 — Have Claude write the judge.** A judge is any command that prints a verdict as JSON (see
+[Building judges](#building-judges)). You can write one by hand, but asking Claude is the easy way:
 
 > **Prompt:** Write `agg/judges/outputs_two.sh`: run `python3 calc.py`, print `{"met":true}` if its
 > output is exactly `2`, else `{"met":false,"rationale":"calc.py did not print 2"}`. Nothing else on
@@ -113,12 +125,12 @@ resume_prompt: AGG_RESUME.md
 ```
 
 The second goal, `tests_pass`, needs no writing — it's a **built-in** judge (`pytest -q` must exit 0).
-Why chain both with `and`? Each catches what the other misses: `outputs_two` alone is gameable — the
-agent could just hardcode `print(2)` — but the suite, which checks `add(2, 3) == 5`, would still be
-red. Requiring **both** is how you stop the agent from faking the goal. That's judge chaining: any
-boolean of goal ids (`and` / `or` / `not`, with parentheses) is a valid `stop_when`.
+The `stop_when: outputs_two and tests_pass` line above requires **both**. Why chain them? Each catches
+what the other misses: `outputs_two` alone is gameable — the agent could just hardcode `print(2)` —
+but `tests_pass`, which checks `add(2, 3) == 5`, would still be red. That `and` is judge chaining:
+any boolean of goal ids (`and` / `or` / `not`, with parentheses) is a valid `stop_when`.
 
-**3 — Run it, and watch.**
+**4 — Run it, and watch.**
 
 ```bash
 agg plan                # dry run: one VERIFY pass, prints the scoreboard. No agent launched.
@@ -131,12 +143,12 @@ judges → `GATE` sees `stop_when` met → the loop stops. This toy finishes in 
 and there's no knob to force more — the loop stops the moment `stop_when` is true. Real projects run
 as many iterations as it takes to satisfy every goal, sometimes hundreds, each a fresh session.
 
-**4 — Optionally, supervise from a second Claude Code session.** Start Claude Code **in the same
+**5 — Optionally, supervise from a second Claude Code session.** Start Claude Code **in the same
 project folder** and run `/agg:supervise`. It's not required — a plain session could read the state
 and run `agg send` too — but the skill hands that session the right playbook: read the compact
 scoreboard (never the worker firehose, which would blow up your token bill), the steering vocabulary,
 and what to watch for. Because you can reach that session from the Claude Code mobile app, you can
-check in and course-correct from your phone:
+even check in and course-correct from your phone:
 
 ```
 /agg:supervise
@@ -159,32 +171,51 @@ agg send pause                 # …and `agg send resume`
 agg stop "done for today"      # graceful stop at the next GATE
 ```
 
-Or skip the exact commands: tell your `/agg:supervise` session (below) in plain English — *"inject:
-focus on the auth module", "raise the budget to 8M", "pause for now"* — and it runs the right
-`agg send` for you.
+Or skip the exact commands: tell your `/agg:supervise` session in plain English — *"inject: focus on
+the auth module", "raise the budget to 8M", "pause for now"* — and it runs the right `agg send` for
+you.
 
 `Ctrl-C` or `agg stop` shuts the agent and the loop down cleanly — no orphaned worker, ledger
 finalized, base branch untouched.
 
 ## Building judges
 
-A judge is *any command that prints this JSON to stdout*. That's the whole contract:
+A judge is any command that prints a **verdict** as JSON to stdout. Only `met` is required; the rest
+are optional:
+
+```jsonc
+{
+  "met":       true | false,   // required — did this goal pass?
+  "value":     <number>,       // optional — a count or percent (drives the progress bar)
+  "max":       <number>,       // optional — the denominator for value
+  "target":    <number>,       // optional — the value that counts as "done"
+  "rationale": "<one line>",   // optional — shown on the dashboard
+  "evidence":  ["<line>", ...] // optional
+}
+```
+
+So a `binary` goal can print just `{"met": true}`; a cardinal one might print, as **one** example:
 
 ```json
 {"met": false, "value": 18, "max": 28, "target": 28, "rationale": "18/28 tests pass"}
 ```
 
-`value`/`max`/`target` are optional — a `binary` goal needs only `met`. There are two `kind`s, and
-`agg` treats their output identically — the difference is only *who builds the command*:
+`agg` uses the last JSON object on stdout, so a judge can log freely and print its verdict last.
 
-- **`script`** — any command whose stdout is that JSON. This is the escape hatch: a shell one-liner,
-  a test runner, a proof checker, even a `claude -p` call you write yourself. Ready-made ones live in
-  [`plugin/judges/`](plugin/judges/) (`cargo_test`, `cmd_exit`, `grep_count`).
-- **`llm`** — a built-in convenience so you don't hand-roll that `claude -p` call. You give `agg` a
-  `rubric` + `inputs` + `model`; it builds and runs the call for you *and hardens it* — the judge
-  session loads only **your** settings (never the agent-mutated repo's `.claude/` config) and treats
-  the repo as untrusted data, so the agent can't steer its own judge. Rubrics live in
-  [`plugin/rubrics/`](plugin/rubrics/).
+**Two flavours, same contract.** Judges are typically deterministic **scripts** or **LLM-as-judge** —
+and to `agg` there's no difference: anything that emits the verdict JSON is a judge (a `script` judge
+can even shell out to `claude -p` itself). The built-in **`llm`** kind is a convenience that also
+*hardens* the LLM case against gaming. Give it a `rubric` + `inputs` + `model` and `agg`:
+
+- **builds the prompt** — your rubric plus the declared input files, wrapped so the repo's content is
+  fed as *untrusted data* the judge is told never to obey (a file can't talk the judge into a pass);
+- **runs it isolated** — `--setting-sources user` (only *your* Claude settings, never the
+  agent-mutated repo's `.claude/` config or hooks) and `--strict-mcp-config` (no MCP servers), so the
+  agent can't steer the judge that grades it — and with no `--dangerously-skip-permissions`;
+- **extracts the verdict** from the model's reply.
+
+Ready-made script judges live in [`plugin/judges/`](plugin/judges/) (`cargo_test`, `cmd_exit`,
+`grep_count`); rubrics in [`plugin/rubrics/`](plugin/rubrics/).
 
 **Chain judges with a boolean.** `stop_when` (and the optional `halt_when`) is any boolean of goal
 ids — `a and b`, `a or b`, `not c`, with parentheses — so several judges together define "done":
