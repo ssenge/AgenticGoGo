@@ -8,6 +8,9 @@ HANDOFF.md
 REFACTOR_PLAN_four_stages.md
 Analysis_Fable5.md
 WEB_UI_SCOPE.md
+ROADMAP.md
+ROADMAP.private.md
+ralph-loop-comparison.draft.md
 
 # debugging/test scratch that `git add -A` has swept in twice already
 *.out
