@@ -5,12 +5,12 @@ disable-model-invocation: false
 
 # /agg:new — set up an AgenticGoGo loop for this project
 
-You are setting up **AgenticGoGo** (`agg`): a harness that runs fresh `claude -p` workers
-in a loop until **goal-based stop conditions** are met. Your job in this skill is to turn
-whatever planning material already exists into three files the harness reads:
+You are setting up **AgenticGoGo** (`agg`): a loop that runs fresh `claude -p` workers
+until **goal-based stop conditions** are met. Your job in this skill is to turn
+whatever planning material already exists into three files the loop reads:
 
 - `goals.yaml` — the goals, their judges, and the stop condition
-- `agg.yaml` — harness config (model, heartbeat, watchdog, budget, summaries)
+- `agg.yaml` — loop config (model, heartbeat, watchdog, budget, summaries)
 - `AGG_RESUME.md` — the "fat" resume prompt fed to every worker session
 
 **Core principle: do NOT replicate spec tooling.** Read what's already there and *translate*
@@ -153,8 +153,8 @@ Show the user the proposed `goals.yaml` and let them approve or edit before writ
 
 ## Step 6 — Write the three files
 
-Write to the **project directory** (where the user invoked this) — OR, to keep the root tidy,
-into an optional **`agg/` config folder**. `agg run` auto-detects either: if `<project>/agg/`
+Write into an **`agg/` config folder** by DEFAULT — it keeps the project root clean and is what
+the README documents. Fall back to the project root only if the user explicitly asks for it. `agg run` auto-detects either: if `<project>/agg/`
 exists, it reads `agg/agg.yaml`, `agg/goals.yaml`, the resume prompt, and `agg/judges/`,
 `agg/rubrics/` from there; otherwise it reads them from the root. Prefer the folder when you're
 generating several judges and/or rubrics (it stops them cluttering the project root); keep the
@@ -207,7 +207,7 @@ Write a self-contained prompt that, on EVERY fresh session, tells the worker to:
 5. Be autonomous — there is NO human in the loop; never pause to ask
 
 Inline any skill/workflow content the worker needs (skills are NOT invocable in headless
-`-p` — see the harness docs), e.g. paste the relevant GSD execution steps directly.
+`-p` — see the loop docs), e.g. paste the relevant GSD execution steps directly.
 
 Also create a starter `HANDOFF.md` capturing the current state + first task.
 

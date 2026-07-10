@@ -1,8 +1,7 @@
 # AgenticGoGo — Roadmap
 
-The consolidated backlog of improvements, drawn from a **competitive comparison** against the
-Ralph-loop tool family (see [COMPARISON.md](COMPARISON.md)) and an ongoing **architecture and
-code review**. Items are grouped by status, then by tier. This is the durable backlog — chat is not.
+The consolidated backlog of improvements, drawn from a survey of the Ralph-loop tool family and
+an ongoing **architecture and code review**. Items are grouped by status, then by tier. This is the durable backlog — chat is not.
 
 > Legend: **P0** must-do · **P1** high-value · **P2** nice-to-have · effort **S/M/L** · ✅ done · ⬜ open · 🚫 decided-against
 

@@ -25,9 +25,9 @@ const RUN_FILL: &str = "#1f6feb";
 /// (label, sub-label, angle in degrees; 0° = top, clockwise)
 const STAGES: [(&str, &str, f64); 4] = [
     ("INJECT", "state + steering → prompt", 0.0),
-    ("RUN", "the agent — one stochastic step", 90.0),
+    ("RUN", "Claude Code — one fresh `claude -p` session", 90.0),
     ("VERIFY", "judges run against the filesystem", 180.0),
-    ("GATE", "keep or roll back · stop or loop", 270.0),
+    ("GATE", "keep or roll back · repeat until stop_when", 270.0),
 ];
 
 fn pos(angle_deg: f64, radius: f64) -> (f64, f64) {
@@ -92,16 +92,6 @@ fn main() {
             y + bh / 2.0 + 16.0
         ));
     }
-
-    // centre caption
-    s.push_str(&format!(
-        "<text x=\"{CX}\" y=\"{:.1}\" fill=\"{INK}\" font-size=\"12\" text-anchor=\"middle\">repeat until</text>\n",
-        CY - 2.0
-    ));
-    s.push_str(&format!(
-        "<text x=\"{CX}\" y=\"{:.1}\" fill=\"{ACCENT}\" font-size=\"12\" text-anchor=\"middle\">stop_when</text>\n",
-        CY + 16.0
-    ));
 
     // legend
     let ly = H - 20.0;

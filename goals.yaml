@@ -1,0 +1,33 @@
+# goals.yaml — what "done" means for this project.
+# Each goal has a judge that prints a verdict JSON to stdout:
+#   {"met": <bool>, "value": <num>, "max": <num>, "target": <num>, "rationale": "<one line>"}
+
+goals:
+  # A cardinal goal: met when `value` reaches `target` (e.g. N of M tests pass).
+  - id: tests_pass
+    type: cardinal           # binary | percentage | cardinal
+    target: 3
+    description: "All tests pass"
+    judge:
+      kind: script           # a command whose stdout is the verdict JSON
+      cmd: "./judges/tests.sh"
+      timeout: 60
+
+  # An INVARIANT goal: must STAY true. If it regresses, halt_when can stop the loop.
+  # (Replace this stub with a real "never break the build / no wrong results" check.)
+  - id: no_regressions
+    type: binary
+    invariant: true
+    description: "Never break a previously-passing build"
+    judge:
+      kind: script
+      cmd: 'echo ''{"met":true,"value":1,"max":1,"target":1,"rationale":"build green (stub — replace me)"}'''
+      timeout: 30
+
+# Stop the loop when this expression is true (a safe mini-language, NOT eval).
+# Terms: goal ids, all_goals, count_met, met_fraction, any_regressed(invariants),
+#        over_budget, tokens_spent, wall_hours.
+stop_when: "tests_pass"
+
+# Optional emergency brake — stop immediately if an invariant breaks or budget/time blows.
+halt_when: "any_regressed(invariants) OR wall_hours >= 4"

@@ -2,13 +2,13 @@
 name = "agg"
 version = "0.0.11"
 edition = "2021"
-description = "AgenticGoGo — a generic agent-loop harness for Claude Code workers"
+description = "AgenticGoGo — a generic agent loop for Claude Code workers"
 authors = ["Sebastian Senge"]
 license = "MIT"
 repository = "https://github.com/ssenge/AgenticGoGo"
 default-run = "agg"
 
-# The harness is a library (`agg`) so integration tests in tests/ can drive the pure cores
+# The loop is a library (`agg`) so integration tests in tests/ can drive the pure cores
 # directly; the binary is a thin CLI over it.
 [lib]
 name = "agg"
