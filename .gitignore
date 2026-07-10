@@ -8,3 +8,10 @@ HANDOFF.md
 REFACTOR_PLAN_four_stages.md
 Analysis_Fable5.md
 WEB_UI_SCOPE.md
+
+# debugging/test scratch that `git add -A` has swept in twice already
+*.out
+*.raw
+*.bak
+*.orig
+typescript
