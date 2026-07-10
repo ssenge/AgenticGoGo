@@ -21,3 +21,103 @@ The judge rejects `3` → the worker edits `add.py` to `print(1 + 1)` → the ju
 - `goals.yaml` — one binary goal, `stop_when: prints_two`
 - `agg.yaml` — minimal config (haiku worker)
 - `AGG_RESUME.md.template` — copy to `AGG_RESUME.md` (the live prompt is gitignored)
+
+---
+
+## Walked example: drive a project to "all tests pass"
+
+The whole thing end to end on a tiny project — a Python lib with three unimplemented functions
+and a failing test suite. `agg` keeps `RUN`ning fresh agents until `VERIFY` goes green, then stops.
+
+**1. The project** (`calc.py` has stubs that raise `NotImplementedError`; `test_calc.py` tests them):
+
+```python
+# calc.py
+def add(a, b):       raise NotImplementedError
+def factorial(n):    raise NotImplementedError
+def is_prime(n):     raise NotImplementedError
+```
+
+**2. A judge** (`VERIFY`) — `judges/tests.sh` runs the suite and prints a verdict:
+
+```bash
+#!/usr/bin/env bash
+out="$(python3 -m pytest -q 2>&1)"
+passed=$(printf '%s' "$out" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo 0)
+failed=$(printf '%s' "$out" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo 0)
+total=$(( ${passed:-0} + ${failed:-0} ))
+met=$([ "${failed:-0}" -eq 0 ] && [ "$total" -gt 0 ] && echo true || echo false)
+printf '{"met":%s,"value":%s,"max":%s,"target":%s,"rationale":"%s/%s tests pass"}\n' \
+  "$met" "${passed:-0}" "$total" "$total" "${passed:-0}" "$total"
+```
+
+**3. `goals.yaml`** — one cardinal goal, met when all 3 tests pass; the `GATE` halts after 30 min:
+
+```yaml
+goals:
+  - id: tests_pass
+    type: cardinal
+    target: 3
+    description: "All calc tests pass"
+    judge: { kind: script, cmd: "./judges/tests.sh", timeout: 60 }
+stop_when: "tests_pass"
+halt_when: "wall_hours >= 0.5"
+```
+
+**4. `agg.yaml`** — outer-loop config + the resume prompt `INJECT`ed into each session:
+
+```yaml
+project: calc
+model: "claude-opus-4-8[1m]"
+resume_prompt: "AGG_RESUME.md"
+budget: { total: 2000000 }       # token ceiling  → over_budget  (a GATE guard)
+cost:   { total: 5.0 }           # $ ceiling → over_cost (API-equivalent price Claude reports;
+                                 #   a usage proxy, NOT a subscription charge — see note below)
+summary: { enabled: true, model: haiku, min_interval_secs: 1 }
+memory: { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md, on by default
+```
+
+> **A note on `cost` / `over_cost`.** The dollar figure is `total_cost_usd` as reported by the
+> `claude` CLI — the **API-equivalent list price** of the work. On a **Max/Pro subscription you are
+> not billed per token**, so this is a **usage proxy, not money charged to you**; the dashboard and
+> `agg status` label it `(API-eq)` for that reason. It's still a useful ceiling (`over_cost` halts a
+> runaway loop by relative spend), but read it as "how much work" not "how much money" unless you're
+> actually on pay-as-you-go API billing. Prefer `over_budget` (tokens) or `over_iterations` if you
+> want a plan-agnostic cap.
+
+**5. `AGG_RESUME.md`** — the prompt `INJECT`ed into *every* fresh session:
+
+```
+GOAL: make all tests in test_calc.py pass.
+calc.py has add(a,b), factorial(n), is_prime(n) stubbed with NotImplementedError.
+
+THIS SESSION:
+1. Run `python3 -m pytest -q` to see what's failing.
+2. Implement the failing function(s) in calc.py — real, correct implementations.
+3. Re-run pytest to confirm. You are autonomous; do the work and exit.
+```
+
+**6. Run it:**
+
+```bash
+agg plan        # dry run: one VERIFY pass, no RUN — shows "tests_pass cardinal 0/3 — loop would continue"
+agg run         # the outer loop: RUN real agents until VERIFY passes, then GATE stops
+agg dashboard   # (optional, second terminal) live colored TUI
+```
+
+What happens: a fresh agent reads the injected prompt, runs pytest, implements the functions,
+re-runs pytest → green, exits. `VERIFY` flips the goal `0/3 → 3/3`; `GATE` sees the stop condition
+met → the loop exits after one session. A one-line summary records what it did.
+
+### Or let `/agg:new` write it for you
+
+In a project you've already planned (a PRD, ROADMAP, get-shit-done `.planning/`, or a README),
+just run the skill inside Claude Code:
+
+```
+/agg:new        # reads your plans → writes goals.yaml + agg.yaml + AGG_RESUME.md
+```
+
+It **translates** whatever plan exists into goals + judges (it doesn't replicate your spec tooling)
+and asks only about genuine gaps. Then exit Claude and `agg run`.
+

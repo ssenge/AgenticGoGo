@@ -950,6 +950,44 @@ wait $SNL; is "…exit 0" "$?" "0"
 is "…with the reason that send stop gave" "$(finish_reason "$SN")" "stopped via bus: via send"
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9j. the docs describe the tool that actually exists"
+# A hand-written CLI table rots the moment a subcommand is added. Assert every clap subcommand
+# appears in the README, and that every relative link in the README resolves to a real file.
+"$AGG" --help > "$WS/help.txt" 2>&1
+python3 - "$ROOT" "$WS/help.txt" <<'PY'
+import re, sys, pathlib
+root = pathlib.Path(sys.argv[1]); helptxt = open(sys.argv[2]).read()
+readme = (root / "README.md").read_text()
+
+# clap prints subcommands one-per-line under "Commands:"
+block = helptxt.split("Commands:", 1)[1].split("Options:", 1)[0]
+cmds = {m.group(1) for m in re.finditer(r"^\s{2}(\w[\w-]*)\s{2,}", block, re.M)} - {"help"}
+missing = sorted(c for c in cmds if f"agg {c}" not in readme)
+print(f"  subcommands in --help: {len(cmds)}; missing from README: {missing or 'none'}")
+sys.exit(1 if missing else 0)
+PY
+[ $? -eq 0 ] && ok "every CLI subcommand is documented in the README" \
+             || bad "the README's CLI table is missing a subcommand"
+
+python3 - "$ROOT" <<'PY'
+import re, sys, pathlib
+root = pathlib.Path(sys.argv[1])
+readme = (root / "README.md").read_text()
+links = re.findall(r"\]\(([^)#:]+)\)", readme) + re.findall(r'src="([^"]+)"', readme)
+broken = [l for l in links if not l.startswith(("http", "#")) and not (root / l).exists()]
+print(f"  relative links checked: {len(links)}; broken: {broken or 'none'}")
+sys.exit(1 if broken else 0)
+PY
+[ $? -eq 0 ] && ok "every relative link/image in the README resolves" \
+             || bad "the README has a broken relative link"
+
+exists "the loop diagram is committed"        "$ROOT/assets/loop.png"
+exists "the config reference exists"          "$ROOT/docs/CONFIG.md"
+exists "the hello-agg example exists"         "$ROOT/examples/hello-agg/README.md"
+exists "the p-vs-np example exists"           "$ROOT/examples/p-vs-np/README.md"
+hasnt  "…and the retired flowchart is gone"   "$ROOT/README.md" "how-it-works"
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "10. agg serve — the JSON API the web UI depends on"
 PORT=$(free_port)
 SV="$(mkproj serve)"; : > "$SV/NO_WORK"; echo 3 > "$SV/WORKER_SLEEP"
