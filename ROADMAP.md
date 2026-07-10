@@ -1,7 +1,7 @@
 # AgenticGoGo — Roadmap
 
-The consolidated backlog of improvements, drawn from two analyses: the **competitive comparison**
-against the Ralph-loop tool family (see [COMPARISON.md](COMPARISON.md)) and a **Senior-Lead-Architect
+The consolidated backlog of improvements, drawn from a **competitive comparison** against the
+Ralph-loop tool family (see [COMPARISON.md](COMPARISON.md)) and an ongoing **architecture and
 code review**. Items are grouped by status, then by tier. This is the durable backlog — chat is not.
 
 > Legend: **P0** must-do · **P1** high-value · **P2** nice-to-have · effort **S/M/L** · ✅ done · ⬜ open · 🚫 decided-against
@@ -70,9 +70,9 @@ Architecture-review P0/P1 cleanup and the optional config folder:
   `stage_session`/`finalize_session`; rate-limit check moved before merge. *(Phase 0 — worktree
   isolation — still open in Tier B #11.)*
 
-### v0.0.11 — security & correctness hardening (post-review P0/P1)
-*(from the Fable-5 full review: close the fakeable-moat findings, fix the rollback-gate defects,
-and land the respectability table-stakes.)*
+### v0.0.11 — security & correctness hardening
+*(Harden the judges against worker-controlled input, fix the rollback-gate defects, and land the
+packaging table-stakes.)*
 - **Judge moat hardened.** The LLM judge no longer loads the worker-mutated repo's config: it runs
   with `--setting-sources user` (only the operator's own settings/hooks, never the repo's
   `.claude/settings.json`), and every untrusted judge input (file contents / `git diff`) is wrapped
