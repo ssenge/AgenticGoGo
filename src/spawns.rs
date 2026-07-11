@@ -77,10 +77,7 @@ impl Registry {
 
     /// Read the registry, or an empty one if missing/unparseable (never fails the loop).
     pub fn load(dir: &Path) -> Registry {
-        std::fs::read_to_string(Self::path(dir))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+        crate::util::load_json_or_default(&Self::path(dir))
     }
 
     /// Write atomically (tmp + rename) so a concurrent reader never sees a torn file.

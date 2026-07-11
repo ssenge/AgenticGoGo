@@ -10,6 +10,32 @@ pub fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
+/// Read + parse a YAML config file, naming the file in BOTH failure modes (can't read it vs.
+/// can't parse it) — the distinction a user needs to fix the problem. Used for every config the
+/// loop refuses to start without: agg.yaml, goals.yaml.
+///
+/// Contrast [`load_json_or_default`]: config errors are fatal and must be loud; runtime state is
+/// best-effort and must never fail the loop.
+pub fn load_yaml<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> anyhow::Result<T> {
+    use anyhow::Context;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Read + parse a JSON state file, falling back to `T::default()` if it is missing, unreadable,
+/// or corrupt. Used for the runtime bookkeeping the loop must survive without: the run ledger,
+/// the spawn registry.
+///
+/// The tolerance is deliberate, not laziness: a torn or hand-edited `project.json` must not stop
+/// a run — it degrades to an empty ledger. See [`load_yaml`] for the fail-loud counterpart.
+pub fn load_json_or_default<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
 /// Compact duration for the display surfaces: `3h12m` · `5m03s` · `45s`.
 ///
 /// Was copy-pasted three times (dashboard, status, project) and — as copies do — had already
