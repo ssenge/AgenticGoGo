@@ -16,7 +16,7 @@
 //! Keys: ↑/↓ scroll focused pane · PgUp/PgDn · g/G top/bottom · Tab switch focus
 //!       (Goals↔Activity) · f toggle activity auto-follow · q/Esc quit.
 
-use crate::state::{ActivityEvent, DashboardState, GoalView};
+use crate::state::{ActivityEvent, DashboardState, GoalView, Phase};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::{execute, terminal};
@@ -195,7 +195,7 @@ pub fn sample_state() -> DashboardState {
         up_secs: 11_520, // 3h12m
         session: 7,
         lifetime_session: 23,
-        phase: "verify".into(),
+        phase: Phase::Verify,
         idle_secs: 4,
         tokens_spent: 2_100_000,
         budget_total: Some(5_000_000),
@@ -363,7 +363,7 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         None => None,
     };
     let halt = if s.halt_when.is_empty() { "—".to_string() } else { s.halt_when.clone() };
-    let phase = Span::styled(s.phase.clone(), Style::default().fg(phase_color(&s.phase)).bold());
+    let phase = Span::styled(s.phase.to_string(), Style::default().fg(phase_color(&s.phase)).bold());
 
     let line1 = Line::from(vec![
         label("project "),
@@ -631,16 +631,19 @@ fn activity_glyph(kind: &str) -> (&'static str, Color) {
     }
 }
 
-/// The four deterministic outer-loop stages, plus the two terminal-ish phases.
-fn phase_color(phase: &str) -> Color {
+/// The four deterministic outer-loop stages, plus the off-cycle ones. Exhaustive over [`Phase`]:
+/// adding a stage is now a compile error here until it gets a color, instead of silently
+/// falling into a `_ => Gray` arm.
+fn phase_color(phase: &Phase) -> Color {
     match phase {
-        "inject" => Color::Blue,
-        "run" => Color::Green,
-        "verify" => Color::Cyan,
-        "gate" => Color::Magenta,
-        "backoff" => Color::Yellow,
-        "done" => Color::Green,
-        _ => Color::Gray,
+        Phase::Inject => Color::Blue,
+        Phase::Run => Color::Green,
+        Phase::Verify => Color::Cyan,
+        Phase::Gate => Color::Magenta,
+        Phase::Backoff => Color::Yellow,
+        Phase::Done => Color::Green,
+        // `Starting` is pre-loop; `Other` is a stage from a different agg build (see Phase).
+        Phase::Starting | Phase::Other(_) => Color::Gray,
     }
 }
 
@@ -736,7 +739,7 @@ mod tests {
             up_secs: 11520,
             session: 7,
             lifetime_session: 7,
-            phase: "run".into(),
+            phase: Phase::Run,
             idle_secs: 12,
             tokens_spent: 2_100_000,
             budget_total: Some(5_000_000),

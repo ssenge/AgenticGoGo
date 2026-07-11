@@ -75,9 +75,8 @@ pub struct DashboardState {
     /// (persisted in `.agg/sessions.count`). Survives restarts so the dashboard can
     /// show "how many sessions has this project ever run", not just this invocation.
     pub lifetime_session: u32,
-    /// the outer loop's current stage: "inject" | "run" | "verify" | "gate",
-    /// plus "starting" | "backoff" | "done"
-    pub phase: String,
+    /// the outer loop's current stage.
+    pub phase: Phase,
     pub idle_secs: u64,
     pub tokens_spent: u64,
     pub budget_total: Option<u64>,
@@ -267,9 +266,122 @@ fn state_str(s: Lifecycle) -> String {
     .to_string()
 }
 
+/// The outer loop's current stage. The four deterministic stages (INJECT → RUN → VERIFY → GATE)
+/// plus the three off-cycle ones.
+///
+/// Was a bare `String` assigned from literals at ~10 sites in loop_.rs and re-matched by literal
+/// in the dashboard and status renderers — a typo at either end was a silent mis-render, and
+/// adding a stage meant remembering to touch two `match`es with `_` arms that would happily
+/// swallow it.
+///
+/// # state.json compatibility (REQUIRED, both directions)
+/// This serializes to and from exactly the lowercase strings it always did, because `state.json`
+/// is a cross-version contract: `agg dashboard` / `agg status` attach to a loop that may be
+/// running a DIFFERENT `agg` build than they are.
+///
+/// That is also why [`Phase::Other`] exists rather than a hard parse error. An older agg wrote
+/// `"phase":"judging"` — a stage this build has no variant for. Rejecting it would crash the
+/// dashboard against a running loop; mapping it to a catch-all `Unknown` would lie about what the
+/// loop is doing. `Other` keeps the text verbatim, so it round-trips and still renders.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Phase {
+    #[default]
+    Starting,
+    Inject,
+    Run,
+    Verify,
+    Gate,
+    Backoff,
+    Done,
+    /// A stage name this build doesn't know — from a state.json written by another agg version.
+    /// Held verbatim so it survives a read/write round-trip instead of being flattened.
+    Other(String),
+}
+
+impl Phase {
+    /// The wire form — the exact lowercase string that has always been in state.json.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Phase::Starting => "starting",
+            Phase::Inject => "inject",
+            Phase::Run => "run",
+            Phase::Verify => "verify",
+            Phase::Gate => "gate",
+            Phase::Backoff => "backoff",
+            Phase::Done => "done",
+            Phase::Other(s) => s,
+        }
+    }
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for Phase {
+    fn from(s: &str) -> Self {
+        match s {
+            "starting" => Phase::Starting,
+            "inject" => Phase::Inject,
+            "run" => Phase::Run,
+            "verify" => Phase::Verify,
+            "gate" => Phase::Gate,
+            "backoff" => Phase::Backoff,
+            "done" => Phase::Done,
+            other => Phase::Other(other.to_string()),
+        }
+    }
+}
+
+// Hand-written rather than `#[derive(Serialize, Deserialize)]`: a derived fieldless enum would
+// reject any unknown tag, and serde's `#[serde(other)]` escape hatch is only available on
+// internally/adjacently-tagged enums — neither applies to a plain JSON string field. So we go
+// through `String` and let `From<&str>` absorb the unknown case.
+impl serde::Serialize for Phase {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Phase {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(Phase::from(String::deserialize(d)?.as_str()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire form is a cross-version contract — it must be byte-for-byte what it always was.
+    #[test]
+    fn phase_round_trips_through_its_legacy_wire_strings() {
+        for (p, wire) in [
+            (Phase::Starting, "starting"),
+            (Phase::Inject, "inject"),
+            (Phase::Run, "run"),
+            (Phase::Verify, "verify"),
+            (Phase::Gate, "gate"),
+            (Phase::Backoff, "backoff"),
+            (Phase::Done, "done"),
+        ] {
+            assert_eq!(serde_json::to_string(&p).unwrap(), format!("\"{wire}\""));
+            assert_eq!(serde_json::from_str::<Phase>(&format!("\"{wire}\"")).unwrap(), p);
+            assert_eq!(p.to_string(), wire);
+        }
+    }
+
+    /// A stage written by a DIFFERENT agg build (an old one wrote "judging") must neither crash
+    /// the reader nor lose its name — `agg dashboard` attaches to loops it didn't launch.
+    #[test]
+    fn an_unknown_phase_survives_verbatim() {
+        let p: Phase = serde_json::from_str("\"judging\"").expect("must not reject a foreign stage");
+        assert_eq!(p, Phase::Other("judging".into()));
+        assert_eq!(p.to_string(), "judging", "it must still render its real name");
+        assert_eq!(serde_json::to_string(&p).unwrap(), "\"judging\"", "and round-trip unchanged");
+    }
 
     /// A state.json written by an OLDER `agg` (no model/halt_when/started_at/recent,
     /// goals without `weight`) must still deserialize — the new fields fall back to

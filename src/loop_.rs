@@ -29,7 +29,7 @@
 use crate::bus::{Bus, Command};
 use crate::config::AggConfig;
 use crate::engine::{CycleResult, Engine, GoalRuntime, RunState};
-use crate::state::{DashboardState, LiveState};
+use crate::state::{DashboardState, LiveState, Phase};
 use crate::summary;
 use crate::worker::{self, SessionOutcome};
 use anyhow::Result;
@@ -266,7 +266,7 @@ impl LoopState<'_> {
         // set the finished state + publish so `agg status`/the dashboard reflect the outcome
         // (previously this path broke without updating either — a never-"finished" run).
         let (gm, gt) = self.eng.tally();
-        self.dash.phase = "done".into();
+        self.dash.phase = Phase::Done;
         self.dash.finished = true;
         self.dash.finish_reason = format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)");
         self.ledger.update(self.session, self.tokens_spent, gm, gt);
@@ -280,7 +280,7 @@ impl LoopState<'_> {
     /// this used to be a `std::process::exit(0)`, which skipped every one of them.
     fn stopped_via_bus(&mut self, reason: String) -> RunOutcome {
         eprintln!("  [bus] stop → {reason}");
-        self.dash.phase = "done".into();
+        self.dash.phase = Phase::Done;
         self.dash.finished = true;
         self.dash.finish_reason = format!("stopped via bus: {reason}");
         let (gm, gt) = self.eng.tally();
@@ -299,7 +299,7 @@ impl LoopState<'_> {
     fn inject(&mut self) -> Injected {
         // Publish the stage BEFORE the drain: a `pause` blocks in here, and a paused loop that
         // still reads "verify" would be lying about where it is waiting.
-        self.dash.phase = "inject".into();
+        self.dash.phase = Phase::Inject;
         self.publish();
 
         // ── drain the bus at the session boundary; apply steering commands ──
@@ -431,7 +431,7 @@ impl LoopState<'_> {
         // idle ~0% CPU until the watchdog killed it — a pure delegate-and-wait stall
         // for zero output. The work here is single-instance + sequential and does
         // not need fan-out, so the worker does it DIRECTLY (inline) instead.
-        self.dash.phase = "run".into();
+        self.dash.phase = Phase::Run;
         self.publish();
         // memory: clear any stale scratch note for THIS session number left by a prior run, so a
         // worker note from a different run can never be folded as this session's learning.
@@ -483,7 +483,7 @@ impl LoopState<'_> {
     /// dying uncleaned — and so a killed session is never judged.
     fn finish_interrupted(&mut self) -> RunOutcome {
         eprintln!("\n⚠ interrupted (SIGINT/SIGTERM) — stopping after the current session; worker killed, base untouched.");
-        self.dash.phase = "done".into();
+        self.dash.phase = Phase::Done;
         self.dash.finished = true;
         self.dash.finish_reason = "interrupted (SIGINT/SIGTERM)".into();
         let (gm, gt) = self.eng.tally();
@@ -533,7 +533,7 @@ impl LoopState<'_> {
         if outcome.rate_limited {
             let secs = self.cfg.ratelimit_backoff_secs;
             eprintln!("  rate limit detected — backing off {secs}s");
-            self.dash.phase = "backoff".into();
+            self.dash.phase = Phase::Backoff;
             // memory: a rate-limited session is incomplete — no durable entry was written (the
             // early fold skips when rate_limited). Just clean up any scratch the worker left.
             if self.cfg.memory.enabled {
@@ -566,7 +566,7 @@ impl LoopState<'_> {
         // Snapshot goal state FIRST: if the gate rolls the merge back, we restore this so the
         // engine reflects base truth and never reports success on discarded work (W5).
         eprintln!("  running judges…");
-        self.dash.phase = "verify".into();
+        self.dash.phase = Phase::Verify;
         self.publish();
         let pre_cycle_goals = self.eng.snapshot_goal_state();
         let rs = self.run_state();
@@ -588,7 +588,7 @@ impl LoopState<'_> {
         // GATE's own publish: the summarizer below can take seconds, and every publish after this
         // point is conditional — without this the dashboard would sit on "verify" through the
         // whole gate.
-        self.dash.phase = "gate".into();
+        self.dash.phase = Phase::Gate;
         self.publish();
 
         // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
@@ -733,7 +733,7 @@ impl LoopState<'_> {
             eprintln!(
                 "\n⚠ HALT — guard condition true: {reason}\n  stopping the loop (this is a guard, not success)."
             );
-            self.dash.phase = "done".into();
+            self.dash.phase = Phase::Done;
             self.dash.finished = true;
             self.dash.finish_reason = format!("HALT: {reason}");
             let (gm, gt) = self.eng.tally();
@@ -745,7 +745,7 @@ impl LoopState<'_> {
         if res.stop {
             let (mt, tt) = self.eng.tally();
             eprintln!("\n✔ STOP condition satisfied — {mt}/{tt} goals met. Done after {} session(s).", self.session);
-            self.dash.phase = "done".into();
+            self.dash.phase = Phase::Done;
             self.dash.finished = true;
             self.dash.finish_reason = format!("{mt}/{tt} goals met after {} session(s)", self.session);
             self.ledger.update(self.session, self.tokens_spent, mt, tt);
@@ -840,7 +840,7 @@ pub fn run(
         halt_when: eng.halt_when.clone().unwrap_or_default(),
         budget_total: cfg.budget.total,
         cost_limit: cfg.cost.total,
-        phase: "starting".into(),
+        phase: Phase::Starting,
         ..Default::default()
     };
     let live = LiveState::new(dir, loop_start, dash.clone());
@@ -894,7 +894,7 @@ pub fn run(
     // Evaluate the goals ONCE up front (run the judges) — maybe we're already done,
     // or an invariant is already broken, before burning a single session.
     eprintln!("  baseline: running judges once before the first session…");
-    st.dash.phase = "verify".into();
+    st.dash.phase = Phase::Verify;
     st.publish();
     let rs = st.run_state();
     let pre = st.eng.evaluate_cycle(dir, config_base, &rs);
@@ -902,7 +902,7 @@ pub fn run(
     st.publish();
     if pre.halt {
         eprintln!("⚠ HALT at baseline — guard already true: {}", pre.halt_reason.clone().unwrap_or_default());
-        st.dash.phase = "done".into();
+        st.dash.phase = Phase::Done;
         st.dash.finished = true;
         st.dash.finish_reason = format!("HALT at baseline: {}", pre.halt_reason.clone().unwrap_or_default());
         let (gm, gt) = st.eng.tally();
@@ -913,7 +913,7 @@ pub fn run(
     }
     if pre.stop {
         eprintln!("✔ stop condition already satisfied at launch — nothing to do.");
-        st.dash.phase = "done".into();
+        st.dash.phase = Phase::Done;
         st.dash.finished = true;
         st.dash.finish_reason = "already satisfied at launch".into();
         let (gm, gt) = st.eng.tally();
