@@ -119,7 +119,7 @@ impl Project {
         // newest first
         for r in self.runs.iter().rev() {
             let dur = if r.ended_at_epoch >= r.started_at_epoch && r.ended_at_epoch > 0 {
-                fmt_dur(r.ended_at_epoch - r.started_at_epoch)
+                crate::util::fmt_dur(r.ended_at_epoch - r.started_at_epoch)
             } else {
                 "—".to_string()
             };
@@ -135,17 +135,6 @@ impl Project {
             ));
         }
         out
-    }
-}
-
-fn fmt_dur(secs: u64) -> String {
-    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    if h > 0 {
-        format!("{h}h{m:02}m")
-    } else if m > 0 {
-        format!("{m}m{s:02}s")
-    } else {
-        format!("{s}s")
     }
 }
 

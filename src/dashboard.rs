@@ -386,7 +386,7 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         phase,
         sep(),
         label("up "),
-        Span::raw(fmt_dur(s.up_secs)),
+        Span::raw(crate::util::fmt_dur(s.up_secs)),
         sep(),
         label("started "),
         Span::raw(fmt_started(s.started_at_epoch)),
@@ -407,7 +407,7 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
     if s.memory_bytes > 0 {
         line2_spans.push(sep());
         line2_spans.push(label("memory "));
-        line2_spans.push(Span::styled(human_bytes(s.memory_bytes), Style::default().fg(Color::Cyan)));
+        line2_spans.push(Span::styled(crate::util::human_bytes(s.memory_bytes), Style::default().fg(Color::Cyan)));
     }
     line2_spans.extend(vec![
         sep(),
@@ -652,19 +652,9 @@ fn measure_str(g: &GoalView) -> String {
     }
 }
 
-fn fmt_dur(secs: u64) -> String {
-    let (h, m) = (secs / 3600, (secs % 3600) / 60);
-    if h > 0 {
-        format!("{h}h{m:02}m")
-    } else {
-        format!("{m}m{:02}s", secs % 60)
-    }
-}
-
-/// Absolute local wall-clock for the loop's start, as `HH:MM:SS <zone>`. We
-/// avoid a chrono dependency: the local UTC offset comes from libc's
-/// `localtime_r` (cached once) so a user in CEST sees their wall clock, not UTC.
-/// The zone label (e.g. `UTC+2`) names what's being shown.
+/// Absolute local wall-clock for the loop's start, as `HH:MM:SS <zone>`. The local offset comes
+/// from `localtime`, so a user in CEST sees their wall clock, not UTC. The zone label
+/// (e.g. `UTC+2`) names what's being shown.
 fn fmt_started(epoch: u64) -> String {
     if epoch == 0 {
         return "—".to_string();
@@ -680,15 +670,6 @@ fn human(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1e3)
     } else {
         n.to_string()
-    }
-}
-
-/// Compact byte size for the memory indicator, e.g. "1.2 KB" / "640 B".
-fn human_bytes(n: usize) -> String {
-    if n >= 1024 {
-        format!("{:.1} KB", n as f64 / 1024.0)
-    } else {
-        format!("{n} B")
     }
 }
 
@@ -893,11 +874,11 @@ mod tests {
     }
 
     #[test]
-    fn human_and_dur() {
+    fn human_compacts_large_counts() {
         assert_eq!(human(2_100_000), "2.1M");
         assert_eq!(human(5_000), "5.0k");
         assert_eq!(human(42), "42");
-        assert_eq!(fmt_dur(11520), "3h12m");
+        // fmt_dur/human_bytes now live in util.rs and are tested there.
     }
 
     #[test]
