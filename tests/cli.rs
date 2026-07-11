@@ -87,6 +87,7 @@ fn init_then_plan_shows_scoreboard() {
     assert!(out.status.success(), "agg init failed: {}", String::from_utf8_lossy(&out.stderr));
     assert!(dir.join("agg.yaml").exists(), "init should scaffold agg.yaml");
     assert!(dir.join("goals.yaml").exists(), "init should scaffold goals.yaml");
+    assert!(dir.join("AGG_RESUME.md").exists(), "init should scaffold the resume prompt");
 
     let out = agg(dir, &path).arg("plan").output().unwrap();
     assert!(out.status.success(), "agg plan failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -96,6 +97,66 @@ fn init_then_plan_shows_scoreboard() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(combined.contains("Goals"), "plan output should show a scoreboard, got:\n{combined}");
+    // `plan` RE-RUNS the judges rather than reading a snapshot — proven by its output carrying the
+    // rationale the scaffolded judge SCRIPT prints, which only exists if the script executed.
+    assert!(
+        combined.contains("replace me"),
+        "plan should re-run the judges and show their live rationale, got:\n{combined}"
+    );
+}
+
+/// `agg doctor` on a COMPLETE setup exits 0 and confirms the agent CLI is on PATH — the
+/// happy-path counterpart to `doctor_flags_a_broken_setup`. (`agg init` supplies the config, so
+/// this also proves the scaffold it writes is one doctor actually accepts.)
+#[test]
+fn doctor_passes_a_good_setup() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    let init = agg(dir, &path).arg("init").output().unwrap();
+    assert!(init.status.success(), "init failed: {}", String::from_utf8_lossy(&init.stderr));
+
+    let out = agg(dir, &path).arg("doctor").output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_exit(&out, 0, &combined);
+    assert!(combined.contains("claude"), "doctor should report the agent CLI on PATH:\n{combined}");
+}
+
+/// Goals never met + the session cap reached → exit 4, with a banner naming the cap. The exit
+/// code alone isn't enough: 4 must be distinguishable from a HALT (3) by what it PRINTS too.
+#[test]
+fn max_sessions_cap_exits_4_and_says_so() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    // a judge that is NEVER satisfied → the loop can only end by hitting the cap.
+    write(dir, "judges/check.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    chmod_x(&dir.join("judges/check.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: cap\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n",
+    );
+    write(dir, "AGG_RESUME.md", "work\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_exit(&out, 4, &combined);
+    assert!(
+        combined.contains("reached max_sessions=2"),
+        "the cap must be named in the banner, not just the exit code:\n{combined}"
+    );
 }
 
 #[test]
@@ -236,6 +297,10 @@ fn run_stops_immediately_when_goal_already_met() {
         combined.contains("already satisfied at launch"),
         "an already-met goal should stop before any session, got:\n{combined}"
     );
+    // and it burned ZERO sessions — the point of the baseline check is to spend nothing.
+    let snap = fs::read_to_string(dir.join(".agg/state.json")).expect("state.json published");
+    let v: serde_json::Value = serde_json::from_str(&snap).expect("state.json parses");
+    assert_eq!(v["session"], 0, "a baseline-satisfied run must launch no worker:\n{snap}");
 }
 
 #[test]
@@ -369,12 +434,37 @@ fn status_and_history_json_are_machine_readable() {
     assert_eq!(v["cost_limit"], 5.0, "cost_limit should round-trip into the snapshot JSON");
     assert!(v["cost_spent"].as_f64().unwrap() > 0.0, "cost_spent should reflect the stub's spend");
 
+    // a finished run publishes the terminal stage + the ledger's machine-readable end reason.
+    assert_eq!(v["finished"], true, "a completed run must be marked finished");
+    assert_eq!(v["phase"], "done", "…and its final phase is `done` (the state.json wire value)");
+
     // history --json: valid JSON with a runs array containing at least our run.
     let hist = agg(dir, &path).args(["history", "--json"]).output().unwrap();
     assert!(hist.status.success(), "history --json failed: {}", String::from_utf8_lossy(&hist.stderr));
     let h: serde_json::Value = serde_json::from_slice(&hist.stdout).expect("history --json must be valid JSON");
     assert_eq!(h["name"], "jsonproj");
-    assert!(h["runs"].as_array().map(|a| !a.is_empty()).unwrap_or(false), "history should have at least one run");
+    let runs = h["runs"].as_array().expect("history should have a runs array");
+    assert!(!runs.is_empty(), "history should have at least one run");
+    assert_eq!(
+        runs.last().unwrap()["end_reason"], "goals-met",
+        "the ledger records WHY the run ended, not just that it did"
+    );
+
+    // The HUMAN renderers, not just the machine ones: `agg status` and the headless
+    // `agg dashboard --once` both read the same published snapshot and must name the project
+    // and the goal. (`dashboard --once` is the no-TTY path — the TUI itself needs a pty and is
+    // driven by scripts/tui_drive.py.)
+    for args in [vec!["status"], vec!["dashboard", "--once"]] {
+        let out = agg(dir, &path).args(&args).output().unwrap();
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_exit(&out, 0, &combined);
+        assert!(combined.contains("jsonproj"), "`agg {args:?}` should render the project:\n{combined}");
+        assert!(combined.contains("worked"), "`agg {args:?}` should render the goal:\n{combined}");
+    }
 }
 
 #[test]
@@ -726,6 +816,52 @@ fi
     // and the run must settle on the terminal phase.
     let state = fs::read_to_string(dir.join(".agg/state.json")).unwrap();
     assert!(state.contains(r#""phase":"done""#), "finished run should publish phase=done:\n{state}");
+}
+
+/// The mirror image: a run whose goal is ALREADY met at launch does the baseline VERIFY and then
+/// stops — it must never enter INJECT/RUN/GATE. The stage trace is the proof that no worker was
+/// launched (an exit code alone can't distinguish "stopped at baseline" from "ran and succeeded").
+#[test]
+fn a_baseline_satisfied_run_enters_no_stage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let path = record_phase_stub(dir);
+
+    write(dir, "did_work", ""); // pre-satisfy the goal
+    write(
+        dir,
+        "judges/check.sh",
+        "#!/bin/sh\nsh bin/rec VERIFY\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n",
+    );
+    chmod_x(&dir.join("judges/check.sh"));
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: baseline\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n\
+         hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
+    );
+    write(dir, "AGG_RESUME.md", "noop\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_exit(&out, 0, &combined);
+
+    let trace = fs::read_to_string(dir.join("trace.txt")).expect("the baseline judge should have run");
+    let seq: Vec<&str> = trace.lines().collect();
+    assert_eq!(
+        seq,
+        ["VERIFY=verify"],
+        "a baseline-satisfied run must judge once and stop — no INJECT, no RUN, no GATE:\n{trace}\n{combined}"
+    );
 }
 
 /// An interrupted session is never judged and never logs a session-exit line: the SIGINT check
