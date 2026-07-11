@@ -64,6 +64,46 @@ impl RunOutcome {
     }
 }
 
+/// Something the loop DID, at the moment it did it.
+///
+/// # seam
+/// There is exactly ONE sink today: `state.json`. Emitting an event does precisely what the loop
+/// already did at each of these points — set the stage and `publish()` — so this is a seam, not a
+/// feature, and it costs nothing at runtime.
+///
+/// ROADMAP #13 (notifications) adds its webhook / desktop sinks INSIDE [`LoopState::emit`], and
+/// the worker-initiated BLOCKED/DECIDE escalation arrives as a `Blocked { question }` variant.
+/// Neither touches the loop body. **Do not build any sink beyond state.json until #13.**
+enum LifecycleEvent {
+    /// entering INJECT — the session boundary: drain the bus, compose the next prompt.
+    Inject,
+    /// entering RUN — a worker session begins.
+    Run,
+    /// entering VERIFY — the judges are running.
+    Verify,
+    /// entering GATE — the merge / rollback decision.
+    Gate,
+    /// rate-limited: sleeping before the session is retried.
+    Backoff,
+    /// the run ENDED, for any reason. `reason` is the human-facing finish banner;
+    /// `ledger_tag` is the machine-readable code the run ledger records.
+    Finished { reason: String, ledger_tag: String },
+}
+
+impl LifecycleEvent {
+    /// The stage this event puts the loop in — the single source of truth for `dash.phase`.
+    fn phase(&self) -> Phase {
+        match self {
+            LifecycleEvent::Inject => Phase::Inject,
+            LifecycleEvent::Run => Phase::Run,
+            LifecycleEvent::Verify => Phase::Verify,
+            LifecycleEvent::Gate => Phase::Gate,
+            LifecycleEvent::Backoff => Phase::Backoff,
+            LifecycleEvent::Finished { .. } => Phase::Done,
+        }
+    }
+}
+
 /// What this session is being ASKED to do — the axis the worker's prompt varies on.
 ///
 /// # seam
@@ -230,6 +270,27 @@ impl LoopState<'_> {
     ///
     /// What it publishes depends on WHERE it is called: it reads `tokens_spent`/`cost_spent`/`eng`
     /// live. Moving a `publish()` across a mutation changes what lands in `state.json`.
+    /// Announce a [`LifecycleEvent`]: set the stage it implies, do its bookkeeping, and publish.
+    ///
+    /// TODAY the only sink is `state.json` — this does exactly what the five terminal sites and
+    /// four stage boundaries each used to do by hand. See [`LifecycleEvent`] for what plugs in
+    /// here later (#13's notification sinks; the BLOCKED escalation). Do NOT add a sink now.
+    fn emit(&mut self, event: LifecycleEvent) {
+        self.dash.phase = event.phase();
+        // A terminal event also closes the run out. This block was copy-pasted at all FIVE exit
+        // paths (max-sessions, bus stop, interrupt, halt, goals-met) — each one had to remember
+        // finished + finish_reason + tally + ledger.update + ledger.finish, in that order, or the
+        // run would end without ever being marked finished.
+        if let LifecycleEvent::Finished { reason, ledger_tag } = &event {
+            self.dash.finished = true;
+            self.dash.finish_reason = reason.clone();
+            let (gm, gt) = self.eng.tally();
+            self.ledger.update(self.session, self.tokens_spent, gm, gt);
+            self.ledger.finish(now_epoch(), ledger_tag);
+        }
+        self.publish();
+    }
+
     fn publish(&mut self) {
         self.dash.up_secs = self.loop_start.elapsed().as_secs();
         self.dash.tokens_spent = self.tokens_spent;
@@ -281,12 +342,10 @@ impl LoopState<'_> {
         // set the finished state + publish so `agg status`/the dashboard reflect the outcome
         // (previously this path broke without updating either — a never-"finished" run).
         let (gm, gt) = self.eng.tally();
-        self.dash.phase = Phase::Done;
-        self.dash.finished = true;
-        self.dash.finish_reason = format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)");
-        self.ledger.update(self.session, self.tokens_spent, gm, gt);
-        self.ledger.finish(now_epoch(), "max-sessions");
-        self.publish();
+        self.emit(LifecycleEvent::Finished {
+            reason: format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)"),
+            ledger_tag: "max-sessions".into(),
+        });
         Some(RunOutcome::MaxSessions)
     }
 
@@ -295,13 +354,10 @@ impl LoopState<'_> {
     /// this used to be a `std::process::exit(0)`, which skipped every one of them.
     fn stopped_via_bus(&mut self, reason: String) -> RunOutcome {
         eprintln!("  [bus] stop → {reason}");
-        self.dash.phase = Phase::Done;
-        self.dash.finished = true;
-        self.dash.finish_reason = format!("stopped via bus: {reason}");
-        let (gm, gt) = self.eng.tally();
-        self.ledger.update(self.session, self.tokens_spent, gm, gt);
-        self.ledger.finish(now_epoch(), "stopped");
-        self.publish();
+        self.emit(LifecycleEvent::Finished {
+            reason: format!("stopped via bus: {reason}"),
+            ledger_tag: "stopped".into(),
+        });
         RunOutcome::Stopped
     }
 
@@ -314,8 +370,7 @@ impl LoopState<'_> {
     fn inject(&mut self) -> Injected {
         // Publish the stage BEFORE the drain: a `pause` blocks in here, and a paused loop that
         // still reads "verify" would be lying about where it is waiting.
-        self.dash.phase = Phase::Inject;
-        self.publish();
+        self.emit(LifecycleEvent::Inject);
 
         // ── drain the bus at the session boundary; apply steering commands ──
         // `drain()` hands back an owned Vec, so the `&self.bus` borrow ends here and the arms
@@ -404,8 +459,7 @@ impl LoopState<'_> {
         }
 
         let effective_prompt = self.compose_prompt(Role::Continue);
-        self.dash.phase = Phase::Run;
-        self.publish();
+        self.emit(LifecycleEvent::Run);
         // memory: clear any stale scratch note for THIS session number left by a prior run, so a
         // worker note from a different run can never be folded as this session's learning.
         if self.cfg.memory.enabled {
@@ -514,13 +568,10 @@ impl LoopState<'_> {
     /// dying uncleaned — and so a killed session is never judged.
     fn finish_interrupted(&mut self) -> RunOutcome {
         eprintln!("\n⚠ interrupted (SIGINT/SIGTERM) — stopping after the current session; worker killed, base untouched.");
-        self.dash.phase = Phase::Done;
-        self.dash.finished = true;
-        self.dash.finish_reason = "interrupted (SIGINT/SIGTERM)".into();
-        let (gm, gt) = self.eng.tally();
-        self.ledger.update(self.session, self.tokens_spent, gm, gt);
-        self.ledger.finish(now_epoch(), "interrupted");
-        self.publish();
+        self.emit(LifecycleEvent::Finished {
+            reason: "interrupted (SIGINT/SIGTERM)".into(),
+            ledger_tag: "interrupted".into(),
+        });
         RunOutcome::Stopped
     }
 
@@ -564,13 +615,14 @@ impl LoopState<'_> {
         if outcome.rate_limited {
             let secs = self.cfg.ratelimit_backoff_secs;
             eprintln!("  rate limit detected — backing off {secs}s");
-            self.dash.phase = Phase::Backoff;
             // memory: a rate-limited session is incomplete — no durable entry was written (the
             // early fold skips when rate_limited). Just clean up any scratch the worker left.
             if self.cfg.memory.enabled {
                 crate::memory::clear_scratch(self.dir, self.session);
             }
-            self.publish();
+            // emit AFTER the scratch cleanup, exactly where the publish() it replaces sat: what
+            // lands in state.json depends on WHERE it is published (see `publish`).
+            self.emit(LifecycleEvent::Backoff);
             std::thread::sleep(Duration::from_secs(secs));
             return None; // don't judge on a rate-limited (incomplete) session
         }
@@ -597,8 +649,7 @@ impl LoopState<'_> {
         // Snapshot goal state FIRST: if the gate rolls the merge back, we restore this so the
         // engine reflects base truth and never reports success on discarded work (W5).
         eprintln!("  running judges…");
-        self.dash.phase = Phase::Verify;
-        self.publish();
+        self.emit(LifecycleEvent::Verify);
         let pre_cycle_goals = self.eng.snapshot_goal_state();
         let rs = self.run_state();
         let res = self.eng.evaluate_cycle(self.dir, self.config_base, &rs);
@@ -619,8 +670,7 @@ impl LoopState<'_> {
         // GATE's own publish: the summarizer below can take seconds, and every publish after this
         // point is conditional — without this the dashboard would sit on "verify" through the
         // whole gate.
-        self.dash.phase = Phase::Gate;
-        self.publish();
+        self.emit(LifecycleEvent::Gate);
 
         // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
         // A goal REGRESSED this cycle iff a delta went from a met state to a not-met state AND the
@@ -764,24 +814,19 @@ impl LoopState<'_> {
             eprintln!(
                 "\n⚠ HALT — guard condition true: {reason}\n  stopping the loop (this is a guard, not success)."
             );
-            self.dash.phase = Phase::Done;
-            self.dash.finished = true;
-            self.dash.finish_reason = format!("HALT: {reason}");
-            let (gm, gt) = self.eng.tally();
-            self.ledger.update(self.session, self.tokens_spent, gm, gt);
-            self.ledger.finish(now_epoch(), &format!("halt:{reason}"));
-            self.publish();
+            self.emit(LifecycleEvent::Finished {
+                reason: format!("HALT: {reason}"),
+                ledger_tag: format!("halt:{reason}"),
+            });
             return GateDecision::Stop(RunOutcome::Halt);
         }
         if res.stop {
             let (mt, tt) = self.eng.tally();
             eprintln!("\n✔ STOP condition satisfied — {mt}/{tt} goals met. Done after {} session(s).", self.session);
-            self.dash.phase = Phase::Done;
-            self.dash.finished = true;
-            self.dash.finish_reason = format!("{mt}/{tt} goals met after {} session(s)", self.session);
-            self.ledger.update(self.session, self.tokens_spent, mt, tt);
-            self.ledger.finish(now_epoch(), "goals-met");
-            self.publish();
+            self.emit(LifecycleEvent::Finished {
+                reason: format!("{mt}/{tt} goals met after {} session(s)", self.session),
+                ledger_tag: "goals-met".into(),
+            });
             return GateDecision::Stop(RunOutcome::GoalsMet);
         }
         GateDecision::Loop
