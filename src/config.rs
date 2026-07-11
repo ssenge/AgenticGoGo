@@ -247,7 +247,7 @@ pub struct GoalsConfig {
 
 // ---- defaults ----
 fn default_model() -> String {
-    "claude-opus-4-8[1m]".into()
+    crate::backend::DEFAULT_MODEL.into()
 }
 fn default_effort() -> String {
     "max".into()
@@ -277,7 +277,7 @@ fn default_true() -> bool {
     true
 }
 fn default_summary_model() -> String {
-    "haiku".into()
+    crate::backend::DEFAULT_SUMMARY_MODEL.into()
 }
 fn default_summary_interval() -> u64 {
     300

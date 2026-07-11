@@ -1,13 +1,10 @@
 //! Judge execution. A judge yields a [`Verdict`].
 //!
 //! - `script` judge: run a command, parse its stdout as verdict JSON.
-//! - `llm` judge: build a prompt from a rubric + inputs, call
-//!   `claude -p --model <m> --output-format json --strict-mcp-config --setting-sources user`,
-//!   extract the verdict JSON from the model's result. `--strict-mcp-config` loads no MCP
-//!   servers; `--setting-sources user` loads ONLY the operator's own settings, never the
-//!   worker-mutated repo's `.claude/settings.json` or hooks → lean, deterministic, and not
-//!   steerable by the worker. Neither uses `--bare` (which breaks keychain auth — see the
-//!   note in run_llm).
+//! - `llm` judge: build a prompt from a rubric + inputs, hand it to [`crate::backend::one_shot`],
+//!   and extract the verdict JSON from the model's answer. The invocation itself — including the
+//!   isolation flags the trust boundary below depends on — lives in `backend.rs`, which is the
+//!   one module that knows what agent we drive.
 //!
 //! ## Trust boundary (the moat)
 //! The worker is untrusted; the judge must not be steerable by anything the worker writes.
@@ -16,8 +13,10 @@
 //!      worker-authored. They go inside a per-invocation random NONCE fence, and any literal
 //!      copy of the fence tokens inside the content is neutralized, so a worker cannot forge
 //!      an "end of untrusted data" marker to smuggle instructions into the judge prompt.
-//!   2. **Config injection via the repo.** `--setting-sources user` stops the judge's own
-//!      `claude` process from loading the worker's project settings/hooks.
+//!   2. **Config injection via the repo.** The one-shot call loads ONLY the operator's own
+//!      settings, never the worker-mutated repo's project settings/hooks, so the worker cannot
+//!      reconfigure its own judge. Enforced in `backend::one_shot` — see its trust-boundary
+//!      note for the exact flags and for why `--bare` is NOT among them.
 //!
 //! RESIDUAL (documented, not yet closed): CLAUDE.md *auto-discovery* in `current_dir(cwd)`
 //! is not disabled by any auth-preserving flag today; fully closing it needs the judge to run
@@ -26,11 +25,12 @@
 //! Both kinds are crash-safe: any failure (spawn, timeout, malformed output)
 //! yields `Verdict::failed(...)` rather than panicking.
 
+use crate::backend;
 use crate::model::{JudgeSpec, Verdict};
 use crate::proc::{self, Captured};
 use crate::util::last_json_object;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Run the judge for a goal and return its verdict.
 ///
@@ -102,48 +102,17 @@ fn run_llm(
         context = context,
     );
 
-    // 4) call claude headless with json output.
-    //
-    // NOTE (verified the hard way): we deliberately do NOT pass `--bare`. `--bare` skips
-    // keychain reads, so the judge call fails with "Not logged in" — it cannot
-    // authenticate. We instead keep a normal headless call (which authenticates) and isolate
-    // it two ways: --strict-mcp-config (no MCP servers) and --setting-sources user (load ONLY
-    // the operator's own settings — never the worker-mutated repo's .claude/settings.json or
-    // hooks). Together these stop the worker from steering the judge via repo config, while
-    // preserving auth. (CLAUDE.md auto-discovery in cwd is the documented residual — see the
-    // module trust-boundary note.)
-    let mut command = Command::new("claude");
-    command
-        .arg("-p")
-        .arg(&prompt)
-        .arg("--model")
-        .arg(model)
-        .arg("--output-format")
-        .arg("json")
-        .arg("--strict-mcp-config") // judge runs with no MCP servers
-        .arg("--setting-sources")
-        .arg("user") // ignore the worker-mutated repo's project/local settings + hooks
-        .stdin(Stdio::null())
-        .current_dir(cwd);
-
-    let out = match proc::run_with_timeout(command, timeout_secs) {
+    // 4) one-shot the agent. The invocation — and the isolation flags that keep a worker from
+    // steering its own judge via repo config — live in `backend::one_shot`; `cwd` is passed
+    // because the judge must see the project it is judging. The JSON envelope is unwrapped
+    // there too, so `body` is already the model's text.
+    let out = match backend::one_shot(&prompt, model, timeout_secs, Some(cwd)) {
         Ok(o) => o,
         Err(e) => return Verdict::failed(format!("llm judge: {e}")),
     };
 
-    // 5) claude --output-format json wraps the answer; the model's text is in `.result`.
-    let body = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-        Ok(v) => v
-            .get("result")
-            .and_then(|r| r.as_str())
-            .map(str::to_string)
-            // fall back to raw stdout if the envelope shape is unexpected
-            .unwrap_or_else(|| String::from_utf8_lossy(&out.stdout).into_owned()),
-        Err(_) => String::from_utf8_lossy(&out.stdout).into_owned(),
-    };
-
-    // parse the extracted model text as the verdict, carrying through exit status/stderr
-    parse_judge_output(&Captured { stdout: body.into_bytes(), stderr: out.stderr, success: out.success })
+    // 5) parse the model text as the verdict, carrying through exit status/stderr
+    parse_judge_output(&Captured { stdout: out.body.into_bytes(), stderr: out.stderr, success: out.success })
 }
 
 /// Resolve the `inputs` list into a single text context block. Each input is

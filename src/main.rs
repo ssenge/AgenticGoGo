@@ -252,7 +252,9 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Run { max_sessions, detach } => {
             no_config_hint(&p.config)?;
-            preflight_claude()?;
+            // agent CLI on PATH BEFORE launching the loop, so a missing binary fails with a
+            // clear message up front rather than a buried mid-run "FAILED to spawn".
+            agg::backend::preflight()?;
             if *detach {
                 // Validate the config NOW (in the foreground) so a typo fails loudly here
                 // rather than silently in a detached child the user can't see. Then spawn
@@ -414,23 +416,3 @@ fn no_config_hint(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Verify the Claude Code CLI is on PATH BEFORE launching the loop, so a missing
-/// `claude` fails with a clear message up front rather than a buried mid-run
-/// "FAILED to spawn claude worker".
-fn preflight_claude() -> Result<()> {
-    let ok = std::process::Command::new("claude")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        anyhow::bail!(
-            "the Claude Code CLI (`claude`) was not found on your PATH.\n  \
-             AgenticGoGo drives it to run the inner workers. Install it from\n  \
-             https://claude.com/claude-code and make sure `claude --version` works, then retry."
-        );
-    }
-    Ok(())
-}

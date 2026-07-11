@@ -24,10 +24,16 @@ pub fn run(dir: &Path, force: bool, folder: bool) -> Result<()> {
         (dir.to_path_buf(), "./judges/tests.sh")
     };
     let goals_yaml = GOALS_YAML.replace("./judges/tests.sh", judge_cmd);
+    // the scaffolded model names come from the backend, so a model bump is a one-line change
+    // there instead of a hunt through a YAML template (which `format!` can't interpolate
+    // without escaping every `{` in its flow maps).
+    let agg_yaml = AGG_YAML
+        .replace("{{MODEL}}", crate::backend::DEFAULT_MODEL)
+        .replace("{{SUMMARY_MODEL}}", crate::backend::DEFAULT_SUMMARY_MODEL);
 
     let files: [(&str, &str, bool); 4] = [
         ("goals.yaml", goals_yaml.as_str(), false),
-        ("agg.yaml", AGG_YAML, false),
+        ("agg.yaml", agg_yaml.as_str(), false),
         ("AGG_RESUME.md", RESUME_MD, false),
         ("judges/tests.sh", JUDGE_SH, true), // true = chmod +x
     ];
@@ -137,7 +143,7 @@ halt_when: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterat
 
 const AGG_YAML: &str = r#"# agg.yaml — harness configuration.
 project: my-project
-model: "claude-opus-4-8[1m]"     # the inner worker model
+model: "{{MODEL}}"     # the inner worker model
 resume_prompt: "AGG_RESUME.md"   # the standing instructions fed to EVERY worker session
 
 heartbeat_secs: 30                # a status line at least this often
@@ -146,7 +152,7 @@ ratelimit_backoff_secs: 1800      # back off this long on a real usage limit
 
 budget: { total: null }           # output-token ceiling (null = unlimited) → over_budget
 cost:   { total: null }           # dollar ceiling, e.g. 5.0 (null = unlimited) → over_cost
-summary: { enabled: true, model: haiku, min_interval_secs: 300 }  # progress summaries
+summary: { enabled: true, model: {{SUMMARY_MODEL}}, min_interval_secs: 300 }  # progress summaries
 memory:  { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md; inject newest 8 KB/prompt
 resume_sessions: false            # fresh context per session (recommended)
 

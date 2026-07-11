@@ -5,6 +5,7 @@
 //! over these modules. The pure cores — `model`, `engine`, `stop`, `config`, `util`, `paths`,
 //! `git`'s decision logic — are the most valuable to test directly.
 
+pub mod backend;
 pub mod bus;
 pub mod config;
 pub mod dashboard;

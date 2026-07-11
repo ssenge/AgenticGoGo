@@ -17,15 +17,13 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path, goals: &Path) -> Resul
     }
     let mut fail = 0;
 
-    // 1) claude CLI present
-    let claude_ok = std::process::Command::new("claude")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    check(claude_ok, "Claude Code CLI (`claude`) on PATH", "install from https://claude.com/claude-code", &mut fail);
+    // 1) agent CLI present (same probe `agg run`'s preflight uses — see backend.rs)
+    check(
+        crate::backend::is_installed(),
+        "Claude Code CLI (`claude`) on PATH",
+        "install from https://claude.com/claude-code",
+        &mut fail,
+    );
 
     // 2) agg.yaml present + parses
     let agg_cfg = match (config.exists(), AggConfig::load(config)) {

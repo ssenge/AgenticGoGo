@@ -3,15 +3,14 @@
 //!   - **cumulative**: the story so far (fed the previous cumulative summary), and
 //!   - **windowed**: just this session/window, independent.
 //!
-//! One cheap Claude call per cycle returns BOTH (as JSON) to minimize cost. The call is
-//! auth-safe (NOT `--bare`, which breaks login; `--strict-mcp-config` to stay lean) — the same
-//! lesson as the LLM judge.
+//! One cheap agent call per cycle returns BOTH (as JSON) to minimize cost. It goes through
+//! [`crate::backend::one_shot`] — the same call the LLM judge makes; this module used to carry a
+//! near-verbatim clone of it, envelope-unwrap included.
 
+use crate::backend;
 use crate::engine::GoalDelta;
-use crate::proc;
 use crate::util::last_json_object;
 use serde::Deserialize;
-use std::process::{Command, Stdio};
 
 /// The two summary lines produced per cycle.
 #[derive(Debug, Clone, Default)]
@@ -75,28 +74,13 @@ pub fn summarize(
          {{\"cumulative\": \"<one sentence>\", \"windowed\": \"<one sentence>\"}}"
     );
 
-    let mut command = Command::new("claude");
-    command
-        .arg("-p")
-        .arg(&prompt)
-        .arg("--model")
-        .arg(model)
-        .arg("--output-format")
-        .arg("json")
-        .arg("--strict-mcp-config")
-        .arg("--setting-sources") // don't load the worker-mutated repo's project settings/hooks
-        .arg("user")
-        .stdin(Stdio::null());
+    // Same one-shot as the judge (this call used to be a near-verbatim clone of it, envelope
+    // unwrap included). `cwd: None` — the summarizer only reads text it was handed, so unlike
+    // the judge it has no business looking at the project.
+    // Best-effort: any failure (spawn/timeout) → None, never breaks the loop.
+    let out = backend::one_shot(&prompt, model, timeout_secs, None).ok()?;
 
-    // best-effort: any failure (spawn/timeout) → None, never breaks the loop.
-    let out = proc::run_with_timeout(command, timeout_secs).ok()?.stdout;
-    // unwrap the claude json envelope -> the model's text
-    let body = serde_json::from_slice::<serde_json::Value>(&out)
-        .ok()
-        .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(str::to_string))
-        .unwrap_or_else(|| String::from_utf8_lossy(&out).into_owned());
-
-    let raw = parse_summaries(&body)?;
+    let raw = parse_summaries(&out.body)?;
     Some(Summaries { cumulative: raw.cumulative, windowed: raw.windowed })
 }
 

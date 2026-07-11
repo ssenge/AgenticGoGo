@@ -1,4 +1,5 @@
-//! Inner worker session: spawn `claude -p`, stream + format its events, run a
+//! Inner worker session: spawn the agent worker (the invocation itself is built by
+//! [`crate::backend`]), stream + format its events, run a
 //! heartbeat and a watchdog, detect rate-limits. Owning the child PID and the threads
 //! directly keeps the watchdog simple. The watchdog kills by pid, so it must not fire after
 //! the main thread reaps the child (the pid could be recycled): it refuses to kill once either
@@ -7,13 +8,14 @@
 //! post-exit group-kill itself is safe by construction: a process *group* outlives its leader
 //! pid until its last member exits, and an empty group makes `kill(-pgid)` a harmless no-op.)
 
+use crate::backend;
 use crate::config::AggConfig;
 use crate::proc;
 use crate::state::{ActivityEvent, LiveState};
 use crate::stream::{self, ActivityTracker};
 use crate::util::{now_epoch, truncate};
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -49,30 +51,16 @@ pub fn run_session(
 ) -> SessionOutcome {
     let start = Instant::now();
 
-    let mut command = Command::new("claude");
-    command
-        .arg("--dangerously-skip-permissions")
-        .arg("--model")
-        .arg(&cfg.model)
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--verbose");
-    // Max thinking effort for the headless worker (configurable via agg.yaml
-    // `effort:`; default "max"). `ultracode` is interactive-only and not a valid
-    // `-p` flag value, so workers get the highest effort reachable from `-p` here
-    // and opt into subagent orchestration through the prompt prefix instead.
-    if !cfg.effort.is_empty() {
-        command.arg("--effort").arg(&cfg.effort);
-    }
-    if let Some(id) = resume_id {
-        command.arg("--resume").arg(id);
-    }
-    // Operator-supplied extra flags (agg.yaml `worker_args`) — e.g. --allowedTools/--add-dir to
-    // constrain the otherwise-unrestricted worker, or any claude flag agg doesn't manage. Applied
-    // after agg's own flags, before -p, so they can extend but not clobber the invocation shape.
-    for a in &cfg.worker_args {
-        command.arg(a);
-    }
+    // WHAT to run is the backend's business (binary, flags, prompt placement); HOW to supervise
+    // it is ours (process group, stream reader, heartbeat, watchdog, reaping).
+    let mut command = backend::session_command(&backend::SessionSpec {
+        prompt,
+        model: &cfg.model,
+        effort: &cfg.effort,
+        resume_id,
+        extra_args: &cfg.worker_args,
+        cwd: dir,
+    });
     // Own process group (pgid == pid) so the watchdog can SIGKILL the WHOLE tree —
     // the worker AND every tool subprocess it spawned. A bare kill(pid) leaves
     // orphan grandchildren (a runaway build/sleep) running, which is exactly the
@@ -82,18 +70,10 @@ pub fn run_session(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = match command
-        .arg("-p")
-        .arg(prompt)
-        .current_dir(dir)
-        .stdin(Stdio::null()) // </dev/null — never block on a TTY read
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("  FAILED to spawn claude worker: {e}");
+            eprintln!("  FAILED to spawn the {} worker: {e}", backend::BIN);
             return SessionOutcome {
                 exit_code: None,
                 duration_secs: 0,
