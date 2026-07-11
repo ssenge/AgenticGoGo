@@ -126,7 +126,7 @@ mod tests {
             up_secs: 3 * 3600 + 12 * 60,
             session: 7,
             lifetime_session: 11,
-            phase: "run".into(),
+            phase: crate::state::Phase::Run,
             tokens_spent: 2_100_000,
             budget_total: Some(5_000_000),
             cost_spent: 1.25,
