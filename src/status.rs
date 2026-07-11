@@ -36,7 +36,7 @@ pub fn render_json(dir: &Path) -> anyhow::Result<String> {
 /// Pure renderer over a snapshot — separated so it's unit-testable without touching disk.
 fn render_state(s: &DashboardState) -> String {
     let mut out = String::new();
-    let up = fmt_dur(s.up_secs);
+    let up = crate::util::fmt_dur(s.up_secs);
     let status = if s.finished { format!("done — {}", s.finish_reason) } else { format!("{} (live)", s.phase) };
     out.push_str(&format!(
         "{}  ·  goals {}/{}  ·  session #{} (#{} lifetime)  ·  up {up}  ·  {status}\n",
@@ -61,7 +61,7 @@ fn render_state(s: &DashboardState) -> String {
     }
     // memory line — shown only once the durable file has content, so a fresh run stays clean.
     if s.memory_bytes > 0 {
-        out.push_str(&format!("memory {} (AGG_MEMORY.md)\n", human_bytes(s.memory_bytes)));
+        out.push_str(&format!("memory {} (AGG_MEMORY.md)\n", crate::util::human_bytes(s.memory_bytes)));
     }
     out.push('\n');
     // per-goal lines
@@ -114,20 +114,6 @@ fn pct(n: u64, d: u64) -> f64 {
 
 fn pctf(n: f64, d: f64) -> f64 {
     if d == 0.0 { 0.0 } else { (n / d) * 100.0 }
-}
-
-/// Compact byte size, e.g. "1.2 KB" / "640 B". Used for the memory line.
-fn human_bytes(n: usize) -> String {
-    if n >= 1024 {
-        format!("{:.1} KB", n as f64 / 1024.0)
-    } else {
-        format!("{n} B")
-    }
-}
-
-fn fmt_dur(secs: u64) -> String {
-    let (h, m) = (secs / 3600, (secs % 3600) / 60);
-    if h > 0 { format!("{h}h{m:02}m") } else { format!("{m}m") }
 }
 
 #[cfg(test)]

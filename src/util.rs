@@ -10,6 +10,39 @@ pub fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
+/// Compact duration for the display surfaces: `3h12m` · `5m03s` · `45s`.
+///
+/// Was copy-pasted three times (dashboard, status, project) and — as copies do — had already
+/// diverged: all three agreed above an hour, but below one, status printed `5m` (and a bare
+/// `0m` for anything under a minute, which read as "no uptime" on a freshly started loop) while
+/// dashboard printed `0m45s`. This is project.rs's variant, the strict superset of the three.
+///
+/// Not `humantime::format_duration`: it renders `1h 2m` / `5m 5s`, and reshaping that into the
+/// TUI's compact form costs more code than the eight lines below.
+pub fn fmt_dur(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Compact byte size for the memory indicator: `1.2 KB` · `640 B`. Was byte-identical in
+/// dashboard.rs and status.rs.
+///
+/// Not `bytesize`: it renders binary units as `1.2 KiB` and rolls over to `MB`/`GB`, so adopting
+/// it would change what the TUI and `agg status` print today.
+pub fn human_bytes(n: usize) -> String {
+    if n >= 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
 /// Truncate `s` to at most `n` characters (not bytes), appending `…` when shortened.
 /// Char-based so it never splits a multi-byte UTF-8 sequence.
 pub fn truncate(s: &str, n: usize) -> String {
@@ -87,5 +120,19 @@ mod tests {
     #[test]
     fn last_json_object_none_when_absent() {
         assert_eq!(last_json_object("no braces here"), None);
+    }
+
+    #[test]
+    fn fmt_dur_covers_all_three_magnitudes() {
+        assert_eq!(fmt_dur(11_520), "3h12m"); // the shape all three copies agreed on
+        assert_eq!(fmt_dur(303), "5m03s"); // status used to print a lossy "5m" here
+        assert_eq!(fmt_dur(45), "45s"); // ...and a bare "0m" here, which read as no uptime
+        assert_eq!(fmt_dur(0), "0s");
+    }
+
+    #[test]
+    fn human_bytes_switches_unit_at_1k() {
+        assert_eq!(human_bytes(640), "640 B");
+        assert_eq!(human_bytes(2048), "2.0 KB");
     }
 }
