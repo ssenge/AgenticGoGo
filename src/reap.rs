@@ -8,7 +8,7 @@
 //!
 //! `run_session` already does one `kill(-pgid)` when the worker exits, which reaps children
 //! that are still alive at that instant. But a child can outlive that single signal (slow to
-//! die, or spawned right at the boundary). [`reap_pgid`] does a second, explicit sweep: it
+//! die, or spawned right at the boundary). [`reap_pgid_except`] does a second, explicit sweep: it
 //! LISTS every process currently in the group and SIGKILLs each — catching stragglers the
 //! one-shot group-kill missed. pgid is freely queryable on every OS (`ps -o pgid=` on
 //! unix; CIM on Windows), unlike a process's environment, which modern macOS blocks reading
@@ -30,20 +30,15 @@
 use crate::proc::{group_of, kill_group, kill_pid, pid_alive, pids_in_group};
 use std::collections::HashSet;
 
-/// Kill every process in process group `pgid` (other than `self_pid`). Best-effort: a process
-/// may exit between listing and killing. Returns the number of stragglers it signalled.
-/// (Retained as the no-exemption convenience + the tested entry point; the loop now always
-/// goes through [`reap_pgid_except`] with the spawn registry's protected set.)
-#[allow(dead_code)]
-pub fn reap_pgid(pgid: u32) -> usize {
-    reap_pgid_except(pgid, &HashSet::new())
-}
-
-/// Like [`reap_pgid`], but SPARE any process whose own pgid is in `protected`. This is how
-/// an `agg spawn` long task survives the worker's post-session straggler sweep: the registry
-/// records the task's pgid as protected, and the reaper skips it instead of killing legitimate
-/// background work along with real leaks. A process is spared iff ITS pgid is protected, so a
-/// detached task that escaped into its own group is matched correctly even after re-parenting.
+/// Kill every process in process group `pgid` (other than `self_pid`), SPARING any process
+/// whose own pgid is in `protected`. Best-effort: a process may exit between listing and
+/// killing. Returns the number of stragglers it signalled.
+///
+/// The `protected` set is how an `agg spawn` long task survives the worker's post-session
+/// straggler sweep: the registry records the task's pgid as protected, and the reaper skips it
+/// instead of killing legitimate background work along with real leaks. A process is spared iff
+/// ITS pgid is protected, so a detached task that escaped into its own group is matched
+/// correctly even after re-parenting. Pass an empty set to reap the whole group.
 pub fn reap_pgid_except(pgid: u32, protected: &HashSet<u32>) -> usize {
     let self_pid = std::process::id();
     // If the worker's own group is protected wholesale, nothing to do.
@@ -83,7 +78,7 @@ mod tests {
     #[test]
     fn reaping_an_empty_group_kills_nothing() {
         // a pgid no process belongs to → zero stragglers, no panic.
-        assert_eq!(reap_pgid(2_000_000_000), 0);
+        assert_eq!(reap_pgid_except(2_000_000_000, &HashSet::new()), 0);
     }
 
     #[cfg(unix)]
@@ -105,10 +100,10 @@ mod tests {
         // The worker (group leader) pid is the straggler's pgid (it inherited the group).
         let pgid = group_of(child_pid).expect("straggler has a pgid");
         assert!(pid_alive(child_pid), "straggler should be alive before reap");
-        let n = reap_pgid(pgid);
+        let n = reap_pgid_except(pgid, &HashSet::new());
         assert!(n >= 1, "should have reaped >=1 straggler in the group");
         std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(!pid_alive(child_pid), "straggler {child_pid} must be dead after reap_pgid");
+        assert!(!pid_alive(child_pid), "straggler {child_pid} must be dead after reap");
     }
 
     #[cfg(unix)]
