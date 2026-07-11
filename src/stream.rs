@@ -1,6 +1,12 @@
 //! Stream-json event formatting. Turns one raw stream-json line into a readable log
 //! line (`🔧 $ <description>`, `🔧 read <path>`, `💬 <thought>`, `✅ RESULT …`),
 //! never the raw input JSON soup.
+//!
+//! # seam
+//! This is the **event-parsing half of [`crate::backend`]** — everything here knows Claude's
+//! `stream-json` wire format, so it is backend-private in spirit even though it stays a separate
+//! module for size. When a second agent backend lands, this moves behind the `trait AgentBackend`
+//! together with backend.rs: `backend` builds the invocation, `stream` reads what comes back.
 
 use serde_json::Value;
 

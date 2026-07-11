@@ -176,7 +176,7 @@ fn default_timeout() -> u64 {
     300
 }
 fn default_model() -> String {
-    "haiku".to_string()
+    crate::backend::DEFAULT_SUMMARY_MODEL.to_string()
 }
 
 impl Goal {
