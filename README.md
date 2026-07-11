@@ -19,7 +19,10 @@ quietly stop one step short — leaving you to babysit a terminal?
 
 AgenticGoGo (`agg`) is a deterministic outer **[Ralph loop](https://ghuntley.com/ralph/)** that
 drives a stochastic inner agent — relaunching a **fresh** session, verifying its work against gates
-*it can't fake* (the **judges**), and repeating until your goals are actually met. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done.
+*it can't fake* (the **judges**), and repeating until your goals are actually met. *(Same generate → verify → keep idea as evolutionary
+code search — DeepMind's [AlphaCode](https://arxiv.org/abs/2203.07814) and the open-source
+[CodeEvolve](https://arxiv.org/abs/2510.14150) — where an automatic evaluator, not the model, is the
+gate.)* The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done.
 
 A **judge** is a small, incorruptible check that decides whether one goal is met — usually a script
 inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading against a rubric. You
@@ -43,6 +46,15 @@ say exactly what "done" means.
 Three of the four stages are deterministic code; only the `RUN` stage is a (stochastic) coding agent.
 The loop continues until all goals are met — potentially for hours, days, weeks (watch your token
 consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate that decides it's done.
+
+<p align="center">
+  <img src="assets/arch.png" alt="AgenticGoGo architecture: the agg outer loop drives one fresh claude -p worker and writes plain state files under .agg/, which the TUI, the web UI, and a Claude supervisor (reachable from your phone) all read" width="760">
+</p>
+
+The whole system is **the loop plus plain files**: `agg` drives one fresh worker and writes state to
+`.agg/`; the TUI, the web UI, and a `/agg:supervise` Claude session you can reach from your phone all
+just *read* those files (and the supervisor can *steer* via the bus). More on that in
+[State and memory](#state-and-memory) and [Interfaces](#interfaces).
 
 ## Quick start
 
