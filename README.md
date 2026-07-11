@@ -228,6 +228,50 @@ halt_when: any_regressed(invariants) or over_budget   # optional guard — see d
 The rule that makes it a moat: **`agg` runs the judge, never the agent.** So make the judge check
 the artifact — tests, a compiler, a proof checker — not the agent's claim about it.
 
+## State & memory — plain files
+
+`agg` keeps **no state in a database or a long-running daemon**. Everything is a plain file under
+`<project>/.agg/` (gitignored), plus git itself. The loop is the single *writer*; every *reader* (the
+TUI, the web UI, `/agg:supervise`, `agg status`) reads the same files — so you can attach any number
+of views to a running loop without coupling any of them to it.
+
+- **`.agg/state.json`** — the live scoreboard snapshot (goals, tokens, phase, activity tail), written
+  atomically after each change. This is what the TUI, `agg serve`, and the supervisor read.
+- **`.agg/run.pid`** · **`.agg/run.log`** — the loop's liveness (double-run guard, `agg stop` target)
+  and its log when detached.
+- **`.agg/bus/`** — the steering queue: `agg send …` writes a command here; the loop drains it at the
+  next `INJECT`.
+- **`.agg/sessions.count`** + run history (`agg history`) — counters that persist across every run.
+- **`AGG_MEMORY.md`** (project root, committable) + **`.agg/memory/`** — durable cross-session memory
+  the loop injects into every prompt.
+- **git commits** — the actual *work* state. Each session commits; the next **fresh** session resumes
+  from the filesystem + `AGG_MEMORY.md`, not from a held-open context. Git *is* the memory between
+  sessions.
+
+Because the log on stdout is the source of truth and `state.json` is just a view of it, a run is
+**crash-safe and observable**: `tail`/`grep`/`cat` the files, kill and restart, inspect mid-run —
+nothing important is hidden in process memory.
+
+## Your Claude Code setup carries in
+
+`agg` bundles no tools of its own. `RUN` is an ordinary `claude -p` call, so it **inherits your Claude
+Code environment** — MCP servers, plugins, settings, and hooks all keep working inside the worker, and
+`/agg:new` will even detect your active MCP servers / skills / hooks and offer to wire them into the
+loop (via `hooks:` + `prompt_includes:`). Nothing is hardcoded; whatever your Claude Code has, the
+worker gets.
+
+Headless `-p` does impose real limits — worth knowing up front:
+
+- **Slash-command skills aren't invocable** in `-p`. Inline the content you need into `AGG_RESUME.md`
+  rather than calling `/some-skill`.
+- **No mid-session interruption** (a platform limit), so steering is session-granular — queued on the
+  bus, applied at the next `INJECT`.
+- **The worker runs with full tool access** (`--dangerously-skip-permissions`), because a `-p` agent
+  can't answer permission prompts. Narrow it with `worker_args` (e.g. `--allowedTools Edit,Bash`).
+- **MCP servers that need interactive auth** (an OAuth login, say) may be unavailable in a headless run.
+- The **judge & summarizer** sessions deliberately load *only your settings* — `--strict-mcp-config`
+  (no MCP) and no repo `.claude/` — so the agent can't steer the process that grades it.
+
 ## Interfaces
 
 Two ways to watch a run — same live state, two views — plus a chat supervisor:
