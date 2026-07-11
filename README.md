@@ -19,7 +19,7 @@ quietly stop one step short — leaving you to babysit a terminal?
 
 AgenticGoGo (`agg`) is a deterministic outer **[Ralph loop](https://ghuntley.com/ralph/)** that
 drives a stochastic inner agent — relaunching a **fresh** session, verifying its work against gates
-*it can't fake* using a concept called **judges**, and repeating until your goals are actually met -- according to the **judges**. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done.
+*it can't fake* (the **judges**), and repeating until your goals are actually met. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done.
 
 A **judge** is a small, incorruptible check that decides whether one goal is met — usually a script
 inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading against a rubric. You
@@ -27,7 +27,7 @@ compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two 
 say exactly what "done" means.
 
 > **So far, Claude Code only.** `agg` drives `claude -p` as its inner agent. No other coding agent is
-> supported today. This will change in future.
+> supported today. This will change in the future.
 
 <p align="center">
   <img src="assets/loop.png" alt="The four stages of the agg loop — INJECT, RUN, VERIFY, GATE — arranged in a circle" width="620">
@@ -76,7 +76,7 @@ Full options (prebuilt binaries, from source, version pinning) →
 **1 — Prerequisite: Claude Code.** `agg` drives Claude Code headlessly, so make sure it's installed
 and authenticated — `claude -p "hello"` should print a reply. A subscription or an API key both work.
 
-**2 — Let Claude set up the loop.** Type `/agg:new` in Claude Corde to turns *your*
+**2 — Let Claude set up the loop.** Type `/agg:new` in Claude Code to turn *your*
 definition of "done" into config. Point it at a spec you already have (a PRD, ROADMAP, README,
 `.planning/`), or just say what you want in the chat or directly as a parameter to the skill — e.g.
 
@@ -105,7 +105,7 @@ resume_prompt: AGG_RESUME.md
 ```
 
 `AGG_RESUME.md` is the standing instruction `INJECT`ed into *every* session — "fix `calc.py` so
-`python3 calc.py` prints 2 and the tests pass". In case of multiple iterations (i.e. multiple subsequent **`RUN`** stages), this file gets adapted to track the progress so far accordingly (see [State & memory](#state-memory)).
+`python3 calc.py` prints 2 and the tests pass". In case of multiple iterations (i.e. multiple subsequent **`RUN`** stages), this file gets adapted to track the progress so far accordingly (see [State and memory](#state-and-memory)).
 Also note the `stop_when: outputs_two and tests_pass` in the `goals.yaml` file, it composes two judges using an `and` conjunction, the next point explains how to create such judges.
 
 **3 — Have Claude write the judge.** A judge is any command that prints a verdict as JSON (see
@@ -227,9 +227,9 @@ halt_when: any_regressed(invariants) or over_budget   # optional guard — see d
 ```
 
 The rule that makes it a moat: **`agg` runs the judges, never the agent.** So make the judges check
-the resulting artifacts — tests, a compiler, a proof checker — not the agent's claim about it (which often enough hallucinates that a job is done).
+the resulting artifacts — tests, a compiler, a proof checker — not the agent's claim about it — the agent will often enough hallucinate that a job is done.
 
-## State & memory
+## State and memory
 
 `agg` keeps **no state in a database or a long-running daemon**. Everything is a plain file under
 `<project>/.agg/` (gitignored), plus git itself. The loop is the single *writer*; every *reader* (the
