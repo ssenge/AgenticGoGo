@@ -64,6 +64,21 @@ impl RunOutcome {
     }
 }
 
+/// What this session is being ASKED to do — the axis the worker's prompt varies on.
+///
+/// # seam
+/// One variant, deliberately. ROADMAP #14 (SEQUENCES session roles) introduces `Reconsider` — a
+/// session that re-examines the plan rather than pushing it forward — and it lands as a new
+/// variant plus a new arm in [`LoopState::compose_prompt`], not as surgery on the loop. Naming the
+/// axis before anything varies on it is the whole point: today's single variant costs one `match`
+/// arm and buys the exhaustiveness that makes adding the next role a compile error rather than a
+/// hunt through 140 lines of inline string building.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// Keep going: carry the standing instructions forward. The only role the loop uses today.
+    Continue,
+}
+
 /// What INJECT produced: the prompt for this session, or a graceful end (the operator stopped the
 /// run over the bus — possibly while it was paused — before any worker was launched).
 enum Injected {
@@ -388,11 +403,31 @@ impl LoopState<'_> {
             eprintln!("  [spawn] {change}");
         }
 
-        // build the effective prompt: [operator instruction] + [spawn status] +
-        // [prompt_includes] + resume. The operator instruction (if any) is consumed once;
-        // the spawn status tells this session about background tasks left running by a
-        // prior session (so it polls instead of relaunching); the prompt_includes prefix
-        // is the user's reusable tooling/guidance fragments.
+        let effective_prompt = self.compose_prompt(Role::Continue);
+        self.dash.phase = Phase::Run;
+        self.publish();
+        // memory: clear any stale scratch note for THIS session number left by a prior run, so a
+        // worker note from a different run can never be folded as this session's learning.
+        if self.cfg.memory.enabled {
+            crate::memory::clear_scratch(self.dir, self.session);
+        }
+        Injected::Prompt(effective_prompt)
+    }
+
+    /// Assemble the worker's prompt for this session's [`Role`], highest priority FIRST:
+    ///
+    /// ```text
+    /// [operator instruction]   consumed once — overrides the default plan
+    /// [spawn status]           background tasks a prior session left running (poll, don't relaunch)
+    /// [prompt_includes]        the user's reusable tooling/guidance fragments
+    /// resume prompt            the standing instructions
+    /// [memory]                 bounded durable slice + LAST SESSION block — lowest priority tail
+    /// ```
+    ///
+    /// The order is the contract: memory is APPENDED below everything else precisely so it can
+    /// never outrank an operator instruction, and the instruction is consumed (`take`) so it
+    /// applies to exactly one session.
+    fn compose_prompt(&mut self, role: Role) -> String {
         let base = if self.prompt_prefix.is_empty() {
             self.resume_prompt.clone()
         } else {
@@ -403,10 +438,8 @@ impl LoopState<'_> {
             Some(status) => format!("{status}\n{base}"),
             None => base,
         };
-        // institutional memory (#3): APPEND the bounded durable slice + LAST SESSION block as the
-        // LOWEST-priority tail of `base` (below the operator instruction, spawn status, and
-        // prompt_includes — those keep their position). Pure code, runs every prompt, never an LLM
-        // call. Empty string when there's nothing yet (fresh project), so the prompt is unchanged.
+        // institutional memory (#3): pure code, runs every prompt, never an LLM call. Empty string
+        // when there's nothing yet (fresh project), so the prompt is unchanged.
         let base = if self.cfg.memory.enabled {
             let mem = crate::memory::read_block(self.dir, &self.last_session, self.cfg.memory.inject_kb);
             if mem.is_empty() {
@@ -417,28 +450,26 @@ impl LoopState<'_> {
         } else {
             base
         };
-        let effective_prompt = match self.pending_instruction.take() {
+        // The role shapes what we ask of the assembled context. Exhaustive on purpose: a new role
+        // is a compile error here until it says what it does to the prompt.
+        let base = match role {
+            // Carry the standing instructions forward, unchanged. #14's `Reconsider` will wrap
+            // `base` in a re-examination framing here rather than feed it forward verbatim.
+            Role::Continue => base,
+        };
+        // NOTE: an `ultracode` prompt prefix was tried (to let the headless worker spawn subagent
+        // Workflows) and REMOVED 2026-06-10. In headless `-p` mode the worker fired an async
+        // Workflow then PARKED itself waiting for a re-invoke that never comes (Workflow returns a
+        // task-id immediately), going idle ~0% CPU until the watchdog killed it — a pure
+        // delegate-and-wait stall for zero output. The work here is single-instance + sequential
+        // and does not need fan-out, so the worker does it DIRECTLY (inline) instead.
+        match self.pending_instruction.take() {
             Some(instr) => format!(
                 "═══ HIGH-PRIORITY OPERATOR INSTRUCTION (act on this FIRST, it overrides the default plan) ═══\n\
                  {instr}\n\n{base}"
             ),
             None => base,
-        };
-        // NOTE: an `ultracode` prompt prefix was tried (to let the headless worker
-        // spawn subagent Workflows) and REMOVED 2026-06-10. In `claude -p` headless
-        // mode the worker fired an async Workflow then PARKED itself waiting for a
-        // re-invoke that never comes (Workflow returns a task-id immediately), going
-        // idle ~0% CPU until the watchdog killed it — a pure delegate-and-wait stall
-        // for zero output. The work here is single-instance + sequential and does
-        // not need fan-out, so the worker does it DIRECTLY (inline) instead.
-        self.dash.phase = Phase::Run;
-        self.publish();
-        // memory: clear any stale scratch note for THIS session number left by a prior run, so a
-        // worker note from a different run can never be folded as this session's learning.
-        if self.cfg.memory.enabled {
-            crate::memory::clear_scratch(self.dir, self.session);
         }
-        Injected::Prompt(effective_prompt)
     }
 
     /// **RUN** — the fresh `claude -p` worker. The ONE stochastic step; agg treats it as an opaque
