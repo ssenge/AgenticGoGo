@@ -662,8 +662,8 @@ fn fmt_started(epoch: u64) -> String {
     if epoch == 0 {
         return "—".to_string();
     }
-    let (h, m, s) = crate::localtime::local_hms(epoch);
-    format!("{h:02}:{m:02}:{s:02} {}", crate::localtime::offset_label())
+    let (h, m, s) = crate::ui::localtime::local_hms(epoch);
+    format!("{h:02}:{m:02}:{s:02} {}", crate::ui::localtime::offset_label())
 }
 
 fn human(n: u64) -> String {

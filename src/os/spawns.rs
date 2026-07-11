@@ -31,7 +31,7 @@
 //! agg at spawn time while it still owns the process, is the stable, provable, cross-platform
 //! "this is ours" key.
 
-use crate::proc::pid_alive;
+use crate::os::proc::pid_alive;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -191,7 +191,7 @@ pub fn summary_for_prompt(dir: &Path) -> Option<String> {
     Some(s)
 }
 
-// (`pid_alive` lives in `crate::proc` — imported at the top.)
+// (`pid_alive` lives in `crate::os::proc` — imported at the top.)
 
 #[cfg(test)]
 mod tests {

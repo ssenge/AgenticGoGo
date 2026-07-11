@@ -26,8 +26,8 @@
 //! yields `Verdict::failed(...)` rather than panicking.
 
 use crate::backend;
-use crate::model::{JudgeSpec, Verdict};
-use crate::proc::{self, Captured};
+use crate::core::model::{JudgeSpec, Verdict};
+use crate::os::proc::{self, Captured};
 use crate::util::last_json_object;
 use std::path::Path;
 use std::process::Command;
@@ -211,7 +211,7 @@ fn read_file(path: std::path::PathBuf) -> String {
 }
 
 // ---------------- shared: verdict parsing ----------------
-// (The timeout-aware command runner + group-kill now live in `crate::proc`; the JSON-object
+// (The timeout-aware command runner + group-kill now live in `crate::os::proc`; the JSON-object
 // extractor in `crate::util`.)
 
 /// Parse judge output into a Verdict. On failure, distinguish "the command itself

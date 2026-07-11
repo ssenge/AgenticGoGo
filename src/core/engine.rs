@@ -3,10 +3,10 @@
 //! This is the goal logic the loop calls once per cycle (after a worker exits).
 //! `agg plan` exercises this engine for a single dry-run cycle.
 
-use crate::config::GoalsConfig;
-use crate::judge;
-use crate::model::{Goal, Lifecycle, RecheckPolicy, Verdict};
-use crate::stop::{self, StopContext};
+use crate::core::config::GoalsConfig;
+use crate::core::judge;
+use crate::core::model::{Goal, Lifecycle, RecheckPolicy, Verdict};
+use crate::core::stop::{self, StopContext};
 use anyhow::Result;
 use std::path::Path;
 
@@ -166,7 +166,7 @@ pub struct Engine {
 #[derive(Debug, Clone)]
 pub struct GoalRuntime {
     pub state: Lifecycle,
-    pub last_verdict: Option<crate::model::Verdict>,
+    pub last_verdict: Option<crate::core::model::Verdict>,
     pub ever_met: bool,
     pub latched: bool,
     pub recheck_sig: Option<u64>,
@@ -348,8 +348,8 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GoalsConfig;
-    use crate::model::{Goal, GoalType, JudgeSpec, RecheckPolicy};
+    use crate::core::config::GoalsConfig;
+    use crate::core::model::{Goal, GoalType, JudgeSpec, RecheckPolicy};
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("agg-engine-{}-{}", std::process::id(), tag));

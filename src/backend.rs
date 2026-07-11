@@ -21,7 +21,14 @@
 //! stays a separate module for size, but it is backend-private in spirit and moves behind the
 //! trait together with this file.
 
-use crate::proc::{self, Captured};
+/// Parses the agent's `stream-json` events — the reading half of this backend (see the `# seam`
+/// note above; it moves behind the trait together with this file).
+pub mod stream;
+/// Supervises one worker session: spawns what [`session_command`] builds, then runs the stream
+/// reader, the heartbeat and the watchdog over it, and reaps what it leaves behind.
+pub mod worker;
+
+use crate::os::proc::{self, Captured};
 use anyhow::Result;
 use std::path::Path;
 use std::process::{Command, Stdio};

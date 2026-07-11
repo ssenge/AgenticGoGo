@@ -76,7 +76,7 @@ pub fn spawn_detached(dir: &Path) -> Result<()> {
         use std::os::unix::process::CommandExt;
         // new session → no controlling tty → survives terminal close.
         unsafe {
-            cmd.pre_exec(crate::proc::setsid);
+            cmd.pre_exec(crate::os::proc::setsid);
         }
     }
 
@@ -101,7 +101,7 @@ pub fn spawn_detached(dir: &Path) -> Result<()> {
 pub fn live_pid(dir: &Path) -> Option<u32> {
     let text = std::fs::read_to_string(run_pid(dir)).ok()?;
     let pid: u32 = text.trim().parse().ok()?;
-    if crate::proc::pid_alive(pid) {
+    if crate::os::proc::pid_alive(pid) {
         Some(pid)
     } else {
         let _ = std::fs::remove_file(run_pid(dir)); // clean up the stale file

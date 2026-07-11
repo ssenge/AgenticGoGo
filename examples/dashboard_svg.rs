@@ -8,7 +8,7 @@
 //! Usage:  cargo run --example dashboard_svg > assets/dashboard.svg
 //! Then rasterize to PNG (crisper in GitHub) with e.g. `magick -density 200 dashboard.svg dashboard.png`.
 
-use agg::dashboard;
+use agg::ui::dashboard;
 use agg::state::DashboardState;
 use ratatui::style::Color;
 

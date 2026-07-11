@@ -103,7 +103,7 @@ fn handle_history(dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>
 }
 
 fn handle_health(dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    let pid = crate::detach::live_pid(dir);
+    let pid = crate::os::detach::live_pid(dir);
     let body = match pid {
         Some(p) => format!(r#"{{"running":true,"pid":{p}}}"#),
         None => r#"{"running":false,"pid":null}"#.to_string(),
@@ -126,7 +126,7 @@ fn handle_send(
     };
     // Liveness guard: refuse (409) when no loop is running, so the UI never silently queues a
     // control action to a dead loop (a stop would then fire at the next run's startup).
-    if crate::detach::live_pid(dir).is_none() {
+    if crate::os::detach::live_pid(dir).is_none() {
         return json_resp(409, &err_json("no loop is running in this project"), origin);
     }
     match bus::queue_command(dir, &cmd) {

@@ -2,7 +2,7 @@
 //!
 //! Both are plain YAML. Env vars (`AGG_*`) override a few hot knobs for CI.
 
-use crate::model::Goal;
+use crate::core::model::Goal;
 use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
