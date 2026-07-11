@@ -92,7 +92,7 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "nohup sleep 60 >/dev/null 2>&1 & echo $!; exit 0"])
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        unsafe { cmd.pre_exec(|| crate::proc::setsid()); }
+        unsafe { cmd.pre_exec(crate::proc::setsid); }
         let out = cmd.output().expect("spawn worker");
         let child_pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
         assert!(child_pid > 0, "couldn't read straggler pid");
@@ -125,7 +125,7 @@ mod tests {
             let mut cmd = Command::new("sh");
             cmd.args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
                 .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-            unsafe { cmd.pre_exec(|| crate::proc::setsid()); }
+            unsafe { cmd.pre_exec(crate::proc::setsid); }
             let mut child = cmd.spawn().expect("spawn sh launcher");
             let mut s = String::new();
             child.stdout.take().unwrap().read_to_string(&mut s).ok();
