@@ -4,7 +4,7 @@
 </h1>
 
 <p align="center">
-  <em>A deterministic outer Ralph loop with incorruptible judges around a stochastic agent.</em>
+  <em>A deterministic outer Ralph loop with incorruptible judges around a stochastic inner agent.</em>
 </p>
 
 <p align="center"><em>Stop typing “go go”.</em></p>
@@ -19,8 +19,7 @@ quietly stop one step short — leaving you to babysit a terminal?
 
 AgenticGoGo (`agg`) is a deterministic outer **[Ralph loop](https://ghuntley.com/ralph/)** that
 drives a stochastic inner agent — relaunching a **fresh** session, verifying its work against gates
-*it can't fake*, and repeating until your goals are actually met. The loop is plain code: it never
-hallucinates a decision. The agent does the work, inside one step, and never decides when it's done.
+*it can't fake* using a concept called **judges**, and repeating until your goals are actually met -- according to the **judges**. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done.
 
 A **judge** is a small, incorruptible check that decides whether one goal is met — usually a script
 inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading against a rubric. You
@@ -28,7 +27,7 @@ compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two 
 say exactly what "done" means.
 
 > **So far, Claude Code only.** `agg` drives `claude -p` as its inner agent. No other coding agent is
-> supported today.
+> supported today. This will change in future.
 
 <p align="center">
   <img src="assets/loop.png" alt="The four stages of the agg loop — INJECT, RUN, VERIFY, GATE — arranged in a circle" width="620">
@@ -41,7 +40,7 @@ say exactly what "done" means.
 | **`VERIFY`** | `agg` runs your **judges** itself. The agent is never asked to grade its own homework. | code |
 | **`GATE`** | Keeps or rolls back the work, checks `stop_when`, carries state forward — or stops. | code |
 
-Three of the four stages are deterministic code; only the `RUN` stage is a stochastic coding agent.
+Three of the four stages are deterministic code; only the `RUN` stage is a (stochastic) coding agent.
 The loop continues until all goals are met — potentially for hours, days, weeks (watch your token
 consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate that decides it's done.
 
@@ -71,21 +70,20 @@ curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh 
 /plugin marketplace add ssenge/AgenticGoGo && /plugin install agg@agenticgogo           # the /agg:* skills
 ```
 
-`agg` just runs `claude -p`, so it works with a Claude subscription **or** an API key — whatever your
-`claude` CLI already uses. Full options (prebuilt binaries, from source, version pinning) →
+Full options (prebuilt binaries, from source, version pinning) →
 **[docs/INSTALL.md](docs/INSTALL.md)**.
 
 **1 — Prerequisite: Claude Code.** `agg` drives Claude Code headlessly, so make sure it's installed
 and authenticated — `claude -p "hello"` should print a reply. A subscription or an API key both work.
 
-**2 — Let Claude set up the loop.** `/agg:new` is a short conversation, not magic: it turns *your*
+**2 — Let Claude set up the loop.** Type `/agg:new` in Claude Corde to turns *your*
 definition of "done" into config. Point it at a spec you already have (a PRD, ROADMAP, README,
-`.planning/`), or just say what you want in the chat — e.g.
+`.planning/`), or just say what you want in the chat or directly as a parameter to the skill — e.g.
 
-> `/agg:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes; don't weaken the tests.
+> `/agg:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes
 
 It reads that plus your code, shows the `goals.yaml` it proposes, and lets you edit before writing it
-into `agg/`:
+into `agg/`. The result might look like:
 
 ```yaml
 # agg/goals.yaml — what "done" means, and who decides
@@ -107,14 +105,17 @@ resume_prompt: AGG_RESUME.md
 ```
 
 `AGG_RESUME.md` is the standing instruction `INJECT`ed into *every* session — "fix `calc.py` so
-`python3 calc.py` prints 2 and the tests pass; don't weaken the tests."
+`python3 calc.py` prints 2 and the tests pass". In case of multiple iterations (i.e. multiple subsequent **`RUN`** stages), this file gets adapted to track the progress so far accordingly (see [State & memory](#state-memory)).
+Also note the `stop_when: outputs_two and tests_pass` in the `goals.yaml` file, it composes two judges using an `and` conjunction, the next point explains how to create such judges.
 
 **3 — Have Claude write the judge.** A judge is any command that prints a verdict as JSON (see
 [Building judges](#building-judges)). You can write one by hand, but asking Claude is the easy way:
 
-> **Prompt:** Write `agg/judges/outputs_two.sh`: run `python3 calc.py`, print `{"met":true}` if its
+> **Prompt:** Write the judge `agg/judges/outputs_two.sh`: run `python3 calc.py`, print `{"met":true}` if its
 > output is exactly `2`, else `{"met":false,"rationale":"calc.py did not print 2"}`. Nothing else on
 > stdout.
+
+The result might look like:
 
 ```bash
 #!/usr/bin/env bash
@@ -217,7 +218,7 @@ can even shell out to `claude -p` itself). The built-in **`llm`** kind is a conv
 Ready-made script judges live in [`plugin/judges/`](plugin/judges/) (`cargo_test`, `cmd_exit`,
 `grep_count`); rubrics in [`plugin/rubrics/`](plugin/rubrics/).
 
-**Chain judges with a boolean.** `stop_when` (and the optional `halt_when`) is any boolean of goal
+**Compose judges with Boolean grammar.** `stop_when` (and the optional `halt_when`) is any boolean of goal
 ids — `a and b`, `a or b`, `not c`, with parentheses — so several judges together define "done":
 
 ```yaml
@@ -225,10 +226,10 @@ stop_when: outputs_two and tests_pass          # both must hold
 halt_when: any_regressed(invariants) or over_budget   # optional guard — see docs/CONFIG.md
 ```
 
-The rule that makes it a moat: **`agg` runs the judge, never the agent.** So make the judge check
-the artifact — tests, a compiler, a proof checker — not the agent's claim about it.
+The rule that makes it a moat: **`agg` runs the judges, never the agent.** So make the judges check
+the resulting artifacts — tests, a compiler, a proof checker — not the agent's claim about it (which often enough hallucinates that a job is done).
 
-## State & memory — plain files
+## State & memory
 
 `agg` keeps **no state in a database or a long-running daemon**. Everything is a plain file under
 `<project>/.agg/` (gitignored), plus git itself. The loop is the single *writer*; every *reader* (the
