@@ -1,83 +1,29 @@
-//! Dependency-free local-time helpers.
+//! Local-time helpers for the display surfaces (dashboard, `agg history`, status).
 //!
-//! The dashboard previously rendered all wall-clock timestamps (the Info block's
-//! "started" anchor and every Activity event line) straight off the raw UTC
-//! epoch — so a user in CEST (UTC+2) saw times two hours behind their wall
-//! clock, even though the code *labelled* them "local". We don't want to pull in
-//! `chrono`/`time` just for an offset, so we read the platform's local UTC
-//! offset (`struct tm`'s `tm_gmtoff`, seconds east of UTC) once via a minimal
-//! `localtime_r` FFI and cache it for the process lifetime.
+//! Every wall-clock timestamp we render comes off a raw UTC epoch, so without a zone conversion
+//! a user in CEST (UTC+2) would see times two hours behind their wall clock while the code
+//! *labelled* them "local". `jiff` does the conversion, reading the platform's tz database.
 //!
-//! `tm_gmtoff` already folds in DST for the current instant, which is exactly
-//! what a "what time is it on my wall" display wants. The offset is captured at
-//! first use; a process that straddles a DST boundary keeps the offset it
-//! started with (acceptable for a dashboard — it never silently shows UTC).
+//! This module used to hand-roll it: a `struct tm` layout, a `localtime_r` FFI block, and
+//! Howard Hinnant's `civil_from_days` for the calendar math — with the offset captured ONCE and
+//! cached for the process lifetime. That cache was a latent bug: a long run straddling a DST
+//! switch kept the offset it started with and showed wrong times for the rest of the run. It
+//! also had no Windows path at all (`localtime_r` is POSIX-only), so Windows silently rendered
+//! UTC labelled as local.
+//!
+//! Both are fixed here. The offset is resolved **per call** against the current instant, so DST
+//! transitions are picked up live, and jiff handles Windows properly. There is no cache and no
+//! FFI: a timestamp→zone conversion is a lookup, not a syscall, and these are display paths
+//! called a handful of times per render.
 
-#[cfg(unix)]
-use std::sync::OnceLock;
+use jiff::{tz::TimeZone, Timestamp};
 
-/// `time_t` / `long` on the LP64 Unix targets we ship for
-/// (aarch64/x86_64 macOS + linux-gnu). 64-bit on all of them.
-#[cfg(unix)]
-#[allow(non_camel_case_types)]
-type time_t = i64;
-
-// `struct tm` layout per POSIX. We only read `tm_gmtoff`; the rest are present
-// so the struct size matches what libc writes into. `tm_zone` is a trailing
-// pointer on glibc/macOS.
-#[cfg(unix)]
-#[repr(C)]
-struct Tm {
-    tm_sec: i32,
-    tm_min: i32,
-    tm_hour: i32,
-    tm_mday: i32,
-    tm_mon: i32,
-    tm_year: i32,
-    tm_wday: i32,
-    tm_yday: i32,
-    tm_isdst: i32,
-    tm_gmtoff: i64,
-    tm_zone: *const i8,
-}
-
-#[cfg(unix)]
-extern "C" {
-    // localtime_r(const time_t *timep, struct tm *result) -> struct tm *
-    // POSIX-only; Windows has no localtime_r (it's localtime_s, with reversed args).
-    fn localtime_r(timep: *const time_t, result: *mut Tm) -> *mut Tm;
-}
-
-/// Local UTC offset in seconds (east of UTC, so CEST = +7200). Computed once from the current
-/// instant and cached. Falls back to 0 (i.e. UTC, the old behaviour) if `localtime_r` ever
-/// fails — never panics on the display path.
-#[cfg(unix)]
-fn local_offset_secs() -> i64 {
-    static OFFSET: OnceLock<i64> = OnceLock::new();
-    *OFFSET.get_or_init(|| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as time_t)
-            .unwrap_or(0);
-        // SAFETY: `now` is a valid time_t; we hand libc a properly-sized,
-        // zero-initialised `Tm` to fill and only read scalar fields back.
-        let mut tm: Tm = unsafe { std::mem::zeroed() };
-        let ret = unsafe { localtime_r(&now, &mut tm) };
-        if ret.is_null() {
-            0
-        } else {
-            tm.tm_gmtoff
-        }
-    })
-}
-
-/// Windows has no `localtime_r`, and the WinAPI offset call (`GetDynamicTimeZoneInformation`)
-/// isn't worth a dependency or hand-rolled FFI for a cosmetic dashboard timestamp. Fall back to
-/// UTC (offset 0) — the same well-defined fallback Unix uses when the syscall fails. The
-/// dashboard then shows UTC times labelled `UTC`, never a wrong "local" time and never a crash.
-#[cfg(not(unix))]
-fn local_offset_secs() -> i64 {
-    0
+/// A UTC epoch as a `Zoned` in the system's local zone. Out-of-range epochs (and a system with
+/// no resolvable tz) degrade to the epoch / UTC rather than panicking — this is a display path.
+fn local(epoch_utc: u64) -> jiff::Zoned {
+    Timestamp::from_second(epoch_utc as i64)
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .to_zoned(TimeZone::system())
 }
 
 /// Format a UTC epoch as a local `HH:MM:SS` string (no date, no zone suffix).
@@ -93,48 +39,25 @@ pub fn ymd_hms(epoch_utc: u64) -> String {
     if epoch_utc == 0 {
         return "—".to_string();
     }
-    let local = epoch_utc as i64 + local_offset_secs();
-    let days = local.div_euclid(86_400);
-    let tod = local.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    let (h, min) = (tod / 3600, (tod % 3600) / 60);
-    format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}")
+    local(epoch_utc).strftime("%Y-%m-%d %H:%M").to_string()
 }
 
-/// Convert a count of days since the Unix epoch (1970-01-01) to a (year, month, day) civil
-/// date. Howard Hinnant's `civil_from_days` — exact, branch-light, dependency-free, valid for
-/// the full range we care about. `days` may be negative (pre-1970), though we never pass that.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468; // shift epoch to 0000-03-01
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
-    (y + i64::from(m <= 2), m, d)
-}
-
-/// Local hour/min/sec for a UTC epoch, applying the cached offset.
+/// Local hour/min/sec for a UTC epoch.
 pub fn local_hms(epoch_utc: u64) -> (u64, u64, u64) {
-    // shift into local seconds, wrapping safely across the day boundary.
-    let local = (epoch_utc as i64 + local_offset_secs()).rem_euclid(86_400) as u64;
-    (local / 3600, (local / 60) % 60, local % 60)
+    let z = local(epoch_utc);
+    (z.hour() as u64, z.minute() as u64, z.second() as u64)
 }
 
-/// The cached offset as a compact label like `UTC+2` / `UTC-5` / `UTC` so the
-/// display can name the zone it's showing.
+/// The CURRENT local offset as a compact label like `UTC+2` / `UTC-5:30` / `UTC`, so the display
+/// can name the zone it's showing.
 pub fn offset_label() -> String {
-    let off = local_offset_secs();
+    let off = TimeZone::system().to_offset(Timestamp::now()).seconds();
     if off == 0 {
         return "UTC".to_string();
     }
     let sign = if off > 0 { '+' } else { '-' };
     let abs = off.abs();
-    let h = abs / 3600;
-    let m = (abs % 3600) / 60;
+    let (h, m) = (abs / 3600, (abs % 3600) / 60);
     if m == 0 {
         format!("UTC{sign}{h}")
     } else {
@@ -148,7 +71,7 @@ mod tests {
 
     #[test]
     fn hms_wraps_across_local_midnight() {
-        // Pure arithmetic check on local_hms: it must stay in range and wrap.
+        // must stay in range for every epoch, whatever the local offset does to it.
         for epoch in [0u64, 1, 3600, 86_399, 86_400, 1_780_956_498] {
             let (h, m, s) = local_hms(epoch);
             assert!(h < 24 && m < 60 && s < 60);
@@ -159,16 +82,6 @@ mod tests {
     fn offset_label_is_well_formed() {
         let l = offset_label();
         assert!(l.starts_with("UTC"));
-    }
-
-    #[test]
-    fn civil_from_days_known_dates() {
-        // day 0 = 1970-01-01 (Unix epoch).
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        // 2000-01-01 is 10957 days after the epoch.
-        assert_eq!(civil_from_days(10_957), (2000, 1, 1));
-        // a leap day: 2020-02-29 is 18321 days after the epoch.
-        assert_eq!(civil_from_days(18_321), (2020, 2, 29));
     }
 
     #[test]
@@ -186,5 +99,22 @@ mod tests {
         assert_eq!(&s[7..8], "-");
         assert_eq!(&s[10..11], " ");
         assert_eq!(&s[13..14], ":");
+    }
+
+    #[test]
+    fn renders_a_known_instant_in_a_known_zone() {
+        // Pin the zone so this asserts a real VALUE, not just a shape: the old hand-rolled
+        // civil_from_days had a dedicated test and its replacement must earn the same trust.
+        // 1_700_000_000 = 2023-11-14 22:13:20 UTC → 23:13:20 in Berlin (CET, UTC+1 in November).
+        let z = Timestamp::from_second(1_700_000_000)
+            .unwrap()
+            .to_zoned(TimeZone::get("Europe/Berlin").unwrap());
+        assert_eq!(z.strftime("%Y-%m-%d %H:%M:%S").to_string(), "2023-11-14 23:13:20");
+        // ...and the same instant in July is CEST (UTC+2) — the DST fold the cached-offset
+        // implementation used to get wrong on a long-running loop.
+        let summer = Timestamp::from_second(1_688_000_000) // 2023-06-29 00:53:20 UTC
+            .unwrap()
+            .to_zoned(TimeZone::get("Europe/Berlin").unwrap());
+        assert_eq!(summer.strftime("%Y-%m-%d %H:%M:%S").to_string(), "2023-06-29 02:53:20");
     }
 }
