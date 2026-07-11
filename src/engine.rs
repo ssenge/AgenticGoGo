@@ -5,7 +5,7 @@
 
 use crate::config::GoalsConfig;
 use crate::judge;
-use crate::model::{Goal, Lifecycle, RecheckPolicy};
+use crate::model::{Goal, Lifecycle, RecheckPolicy, Verdict};
 use crate::stop::{self, StopContext};
 use anyhow::Result;
 use std::path::Path;
@@ -199,15 +199,16 @@ impl Engine {
             .map(|g| (g.last_verdict.as_ref().map(|v| v.value).unwrap_or(0.0), g.state))
             .collect();
 
-        for goal in &mut self.goals {
-            if goal_should_skip_judge(goal, cwd) {
-                // status can't have changed → keep the last verdict, skip the (maybe
-                // expensive) judge. `last_verdict`/`state` are left intact.
-                continue;
+        // Judging (the expensive part) is separated from folding the results in (the cheap part)
+        // so the former has ONE choke point — see `run_judges`.
+        let verdicts = self.run_judges(cwd, config_base);
+        for (goal, verdict) in self.goals.iter_mut().zip(verdicts) {
+            // None = skipped: status can't have changed → keep the last verdict, skip the (maybe
+            // expensive) judge. `last_verdict`/`state` are left intact.
+            if let Some(v) = verdict {
+                goal.apply(v);
+                update_recheck_state(goal, cwd);
             }
-            let verdict = judge::run(&goal.judge, cwd, config_base);
-            goal.apply(verdict);
-            update_recheck_state(goal, cwd);
         }
 
         let deltas: Vec<GoalDelta> = self
@@ -225,6 +226,32 @@ impl Engine {
             .collect();
 
         self.conditions_with_deltas(run, deltas)
+    }
+
+    /// Run the judge for every goal that needs one, and return the verdicts POSITIONALLY —
+    /// `verdicts[i]` belongs to `goals[i]`, and `None` means "skipped, keep the last verdict".
+    ///
+    /// # seam
+    /// This is the single choke point through which every judge in a cycle runs, and it is the
+    /// only reason it exists as its own fn: ROADMAP #8 (judge parallelism + result caching) lands
+    /// INSIDE this function and nowhere else. That is why it takes `&self` rather than `&mut self`
+    /// — judging is a pure read of goal state, so the calls are independently spawnable; the
+    /// mutation (`apply` + `update_recheck_state`) stays in the caller, sequential and in goal
+    /// order, so parallelizing this cannot reorder state updates or change what the loop records.
+    ///
+    /// Today it is a plain sequential map. That is deliberate: the seam is the deliverable, not
+    /// the parallelism.
+    fn run_judges(&self, cwd: &Path, config_base: &Path) -> Vec<Option<Verdict>> {
+        self.goals
+            .iter()
+            .map(|goal| {
+                if goal_should_skip_judge(goal, cwd) {
+                    None
+                } else {
+                    Some(judge::run(&goal.judge, cwd, config_base))
+                }
+            })
+            .collect()
     }
 
     /// Snapshot every goal's per-cycle RUNTIME state (everything `apply`/`update_recheck_state`
