@@ -174,6 +174,40 @@ even check in and course-correct from your phone:
 The supervisor reads only `.agg/state.json` — the small scoreboard snapshot — and `agg status`. It
 **never** tails the workers' output, so supervising a long run costs you almost nothing.
 
+## Features
+
+The high-level capabilities at a glance — deeper detail lives in the linked sections and
+[`docs/CONFIG.md`](docs/CONFIG.md).
+
+**Correctness — the moat**
+- **Deterministic four-stage loop** — INJECT → RUN → VERIFY → GATE; only RUN is stochastic.
+- **Fresh session every iteration** — no context degradation; git + memory carry state, not a long chat.
+- **Incorruptible judges** — agg runs them, the agent never grades itself ([script or LLM-as-judge](#building-judges)).
+- **Boolean goal DSL** — compose judges with `and` / `or` / `not`; binary / percentage / cardinal goals + invariants.
+- **Post-merge rollback gate** — a red session is reverted; the base never advances broken.
+
+**Guardrails for unattended runs**
+- **Rate-limit backoff** — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
+- **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
+- **No orphaned compute** — process-group reaping sweeps stragglers when a session or the loop ends.
+- **Token + dollar ceilings** — hard `over_budget` / `over_cost` / `over_iterations` / `wall_hours` guards.
+- **Long-task tracking** — `agg spawn` keeps a sim/build alive across sessions so the reaper spares it.
+
+**State & memory**
+- **Cross-session memory** — durable `AGG_MEMORY.md`, injected into every session.
+- **Plain-file state** — crash-safe and observable; no database or daemon ([details](#state-and-memory)).
+- **Rolling summaries** — cheap progress digests for the dashboard and supervisor.
+
+**Control & observability**
+- **Live TUI + standalone web UI** — same state, two views ([Interfaces](#interfaces)).
+- **Mobile supervisor** (`/agg:supervise`) — status and steering by chat from your phone.
+- **Session-granular steering** — `agg send inject / budget / pause / resume / stop`.
+- **Automation-friendly** — `--json` output and meaningful exit codes.
+
+**Works with your setup**
+- **Claude Code, subscription or API key** — inherits your MCP servers, plugins, hooks, and skills.
+- **Tool-agnostic hooks** — wire in your own code graph, linter, or memory via lifecycle hooks + prompt includes.
+
 ## Steering a running loop
 
 You can't interrupt a headless agent mid-thought (a platform limit), so steering is
