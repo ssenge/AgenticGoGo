@@ -361,11 +361,8 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg dashboard` | Live TUI | `--once` one-shot text snapshot |
 | `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `POST /api/send` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` |
 | `agg spawn` | *(used by the worker, not to start the loop)* track a long child task so the reaper spares it and the next session polls it | `--name <n>` · `--reason <why>` · `-- <cmd…>` |
-| `agg stop [reason]` | Graceful stop at the next session boundary | |
-| `agg inject <text>` | Prepend a high-priority instruction to the next session | |
-| `agg pause` · `agg resume` | Hold the loop before the next session · continue a paused one | |
-| `agg budget [total]` | Change the token ceiling (omit the value for unlimited) | |
-| `agg send <cmd>` | The same steering, explicit: `inject`, `budget`, `pause`, `resume`, `stop`, `note` | |
+| `agg stop [reason]` | Graceful stop at the next session boundary (the one top-level steering alias) | |
+| `agg send <cmd>` | All steering, applied at the next session boundary: `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` | |
 
 `agg run` exit codes, so automation can branch on the outcome: **0** goals met (or an operator
 stop) · **1** hard error · **3** a guard fired (`halt_when`) · **4** hit `--max-sessions`.

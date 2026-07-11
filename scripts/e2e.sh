@@ -265,8 +265,8 @@ sec "5. steering a LIVE loop over the bus  (inject · note · pause/resume · bu
 
 # a queued command with no loop running is accepted but warns
 Q="$(mkproj prearm)"
-agg_do "$Q" inject "pre-armed" > "$Q/q.log" 2>&1
-is  "agg inject with no loop exits 0 (pre-arming is legal)" "$?" "0"
+agg_do "$Q" send inject "pre-armed" > "$Q/q.log" 2>&1
+is  "agg send inject with no loop exits 0 (pre-arming is legal)" "$?" "0"
 has "…but warns that no loop is running" "$Q/q.log" "NO loop is running"
 
 # --- a slow loop we can steer while it runs
@@ -275,17 +275,17 @@ agg_bg LOOP "$S" run.log run --max-sessions 6
 waitfor 30 "live loop reaches its first RUN" grep -q "RUN=run" "$S/trace.txt"
 
 agg_do "$S" send note "hello-bus" > /dev/null 2>&1
-agg_do "$S" inject "OPERATOR_MARKER_XYZ" > /dev/null 2>&1
+agg_do "$S" send inject "OPERATOR_MARKER_XYZ" > /dev/null 2>&1
 waitfor 30 "injected instruction reaches the NEXT worker prompt" grep -q "OPERATOR_MARKER_XYZ" "$S/prompt_latest.txt"
 has "…as a HIGH-PRIORITY header"     "$S/prompt_latest.txt" "HIGH-PRIORITY OPERATOR INSTRUCTION"
 has "…and the resume prompt survives" "$S/prompt_latest.txt" "create the file did_work"
 has "agg send note is logged by the loop" "$S/run.log" "[bus] note: hello-bus"
 
-agg_do "$S" pause > /dev/null 2>&1
-waitfor 30 "agg pause parks the loop in INJECT" grep -q "pause → waiting for resume/stop" "$S/run.log"
+agg_do "$S" send pause > /dev/null 2>&1
+waitfor 30 "agg send pause parks the loop in INJECT" grep -q "pause → waiting for resume/stop" "$S/run.log"
 is  "…and the published phase says inject" "$(phase_of "$S")" "inject"
-agg_do "$S" resume > /dev/null 2>&1
-waitfor 30 "agg resume continues the loop" grep -q "resume → continuing" "$S/run.log"
+agg_do "$S" send resume > /dev/null 2>&1
+waitfor 30 "agg send resume continues the loop" grep -q "resume → continuing" "$S/run.log"
 
 agg_do "$S" stop "e2e-stop-reason" > /dev/null 2>&1
 waitfor 40 "agg stop ends the loop" bash -c "! kill -0 $LOOP 2>/dev/null"
@@ -304,8 +304,8 @@ B="$(mkproj budget)"; : > "$B/NO_WORK"; echo 2 > "$B/WORKER_SLEEP"; echo 500 > "
 printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: worked\nhalt_when: over_budget\n' > "$B/goals.yaml"
 agg_bg BLOOP "$B" run.log run --max-sessions 6
 waitfor 30 "live loop for budget test reaches RUN" grep -q "RUN=run" "$B/trace.txt"
-agg_do "$B" budget 1 > /dev/null 2>&1
-waitfor 40 "agg budget <n> halts the running loop" bash -c "! kill -0 $BLOOP 2>/dev/null"
+agg_do "$B" send budget 1 > /dev/null 2>&1
+waitfor 40 "agg send budget <n> halts the running loop" bash -c "! kill -0 $BLOOP 2>/dev/null"
 wait $BLOOP; RC=$?
 is  "…exit 3 (a guard fired)" "$RC" "3"
 has "…names over_budget"      "$B/run.log" "over_budget"
