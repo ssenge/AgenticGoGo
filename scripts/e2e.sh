@@ -156,111 +156,27 @@ sec "0. build"
 [ -x "$AGG" ] && ok "agg binary at target/debug/agg" || bad "agg binary missing"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "1. scaffolding & diagnostics  (init · doctor · plan · judge)"
-D="$WS/scaffold"; mkdir -p "$D/bin"
-cat > "$D/bin/claude" <<'EOF'
-#!/bin/sh
-echo "fake-claude 0.0.0"; exit 0
-EOF
-chmod +x "$D/bin/claude"
-
-agg_do "$D" init > "$D/init.log" 2>&1
-is  "agg init exits 0" "$?" "0"
-exists "init scaffolds agg.yaml"      "$D/agg.yaml"
-exists "init scaffolds goals.yaml"    "$D/goals.yaml"
-exists "init scaffolds AGG_RESUME.md" "$D/AGG_RESUME.md"
-
-agg_do "$D" doctor > "$D/doctor.log" 2>&1
-is "agg doctor exits 0 on a good setup" "$?" "0"
-has "doctor reports claude on PATH" "$D/doctor.log" "claude"
-
-DF="$WS/doctorbad"; mkdir -p "$DF"
-echo "project: broken" > "$DF/agg.yaml"     # no goals.yaml
-( cd "$DF" && "$AGG" doctor > doctor.log 2>&1 )
-[ $? -ne 0 ] && ok "agg doctor exits non-zero on a broken setup" || bad "doctor should flag a broken setup"
-
-P1="$(mkproj plan)"
-agg_do "$P1" plan > "$P1/plan.log" 2>&1
-is  "agg plan exits 0" "$?" "0"
-has "plan prints the scoreboard"     "$P1/plan.log" "worked"
-has "plan re-runs judges (not met)"  "$P1/plan.log" "not yet"
-
-agg_do "$P1" judge worked > "$P1/judge.log" 2>&1
-is  "agg judge <id> exits 0" "$?" "0"
-has "judge prints raw verdict JSON" "$P1/judge.log" '"met"'
-agg_do "$P1" judge no_such_goal > "$P1/judge_bad.log" 2>&1
-[ $? -ne 0 ] && ok "agg judge <unknown> exits non-zero" || bad "unknown goal id should fail"
-
-# init --folder layout
-FD="$WS/folder"; mkdir -p "$FD"
-( cd "$FD" && "$AGG" init --folder > init.log 2>&1 )
-exists "init --folder puts config in agg/" "$FD/agg/agg.yaml"
-
 # ═══════════════════════════════════════════════════════════════════════════
-sec "2. run lifecycle — every exit code a script can branch on"
-G="$(mkproj goalsmet)"
-agg_do "$G" run --max-sessions 3 > "$G/run.log" 2>&1
-is  "goals met → exit 0" "$?" "0"
-has "…prints the STOP banner" "$G/run.log" "STOP condition satisfied"
-exists "…the worker really ran" "$G/did_work"
-
-M="$(mkproj maxsess)"; : > "$M/NO_WORK"
-agg_do "$M" run --max-sessions 2 > "$M/run.log" 2>&1
-is  "goals never met, cap hit → exit 4" "$?" "4"
-has "…prints the max_sessions banner" "$M/run.log" "reached max_sessions=2"
-
-H="$(mkproj halted)"; : > "$H/NO_WORK"; echo "0.05" > "$H/WORKER_COST"
-printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: worked\nhalt_when: over_cost\n' > "$H/goals.yaml"
-printf 'project: halted\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\ncost: { total: 0 }\n' > "$H/agg.yaml"
-agg_do "$H" run --max-sessions 20 > "$H/run.log" 2>&1
-is  "cost guard fires → exit 3 (HALT)" "$?" "3"
-has "…names the guard"                  "$H/run.log" "over_cost"
-hasnt "…did NOT run to the session cap" "$H/run.log" "reached max_sessions"
-
-A="$(mkproj already)"; : > "$A/did_work"
-agg_do "$A" run --max-sessions 3 > "$A/run.log" 2>&1
-is  "already satisfied at launch → exit 0" "$?" "0"
-has "…says so"                             "$A/run.log" "already satisfied at launch"
-is  "…zero sessions burned" "$(python3 -c "import json;print(json.load(open('$A/.agg/state.json'))['session'])")" "0"
-
-NC="$WS/noconfig"; mkdir -p "$NC"
-( cd "$NC" && "$AGG" run --max-sessions 1 > run.log 2>&1 )
-[ $? -eq 1 ] && ok "no config → exit 1 (hard error, distinct from 3/4)" || bad "missing config should exit 1"
-has "…with an actionable hint" "$NC/run.log" "agg init"
-
-# ═══════════════════════════════════════════════════════════════════════════
-sec "3. the four outer-loop stages are observable (INJECT · RUN · VERIFY · GATE)"
-is "stage trace for a full cycle" \
-   "$(tr '\n' ' ' < "$G/trace.txt")" \
-   "VERIFY=verify INJECT=inject RUN=run VERIFY=verify GATE=gate "
-is "baseline-only run never enters a stage" "$(tr '\n' ' ' < "$A/trace.txt")" "VERIFY=verify "
-is "final phase is done" "$(phase_of "$G")" "done"
-
-# ═══════════════════════════════════════════════════════════════════════════
-sec "4. status · history · dashboard --once  (read the published snapshot)"
-agg_do "$G" status > "$G/status.log" 2>&1
-is  "agg status exits 0" "$?" "0"
-has "…renders the project"  "$G/status.log" "goalsmet"
-has "…renders the goal"     "$G/status.log" "worked"
-
-agg_do "$G" status --json > "$G/status.json" 2>&1
-python3 -c "import json;d=json.load(open('$G/status.json'));assert d['project']=='goalsmet';assert d['finished'] is True;assert d['phase']=='done'" \
-  && ok "agg status --json is machine-readable (project/finished/phase)" || bad "status --json malformed"
-
-agg_do "$G" history > "$G/history.log" 2>&1
-is  "agg history exits 0" "$?" "0"
-agg_do "$G" history --json > "$G/history.json" 2>&1
-python3 -c "
-import json;d=json.load(open('$G/history.json'))
-runs=d['runs']; assert len(runs)>=1
-r=runs[-1]; assert r['end_reason']=='goals-met', r['end_reason']
-assert r['sessions']>=1" && ok "agg history --json records end_reason=goals-met" || bad "history --json malformed"
-
-agg_do "$G" dashboard --once > "$G/dash.log" 2>&1
-is  "agg dashboard --once exits 0 (headless snapshot)" "$?" "0"
-has "…renders project + goal" "$G/dash.log" "worked"
-
-# ═══════════════════════════════════════════════════════════════════════════
+# 1-4, 6. scaffolding · exit codes · stage trace · status/history/dashboard · interrupt
+#
+# DELETED — these are covered by `cargo test --test cli` (tests/cli.rs), which drives the
+# same paths against the same fake-claude shim, in-process and in CI. Kept here only as a
+# map so a future reader does not think the coverage vanished:
+#
+#   init/doctor/plan/judge      → init_then_plan_shows_scoreboard · doctor_passes_a_good_setup
+#                                 doctor_flags_a_broken_setup · judge_runs_one_goal_and_prints_raw_verdict
+#                                 config_lives_in_the_optional_agg_folder
+#   exit codes 0/1/3/4          → run_drives_a_correction_loop_to_stop · run_without_config_gives_actionable_hint
+#                                 dollar_budget_halts_the_loop · max_sessions_cap_exits_4_and_says_so
+#                                 run_stops_immediately_when_goal_already_met
+#   four-stage trace            → phase_names_the_four_outer_loop_stages
+#   baseline enters no stage    → a_baseline_satisfied_run_enters_no_stage
+#   status/history/dashboard    → status_and_history_json_are_machine_readable
+#   interrupt (Ctrl-C)          → interrupt_during_run_skips_verify_and_the_exit_log
+#
+# What REMAINS in this file is what cli.rs cannot or does not drive: live loops steered over
+# the bus, detached runs, spawn, the watchdog, git merge/conflict/recovery paths, the HTTP API,
+# a real pty TUI, and the browser.
 sec "5. steering a LIVE loop over the bus  (inject · note · pause/resume · budget · stop)"
 
 # a queued command with no loop running is accepted but warns
@@ -311,18 +227,6 @@ is  "…exit 3 (a guard fired)" "$RC" "3"
 has "…names over_budget"      "$B/run.log" "over_budget"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "6. interrupt (Ctrl-C) — nothing staged, nothing judged, guards run"
-I="$(mkproj intr)"; : > "$I/NO_WORK"; echo 30 > "$I/WORKER_SLEEP"
-agg_bg ILOOP "$I" run.log run --max-sessions 3
-waitfor 30 "loop reaches RUN before we Ctrl-C it" grep -q "RUN=run" "$I/trace.txt"
-kill -INT $ILOOP; wait $ILOOP; RC=$?
-is  "SIGINT → exit 0 (clean operator stop)" "$RC" "0"
-is  "…trace stops at RUN (never judged, never gated)" "$(tr '\n' ' ' < "$I/trace.txt")" "VERIFY=verify INJECT=inject RUN=run "
-has "…prints the interrupt banner"       "$I/run.log" "interrupted (SIGINT/SIGTERM)"
-hasnt "…no bogus session-exit log line"  "$I/run.log" "exited (code"
-absent "…run.pid cleared" "$I/.agg/run.pid"
-
-# ═══════════════════════════════════════════════════════════════════════════
 sec "7. detached run + agg stop"
 DT="$(mkproj detach)"; : > "$DT/NO_WORK"; echo 2 > "$DT/WORKER_SLEEP"
 agg_do "$DT" run --detach --max-sessions 6 > "$DT/detach.log" 2>&1
@@ -357,15 +261,12 @@ SPID=$(python3 -c "import json;print([x for x in json.load(open('$SP/.agg/spawns
 [ -n "${SPID:-}" ] && kill -9 "$SPID" 2>/dev/null || true
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9. institutional memory — AGG_MEMORY.md, written without worker cooperation"
-MEM="$(mkproj memory)"
-agg_do "$MEM" run --max-sessions 2 > "$MEM/run.log" 2>&1
-exists "AGG_MEMORY.md is written" "$MEM/AGG_MEMORY.md"
-has "…records the session mechanically" "$MEM/AGG_MEMORY.md" "session"
-N=$(grep -c "^## session" "$MEM/AGG_MEMORY.md" 2>/dev/null || echo 0)
-[ "$N" = "1" ] && ok "…exactly ONE entry per completed session (early fold superseded)" \
-               || bad "expected 1 folded entry, got $N"
-absent "…scratch note deleted after folding" "$MEM/.agg/memory/session-1.md"
+sec "9. institutional memory — carried ACROSS separate \`agg run\` invocations"
+# The single-run memory contract (AGG_MEMORY.md is written · exactly ONE entry per completed
+# session, the early fold superseded · the scratch note is deleted after folding) is covered by
+# tests/cli.rs — institutional_memory_is_written_without_worker_cooperation and
+# worker_written_memory_note_is_folded. What stays HERE is the part cli.rs does not drive:
+# memory surviving across TWO separate `agg run` PROCESSES and reaching the next one's prompt.
 
 # NO_WORK: run 1 must NOT meet the goal, else run 2 stops at baseline and never builds a prompt.
 MEM2="$(mkproj memory2)"; : > "$MEM2/NO_WORK"
