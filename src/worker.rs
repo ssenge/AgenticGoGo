@@ -92,173 +92,14 @@ pub fn run_session(
     // SIGINT/SIGTERM on `agg run` kills the worker's whole tree instead of orphaning it, and lets
     // the loop unwind through its Drop guards. Cleared right after child.wait() below.
     crate::signals::set_worker_pgid(pid);
-    // shared state between reader thread, heartbeat thread, and watchdog thread
-    let last_activity = Arc::new(AtomicU64::new(now_epoch())); // epoch secs of last stream event
-    let last_thought = Arc::new(std::sync::Mutex::new(String::from("session start")));
-    let rate_limited = Arc::new(AtomicBool::new(false));
-    let output_tokens = Arc::new(AtomicU64::new(0));
-    // dollar cost: a result event carries the FINAL cumulative cost for the session, so we
-    // SET it (not accumulate). f64 has no atomic, so a tiny Mutex — matches the project's
-    // `.unwrap_or_else(|e| e.into_inner())` poison-recovery style used elsewhere here.
-    let cost_usd = Arc::new(std::sync::Mutex::new(0.0f64));
-    let done = Arc::new(AtomicBool::new(false));
-    let killed = Arc::new(AtomicBool::new(false));
-    // Ownership-handoff gate that fully closes the watchdog's pid-reuse window. The main thread
-    // sets this true BEFORE it calls `child.wait()` (which reaps the pid and lets the OS recycle
-    // it); the watchdog refuses to kill once it's set. Because it's set strictly before the
-    // reap, there is no instant where the watchdog can SIGKILL a pid the main thread has already
-    // freed (and the OS handed to someone else). `done` (set AFTER wait) only handled the common
-    // case; this handles the race.
-    let reaping = Arc::new(AtomicBool::new(false));
 
-    // ---- reader thread: format the stream, update activity + rate-limit + tokens ----
-    // It sends its result on a channel (not via join) so the main thread can collect
-    // it with a TIMEOUT — if a grandchild keeps the stdout pipe open, the reader may
-    // block on EOF forever, and we must not let that wedge the loop.
+    let sh = Arc::new(Shared::new());
+
+    // ---- the three helper threads ----
     let stdout = child.stdout.take().expect("piped stdout");
-    let (reader_tx, reader_rx) = std::sync::mpsc::channel::<(Vec<String>, Option<String>)>();
-    {
-        let last_activity = last_activity.clone();
-        let last_thought = last_thought.clone();
-        let rate_limited = rate_limited.clone();
-        let output_tokens = output_tokens.clone();
-        let cost_usd = cost_usd.clone();
-        let live = live.clone();
-        // throttle disk writes of the live stream so we don't rewrite state.json on
-        // every token. The in-memory snapshot still updates on every event; only the
-        // atomic file write (and seq bump) is rate-limited to ~once a second.
-        let throttle = Duration::from_millis(800);
-        std::thread::spawn(move || {
-            let mut tracker = ActivityTracker::default();
-            let mut session_id: Option<String> = None;
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Some(ev) = stream::format_event(&line) {
-                    // print to the live log (the plain stdout stream — source of truth)
-                    println!("{} | {}", hhmmss(), ev.display);
-                    if !ev.is_result {
-                        last_activity.store(now_epoch(), Ordering::Relaxed);
-                    }
-                    if let Some(thought) = &ev.thought {
-                        *last_thought.lock().unwrap_or_else(|e| e.into_inner()) = thought.clone();
-                    }
-                    // push the event into the shared dashboard state so the TUI's
-                    // Activity tail reflects the foreground stream in REAL TIME (the
-                    // bug this fixes: now/think/recent were empty mid-session).
-                    let act = ActivityEvent { ts: hhmmss(), kind: ev.kind.tag().to_string(), text: ev.text.clone() };
-                    live.update_throttled(throttle, |s| {
-                        s.idle_secs = 0;
-                        s.push_event(act);
-                    });
-                    tracker.observe(&ev);
-                }
-                // capture the session_id (for optional --resume continuity)
-                if let Some(id) = stream::session_id_from_result(&line) {
-                    session_id = Some(id);
-                }
-                // rate-limit detection: only the terminal result event matters
-                if stream::line_is_rate_limited_result(&line) {
-                    rate_limited.store(true, Ordering::Relaxed);
-                }
-                // accumulate output tokens reported on the result event (budget)
-                let toks = stream::output_tokens_from_result(&line);
-                if toks > 0 {
-                    output_tokens.fetch_add(toks, Ordering::Relaxed);
-                }
-                // record the session's dollar cost (result carries the FINAL cumulative
-                // value, so SET it, don't add). 0.0 on non-result lines → left untouched.
-                let c = stream::cost_usd_from_result(&line);
-                if c > 0.0 {
-                    *cost_usd.lock().unwrap_or_else(|e| e.into_inner()) = c;
-                }
-            }
-            let _ = reader_tx.send((tracker.thoughts, session_id)); // ok if receiver timed out
-        });
-    };
-
-    // ---- heartbeat thread ----
-    let heartbeat = {
-        let last_activity = last_activity.clone();
-        let last_thought = last_thought.clone();
-        let done = done.clone();
-        let interval = cfg.heartbeat_secs;
-        let live = live.clone();
-        std::thread::spawn(move || {
-            while !done.load(Ordering::Relaxed) {
-                sleep_secs(interval, &done);
-                if done.load(Ordering::Relaxed) {
-                    break;
-                }
-                let idle = now_epoch().saturating_sub(last_activity.load(Ordering::Relaxed));
-                let up = start.elapsed().as_secs();
-                let thought = last_thought.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let flag = if idle >= 240 { format!(" ⚠IDLE{idle}s") } else { String::new() };
-                eprintln!(
-                    "[HB {}] sess#{session} +{}m{:02}s | idle {idle}s{flag} | now: {}",
-                    hhmmss(),
-                    up / 60,
-                    up % 60,
-                    truncate(&thought, 140)
-                );
-                // keep the dashboard's idle indicator live between stream events — a
-                // quiet worker (long tool, deep think) still ticks idle upward here.
-                live.update(|s| s.idle_secs = idle);
-            }
-        })
-    };
-
-    // ---- watchdog thread: kill a hung worker (stream-idle AND cpu-flat) ----
-    let watchdog = {
-        let last_activity = last_activity.clone();
-        let done = done.clone();
-        let reaping = reaping.clone();
-        let killed = killed.clone();
-        let idle_thresh = cfg.watchdog.idle_secs;
-        let cpu_grace = cfg.watchdog.cpu_grace;
-        std::thread::spawn(move || {
-            // single-threaded state (only this thread touches it). `last_cpu` is reset
-            // to -1 whenever we leave an idle window, so each window starts a fresh
-            // two-sample comparison rather than comparing against an ancient sample.
-            let mut last_cpu: i64 = -1;
-            let mut cpu_flat_since: Option<u64> = None;
-            while !done.load(Ordering::Relaxed) {
-                sleep_secs(30, &done);
-                if done.load(Ordering::Relaxed) {
-                    break;
-                }
-                let idle = now_epoch().saturating_sub(last_activity.load(Ordering::Relaxed));
-                if idle < idle_thresh {
-                    cpu_flat_since = None;
-                    last_cpu = -1; // worker active → restart flat-detection cleanly
-                    continue;
-                }
-                // stream-idle long enough — now require CPU to be flat too
-                let cpu = cpu_jiffies(pid);
-                let prev = std::mem::replace(&mut last_cpu, cpu);
-                if cpu >= 0 && cpu == prev {
-                    let since = *cpu_flat_since.get_or_insert(now_epoch());
-                    let flat = now_epoch().saturating_sub(since);
-                    if flat >= cpu_grace {
-                        // Refuse to kill if the main thread is done OR has begun reaping: once
-                        // `reaping` is set (strictly BEFORE child.wait() frees the pid), the pid
-                        // may be recycled at any moment, so a kill here could hit an unrelated
-                        // process. This fully closes the pid-reuse window the bare `done` check
-                        // only narrowed.
-                        if done.load(Ordering::Relaxed) || reaping.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        eprintln!(
-                            "⚠ WATCHDOG: worker pid={pid} hung (stream-idle {idle}s + cpu-flat {flat}s) — SIGKILL"
-                        );
-                        proc::kill_group(pid);
-                        killed.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                } else {
-                    cpu_flat_since = None; // CPU advanced => real work, reset (last_cpu holds fresh sample)
-                }
-            }
-        })
-    };
+    let reader_rx = spawn_reader(sh.clone(), stdout, live.clone());
+    let heartbeat = spawn_heartbeat(sh.clone(), live.clone(), session, cfg.heartbeat_secs, start);
+    let watchdog = spawn_watchdog(sh.clone(), pid, cfg.watchdog.idle_secs, cfg.watchdog.cpu_grace);
 
     // ---- wait for the worker, then tear down the helper threads ----
     let status = child.wait().ok();
@@ -269,8 +110,8 @@ pub fn run_session(
     // BOTH flags before the post-exit group-kill below so the watchdog (which kills by pid) can
     // never fire on a recycled pid: `done` ends its loop, `reaping` is the belt-and-braces guard
     // it also checks right before killing.
-    reaping.store(true, Ordering::Relaxed);
-    done.store(true, Ordering::Relaxed);
+    sh.reaping.store(true, Ordering::Relaxed);
+    sh.done.store(true, Ordering::Relaxed);
 
     // The immediate worker has exited. If it spawned a tool subprocess that inherited
     // our stdout pipe and is still alive (orphaned), the reader thread would block on
@@ -315,19 +156,215 @@ pub fn run_session(
 
     // copy the cost out of the guard into a plain f64 before building the outcome (the
     // MutexGuard temporary can't outlive the returned struct).
-    let cost = *cost_usd.lock().unwrap_or_else(|e| e.into_inner());
+    let cost = *sh.cost_usd.lock().unwrap_or_else(|e| e.into_inner());
     SessionOutcome {
         exit_code: status.and_then(|s| s.code()),
         duration_secs: start.elapsed().as_secs(),
         // GATE: a clean exit 0 is never a rate-limit, even if a transient event looked like one.
-        rate_limited: rate_limited.load(Ordering::Relaxed)
+        rate_limited: sh.rate_limited.load(Ordering::Relaxed)
             && status.and_then(|s| s.code()).unwrap_or(0) != 0,
-        killed_by_watchdog: killed.load(Ordering::Relaxed),
-        output_tokens: output_tokens.load(Ordering::Relaxed),
+        killed_by_watchdog: sh.killed.load(Ordering::Relaxed),
+        output_tokens: sh.output_tokens.load(Ordering::Relaxed),
         cost_usd: cost,
         thoughts,
         session_id,
     }
+}
+
+// ---------------- shared state + the three helper threads ----------------
+
+/// State the main thread shares with the reader, heartbeat, and watchdog threads.
+///
+/// This was eight separate `Arc<_>`s, each cloned by hand into each closure that needed it. One
+/// `Arc<Shared>` says the same thing once, and makes the helper threads extractable into named
+/// fns (below) instead of 200 lines of closure inlined into `run_session`.
+struct Shared {
+    /// epoch secs of the last stream event — the input to both the heartbeat's idle display and
+    /// the watchdog's hang detection.
+    last_activity: AtomicU64,
+    /// the worker's most recent `💬` thought, for the heartbeat line.
+    last_thought: std::sync::Mutex<String>,
+    rate_limited: AtomicBool,
+    output_tokens: AtomicU64,
+    /// a result event carries the FINAL cumulative cost for the session, so this is SET, not
+    /// accumulated. f64 has no atomic, hence a tiny Mutex.
+    cost_usd: std::sync::Mutex<f64>,
+    /// the session is over — every helper thread's loop exits on this.
+    done: AtomicBool,
+    /// the watchdog SIGKILLed the worker.
+    killed: AtomicBool,
+    /// Ownership-handoff gate that fully closes the watchdog's pid-reuse window. The main thread
+    /// sets this true BEFORE it calls `child.wait()` (which reaps the pid and lets the OS recycle
+    /// it); the watchdog refuses to kill once it's set. Because it's set strictly before the
+    /// reap, there is no instant where the watchdog can SIGKILL a pid the main thread has already
+    /// freed (and the OS handed to someone else). `done` (set AFTER wait) only handled the common
+    /// case; this handles the race.
+    reaping: AtomicBool,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Shared {
+            last_activity: AtomicU64::new(now_epoch()),
+            last_thought: std::sync::Mutex::new(String::from("session start")),
+            rate_limited: AtomicBool::new(false),
+            output_tokens: AtomicU64::new(0),
+            cost_usd: std::sync::Mutex::new(0.0),
+            done: AtomicBool::new(false),
+            killed: AtomicBool::new(false),
+            reaping: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Reader thread: format the event stream, and update activity / rate-limit / tokens / cost.
+///
+/// Returns its thoughts + session_id over a CHANNEL rather than via `join`, so the main thread
+/// can collect them with a TIMEOUT: if a grandchild holds the stdout pipe open, the reader can
+/// block on EOF forever, and that must never wedge the loop.
+fn spawn_reader(
+    sh: Arc<Shared>,
+    stdout: std::process::ChildStdout,
+    live: LiveState,
+) -> std::sync::mpsc::Receiver<(Vec<String>, Option<String>)> {
+    let (tx, rx) = std::sync::mpsc::channel::<(Vec<String>, Option<String>)>();
+    // Throttle disk writes of the live stream so we don't rewrite state.json on every token. The
+    // in-memory snapshot still updates on every event; only the atomic file write (and seq bump)
+    // is rate-limited to ~once a second.
+    let throttle = Duration::from_millis(800);
+    std::thread::spawn(move || {
+        let mut tracker = ActivityTracker::default();
+        let mut session_id: Option<String> = None;
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(ev) = stream::format_event(&line) {
+                // print to the live log (the plain stdout stream — source of truth)
+                println!("{} | {}", hhmmss(), ev.display);
+                if !ev.is_result {
+                    sh.last_activity.store(now_epoch(), Ordering::Relaxed);
+                }
+                if let Some(thought) = &ev.thought {
+                    *sh.last_thought.lock().unwrap_or_else(|e| e.into_inner()) = thought.clone();
+                }
+                // push the event into the shared dashboard state so the TUI's Activity tail
+                // reflects the foreground stream in REAL TIME (the bug this fixes: now/think/
+                // recent were empty mid-session).
+                let act = ActivityEvent { ts: hhmmss(), kind: ev.kind.tag().to_string(), text: ev.text.clone() };
+                live.update_throttled(throttle, |s| {
+                    s.idle_secs = 0;
+                    s.push_event(act);
+                });
+                tracker.observe(&ev);
+            }
+            // capture the session_id (for optional --resume continuity)
+            if let Some(id) = stream::session_id_from_result(&line) {
+                session_id = Some(id);
+            }
+            // rate-limit detection: only the terminal result event matters
+            if stream::line_is_rate_limited_result(&line) {
+                sh.rate_limited.store(true, Ordering::Relaxed);
+            }
+            // accumulate output tokens reported on the result event (budget)
+            let toks = stream::output_tokens_from_result(&line);
+            if toks > 0 {
+                sh.output_tokens.fetch_add(toks, Ordering::Relaxed);
+            }
+            // record the session's dollar cost (result carries the FINAL cumulative value, so SET
+            // it, don't add). 0.0 on non-result lines → left untouched.
+            let c = stream::cost_usd_from_result(&line);
+            if c > 0.0 {
+                *sh.cost_usd.lock().unwrap_or_else(|e| e.into_inner()) = c;
+            }
+        }
+        let _ = tx.send((tracker.thoughts, session_id)); // ok if the receiver timed out
+    });
+    rx
+}
+
+/// Heartbeat thread: a status line at least every `interval` secs, so a long quiet stretch is
+/// visibly alive rather than indistinguishable from a hang.
+fn spawn_heartbeat(
+    sh: Arc<Shared>,
+    live: LiveState,
+    session: u32,
+    interval: u64,
+    start: Instant,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !sh.done.load(Ordering::Relaxed) {
+            sleep_secs(interval, &sh.done);
+            if sh.done.load(Ordering::Relaxed) {
+                break;
+            }
+            let idle = now_epoch().saturating_sub(sh.last_activity.load(Ordering::Relaxed));
+            let up = start.elapsed().as_secs();
+            let thought = sh.last_thought.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let flag = if idle >= 240 { format!(" ⚠IDLE{idle}s") } else { String::new() };
+            eprintln!(
+                "[HB {}] sess#{session} +{}m{:02}s | idle {idle}s{flag} | now: {}",
+                hhmmss(),
+                up / 60,
+                up % 60,
+                truncate(&thought, 140)
+            );
+            // keep the dashboard's idle indicator live between stream events — a quiet worker
+            // (long tool, deep think) still ticks idle upward here.
+            live.update(|s| s.idle_secs = idle);
+        }
+    })
+}
+
+/// Watchdog thread: SIGKILL a HUNG worker — one that is BOTH stream-idle and cpu-flat. Either
+/// signal alone is a false positive (a deep think is idle but burning CPU; a slow download is
+/// cpu-flat but streaming), so both are required.
+fn spawn_watchdog(
+    sh: Arc<Shared>,
+    pid: u32,
+    idle_thresh: u64,
+    cpu_grace: u64,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        // single-threaded state (only this thread touches it). `last_cpu` is reset to -1 whenever
+        // we leave an idle window, so each window starts a fresh two-sample comparison rather than
+        // comparing against an ancient sample.
+        let mut last_cpu: i64 = -1;
+        let mut cpu_flat_since: Option<u64> = None;
+        while !sh.done.load(Ordering::Relaxed) {
+            sleep_secs(30, &sh.done);
+            if sh.done.load(Ordering::Relaxed) {
+                break;
+            }
+            let idle = now_epoch().saturating_sub(sh.last_activity.load(Ordering::Relaxed));
+            if idle < idle_thresh {
+                cpu_flat_since = None;
+                last_cpu = -1; // worker active → restart flat-detection cleanly
+                continue;
+            }
+            // stream-idle long enough — now require CPU to be flat too
+            let cpu = cpu_jiffies(pid);
+            let prev = std::mem::replace(&mut last_cpu, cpu);
+            if cpu >= 0 && cpu == prev {
+                let since = *cpu_flat_since.get_or_insert(now_epoch());
+                let flat = now_epoch().saturating_sub(since);
+                if flat >= cpu_grace {
+                    // Refuse to kill if the main thread is done OR has begun reaping: once
+                    // `reaping` is set (strictly BEFORE child.wait() frees the pid), the pid may
+                    // be recycled at any moment, so a kill here could hit an unrelated process.
+                    // This fully closes the pid-reuse window the bare `done` check only narrowed.
+                    if sh.done.load(Ordering::Relaxed) || sh.reaping.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    eprintln!(
+                        "⚠ WATCHDOG: worker pid={pid} hung (stream-idle {idle}s + cpu-flat {flat}s) — SIGKILL"
+                    );
+                    proc::kill_group(pid);
+                    sh.killed.store(true, Ordering::Relaxed);
+                    break;
+                }
+            } else {
+                cpu_flat_since = None; // CPU advanced => real work, reset (last_cpu holds fresh sample)
+            }
+        }
+    })
 }
 
 // ---------------- small platform helpers ----------------
