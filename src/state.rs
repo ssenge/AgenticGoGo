@@ -10,8 +10,8 @@
 //! [`LiveState`]. A single writer under the lock is what keeps the `seq`/file write consistent
 //! and the live `now`/`think` fields populated mid-session.
 
-use crate::engine::Engine;
-use crate::model::{GoalType, Lifecycle};
+use crate::core::engine::Engine;
+use crate::core::model::{GoalType, Lifecycle};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -120,8 +120,8 @@ impl DashboardState {
                 let value = g.last_verdict.as_ref().map(|v| v.value).unwrap_or(0.0);
                 let prev_value = prev.iter().find(|p| p.id == g.id).map(|p| p.value).unwrap_or(value);
                 let judge_kind = match &g.judge {
-                    crate::model::JudgeSpec::Script { .. } => "script".to_string(),
-                    crate::model::JudgeSpec::Llm { model, .. } => format!("llm:{model}"),
+                    crate::core::model::JudgeSpec::Script { .. } => "script".to_string(),
+                    crate::core::model::JudgeSpec::Llm { model, .. } => format!("llm:{model}"),
                 };
                 GoalView {
                     id: g.id.clone(),

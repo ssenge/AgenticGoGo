@@ -8,7 +8,7 @@
 //! near-verbatim clone of it, envelope-unwrap included.
 
 use crate::backend;
-use crate::engine::GoalDelta;
+use crate::core::engine::GoalDelta;
 use crate::util::last_json_object;
 use serde::Deserialize;
 
@@ -93,7 +93,7 @@ fn parse_summaries(text: &str) -> Option<RawSummaries> {
     let block = last_json_object(trimmed)?;
     serde_json::from_str::<RawSummaries>(block).ok()
 }
-// (The timeout-aware runner + group-kill live in `crate::proc`; `last_json_object` in `crate::util`.)
+// (The timeout-aware runner + group-kill live in `crate::os::proc`; `last_json_object` in `crate::util`.)
 
 #[cfg(test)]
 mod tests {
@@ -125,8 +125,8 @@ mod tests {
     #[test]
     #[ignore]
     fn real_summary() {
-        use crate::engine::GoalDelta;
-        use crate::model::Lifecycle;
+        use crate::core::engine::GoalDelta;
+        use crate::core::model::Lifecycle;
         let thoughts = vec![
             "Reading the parser module to understand the token grammar.".to_string(),
             "Found a panic in parse_expr on nested groups — debugging the recursion.".to_string(),

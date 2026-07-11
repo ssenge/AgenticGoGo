@@ -9,10 +9,10 @@
 //! pid until its last member exits, and an empty group makes `kill(-pgid)` a harmless no-op.)
 
 use crate::backend;
-use crate::config::AggConfig;
-use crate::proc;
+use crate::core::config::AggConfig;
+use crate::os::proc;
 use crate::state::{ActivityEvent, LiveState};
-use crate::stream::{self, ActivityTracker};
+use crate::backend::stream::{self, ActivityTracker};
 use crate::util::{now_epoch, truncate};
 use std::io::{BufRead, BufReader};
 use std::process::Command;
@@ -91,7 +91,7 @@ pub fn run_session(
     // Register the worker's process group (pgid == pid, since we set process_group(0)) so a
     // SIGINT/SIGTERM on `agg run` kills the worker's whole tree instead of orphaning it, and lets
     // the loop unwind through its Drop guards. Cleared right after child.wait() below.
-    crate::signals::set_worker_pgid(pid);
+    crate::os::signals::set_worker_pgid(pid);
 
     let sh = Arc::new(Shared::new());
 
@@ -105,7 +105,7 @@ pub fn run_session(
     let status = child.wait().ok();
     // The session's process is done — a later signal must not target this (about-to-be-recycled)
     // pgid. The loop checks signals::interrupted() after we return.
-    crate::signals::clear_worker_pgid();
+    crate::os::signals::clear_worker_pgid();
     // The child is now reaped — its pid is free and the OS may recycle it at any moment. Set
     // BOTH flags before the post-exit group-kill below so the watchdog (which kills by pid) can
     // never fire on a recycled pid: `done` ends its loop, `reaping` is the belt-and-braces guard
@@ -125,12 +125,12 @@ pub fn run_session(
     // background work. Spare protected pgids — a properly-spawned task has its OWN group
     // and its own log (not the worker pipe), so this only matters for the edge case, and
     // there the per-pid protected sweep below releases any real pipe-holder anyway.
-    let protected = crate::spawns::protected_pgids(dir);
+    let protected = crate::os::spawns::protected_pgids(dir);
     if protected.is_empty() {
         proc::kill_group(pid);
     } else {
         // protected tasks present: do a protected-aware sweep instead of a blind group kill.
-        let _ = crate::reap::reap_pgid_except(pid, &protected);
+        let _ = crate::os::reap::reap_pgid_except(pid, &protected);
     }
     // bounded collect: if the reader is still blocked on a held-open pipe after the
     // group kill, give up after 10s with whatever we have (the thread dies on its own
@@ -149,7 +149,7 @@ pub fn run_session(
     // BUT spare registered `agg spawn` long tasks: a worker may have deliberately left a
     // multi-hour sim running to poll next session. Their pgids are PROTECTED so the sweep
     // kills real leaks but not intentional background work. (`protected` computed above.)
-    let reaped = crate::reap::reap_pgid_except(pid, &protected);
+    let reaped = crate::os::reap::reap_pgid_except(pid, &protected);
     if reaped > 0 {
         eprintln!("  reaped {reaped} straggler process(es) from the worker group");
     }
@@ -372,7 +372,7 @@ fn spawn_watchdog(
 fn hhmmss() -> String {
     // local HH:MM:SS via the cached libc offset (no chrono dependency) so the
     // dashboard's Activity tail matches the user's wall clock, not UTC.
-    crate::localtime::hhmmss(now_epoch())
+    crate::ui::localtime::hhmmss(now_epoch())
 }
 
 /// Sleep up to `secs`, waking early in 1s steps if `done` flips.

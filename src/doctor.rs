@@ -1,9 +1,9 @@
 //! `agg doctor` — preflight diagnosis. Answers "am I set up right?" in one command,
 //! so "why isn't it working?" becomes a checklist instead of a mystery.
 
-use crate::config::{AggConfig, GoalsConfig};
-use crate::engine::Engine;
-use crate::model::JudgeSpec;
+use crate::core::config::{AggConfig, GoalsConfig};
+use crate::core::engine::Engine;
+use crate::core::model::JudgeSpec;
 use anyhow::Result;
 use std::path::Path;
 

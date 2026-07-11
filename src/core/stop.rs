@@ -18,7 +18,7 @@
 //!             any_regressed, count_regressed. The `(invariants)` subset restricts
 //!             an aggregate to invariant goals.
 
-use crate::model::Goal;
+use crate::core::model::Goal;
 use anyhow::{anyhow, bail, Result};
 
 /// The facts the evaluator needs about the current goal set + run.
@@ -369,7 +369,7 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Goal, GoalType, JudgeSpec, Lifecycle, Verdict};
+    use crate::core::model::{Goal, GoalType, JudgeSpec, Lifecycle, Verdict};
 
     fn g(id: &str, met: bool, invariant: bool) -> Goal {
         let mut goal = Goal {
@@ -380,7 +380,7 @@ mod tests {
             weight: 1.0,
             invariant,
             description: String::new(),
-            recheck: crate::model::RecheckPolicy::Always,
+            recheck: crate::core::model::RecheckPolicy::Always,
             recheck_inputs: vec![],
             state: Lifecycle::Pending,
             last_verdict: None,

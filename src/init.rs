@@ -260,9 +260,9 @@ mod tests {
         let dir = tmpdir("root");
         run(&dir, false, false).unwrap();
         // the generated config must load with the ACTUAL loaders (no schema drift)
-        crate::config::AggConfig::load(&dir.join("agg.yaml")).expect("scaffolded agg.yaml must parse");
-        let g = crate::config::GoalsConfig::load(&dir.join("goals.yaml")).expect("scaffolded goals.yaml must parse");
-        crate::engine::Engine::new(g).expect("scaffolded goals must build an engine (stop_when valid)");
+        crate::core::config::AggConfig::load(&dir.join("agg.yaml")).expect("scaffolded agg.yaml must parse");
+        let g = crate::core::config::GoalsConfig::load(&dir.join("goals.yaml")).expect("scaffolded goals.yaml must parse");
+        crate::core::engine::Engine::new(g).expect("scaffolded goals must build an engine (stop_when valid)");
         // refuses to clobber without force
         assert!(run(&dir, false, false).is_err());
         assert!(run(&dir, true, false).is_ok());
@@ -282,13 +282,13 @@ mod tests {
         assert_eq!(crate::paths::config_base(&dir), dir.join("agg"));
         let cfg = crate::paths::config_file(&dir, "goals.yaml");
         assert_eq!(cfg, dir.join("agg/goals.yaml"));
-        let g = crate::config::GoalsConfig::load(&cfg).expect("foldered goals.yaml must parse");
+        let g = crate::core::config::GoalsConfig::load(&cfg).expect("foldered goals.yaml must parse");
         // the judge cmd points at the project-root-relative path
         assert!(
             format!("{:?}", g.goals[0].judge).contains("./agg/judges/tests.sh"),
             "foldered judge cmd should be root-relative: {:?}", g.goals[0].judge
         );
-        crate::engine::Engine::new(g).expect("foldered goals must build an engine");
+        crate::core::engine::Engine::new(g).expect("foldered goals must build an engine");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

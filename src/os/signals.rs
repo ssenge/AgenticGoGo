@@ -56,7 +56,7 @@ pub fn install() {
                     if pgid != 0 {
                         // SIGKILL the worker's whole group so no tool subprocess is orphaned, and
                         // so the loop's blocking child.wait() returns for graceful cleanup.
-                        crate::proc::kill_group(pgid);
+                        crate::os::proc::kill_group(pgid);
                     }
                 }
             });

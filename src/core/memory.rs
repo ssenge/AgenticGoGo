@@ -322,7 +322,7 @@ fn cap_bytes_keep_newest_chars(s: &str, max: usize) -> String {
 /// deltas this cycle + the current scoreboard. Pure formatting over data the loop already holds —
 /// no I/O. Each change line is truncated (a judge rationale can be long) and the whole block is
 /// byte-capped.
-pub fn last_session_block(deltas: &[crate::engine::GoalDelta], scoreboard: &str) -> String {
+pub fn last_session_block(deltas: &[crate::core::engine::GoalDelta], scoreboard: &str) -> String {
     let mut out = String::new();
     let changed = changed_lines(deltas);
     if changed.is_empty() {
@@ -349,7 +349,7 @@ pub fn mechanical_note(
     rate_limited: bool,
     duration_secs: u64,
     scoreboard: &str,
-    deltas: &[crate::engine::GoalDelta],
+    deltas: &[crate::core::engine::GoalDelta],
 ) -> String {
     let outcome = if killed_by_watchdog {
         "worker killed by watchdog (hung)".to_string()
@@ -380,7 +380,7 @@ pub fn mechanical_note(
 
 /// Changed-goal lines, each truncated so a verbose judge rationale (embedded by
 /// `GoalDelta::line()`) can't balloon the block / the prompt.
-fn changed_lines(deltas: &[crate::engine::GoalDelta]) -> Vec<String> {
+fn changed_lines(deltas: &[crate::core::engine::GoalDelta]) -> Vec<String> {
     deltas
         .iter()
         .filter(|d| d.changed())
@@ -391,8 +391,8 @@ fn changed_lines(deltas: &[crate::engine::GoalDelta]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::GoalDelta;
-    use crate::model::Lifecycle;
+    use crate::core::engine::GoalDelta;
+    use crate::core::model::Lifecycle;
     use std::path::PathBuf;
 
     fn tmpdir(tag: &str) -> PathBuf {

@@ -6,7 +6,10 @@
 
 // The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.
-use agg::{bus, config, dashboard, detach, doctor, engine, init, judge, loop_, project, spawns, state, status};
+use agg::core::{config, engine, judge};
+use agg::os::{detach, spawns};
+use agg::ui::{dashboard, status};
+use agg::{bus, doctor, init, loop_, project, state};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -273,7 +276,7 @@ fn run_cli() -> Result<ExitCode> {
             return Ok(ExitCode::from(outcome.exit_code()));
         }
         Cmd::Serve { port, cors_origin, token } => {
-            agg::serve::run(agg::serve::ServeConfig {
+            agg::ui::serve::run(agg::ui::serve::ServeConfig {
                 dir: p.dir.clone(),
                 port: *port,
                 cors_origin: cors_origin.clone(),
@@ -312,7 +315,7 @@ fn run_cli() -> Result<ExitCode> {
 /// Queue one steering command onto a running loop's bus. Shared by `agg send …` and
 /// the `agg stop` convenience alias.
 fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
-    let live = agg::detach::live_pid(dir).is_some();
+    let live = agg::os::detach::live_pid(dir).is_some();
     let path = agg::bus::queue_command(dir, &cmd)?;
     if live {
         eprintln!("queued → {} (the loop applies it at the next session boundary)", path.display());
@@ -365,7 +368,7 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
         use std::os::unix::process::CommandExt;
         // new session → new process group (child is leader) → no controlling tty.
         unsafe {
-            c.pre_exec(agg::proc::setsid);
+            c.pre_exec(agg::os::proc::setsid);
         }
     }
     let child = c.spawn().with_context(|| format!("spawning `{}`", cmd.join(" ")))?;

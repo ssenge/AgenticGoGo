@@ -27,7 +27,7 @@
 //! latter is restricted on current macOS and returns nothing, which silently defeats an
 //! env-marker scheme. pgid avoids that trap entirely.)
 
-use crate::proc::{group_of, kill_group, kill_pid, pid_alive, pids_in_group};
+use crate::os::proc::{group_of, kill_group, kill_pid, pid_alive, pids_in_group};
 use std::collections::HashSet;
 
 /// Kill every process in process group `pgid` (other than `self_pid`), SPARING any process
@@ -69,7 +69,7 @@ pub fn reap_pgid_except(pgid: u32, protected: &HashSet<u32>) -> usize {
 }
 
 // (The process primitives `group_of` / `pids_in_group` / `kill_group` / `kill_pid` /
-// `pid_alive` now live in `crate::proc` — see the imports at the top.)
+// `pid_alive` now live in `crate::os::proc` — see the imports at the top.)
 
 #[cfg(test)]
 mod tests {
@@ -92,7 +92,7 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "nohup sleep 60 >/dev/null 2>&1 & echo $!; exit 0"])
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-        unsafe { cmd.pre_exec(crate::proc::setsid); }
+        unsafe { cmd.pre_exec(crate::os::proc::setsid); }
         let out = cmd.output().expect("spawn worker");
         let child_pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
         assert!(child_pid > 0, "couldn't read straggler pid");
@@ -125,7 +125,7 @@ mod tests {
             let mut cmd = Command::new("sh");
             cmd.args(["-c", "sleep 30 >/dev/null 2>&1 & echo $!"])
                 .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-            unsafe { cmd.pre_exec(crate::proc::setsid); }
+            unsafe { cmd.pre_exec(crate::os::proc::setsid); }
             let mut child = cmd.spawn().expect("spawn sh launcher");
             let mut s = String::new();
             child.stdout.take().unwrap().read_to_string(&mut s).ok();

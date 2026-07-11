@@ -27,11 +27,11 @@
 //! homework. The determinism of the GATE is what makes it safe to trust a stochastic worker.
 
 use crate::bus::{Bus, Command};
-use crate::config::AggConfig;
-use crate::engine::{CycleResult, Engine, GoalRuntime, RunState};
+use crate::core::config::AggConfig;
+use crate::core::engine::{CycleResult, Engine, GoalRuntime, RunState};
 use crate::state::{DashboardState, LiveState, Phase};
 use crate::summary;
-use crate::worker::{self, SessionOutcome};
+use crate::backend::worker::{self, SessionOutcome};
 use anyhow::Result;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -189,7 +189,7 @@ struct RunPidGuard<'a> {
 }
 impl Drop for RunPidGuard<'_> {
     fn drop(&mut self) {
-        crate::detach::clear_run_pid(self.dir);
+        crate::os::detach::clear_run_pid(self.dir);
     }
 }
 
@@ -454,7 +454,7 @@ impl LoopState<'_> {
         // Layer-3 spawn scanner: flip finished long-tasks to "done", prune stale entries.
         // Runs every boundary (the harness's natural tick) — autonomous-safe, only updates
         // liveness of tasks WE registered; never kills a process it can't prove is ours.
-        if let Some(change) = crate::spawns::scan(self.dir) {
+        if let Some(change) = crate::os::spawns::scan(self.dir) {
             eprintln!("  [spawn] {change}");
         }
 
@@ -463,7 +463,7 @@ impl LoopState<'_> {
         // memory: clear any stale scratch note for THIS session number left by a prior run, so a
         // worker note from a different run can never be folded as this session's learning.
         if self.cfg.memory.enabled {
-            crate::memory::clear_scratch(self.dir, self.session);
+            crate::core::memory::clear_scratch(self.dir, self.session);
         }
         Injected::Prompt(effective_prompt)
     }
@@ -488,14 +488,14 @@ impl LoopState<'_> {
             format!("{}\n\n{}", self.prompt_prefix, self.resume_prompt)
         };
         // prepend any tracked background-task status so the worker sees what is pending + why.
-        let base = match crate::spawns::summary_for_prompt(self.dir) {
+        let base = match crate::os::spawns::summary_for_prompt(self.dir) {
             Some(status) => format!("{status}\n{base}"),
             None => base,
         };
         // institutional memory (#3): pure code, runs every prompt, never an LLM call. Empty string
         // when there's nothing yet (fresh project), so the prompt is unchanged.
         let base = if self.cfg.memory.enabled {
-            let mem = crate::memory::read_block(self.dir, &self.last_session, self.cfg.memory.inject_kb);
+            let mem = crate::core::memory::read_block(self.dir, &self.last_session, self.cfg.memory.inject_kb);
             if mem.is_empty() {
                 base
             } else {
@@ -543,7 +543,7 @@ impl LoopState<'_> {
         self.tokens_spent += outcome.output_tokens;
         self.cost_spent += outcome.cost_usd;
 
-        if crate::signals::interrupted() {
+        if crate::os::signals::interrupted() {
             return None;
         }
         // (run_session now reaps any straggler in the worker's process group on exit, and the
@@ -595,7 +595,7 @@ impl LoopState<'_> {
         let mut mem_folded = false;
         if self.cfg.memory.enabled && !outcome.rate_limited {
             let scoreboard_now = self.eng.scoreboard();
-            let body = crate::memory::mechanical_note(
+            let body = crate::core::memory::mechanical_note(
                 outcome.exit_code,
                 outcome.killed_by_watchdog,
                 outcome.rate_limited,
@@ -604,7 +604,7 @@ impl LoopState<'_> {
                 &[], // no deltas yet — judging hasn't run; superseded below if we get there.
             );
             self.dash.memory_bytes =
-                crate::memory::append_entry(self.dir, self.session, "session-start", &body, self.cfg.memory.max_kb);
+                crate::core::memory::append_entry(self.dir, self.session, "session-start", &body, self.cfg.memory.max_kb);
             mem_folded = true;
             self.publish();
         }
@@ -618,7 +618,7 @@ impl LoopState<'_> {
             // memory: a rate-limited session is incomplete — no durable entry was written (the
             // early fold skips when rate_limited). Just clean up any scratch the worker left.
             if self.cfg.memory.enabled {
-                crate::memory::clear_scratch(self.dir, self.session);
+                crate::core::memory::clear_scratch(self.dir, self.session);
             }
             // emit AFTER the scratch cleanup, exactly where the publish() it replaces sat: what
             // lands in state.json depends on WHERE it is published (see `publish`).
@@ -696,8 +696,8 @@ impl LoopState<'_> {
                     .unwrap_or(false)
             };
             let regressed = res.deltas.iter().any(|d| {
-                d.before_state == crate::model::Lifecycle::Met
-                    && d.after_state != crate::model::Lifecycle::Met
+                d.before_state == crate::core::model::Lifecycle::Met
+                    && d.after_state != crate::core::model::Lifecycle::Met
                     && judge_ran(&d.id)
             });
             let keep = !regressed;
@@ -766,7 +766,7 @@ impl LoopState<'_> {
             // the mechanical fact is ALWAYS recorded — the worker note (if any) is appended as a
             // clearly-fenced, lower-trust hint, never allowed to stand alone (so a poisoned or
             // over-confident note can't masquerade as the authoritative session record).
-            let mut mech = crate::memory::mechanical_note(
+            let mut mech = crate::core::memory::mechanical_note(
                 outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
                 outcome.duration_secs, &scoreboard, &res.deltas,
             );
@@ -780,7 +780,7 @@ impl LoopState<'_> {
             }
             // 3a: optional worker note (sanitized + size-capped + de-fanged in read_worker_note);
             //     here we additionally FENCE it so its body can never be read as live markdown.
-            let worker_note = crate::memory::read_worker_note(self.dir, self.session);
+            let worker_note = crate::core::memory::read_worker_note(self.dir, self.session);
             let (source, body) = match worker_note {
                 Some(note) => (
                     "mechanical+worker",
@@ -799,12 +799,12 @@ impl LoopState<'_> {
             // SUPERSEDE the early "session-start" floor entry in place → exactly ONE entry per
             // completed session (no double-fold).
             self.dash.memory_bytes =
-                crate::memory::fold_entry(self.dir, self.session, source, &body, self.cfg.memory.max_kb, true);
+                crate::core::memory::fold_entry(self.dir, self.session, source, &body, self.cfg.memory.max_kb, true);
             // delete the scratch note now that it's folded (bounds `.agg/memory/` growth; prevents
             // a cross-run re-fold).
-            crate::memory::clear_scratch(self.dir, self.session);
+            crate::core::memory::clear_scratch(self.dir, self.session);
             // carry the always-on LAST SESSION block into the NEXT prompt's READ block.
-            self.last_session = crate::memory::last_session_block(&res.deltas, &scoreboard);
+            self.last_session = crate::core::memory::last_session_block(&res.deltas, &scoreboard);
             eprintln!("  [memory] session #{} folded ({source}); AGG_MEMORY.md {} B", self.session, self.dash.memory_bytes);
             self.publish();
         }
@@ -847,7 +847,7 @@ pub fn run(
     // pidfile from a crashed loop is cleaned up and ignored). We exempt our OWN pid because
     // the detached child re-runs `agg run` after `spawn_detached` already wrote the child's
     // pid to run.pid — so the child legitimately finds its own pid here and must NOT bail.
-    if let Some(pid) = crate::detach::live_pid(dir) {
+    if let Some(pid) = crate::os::detach::live_pid(dir) {
         if pid != std::process::id() {
             anyhow::bail!(
                 "a loop is already running in this project (pid {pid}).\n  \
@@ -860,13 +860,13 @@ pub fn run(
     // Record THIS process as the live loop so `agg stop` / the double-run guard read a
     // current pid. Covers BOTH foreground `agg run` and the detached child (which re-runs
     // `agg run` for real) — the child overwrites the launcher's pid with its own.
-    crate::detach::write_run_pid(dir);
+    crate::os::detach::write_run_pid(dir);
     let _run_pid_guard = RunPidGuard { dir };
 
     // Install SIGINT/SIGTERM handling: a Ctrl-C now kills the worker's process group (no orphan)
     // and lets the loop return through its Drop guards instead of dying uncleaned. Checked at the
     // phase boundaries below via signals::interrupted().
-    crate::signals::install();
+    crate::os::signals::install();
 
     // the resume prompt sits next to agg.yaml → resolve against config_base (the `agg/` folder
     // when in use, else the project root).
@@ -1007,10 +1007,10 @@ pub fn run(
     // durable file's newest entry is the cross-RUN carry. Make memory work WITHOUT git isolation
     // by creating `.agg/memory/` ourselves (not via the isolation-only gitignore path).
     if cfg.memory.enabled {
-        crate::memory::ensure_scratch_dir(dir);
+        crate::core::memory::ensure_scratch_dir(dir);
         // sweep any scratch notes left by a prior run (crash / forged filename) — the durable
         // AGG_MEMORY.md is the only legitimate cross-run carrier, so they are all stale.
-        crate::memory::sweep_scratch(dir);
+        crate::core::memory::sweep_scratch(dir);
     }
 
     // ---- bus: operator/outer-Claude steering, drained at each session boundary

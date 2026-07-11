@@ -123,7 +123,7 @@ impl Project {
             out.push_str(&format!(
                 "{:<4} {:<19} {:<8} {:>9} {:>9} {:>7} {}\n",
                 r.run,
-                crate::localtime::ymd_hms(r.started_at_epoch),
+                crate::ui::localtime::ymd_hms(r.started_at_epoch),
                 dur,
                 r.sessions,
                 r.tokens,
