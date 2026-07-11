@@ -1070,17 +1070,17 @@ if [ "$WEB" = "0" ]; then
   skip "web interface" "--no-web"
 elif ! command -v node >/dev/null 2>&1; then
   skip "web interface" "node not installed"
-elif [ ! -d "$ROOT/web/node_modules" ]; then
+elif [ ! -d "$ROOT/src/web/node_modules" ]; then
   skip "web interface" "run 'npm install' in web/ first"
 else
   WPORT=$(free_port); APORT=$(free_port)
   W="$(mkproj web)"; : > "$W/NO_WORK"; echo 3 > "$W/WORKER_SLEEP"
 
-  ( cd "$ROOT/web" && npm run build > "$W/build.log" 2>&1 )
+  ( cd "$ROOT/src/web" && npm run build > "$W/build.log" 2>&1 )
   is "web app builds (npm run build)" "$?" "0"
 
   agg_bg WSRV "$W" serve.log serve --port "$APORT" --cors-origin "http://localhost:$WPORT"
-  ( cd "$ROOT/web" && exec env AGG_API="http://127.0.0.1:$APORT" PORT="$WPORT" node build/index.js > "$W/web.log" 2>&1 ) & WAPP=$!
+  ( cd "$ROOT/src/web" && exec env AGG_API="http://127.0.0.1:$APORT" PORT="$WPORT" node build/index.js > "$W/web.log" 2>&1 ) & WAPP=$!
   BGPIDS+=("$WAPP")
   waitfor 30 "web app serves on :$WPORT" bash -c "curl -sf http://127.0.0.1:$WPORT/ -o /dev/null"
 
@@ -1140,7 +1140,7 @@ assert d['phase'] in ('inject','run','verify','gate'), d['phase']" \
   kill $WSRV 2>/dev/null; wait $WSRV 2>/dev/null
 
   # the BFF must degrade gracefully when agg serve is gone (api_offline path)
-  ( cd "$ROOT/web" && exec env AGG_API="http://127.0.0.1:1" PORT="$WPORT" node build/index.js > "$W/web2.log" 2>&1 ) & WAPP2=$!
+  ( cd "$ROOT/src/web" && exec env AGG_API="http://127.0.0.1:1" PORT="$WPORT" node build/index.js > "$W/web2.log" 2>&1 ) & WAPP2=$!
   BGPIDS+=("$WAPP2")
   waitfor 30 "web app restarts with agg serve DOWN" bash -c "curl -sf http://127.0.0.1:$WPORT/ -o /dev/null"
   curl -s "http://127.0.0.1:$WPORT/api/health" -o "$W/h2.json"

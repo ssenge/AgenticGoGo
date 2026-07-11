@@ -330,13 +330,13 @@ Two ways to watch a run — same live state, two views — plus a chat superviso
   <img src="assets/web.png" alt="the agg web UI — scoreboard, controls, and activity log" width="49%">
 </p>
 <p align="center">
-  <sub><b>TUI</b> (<code>agg dashboard</code>) &nbsp;·&nbsp; <b>Web</b> (<code>agg serve</code> + the SvelteKit app in <code>web/</code>)</sub>
+  <sub><b>TUI</b> (<code>agg dashboard</code>) &nbsp;·&nbsp; <b>Web</b> (<code>agg serve</code> + the SvelteKit app in <code>src/web/</code>)</sub>
 </p>
 
 | | |
 |---|---|
 | **TUI** | `agg dashboard` — live scoreboard, goals, activity tail. `Tab` focus · `↑↓` `PgUp` `PgDn` `g` `G` scroll · `f` follow · `q` quit. `--once` prints a one-shot snapshot for CI/SSH. |
-| **Web** | A standalone SvelteKit app in [`web/`](web/). The binary stays UI-free and exposes a thin JSON API. |
+| **Web** | A standalone SvelteKit app in [`src/web/`](src/web/). The binary stays UI-free and exposes a thin JSON API. |
 | **Supervisor** | `/agg:supervise` in a second Claude Code session — status and steering by chat, reachable from the mobile app. Reads the snapshot only, not the workers' output. |
 
 ```bash

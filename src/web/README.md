@@ -20,7 +20,7 @@ auth in the remote phase.
    ```
 2. **Start this web app:**
    ```
-   cd web
+   cd src/web
    npm install
    npm run dev               # serves http://localhost:5173
    ```
