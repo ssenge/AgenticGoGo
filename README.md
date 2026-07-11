@@ -19,8 +19,10 @@ quietly stop one step short — leaving you to babysit a terminal?
 
 AgenticGoGo (`agg`) is a deterministic outer **[Ralph loop](https://ghuntley.com/ralph/)** that
 drives a stochastic inner agent — relaunching a **fresh** session, verifying its work against gates
-*it can't fake* (the **judges**), and repeating until your goals are actually met. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done. *(A similar LLM-based approach (generate → verify → keep) as evolutionary code search was proposed by DeepMind [AlphaCode](https://arxiv.org/abs/2203.07814) and it's open-source variant
-[CodeEvolve](https://arxiv.org/abs/2510.14150) outside of the Ralph loop community already years ago.)*
+*it can't fake* (the **judges**), and repeating until your goals are actually met. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done. *(A similar LLM-based approach — generate → verify → keep, as in evolutionary code search — was
+proposed years ago, outside the Ralph-loop community, by DeepMind's
+[AlphaCode](https://arxiv.org/abs/2203.07814) and its open-source variant
+[CodeEvolve](https://arxiv.org/abs/2510.14150).)*
 
 A **judge** is a small, incorruptible check that decides whether one goal is met — usually a script
 inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading against a rubric. You
@@ -45,7 +47,7 @@ Three of the four stages are deterministic code; only the `RUN` stage is a (stoc
 The loop continues until all goals are met — potentially for hours, days, weeks (watch your token
 consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate that decides it's done.
 
-The overall architecutre is caputured in the following diagram:
+The overall architecture is captured in the following diagram:
 
 <p align="center">
   <img src="assets/arch.png" alt="AgenticGoGo architecture: the agg outer loop drives one fresh claude -p worker and writes plain state files under .agg/, which the TUI, the web UI, and a Claude supervisor (reachable from your phone) all read" width="760">
@@ -118,7 +120,7 @@ resume_prompt: AGG_RESUME.md
 
 `AGG_RESUME.md` is the standing instruction `INJECT`ed into *every* session — "fix `calc.py` so
 `python3 calc.py` prints 2 and the tests pass". In case of multiple iterations (i.e. multiple subsequent **`RUN`** stages), this file gets adapted to track the progress so far accordingly (see [State and memory](#state-and-memory)).
-Also note the `stop_when: outputs_two and tests_pass` in the `goals.yaml` file, it composes two judges using an `and` conjunction, the next point explains how to create such judges.
+Also note the `stop_when: outputs_two and tests_pass` line in the `goals.yaml` file: it composes two judges with an `and`, and the next step explains how to create such judges.
 
 **3 — Have Claude write the judge.** A judge is any command that prints a verdict as JSON (see
 [Building judges](#building-judges)). You can write one by hand, but asking Claude is the easy way:
