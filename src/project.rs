@@ -61,10 +61,7 @@ impl Project {
 
     /// Load the ledger, or a fresh empty one if absent/unreadable/corrupt.
     pub fn load(dir: &Path) -> Self {
-        std::fs::read_to_string(Self::path(dir))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        crate::util::load_json_or_default(&Self::path(dir))
     }
 
     /// Best-effort persist (pretty-printed for human inspection). ATOMIC (write tmp, rename) —

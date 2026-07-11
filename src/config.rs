@@ -3,7 +3,7 @@
 //! Both are plain YAML. Env vars (`AGG_*`) override a few hot knobs for CI.
 
 use crate::model::Goal;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -291,10 +291,7 @@ fn default_memory_inject_kb() -> Option<u64> {
 
 impl AggConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading agg config {}", path.display()))?;
-        let mut cfg: AggConfig =
-            serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut cfg: AggConfig = crate::util::load_yaml(path)?;
         cfg.apply_env_overrides();
         Ok(cfg)
     }
@@ -332,10 +329,7 @@ impl AggConfig {
 
 impl GoalsConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading goals {}", path.display()))?;
-        let cfg: GoalsConfig =
-            serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let cfg: GoalsConfig = crate::util::load_yaml(path)?;
         anyhow::ensure!(!cfg.goals.is_empty(), "goals.yaml has no goals");
         Ok(cfg)
     }
