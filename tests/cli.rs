@@ -794,10 +794,19 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
     }
     // no libc dep: this file is already unix-only and shells out freely.
     Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
+    let signalled_at = std::time::Instant::now();
     let status = child.wait().unwrap();
+    let took = signalled_at.elapsed();
 
     let err = fs::read_to_string(dir.join("run.err")).unwrap_or_default();
     assert_eq!(status.code(), Some(0), "an operator interrupt is a clean stop:\n{err}");
+    // The worker above sleeps 30s. The loop can only come back this fast if the signal path
+    // actually SIGKILLed the worker's process GROUP — without that kill we'd simply wait the
+    // sleep out and still exit 0, so every other assertion here would pass on a broken kill.
+    assert!(
+        took < std::time::Duration::from_secs(15),
+        "interrupt took {took:?} — the worker group was not killed, we waited out its sleep:\n{err}"
+    );
 
     let trace = fs::read_to_string(&trace_path).unwrap();
     let seq: Vec<&str> = trace.lines().collect();
