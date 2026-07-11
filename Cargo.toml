@@ -28,6 +28,7 @@ ratatui = "0.29"          # the live TUI dashboard
 crossterm = "0.28"        # terminal backend for ratatui
 tiny_http = "0.12"        # `agg serve` — the thin JSON API for the standalone web UI (sync, no tokio)
 jiff = "0.2.32"
+nix = { version = "0.31.3", features = ["signal", "process"] }
 
 [dev-dependencies]
 assert_cmd = "2"          # drive the built `agg` binary in integration tests

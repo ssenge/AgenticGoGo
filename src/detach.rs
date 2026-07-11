@@ -76,7 +76,7 @@ pub fn spawn_detached(dir: &Path) -> Result<()> {
         use std::os::unix::process::CommandExt;
         // new session → no controlling tty → survives terminal close.
         unsafe {
-            cmd.pre_exec(|| crate::proc::setsid());
+            cmd.pre_exec(crate::proc::setsid);
         }
     }
 

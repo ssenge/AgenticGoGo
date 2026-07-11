@@ -1,8 +1,8 @@
 //! AgenticGoGo (`agg`) — the CLI entry point.
 //!
 //! A thin clap front-end over the `agg` library: it parses subcommands (init/doctor/plan/
-//! status/run/dashboard/stop/inject/pause/resume/spawn/send), resolves the project paths, and
-//! dispatches into the harness. The orchestration itself lives in the library crate.
+//! status/run/dashboard/stop/spawn/send), resolves the project paths, and dispatches into the
+//! harness. The orchestration itself lives in the library crate.
 
 // The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.
@@ -363,7 +363,7 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
         use std::os::unix::process::CommandExt;
         // new session → new process group (child is leader) → no controlling tty.
         unsafe {
-            c.pre_exec(|| agg::proc::setsid());
+            c.pre_exec(agg::proc::setsid);
         }
     }
     let child = c.spawn().with_context(|| format!("spawning `{}`", cmd.join(" ")))?;

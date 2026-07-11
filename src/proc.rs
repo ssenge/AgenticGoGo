@@ -5,30 +5,18 @@
 //! to diverge). Process killing, liveness, and the timeout-runner are correctness-sensitive;
 //! they belong in exactly one place. Everything cross-platform lives here behind a `#[cfg]`.
 //!
-//! Why raw `libc` FFI instead of the `libc` crate: a single `kill(2)` declaration is cheaper
-//! than a dependency, and it's the only libc symbol the project needs. Now that it's declared
-//! once, the leanness argument holds without the six-fold repetition that made it a liability.
+//! The unix syscalls come from `nix`'s safe wrappers rather than a hand-declared `extern "C"`
+//! block — same syscalls, no `unsafe`, and it typechecks the pid/signal arguments that a raw
+//! `kill(-pgid, 9)` leaves as bare integers.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-// ---------------- raw kill(2) — declared ONCE for the whole crate ----------------
-
 #[cfg(unix)]
-extern "C" {
-    /// POSIX `kill(2)`. `sig == 0` tests for existence (no signal sent). A negative `pid`
-    /// targets the whole process group. Returns 0 on success.
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
-
-    /// POSIX `setsid(2)`: start a new session (and new process group, with the caller as
-    /// leader) and drop the controlling tty. Returns the new sid, or -1 on error.
-    #[link_name = "setsid"]
-    fn libc_setsid() -> i32;
-}
-
-#[cfg(unix)]
-const SIGKILL: i32 = 9;
+use nix::{
+    sys::signal::{kill, killpg, Signal},
+    unistd::Pid,
+};
 
 // ---------------- liveness + single-pid / group kills ----------------
 
@@ -39,7 +27,8 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
-        unsafe { libc_kill(pid as i32, 0) == 0 }
+        // signal `None` is the POSIX `sig == 0` existence probe: permission-checked, sends nothing.
+        kill(Pid::from_raw(pid as i32), None).is_ok()
     }
     #[cfg(not(unix))]
     {
@@ -56,7 +45,7 @@ pub fn pid_alive(pid: u32) -> bool {
 pub fn kill_pid(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        unsafe { libc_kill(pid as i32, SIGKILL) == 0 }
+        kill(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
     }
     #[cfg(not(unix))]
     {
@@ -68,14 +57,15 @@ pub fn kill_pid(pid: u32) -> bool {
     }
 }
 
-/// SIGKILL an entire process group at once (`kill(-pgid, SIGKILL)` on unix). On Windows
-/// (no POSIX groups) `pgid` carries the leader pid and `taskkill /T` tree-kills it.
+/// SIGKILL an entire process group at once (`killpg(2)` on unix). On Windows (no POSIX groups)
+/// `pgid` carries the leader pid and `taskkill /T` tree-kills it.
+///
+/// Async-signal-safe on unix (a bare `killpg(2)`), which is what lets `signals.rs` call this
+/// from its SIGINT/SIGTERM path to stop the worker group without orphaning it.
 pub fn kill_group(pgid: u32) {
     #[cfg(unix)]
     {
-        unsafe {
-            libc_kill(-(pgid as i32), SIGKILL);
-        }
+        let _ = killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL);
     }
     #[cfg(not(unix))]
     {
@@ -90,8 +80,11 @@ pub fn kill_group(pgid: u32) {
 pub fn group_of(pid: u32) -> Option<u32> {
     #[cfg(unix)]
     {
-        let o = Command::new("ps").args(["-o", "pgid=", "-p", &pid.to_string()]).output().ok()?;
-        String::from_utf8_lossy(&o.stdout).trim().parse().ok()
+        // `getpgid(2)` — was a `ps -o pgid= -p <pid>` fork+exec per call, and the reaper calls it
+        // once per pid in the group.
+        nix::unistd::getpgid(Some(Pid::from_raw(pid as i32)))
+            .ok()
+            .map(|pg| pg.as_raw() as u32)
     }
     #[cfg(not(unix))]
     {
@@ -128,19 +121,13 @@ pub fn pids_in_group(pgid: u32) -> Vec<u32> {
 }
 
 /// `setsid(2)` — start a new session + process group with the caller as leader, dropping the
-/// controlling tty. Call from a `pre_exec` closure. Returns Err if the syscall failed, so the
-/// caller can abort the spawn rather than launch a child still tied to the parent's group.
-///
-/// # Safety
-/// Must be called in the narrow `pre_exec` window (post-fork, pre-exec), where only
-/// async-signal-safe work is permitted. `setsid` is async-signal-safe.
+/// controlling tty. Call from a `pre_exec` closure (which is itself `unsafe`: only
+/// async-signal-safe work is permitted in the post-fork/pre-exec window, and `setsid` qualifies).
+/// Returns Err if the syscall failed, so the caller can abort the spawn rather than launch a
+/// child still tied to the parent's group.
 #[cfg(unix)]
-pub unsafe fn setsid() -> std::io::Result<()> {
-    if libc_setsid() == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+pub fn setsid() -> std::io::Result<()> {
+    nix::unistd::setsid().map(|_| ()).map_err(std::io::Error::from)
 }
 
 // ---------------- timeout-aware command runner ----------------
