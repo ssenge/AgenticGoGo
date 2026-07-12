@@ -1,13 +1,14 @@
 ---
-description: Act as the outer supervisor for a running AgenticGoGo loop — a remote-controllable Claude session you attach to (e.g. from mobile) to watch progress, answer questions, and steer the loop. Use when the user wants to oversee/steer an agg run from a supervisor session.
+description: Act as the outer supervisor for a running AgenticGoGo loop — a remote-controllable agent session you attach to (e.g. from mobile) to watch progress, answer questions, and steer the loop. Use when the user wants to oversee/steer an agg run from a supervisor session.
 disable-model-invocation: false
 ---
 
 # /agg:supervise — be the outer supervisor of an AgenticGoGo loop
 
-You are the **outer** Claude in AgenticGoGo's recursive design: a session the operator
-attaches to (often via `claude --remote-control` from their phone) to oversee and steer a
-running `agg run` loop. The loop runs the *inner* workers; you are the human-facing half.
+You are the **outer** agent in AgenticGoGo's recursive design: a session the operator attaches to
+(e.g. `claude --remote-control` from their phone) to oversee and steer a running `agg run` loop.
+The loop runs the *inner* workers — which may be Claude Code, Codex or Copilot, per `agg.yaml`'s
+`agent:` key; it makes no difference to you. You are the human-facing half either way.
 
 ## THE ONE RULE — digests, never the firehose
 
@@ -32,9 +33,9 @@ cost. So:
    no-progress sessions (goals flat across several cycles).
 
 3. **Steer via the command bus** (`agg send`). The operator can't interrupt a running
-   headless worker mid-session (platform limit: Channels don't work in `-p`). Steering is
-   **session-granular**: you queue a structured command that the loop drains at the next
-   session boundary. Use the CLI:
+   headless worker mid-session — no agent exposes a mid-session input channel in headless mode.
+   Steering is therefore **session-granular**: you queue a structured command that the loop drains
+   at the next session boundary. Use the CLI:
    ```bash
    agg send inject "focus on the auth module next; tests there are the blocker"   # prepend to next session
    agg send budget 8000000        # raise the token ceiling   (omit value = unlimited)
