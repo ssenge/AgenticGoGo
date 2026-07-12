@@ -20,12 +20,19 @@
 //! | headless prompt | `-p <text>` | **positional** (`-p` is `--profile`!) | `-p <text>` |
 //! | auto-approve | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | `--allow-all-tools` |
 //! | event stream | `--output-format stream-json` | `--json` | `--output-format json` |
-//! | output tokens | `usage.output_tokens` | `turn.completed.usage.output_tokens` | `assistant.usage.data.outputTokens` |
-//! | **dollar cost** | ✅ `total_cost_usd` | ❌ **NONE** (source-confirmed) | ❌ `cost` = a *billing multiplier*, not USD |
+//! | output tokens | `usage.output_tokens` on the TERMINAL event | `turn.completed.usage.output_tokens` | `assistant.message.data.outputTokens` — **per message, NOT on the terminal event** |
+//! | **dollar cost** | ✅ `total_cost_usd` | ❌ **NONE** (source-confirmed) | ❌ **NONE** — terminal `usage` holds `premiumRequests` + durations only |
 //! | tools-off one-shot | ✅ | ❌ no way found | ⚠️ maybe (`--available-tools=` + `--disable-builtin-mcps`), unverified |
-//! | resume | `--resume <id>` | **subcommand** `codex exec resume <ID>` | `-r/--resume=<id>` |
+//! | resume | `--resume <id>` | **subcommand** `codex exec resume <ID>` | `-r/--resume=<id>`; id = `result.sessionId` |
 //! | effort | `--effort` | ❌ no flag (only `-c model_reasoning_effort=…`) | `--effort` (same vocabulary) |
-//! | terminal event | `type:"result"` | `turn.completed` \| `turn.failed` \| bare `error` | `session.shutdown` (`shutdownType`) |
+//! | terminal event | `type:"result"` | `turn.completed` \| `turn.failed` \| bare `error` | `type:"result"` (`sessionId`, `exitCode`, `usage`) |
+//!
+//! Copilot's rows are **empirical** — from actually running `copilot -p … --output-format json`
+//! and reading the stream. They CONTRADICT its SDK docs, which describe a `session.shutdown`
+//! terminal, an `assistant.usage` event, and no top-level session id. The real CLI emits none of
+//! those: it emits `result` (carrying `sessionId`), and tokens ride on `assistant.message`. Trust
+//! the wire, not the doc — and re-verify before shipping a Copilot backend, because that JSON
+//! output is weeks old and GitHub has not committed to it as a stable API.
 //!
 //! ## The dangerous one: cost
 //! `over_cost` is `cost_spent >= cost_limit`. If a backend never reports cost, `cost_spent` stays
@@ -104,18 +111,20 @@ pub struct Capabilities {
 
 // ---------------- what the loop needs back from a session ----------------
 
-/// Everything the loop learns from an agent's TERMINAL event.
+/// What the loop learns from an agent's TERMINAL event.
 ///
 /// Every field is an `Option` on purpose: `None` means **the agent did not report this**, which is
 /// categorically different from "it reported zero". Collapsing those two is exactly the bug that
 /// makes a spend guard silently stop guarding.
+///
+/// Note what is NOT here: output tokens. They are accumulated per-line via
+/// [`AgentBackend::parse_usage`], because **not every agent reports them on the terminal event** —
+/// see that method for the empirical reason.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionReport {
-    /// handle for a later `--resume`, if the agent exposes one.
+    /// handle for a later resume, if the agent exposes one.
     pub session_id: Option<String>,
-    /// output-side tokens this session spent.
-    pub output_tokens: Option<u64>,
-    /// dollars this session spent, if the agent prices itself.
+    /// dollars this session spent, if the agent prices itself. Cumulative — SET, don't add.
     pub cost_usd: Option<f64>,
     /// the terminal event reported a rate/usage limit.
     pub rate_limited: bool,
@@ -180,6 +189,25 @@ pub trait AgentBackend: Send + Sync {
     /// Parse one line of the agent's event stream into a displayable event, or `None` for a line
     /// that carries nothing to show.
     fn parse_event(&self, line: &str) -> Option<stream::Event>;
+
+    /// Output tokens observed on THIS line, to be **added** to the session's running total.
+    ///
+    /// # Why this is per-line and not part of [`Self::parse_result`]
+    /// Because agents do not agree on where usage lives, and assuming they do produces a
+    /// false negative that silently disables the token budget. Observed, not guessed:
+    ///
+    /// - **Claude** reports cumulative `usage.output_tokens` ONCE, on its terminal `result` event.
+    /// - **Copilot** reports `outputTokens` on EVERY `assistant.message` — and its terminal
+    ///   `result` event carries **no token count at all** (its `usage` object holds
+    ///   `premiumRequests` and durations instead). Verified by running it: an earlier design that
+    ///   read tokens only from the terminal event would have forced `reports_output_tokens: false`
+    ///   for Copilot and refused `over_budget` — even though Copilot reports tokens perfectly well.
+    ///
+    /// Summing works for BOTH shapes: an agent that reports once contributes once; an agent that
+    /// reports per-message contributes many times. So this returns an INCREMENT, never a total.
+    /// Return `None` for a line that carries no usage (and for an agent that never reports usage,
+    /// which must also declare `reports_output_tokens: false`).
+    fn parse_usage(&self, line: &str) -> Option<u64>;
 
     /// Parse one line as the session's TERMINAL event. `None` = this line is not terminal.
     ///
@@ -275,5 +303,49 @@ mod tests {
         assert!(c.reports_output_tokens && c.reports_cost_usd, "claude reports both");
         assert!(c.supports_one_shot, "claude can run a tools-off judge call");
         assert!(c.supports_resume && c.supports_effort && c.detects_rate_limits);
+    }
+
+    /// `parse_usage` returns an INCREMENT per line, which is what lets ONE worker loop serve two
+    /// incompatible reporting shapes. Claude reports once, on its terminal event. Copilot reports
+    /// on every assistant message and puts NO token count on its terminal event — an earlier design
+    /// read tokens only from the terminal event, which would have forced Copilot to declare
+    /// `reports_output_tokens: false` and silently refused `over_budget` on an agent that reports
+    /// tokens perfectly well. Summing serves both; totalling does not.
+    #[test]
+    fn usage_is_an_increment_so_report_once_and_report_per_message_both_work() {
+        let b = active();
+        // Claude's shape: usage rides the terminal `result` event, once.
+        let result_line = r#"{"type":"result","usage":{"output_tokens":100,"cache_creation_input_tokens":5},"total_cost_usd":0.25,"session_id":"s1"}"#;
+        assert_eq!(b.parse_usage(result_line), Some(105), "output + cache-creation are both output-priced");
+
+        // A line with no usage contributes NOTHING — and `None` is not `Some(0)`. That distinction
+        // is what keeps "the agent didn't report" from masquerading as "the agent reported zero".
+        assert_eq!(b.parse_usage(r#"{"type":"assistant","message":{}}"#), None);
+        assert_eq!(b.parse_usage(r#"{"type":"result","session_id":"s1"}"#), None, "result with no usage object");
+
+        // Summing the stream is the worker's job; here we prove the pieces add up.
+        let total: u64 = [result_line, r#"{"type":"assistant"}"#]
+            .iter()
+            .filter_map(|l| b.parse_usage(l))
+            .sum();
+        assert_eq!(total, 105);
+    }
+
+    /// The terminal event still owns the CUMULATIVE facts (id, cost, rate-limit) — those are SET,
+    /// not summed, and must not be confused with the incremental usage above.
+    #[test]
+    fn the_terminal_event_owns_the_cumulative_facts() {
+        let b = active();
+        let r = b
+            .parse_result(r#"{"type":"result","total_cost_usd":0.25,"session_id":"s1"}"#)
+            .expect("a result line is terminal");
+        assert_eq!(r.session_id.as_deref(), Some("s1"));
+        assert_eq!(r.cost_usd, Some(0.25));
+        assert!(!r.rate_limited);
+        // a non-terminal line is not a report at all
+        assert!(b.parse_result(r#"{"type":"assistant"}"#).is_none());
+        // …and an agent that reports no cost yields None, NOT Some(0.0)
+        let r = b.parse_result(r#"{"type":"result","session_id":"s1"}"#).unwrap();
+        assert_eq!(r.cost_usd, None, "absent cost must be None — Some(0.0) would disarm over_cost");
     }
 }

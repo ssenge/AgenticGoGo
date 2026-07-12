@@ -231,20 +231,15 @@ pub fn parse_result(line: &str) -> Option<crate::backend::SessionReport> {
     if v.get("type")?.as_str()? != "result" {
         return None;
     }
-    // output tokens + cache-creation (also output-priced); ignore input/read. Absent `usage`
-    // object → None (not reported), not Some(0).
-    let output_tokens = v.get("usage").map(|u| {
-        let get = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-        get("output_tokens") + get("cache_creation_input_tokens")
-    });
     Some(crate::backend::SessionReport {
         session_id: v.get("session_id").and_then(|x| x.as_str()).map(str::to_string),
-        output_tokens,
         // Claude prices the session itself — correctly per-model (including the `[1m]` variant),
         // cache-aware, no pricing table needed on our side. We just read it.
         cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
         rate_limited: line_is_rate_limited_result(line),
     })
+    // NOTE: output tokens are NOT read here — they are accumulated per-line via
+    // `AgentBackend::parse_usage`, because not every agent reports them on the terminal event.
 }
 
 /// Extract the `session_id` from a terminal `result` event (for `--resume`), if any.
@@ -256,22 +251,21 @@ pub fn session_id_from_result(line: &str) -> Option<String> {
     v.get("session_id")?.as_str().map(str::to_string)
 }
 
-/// Extract output-token usage from a terminal `result` event, if present.
-/// `claude --output-format stream-json` reports a `usage` object on the result;
-/// we sum the output-side tokens (the meaningful cost driver for the budget).
-/// Returns 0 if the line is not a result or carries no usage.
-pub fn output_tokens_from_result(line: &str) -> u64 {
-    let Ok(v) = serde_json::from_str::<Value>(line) else { return 0 };
-    if v.get("type").and_then(|t| t.as_str()) != Some("result") {
-        return 0;
+/// Output-token usage reported on a terminal `result` event.
+///
+/// `claude --output-format stream-json` reports a `usage` object ONCE, on the result — so this
+/// fires exactly once per session. `None` = this line carries no usage (not a result, or no
+/// `usage` object), which is deliberately distinct from `Some(0)`: "did not report" is not
+/// "reported zero", and conflating them is what silently disarms the token budget.
+pub fn output_tokens_from_result(line: &str) -> Option<u64> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "result" {
+        return None;
     }
-    let usage = match v.get("usage") {
-        Some(u) => u,
-        None => return 0,
-    };
+    let usage = v.get("usage")?;
     let get = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
     // output tokens + cache-creation (also output-priced); ignore input/read.
-    get("output_tokens") + get("cache_creation_input_tokens")
+    Some(get("output_tokens") + get("cache_creation_input_tokens"))
 }
 
 /// Extract the session's dollar cost from a terminal `result` event, if present.

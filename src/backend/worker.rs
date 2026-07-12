@@ -260,22 +260,25 @@ fn spawn_reader(
                 });
                 tracker.observe(&ev);
             }
-            // The terminal event carries everything the loop learns from the session at once.
-            // Each field is an Option: `None` = THIS AGENT DOES NOT REPORT IT, which is not the
-            // same as zero. We only fold in what was actually reported; a config that *needs* a
-            // number the agent can't produce was already refused at startup by `capability::check`,
-            // so a `None` here can never quietly disarm a guard.
+            // Usage is ACCUMULATED per line, not read off the terminal event — agents disagree
+            // about where it lives. Claude reports it ONCE (on its result); Copilot reports it on
+            // EVERY assistant message and puts no token count on its terminal event at all.
+            // Summing handles both shapes. See AgentBackend::parse_usage.
+            if let Some(toks) = agent.parse_usage(&line) {
+                sh.output_tokens.fetch_add(toks, Ordering::Relaxed);
+            }
+            // The TERMINAL event carries the rest. Each field is an Option: `None` = THIS AGENT
+            // DOES NOT REPORT IT, which is not the same as zero. We fold in only what was actually
+            // reported; a config that *needs* a number the agent can't produce was already refused
+            // at startup by `capability::check`, so a `None` here can never quietly disarm a guard.
             if let Some(report) = agent.parse_result(&line) {
                 if let Some(id) = report.session_id {
-                    session_id = Some(id); // for optional --resume continuity
+                    session_id = Some(id); // for optional resume continuity
                 }
                 if report.rate_limited {
                     sh.rate_limited.store(true, Ordering::Relaxed);
                 }
-                if let Some(toks) = report.output_tokens {
-                    sh.output_tokens.fetch_add(toks, Ordering::Relaxed);
-                }
-                // the terminal event carries the FINAL cumulative cost, so SET it, don't add.
+                // cost is CUMULATIVE on the terminal event, so SET it, don't add.
                 if let Some(c) = report.cost_usd {
                     *sh.cost_usd.lock().unwrap_or_else(|e| e.into_inner()) = c;
                 }
