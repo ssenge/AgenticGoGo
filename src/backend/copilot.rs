@@ -67,10 +67,18 @@ impl AgentBackend for Copilot {
             supports_resume: true,
             // `--effort`, and the same vocabulary Claude uses (low|medium|high|xhigh|max).
             supports_effort: true,
-            // NOT VERIFIED, and the docs suggest a rate-limited session may PAUSE AND AUTO-RETRY
-            // silently — in which case it never surfaces to us at all. Claiming detection we don't
-            // have would make the loop burn its session budget on retries it thinks are failures.
-            // False until someone observes a real limit on the wire.
+            // NO — and unlike Claude/Codex this is a genuine gap, not conservatism.
+            //
+            // Those two put failure PROSE on their terminal event, which is scannable. Copilot's
+            // terminal `result` carries only `sessionId`, `exitCode` and `usage` — there is no
+            // error text on it at all, so there is nothing to match against. GitHub also documents
+            // that a rate-limited session may PAUSE AND AUTO-RETRY silently, in which case the
+            // limit never reaches us in any form.
+            //
+            // Guessing a field path we have never seen on the wire is exactly the mistake that this
+            // file's whole header warns about. If someone captures a real limit, add it here and
+            // flip this to true — `backend::looks_rate_limited` is the shared matcher, already
+            // carrying Copilot's `quota_exceeded` / HTTP 402 signature.
             detects_rate_limits: false,
             // YES — by NOT passing `--allow-all-tools`, so any write is permission-denied.
             //

@@ -62,16 +62,16 @@ impl AgentBackend for Codex {
             reports_cost_usd: false,
             // `codex exec resume <SESSION_ID>`, id from thread.started.thread_id.
             supports_resume: true,
-            // NO effort flag on `codex exec` at all. (There is a `-c model_reasoning_effort=…`
-            // config override, but its vocabulary is not agg's — agg speaks Claude's
-            // low|medium|high|xhigh|max — and silently mistranslating an effort level is exactly
-            // the quiet downgrade this contract exists to prevent. An operator who wants it can
-            // pass `-c model_reasoning_effort=high` through agg.yaml `worker_args` explicitly.)
-            supports_effort: false,
-            // Rate limits surface only as free-form text in an error message — no error kind, no
-            // code. Substring-sniffing prose would rot on the next release, and a false positive
-            // parks the loop in a 30-minute backoff for nothing.
-            detects_rate_limits: false,
+            // YES — not via a flag (`codex exec` has none) but via the `-c model_reasoning_effort=`
+            // config override, which is verified to work. See `effort_arg` for the level mapping.
+            supports_effort: true,
+            // YES — best-effort, exactly as it is for Claude. Codex has no error KIND (its
+            // ThreadErrorEvent is just `{message: String}`), so a rate limit is only recognisable
+            // from the text. That is also true of Claude, whose detector is a substring match on
+            // the same kind of prose. Scanning is tightly gated to the TERMINAL failure events
+            // (turn.failed / bare error), never tool output, so a command that merely prints "429"
+            // cannot trip a false backoff.
+            detects_rate_limits: true,
             // YES — via `--sandbox read-only`, which is the property a judge actually needs.
             //
             // The requirement was never "tools must be absent". It is "the judge must not be able
@@ -90,11 +90,10 @@ impl AgentBackend for Codex {
         DEFAULT_SUMMARY_MODEL
     }
 
-    /// Empty: Codex has no effort flag, so agg's blanket `max` default would otherwise be a demand
-    /// no Codex run could satisfy — and every one would be refused at startup for an effort the
-    /// user never asked for.
+    /// `high` — the most reasoning Codex offers. (agg's blanket `max` is Claude's vocabulary; see
+    /// [`effort_arg`] for how the levels map.)
     fn default_effort(&self) -> &'static str {
-        ""
+        "high"
     }
 
     /// `codex exec [OPTIONS] <PROMPT>` — prompt POSITIONAL and LAST; stdin nulled or it hangs.
@@ -119,7 +118,10 @@ impl AgentBackend for Codex {
         if !spec.model.is_empty() {
             command.arg("--model").arg(spec.model);
         }
-        // NOTE: no `--effort` — Codex has none. See capabilities().
+        // Codex has no `--effort` flag; reasoning effort is a CONFIG override.
+        if let Some(level) = effort_arg(spec.effort) {
+            command.arg("-c").arg(format!("model_reasoning_effort={level}"));
+        }
         for a in spec.extra_args {
             command.arg(a);
         }
@@ -225,8 +227,8 @@ impl AgentBackend for Codex {
             return None;
         }
         Some(SessionReport {
-            cost_usd: None,      // Codex reports no cost, anywhere — see capabilities()
-            rate_limited: false, // free-form prose only; not reliably detectable — see capabilities()
+            cost_usd: None, // Codex reports no cost, anywhere — see capabilities()
+            rate_limited: rate_limited(&v, ty),
         })
     }
 
@@ -331,6 +333,38 @@ fn clean(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Map agg's effort level onto Codex's `model_reasoning_effort` value. `None` = pass nothing.
+///
+/// agg speaks Claude's vocabulary (`low|medium|high|xhigh|max`); Codex's tops out at `high`. The
+/// two above it are CLAMPED to `high` rather than rejected: "max" means *"think as hard as this
+/// agent can"*, and `high` is as hard as Codex thinks. That is an honest clamp, not a silent
+/// downgrade — asking for more reasoning than the model offers can only ever give you its most.
+fn effort_arg(effort: &str) -> Option<&'static str> {
+    match effort {
+        "" => None,
+        "minimal" => Some("minimal"),
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        // Codex has no xhigh/max — clamp to its ceiling.
+        "high" | "xhigh" | "max" => Some("high"),
+        _ => Some("high"), // an unknown level asks for more thinking, not less
+    }
+}
+
+/// Did a TERMINAL failure event report a rate/usage limit?
+///
+/// Codex has no error kind — `ThreadErrorEvent` is `{message: String}` — so text is all there is.
+/// This is exactly what Claude's detector does with its own prose. Gated to the terminal failure
+/// events only, so a tool that merely PRINTS "429" cannot trip a false 30-minute backoff.
+fn rate_limited(v: &Value, ty: &str) -> bool {
+    let text = match ty {
+        "turn.failed" => v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()),
+        "error" => v.get("message").and_then(|m| m.as_str()),
+        _ => None,
+    };
+    text.map(super::looks_rate_limited).unwrap_or(false)
+}
+
 /// The model's ANSWER from a `--json` stream: the LAST `agent_message` item. Codex emits its
 /// reasoning and progress as separate items; the final agent_message is the reply. Falls back to
 /// the raw bytes so a schema change degrades to "pass the text through" rather than to an empty
@@ -407,7 +441,7 @@ mod tests {
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args[0], "exec");
         assert!(!args.contains(&"-p".to_string()), "-p is --profile in codex — NEVER the prompt");
-        assert!(!args.contains(&"--effort".to_string()), "codex has no effort flag");
+        assert!(!args.contains(&"--effort".to_string()), "codex has no --effort FLAG; it uses -c");
         assert_eq!(args.last().unwrap(), "do the thing", "prompt is positional and LAST");
         // REGRESSION: naming a model default (`gpt-5-codex`) is a hard 400 on a ChatGPT account —
         // the available models depend on how the user authenticated. Empty ⇒ omit the flag.
@@ -446,8 +480,19 @@ mod tests {
         let c = Codex.capabilities();
         assert!(c.reports_output_tokens && c.supports_resume);
         assert!(!c.reports_cost_usd, "codex reports no dollar cost anywhere");
-        assert!(!c.supports_effort, "codex exec has no effort flag");
+        assert!(c.supports_effort, "via -c model_reasoning_effort= (verified working)");
         assert!(c.supports_one_shot, "read-only sandbox = can host a judge that cannot WRITE");
-        assert_eq!(Codex.default_effort(), "", "so agg's `max` default must not refuse every run");
+        assert_eq!(Codex.default_effort(), "high", "codex's ceiling — agg's `max` clamps to it");
+        assert!(c.detects_rate_limits, "turn.failed/error carry the text, same as Claude");
+        // the level mapping: agg speaks Claude's vocabulary; codex tops out at `high`.
+        assert_eq!(effort_arg(""), None, "empty = pass nothing");
+        assert_eq!(effort_arg("low"), Some("low"));
+        assert_eq!(effort_arg("max"), Some("high"), "clamp, don't reject — `max` = as hard as it thinks");
+        assert_eq!(effort_arg("xhigh"), Some("high"));
+        // rate limits are read from the TERMINAL failure events only, never tool output.
+        let rl = Codex.parse_result(r#"{"type":"turn.failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests"}}"#).unwrap();
+        assert!(rl.rate_limited, "a 429 on turn.failed must back the loop off");
+        let ok = Codex.parse_result(r#"{"type":"turn.completed","usage":{}}"#).unwrap();
+        assert!(!ok.rate_limited);
     }
 }

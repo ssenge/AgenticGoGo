@@ -270,6 +270,29 @@ pub trait AgentBackend: Send + Sync {
 
 // ---------------- selection ----------------
 
+/// Does this text look like a rate/usage-limit error?
+///
+/// Shared by every backend, because none of them expose a machine-readable error CODE for it —
+/// Claude's terminal event carries prose, and Codex's `ThreadErrorEvent` is literally
+/// `{message: String}`. Substring matching is all anyone has, so at least they all use the SAME
+/// list, and each backend gates it to its TERMINAL failure events only. Never scan tool output: a
+/// command that merely prints "429" must not park the loop in a 30-minute backoff.
+pub fn looks_rate_limited(text: &str) -> bool {
+    const PATS: &[&str] = &[
+        "rate_limit_error",
+        "usage limit reached",
+        "status 429",
+        "http 429",
+        "429 too many requests",
+        "overloaded_error",
+        "too many requests",
+        "quota_exceeded", // Copilot returns HTTP 402 with this
+        "insufficient_quota",
+    ];
+    let h = text.to_lowercase();
+    PATS.iter().any(|p| h.contains(p))
+}
+
 /// Every backend agg knows how to drive. Adding one = a new `claude.rs`-shaped module + one arm.
 pub const KNOWN: &[&str] = &["claude", "codex", "copilot"];
 
