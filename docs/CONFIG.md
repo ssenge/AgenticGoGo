@@ -43,12 +43,15 @@ that wastes work — especially with an LLM judge. Set a recheck policy in `goal
 
 ```yaml
 - id: report_written
+  type: binary             # REQUIRED on every goal: binary | percentage | cardinal
   recheck: once_met        # judge until first met, then LATCH — never re-judged (shown 🔒)
-  # `model:` uses YOUR agent's model names (`haiku` is Claude's). Omit it to take the agent's
-  # default judge model — the only portable choice, and required on Codex.
-  judge: { kind: llm, model: haiku, rubric: "judges/report.md", inputs: ["REPORT.md"] }
+  # `model:` is OMITTED on purpose: it takes your agent's own default judge model. That is the
+  # only portable choice, and it is required on Codex (naming a model there is a hard 400).
+  # If you do set it, use YOUR agent's names — `haiku` is Claude's.
+  judge: { kind: llm, rubric: "judges/report.md", inputs: ["REPORT.md"] }
 
 - id: artifact_valid
+  type: binary
   recheck: on_change       # re-judge only when a declared input changes (by content hash)
   recheck_inputs: ["build/out.json"]
   judge: { kind: script, cmd: "./judges/validate.sh" }
@@ -86,13 +89,27 @@ overnight runs, prefer running `agg` in a container/VM you're willing to hand to
 To narrow what the agent may do, pass extra flags **for your agent** via `worker_args` in `agg.yaml`
 — they are passed through verbatim, so the vocabulary is that agent's own:
 
+Pick the ONE line for your agent (they are shown together only to compare — two `worker_args`
+keys in one file is a duplicate mapping key and will not parse):
+
 ```yaml
-worker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "src"]   # claude
-worker_args: ["--max-ai-credits", "50"]                            # copilot — its own spend ceiling
+# agent: claude
+worker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "src"]
+```
+```yaml
+# agent: codex
+worker_args: ["--sandbox", "workspace-write"]
+```
+```yaml
+# agent: copilot — its own spend ceiling, since it cannot report dollars
+worker_args: ["--max-ai-credits", "50"]
 ```
 
-These are appended to every `RUN`. The judge and summarizer run as separate, tools-off calls that
-load only your own settings — never the agent-mutated repo's config.
+These are appended to every `RUN`. The judge and summarizer run as separate **read-only** calls that
+load only your own settings — never the agent-mutated repo's config — so the agent cannot steer the
+thing that grades it. Same guarantee, three mechanisms: Claude `--strict-mcp-config` +
+`--setting-sources user`; Codex `--sandbox read-only`; Copilot by withholding `--allow-all-tools`
+(tools are offered, but every write is denied).
 
 **No orphaned compute** *(macOS + Linux)*. The agent runs in its own process group; when a session
 ends, the loop stops, or you `Ctrl-C`, `agg` sweeps the whole group and kills any straggler — even a

@@ -27,7 +27,8 @@ use std::process::{Command, Stdio};
 /// Copilot's default model on the free tier is chosen by `auto`; naming it explicitly keeps the
 /// invocation reproducible.
 pub const DEFAULT_MODEL: &str = "auto";
-/// The summarizer/judge model. Unused today — see `supports_one_shot` below.
+/// The summarizer/judge model — `default_summary_model()`'s value, i.e. the serde default for
+/// `summary.model` when agg.yaml omits it.
 pub const DEFAULT_SUMMARY_MODEL: &str = "auto";
 
 /// The isolation a JUDGE/summarizer call runs under. **`--allow-all-tools` is deliberately absent**
@@ -338,10 +339,12 @@ impl AgentBackend for Copilot {
     fn preflight(&self) -> Result<()> {
         if !self.is_installed() {
             anyhow::bail!(
+                // PARALLEL with claude.rs / codex.rs — install, login, HEADLESS check.
                 "the GitHub Copilot CLI (`{}`) was not found on your PATH.\n  \
-                 Install it with `npm install -g @github/copilot`, then run `copilot login`\n  \
-                 (or set GH_TOKEN / COPILOT_GITHUB_TOKEN) and make sure `{} --version` works.",
-                self.bin(),
+                 AgenticGoGo drives it to run the inner workers. Install it with\n    \
+                 npm install -g @github/copilot\n  \
+                 then run `copilot login` (or set GH_TOKEN / COPILOT_GITHUB_TOKEN), and make\n  \
+                 sure `copilot -p \"hello\"` answers.",
                 self.bin()
             );
         }

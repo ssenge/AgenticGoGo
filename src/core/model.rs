@@ -160,7 +160,8 @@ pub enum JudgeSpec {
         #[serde(default = "default_timeout")]
         timeout: u64,
     },
-    /// A cheap `claude -p` call that scores artifacts against a rubric prompt.
+    /// A cheap, READ-ONLY one-shot model call that scores artifacts against a rubric prompt. Runs on
+/// whichever agent `agent:` selects — see `backend::AgentBackend::one_shot`.
     Llm {
         #[serde(default = "default_model")]
         model: String,

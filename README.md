@@ -101,7 +101,10 @@ Or install them straight into **this project**, with the binary you just install
 same three skills, every agent:
 
 ```bash
-agg skills install          # --agent claude|codex|copilot · --user for account-wide
+agg skills install --agent codex     # claude | codex | copilot · --user for account-wide
+                                     # (agg needs to know WHICH agent — it installs into a
+                                     #  different directory for each, and this runs before
+                                     #  agg.yaml exists. Inside an agent's own shell it detects it.)
 ```
 
 Full options (prebuilt binaries, from source, version pinning) →
@@ -150,7 +153,7 @@ stop_when: outputs_two and tests_pass
 # agg/agg.yaml — how the loop runs
 agent: claude              # claude (default) · codex · copilot — see "Choosing an agent"
 project: calc
-model: claude-sonnet-5
+model: "claude-opus-4-8[1m]"   # claude only. On codex: OMIT this line. On copilot: `auto`.
 resume_prompt: AGG_RESUME.md
 ```
 
@@ -252,8 +255,12 @@ both consume the *same* manifest Claude does, so there is one plugin, not three.
 **Route 2 — install into the project**, with the binary you already have:
 
 ```bash
-agg skills install            # installs for the agent in agg.yaml (or --agent codex|copilot|claude)
-agg skills install --user     # …for your whole account instead of just this project
+agg skills install --agent codex   # claude | codex | copilot
+agg skills install --user          # …for your whole account instead of just this project
+
+# --agent is optional once agg.yaml exists (it reads the `agent:` key), and inside an agent's own
+# shell agg detects which one you are in. Otherwise name it — the install directory differs per
+# agent, so a wrong guess puts the skills where that agent will never look.
 ```
 
 That copies the three skills — `agg-new`, `agg-status`, `agg-supervise` — into the directory your
@@ -297,8 +304,9 @@ agg run
 Copilot — see [Choosing an agent](#choosing-an-agent)), and `/agg:new` writes a config shaped for the agent you
 chose. If doctor is green, `agg run` will start.
 
-**No skills at all?** `agg init` still scaffolds `agg.yaml`, `goals.yaml`, `AGG_RESUME.md` and a
-starter judge by hand. It is the fallback, not the recommended path — `/agg:new` reads your existing
+**No skills at all?** `agg init --agent codex` still scaffolds `agg.yaml`, `goals.yaml`,
+`AGG_RESUME.md` and a starter judge — shaped for that agent (it omits the keys your agent cannot
+honour, so the result starts).</br> It is the fallback, not the recommended path — `/agg:new` reads your existing
 plans and derives goals and judges from them; `agg init` just writes a template.
 
 ## Features
@@ -327,7 +335,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 
 **Control & observability**
 - **Live TUI + standalone web UI** — same state, two views ([Interfaces](#interfaces)).
-- **Mobile supervisor** (`/agg:supervise`) — status and steering by chat from your phone.
+- **Chat supervisor** (`/agg:supervise` · `/agg-supervise` · `$agg-supervise`) — status and steering by chat in a second agent session; from your phone via Claude Code's mobile app.
 - **Session-granular steering** — `agg send inject / budget / pause / resume / stop`.
 - **Automation-friendly** — `--json` output and meaningful exit codes.
 
@@ -381,7 +389,8 @@ So a `binary` goal can print just `{"met": true}`; a cardinal one might print, a
 **Two flavours, same contract.** Judges are typically deterministic **scripts** or **LLM-as-judge** —
 and to `agg` there's no difference: anything that emits the verdict JSON is a judge (a `script` judge
 can even shell out to `claude -p` itself). The built-in **`llm`** kind is a convenience that also
-*hardens* the LLM case against gaming. Give it a `rubric` + `inputs` + `model` and `agg`:
+*hardens* the LLM case against gaming. Give it a `rubric` + `inputs` (and optionally a `model` — **omit it to take your agent's default,
+which is the only portable choice, and required on Codex**) and `agg`:
 
 - **builds the prompt** — your rubric plus the declared input files, wrapped so the repo's content is
   fed as *untrusted data* the judge is told never to obey (a file can't talk the judge into a pass);
@@ -472,7 +481,7 @@ Two ways to watch a run — same live state, two views — plus a chat superviso
 
 ```bash
 agg serve                              # JSON API on :7878
-cd web && npm install && npm run dev   # the web tool on :5173
+cd src/web && npm install && npm run dev   # the web UI on :5173
 ```
 
 ## CLI reference
@@ -494,7 +503,7 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `POST /api/send` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` |
 | `agg spawn` | *(used by the worker, not to start the loop)* track a long child task so the reaper spares it and the next session polls it | `--name <n>` · `--reason <why>` · `-- <cmd…>` |
 | `agg stop [reason]` | Graceful stop at the next session boundary (the one top-level steering alias) | |
-| `agg send <cmd>` | All steering, applied at the next session boundary: `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` | |
+| `agg send <cmd>` | All steering, applied at the next session boundary | `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` |
 
 `agg run` exit codes, so automation can branch on the outcome: **0** goals met (or an operator
 stop) · **1** hard error · **3** a guard fired (`halt_when`) · **4** hit `--max-sessions`.

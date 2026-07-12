@@ -4,10 +4,11 @@
 //! [`super::copilot`]). Everything Claude-specific in the whole crate lives here or in
 //! [`super::stream`], which parses its `stream-json` wire format.
 //!
-//! Claude is the most capable backend of the ones surveyed: it is the only one that reports a
-//! DOLLAR cost, and the only one with a verified way to run a genuinely non-agentic one-shot call
-//! (tools and MCP off) — which is what an LLM judge has to be, or it could go and edit the thing
-//! it is grading. See [`super::Capabilities`] for what that means for its siblings.
+//! Claude is the only backend that reports a DOLLAR cost (`total_cost_usd`), which is why
+//! `cost.total` / `over_cost` are Claude-only. It is NOT the only one that can run a read-only
+//! one-shot call — Codex (`--sandbox read-only`) and Copilot (withhold `--allow-all-tools`) can
+//! too, so LLM judges and summaries work on all three. Read-only is what an LLM judge HAS to be, or
+//! it could go and edit the thing it is grading. See [`super::Capabilities`] for the full matrix.
 
 use super::{stream, AgentBackend, Capabilities, OneShot, SessionReport, SessionSpec};
 use crate::os::proc::{self, Captured};
@@ -157,10 +158,13 @@ impl AgentBackend for Claude {
     fn preflight(&self) -> Result<()> {
         if !self.is_installed() {
             anyhow::bail!(
+                // Keep this PARALLEL with codex.rs / copilot.rs: install command, then login,
+                // then a HEADLESS check. `--version` is not the check — agg only ever drives the
+                // agent headlessly, so "the binary exists" proves nothing about whether it can run.
                 "the Claude Code CLI (`{}`) was not found on your PATH.\n  \
-                 AgenticGoGo drives it to run the inner workers. Install it from\n  \
-                 https://claude.com/claude-code and make sure `{} --version` works, then retry.",
-                self.bin(),
+                 AgenticGoGo drives it to run the inner workers. Install it with\n    \
+                 npm install -g @anthropic-ai/claude-code\n  \
+                 then run `claude auth login`, and make sure `claude -p \"hello\"` answers.",
                 self.bin()
             );
         }

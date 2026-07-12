@@ -15,7 +15,19 @@ use std::path::Path;
 /// Scaffold the four starter files. With `folder`, they go under `<dir>/agg/`; otherwise into
 /// `<dir>` directly. Refuses to clobber existing config unless `force` is set, so re-running
 /// init never silently destroys real work.
-pub fn run(dir: &Path, force: bool, folder: bool) -> Result<()> {
+pub fn run(dir: &Path, force: bool, folder: bool, agent: Option<&str>) -> Result<()> {
+    // Resolve the backend the scaffold is FOR. Every agent-specific choice below (`model`,
+    // `summary.model`, whether `cost:` / `over_cost` are even legal) is read off it.
+    // `--agent` wins; else the agent whose shell we are in; else Claude, the default.
+    //
+    // Deliberately `for_name`, NOT `backend::init` + `active()`: `active()` is a OnceLock, so it
+    // returns whatever was latched FIRST in this process, not what was asked for here. Resolving
+    // locally keeps `agg init --agent codex` correct no matter what else ran before it.
+    let chosen = agent.map(str::to_string).or_else(|| crate::skills::host_agent().map(str::to_string));
+    let b: &dyn crate::backend::AgentBackend = match &chosen {
+        Some(a) => crate::backend::for_name(a)?, // rejects an unknown agent before writing anything
+        None => crate::backend::active(),
+    };
     // config_base = where the config files land; judge_cmd = how goals.yaml refers to the judge
     // (relative to the PROJECT ROOT, since judge scripts run there regardless of layout).
     let (base, judge_cmd) = if folder {
@@ -24,12 +36,50 @@ pub fn run(dir: &Path, force: bool, folder: bool) -> Result<()> {
         (dir.to_path_buf(), "./judges/tests.sh")
     };
     let goals_yaml = GOALS_YAML.replace("./judges/tests.sh", judge_cmd);
-    // the scaffolded model names come from the backend, so a model bump is a one-line change
-    // there instead of a hunt through a YAML template (which `format!` can't interpolate
-    // without escaping every `{` in its flow maps).
+
+    // The scaffold must be shaped for the agent it will actually DRIVE. Before this, `agg init`
+    // wrote no `agent:` key at all and interpolated Claude's model — so the documented "no skill?
+    // use agg init" fallback handed every Codex user a Claude config, and `agg run` refused it.
+    //
+    // Two keys are not universal, and emitting them anyway is a startup refusal, not a warning:
+    //   model:  Codex must OMIT it — naming a model you aren't entitled to is a hard 400.
+    //   cost:   Claude ONLY — nobody else reports dollars, so `capability::check` rejects it.
+    let agent = b.name();
+    let model_line = match b.default_model() {
+        "" => "# model:              # codex picks its own — naming one is a hard 400\n".to_string(),
+        m => format!("model: \"{m}\"     # the inner worker model\n"),
+    };
+    let cost_line = if b.capabilities().reports_cost_usd {
+        "cost:   { total: null }           # dollar ceiling, e.g. 5.0 (null = unlimited) → over_cost\n"
+            .to_string()
+    } else {
+        format!("# cost: NOT supported by `{agent}` — it cannot report dollars, and agg refuses the\n\
+                 #       config rather than leave a spend guard that could never fire. Use `budget`.\n")
+    };
+    let effort_line = match b.default_effort() {
+        "" => format!(
+            "effort: \"\"                        # `{agent}` cannot combine an effort with `model: auto`\n"
+        ),
+        e => format!("effort: {e}                     # thinking effort: low|medium|high|xhigh|max\n"),
+    };
+    let summary_model = match b.default_summary_model() {
+        "" => String::new(), // codex: omit, same hard-400 reason as `model:`
+        m => format!(", model: {m}"),
+    };
+    // `over_cost` in halt_when is the same trap as `cost:` in agg.yaml — naming it for an agent
+    // that cannot report dollars makes `capability::check` refuse the run. The scaffold must not
+    // hand the user a config that will not start.
+    let goals_yaml = goals_yaml.replace(
+        "{{OVER_COST}}",
+        if b.capabilities().reports_cost_usd { " OR over_cost" } else { "" },
+    );
+
     let agg_yaml = AGG_YAML
-        .replace("{{MODEL}}", crate::backend::active().default_model())
-        .replace("{{SUMMARY_MODEL}}", crate::backend::active().default_summary_model());
+        .replace("{{AGENT}}", agent)
+        .replace("{{MODEL_LINE}}", &model_line)
+        .replace("{{COST_LINE}}", &cost_line)
+        .replace("{{EFFORT_LINE}}", &effort_line)
+        .replace("{{SUMMARY_MODEL}}", &summary_model);
 
     let files: [(&str, &str, bool); 4] = [
         ("goals.yaml", goals_yaml.as_str(), false),
@@ -131,28 +181,29 @@ goals:
 
 # Stop the loop when this expression is true (a safe mini-language, NOT eval).
 # Terms: goal ids, all_goals, count_met, met_fraction, any_regressed(invariants),
-#        and three ceiling guards — over_budget (tokens), over_cost ($), over_iterations
+#        and three ceiling guards — over_budget (tokens), over_cost ($, CLAUDE ONLY), over_iterations
 #        (sessions) — plus wall_hours. Set the ceilings in agg.yaml (budget/cost) and via
 #        --max-sessions; each `over_*` trips when its ceiling is exceeded.
 stop_when: "tests_pass"
 
 # Optional emergency brake — stop immediately if an invariant breaks, OR any ceiling blows.
-# (Money, tokens, sessions, and time are all OR-ed: hit ANY one and the loop halts.)
-halt_when: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 4"
+# (Tokens, sessions, and time are all OR-ed: hit ANY one and the loop halts.)
+# NOTE: a guard only fires if its ceiling is SET — over_budget needs `budget.total` in agg.yaml,
+#       over_iterations needs `agg run --max-sessions <n>`. Unset = that term is simply never true.
+halt_when: "any_regressed(invariants){{OVER_COST}} OR over_budget OR over_iterations OR wall_hours >= 4"
 "#;
 
 const AGG_YAML: &str = r#"# agg.yaml — harness configuration.
 project: my-project
-model: "{{MODEL}}"     # the inner worker model
-resume_prompt: "AGG_RESUME.md"   # the standing instructions fed to EVERY worker session
+agent: {{AGENT}}       # which coding agent drives the workers: claude | codex | copilot
+{{MODEL_LINE}}{{EFFORT_LINE}}resume_prompt: "AGG_RESUME.md"   # the standing instructions fed to EVERY worker session
 
 heartbeat_secs: 30                # a status line at least this often
 watchdog: { idle_secs: 900, cpu_grace: 180 }   # kill a worker silent AND cpu-flat this long
 ratelimit_backoff_secs: 1800      # back off this long on a real usage limit
 
 budget: { total: null }           # output-token ceiling (null = unlimited) → over_budget
-cost:   { total: null }           # dollar ceiling, e.g. 5.0 (null = unlimited) → over_cost
-summary: { enabled: true, model: {{SUMMARY_MODEL}}, min_interval_secs: 300 }  # progress summaries
+{{COST_LINE}}summary: { enabled: true{{SUMMARY_MODEL}}, min_interval_secs: 300 }  # progress summaries
 memory:  { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md; inject newest 8 KB/prompt
 resume_sessions: false            # fresh context per session (recommended)
 
@@ -258,21 +309,21 @@ mod tests {
     #[test]
     fn scaffold_parses_with_real_loaders() {
         let dir = tmpdir("root");
-        run(&dir, false, false).unwrap();
+        run(&dir, false, false, None).unwrap();
         // the generated config must load with the ACTUAL loaders (no schema drift)
         crate::core::config::AggConfig::load(&dir.join("agg.yaml")).expect("scaffolded agg.yaml must parse");
         let g = crate::core::config::GoalsConfig::load(&dir.join("goals.yaml")).expect("scaffolded goals.yaml must parse");
         crate::core::engine::Engine::new(g).expect("scaffolded goals must build an engine (stop_when valid)");
         // refuses to clobber without force
-        assert!(run(&dir, false, false).is_err());
-        assert!(run(&dir, true, false).is_ok());
+        assert!(run(&dir, false, false, None).is_err());
+        assert!(run(&dir, true, false, None).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn folder_scaffold_lands_under_agg_and_resolves() {
         let dir = tmpdir("folder");
-        run(&dir, false, true).unwrap();
+        run(&dir, false, true, None).unwrap();
         // files land under agg/, NOT the root
         assert!(dir.join("agg/agg.yaml").exists(), "foldered agg.yaml under agg/");
         assert!(dir.join("agg/goals.yaml").exists());
@@ -290,5 +341,50 @@ mod tests {
         );
         crate::core::engine::Engine::new(g).expect("foldered goals must build an engine");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// REGRESSION — **the scaffold must produce a config that STARTS, on every agent.**
+    ///
+    /// `agg init` used to write no `agent:` key at all and interpolate Claude's model and Claude's
+    /// `cost:` guard. So the documented "no skills? use `agg init`" fallback handed every Codex and
+    /// Copilot user a config that `capability::check` REFUSES — a cost guard no non-Claude agent can
+    /// honour, plus (on Codex) a model name that is a hard 400. The one command whose entire job is
+    /// "give me something that works" produced something that could not run.
+    ///
+    /// This asserts the fix where it matters: the scaffold for each agent must pass the SAME
+    /// capability check `agg run` performs at startup.
+    #[test]
+    fn the_scaffold_starts_on_every_agent() {
+        for agent in crate::backend::KNOWN {
+            let dir = tmpdir(&format!("scaffold-{agent}"));
+            run(&dir, false, false, Some(agent)).unwrap();
+
+            let cfg = crate::core::config::AggConfig::load(&dir.join("agg.yaml"))
+                .unwrap_or_else(|e| panic!("`agg init --agent {agent}` must emit parseable YAML: {e}"));
+            let goals = crate::core::config::GoalsConfig::load(&dir.join("goals.yaml")).unwrap();
+            let backend = crate::backend::for_name(agent).unwrap();
+
+            assert_eq!(cfg.agent, *agent, "the scaffold must PIN the agent it was made for");
+            crate::capability::check(&cfg, &goals, backend).unwrap_or_else(|e| {
+                panic!("`agg init --agent {agent}` produced a config agg REFUSES to start:\n{e}")
+            });
+
+            // and the two keys that cause that refusal must be absent for an agent that can't honour them
+            let yaml = std::fs::read_to_string(dir.join("agg.yaml")).unwrap();
+            let halt = std::fs::read_to_string(dir.join("goals.yaml")).unwrap();
+            // inspect the ACTIVE lines only — the templates explain `over_cost` in comments, and a
+            // comment mentioning it is not a guard demanding it.
+            let active = |s: &str, key: &str| {
+                s.lines().any(|l| !l.trim_start().starts_with('#') && l.contains(key))
+            };
+            if !backend.capabilities().reports_cost_usd {
+                assert!(!active(&yaml, "cost:"), "{agent} cannot report dollars — no active `cost:` key");
+                assert!(!active(&halt, "over_cost"), "{agent} cannot report dollars — no `over_cost` guard");
+            }
+            if backend.default_model().is_empty() {
+                assert!(!active(&yaml, "model:"), "{agent} must not be handed a model name (hard 400)");
+            }
+            std::fs::remove_dir_all(&dir).ok();
+        }
     }
 }

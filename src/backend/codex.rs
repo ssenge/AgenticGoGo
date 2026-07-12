@@ -40,7 +40,8 @@ use std::process::{Command, Stdio};
 /// API key), which agg cannot know. Codex already picks a model appropriate to the account; an
 /// operator who wants a specific one sets `model:` in agg.yaml explicitly.
 pub const DEFAULT_MODEL: &str = "";
-/// Unused — see `supports_one_shot`.
+/// The summarizer/judge model. EMPTY on purpose: Codex must not be handed a model name (a hard
+/// 400 on a ChatGPT account), so the flag is omitted entirely and Codex picks its own.
 pub const DEFAULT_SUMMARY_MODEL: &str = "";
 
 pub struct Codex;
@@ -282,9 +283,12 @@ impl AgentBackend for Codex {
     fn preflight(&self) -> Result<()> {
         if !self.is_installed() {
             anyhow::bail!(
+                // PARALLEL with claude.rs / copilot.rs — install, login, HEADLESS check.
                 "the OpenAI Codex CLI (`{}`) was not found on your PATH.\n  \
-                 Install it with `npm install -g @openai/codex`, then run `codex login`\n  \
-                 (or set OPENAI_API_KEY) and make sure `codex login status` reports a login.",
+                 AgenticGoGo drives it to run the inner workers. Install it with\n    \
+                 npm install -g @openai/codex\n  \
+                 then run `codex login` (or set OPENAI_API_KEY), and make sure\n  \
+                 `codex exec \"hello\"` answers.",
                 self.bin()
             );
         }
