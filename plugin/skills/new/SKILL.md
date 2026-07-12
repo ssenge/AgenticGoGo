@@ -5,18 +5,62 @@ disable-model-invocation: false
 
 # /agg:new — set up an AgenticGoGo loop for this project
 
-You are setting up **AgenticGoGo** (`agg`): a loop that runs fresh `claude -p` workers
+You are setting up **AgenticGoGo** (`agg`): a loop that runs fresh headless agent workers
 until **goal-based stop conditions** are met. Your job in this skill is to turn
 whatever planning material already exists into three files the loop reads:
 
 - `goals.yaml` — the goals, their judges, and the stop condition
-- `agg.yaml` — loop config (model, heartbeat, watchdog, budget, summaries)
+- `agg.yaml` — loop config (agent, model, heartbeat, watchdog, budget, summaries)
 - `AGG_RESUME.md` — the "fat" resume prompt fed to every worker session
 
 **Core principle: do NOT replicate spec tooling.** Read what's already there and *translate*
 it into goals. Only ask the user for what's genuinely missing.
 
+`agg` can drive **Claude Code, OpenAI Codex, or GitHub Copilot** — chosen by the `agent:` key you
+write into `agg.yaml`. They are **not interchangeable**, and `agg` REFUSES to start a run whose
+config asks for something the chosen agent cannot do. **Step 0 is therefore not optional: get the
+agent right, or the config you generate will not start.**
+
 ---
+
+## Step 0 — Pick the agent the loop will drive (do this FIRST)
+
+Which agent runs the *inner workers*. This is independent of whichever agent is running THIS
+skill — but "the one I'm already using" is the sane default, so offer it first.
+
+See which are actually installed, and ask the user (default: the agent you are running in):
+
+```bash
+claude --version; codex --version; copilot --version
+```
+
+Write the answer as `agent: claude|codex|copilot` in `agg.yaml`. Then obey the matrix below.
+
+### The capability matrix — VERIFIED, do not re-derive
+
+| | claude | codex | copilot |
+|---|---|---|---|
+| script judges | ✅ | ✅ | ✅ |
+| LLM judges (`judge: {kind: llm}`) | ✅ | ✅ | ✅ |
+| summaries (`summary.enabled`) | ✅ | ✅ | ✅ |
+| token budget (`budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
+| session resume (`resume_sessions`) | ✅ | ✅ | ✅ |
+| thinking effort (`effort:`) | ✅ | ✅ (clamps `max`→`high`) | ✅ |
+| rate-limit backoff | ✅ | ✅ | ❌ |
+| **dollar cost (`cost.total`, `over_cost`)** | ✅ | ❌ | ❌ |
+
+### Four hard rules. Break one and the config you write CANNOT START.
+
+1. **`cost.total` and `halt_when: over_cost` are CLAUDE-ONLY.** Codex and Copilot cannot price a
+   session in dollars, so `agg` refuses the config outright rather than let a spend guard silently
+   never fire. For codex/copilot use **`budget.total` (output tokens)** instead — it works on all
+   three. (Copilot can additionally cap itself with `--max-ai-credits <n>` via `worker_args`.)
+2. **Codex: OMIT `model:` entirely** unless the user explicitly names one. Guessing (e.g.
+   `gpt-5-codex`) is a hard 400 — *"not supported when using Codex with a ChatGPT account"*. Which
+   models exist depends on how the user authenticated, so let `agg` pick its default.
+3. **Copilot: `model: auto` is safe.** Claude: `model: "claude-opus-4-8[1m]"` is the default.
+4. **Finish by running `agg doctor`** (Step 7). It re-checks every rule above against the real
+   backend. It is a free correctness check — if it passes, the config starts.
 
 ## Step 1 — Discover existing plans (read, don't ask yet)
 
@@ -72,17 +116,20 @@ Two kinds:
     cmd: "./judges/tests.sh"
     timeout: 300
   ```
-- **`llm`** (for qualitative goals) — a `claude -p` call with a **rubric** that scores
-  artifacts. Generate a rubric file under `rubrics/<id>.md` with explicit criteria ending in
-  the required line: *"Output ONLY the verdict JSON: {met, value, max, target, rationale}."*
+- **`llm`** (for qualitative goals) — a tools-off one-shot model call with a **rubric** that scores
+  artifacts. Works on **all three agents**. Generate a rubric file under `rubrics/<id>.md` with
+  explicit criteria ending in the required line:
+  *"Output ONLY the verdict JSON: {met, value, max, target, rationale}."*
   ```yaml
   judge:
     kind: llm
-    model: haiku
+    model: haiku          # claude: haiku · copilot: auto · codex: OMIT this line
     rubric: "rubrics/<id>.md"
     inputs: ["diff", "log:logs/test.out", "src/main.rs"]
     timeout: 120
   ```
+  The `model:` here follows **the same rule as Step 0**: a cheap model on Claude (`haiku`), `auto`
+  on Copilot, and **omitted entirely on Codex** (naming one is a hard 400).
   Valid `inputs` tokens: `"diff"`, `"diff:<rev>"`, `"status"`, `"log:<path>"` (tail), or a file path.
 
 ## Step 4 — Choose the stop condition
@@ -90,8 +137,9 @@ Two kinds:
 `stop_when` is a whitelisted expression over goals (NOT arbitrary code). Available terms:
 goal ids (→ their met bool), `all_goals`, `count_met`, `total`, `met_fraction`,
 `weighted_fraction`, `any_regressed(invariants)`, `wall_hours`, and three **ceiling guards**:
-- `over_budget` — output **tokens** exceed `budget.total` (agg.yaml)
-- `over_cost` — **dollars** exceed `cost.total` (agg.yaml; Claude reports the price, agg sums it)
+- `over_budget` — output **tokens** exceed `budget.total` (agg.yaml). **Works on all three agents.**
+- `over_cost` — **dollars** exceed `cost.total` (agg.yaml). **CLAUDE ONLY** — only Claude reports a
+  price. Emitting this for codex/copilot makes the config refuse to start (Step 0, rule 1).
 - `over_iterations` — **sessions** reach the `--max-sessions` cap
 
 - Default: `stop_when: "all_goals"`
@@ -100,7 +148,16 @@ goal ids (→ their met bool), `all_goals`, `count_met`, `total`, `met_fraction`
 
 Add a **`halt_when`** guard if there are invariants or you want a ceiling brake. The ceilings
 OR together — the loop halts the moment ANY one trips:
-`halt_when: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 8"`
+
+```yaml
+# claude:
+halt_when: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 8"
+# codex / copilot — SAME, minus over_cost (they cannot report dollars):
+halt_when: "any_regressed(invariants) OR over_budget OR over_iterations OR wall_hours >= 8"
+```
+
+**Never leave an autonomous loop with no ceiling at all.** If you drop `over_cost` for
+codex/copilot, you MUST keep `over_budget` (with a real `budget.total`) in its place.
 
 ## Step 4.5 — Detect the user's tools and offer to wire them in (NO hardcoded tool list)
 
@@ -111,16 +168,23 @@ sessions) is cheaper and smarter. So: **enumerate the tools that are actually ac
 session, then ASK the user which to wire into the loop.** Do NOT assume any specific tool
 exists — discover them.
 
-**Enumerate (do all three; report only what's actually present):**
-1. **MCP servers** — run `claude mcp list`. Each line that shows `✓ Connected` is a live MCP
-   server the worker will also inherit; its tools appear as `mcp__<server>__<tool>`.
-2. **Skills** — list `~/.claude/skills/` and any plugin skill dirs; also note skills you can
-   see in your own available-tools list. Each is a `/<name>` capability the worker inherits.
-3. **Hooks** — check `~/.claude/settings.json` for a `"hooks"` block (e.g. a command-rewrite
-   proxy). These are auto-inherited by `claude -p`; they need NO agg wiring — just note them.
+**Enumerate for the agent the loop will DRIVE (Step 0) — not for whichever agent runs this skill.
+Report only what's actually present:**
 
-**Then, for each tool that plausibly helps a long autonomous loop, ASK the user (one
-`AskUserQuestion`) whether to wire it in — and infer HOW from the tool's own purpose:**
+1. **MCP servers** — the worker inherits the live ones; their tools appear as `mcp__<server>__<tool>`.
+   - claude: `claude mcp list` (each `✓ Connected` line)
+   - codex: `codex mcp list`
+   - copilot: `copilot mcp list`
+2. **Skills** — each is a capability the worker inherits. Look where THAT agent looks:
+   - claude: `~/.claude/skills/` + plugin skill dirs
+   - codex: `.agents/skills/`, `~/.agents/skills/`, `~/.codex/skills/`
+   - copilot: `copilot skill list` (lists every source at once — and costs no quota)
+3. **Hooks** — a global settings hook (e.g. a command-rewrite proxy) is inherited by the headless
+   worker automatically. It needs NO agg wiring — just note it.
+   - claude: a `"hooks"` block in `~/.claude/settings.json`
+
+**Then, for each tool that plausibly helps a long autonomous loop, ASK the user (ONE question)
+whether to wire it in — and infer HOW from the tool's own purpose:**
 - A **code-graph / indexer** tool → offer: `hooks.on_start` to build it, `hooks.on_session_end`
   (or `background`) to keep it fresh, and a `prompt_includes` line telling the worker to query
   it instead of grepping. (Refresh matters: the graph must track code changes between sessions.)
@@ -143,11 +207,13 @@ small `AGG_TOOLING.md` you reference from `prompt_includes`.
 
 ## Step 5 — Ask ONLY what's missing
 
-Use `AskUserQuestion` (or plain questions) ONLY for genuine gaps you couldn't infer, e.g.:
+Ask (with a structured picker if your agent has one, else plain questions) ONLY for genuine gaps
+you couldn't infer, e.g.:
+- which agent the loop should drive, if Step 0 didn't settle it
 - the test/benchmark command if you couldn't find it
 - the target threshold for a percentage/cardinal goal
 - the token budget and max wall-time, if the user wants guards
-- the inner-worker model (default `claude-opus-4-8[1m]`)
+- the inner-worker model — but see Step 0 rules 2–3: **never guess one for codex**
 
 Show the user the proposed `goals.yaml` and let them approve or edit before writing.
 
@@ -178,17 +244,17 @@ stop_when: "<expression>"
 halt_when: "<expression>"   # optional
 ```
 
-### `agg.yaml`
+### `agg.yaml` — **the agent-specific file. Get this wrong and the loop won't start.**
+
+Common to every agent:
 ```yaml
 project: <name>
-model: "claude-opus-4-8[1m]"
+agent: <claude|codex|copilot>          # from Step 0 — REQUIRED
 resume_prompt: "AGG_RESUME.md"
 heartbeat_secs: 30
 watchdog: { idle_secs: 900, cpu_grace: 180 }
-ratelimit_backoff_secs: 1800
-budget: { total: <tokens or null> }   # token ceiling  → over_budget
-cost:   { total: <dollars or null> }  # dollar ceiling → over_cost
-summary: { enabled: true, model: haiku, min_interval_secs: 300 }
+budget: { total: <tokens or null> }   # token ceiling → over_budget. Works on ALL agents.
+summary: { enabled: true, min_interval_secs: 300 }
 # hooks + prompt_includes: ONLY if Step 4.5 wired tools the user confirmed. Omit otherwise.
 # hooks:
 #   on_start:       ["<build-graph-cmd>"]      # whatever the detected tool needs
@@ -197,23 +263,54 @@ summary: { enabled: true, model: haiku, min_interval_secs: 300 }
 # prompt_includes: ["AGG_TOOLING.md"]
 ```
 
+Then add ONLY the lines your agent supports:
+
+```yaml
+# ── agent: claude ────────────────────────────────────────────────
+model: "claude-opus-4-8[1m]"
+cost: { total: <dollars or null> }    # dollar ceiling → over_cost.  CLAUDE ONLY.
+summary: { enabled: true, model: haiku, min_interval_secs: 300 }
+ratelimit_backoff_secs: 1800
+
+# ── agent: codex ─────────────────────────────────────────────────
+# NO `model:` line at all — naming one is a hard 400 on a ChatGPT account.
+# NO `cost:` line — codex reports no dollars; agg would refuse the config.
+ratelimit_backoff_secs: 1800
+
+# ── agent: copilot ───────────────────────────────────────────────
+model: auto
+summary: { enabled: true, model: auto, min_interval_secs: 300 }
+# NO `cost:` line — copilot bills in AI Credits, not dollars; agg would refuse the config.
+# NO `ratelimit_backoff_secs` — copilot cannot flag a rate-limit.
+# Optional self-cap, since agg's dollar guard is unavailable:
+# worker_args: ["--max-ai-credits", "50"]
+```
+
 ### `AGG_RESUME.md` (the fat resume prompt — this is the worker's standing instructions)
 Write a self-contained prompt that, on EVERY fresh session, tells the worker to:
 1. Read its handoff/state (a `HANDOFF.md` you also create, or the project's existing one)
 2. Do ONE self-contained chunk of work toward the goals
 3. Commit as it goes
-4. Before exiting (context fills — `claude -p` does NOT auto-compact): rewrite the handoff
+4. Before exiting (context fills — a headless worker does NOT auto-compact): rewrite the handoff
    with new state + the exact next task, commit
 5. Be autonomous — there is NO human in the loop; never pause to ask
 
-Inline any skill/workflow content the worker needs (skills are NOT invocable in headless
-`-p` — see the loop docs), e.g. paste the relevant GSD execution steps directly.
+Inline any workflow content the worker needs — do not assume it can invoke a skill by name in a
+headless session. Paste the relevant steps directly.
 
 Also create a starter `HANDOFF.md` capturing the current state + first task.
 
-## Step 7 — Validate the baseline
+## Step 7 — Validate: `agg doctor`, then `agg plan`
 
-Run the dry-run to confirm the judges work and show the starting scoreboard:
+**`agg doctor` first — it is the check that catches a config the chosen agent cannot honour**
+(a cost guard on codex, a model name codex will reject, a stray `effort:`). It verifies the agent
+CLI is installed AND that every key you wrote is one that agent can actually deliver:
+```bash
+agg doctor
+```
+Fix anything it marks ✗ — a ✗ here means `agg run` would refuse to start.
+
+Then the dry-run, to confirm the judges work and show the starting scoreboard:
 ```bash
 agg plan
 ```
@@ -222,7 +319,7 @@ If a judge errors, fix its command/rubric before finishing.
 ## Step 8 — Tell the user how to launch
 
 ```
-Setup complete. Starting scoreboard above.
+Setup complete — driving <agent>. Starting scoreboard above.
 
 To run the loop:
   agg run                # foreground, watch it live
@@ -239,4 +336,4 @@ The loop stops when:  <stop_when>
 ```
 
 (If `agg` is not on PATH, tell them to install it — the install script or GitHub Releases, see
-the repo README — since the plugin ships only these skills, not the CLI binary.)
+the repo README — since these skills ship without the CLI binary.)
