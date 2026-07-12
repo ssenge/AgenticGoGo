@@ -219,6 +219,34 @@ pub fn line_is_rate_limited_result(line: &str) -> bool {
     PATS.iter().any(|p| h.contains(p))
 }
 
+/// Parse one line as Claude's TERMINAL event (`{"type":"result", …}`), which carries the session
+/// id, usage, cost and any rate-limit error together — so ONE parse of the line yields the whole
+/// report. `None` = this line is not terminal.
+///
+/// Each field is `Option`: `None` means Claude did not report it, which is NOT the same as
+/// reporting zero. Claude in practice reports all of them, but the type is what stops a future
+/// backend from silently degrading a spend guard into a no-op (see [`crate::backend::Capabilities`]).
+pub fn parse_result(line: &str) -> Option<crate::backend::SessionReport> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "result" {
+        return None;
+    }
+    // output tokens + cache-creation (also output-priced); ignore input/read. Absent `usage`
+    // object → None (not reported), not Some(0).
+    let output_tokens = v.get("usage").map(|u| {
+        let get = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        get("output_tokens") + get("cache_creation_input_tokens")
+    });
+    Some(crate::backend::SessionReport {
+        session_id: v.get("session_id").and_then(|x| x.as_str()).map(str::to_string),
+        output_tokens,
+        // Claude prices the session itself — correctly per-model (including the `[1m]` variant),
+        // cache-aware, no pricing table needed on our side. We just read it.
+        cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
+        rate_limited: line_is_rate_limited_result(line),
+    })
+}
+
 /// Extract the `session_id` from a terminal `result` event (for `--resume`), if any.
 pub fn session_id_from_result(line: &str) -> Option<String> {
     let v: Value = serde_json::from_str(line).ok()?;

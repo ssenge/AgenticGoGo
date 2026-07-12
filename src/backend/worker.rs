@@ -12,7 +12,7 @@ use crate::backend;
 use crate::core::config::AggConfig;
 use crate::os::proc;
 use crate::state::{ActivityEvent, LiveState};
-use crate::backend::stream::{self, ActivityTracker};
+use crate::backend::stream::ActivityTracker;
 use crate::util::{now_epoch, truncate};
 use std::io::{BufRead, BufReader};
 use std::process::Command;
@@ -53,7 +53,8 @@ pub fn run_session(
 
     // WHAT to run is the backend's business (binary, flags, prompt placement); HOW to supervise
     // it is ours (process group, stream reader, heartbeat, watchdog, reaping).
-    let mut command = backend::session_command(&backend::SessionSpec {
+    let agent = backend::active();
+    let mut command = agent.session_command(&backend::SessionSpec {
         prompt,
         model: &cfg.model,
         effort: &cfg.effort,
@@ -73,7 +74,7 @@ pub fn run_session(
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("  FAILED to spawn the {} worker: {e}", backend::BIN);
+            eprintln!("  FAILED to spawn the {} worker: {e}", agent.bin());
             return SessionOutcome {
                 exit_code: None,
                 duration_secs: 0,
@@ -233,10 +234,14 @@ fn spawn_reader(
     // is rate-limited to ~once a second.
     let throttle = Duration::from_millis(800);
     std::thread::spawn(move || {
+        let agent = backend::active();
         let mut tracker = ActivityTracker::default();
         let mut session_id: Option<String> = None;
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Some(ev) = stream::format_event(&line) {
+            // Two questions per line, both answered BY THE BACKEND — this thread knows nothing
+            // about any agent's wire format. (It used to parse each line up to FIVE times with
+            // serde_json to ask five separate questions of it.)
+            if let Some(ev) = agent.parse_event(&line) {
                 // print to the live log (the plain stdout stream — source of truth)
                 println!("{} | {}", hhmmss(), ev.display);
                 if !ev.is_result {
@@ -255,24 +260,25 @@ fn spawn_reader(
                 });
                 tracker.observe(&ev);
             }
-            // capture the session_id (for optional --resume continuity)
-            if let Some(id) = stream::session_id_from_result(&line) {
-                session_id = Some(id);
-            }
-            // rate-limit detection: only the terminal result event matters
-            if stream::line_is_rate_limited_result(&line) {
-                sh.rate_limited.store(true, Ordering::Relaxed);
-            }
-            // accumulate output tokens reported on the result event (budget)
-            let toks = stream::output_tokens_from_result(&line);
-            if toks > 0 {
-                sh.output_tokens.fetch_add(toks, Ordering::Relaxed);
-            }
-            // record the session's dollar cost (result carries the FINAL cumulative value, so SET
-            // it, don't add). 0.0 on non-result lines → left untouched.
-            let c = stream::cost_usd_from_result(&line);
-            if c > 0.0 {
-                *sh.cost_usd.lock().unwrap_or_else(|e| e.into_inner()) = c;
+            // The terminal event carries everything the loop learns from the session at once.
+            // Each field is an Option: `None` = THIS AGENT DOES NOT REPORT IT, which is not the
+            // same as zero. We only fold in what was actually reported; a config that *needs* a
+            // number the agent can't produce was already refused at startup by `capability::check`,
+            // so a `None` here can never quietly disarm a guard.
+            if let Some(report) = agent.parse_result(&line) {
+                if let Some(id) = report.session_id {
+                    session_id = Some(id); // for optional --resume continuity
+                }
+                if report.rate_limited {
+                    sh.rate_limited.store(true, Ordering::Relaxed);
+                }
+                if let Some(toks) = report.output_tokens {
+                    sh.output_tokens.fetch_add(toks, Ordering::Relaxed);
+                }
+                // the terminal event carries the FINAL cumulative cost, so SET it, don't add.
+                if let Some(c) = report.cost_usd {
+                    *sh.cost_usd.lock().unwrap_or_else(|e| e.into_inner()) = c;
+                }
             }
         }
         let _ = tx.send((tracker.thoughts, session_id)); // ok if the receiver timed out

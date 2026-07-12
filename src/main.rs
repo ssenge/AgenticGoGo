@@ -198,6 +198,13 @@ fn run_cli() -> Result<ExitCode> {
         Cmd::Plan => {
             no_config_hint(&p.goals)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
+            // `plan` RE-RUNS the judges, so an LLM judge would make a real model call — select the
+            // agent (agg.yaml may be absent here; `plan` works off goals.yaml alone) and refuse an
+            // LLM judge the agent can't run with tools off.
+            if let Ok(agg_cfg) = config::AggConfig::load(&p.config) {
+                agg::backend::init(&agg_cfg.agent)?;
+                agg::capability::check(&agg_cfg, &goals_cfg, agg::backend::active())?;
+            }
             let mut eng = engine::Engine::new(goals_cfg)?;
             eprintln!("agg: evaluating {} goal(s) once (dry run)…", eng.goals.len());
             // dry run: no budget/wall-time accounting (default RunState)
@@ -255,22 +262,29 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Run { max_sessions, detach } => {
             no_config_hint(&p.config)?;
-            // agent CLI on PATH BEFORE launching the loop, so a missing binary fails with a
-            // clear message up front rather than a buried mid-run "FAILED to spawn".
-            agg::backend::preflight()?;
-            if *detach {
-                // Validate the config NOW (in the foreground) so a typo fails loudly here
-                // rather than silently in a detached child the user can't see. Then spawn
-                // the loop detached and return — the child re-runs `agg run` for real. A
-                // detached run returns before the outcome exists, so consumers poll
-                // `agg status --json` / `agg history --json` for the end reason instead.
-                let _ = config::AggConfig::load(&p.config)?;
-                let _ = config::GoalsConfig::load(&p.goals)
-                    .and_then(engine::Engine::new)?;
-                return detach::spawn_detached(&p.dir).map(|_| ExitCode::SUCCESS);
-            }
+            // Config FIRST — it names the agent. Everything below depends on knowing which one.
+            // (This also validates it in the FOREGROUND on the --detach path, so a typo fails
+            // loudly here rather than silently inside a detached child the user can't see.)
             let agg_cfg = config::AggConfig::load(&p.config)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
+
+            // Select the backend this process drives…
+            agg::backend::init(&agg_cfg.agent)?;
+            // …then REFUSE anything the config asks for that this agent cannot do. A spend guard
+            // against an agent that can't report spend would never fire, and an autonomous loop
+            // would run unbounded. Loud here beats silent later.
+            agg::capability::check(&agg_cfg, &goals_cfg, agg::backend::active())?;
+            // agent CLI on PATH BEFORE launching the loop, so a missing binary fails with a
+            // clear message up front rather than a buried mid-run "FAILED to spawn".
+            agg::backend::active().preflight()?;
+
+            if *detach {
+                // The config is validated (above); spawn the loop detached and return — the child
+                // re-runs `agg run` for real. A detached run returns before the outcome exists, so
+                // consumers poll `agg status --json` / `agg history --json` for the end reason.
+                let _ = engine::Engine::new(goals_cfg)?;
+                return detach::spawn_detached(&p.dir).map(|_| ExitCode::SUCCESS);
+            }
             let eng = engine::Engine::new(goals_cfg)?;
             let outcome = loop_::run(agg_cfg, eng, &p.dir, &p.config_base, *max_sessions)?;
             return Ok(ExitCode::from(outcome.exit_code()));

@@ -31,6 +31,7 @@ pub mod os;
 pub mod ui;
 
 pub mod bus;
+pub mod capability;
 pub mod doctor;
 pub mod git;
 pub mod hooks;

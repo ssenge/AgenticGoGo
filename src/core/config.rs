@@ -11,6 +11,14 @@ use std::path::Path;
 #[derive(Debug, Clone, Deserialize)]
 pub struct AggConfig {
     pub project: String,
+    /// which coding agent drives the RUN stage. See `crate::backend::KNOWN`.
+    ///
+    /// Agents are NOT interchangeable — they differ in whether they can report a dollar cost,
+    /// resume a session, or make a tools-off judge call. Anything this config asks for that the
+    /// chosen agent cannot do is refused at STARTUP (`crate::capability::check`), never silently
+    /// ignored.
+    #[serde(default = "default_agent")]
+    pub agent: String,
     /// model id for the inner worker
     #[serde(default = "default_model")]
     pub model: String,
@@ -246,8 +254,11 @@ pub struct GoalsConfig {
 }
 
 // ---- defaults ----
+fn default_agent() -> String {
+    "claude".into()
+}
 fn default_model() -> String {
-    crate::backend::DEFAULT_MODEL.into()
+    crate::backend::active().default_model().into()
 }
 fn default_effort() -> String {
     "max".into()
@@ -277,7 +288,7 @@ fn default_true() -> bool {
     true
 }
 fn default_summary_model() -> String {
-    crate::backend::DEFAULT_SUMMARY_MODEL.into()
+    crate::backend::active().default_summary_model().into()
 }
 fn default_summary_interval() -> u64 {
     300
