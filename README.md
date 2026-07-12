@@ -206,12 +206,23 @@ places for Copilot alone.
 | **Progress summaries** (`summary.enabled`) | ✅ | ✅ | ✅ |
 | Token budget (`budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
 | Session resume (`resume_sessions`) | ✅ | ✅ | ✅ |
+| Thinking effort (`effort:`) | ✅ | ✅ | ✅ |
+| Rate-limit backoff | ✅ | ✅ | ❌ |
 | **Dollar cost cap** (`cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
-| Thinking effort (`effort:`) | ✅ | ❌ | ✅ |
-| Rate-limit backoff | ✅ | ❌ | ❌ |
 
-The only real gap is **cost**. Only Claude reports a dollar figure per session; Codex reports none
-at all, and Copilot bills in AI Credits. Everything else works on all three.
+Two honest gaps, and only two:
+
+- **Dollar cost.** Only Claude reports a per-session dollar figure. Codex reports none at all;
+  Copilot bills in AI Credits, not currency. So `cost.total` / `over_cost` is refused on those two —
+  it would be a guard that never fires. Copilot can still cap *itself*: pass
+  `--max-ai-credits <n>` via `worker_args`.
+- **Copilot rate-limit backoff.** Claude and Codex both put failure text on their terminal event, so
+  a usage limit is recognisable and the loop backs off. Copilot's terminal event carries no error
+  text at all, and GitHub documents that a limited session may pause and silently auto-retry — so
+  there is nothing to detect. Rather than guess, agg says so.
+
+`effort:` works everywhere, though the vocabulary differs: agg speaks `low|medium|high|xhigh|max`,
+and Codex tops out at `high`, so `max` clamps to it — you get as much reasoning as that agent offers.
 
 **How the LLM judge stays honest on every agent.** A judge must not be able to modify the artifact
 it is grading — but it *must* be able to read it. So the requirement is **"cannot write"**, not

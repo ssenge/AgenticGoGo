@@ -207,16 +207,8 @@ pub fn line_is_rate_limited_result(line: &str) -> bool {
             hay.push(' ');
         }
     }
-    let h = hay.to_lowercase();
-    const PATS: &[&str] = &[
-        "rate_limit_error",
-        "usage limit reached",
-        "status 429",
-        "http 429",
-        "overloaded_error",
-        "too many requests",
-    ];
-    PATS.iter().any(|p| h.contains(p))
+    // one shared matcher for every backend — see `backend::looks_rate_limited`.
+    crate::backend::looks_rate_limited(&hay)
 }
 
 /// Parse one line as Claude's TERMINAL event (`{"type":"result", …}`), which carries the session
