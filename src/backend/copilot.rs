@@ -30,6 +30,19 @@ pub const DEFAULT_MODEL: &str = "auto";
 /// The summarizer/judge model. Unused today — see `supports_one_shot` below.
 pub const DEFAULT_SUMMARY_MODEL: &str = "auto";
 
+/// The isolation a JUDGE/summarizer call runs under. **`--allow-all-tools` is deliberately absent**
+/// — that flag belongs to the worker. Without it Copilot denies writes at execution, which is what
+/// stops a judge from editing the artifact it is grading. A test asserts this list, so adding an
+/// allow-all flag here fails loudly rather than silently handing the judge write access.
+const ONE_SHOT_FLAGS: &[&str] = &[
+    "--output-format",
+    "json",
+    "--no-custom-instructions", // don't load repo AGENTS.md — the worker writes those
+    "--disable-builtin-mcps",   // no MCP servers (Claude's --strict-mcp-config equivalent)
+    "--no-color",
+    "--no-auto-update",
+];
+
 pub struct Copilot;
 
 impl AgentBackend for Copilot {
@@ -59,20 +72,15 @@ impl AgentBackend for Copilot {
             // have would make the loop burn its session budget on retries it thinks are failures.
             // False until someone observes a real limit on the wire.
             detects_rate_limits: false,
-            // NO — and this one is subtle enough to be worth the paragraph.
+            // YES — by NOT passing `--allow-all-tools`, so any write is permission-denied.
             //
-            // The LLM judge exists to be UNSTEERABLE: it must not be able to edit the thing it is
-            // grading. Claude gets that from `--strict-mcp-config` — the tools are never OFFERED.
-            // Copilot has no equivalent. Probing it (`--available-tools=` + `--disable-builtin-mcps`
-            // + `--no-custom-instructions`), the model STILL called the `create` tool; the write was
-            // stopped at EXECUTION time by a permission denial, not by the tool being absent.
-            //
-            // Permission-denial is a real defence, but it is enforcement-time, not
-            // availability-time: it holds only while Copilot's default stays deny, and the model
-            // still burns a turn attempting the call. That is a weaker property than the moat
-            // requires, so we decline rather than quietly downgrade what a judge means. Script
-            // judges are unaffected; only `judge: { kind: llm }` and the summarizer are refused.
-            supports_one_shot: false,
+            // The requirement was never "tools must be absent" — it is "the judge must not be able
+            // to MODIFY the artifact it is grading". Probing this, the model DID call the `create`
+            // tool and the write was DENIED at execution (`success: false, "Permission denied"`),
+            // leaving the file untouched. That is the same mechanism Claude relies on: its one-shot
+            // call omits `--dangerously-skip-permissions`, so its built-in tools are denied too
+            // (`--strict-mcp-config` only disables MCP servers, not Bash/Edit).
+            supports_one_shot: true,
         }
     }
 
@@ -249,11 +257,28 @@ impl AgentBackend for Copilot {
         "max"
     }
 
-    /// Unreachable: `supports_one_shot` is false, so `capability::check` refuses any config that
-    /// would call this (LLM judges, the summarizer) before the loop starts.
-    fn one_shot(&self, _prompt: &str, _model: &str, _timeout_secs: u64, _cwd: Option<&Path>) -> Result<OneShot, String> {
-        Err("the copilot backend cannot make a tools-off one-shot call — see Capabilities::supports_one_shot"
-            .to_string())
+    /// A judging / summarizing call: the model may READ, but it cannot WRITE.
+    ///
+    /// # trust boundary
+    /// - **No `--allow-all-tools`.** That flag is what the WORKER gets. Without it Copilot's
+    ///   default is deny, so a write is refused at execution — verified: the model called `create`
+    ///   and got `success: false, "Permission denied"`, and the file was never created.
+    /// - **`--no-custom-instructions`** — do NOT load `.github/copilot-instructions.md` / `AGENTS.md`
+    ///   from the repo. The worker writes those, so loading them would let it reconfigure its own
+    ///   judge. Copilot's equivalent of Claude's `--setting-sources user`.
+    /// - **`--disable-builtin-mcps`** — no MCP servers, like Claude's `--strict-mcp-config`.
+    fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String> {
+        let mut command = Command::new(self.bin());
+        command.args(ONE_SHOT_FLAGS).arg("--model").arg(model).arg("-p").arg(prompt).stdin(Stdio::null());
+        if let Some(dir) = cwd {
+            command.current_dir(dir);
+        }
+        let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
+        Ok(OneShot {
+            body: last_assistant_message(&out.stdout),
+            stderr: out.stderr,
+            success: out.success,
+        })
     }
 
     fn is_installed(&self) -> bool {
@@ -297,6 +322,24 @@ fn summarize_args(args: &Value) -> String {
 /// Collapse whitespace so one event is one log line.
 fn clean(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The model's ANSWER from a `--output-format json` stream: the LAST non-empty
+/// `assistant.message.data.content`. (Copilot also emits empty message envelopes that carry only
+/// usage — those are not the answer.) Falls back to the raw bytes so a schema change degrades to
+/// "pass the text through" rather than to an empty verdict, which a judge would read as "not met".
+fn last_assistant_message(stdout: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    let last = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("assistant.message"))
+        .filter_map(|v| {
+            let c = v.get("data")?.get("content")?.as_str()?;
+            (!c.trim().is_empty()).then(|| c.to_string())
+        })
+        .next_back();
+    last.unwrap_or_else(|| text.into_owned())
 }
 
 #[cfg(test)]
@@ -371,12 +414,21 @@ mod tests {
         assert!(args.contains(&"--effort".to_string()) && args.contains(&"--resume".to_string()));
     }
 
-    /// An LLM judge on Copilot must be REFUSED, not quietly downgraded — the probe showed the model
-    /// still calls tools and is only stopped by a permission denial at execution time.
+    /// A judge call must NOT carry `--allow-all-tools` — that flag is the WORKER's. Without it,
+    /// Copilot denies writes at execution, which is what stops a judge editing what it grades.
+    /// If this ever regresses, the judge silently gains write access to the repo it is judging.
     #[test]
-    fn copilot_declines_the_one_shot_judge_call() {
-        assert!(!Copilot.capabilities().supports_one_shot);
-        assert!(Copilot.one_shot("p", "m", 10, None).is_err());
+    fn the_judge_call_never_gets_write_access() {
+        assert!(Copilot.capabilities().supports_one_shot);
+        // We can't spawn copilot in a unit test, so assert the CONTRACT on the flags we'd send.
+        // (The live probe confirmed the behaviour: `create` returned "Permission denied".)
+        let forbidden = ["--allow-all-tools", "--allow-all"];
+        for f in forbidden {
+            assert!(!ONE_SHOT_FLAGS.contains(&f), "a judge must never be given `{f}`");
+        }
+        for required in ["--no-custom-instructions", "--disable-builtin-mcps"] {
+            assert!(ONE_SHOT_FLAGS.contains(&required), "judge isolation needs `{required}`");
+        }
     }
 
     #[test]

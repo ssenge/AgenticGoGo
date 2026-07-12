@@ -29,8 +29,10 @@ inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading 
 compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two and tests_pass`) to
 say exactly what "done" means.
 
-> **So far, Claude Code only.** `agg` drives `claude -p` as its inner agent. No other coding agent is
-> supported today. This will change in the future.
+> **Three agents.** `agg` drives **Claude Code**, **OpenAI Codex**, or **GitHub Copilot CLI** as its
+> inner agent — pick one with `agent:` in `agg.yaml`. They are *not* interchangeable, and agg
+> refuses at startup rather than silently ignoring what your chosen agent can't do. See
+> [Choosing an agent](#choosing-an-agent).
 
 <p align="center">
   <img src="assets/loop.png" alt="The four stages of the agg loop — INJECT, RUN, VERIFY, GATE — arranged in a circle" width="620">
@@ -39,7 +41,7 @@ say exactly what "done" means.
 | Stage | What it does | Who runs it |
 |---|---|---|
 | **`INJECT`** | Builds the agent's prompt: your standing instruction, what past sessions learned, any steering you queued. | code |
-| **`RUN`** | Launches one **fresh** Claude Code session (`claude -p`). It edits files. It never decides whether it succeeded. | **the agent** |
+| **`RUN`** | Launches one **fresh** agent session (`claude -p` · `codex exec` · `copilot -p`). It edits files. It never decides whether it succeeded. | **the agent** |
 | **`VERIFY`** | `agg` runs your **judges** itself. The agent is never asked to grade its own homework. | code |
 | **`GATE`** | Keeps or rolls back the work, checks `stop_when`, carries state forward — or stops. | code |
 
@@ -87,8 +89,18 @@ curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/ins
 Full options (prebuilt binaries, from source, version pinning) →
 **[docs/INSTALL.md](docs/INSTALL.md)**.
 
-**1 — Prerequisite: Claude Code.** `agg` drives Claude Code headlessly, so make sure it's installed
-and authenticated — `claude -p "hello"` should print a reply. A subscription or an API key both work.
+**1 — Prerequisite: a coding agent.** `agg` drives one headlessly. Install and authenticate whichever
+you want, and check it works:
+
+| agent | `agg.yaml` | install | check |
+|---|---|---|---|
+| **Claude Code** *(default)* | `agent: claude` | [claude.com/claude-code](https://claude.com/claude-code) | `claude -p "hello"` |
+| **OpenAI Codex** | `agent: codex` | `npm i -g @openai/codex` · `codex login` | `codex login status` |
+| **GitHub Copilot CLI** | `agent: copilot` | `npm i -g @github/copilot` · `copilot login` | `copilot --version` |
+
+`agg doctor` verifies the agent is on your PATH **and** that it can do what your config asks —
+run it before your first loop. See [Choosing an agent](#choosing-an-agent) for what each one
+can't do.
 
 **2 — Let Claude set up the loop.** Type `/agg:new` in Claude Code to turn *your*
 definition of "done" into config. Point it at a spec you already have (a PRD, ROADMAP, README,
@@ -113,6 +125,7 @@ stop_when: outputs_two and tests_pass
 
 ```yaml
 # agg/agg.yaml — how the loop runs
+agent: claude              # claude (default) · codex · copilot — see "Choosing an agent"
 project: calc
 model: claude-sonnet-5
 resume_prompt: AGG_RESUME.md
@@ -173,6 +186,58 @@ even check in and course-correct from your phone:
 
 The supervisor reads only `.agg/state.json` — the small scoreboard snapshot — and `agg status`. It
 **never** tails the workers' output, so supervising a long run costs you almost nothing.
+
+## Choosing an agent
+
+```yaml
+# agg.yaml
+agent: claude     # claude (default) · codex · copilot
+```
+
+**Agents are not interchangeable, and the gaps are not cosmetic.** Every row below was verified by
+running the real CLI and reading its event stream — not from its docs, which were wrong in three
+places for Copilot alone.
+
+| | Claude | Codex | Copilot |
+|---|---|---|---|
+| Runs the loop, edits files | ✅ | ✅ | ✅ |
+| Script judges | ✅ | ✅ | ✅ |
+| **LLM judges** (`judge: { kind: llm }`) | ✅ | ✅ | ✅ |
+| **Progress summaries** (`summary.enabled`) | ✅ | ✅ | ✅ |
+| Token budget (`budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
+| Session resume (`resume_sessions`) | ✅ | ✅ | ✅ |
+| **Dollar cost cap** (`cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
+| Thinking effort (`effort:`) | ✅ | ❌ | ✅ |
+| Rate-limit backoff | ✅ | ❌ | ❌ |
+
+The only real gap is **cost**. Only Claude reports a dollar figure per session; Codex reports none
+at all, and Copilot bills in AI Credits. Everything else works on all three.
+
+**How the LLM judge stays honest on every agent.** A judge must not be able to modify the artifact
+it is grading — but it *must* be able to read it. So the requirement is **"cannot write"**, not
+"has no tools", and each agent enforces that its own way: Claude omits
+`--dangerously-skip-permissions` (so tool execution is denied), Codex runs `--sandbox read-only`,
+and Copilot is not given `--allow-all-tools` (so writes are permission-denied). All three are
+verified by an escape probe: a judge explicitly *told* to write a file fails to. Each judge also
+refuses to load the repo's own agent-config files, so a worker cannot reconfigure its own judge.
+
+**agg refuses to start rather than silently ignoring a gap.** If you ask for something your agent
+can't do, you get an error at startup naming the key, what would break, and how to fix it:
+
+```
+$ agg run
+error: the `copilot` agent cannot do what this config asks of it (2 problem(s)).
+
+  ✗ cost.total / halt_when: over_cost
+      would mean: the SPEND guard would NEVER fire — the loop would run unbounded,
+                  spending real money
+      fix: remove the cost guard, or use an agent that reports a dollar cost.
+           DO NOT leave an autonomous loop with no spend ceiling at all — `copilot`
+           can cap itself instead: pass `--max-ai-credits <n>` via `worker_args`
+```
+
+That is deliberate. **A guard that never fires is worse than no guard** — an autonomous loop with a
+dead `over_cost` runs unbounded and spends real money with no error anywhere.
 
 ## Features
 
@@ -370,10 +435,11 @@ stop) · **1** hard error · **3** a guard fired (`halt_when`) · **4** hit `--m
 ## Configuration
 
 You don't normally write this by hand — `/agg:new` generates `agg/agg.yaml` and `agg/goals.yaml`
-for your project, and `agg run` auto-detects the `agg/` folder. When you want to tune it: token and
-dollar ceilings, the rolling summary, cross-session memory, per-session git isolation with a
-rollback gate, lifecycle hooks, watchdog thresholds, goal types and the stop/halt condition DSL are
-all documented in **[`docs/CONFIG.md`](docs/CONFIG.md)**.
+for your project, and `agg run` auto-detects the `agg/` folder. When you want to tune it: the
+`agent:` (see [Choosing an agent](#choosing-an-agent)), token and dollar ceilings, the rolling
+summary, cross-session memory, per-session git isolation with a rollback gate, lifecycle hooks,
+watchdog thresholds, goal types and the stop/halt condition DSL are all documented in
+**[`docs/CONFIG.md`](docs/CONFIG.md)**.
 
 ## Examples
 

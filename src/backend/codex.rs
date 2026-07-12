@@ -72,9 +72,14 @@ impl AgentBackend for Codex {
             // code. Substring-sniffing prose would rot on the next release, and a false positive
             // parks the loop in a 30-minute backoff for nothing.
             detects_rate_limits: false,
-            // NO tools-off mode. `--sandbox read-only` restricts what tools DO; it does not stop
-            // the agent loop from calling them. An LLM judge that can run tools is not a judge.
-            supports_one_shot: false,
+            // YES — via `--sandbox read-only`, which is the property a judge actually needs.
+            //
+            // The requirement was never "tools must be absent". It is "the judge must not be able
+            // to MODIFY the artifact it is grading" — a judge SHOULD read the repo; that is its
+            // job. Read-only is exactly that, and it is enforced by the sandbox rather than by
+            // hoping the model behaves. (Claude gets the same property a different way: its
+            // one-shot call omits `--dangerously-skip-permissions`, so tool execution is denied.)
+            supports_one_shot: true,
         }
     }
 
@@ -225,10 +230,41 @@ impl AgentBackend for Codex {
         })
     }
 
-    /// Unreachable: `supports_one_shot` is false, so `capability::check` refuses any config that
-    /// would reach here (LLM judges, the summarizer) before the loop starts.
-    fn one_shot(&self, _p: &str, _m: &str, _t: u64, _cwd: Option<&Path>) -> Result<OneShot, String> {
-        Err("the codex backend cannot make a tools-off one-shot call — see Capabilities::supports_one_shot".to_string())
+    /// A judging / summarizing call: the model may READ, but it cannot WRITE.
+    ///
+    /// # trust boundary
+    /// Two things are defended, mirroring what Claude's one-shot does:
+    /// - **`--sandbox read-only`** — the judge can inspect the repo (its job) but cannot modify the
+    ///   artifact it is grading. Enforced by the sandbox, not by asking the model nicely.
+    /// - **`--ignore-user-config --ignore-rules`** — do NOT load `AGENTS.md` or any repo rules. The
+    ///   worker writes those files, so loading them would let the worker reconfigure its own judge.
+    ///   This is Codex's equivalent of Claude's `--setting-sources user`.
+    ///
+    /// `--ephemeral` keeps a judge call from polluting the resumable-session history.
+    fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String> {
+        let mut command = Command::new(self.bin());
+        command
+            .arg("exec")
+            .arg("--json")
+            .arg("--sandbox")
+            .arg("read-only") // CANNOT write — the judge's core guarantee
+            .arg("--skip-git-repo-check")
+            .arg("--ignore-user-config") // the worker must not steer its own judge
+            .arg("--ignore-rules")
+            .arg("--ephemeral");
+        if !model.is_empty() {
+            command.arg("--model").arg(model);
+        }
+        command.arg(prompt).stdin(Stdio::null()); // positional prompt; stdin nulled or it hangs
+        if let Some(dir) = cwd {
+            command.current_dir(dir);
+        }
+        let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
+        Ok(OneShot {
+            body: last_agent_message(&out.stdout),
+            stderr: out.stderr,
+            success: out.success,
+        })
     }
 
     fn is_installed(&self) -> bool {
@@ -293,6 +329,27 @@ fn result_event(text: String) -> stream::Event {
 
 fn clean(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The model's ANSWER from a `--json` stream: the LAST `agent_message` item. Codex emits its
+/// reasoning and progress as separate items; the final agent_message is the reply. Falls back to
+/// the raw bytes so a schema change degrades to "pass the text through" rather than to an empty
+/// verdict (a judge that silently returns nothing would read as "not met").
+fn last_agent_message(stdout: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    let last = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("item.completed"))
+        .filter_map(|v| {
+            let item = v.get("item")?;
+            if item.get("type")?.as_str()? != "agent_message" {
+                return None;
+            }
+            item.get("text")?.as_str().map(str::to_string)
+        })
+        .next_back();
+    last.unwrap_or_else(|| text.into_owned())
 }
 
 #[cfg(test)]
@@ -390,7 +447,7 @@ mod tests {
         assert!(c.reports_output_tokens && c.supports_resume);
         assert!(!c.reports_cost_usd, "codex reports no dollar cost anywhere");
         assert!(!c.supports_effort, "codex exec has no effort flag");
-        assert!(!c.supports_one_shot, "no tools-off mode → cannot host an unsteerable judge");
+        assert!(c.supports_one_shot, "read-only sandbox = can host a judge that cannot WRITE");
         assert_eq!(Codex.default_effort(), "", "so agg's `max` default must not refuse every run");
     }
 }
