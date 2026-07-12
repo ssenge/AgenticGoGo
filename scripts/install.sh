@@ -12,8 +12,12 @@
 #   AGG_VERSION=v0.0.2        install a specific tag instead of the latest release
 #   AGG_INSTALL_DIR=~/bin     install to a specific dir (skips the /usr/local/bin try)
 #
-# This installs ONLY the `agg` CLI. The Claude Code plugin (the `/agg:*` skills) is
-# separate — install it inside Claude Code with `/plugin install agg@agenticgogo`.
+# This installs ONLY the `agg` CLI. The `/agg:*` skills are separate, and work on ALL THREE agents
+# (Claude Code, OpenAI Codex, GitHub Copilot) — once `agg` is on your PATH:
+#
+#   agg skills install --agent claude|codex|copilot
+#
+# …or via the plugin marketplace, which all three consume from the same manifest. See the README.
 
 set -eu
 

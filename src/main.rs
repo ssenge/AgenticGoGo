@@ -37,6 +37,10 @@ struct Cli {
 enum Cmd {
     /// Scaffold a starter agg.yaml + goals.yaml + AGG_RESUME.md + a judge in this dir.
     Init {
+        /// which agent the scaffold should target (default: the agent whose shell you are in,
+        /// else claude). The template differs: codex omits `model:`, and only claude may set `cost:`.
+        #[arg(long)]
+        agent: Option<String>,
         /// overwrite existing config files
         #[arg(long)]
         force: bool,
@@ -45,7 +49,8 @@ enum Cmd {
         #[arg(long)]
         folder: bool,
     },
-    /// Diagnose your setup (claude on PATH, config parses, conditions valid, …).
+    /// Diagnose your setup (the agent is on PATH and can do what your config asks, config
+    /// parses, conditions valid, skills installed).
     Doctor,
     /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
     Plan,
@@ -133,9 +138,11 @@ enum SkillsCmd {
     /// Copy the `/agg:*` skills into the directory the chosen agent discovers.
     ///
     /// claude reads `.claude/skills/`; codex and copilot read `.agents/skills/`. Claude and Copilot
-    /// then expose them as slash commands (`/agg:new`, `/agg-new`); codex has none — ask for it.
+    /// invoke them as slash commands (`/agg-new`); codex uses a DOLLAR prefix (`$agg-new`).
     Install {
-        /// which agent to install for (default: the `agent:` key in agg.yaml, else claude)
+        /// which agent to install for. Default: the `agent:` key in agg.yaml if it exists, else
+        /// the agent whose shell you are running in. Installing for the wrong agent puts the files
+        /// where it will never look, so agg asks rather than guess.
         #[arg(long)]
         agent: Option<String>,
         /// install for your whole user account (under $HOME) instead of just this project
@@ -144,7 +151,7 @@ enum SkillsCmd {
     },
 }
 
-/// Steering commands the operator (or outer Claude) can send to a running loop.
+/// Steering commands the operator (or an outer supervisor session) can send to a running loop.
 #[derive(Subcommand)]
 enum SendCmd {
     /// Prepend a high-priority instruction to the next worker session.
@@ -213,7 +220,7 @@ fn run_cli() -> Result<ExitCode> {
     let p = cli.paths();
 
     match &cli.cmd {
-        Cmd::Init { force, folder } => init::run(&p.dir, *force, *folder),
+        Cmd::Init { agent, force, folder } => init::run(&p.dir, *force, *folder, agent.as_deref()),
         Cmd::Doctor => doctor::run(&p.dir, &p.config_base, &p.config, &p.goals),
         Cmd::Plan => {
             no_config_hint(&p.goals)?;
@@ -345,11 +352,24 @@ fn run_cli() -> Result<ExitCode> {
             send_to_bus(&p.dir, cmd)
         }
         Cmd::Skills(SkillsCmd::Install { agent, user }) => {
-            // Default to the agent this project already drives, so the common case is just
-            // `agg skills install` with no flags and no way to get it wrong.
-            let agent = agent
-                .clone()
-                .unwrap_or_else(|| config::AggConfig::agent_name(&p.config));
+            // Resolving the agent is the whole correctness of this command: install for the wrong
+            // one and the files land in a directory that agent never reads, so the user sees no
+            // skill and NO ERROR. This runs at SETUP time, so agg.yaml usually does not exist yet —
+            // and `AggConfig::agent_name` answers `claude` for a missing file. Silently trusting it
+            // sent every Codex user's skills to `.claude/skills/`. So: config first (explicit
+            // intent), then the agent we are actually RUNNING inside, and only then give up.
+            let agent = match agent.clone() {
+                Some(a) => a,
+                None if p.config.exists() => config::AggConfig::agent_name(&p.config),
+                None => skills::host_agent()
+                    .map(str::to_string)
+                    .context(
+                        "cannot tell which agent to install the skills for.\n  \
+                         There is no agg.yaml yet (so no `agent:` key), and this shell is not \
+                         inside a known agent.\n  Name it explicitly:\n    \
+                         agg skills install --agent claude|codex|copilot",
+                    )?,
+            };
             let root = skills::install(&agent, &p.dir, *user)?;
             eprintln!("installed the /agg:* skills for `{agent}` → {}", root.display());
             for (name, _) in skills::SKILLS {

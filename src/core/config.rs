@@ -63,7 +63,8 @@ pub struct AggConfig {
     /// here instead of baking them into agg. Paths are relative to the project dir.
     #[serde(default)]
     pub prompt_includes: Vec<String>,
-    /// Extra flags appended to every worker `claude -p` invocation. The worker ALWAYS runs with
+    /// Extra flags appended VERBATIM to every worker invocation — so the vocabulary is your AGENT's
+/// own (`--allowedTools` is Claude's; Copilot takes `--max-ai-credits`). The worker ALWAYS runs with
     /// `--dangerously-skip-permissions` (a headless `-p` worker cannot answer permission prompts,
     /// so it needs full host access — see the README "What the worker can do"). Use this to
     /// constrain it: e.g. `worker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "src"]`, or

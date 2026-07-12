@@ -9,7 +9,7 @@
 //!   agent: <one that does not report dollar cost>
 //! ```
 //!
-//! `over_cost` is `cost_spent >= cost_limit`. An agent that never reports cost leaves `cost_spent`
+//! `over_cost` is `cost_spent > cost_limit` (see `core::stop`). An agent that never reports cost leaves `cost_spent`
 //! at 0.0 forever, so the predicate is never true, so the guard **never fires** — and an
 //! autonomous loop runs unbounded, spending real money, with no error anywhere. Of the three
 //! agents surveyed (Claude, Codex, Copilot) **only Claude reports dollars at all**: Codex reports
@@ -270,8 +270,9 @@ mod tests {
         assert!(err.contains("run unbounded"), "got:\n{err}");
     }
 
-    /// An LLM judge needs a TOOLS-OFF call. Neither Codex nor Copilot has a verified way to do
-    /// that, and a judge that can run tools can edit what it is grading.
+    /// An LLM judge needs a READ-ONLY call — a judge that can WRITE can edit what it is grading.
+    /// All three real agents can do this (each by its own mechanism); `Barebones` cannot, which is
+    /// what this test pins: the refusal must fire for ANY backend that declares it cannot.
     #[test]
     fn an_llm_judge_on_an_agent_without_a_one_shot_call_is_refused() {
         let cfg = cfg_yaml(

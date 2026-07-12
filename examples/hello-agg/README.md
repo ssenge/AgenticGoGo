@@ -1,6 +1,6 @@
 # hello-agg — the smallest possible loop
 
-The whole idea in four files: a worker does a task, a **judge** (any script that prints one
+The whole idea in five files: a worker does a task, a **judge** (any script that prints one
 line of JSON `{"met": …}`) checks it, and the loop repeats until the judge says met.
 
 `add.py` starts WRONG on purpose (prints 3) so you can watch the correction loop happen.
@@ -17,8 +17,8 @@ The judge rejects `3` → the worker edits `add.py` to `print(1 + 1)` → the ju
 
 ## Run it on another agent
 
-The judge is a shell script, so nothing here is Claude-specific — only the `agent:` and `model:` lines
-in `agg.yaml` are. Edit them and re-run:
+The judge is a shell script, so nothing here is Claude-specific — only the `agent:` and `model:` keys
+in `agg.yaml` are. Edit them and re-run (or let `agg init --agent <a>` write a correct one):
 
 ```yaml
 # Claude Code (as shipped)
@@ -42,7 +42,7 @@ The loop, the judge and the gate behave identically on all three.
 - `add.py` — the (broken) target the worker fixes
 - `check.sh` — the judge (prints `{"met":...}`) — a plain script, so it works on any agent
 - `goals.yaml` — one binary goal, `stop_when: prints_two`
-- `agg.yaml` — minimal config (`agent:` + model)
+- `agg.yaml` — minimal config (`agent:` + `model:`)
 - `AGG_RESUME.md.template` — copy to `AGG_RESUME.md` (the live prompt is gitignored)
 
 ---
@@ -103,9 +103,12 @@ summary: { enabled: true, model: haiku, min_interval_secs: 1 }
 memory: { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md, on by default
 ```
 
-> **Running this on Codex or Copilot?** Drop the `cost:` line — `budget:` above already caps the run,
-> and it works everywhere. Also drop `model:` on Codex (naming one is a hard 400) and use
-> `model: auto` on Copilot. `agg doctor` checks all of this for you.
+> **Running this on Codex or Copilot?** Three Claude-shaped keys have to go:
+> drop `cost:` (only Claude reports dollars — `budget:` above already caps the run and works
+> everywhere), drop the `model:` **inside `summary:`** (`haiku` is a Claude name), and for the
+> worker `model:` — omit it entirely on Codex (naming one is a hard 400), or use `auto` on Copilot.
+> `agg doctor` catches the first and third; the summary model it cannot, so do not miss it.
+> Easier: `agg init --agent codex` scaffolds a correct one for you.
 
 > **A note on `cost` / `over_cost`.** The dollar figure is `total_cost_usd` as reported by the
 > `claude` CLI — the **API-equivalent list price** of the work. On a **Max/Pro subscription you are

@@ -78,6 +78,32 @@ fn relative_root(agent: &str) -> &'static str {
     }
 }
 
+/// Which agent is running THIS process's terminal, from the marker each CLI exports into its
+/// shell. `None` when we are not inside any of them (a plain terminal).
+///
+/// # Why this exists
+/// `agg skills install` is run at SETUP time — before `agg.yaml` exists. Falling back to
+/// `AggConfig::agent_name`, which returns `claude` for a missing file, meant a Codex user running
+/// the documented first step got the skills written to `.claude/skills/` — a directory Codex never
+/// reads. They then saw no skill, with no error, and nothing to tell them why.
+///
+/// Markers verified by dumping the environment inside each agent (they are not documented):
+/// `COPILOT_CLI=1`, `CODEX_THREAD_ID=<uuid>`, `CLAUDECODE=1`. Checked innermost-first, because
+/// nesting one agent inside another leaves BOTH set.
+pub fn host_agent() -> Option<&'static str> {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    // order matters: a codex/copilot session launched from inside Claude Code inherits CLAUDECODE.
+    if set("COPILOT_CLI") {
+        Some("copilot")
+    } else if set("CODEX_THREAD_ID") {
+        Some("codex")
+    } else if set("CLAUDECODE") {
+        Some("claude")
+    } else {
+        None
+    }
+}
+
 /// Where the `/agg:*` skills belong for `agent`: under `dir` for a project install, or under
 /// `$HOME` for a user-wide one.
 pub fn skills_root(agent: &str, dir: &Path, user: bool) -> Result<PathBuf> {
