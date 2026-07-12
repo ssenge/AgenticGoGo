@@ -135,12 +135,20 @@ met → the loop exits after one session. A one-line summary records what it did
 ### Or let `/agg:new` write it for you
 
 In a project you've already planned (a PRD, ROADMAP, get-shit-done `.planning/`, or a README),
-just run the skill inside Claude Code:
+let the skill do it. First install it (once per project, or `--user` for good):
+
+```bash
+agg skills install        # all three agents — puts it where yours actually looks
+```
+
+Then, inside your agent:
 
 ```
-/agg:new        # reads your plans → writes goals.yaml + agg.yaml + AGG_RESUME.md
+/agg:new                                  # Claude Code — a slash command
+"set up AgenticGoGo for this project"     # Codex / Copilot — no slash; just ask
 ```
 
-It **translates** whatever plan exists into goals + judges (it doesn't replicate your spec tooling)
-and asks only about genuine gaps. Then exit Claude and `agg run`.
+It **translates** whatever plan exists into goals + judges (it doesn't replicate your spec tooling),
+asks only about genuine gaps, and writes an `agg.yaml` shaped for **your** agent — no cost guard on
+Codex or Copilot, which cannot report one. Then exit the agent and `agg run`.
 
