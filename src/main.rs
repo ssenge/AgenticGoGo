@@ -132,8 +132,8 @@ enum Cmd {
 enum SkillsCmd {
     /// Copy the `/agg:*` skills into the directory the chosen agent discovers.
     ///
-    /// claude reads `.claude/skills/`; codex and copilot read `.agents/skills/`. On codex and
-    /// copilot there is no slash command — ask the agent for the skill in prose instead.
+    /// claude reads `.claude/skills/`; codex and copilot read `.agents/skills/`. Claude and Copilot
+    /// then expose them as slash commands (`/agg:new`, `/agg-new`); codex has none — ask for it.
     Install {
         /// which agent to install for (default: the `agent:` key in agg.yaml, else claude)
         #[arg(long)]
@@ -355,18 +355,28 @@ fn run_cli() -> Result<ExitCode> {
             for (name, _) in skills::SKILLS {
                 eprintln!("  ✔ {name}");
             }
-            // The invocation UX genuinely differs, and getting it wrong is the difference between
-            // "it works" and "that command doesn't exist" — so say which one they have.
-            if agent == "claude" {
-                eprintln!("\nInvoke them with `/agg:new`, `/agg:status`, `/agg:supervise`.");
-            } else {
-                eprintln!(
-                    "\n`{agent}` has no slash commands for skills — it picks a skill by matching \
-                     your request\nagainst its description. Just ask, e.g.:\n  \
-                     \"set up AgenticGoGo for this project\"   (→ agg-new)\n  \
-                     \"how is the agg loop doing?\"             (→ agg-status)"
-                );
+            // The PREFIX is not the same on each agent, and telling someone to type a command their
+            // agent does not have is the difference between "it works" and "that does nothing".
+            // Claude: `/agg-new` here (the `agg:` in `/agg:new` comes from the PLUGIN namespace, so
+            // a copy-in install does not get it). Copilot: every skill is a slash command
+            // (`userInvocable` in its own SDK = "can be invoked by the user as a slash command").
+            // Codex: `$agg-new` — it uses `$`, NOT `/`; a `/agg-new` there is "Unrecognized command"
+            // (openai/codex#11817, closed as not planned).
+            match agent.as_str() {
+                "codex" => eprintln!(
+                    "\nInvoke them with `$agg-new`, `$agg-status`, `$agg-supervise` \
+                     — codex uses `$`, not `/`."
+                ),
+                "claude" => eprintln!(
+                    "\nInvoke them with `/agg-new`, `/agg-status`, `/agg-supervise`.\n\
+                     (From the plugin marketplace instead, they are `/agg:new` etc.)"
+                ),
+                _ => eprintln!("\nInvoke them with `/agg-new`, `/agg-status`, `/agg-supervise`."),
             }
+            eprintln!(
+                "Or just ask — every agent also picks a skill by matching your request against its\n\
+                 description: \"set up AgenticGoGo for this project\" → agg-new."
+            );
             Ok(())
         }
     }

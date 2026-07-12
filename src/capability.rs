@@ -15,9 +15,9 @@
 //! agents surveyed (Claude, Codex, Copilot) **only Claude reports dollars at all**: Codex reports
 //! none, Copilot reports a credit multiplier that is not USD.
 //!
-//! The same trap applies to `over_budget` (needs output tokens), `resume_sessions` (needs a
-//! resume handle), LLM judges and the summarizer (need a genuinely tools-off one-shot call — which
-//! neither Codex nor Copilot has a verified way to do), and `effort:`.
+//! The same trap applies to `over_budget` (needs output tokens), `resume_sessions` (needs a resume
+//! handle), LLM judges and the summarizer (need a read-only one-shot call — which all three agents
+//! can do, each by its own mechanism), and `effort:`.
 //!
 //! So: every such demand is checked ONCE, at startup, against the backend's declared
 //! [`Capabilities`], and a mismatch is a hard error naming the config key, the agent, and the fix.

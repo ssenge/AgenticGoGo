@@ -47,12 +47,12 @@ consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate
 The overall architecture is captured in the following diagram:
 
 <p align="center">
-  <img src="assets/arch.png" alt="AgenticGoGo architecture: the agg outer loop drives one fresh claude -p worker and writes plain state files under .agg/, which the TUI, the web UI, and a Claude supervisor (reachable from your phone) all read" width="760">
+  <img src="assets/arch.png" alt="AgenticGoGo architecture: the agg outer loop drives one fresh agent worker (claude -p / codex exec / copilot -p) and writes plain state files under .agg/, which the TUI, the web UI, and an agent supervisor session (reachable from your phone) all read" width="760">
 </p>
 
 The whole system is **the loop plus plain files**: `agg` drives one fresh worker and writes state to
-`.agg/`; the TUI, the web UI, and a `/agg:supervise` Claude session you can reach from your phone all
-just *read* those files (and the supervisor can *steer* via the bus). More on that in
+`.agg/`; the TUI, the web UI, and an `/agg:supervise` agent session (reachable from your phone, via Claude
+Code's mobile app) all just *read* those files (and the supervisor can *steer* via the bus). More on that in
 [State and memory](#state-and-memory) and [Interfaces](#interfaces).
 
 ## Quick start
@@ -72,11 +72,6 @@ if __name__ == "__main__":
 yourself. It's here to show the mechanics; the real payoff is long, multi-hour work you'd otherwise
 have to babysit.)*
 
-> **This walkthrough uses Claude Code**, because the `/agg:*` skills that set the loop up for you
-> only exist there today. Codex and Copilot run the same loop just as well — you write the two
-> config files yourself with `agg init` instead of asking a skill to. See
-> [Choosing an agent](#choosing-an-agent).
-
 **0 — Install.** The binary:
 
 ```bash
@@ -84,23 +79,26 @@ curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/ins
 ```
 
 Then the `/agg:*` skills. **All three agents have a plugin marketplace, and all three take the same
-one** — pick your agent:
+one** — add the marketplace, install the plugin:
 
 ```
-# Claude Code (inside a session)
-/plugin marketplace add ssenge/AgenticGoGo && /plugin install agg@agenticgogo
+# Claude Code — inside a session
+/plugin marketplace add ssenge/AgenticGoGo
+/plugin install agg@agenticgogo
 ```
 ```bash
 # OpenAI Codex
 codex plugin marketplace add https://github.com/ssenge/AgenticGoGo
 codex plugin add agg@agenticgogo
-
+```
+```bash
 # GitHub Copilot
 copilot plugin marketplace add ssenge/AgenticGoGo
 copilot plugin install agg@agenticgogo
 ```
 
-Or install them straight into **this project** (no marketplace, works for every agent):
+Or install them straight into **this project**, with the binary you just installed — no marketplace,
+same three skills, every agent:
 
 ```bash
 agg skills install          # --agent claude|codex|copilot · --user for account-wide
@@ -122,10 +120,11 @@ you want, and check it works:
 run it before your first loop. See [Choosing an agent](#choosing-an-agent) for what each one
 can't do.
 
-**2 — Let the agent set up the loop.** In Claude Code, type `/agg:new`. On Codex or Copilot there
-are no slash commands — just **ask** ("set up AgenticGoGo for this project"), and the agent picks the
-skill up by its description. Either way it turns *your* definition of "done" into config. Point it at
-a spec you already have (a PRD, ROADMAP, README, `.planning/`), or just say what you want — e.g.
+**2 — Let the agent set up the loop.** Invoke the skill: **`/agg:new`** (Claude Code), **`/agg-new`**
+(Copilot), **`$agg-new`** (Codex — it uses `$`, not `/`). On any of them you can equally just *ask*
+("set up AgenticGoGo for this project") and the agent picks the skill up by its description. Either
+way it turns *your* definition of "done" into config. Point it at a spec you already have (a PRD,
+ROADMAP, README, `.planning/`), or just say what you want — e.g.
 
 > `/agg:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes
 
@@ -138,9 +137,9 @@ goals:
   - id: outputs_two          # behaviour: the program actually prints 2
     type: binary
     judge: { kind: script, cmd: "./agg/judges/outputs_two.sh" }
-  - id: tests_pass           # regression safety: the whole suite is green (a built-in judge)
+  - id: tests_pass           # regression safety: the whole suite is green (an inline judge)
     type: binary
-    judge: { kind: script, cmd: "AGG_CMD='pytest -q' ${CLAUDE_PLUGIN_ROOT}/judges/cmd_exit.sh" }
+    judge: { kind: script, cmd: "pytest -q >/dev/null 2>&1 && echo '{\"met\":true}' || echo '{\"met\":false}'" }
 stop_when: outputs_two and tests_pass
 ```
 
@@ -156,8 +155,8 @@ resume_prompt: AGG_RESUME.md
 `python3 calc.py` prints 2 and the tests pass". In case of multiple iterations (i.e. multiple subsequent **`RUN`** stages), this file gets adapted to track the progress so far accordingly (see [State and memory](#state-and-memory)).
 Also note the `stop_when: outputs_two and tests_pass` line in the `goals.yaml` file: it composes two judges with an `and`, and the next step explains how to create such judges.
 
-**3 — Have Claude write the judge.** A judge is any command that prints a verdict as JSON (see
-[Building judges](#building-judges)). You can write one by hand, but asking Claude is the easy way:
+**3 — Have the agent write the judge.** A judge is any command that prints a verdict as JSON (see
+[Building judges](#building-judges)). You can write one by hand, but asking your agent is the easy way:
 
 > **Prompt:** Write the judge `agg/judges/outputs_two.sh`: run `python3 calc.py`, print `{"met":true}` if its
 > output is exactly `2`, else `{"met":false,"rationale":"calc.py did not print 2"}`. Nothing else on
@@ -173,7 +172,7 @@ The result might look like:
   || echo '{"met":false,"rationale":"calc.py did not print 2"}'
 ```
 
-The second goal, `tests_pass`, needs no writing — it's a **built-in** judge (`pytest -q` must exit 0).
+The second goal, `tests_pass`, needs no script at all — an inline shell command that prints the verdict is a perfectly good judge (`pytest -q` must exit 0).
 The `stop_when: outputs_two and tests_pass` line above requires **both**. Why chain them? Each catches
 what the other misses: `outputs_two` alone is gameable — the agent could just hardcode `print(2)` —
 but `tests_pass`, which checks `add(2, 3) == 5`, would still be red. That `and` is judge chaining:
@@ -192,12 +191,13 @@ judges → `GATE` sees `stop_when` met → the loop stops. This toy finishes in 
 and there's no knob to force more — the loop stops the moment `stop_when` is true. Real projects run
 as many iterations as it takes to satisfy every goal, sometimes hundreds, each a fresh session.
 
-**5 — Optionally, supervise from a second Claude Code session.** Start Claude Code **in the same
-project folder** and run `/agg:supervise`. It's not required — a plain session could read the state
-and run `agg send` too — but the skill hands that session the right playbook: read the compact
-scoreboard (never the worker firehose, which would blow up your token bill), the steering vocabulary,
-and what to watch for. Because you can reach that session from the Claude Code mobile app, you can
-even check in and course-correct from your phone:
+**5 — Optionally, supervise from a second agent session.** Open a second session **in the same project
+folder** and invoke the supervisor skill — `/agg:supervise` (Claude), `/agg-supervise` (Copilot),
+`$agg-supervise` (Codex). It's not required — a plain session could read the state and run `agg send`
+too — but the skill hands that session the right playbook: read the compact scoreboard (never the
+worker firehose, which would blow up your token bill), the steering vocabulary, and what to watch for.
+And because a Claude Code session is reachable from the mobile app, you can check in and
+course-correct from your phone:
 
 ```
 /agg:supervise
@@ -224,18 +224,26 @@ Supported features:
 | **Progress summaries** (`summary.enabled`) | ✅ | ✅ | ✅ |
 | Token budget (`budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
 | Session resume (`resume_sessions`) | ✅ | ✅ | ✅ |
-| Thinking effort (`effort:`) | ✅ | ✅ | ✅ |
+| Thinking effort (`effort:`) | ✅ | ✅ | ⚠️ ¹ |
 | Rate-limit backoff | ✅ | ✅ | ❌ |
 | **Dollar cost cap** (`cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
 
-Two notes: `effort:` takes `low|medium|high|xhigh|max`, and Codex tops out at `high` (`max` clamps
-to it). Codex picks its own model unless you set `model:`.
+- **`model:`** — **Codex: omit it entirely.** Which models you may use depends on how you
+  authenticated, and naming a wrong one is a hard 400 at runtime. **Copilot: `model: auto`.**
+- **`effort:`** takes `low|medium|high|xhigh|max`. Codex tops out at `high` (`max` clamps to it).
+  ¹ **Copilot rejects `effort:` together with `model: auto`** — which is its default. Name a concrete
+  model, or leave `effort:` empty. `agg` refuses the pair at startup rather than letting every
+  session die.
+- **Dollar cost** is Claude-only: Codex reports no cost at all, Copilot bills in AI Credits, not
+  dollars. Ask for `cost.total` / `over_cost` on either and `agg run` **refuses to start** — a spend
+  guard that can never fire is worse than none. Use `budget.total` (tokens), which works everywhere.
+  Copilot can also cap itself: `worker_args: ["--max-ai-credits", "50"]`.
 
 ### Setting up on Codex or Copilot
 
 The `/agg:*` skills work on **all three agents**, by two routes.
 
-**Route 1 — the plugin marketplace** (see [Install](#install)). Codex and Copilot both have one, and
+**Route 1 — the plugin marketplace** (see [Quick start](#quick-start)). Codex and Copilot both have one, and
 both consume the *same* manifest Claude does, so there is one plugin, not three.
 
 **Route 2 — install into the project**, with the binary you already have:
@@ -245,8 +253,9 @@ agg skills install            # installs for the agent in agg.yaml (or --agent c
 agg skills install --user     # …for your whole account instead of just this project
 ```
 
-That copies `/agg:new`, `/agg:status` and `/agg:supervise` into the directory your agent actually
-reads. The directory differs, which is the only reason this is a command and not a `cp`:
+That copies the three skills — `agg-new`, `agg-status`, `agg-supervise` — into the directory your
+agent actually reads. (Note the namespace differs by route: the `agg:` in `/agg:new` comes from the
+plugin, so via this installer Claude gives you `/agg-new`.) The directory differs, which is the only reason this is a command and not a `cp`:
 
 | agent | project install | `--user` install |
 |---|---|---|
@@ -257,19 +266,22 @@ reads. The directory differs, which is the only reason this is a command and not
 `.agents/` is the emerging agent-neutral convention, and Codex and Copilot both honour it — so one
 directory serves both. Claude reads neither, hence two.
 
-**How you invoke them differs, and this part matters:**
+**How you invoke them differs per agent** — and the prefix is not the same:
 
-- **Claude Code** has slash commands: type `/agg:new`, `/agg:status`, `/agg:supervise`.
-  (Claude users can also install them the classic way, via the plugin marketplace — see
-  [Install](#install). Both routes work.)
-- **Codex and Copilot have no slash commands for skills.** They pick a skill by matching your
-  request against its description. So you just *ask*:
+| agent | invoke it with | |
+|---|---|---|
+| Claude Code | `/agg:new` `/agg:status` `/agg:supervise` | `/agg-new` etc. if installed via `agg skills install` — the `agg:` namespace comes from the plugin |
+| GitHub Copilot | `/agg-new` `/agg-status` `/agg-supervise` | every skill is a slash command |
+| OpenAI Codex | **`$agg-new`** `$agg-status` `$agg-supervise` | Codex uses `$`, not `/` — `/agg-new` is *"Unrecognized command"*. `/skills` opens a picker. |
 
-  ```
-  set up AgenticGoGo for this project     → agg-new
-  how is the agg loop doing?              → agg-status
-  supervise the running agg loop          → agg-supervise
-  ```
+**Or just ask, on any of them** — every agent also selects a skill by matching your request against
+its `description:`, and that is the only route that works headlessly:
+
+```
+set up AgenticGoGo for this project     → agg-new
+how is the agg loop doing?              → agg-status
+supervise the running agg loop          → agg-supervise
+```
 
 Then:
 
@@ -279,7 +291,7 @@ agg run
 ```
 
 `agg doctor` is the one to trust: agents are **not** interchangeable (no cost guard on Codex or
-Copilot — see [Which agent?](#which-agent)), and `/agg:new` writes a config shaped for the agent you
+Copilot — see [Choosing an agent](#choosing-an-agent)), and `/agg:new` writes a config shaped for the agent you
 chose. If doctor is green, `agg run` will start.
 
 **No skills at all?** `agg init` still scaffolds `agg.yaml`, `goals.yaml`, `AGG_RESUME.md` and a
@@ -299,10 +311,10 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Post-merge rollback gate** — a red session is reverted; the base never advances broken.
 
 **Guardrails for unattended runs**
-- **Rate-limit backoff** — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
+- **Rate-limit backoff** *(Claude + Codex)* — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
 - **No orphaned compute** — process-group reaping sweeps stragglers when a session or the loop ends.
-- **Token + dollar ceilings** — hard `over_budget` / `over_cost` / `over_iterations` / `wall_hours` guards.
+- **Token ceilings on every agent, dollar ceilings on Claude** — `over_budget` / `over_iterations` / `wall_hours` everywhere; `over_cost` only where the agent reports dollars. Asking for a guard your agent can't report is refused at startup, never silently ignored.
 - **Long-task tracking** — `agg spawn` keeps a sim/build alive across sessions so the reaper spares it.
 
 **State & memory**
@@ -317,7 +329,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Automation-friendly** — `--json` output and meaningful exit codes.
 
 **Works with your setup**
-- **Claude Code, subscription or API key** — inherits your MCP servers, plugins, hooks, and skills.
+- **Claude Code, OpenAI Codex or GitHub Copilot** — subscription or API key; the worker inherits your agent's MCP servers, plugins, hooks, and skills.
 - **Tool-agnostic hooks** — wire in your own code graph, linter, or memory via lifecycle hooks + prompt includes.
 
 ## Steering a running loop
@@ -413,25 +425,29 @@ Because the log on stdout is the source of truth and `state.json` is just a view
 **crash-safe and observable**: `tail`/`grep`/`cat` the files, kill and restart, inspect mid-run —
 nothing important is hidden in process memory.
 
-## Your Claude Code setup carries in
+## Your agent's setup carries in
 
-`agg` bundles no tools of its own. `RUN` is an ordinary `claude -p` call, so it **inherits your Claude
-Code environment** — MCP servers, plugins, settings, and hooks all keep working inside the worker, and
-`/agg:new` will even detect your active MCP servers / skills / hooks and offer to wire them into the
-loop (via `hooks:` + `prompt_includes:`). Nothing is hardcoded; whatever your Claude Code has, the
-worker gets.
+`agg` bundles no tools of its own. `RUN` is an ordinary `claude -p` / `codex exec` / `copilot -p`
+call, so it **inherits your agent's environment** — MCP servers, plugins, settings, and hooks all keep
+working inside the worker, and `/agg:new` will even detect your active MCP servers / skills / hooks
+and offer to wire them into the loop (via `hooks:` + `prompt_includes:`). Nothing is hardcoded;
+whatever your agent has, the worker gets.
 
-Headless `-p` does impose real limits — worth knowing up front:
+Running an agent headlessly does impose real limits — worth knowing up front:
 
-- **Slash-command skills aren't invocable** in `-p`. Inline the content you need into `AGG_RESUME.md`
-  rather than calling `/some-skill`.
-- **No mid-session interruption** (a platform limit), so steering is session-granular — queued on the
-  bus, applied at the next `INJECT`.
-- **The worker runs with full tool access** (`--dangerously-skip-permissions`), because a `-p` agent
-  can't answer permission prompts. Narrow it with `worker_args` (e.g. `--allowedTools Edit,Bash`).
+- **Don't rely on invoking a skill by name** inside the worker. Inline the content you need into
+  `AGG_RESUME.md` rather than calling `/some-skill`.
+- **No mid-session interruption** (a platform limit on all three), so steering is session-granular —
+  queued on the bus, applied at the next `INJECT`.
+- **The worker runs with full tool access**, because a headless agent can't answer permission
+  prompts: `--dangerously-skip-permissions` (Claude), `--dangerously-bypass-approvals-and-sandbox`
+  (Codex), `--allow-all-tools` (Copilot). Narrow it with `worker_args`, which passes flags **verbatim
+  to your agent** — so use that agent's own vocabulary (e.g. Claude's `--allowedTools Edit,Bash`,
+  Copilot's `--max-ai-credits 50`).
 - **MCP servers that need interactive auth** (an OAuth login, say) may be unavailable in a headless run.
-- The **judge & summarizer** sessions deliberately load *only your settings* — `--strict-mcp-config`
-  (no MCP) and no repo `.claude/` — so the agent can't steer the process that grades it.
+- The **judge & summarizer** sessions are deliberately **read-only**, so the agent can't steer the
+  process that grades it. Same guarantee, three mechanisms: Claude `--strict-mcp-config` +
+  `--setting-sources user`; Codex `--sandbox read-only`; Copilot by withholding `--allow-all-tools`.
 
 ## Interfaces
 
@@ -449,7 +465,7 @@ Two ways to watch a run — same live state, two views — plus a chat superviso
 |---|---|
 | **TUI** | `agg dashboard` — live scoreboard, goals, activity tail. `Tab` focus · `↑↓` `PgUp` `PgDn` `g` `G` scroll · `f` follow · `q` quit. `--once` prints a one-shot snapshot for CI/SSH. |
 | **Web** | A standalone SvelteKit app in [`src/web/`](src/web/). The binary stays UI-free and exposes a thin JSON API. |
-| **Supervisor** | `/agg:supervise` in a second Claude Code session — status and steering by chat, reachable from the mobile app. Reads the snapshot only, not the workers' output. |
+| **Supervisor** | `/agg:supervise` (Claude) · `/agg-supervise` (Copilot) · `$agg-supervise` (Codex), in a second agent session — status and steering by chat; a Claude session is reachable from the mobile app. Reads the snapshot only, not the workers' output. |
 
 ```bash
 agg serve                              # JSON API on :7878
@@ -465,7 +481,7 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 |---|---|---|
 | `agg init` | Scaffold **placeholder** config you must then edit — a blank-slate fallback. Prefer `/agg:new`, which fills it in from your project. | `--force` overwrite · `--folder` scaffold into `agg/` |
 | `agg doctor` | Diagnose the setup: the agent is on PATH, config parses, conditions valid, **the agent can do what the config asks**, skills installed | |
-| `agg skills install` | Install the `/agg:*` skills where your agent looks (`.claude/skills/` for Claude, `.agents/skills/` for Codex + Copilot) | `--agent <a>` (default: agg.yaml's `agent:`) · `--user` install under `$HOME` |
+| `agg skills install` | Install the `agg-*` skills where your agent looks (`.claude/skills/` for Claude, `.agents/skills/` for Codex + Copilot) | `--agent <a>` (default: agg.yaml's `agent:`) · `--user` install under `$HOME` |
 | `agg plan` | Run every judge once and print the starting scoreboard (a dry run) | |
 | `agg run` | Drive the loop until `stop_when` is met (or a guard fires) | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` |
 | `agg judge <id>` | Run **one** goal's judge and print its raw verdict — for authoring judges | |

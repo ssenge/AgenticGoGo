@@ -22,7 +22,7 @@
 //! | event stream | `--output-format stream-json` | `--json` | `--output-format json` |
 //! | output tokens | `usage.output_tokens` on the TERMINAL event | `turn.completed.usage.output_tokens` | `assistant.message.data.outputTokens` — **per message, NOT on the terminal event** |
 //! | **dollar cost** | ✅ `total_cost_usd` | ❌ **NONE** (source-confirmed) | ❌ **NONE** — terminal `usage` holds `premiumRequests` + durations only |
-//! | tools-off one-shot | ✅ `--strict-mcp-config` | ❌ no way found | ❌ **probed: tools still OFFERED**, the write was only permission-denied at execution |
+//! | read-only one-shot | ✅ `--strict-mcp-config` + `--setting-sources user` | ✅ `--sandbox read-only` | ✅ withhold `--allow-all-tools` (tools are offered, but every write is denied) |
 //! | resume | `--resume <id>` | **subcommand** `codex exec resume <ID>` | `-r/--resume=<id>`; id = `result.sessionId` |
 //! | effort | `--effort` | ❌ no flag (only `-c model_reasoning_effort=…`) | `--effort` (same vocabulary) |
 //! | terminal event | `type:"result"` | `turn.completed` \| `turn.failed` \| bare `error` | `type:"result"` (`sessionId`, `exitCode`, `usage`) |
@@ -105,10 +105,12 @@ pub struct Capabilities {
     /// Can make a NON-AGENTIC single prompt→text call with tools/MCP disabled and project config
     /// ignored. Required by LLM judges and the summarizer.
     ///
-    /// This is the one most likely to be `false`, and it is not obvious: Codex and Copilot are
-    /// architecturally agentic even for one-shot calls, and neither has a verified way to fully
-    /// disable tools. An LLM judge that can run tools is not a judge — it can go and edit the
-    /// thing it is grading. Script judges are unaffected.
+    /// An LLM judge that can WRITE is not a judge — it can go and edit the thing it is grading. All
+    /// three agents can be held to a read-only one-shot, but by three different mechanisms: Claude
+    /// `--strict-mcp-config` + `--setting-sources user`; Codex `--sandbox read-only`; Copilot by
+    /// WITHHOLDING `--allow-all-tools`, so tools are still offered but every write is denied. (An
+    /// earlier survey concluded Codex and Copilot had 'no way found' and that LLM judges were
+    /// Claude-only. That was wrong — verified live on all three.) Script judges are unaffected.
     pub supports_one_shot: bool,
 }
 

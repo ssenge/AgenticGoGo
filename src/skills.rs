@@ -38,10 +38,15 @@
 //! The DIRECTORY is named `agg-new` too, belt-and-braces: Codex and Copilot both fall back to the
 //! directory name when a skill has no `name:` key.
 //!
-//! # There is no slash command on Codex or Copilot
-//! Neither has a slash registry; both select a skill by matching its `description:` — Codex injects
-//! every skill's name+description into the system prompt and lets the model choose. So an installed
-//! skill is invoked by ASKING for it in prose, not by typing `/agg:new`. Only Claude has the slash.
+//! # How a user INVOKES the skill — the PREFIX is not the same on all three
+//! | agent | invoke with | |
+//! |---|---|---|
+//! | claude | `/agg-new` | `/agg:new` when installed from the plugin marketplace instead — the `agg:` namespace is the PLUGIN's, not the file's |
+//! | copilot | `/agg-new` | every skill is a slash command. Its SDK: `userInvocable` = *"whether the skill can be invoked by the user as a slash command"*, and it is `true` for ours (verified on a live `session.skills_loaded`) |
+//! | codex | **`$agg-new`** | Codex uses `$`, **not** `/`. A `/agg-new` is "Unrecognized command" — requested and closed as not planned (openai/codex#11817). `/skills` opens a picker. |
+//!
+//! On all three, the skill is ALSO selected by matching the request against its `description:` —
+//! which is the only route that works headlessly. So the description is load-bearing, not decoration.
 //!
 //! # This installer is not the only route
 //! Codex and Copilot BOTH have plugin marketplaces, and both accept this repo's existing

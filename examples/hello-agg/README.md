@@ -17,8 +17,8 @@ The judge rejects `3` → the worker edits `add.py` to `print(1 + 1)` → the ju
 
 ## Run it on another agent
 
-The judge is a shell script, so nothing here is Claude-specific — only the two model lines in
-`agg.yaml` are. Edit them and re-run:
+The judge is a shell script, so nothing here is Claude-specific — only the `agent:` and `model:` lines
+in `agg.yaml` are. Edit them and re-run:
 
 ```yaml
 # Claude Code (as shipped)
@@ -90,15 +90,22 @@ halt_when: "wall_hours >= 0.5"
 **4. `agg.yaml`** — outer-loop config + the resume prompt `INJECT`ed into each session:
 
 ```yaml
+agent: claude                    # ⚠️ this file is CLAUDE-SHAPED — see "Run it on another agent"
 project: calc
 model: "claude-opus-4-8[1m]"
 resume_prompt: "AGG_RESUME.md"
-budget: { total: 2000000 }       # token ceiling  → over_budget  (a GATE guard)
-cost:   { total: 5.0 }           # $ ceiling → over_cost (API-equivalent price Claude reports;
-                                 #   a usage proxy, NOT a subscription charge — see note below)
+budget: { total: 2000000 }       # token ceiling  → over_budget  (a GATE guard). Works on ANY agent.
+cost:   { total: 5.0 }           # $ ceiling → over_cost. CLAUDE ONLY — agg REFUSES this config on
+                                 #   codex/copilot, which cannot report dollars. (API-equivalent
+                                 #   price Claude reports; a usage proxy, NOT a subscription
+                                 #   charge — see note below)
 summary: { enabled: true, model: haiku, min_interval_secs: 1 }
 memory: { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md, on by default
 ```
+
+> **Running this on Codex or Copilot?** Drop the `cost:` line — `budget:` above already caps the run,
+> and it works everywhere. Also drop `model:` on Codex (naming one is a hard 400) and use
+> `model: auto` on Copilot. `agg doctor` checks all of this for you.
 
 > **A note on `cost` / `over_cost`.** The dollar figure is `total_cost_usd` as reported by the
 > `claude` CLI — the **API-equivalent list price** of the work. On a **Max/Pro subscription you are
@@ -138,15 +145,18 @@ In a project you've already planned (a PRD, ROADMAP, get-shit-done `.planning/`,
 let the skill do it. First install it (once per project, or `--user` for good):
 
 ```bash
-agg skills install        # all three agents — puts it where yours actually looks
+agg skills install        # installs for the agent in agg.yaml — or --agent claude|codex|copilot
 ```
 
 Then, inside your agent:
 
 ```
-/agg:new                                  # Claude Code — a slash command
-"set up AgenticGoGo for this project"     # Codex / Copilot — no slash; just ask
+/agg-new                                  # Claude Code  (/agg:new if you installed the plugin)
+/agg-new                                  # GitHub Copilot
+$agg-new                                  # OpenAI Codex — it uses $, not /
 ```
+
+Or just **ask** on any of them: "set up AgenticGoGo for this project".
 
 It **translates** whatever plan exists into goals + judges (it doesn't replicate your spec tooling),
 asks only about genuine gaps, and writes an `agg.yaml` shaped for **your** agent — no cost guard on
