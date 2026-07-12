@@ -260,6 +260,23 @@ impl AgentBackend for Copilot {
         v.get("sessionId")?.as_str().map(str::to_string)
     }
 
+    /// `--effort` and `--model auto` are each fine alone and fatal together — see
+    /// [`AgentBackend::config_conflict`] and [`Self::default_effort`]. Fixing the DEFAULT was not
+    /// enough: a user (or `/agg:new`) can still ask for both explicitly, and every worker session
+    /// would die instantly while `agg doctor` reported the config as fine. So refuse it at startup.
+    fn config_conflict(&self, model: &str, effort: &str) -> Option<String> {
+        (model == "auto" && !effort.is_empty()).then(|| {
+            format!(
+                "`model: auto` and `effort: {effort}` cannot be combined — Copilot rejects the pair \
+                 outright (\"Model `auto` does not support reasoning effort configuration\"), so \
+                 EVERY worker session would die in seconds having spent 0 tokens, and the loop \
+                 would halt on over_iterations having done nothing.\n      \
+                 fix: either name a concrete model that accepts an effort, or set `effort: \"\"` \
+                 and let `auto` choose."
+            )
+        })
+    }
+
     /// **Empty on purpose — do NOT "restore" this to `max`.**
     ///
     /// This used to return `"max"`, on the reasoning that Copilot's `--effort` takes the same

@@ -247,6 +247,31 @@ pub trait AgentBackend: Send + Sync {
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
     fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String>;
 
+    /// Two config keys that are each individually LEGAL, but that this agent cannot accept
+    /// TOGETHER. Return the explanation; `None` (the default) means the agent has no such pair.
+    ///
+    /// # Why this is separate from [`Capabilities`]
+    /// `Capabilities` answers "can the agent do X at all?" — a property of the agent. This answers
+    /// "can it do X *and* Y at once?" — a property of the COMBINATION, which no per-feature flag
+    /// can express. Copilot is the reason it exists: it supports `--effort`, and it supports
+    /// `--model auto`, so both capability flags are honestly `true` — but ask for both and it
+    /// refuses the invocation outright:
+    ///
+    /// ```text
+    /// Error: Model "auto" does not support reasoning effort configuration (requested: "max").
+    /// ```
+    ///
+    /// Every worker session then dies in ~4s with exit 1 and zero tokens, while the loop happily
+    /// runs sessions, judges them, and halts on `over_iterations` having achieved nothing. Before
+    /// this hook, `agg doctor` printed "✔ agent `copilot` can do everything this config asks" for
+    /// exactly that config — a green light on a run that cannot work.
+    ///
+    /// Checked at startup by [`crate::capability::check`], so it is a loud refusal, never a silent
+    /// dropped flag.
+    fn config_conflict(&self, _model: &str, _effort: &str) -> Option<String> {
+        None
+    }
+
     /// How this agent can cap its OWN spend, when it cannot report cost to us in dollars.
     ///
     /// Refusing `cost.total` on a backend with `reports_cost_usd: false` is correct — but on its

@@ -64,7 +64,7 @@ Write the answer as `agent: claude|codex|copilot` in `agg.yaml`. Then obey the m
 | summaries (`summary.enabled`) | ✅ | ✅ | ✅ |
 | token budget (`budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
 | session resume (`resume_sessions`) | ✅ | ✅ | ✅ |
-| thinking effort (`effort:`) | ✅ | ✅ (clamps `max`→`high`) | ✅ |
+| thinking effort (`effort:`) | ✅ | ✅ (clamps `max`→`high`) | ⚠️ **not with `model: auto`** |
 | rate-limit backoff | ✅ | ✅ | ❌ |
 | **dollar cost (`cost.total`, `over_cost`)** | ✅ | ❌ | ❌ |
 
@@ -77,7 +77,11 @@ Write the answer as `agent: claude|codex|copilot` in `agg.yaml`. Then obey the m
 2. **Codex: OMIT `model:` entirely** unless the user explicitly names one. Guessing (e.g.
    `gpt-5-codex`) is a hard 400 — *"not supported when using Codex with a ChatGPT account"*. Which
    models exist depends on how the user authenticated, so let `agg` pick its default.
-3. **Copilot: `model: auto` is safe.** Claude: `model: "claude-opus-4-8[1m]"` is the default.
+3. **Copilot: `model: auto` is safe — but then do NOT set `effort:`.** Copilot refuses the pair
+   (*"Model `auto` does not support reasoning effort configuration"*) and every worker session dies
+   instantly having spent 0 tokens. Use `model: auto` with **no** `effort:` (the default), or name a
+   concrete model if the user really wants an effort level.
+   Claude: `model: "claude-opus-4-8[1m]"` is the default.
 4. **Finish by running `agg doctor`** (Step 7). It re-checks every rule above against the real
    backend. It is a free correctness check — if it passes, the config starts.
 
