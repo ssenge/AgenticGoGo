@@ -10,26 +10,46 @@
 //! Codex and Copilot — and the answer changed the shape. See [`Capabilities`].
 //!
 //! # The capability problem — read this before adding a backend
-//! Agents are NOT interchangeable, and the differences are not cosmetic. From a survey of Claude,
-//! OpenAI Codex (`codex exec`) and GitHub Copilot (`copilot -p`):
+//! Agents are NOT interchangeable, and the differences are not cosmetic. Verified against
+//! `claude` 2.1.207, `codex` 0.144.1 (flags from `codex exec --help`; event schema from its Rust
+//! source `codex-rs/exec/src/exec_events.rs`) and `copilot` 1.0.70 (flags from `copilot --help`;
+//! event schema from the Copilot SDK streaming-events docs):
 //!
 //! | | Claude | Codex | Copilot |
 //! |---|---|---|---|
-//! | output tokens | ✅ | ✅ (different field path) | ✅ (different again) |
-//! | **dollar cost** | ✅ `total_cost_usd` | ❌ **none** | ❌ "billing multiplier", AI Credits |
-//! | tools-off one-shot | ✅ | ❌ no verified way | ❌ no verified way |
-//! | session resume | ✅ | ✅ | ⚠️ unverified |
-//! | rate-limit signal | ✅ | ⚠️ free-form text | ⚠️ may auto-retry, never surfacing |
+//! | headless prompt | `-p <text>` | **positional** (`-p` is `--profile`!) | `-p <text>` |
+//! | auto-approve | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | `--allow-all-tools` |
+//! | event stream | `--output-format stream-json` | `--json` | `--output-format json` |
+//! | output tokens | `usage.output_tokens` | `turn.completed.usage.output_tokens` | `assistant.usage.data.outputTokens` |
+//! | **dollar cost** | ✅ `total_cost_usd` | ❌ **NONE** (source-confirmed) | ❌ `cost` = a *billing multiplier*, not USD |
+//! | tools-off one-shot | ✅ | ❌ no way found | ⚠️ maybe (`--available-tools=` + `--disable-builtin-mcps`), unverified |
+//! | resume | `--resume <id>` | **subcommand** `codex exec resume <ID>` | `-r/--resume=<id>` |
+//! | effort | `--effort` | ❌ no flag (only `-c model_reasoning_effort=…`) | `--effort` (same vocabulary) |
+//! | terminal event | `type:"result"` | `turn.completed` \| `turn.failed` \| bare `error` | `session.shutdown` (`shutdownType`) |
 //!
-//! The dangerous one is **cost**. `over_cost` is `cost_spent >= cost_limit`; if a backend never
-//! reports cost, `cost_spent` stays 0.0, the predicate is never true, and the guard is **silently
-//! dead** — an autonomous loop with `halt_when: over_cost` would run unbounded, spending real
-//! money. Same for `over_budget` and output tokens.
+//! ## The dangerous one: cost
+//! `over_cost` is `cost_spent >= cost_limit`. If a backend never reports cost, `cost_spent` stays
+//! 0.0, the predicate is never true, and the guard is **silently dead** — an autonomous loop with
+//! `halt_when: over_cost` runs unbounded, spending real money, with no error anywhere. Same shape
+//! for `over_budget`. **Neither Codex nor Copilot can price a session in dollars.**
 //!
 //! So a backend must DECLARE what it can report ([`Capabilities`]), the parse layer returns
 //! `Option` rather than a silently-zero default ([`SessionReport`]), and [`crate::capability`]
 //! refuses to start a run whose config demands something the chosen backend cannot deliver.
-//! **A missing capability is a loud startup error, never a quiet no-op.**
+//! **A missing capability is a loud startup error, never a quiet no-op.** Where the agent has its
+//! OWN ceiling mechanism instead (Copilot's `--max-ai-credits`), say so via
+//! [`AgentBackend::spend_ceiling_hint`] so a refused guard doesn't leave the user unprotected.
+//!
+//! ## Three traps that will bite an implementer
+//! 1. **`-p` is not universal.** In `codex exec`, `-p` means `--profile`. Porting Claude's builder
+//!    by reflex would pass the entire prompt as a config-profile NAME. The prompt is positional.
+//! 2. **Resume is not always a flag.** Codex resumes via a *subcommand* with a different argv
+//!    shape (`codex exec resume <ID> <PROMPT>`), not `--resume`. [`AgentBackend::session_command`]
+//!    returns the whole `Command` precisely so a backend can restructure argv, not just add flags.
+//! 3. **Terminal events are not uniform.** Codex can end with `turn.completed`, `turn.failed`, OR
+//!    a bare top-level `error` with no turn wrapper. Copilot ends with `session.shutdown` carrying
+//!    `shutdownType: routine|error`. Never treat one shape as "the" terminal — and keep PROCESS
+//!    EXIT as ground truth, which is what the loop already does.
 //!
 //! # seam
 //! `agg run --sandbox` (ROADMAP P2) wraps what [`AgentBackend::session_command`] returns.
@@ -56,10 +76,14 @@ pub struct Capabilities {
     pub reports_output_tokens: bool,
     /// Reports a DOLLAR cost. Required by `cost.total` / `over_cost`.
     ///
-    /// Only Claude does. Codex reports nothing; Copilot reports a credit multiplier, not USD.
-    /// A backend that cannot price itself in dollars must say `false` here rather than let the
-    /// spend guard rot into a no-op. (A future agg could carry its own price table keyed by
-    /// model — that would be a new capability, not a lie in this one.)
+    /// **Only Claude does.** Codex's event schema has no cost field at all (confirmed in its
+    /// source); Copilot's `assistant.usage.data.cost` is documented as a *"model multiplier cost
+    /// for billing"* — a relative credit multiplier, not currency.
+    ///
+    /// A backend that cannot price itself in dollars must say `false` rather than let the spend
+    /// guard rot into a no-op — but should then offer [`AgentBackend::spend_ceiling_hint`] if the
+    /// agent can cap itself some other way. (A future agg could carry its own price table keyed by
+    /// model; that would be a new capability, not a lie in this one.)
     pub reports_cost_usd: bool,
     /// Can continue a prior session's context. Required by `resume_sessions: true`.
     pub supports_resume: bool,
@@ -169,6 +193,20 @@ pub trait AgentBackend: Send + Sync {
     /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
     fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String>;
+
+    /// How this agent can cap its OWN spend, when it cannot report cost to us in dollars.
+    ///
+    /// Refusing `cost.total` on a backend with `reports_cost_usd: false` is correct — but on its
+    /// own it leaves the operator with NO spend protection at all, which is the very outcome the
+    /// refusal exists to prevent. If the agent has a native ceiling, name it here and
+    /// [`crate::capability::check`] will put it in the error.
+    ///
+    /// Copilot, for example, takes `--max-ai-credits <n>` (it bills in GitHub AI Credits, not
+    /// dollars) — passable through agg.yaml's `worker_args`. Claude returns `None`: agg's own cost
+    /// guard works, so there is nothing to fall back to.
+    fn spend_ceiling_hint(&self) -> Option<&'static str> {
+        None
+    }
 
     /// Is the agent CLI on PATH and runnable?
     fn is_installed(&self) -> bool;

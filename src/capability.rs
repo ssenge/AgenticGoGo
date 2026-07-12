@@ -40,7 +40,7 @@ struct Demand {
     /// what breaks, in the user's terms, if we let this through.
     consequence: &'static str,
     /// how to resolve it.
-    fix: &'static str,
+    fix: String,
 }
 
 /// Check the config against the active backend. Called once, before the loop starts.
@@ -62,13 +62,27 @@ pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -
             || goals.halt_when.as_deref().unwrap_or("").contains(predicate)
     };
 
+    // Refusing a cost guard is right, but on its own it leaves the operator with NO spend
+    // protection — the very outcome the refusal exists to prevent. If the agent can cap itself
+    // some other way (Copilot: `--max-ai-credits`), say so.
+    let cost_fix = match backend.spend_ceiling_hint() {
+        Some(hint) => format!(
+            "remove the cost guard, or use an agent that reports a dollar cost.\n           \
+             DO NOT leave an autonomous loop with no spend ceiling at all — `{agent}` can cap \
+             itself instead: {hint}"
+        ),
+        None => "remove the cost guard (an unbounded autonomous loop is a real risk), \
+                 or use an agent that reports a dollar cost"
+            .to_string(),
+    };
+
     let demands = [
         Demand {
             wanted: cfg.budget.total.is_some() || named("over_budget"),
             provided: caps.reports_output_tokens,
             key: "budget.total / halt_when: over_budget",
             consequence: "the token guard would NEVER fire — the loop would run unbounded",
-            fix: "remove the budget guard, or use an agent that reports token usage",
+            fix: "remove the budget guard, or use an agent that reports token usage".to_string(),
         },
         Demand {
             wanted: cfg.cost.total.is_some() || named("over_cost"),
@@ -76,8 +90,7 @@ pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -
             key: "cost.total / halt_when: over_cost",
             consequence: "the SPEND guard would NEVER fire — the loop would run unbounded, \
                           spending real money",
-            fix: "remove the cost guard (an unbounded autonomous loop is a real risk), \
-                  or use an agent that reports a dollar cost",
+            fix: cost_fix,
         },
         Demand {
             wanted: cfg.resume_sessions,
@@ -85,14 +98,15 @@ pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -
             key: "resume_sessions: true",
             consequence: "every session would silently start with a FRESH context instead of \
                           continuing the last one",
-            fix: "set `resume_sessions: false`, or use an agent that supports resuming a session",
+            fix: "set `resume_sessions: false`, or use an agent that supports resuming a session"
+                .to_string(),
         },
         Demand {
             wanted: !cfg.effort.is_empty(),
             provided: caps.supports_effort,
             key: "effort",
             consequence: "the effort level would be silently ignored",
-            fix: "set `effort: \"\"`, or use an agent that accepts a thinking-effort level",
+            fix: "set `effort: \"\"`, or use an agent that accepts a thinking-effort level".to_string(),
         },
         Demand {
             wanted: uses_llm_judge,
@@ -100,14 +114,15 @@ pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -
             key: "a goal with `judge: { kind: llm }`",
             consequence: "the judge could not be run with tools disabled — an LLM judge that can \
                           run tools is not a judge, it can edit the very thing it is grading",
-            fix: "use script judges, or use an agent that can make a tools-off one-shot call",
+            fix: "use script judges, or use an agent that can make a tools-off one-shot call".to_string(),
         },
         Demand {
             wanted: uses_summarizer,
             provided: caps.supports_one_shot,
             key: "summary.enabled: true",
             consequence: "the summarizer has no way to make a plain, non-agentic model call",
-            fix: "set `summary: { enabled: false }`, or use an agent that supports a one-shot call",
+            fix: "set `summary: { enabled: false }`, or use an agent that supports a one-shot call"
+                .to_string(),
         },
     ];
 
@@ -165,6 +180,46 @@ mod tests {
         }
         fn is_installed(&self) -> bool { true }
         fn preflight(&self) -> Result<()> { Ok(()) }
+    }
+
+    /// Like Barebones, but it CAN cap its own spend — the shape Copilot actually has
+    /// (`--max-ai-credits`: it bills in credits, so it cannot report dollars, but it is not
+    /// therefore unboundable).
+    struct SelfCapping;
+    impl crate::backend::AgentBackend for SelfCapping {
+        fn name(&self) -> &'static str { "selfcapping" }
+        fn bin(&self) -> &'static str { "selfcapping" }
+        fn capabilities(&self) -> Capabilities { Barebones.capabilities() }
+        fn spend_ceiling_hint(&self) -> Option<&'static str> {
+            Some("pass `--max-ai-credits <n>` via agg.yaml `worker_args`")
+        }
+        fn default_model(&self) -> &'static str { "m" }
+        fn default_summary_model(&self) -> &'static str { "m" }
+        fn session_command(&self, _s: &SessionSpec) -> Command { Command::new("true") }
+        fn parse_event(&self, _l: &str) -> Option<crate::backend::stream::Event> { None }
+        fn parse_result(&self, _l: &str) -> Option<SessionReport> { None }
+        fn one_shot(&self, _p: &str, _m: &str, _t: u64, _c: Option<&Path>) -> Result<OneShot, String> {
+            unreachable!("gated by supports_one_shot")
+        }
+        fn is_installed(&self) -> bool { true }
+        fn preflight(&self) -> Result<()> { Ok(()) }
+    }
+
+    /// Refusing the cost guard is right, but it must not leave the operator with NO ceiling at
+    /// all. When the agent can cap itself, the refusal has to SAY SO — otherwise the safest
+    /// reading of the error ("just delete the cost guard") is the most dangerous action.
+    #[test]
+    fn a_refused_cost_guard_points_at_the_agents_own_ceiling_when_it_has_one() {
+        let cfg = cfg_yaml(
+            "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: false }\n\
+             effort: \"\"\ncost: { total: 5.0 }\n",
+        );
+        let err = check(&cfg, &goals_yaml(SCRIPT_GOALS), &SelfCapping).unwrap_err().to_string();
+        assert!(err.contains("--max-ai-credits"), "must name the agent's own ceiling:\n{err}");
+        assert!(
+            err.contains("DO NOT leave an autonomous loop with no spend ceiling"),
+            "must warn against the naive fix:\n{err}"
+        );
     }
 
     fn goals_yaml(body: &str) -> GoalsConfig {
