@@ -176,7 +176,7 @@ fn default_timeout() -> u64 {
     300
 }
 fn default_model() -> String {
-    crate::backend::DEFAULT_SUMMARY_MODEL.to_string()
+    crate::backend::active().default_summary_model().to_string()
 }
 
 impl Goal {

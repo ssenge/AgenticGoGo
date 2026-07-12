@@ -78,7 +78,7 @@ pub fn summarize(
     // unwrap included). `cwd: None` — the summarizer only reads text it was handed, so unlike
     // the judge it has no business looking at the project.
     // Best-effort: any failure (spawn/timeout) → None, never breaks the loop.
-    let out = backend::one_shot(&prompt, model, timeout_secs, None).ok()?;
+    let out = backend::active().one_shot(&prompt, model, timeout_secs, None).ok()?;
 
     let raw = parse_summaries(&out.body)?;
     Some(Summaries { cumulative: raw.cumulative, windowed: raw.windowed })

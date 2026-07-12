@@ -106,7 +106,7 @@ fn run_llm(
     // steering its own judge via repo config — live in `backend::one_shot`; `cwd` is passed
     // because the judge must see the project it is judging. The JSON envelope is unwrapped
     // there too, so `body` is already the model's text.
-    let out = match backend::one_shot(&prompt, model, timeout_secs, Some(cwd)) {
+    let out = match backend::active().one_shot(&prompt, model, timeout_secs, Some(cwd)) {
         Ok(o) => o,
         Err(e) => return Verdict::failed(format!("llm judge: {e}")),
     };

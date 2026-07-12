@@ -1,242 +1,241 @@
-//! The agent backend — **the one module that knows which agent binary we drive.**
+//! The agent backend — **the abstraction over which coding agent the loop drives.**
 //!
-//! Everything Claude-specific funnels through here: the binary name, the flag vocabulary, the
-//! JSON envelope its `--output-format json` wraps answers in, the model defaults, and the
-//! install check. Before this module those details were smeared across five files — worker.rs
-//! built the interactive invocation, judge.rs and summary.rs each built a near-identical
-//! one-shot call (with their own copy of the `.result` unwrap), and doctor.rs and main.rs each
-//! had their own byte-for-byte copy of the `--version` probe.
+//! One process drives exactly one agent, chosen at startup by `agg.yaml`'s `agent:` key and held
+//! in [`active`]. Everything agent-specific lives behind [`AgentBackend`]: the binary name, the
+//! flag vocabulary, the event-stream wire format, the model defaults, the install probe.
+//!
+//! # Why this is a trait and not a set of free functions
+//! Phase 2 of REFACTOR_1 deliberately built the *seam* (one module, no trait) on the reasoning
+//! that one implementation needs no abstraction. That was right until we actually looked at
+//! Codex and Copilot — and the answer changed the shape. See [`Capabilities`].
+//!
+//! # The capability problem — read this before adding a backend
+//! Agents are NOT interchangeable, and the differences are not cosmetic. From a survey of Claude,
+//! OpenAI Codex (`codex exec`) and GitHub Copilot (`copilot -p`):
+//!
+//! | | Claude | Codex | Copilot |
+//! |---|---|---|---|
+//! | output tokens | ✅ | ✅ (different field path) | ✅ (different again) |
+//! | **dollar cost** | ✅ `total_cost_usd` | ❌ **none** | ❌ "billing multiplier", AI Credits |
+//! | tools-off one-shot | ✅ | ❌ no verified way | ❌ no verified way |
+//! | session resume | ✅ | ✅ | ⚠️ unverified |
+//! | rate-limit signal | ✅ | ⚠️ free-form text | ⚠️ may auto-retry, never surfacing |
+//!
+//! The dangerous one is **cost**. `over_cost` is `cost_spent >= cost_limit`; if a backend never
+//! reports cost, `cost_spent` stays 0.0, the predicate is never true, and the guard is **silently
+//! dead** — an autonomous loop with `halt_when: over_cost` would run unbounded, spending real
+//! money. Same for `over_budget` and output tokens.
+//!
+//! So a backend must DECLARE what it can report ([`Capabilities`]), the parse layer returns
+//! `Option` rather than a silently-zero default ([`SessionReport`]), and [`crate::capability`]
+//! refuses to start a run whose config demands something the chosen backend cannot deliver.
+//! **A missing capability is a loud startup error, never a quiet no-op.**
 //!
 //! # seam
-//! Two planned features slot in HERE and nowhere else:
-//!   • **a second agent backend** (Codex, Amp, Gemini, …). The three fns below are deliberately
-//!     shaped like the methods of the `trait AgentBackend` that will exist once backend #2 is
-//!     real — extracting the trait then is a mechanical `impl`, not a refactor. The trait is NOT
-//!     defined now: one implementation does not need an abstraction, and guessing the second
-//!     one's shape before it exists is how you get the wrong seam.
-//!   • **`agg run --sandbox`**: a sandbox is a `Command` wrapper, so it wraps what
-//!     [`session_command`] returns.
-//!
-//! `stream.rs` is the other half of this backend — it parses Claude's `stream-json` events. It
-//! stays a separate module for size, but it is backend-private in spirit and moves behind the
-//! trait together with this file.
+//! `agg run --sandbox` (ROADMAP P2) wraps what [`AgentBackend::session_command`] returns.
 
-/// Parses the agent's `stream-json` events — the reading half of this backend (see the `# seam`
-/// note above; it moves behind the trait together with this file).
+pub mod claude;
 pub mod stream;
-/// Supervises one worker session: spawns what [`session_command`] builds, then runs the stream
-/// reader, the heartbeat and the watchdog over it, and reaps what it leaves behind.
 pub mod worker;
 
-use crate::os::proc::{self, Captured};
 use anyhow::Result;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::sync::OnceLock;
 
-/// The agent CLI we drive. Resolved via PATH, so the test suite can shim a fake `claude`
-/// (tests/cli.rs does exactly that) and so does any operator with a wrapper script.
-pub const BIN: &str = "claude";
+// ---------------- what a backend can and cannot do ----------------
 
-/// Default worker model (agg.yaml `model:`).
-pub const DEFAULT_MODEL: &str = "claude-opus-4-8[1m]";
-
-/// Default summarizer/LLM-judge model — the cheap one (agg.yaml `summary.model:`).
-pub const DEFAULT_SUMMARY_MODEL: &str = "haiku";
-
-// ---------------- the interactive worker session ----------------
-
-/// Everything the backend needs to build one worker invocation. Fields are agent-agnostic on
-/// purpose (a model name, an effort level, a resume handle, pass-through args) — the mapping
-/// onto *Claude's* flags happens in [`session_command`] and nowhere else.
-pub struct SessionSpec<'a> {
-    pub prompt: &'a str,
-    pub model: &'a str,
-    /// thinking effort; empty = don't pass the flag at all.
-    pub effort: &'a str,
-    /// continue a prior session's context instead of starting fresh.
-    pub resume_id: Option<&'a str>,
-    /// operator-supplied extra flags (agg.yaml `worker_args`).
-    pub extra_args: &'a [String],
-    /// the project directory the worker runs in.
-    pub cwd: &'a Path,
-}
-
-/// Build the `Command` for one interactive worker session. The caller spawns it — process-group
-/// setup, the stdout stream reader, the heartbeat and the watchdog are agg's process-management
-/// concerns, not the backend's, and they live in worker.rs.
+/// What a backend is able to REPORT or SUPPORT. Every field here exists because at least one real
+/// agent lacks it — this is not speculative generality.
 ///
-/// stdin is `/dev/null` so a worker can never block on a TTY read; stdout/stderr are piped
-/// because the event stream IS stdout.
-pub fn session_command(spec: &SessionSpec) -> Command {
-    let mut command = Command::new(BIN);
-    command
-        .arg("--dangerously-skip-permissions")
-        .arg("--model")
-        .arg(spec.model)
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--verbose");
-    // Max thinking effort for the headless worker (agg.yaml `effort:`; default "max").
-    // `ultracode` is interactive-only and not a valid `-p` flag value, so workers get the
-    // highest effort reachable from `-p` here and opt into subagent orchestration through the
-    // prompt prefix instead.
-    if !spec.effort.is_empty() {
-        command.arg("--effort").arg(spec.effort);
-    }
-    if let Some(id) = spec.resume_id {
-        command.arg("--resume").arg(id);
-    }
-    // Applied AFTER agg's own flags and BEFORE -p, so an operator can extend the invocation but
-    // not clobber its shape.
-    for a in spec.extra_args {
-        command.arg(a);
-    }
-    command
-        .arg("-p")
-        .arg(spec.prompt)
-        .current_dir(spec.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command
+/// A `false` is not a defect to be worked around silently. It is a constraint the loop must
+/// enforce at startup (see [`crate::capability::check`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Reports output-token usage on its terminal event. Required by `budget.total` / `over_budget`.
+    pub reports_output_tokens: bool,
+    /// Reports a DOLLAR cost. Required by `cost.total` / `over_cost`.
+    ///
+    /// Only Claude does. Codex reports nothing; Copilot reports a credit multiplier, not USD.
+    /// A backend that cannot price itself in dollars must say `false` here rather than let the
+    /// spend guard rot into a no-op. (A future agg could carry its own price table keyed by
+    /// model — that would be a new capability, not a lie in this one.)
+    pub reports_cost_usd: bool,
+    /// Can continue a prior session's context. Required by `resume_sessions: true`.
+    pub supports_resume: bool,
+    /// Accepts a thinking-effort level. Required by a non-empty `effort:`.
+    pub supports_effort: bool,
+    /// Can distinguish a rate-limit/usage-limit from an ordinary failure, so the loop backs off
+    /// instead of burning its session budget on retries. Best-effort everywhere.
+    pub detects_rate_limits: bool,
+    /// Can make a NON-AGENTIC single prompt→text call with tools/MCP disabled and project config
+    /// ignored. Required by LLM judges and the summarizer.
+    ///
+    /// This is the one most likely to be `false`, and it is not obvious: Codex and Copilot are
+    /// architecturally agentic even for one-shot calls, and neither has a verified way to fully
+    /// disable tools. An LLM judge that can run tools is not a judge — it can go and edit the
+    /// thing it is grading. Script judges are unaffected.
+    pub supports_one_shot: bool,
 }
 
-// ---------------- the one-shot call (judge + summarizer) ----------------
+// ---------------- what the loop needs back from a session ----------------
 
-/// A completed one-shot call: the model's TEXT (already unwrapped from the agent's JSON
-/// envelope), plus the exit status and stderr the caller needs to tell "the model said no" from
-/// "the call itself failed".
+/// Everything the loop learns from an agent's TERMINAL event.
+///
+/// Every field is an `Option` on purpose: `None` means **the agent did not report this**, which is
+/// categorically different from "it reported zero". Collapsing those two is exactly the bug that
+/// makes a spend guard silently stop guarding.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionReport {
+    /// handle for a later `--resume`, if the agent exposes one.
+    pub session_id: Option<String>,
+    /// output-side tokens this session spent.
+    pub output_tokens: Option<u64>,
+    /// dollars this session spent, if the agent prices itself.
+    pub cost_usd: Option<f64>,
+    /// the terminal event reported a rate/usage limit.
+    pub rate_limited: bool,
+}
+
+/// A completed one-shot call: the model's TEXT (envelope already stripped), plus the exit status
+/// and stderr the caller needs to tell "the model said no" from "the call itself failed".
 pub struct OneShot {
-    /// the model's answer text — envelope already stripped.
     pub body: String,
     pub stderr: Vec<u8>,
     pub success: bool,
 }
 
-/// Run a single non-interactive prompt and return the model's answer. The judge and the
-/// summarizer both go through this — they used to build near-identical `Command`s and each
-/// carried its own copy of the `.result` unwrap below.
+/// Everything a backend needs to build one worker invocation. Agent-agnostic by construction — a
+/// model name, an effort level, a resume handle, pass-through args. The mapping onto any
+/// particular agent's FLAGS happens inside that backend's [`AgentBackend::session_command`].
+pub struct SessionSpec<'a> {
+    pub prompt: &'a str,
+    pub model: &'a str,
+    /// thinking effort; empty = don't pass it at all.
+    pub effort: &'a str,
+    /// continue a prior session's context instead of starting fresh.
+    pub resume_id: Option<&'a str>,
+    /// operator-supplied extra flags (agg.yaml `worker_args`), passed through verbatim.
+    pub extra_args: &'a [String],
+    /// the project directory the worker runs in.
+    pub cwd: &'a Path,
+}
+
+// ---------------- the backend contract ----------------
+
+/// One coding agent the loop can drive.
 ///
-/// `cwd` is `Some` when the call must see the project (the judge inspects the repo) and `None`
-/// when it must not care (the summarizer only reads text it was handed).
+/// # Implementing a new backend
+/// The three hard parts, in order of how badly they bite:
 ///
-/// # trust boundary (verified the hard way — do not "simplify" these flags away)
-/// We deliberately do NOT pass `--bare`: it skips keychain reads, so the call fails with
-/// "Not logged in" — it cannot authenticate. Instead this stays a normal headless call (which
-/// authenticates) and is isolated two ways: `--strict-mcp-config` (no MCP servers) and
-/// `--setting-sources user` (load ONLY the operator's own settings, never the worker-mutated
-/// repo's `.claude/settings.json` or hooks). Together these stop a worker from steering its own
-/// judge via repo config, while preserving auth. (CLAUDE.md auto-discovery in cwd is the
-/// documented residual — see judge.rs's trust-boundary note.)
-pub fn one_shot(prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String> {
-    let mut command = Command::new(BIN);
-    command
-        .arg("-p")
-        .arg(prompt)
-        .arg("--model")
-        .arg(model)
-        .arg("--output-format")
-        .arg("json")
-        .arg("--strict-mcp-config")
-        .arg("--setting-sources")
-        .arg("user")
-        .stdin(Stdio::null());
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
+/// 1. **[`Self::capabilities`] must be honest.** Claiming `reports_cost_usd: true` when the agent
+///    doesn't emit dollars re-introduces the silent-guard bug this trait exists to prevent.
+/// 2. **[`Self::parse_result`] decides when a session ENDED.** Terminal semantics are not uniform
+///    (Codex can end with a bare top-level `error` and no turn wrapper). Return `Some` only for a
+///    genuinely terminal event. The loop treats PROCESS EXIT as ground truth regardless, so a
+///    missed terminal event degrades the report, it does not hang the loop.
+/// 3. **The prompt goes on ARGV, and stdin must be `/dev/null`.** Not negotiable: `codex exec`
+///    hangs waiting on stdin EOF when spawned as a non-TTY child, and Copilot ignores piped stdin
+///    when `-p` is given. [`worker`] already nulls stdin; keep it that way.
+pub trait AgentBackend: Send + Sync {
+    /// the `agent:` value in agg.yaml that selects this backend.
+    fn name(&self) -> &'static str;
+    /// the CLI binary, resolved via PATH (so a fake can be shimmed in tests).
+    fn bin(&self) -> &'static str;
+    fn capabilities(&self) -> Capabilities;
+    /// default worker model (agg.yaml `model:`).
+    fn default_model(&self) -> &'static str;
+    /// default cheap model for the summarizer / LLM judge.
+    fn default_summary_model(&self) -> &'static str;
+
+    /// Build the `Command` for one interactive worker session. The caller spawns and supervises
+    /// it — process groups, the stream reader, the heartbeat and the watchdog are agg's
+    /// process-management concerns, not the backend's.
+    fn session_command(&self, spec: &SessionSpec) -> Command;
+
+    /// Parse one line of the agent's event stream into a displayable event, or `None` for a line
+    /// that carries nothing to show.
+    fn parse_event(&self, line: &str) -> Option<stream::Event>;
+
+    /// Parse one line as the session's TERMINAL event. `None` = this line is not terminal.
+    ///
+    /// Returning `Some` with `None` fields is correct and expected for an agent that simply does
+    /// not report that number — see [`SessionReport`].
+    fn parse_result(&self, line: &str) -> Option<SessionReport>;
+
+    /// A single NON-AGENTIC prompt→text call, tools/MCP off, project config ignored. Used by the
+    /// LLM judge and the summarizer.
+    ///
+    /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
+    /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
+    fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String>;
+
+    /// Is the agent CLI on PATH and runnable?
+    fn is_installed(&self) -> bool;
+
+    /// Hard preflight: bail with an install hint if the CLI is missing.
+    fn preflight(&self) -> Result<()>;
+}
+
+// ---------------- selection ----------------
+
+/// Every backend agg knows how to drive. Adding one = a new `claude.rs`-shaped module + one arm.
+pub const KNOWN: &[&str] = &["claude"];
+
+/// Resolve an `agent:` name to its backend.
+pub fn for_name(name: &str) -> Result<&'static dyn AgentBackend> {
+    match name {
+        "claude" => Ok(&claude::Claude),
+        other => anyhow::bail!(
+            "unknown agent `{other}` in agg.yaml.\n  known agents: {}\n  \
+             (adding one means implementing `trait AgentBackend` — see src/backend.rs)",
+            KNOWN.join(", ")
+        ),
     }
-
-    let out: Captured = proc::run_with_timeout(command, timeout_secs)?;
-    Ok(OneShot { body: unwrap_envelope(&out.stdout), stderr: out.stderr, success: out.success })
 }
 
-/// `--output-format json` wraps the answer in an envelope; the model's text is in `.result`.
-/// Falls back to the raw bytes when the shape is anything else, so an envelope change degrades
-/// to "pass the text through" rather than to an empty verdict.
-fn unwrap_envelope(stdout: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(stdout)
-        .ok()
-        .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(str::to_string))
-        .unwrap_or_else(|| String::from_utf8_lossy(stdout).into_owned())
-}
+/// The backend this process drives. One process, one agent — selected once at startup.
+static ACTIVE: OnceLock<&'static dyn AgentBackend> = OnceLock::new();
 
-// ---------------- install check ----------------
-
-/// Is the agent CLI on PATH and runnable? The cheap probe both `agg doctor` and `agg run`'s
-/// preflight use.
-pub fn is_installed() -> bool {
-    Command::new(BIN)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Hard preflight for `agg run`: bail with an install hint if the agent CLI is missing.
-/// `agg doctor` reports the same condition as one line of its checklist via [`is_installed`].
-pub fn preflight() -> Result<()> {
-    if !is_installed() {
-        anyhow::bail!(
-            "the Claude Code CLI (`{BIN}`) was not found on your PATH.\n  \
-             AgenticGoGo drives it to run the inner workers. Install it from\n  \
-             https://claude.com/claude-code and make sure `{BIN} --version` works, then retry."
-        );
-    }
+/// Select the backend for this process. Call once, at startup, from the `agent:` config key.
+/// Idempotent; a second call with a different agent is ignored (the first wins).
+pub fn init(name: &str) -> Result<()> {
+    let b = for_name(name)?;
+    let _ = ACTIVE.set(b);
     Ok(())
+}
+
+/// The active backend. Defaults to Claude when [`init`] was never called — which is what every
+/// path that predates multi-agent support (and every test that doesn't care) gets.
+pub fn active() -> &'static dyn AgentBackend {
+    *ACTIVE.get_or_init(|| &claude::Claude)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The envelope unwrap was duplicated in judge.rs and summary.rs and tested in neither.
     #[test]
-    fn unwrap_envelope_extracts_result_and_falls_back() {
-        assert_eq!(unwrap_envelope(br#"{"result":"the answer","cost":1}"#), "the answer");
-        // unexpected shape → pass the raw text through rather than yield nothing
-        assert_eq!(unwrap_envelope(br#"{"unexpected":true}"#), r#"{"unexpected":true}"#);
-        assert_eq!(unwrap_envelope(b"not json at all"), "not json at all");
-        assert_eq!(unwrap_envelope(b""), "");
+    fn unknown_agent_is_a_loud_error_that_lists_the_known_ones() {
+        // `.err()` not `.unwrap_err()`: the Ok type is `&dyn AgentBackend`, which has no Debug.
+        let e = for_name("codex").err().expect("an unknown agent must be an error").to_string();
+        assert!(e.contains("unknown agent `codex`"), "got: {e}");
+        assert!(e.contains("claude"), "the error must list what IS supported, got: {e}");
     }
 
     #[test]
-    fn session_command_shape() {
-        let spec = SessionSpec {
-            prompt: "do the thing",
-            model: "m",
-            effort: "max",
-            resume_id: Some("abc"),
-            extra_args: &["--add-dir".to_string(), "/x".to_string()],
-            cwd: Path::new("/tmp"),
-        };
-        let cmd = session_command(&spec);
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(cmd.get_program().to_string_lossy(), BIN);
-        // operator args land after agg's flags but before -p, and -p is last so the prompt
-        // can never be parsed as a flag value.
-        let p = args.iter().position(|a| a == "-p").expect("-p present");
-        let add_dir = args.iter().position(|a| a == "--add-dir").expect("worker_args passed through");
-        assert!(add_dir < p, "worker_args must precede -p");
-        assert_eq!(args.last().unwrap(), "do the thing", "prompt is the final arg");
-        assert!(args.contains(&"--resume".to_string()) && args.contains(&"abc".to_string()));
-        assert!(args.contains(&"--effort".to_string()));
+    fn the_default_backend_is_claude() {
+        assert_eq!(active().name(), "claude");
+        assert_eq!(active().bin(), "claude");
     }
 
-    /// An empty `effort` must omit the flag entirely — passing `--effort ""` is an error.
+    /// The whole point of `Capabilities`: a backend that cannot price itself must SAY so. If this
+    /// ever flips to a blanket `true` for a non-reporting agent, the spend guard dies silently.
     #[test]
-    fn empty_effort_omits_the_flag() {
-        let spec = SessionSpec {
-            prompt: "p",
-            model: "m",
-            effort: "",
-            resume_id: None,
-            extra_args: &[],
-            cwd: Path::new("/tmp"),
-        };
-        let cmd = session_command(&spec);
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert!(!args.contains(&"--effort".to_string()));
-        assert!(!args.contains(&"--resume".to_string()));
+    fn claude_declares_the_capabilities_it_actually_has() {
+        let c = active().capabilities();
+        assert!(c.reports_output_tokens && c.reports_cost_usd, "claude reports both");
+        assert!(c.supports_one_shot, "claude can run a tools-off judge call");
+        assert!(c.supports_resume && c.supports_effort && c.detects_rate_limits);
     }
 }

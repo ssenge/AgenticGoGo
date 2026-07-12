@@ -28,8 +28,8 @@ pub fn run(dir: &Path, force: bool, folder: bool) -> Result<()> {
     // there instead of a hunt through a YAML template (which `format!` can't interpolate
     // without escaping every `{` in its flow maps).
     let agg_yaml = AGG_YAML
-        .replace("{{MODEL}}", crate::backend::DEFAULT_MODEL)
-        .replace("{{SUMMARY_MODEL}}", crate::backend::DEFAULT_SUMMARY_MODEL);
+        .replace("{{MODEL}}", crate::backend::active().default_model())
+        .replace("{{SUMMARY_MODEL}}", crate::backend::active().default_summary_model());
 
     let files: [(&str, &str, bool); 4] = [
         ("goals.yaml", goals_yaml.as_str(), false),

@@ -17,11 +17,19 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path, goals: &Path) -> Resul
     }
     let mut fail = 0;
 
-    // 1) agent CLI present (same probe `agg run`'s preflight uses — see backend.rs)
+    // 1) the agent CLI is present (same probe `agg run`'s preflight uses — see backend.rs).
+    // The agent comes from agg.yaml's `agent:`; if that file is broken we still probe the default,
+    // so doctor keeps working on exactly the setups it exists to diagnose.
+    if let Ok(c) = AggConfig::load(config) {
+        if let Err(e) = crate::backend::init(&c.agent) {
+            check(false, "agg.yaml names a known agent", &format!("{e}"), &mut fail);
+        }
+    }
+    let agent = crate::backend::active();
     check(
-        crate::backend::is_installed(),
-        "Claude Code CLI (`claude`) on PATH",
-        "install from https://claude.com/claude-code",
+        agent.is_installed(),
+        &format!("agent `{}`: the `{}` CLI is on PATH", agent.name(), agent.bin()),
+        "install it and make sure `--version` works",
         &mut fail,
     );
 
@@ -56,6 +64,16 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path, goals: &Path) -> Resul
             None
         }
     };
+
+    // 2b) the agent can actually do what this config asks of it. This is the check that answers
+    // "why did my cost guard never fire?" — the answer being that the agent cannot report cost,
+    // which `agg run` now refuses outright rather than ignoring.
+    if let (Some(ac), Some(gc)) = (agg_cfg.as_ref(), goals_cfg.as_ref()) {
+        match crate::capability::check(ac, gc, agent) {
+            Ok(()) => check(true, &format!("agent `{}` can do everything this config asks", agent.name()), "", &mut fail),
+            Err(e) => check(false, "the agent supports what this config asks", &format!("{e}"), &mut fail),
+        }
+    }
 
     if let Some(gc) = goals_cfg {
         let n = gc.goals.len();
