@@ -304,12 +304,28 @@ pub trait AgentBackend: Send + Sync {
 /// command that merely prints "429" must not park the loop in a 30-minute backoff.
 pub fn looks_rate_limited(text: &str) -> bool {
     const PATS: &[&str] = &[
+        // ---- Anthropic / Claude prose ----
         "rate_limit_error",
         "usage limit reached",
+        "overloaded_error",
+        // ---- OpenAI / Codex ----
+        // Codex does NOT hand us prose: its terminal event's `message` is the RAW UPSTREAM JSON,
+        // verified on the wire by forcing a 400:
+        //   {"type":"error","message":"{\"type\":\"error\",\"status\":400,
+        //     \"error\":{\"type\":\"invalid_request_error\",\"message\":\"…\"}}"}
+        // So a real 429 arrives as `"status":429` and `"type":"rate_limit_exceeded"` — NONE of
+        // which the Claude-shaped patterns above match. Before these three, Codex declared
+        // `detects_rate_limits: true` and detected nothing: a rate-limited loop would skip the
+        // backoff, treat the 429 as an ordinary failure, and immediately burn the next session
+        // against the wall. Match the JSON form, not the prose.
+        "\"status\":429",
+        "\"status\": 429",
+        "rate_limit_exceeded",
+        "rate limit reached",
+        // ---- shape-agnostic ----
         "status 429",
         "http 429",
         "429 too many requests",
-        "overloaded_error",
         "too many requests",
         "quota_exceeded", // Copilot returns HTTP 402 with this
         "insufficient_quota",
@@ -379,6 +395,48 @@ mod tests {
             let b = for_name(name).unwrap_or_else(|_| panic!("KNOWN lists `{name}` but for_name rejects it"));
             assert_eq!(&b.name(), name, "a backend's name() must match the `agent:` value that selects it");
         }
+    }
+
+    /// REGRESSION — the rate-limit detector must match the shape each agent ACTUALLY sends.
+    ///
+    /// The pattern list was written against Claude, which reports prose (`rate_limit_error`).
+    /// Codex does not: its terminal event's `message` is the RAW UPSTREAM JSON. Captured from the
+    /// wire by forcing a 400 (`codex exec --model definitely-not-a-real-model --json`):
+    ///
+    /// ```text
+    /// {"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,
+    ///   \"error\":{\"type\":\"invalid_request_error\",\"message\":\"…\"}}"}}
+    /// ```
+    ///
+    /// So a real 429 carries `"status":429` and `"rate_limit_exceeded"` — and matched NOTHING in
+    /// the Claude-shaped list. Codex therefore declared `detects_rate_limits: true` while detecting
+    /// nothing at all: on a real rate limit the loop would skip its backoff, score the 429 as an
+    /// ordinary failure, and immediately spawn the next session into the same wall, burning the
+    /// session budget. Both agents' real shapes are asserted here so neither can regress.
+    #[test]
+    fn the_rate_limit_detector_matches_what_each_agent_really_sends() {
+        // Codex: the exact envelope observed on the wire, with 429 in place of the captured 400.
+        let codex_429 = r#"{"type":"error","status":429,"error":{"type":"rate_limit_exceeded","message":"Rate limit reached for gpt-5-codex in organization org-x on requests per min (RPM): Limit 500, Used 500."}}"#;
+        assert!(
+            looks_rate_limited(codex_429),
+            "a REAL codex 429 must trip the backoff — it carries JSON, not prose"
+        );
+        // …and it must survive the turn.failed wrapper the loop actually feeds it.
+        let wrapped = format!(r#"{{"type":"turn.failed","error":{{"message":{codex_429:?}}}}}"#);
+        assert!(looks_rate_limited(&wrapped), "…including nested in turn.failed");
+
+        // Claude's prose shape must keep working — this is a widening, not a replacement.
+        assert!(looks_rate_limited(r#"{"type":"result","result":"rate_limit_error: slow down"}"#));
+        assert!(looks_rate_limited("Usage limit reached — resets at 5pm"));
+        // Copilot's 402.
+        assert!(looks_rate_limited(r#"{"error":{"code":"quota_exceeded"}}"#));
+
+        // And the thing that must NOT trip a 30-minute backoff: an ordinary failure, and a build
+        // log that merely mentions the number.
+        assert!(!looks_rate_limited(
+            r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"model not supported"}}"#
+        ));
+        assert!(!looks_rate_limited("test_429_parsing ... ok"));
     }
 
     /// REGRESSION — a backend's OWN defaults must not contradict each other.
