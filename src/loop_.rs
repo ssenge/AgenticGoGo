@@ -250,6 +250,10 @@ struct LoopState<'a> {
     last_session_id: Option<String>,
     cumulative: String,
     last_summary: Instant,
+    /// Consecutive sessions that died WITHOUT DOING ANYTHING — non-zero exit, zero tokens, not
+    /// rate-limited. See [`LoopState::worker_is_broken`]; reset by any session that gets off the
+    /// ground.
+    dud_streak: u32,
 
     // ── per-session git isolation ──
     iso_base: Option<String>,
@@ -560,7 +564,53 @@ impl LoopState<'_> {
             outcome.cost_usd,
             self.cost_spent,
         );
+
+        // A session that exits non-zero having produced ZERO tokens never reached the model: the
+        // agent CLI rejected the invocation itself. Retrying is pointless — the next session builds
+        // the identical argv and fails identically.
+        let dud = !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.output_tokens == 0;
+        self.dud_streak = if dud { self.dud_streak + 1 } else { 0 };
+
         Some(outcome)
+    }
+
+    /// Bail when the worker has failed to even START, repeatedly.
+    ///
+    /// # The bug that made this necessary
+    /// Copilot shipped with `model: auto` + `effort: max` as its DEFAULTS — a pair Copilot rejects
+    /// outright. Every worker session died in ~4s with exit 1 and zero tokens. And the loop simply
+    /// kept going: spawn, die, judge, spawn, die, judge — looking for all the world like a running
+    /// autonomous loop, printing a scoreboard each cycle, until it hit `over_iterations` and
+    /// reported a perfectly ordinary halt. With `--max-sessions 0` (the default, unlimited) it
+    /// would have spun until the operator noticed. Nothing anywhere said "your worker is broken".
+    ///
+    /// That specific config is now refused at startup ([`crate::capability::check`]), but the
+    /// SHAPE of the bug is not Copilot's: any bad model name, expired auth, or unknown flag in
+    /// `worker_args` produces exactly the same silent spin. This is the backstop for the whole
+    /// class — the loop is not allowed to look busy while doing nothing.
+    ///
+    /// Rate-limited sessions are exempt: they also exit non-zero with no tokens, but they are
+    /// TRANSIENT and the loop already has a backoff for them. Counting them here would abort a run
+    /// that just needed to wait.
+    fn worker_is_broken(&self) -> Option<anyhow::Error> {
+        const LIMIT: u32 = 3;
+        (self.dud_streak >= LIMIT).then(|| {
+            let agent = crate::backend::active().name();
+            anyhow::anyhow!(
+                "the `{agent}` worker failed to start {LIMIT} times in a row — non-zero exit, ZERO \
+                 tokens, every time.\n\
+                 That means the agent CLI rejected the invocation itself; it never reached the \
+                 model. Retrying cannot help: each session builds the same command.\n\n\
+                 Usual causes:\n  \
+                 • a `model:` the agent does not accept (or is not entitled to on your plan)\n  \
+                 • `effort:` set on a model that cannot take one (copilot: `model: auto` cannot)\n  \
+                 • an unknown flag in `worker_args`\n  \
+                 • expired / missing auth for `{agent}`\n\n\
+                 Run `agg doctor`, and try the worker by hand to see the CLI's own error.\n\
+                 (Stopping instead of spinning — a loop that fails silently forever is worse than \
+                 one that stops.)"
+            )
+        })
     }
 
     /// The graceful SIGINT/SIGTERM exit, taken straight after RUN. Returns through the caller so
@@ -959,6 +1009,7 @@ pub fn run(
         pending_instruction: None,
         last_session: String::new(),
         last_session_id: None,
+        dud_streak: 0,
         cumulative: String::new(),
         last_summary: loop_start, // real value set below, after the baseline evaluation
         iso_base: None,
@@ -1072,6 +1123,12 @@ pub fn run(
             // RUN
             return Ok(st.finish_interrupted()); // SIGINT/SIGTERM — nothing staged, nothing judged
         };
+
+        // A worker that cannot even start is a HARD error, not a lap of the loop. Without this the
+        // loop spins forever looking busy — see `worker_is_broken`.
+        if let Some(e) = st.worker_is_broken() {
+            return Err(e);
+        }
 
         let Some(verified) = st.verify(&outcome) else {
             // VERIFY
