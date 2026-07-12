@@ -18,7 +18,7 @@ quietly stop one step short — leaving you to babysit a terminal?
 **Then AgenticGoGo is for you.**
 
 AgenticGoGo (`agg`) is a deterministic outer **[Ralph loop](https://ghuntley.com/ralph/)** that
-drives a stochastic inner coding agent (currently supported: Claude Code, OpenAI Codex, GitHub Copilot) — relaunching a **fresh** session, verifying its work against gates
+drives a stochastic inner coding agent (currently supported: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex/cli), [GitHub Copilot](https://github.com/github/copilot-cli)) — relaunching a **fresh** session, verifying its work against gates
 *it can't fake* (the **judges**), and repeating until your goals are actually met. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done. *(A similar LLM-based approach — generate → verify → keep, as in evolutionary code search — was
 proposed years ago, outside the Ralph-loop community, by DeepMind's
 [AlphaCode](https://arxiv.org/abs/2203.07814) and its open-source variant
@@ -113,8 +113,8 @@ you want, and check it works:
 | agent | `agg.yaml` | install | check |
 |---|---|---|---|
 | **Claude Code** *(default)* | `agent: claude` | [claude.com/claude-code](https://claude.com/claude-code) | `claude -p "hello"` |
-| **OpenAI Codex** | `agent: codex` | `npm i -g @openai/codex` · `codex login` | `codex login status` |
-| **GitHub Copilot CLI** | `agent: copilot` | `npm i -g @github/copilot` · `copilot login` | `copilot --version` |
+| **[OpenAI Codex](https://developers.openai.com/codex/cli)** | `agent: codex` | `npm i -g @openai/codex` · `codex login` | `codex login status` |
+| **[GitHub Copilot CLI](https://github.com/github/copilot-cli)** | `agent: copilot` | `npm i -g @github/copilot` · `copilot login` | `copilot --version` |
 
 `agg doctor` verifies the agent is on your PATH **and** that it can do what your config asks —
 run it before your first loop. See [Choosing an agent](#choosing-an-agent) for what each one
