@@ -92,8 +92,15 @@ impl AgentBackend for Claude {
         stream::format_event(line)
     }
 
-    /// Claude's terminal event is `{"type":"result", …}`, carrying usage, cost, the session id,
-    /// and any rate-limit error together — so one parse of the line yields the whole report.
+    /// Claude reports usage ONCE, on its terminal `result` event — so this fires exactly once per
+    /// session and the accumulated total equals the reported total. (Contrast Copilot, which
+    /// reports per-message; the worker sums either shape identically.)
+    fn parse_usage(&self, line: &str) -> Option<u64> {
+        stream::output_tokens_from_result(line)
+    }
+
+    /// Claude's terminal event is `{"type":"result", …}`, carrying the session id, the cost and any
+    /// rate-limit error together — so one parse of the line yields the whole report.
     fn parse_result(&self, line: &str) -> Option<SessionReport> {
         stream::parse_result(line)
     }
