@@ -232,12 +232,13 @@ pub fn parse_result(line: &str) -> Option<crate::backend::SessionReport> {
         return None;
     }
     Some(crate::backend::SessionReport {
-        session_id: v.get("session_id").and_then(|x| x.as_str()).map(str::to_string),
         // Claude prices the session itself — correctly per-model (including the `[1m]` variant),
         // cache-aware, no pricing table needed on our side. We just read it.
         cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
         rate_limited: line_is_rate_limited_result(line),
     })
+    // The session id comes via `AgentBackend::parse_session_id` (per-line), not from here —
+    // Codex puts its resume handle on the FIRST event, not the terminal one.
     // NOTE: output tokens are NOT read here — they are accumulated per-line via
     // `AgentBackend::parse_usage`, because not every agent reports them on the terminal event.
 }

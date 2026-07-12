@@ -175,6 +175,7 @@ mod tests {
         fn session_command(&self, _s: &SessionSpec) -> Command { Command::new("true") }
         fn parse_event(&self, _l: &str) -> Option<crate::backend::stream::Event> { None }
         fn parse_usage(&self, _l: &str) -> Option<u64> { None }
+        fn parse_session_id(&self, _l: &str) -> Option<String> { None }
         fn parse_result(&self, _l: &str) -> Option<SessionReport> { None }
         fn one_shot(&self, _p: &str, _m: &str, _t: u64, _c: Option<&Path>) -> Result<OneShot, String> {
             unreachable!("gated by supports_one_shot")
@@ -199,6 +200,7 @@ mod tests {
         fn session_command(&self, _s: &SessionSpec) -> Command { Command::new("true") }
         fn parse_event(&self, _l: &str) -> Option<crate::backend::stream::Event> { None }
         fn parse_usage(&self, _l: &str) -> Option<u64> { None }
+        fn parse_session_id(&self, _l: &str) -> Option<String> { None }
         fn parse_result(&self, _l: &str) -> Option<SessionReport> { None }
         fn one_shot(&self, _p: &str, _m: &str, _t: u64, _c: Option<&Path>) -> Result<OneShot, String> {
             unreachable!("gated by supports_one_shot")

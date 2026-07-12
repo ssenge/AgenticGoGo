@@ -99,8 +99,19 @@ impl AgentBackend for Claude {
         stream::output_tokens_from_result(line)
     }
 
-    /// Claude's terminal event is `{"type":"result", …}`, carrying the session id, the cost and any
-    /// rate-limit error together — so one parse of the line yields the whole report.
+    /// Claude puts the session id on its TERMINAL `result` event (unlike Codex, which puts it on
+    /// the first event) — but the method is per-line, so both fit.
+    fn parse_session_id(&self, line: &str) -> Option<String> {
+        stream::session_id_from_result(line)
+    }
+
+    /// Max thinking effort by default — the top of the `-p` flag's enum.
+    fn default_effort(&self) -> &'static str {
+        "max"
+    }
+
+    /// Claude's terminal event is `{"type":"result", …}`, carrying the cost and any rate-limit
+    /// error together — so one parse of the line yields the whole report.
     fn parse_result(&self, line: &str) -> Option<SessionReport> {
         stream::parse_result(line)
     }
