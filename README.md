@@ -18,7 +18,7 @@ quietly stop one step short — leaving you to babysit a terminal?
 **Then AgenticGoGo is for you.**
 
 AgenticGoGo (`agg`) is a deterministic outer **[Ralph loop](https://ghuntley.com/ralph/)** that
-drives a stochastic inner agent — relaunching a **fresh** session, verifying its work against gates
+drives a stochastic inner coding agent (currently supported: Claude Code, OpenAI Codex, GitHub Copilot) — relaunching a **fresh** session, verifying its work against gates
 *it can't fake* (the **judges**), and repeating until your goals are actually met. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done. *(A similar LLM-based approach — generate → verify → keep, as in evolutionary code search — was
 proposed years ago, outside the Ralph-loop community, by DeepMind's
 [AlphaCode](https://arxiv.org/abs/2203.07814) and its open-source variant
@@ -28,11 +28,6 @@ A **judge** is a small, incorruptible check that decides whether one goal is met
 inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading against a rubric. You
 compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two and tests_pass`) to
 say exactly what "done" means.
-
-The inner agent can be [**Claude Code**](https://claude.com/claude-code),
-[**OpenAI Codex**](https://developers.openai.com/codex/cli) or
-[**GitHub Copilot CLI**](https://github.com/github/copilot-cli) — one line in `agg.yaml`
-([Choosing an agent](#choosing-an-agent)).
 
 <p align="center">
   <img src="assets/loop.png" alt="The four stages of the agg loop — INJECT, RUN, VERIFY, GATE — arranged in a circle" width="620">
@@ -219,6 +214,7 @@ The supervisor reads only `.agg/state.json` — the small scoreboard snapshot �
 # agg.yaml
 agent: claude     # claude (default) · codex · copilot
 ```
+Supported features:
 
 | | Claude | Codex | Copilot |
 |---|---|---|---|
@@ -231,21 +227,6 @@ agent: claude     # claude (default) · codex · copilot
 | Thinking effort (`effort:`) | ✅ | ✅ | ✅ |
 | Rate-limit backoff | ✅ | ✅ | ❌ |
 | **Dollar cost cap** (`cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
-
-Ask for something your agent can't do and `agg run` refuses at startup — it never silently ignores
-a guard:
-
-```
-$ agg run
-error: the `copilot` agent cannot do what this config asks of it (1 problem).
-
-  ✗ cost.total / halt_when: over_cost
-      would mean: the SPEND guard would NEVER fire — the loop would run unbounded,
-                  spending real money
-      fix: remove the cost guard, or use an agent that reports a dollar cost.
-           DO NOT leave an autonomous loop with no spend ceiling at all — `copilot`
-           can cap itself instead: pass `--max-ai-credits <n>` via `worker_args`
-```
 
 Two notes: `effort:` takes `low|medium|high|xhigh|max`, and Codex tops out at `high` (`max` clamps
 to it). Codex picks its own model unless you set `model:`.
