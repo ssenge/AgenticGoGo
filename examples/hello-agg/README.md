@@ -15,11 +15,34 @@ agg run
 The judge rejects `3` → the worker edits `add.py` to `print(1 + 1)` → the judge sees `2` →
 `met:true` → the loop stops. That's the entire model.
 
+## Run it on another agent
+
+The judge is a shell script, so nothing here is Claude-specific — only the two model lines in
+`agg.yaml` are. Edit them and re-run:
+
+```yaml
+# Claude Code (as shipped)
+agent: claude
+model: claude-haiku-4-5-20251001
+```
+```yaml
+# OpenAI Codex — delete `model:` entirely; Codex picks one that fits your account
+agent: codex
+```
+```yaml
+# GitHub Copilot CLI
+agent: copilot
+model: auto
+```
+
+Then `agg doctor` (checks the agent is installed and can do what this config asks) and `agg run`.
+The loop, the judge and the gate behave identically on all three.
+
 ## Files
 - `add.py` — the (broken) target the worker fixes
-- `check.sh` — the judge (prints `{"met":...}`)
+- `check.sh` — the judge (prints `{"met":...}`) — a plain script, so it works on any agent
 - `goals.yaml` — one binary goal, `stop_when: prints_two`
-- `agg.yaml` — minimal config (haiku worker)
+- `agg.yaml` — minimal config (`agent:` + model)
 - `AGG_RESUME.md.template` — copy to `AGG_RESUME.md` (the live prompt is gitignored)
 
 ---
