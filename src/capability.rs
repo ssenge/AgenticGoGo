@@ -126,8 +126,14 @@ pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -
         },
     ];
 
+    // Beyond "can it do X?" there is "can it do X AND Y at once?" — a property of the COMBINATION
+    // that no per-feature capability flag can express. Copilot supports `--effort` and supports
+    // `model: auto`, so both flags are honestly true, yet asking for both makes it refuse every
+    // invocation. Without this, `doctor` green-lit a config in which no session could ever run.
+    let conflict = backend.config_conflict(&cfg.model, &cfg.effort);
+
     let unmet: Vec<&Demand> = demands.iter().filter(|d| d.wanted && !d.provided).collect();
-    if unmet.is_empty() {
+    if unmet.is_empty() && conflict.is_none() {
         return Ok(());
     }
 
@@ -135,13 +141,16 @@ pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -
         "the `{agent}` agent cannot do what this config asks of it ({} problem(s)).\n\
          These are refused at startup rather than silently ignored — a guard that never fires is \
          worse than no guard.\n",
-        unmet.len()
+        unmet.len() + usize::from(conflict.is_some())
     );
     for d in unmet {
         msg.push_str(&format!(
             "\n  ✗ {}\n      would mean: {}\n      fix: {}\n",
             d.key, d.consequence, d.fix
         ));
+    }
+    if let Some(c) = conflict {
+        msg.push_str(&format!("\n  ✗ model + effort\n      {c}\n"));
     }
     anyhow::bail!(msg)
 }
@@ -288,6 +297,38 @@ mod tests {
         for key in ["cost.total", "budget.total", "resume_sessions", "effort", "summary.enabled"] {
             assert!(err.contains(key), "every unmet demand must be listed; missing {key}:\n{err}");
         }
+    }
+
+    /// REGRESSION: a pair of keys that are each individually legal but MUTUALLY exclusive must be
+    /// refused. Copilot declares `supports_effort: true` (honestly — the flag exists) and defaults
+    /// to `model: auto`, so every per-feature check passes; but Copilot rejects the two together
+    /// and EVERY worker session dies in seconds with 0 tokens, while the loop halts on
+    /// over_iterations having done nothing. `agg doctor` used to print
+    /// "✔ agent `copilot` can do everything this config asks" for precisely that config.
+    #[test]
+    fn a_pair_of_individually_legal_keys_the_agent_cannot_combine_is_refused() {
+        let cop = crate::backend::for_name("copilot").unwrap();
+        let bad = cfg_yaml(
+            "project: p\nagent: copilot\nmodel: auto\neffort: high\nresume_prompt: R\n\
+             summary: { enabled: false }\n",
+        );
+        let err = check(&bad, &goals_yaml(SCRIPT_GOALS), cop).unwrap_err().to_string();
+        assert!(err.contains("model: auto"), "must name the offending pair:\n{err}");
+        assert!(err.contains("0 tokens"), "must say what actually breaks:\n{err}");
+
+        // …and each key ALONE is still perfectly fine — this must not become a blanket ban.
+        let auto_no_effort = cfg_yaml(
+            "project: p\nagent: copilot\nmodel: auto\neffort: \"\"\nresume_prompt: R\n\
+             summary: { enabled: false }\n",
+        );
+        check(&auto_no_effort, &goals_yaml(SCRIPT_GOALS), cop).expect("`auto` with no effort is the default, and works");
+
+        let named_model_with_effort = cfg_yaml(
+            "project: p\nagent: copilot\nmodel: claude-sonnet-4.5\neffort: high\nresume_prompt: R\n\
+             summary: { enabled: false }\n",
+        );
+        check(&named_model_with_effort, &goals_yaml(SCRIPT_GOALS), cop)
+            .expect("a concrete model may carry an effort");
     }
 
     /// Claude can do everything, so a full-featured config must pass cleanly.
