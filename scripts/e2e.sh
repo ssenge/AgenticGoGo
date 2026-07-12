@@ -378,6 +378,30 @@ absent "…and leaves NO durable memory entry"  "$RL/AGG_MEMORY.md"
 is "…the trace shows no VERIFY/GATE after RUN" \
    "$(tr '\n' ' ' < "$RL/trace.txt")" "VERIFY=verify INJECT=inject RUN=run INJECT=inject RUN=run "
 
+# A worker that cannot even START (bad model, dead auth, unknown worker_arg) exits non-zero having
+# produced ZERO tokens. The loop used to just go round again: spawn, die, judge, spawn, die, judge
+# — looking exactly like a healthy autonomous run, printing a scoreboard every cycle, doing nothing
+# whatsoever, forever (--max-sessions defaults to unlimited). This is how Copilot's `model: auto` +
+# `effort: max` default shipped broken and looked fine. NOTE the stub emits no rate-limit text, so
+# this must NOT be confused with the backoff path above — which also exits 1 with 0 tokens, and
+# which must still be allowed to retry (the section above is what proves the exemption holds).
+DUD="$(mkproj dud)"
+cat > "$DUD/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+echo "Error: unknown model" >&2
+exit 1
+EOF
+chmod +x "$DUD/bin/claude"
+printf 'project: dud\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n' > "$DUD/agg.yaml"
+# NO --max-sessions: this is the unbounded case that used to spin forever.
+agg_do "$DUD" run > "$DUD/run.log" 2>&1
+is  "a worker that never starts ABORTS the run (exit 1)" "$?" "1"
+has "…after a bounded number of tries, not forever"      "$DUD/run.log" "failed to start 3 times in a row"
+has "…saying it never reached the model"                 "$DUD/run.log" "ZERO tokens"
+has "…and how to diagnose it"                            "$DUD/run.log" "agg doctor"
+
 # The watchdog polls every 30s, so even with idle_secs=3 the kill lands ~90s in. This is the
 # check that caught `parse_ps_time` rejecting macOS's fractional `ps` TIME ("0:00.00"), which made
 # cpu_jiffies() return -1 forever and silently disabled the CPU-flat detector on every mac.
