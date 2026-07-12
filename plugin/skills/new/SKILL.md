@@ -1,4 +1,5 @@
 ---
+name: agg-new
 description: Set up AgenticGoGo for the current project — read existing plans, then generate goals.yaml, agg.yaml, and AGG_RESUME.md so `agg run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
 disable-model-invocation: false
 ---
@@ -25,14 +26,32 @@ agent right, or the config you generate will not start.**
 
 ## Step 0 — Pick the agent the loop will drive (do this FIRST)
 
-Which agent runs the *inner workers*. This is independent of whichever agent is running THIS
-skill — but "the one I'm already using" is the sane default, so offer it first.
+This decides which agent runs the *inner workers*. **There is no default. Do NOT guess, and in
+particular do NOT fall back to `claude` just because it appears first in the examples below** — a
+`claude`-shaped config handed to a Copilot user silently drives the wrong agent.
 
-See which are actually installed, and ask the user (default: the agent you are running in):
+**0a. Identify yourself by RUNNING this — you cannot tell from introspection alone:**
+
+```bash
+if [ -n "$COPILOT_CLI" ];      then echo copilot
+elif [ -n "$CODEX_THREAD_ID" ]; then echo codex
+elif [ -n "$CLAUDECODE" ];      then echo claude
+else echo "UNKNOWN — ask the user"; fi
+```
+
+(Each agent exports its own marker: `COPILOT_CLI=1`, `CODEX_THREAD_ID=<uuid>`, `CLAUDECODE=1`.
+If you are nested inside another agent, more than one may be set — the FIRST match above wins,
+innermost first.)
+
+**0b. See what is actually installed:**
 
 ```bash
 claude --version; codex --version; copilot --version
 ```
+
+**0c. Decide.** The agent running this skill is the sane default for the loop to drive, so propose
+the one Step 0a printed — but they are independent choices (you can drive Codex from Claude Code),
+so let the user override. **If 0a printed `UNKNOWN`, ASK. Never assume.**
 
 Write the answer as `agent: claude|codex|copilot` in `agg.yaml`. Then obey the matrix below.
 
@@ -61,6 +80,12 @@ Write the answer as `agent: claude|codex|copilot` in `agg.yaml`. Then obey the m
 3. **Copilot: `model: auto` is safe.** Claude: `model: "claude-opus-4-8[1m]"` is the default.
 4. **Finish by running `agg doctor`** (Step 7). It re-checks every rule above against the real
    backend. It is a free correctness check — if it passes, the config starts.
+
+> ⚠️ **The failure this ordering exists to prevent:** an early version of this skill said "default
+> to the agent you are running in", and Copilot — unable to introspect its own identity — wrote
+> `agent: claude` with a `claude-opus` model. `agg doctor` passed (a Claude config IS valid), and
+> the loop would have silently driven **Claude instead of Copilot**. `agg doctor` cannot catch this
+> — it has no way to know which agent you *meant*. **Step 0a is the only thing that catches it.**
 
 ## Step 1 — Discover existing plans (read, don't ask yet)
 

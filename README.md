@@ -82,18 +82,33 @@ have to babysit.)*
 > config files yourself with `agg init` instead of asking a skill to. See
 > [Choosing an agent](#choosing-an-agent).
 
-**0 — Install.** The binary, then the `/agg:*` skills:
+**0 — Install.** The binary:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/install.sh | sh   # the agg binary
-agg skills install                                                                     # the /agg:* skills
+curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/install.sh | sh
 ```
 
-`agg skills install` works for **all three agents** — it puts the skills wherever your agent looks.
-Claude Code users can equally use the plugin marketplace, which is the same three skills:
+Then the `/agg:*` skills. **All three agents have a plugin marketplace, and all three take the same
+one** — pick your agent:
 
 ```
+# Claude Code (inside a session)
 /plugin marketplace add ssenge/AgenticGoGo && /plugin install agg@agenticgogo
+```
+```bash
+# OpenAI Codex
+codex plugin marketplace add https://github.com/ssenge/AgenticGoGo
+codex plugin add agg@agenticgogo
+
+# GitHub Copilot
+copilot plugin marketplace add ssenge/AgenticGoGo
+copilot plugin install agg@agenticgogo
+```
+
+Or install them straight into **this project** (no marketplace, works for every agent):
+
+```bash
+agg skills install          # --agent claude|codex|copilot · --user for account-wide
 ```
 
 Full options (prebuilt binaries, from source, version pinning) →
@@ -237,7 +252,12 @@ to it). Codex picks its own model unless you set `model:`.
 
 ### Setting up on Codex or Copilot
 
-The `/agg:*` skills work on **all three agents**. Install them with the binary you already have:
+The `/agg:*` skills work on **all three agents**, by two routes.
+
+**Route 1 — the plugin marketplace** (see [Install](#install)). Codex and Copilot both have one, and
+both consume the *same* manifest Claude does, so there is one plugin, not three.
+
+**Route 2 — install into the project**, with the binary you already have:
 
 ```bash
 agg skills install            # installs for the agent in agg.yaml (or --agent codex|copilot|claude)
