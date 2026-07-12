@@ -9,7 +9,7 @@
 use agg::core::{config, engine, judge};
 use agg::os::{detach, spawns};
 use agg::ui::{dashboard, status};
-use agg::{bus, doctor, init, loop_, project, state};
+use agg::{bus, doctor, init, loop_, project, skills, state};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -122,6 +122,26 @@ enum Cmd {
     /// Send a steering command to a running loop's bus (applied at the next session boundary).
     #[command(subcommand)]
     Send(SendCmd),
+    /// Install the `/agg:*` setup skills where your agent will actually find them.
+    #[command(subcommand)]
+    Skills(SkillsCmd),
+}
+
+/// Managing the `/agg:*` skills (`/agg:new`, `/agg:status`, `/agg:supervise`).
+#[derive(Subcommand)]
+enum SkillsCmd {
+    /// Copy the `/agg:*` skills into the directory the chosen agent discovers.
+    ///
+    /// claude reads `.claude/skills/`; codex and copilot read `.agents/skills/`. On codex and
+    /// copilot there is no slash command — ask the agent for the skill in prose instead.
+    Install {
+        /// which agent to install for (default: the `agent:` key in agg.yaml, else claude)
+        #[arg(long)]
+        agent: Option<String>,
+        /// install for your whole user account (under $HOME) instead of just this project
+        #[arg(long)]
+        user: bool,
+    },
 }
 
 /// Steering commands the operator (or outer Claude) can send to a running loop.
@@ -323,6 +343,31 @@ fn run_cli() -> Result<ExitCode> {
                 SendCmd::Note { text } => bus::Command::Note { text: text.clone() },
             };
             send_to_bus(&p.dir, cmd)
+        }
+        Cmd::Skills(SkillsCmd::Install { agent, user }) => {
+            // Default to the agent this project already drives, so the common case is just
+            // `agg skills install` with no flags and no way to get it wrong.
+            let agent = agent
+                .clone()
+                .unwrap_or_else(|| config::AggConfig::agent_name(&p.config));
+            let root = skills::install(&agent, &p.dir, *user)?;
+            eprintln!("installed the /agg:* skills for `{agent}` → {}", root.display());
+            for (name, _) in skills::SKILLS {
+                eprintln!("  ✔ {name}");
+            }
+            // The invocation UX genuinely differs, and getting it wrong is the difference between
+            // "it works" and "that command doesn't exist" — so say which one they have.
+            if agent == "claude" {
+                eprintln!("\nInvoke them with `/agg:new`, `/agg:status`, `/agg:supervise`.");
+            } else {
+                eprintln!(
+                    "\n`{agent}` has no slash commands for skills — it picks a skill by matching \
+                     your request\nagainst its description. Just ask, e.g.:\n  \
+                     \"set up AgenticGoGo for this project\"   (→ agg-new)\n  \
+                     \"how is the agg loop doing?\"             (→ agg-status)"
+                );
+            }
+            Ok(())
         }
     }
     // Every non-`run` subcommand yields `()` on success → exit 0. `agg run` returns its outcome
