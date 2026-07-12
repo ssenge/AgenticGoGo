@@ -11,11 +11,14 @@
 `agg` drives **one coding agent**, chosen by `agent:` in `agg.yaml`. Whichever you pick must be on
 your `PATH`:
 
-| `agent:` | CLI | install |
-|---|---|---|
-| `claude` *(default)* | [Claude Code](https://claude.com/claude-code) | `claude -p "hi"` should work |
-| `codex` | [OpenAI Codex](https://developers.openai.com/codex/cli) | `npm i -g @openai/codex` · `codex login` |
-| `copilot` | [GitHub Copilot CLI](https://github.com/github/copilot-cli) | `npm i -g @github/copilot` · `copilot login` |
+| `agent:` | CLI | install + authenticate | check it works headlessly |
+|---|---|---|---|
+| `claude` *(default)* | [Claude Code](https://claude.com/claude-code) | `npm i -g @anthropic-ai/claude-code` · `claude auth login` | `claude -p "hello"` |
+| `codex` | [OpenAI Codex](https://developers.openai.com/codex/cli) | `npm i -g @openai/codex` · `codex login` | `codex exec "hello"` |
+| `copilot` | [GitHub Copilot CLI](https://github.com/github/copilot-cli) | `npm i -g @github/copilot` · `copilot login` | `copilot -p "hello"` |
+
+`agg` only ever drives the agent **headlessly**, so the check column is the one that matters — a
+version number or a login status does not tell you the thing `agg` depends on.
 
 Your existing plugins, MCP servers and settings for that agent keep working inside the `RUN` stage.
 

@@ -110,11 +110,14 @@ Full options (prebuilt binaries, from source, version pinning) →
 **1 — Prerequisite: a coding agent.** `agg` drives one headlessly. Install and authenticate whichever
 you want, and check it works:
 
-| agent | `agg.yaml` | install | check |
+| agent | `agg.yaml` | install + authenticate | check it works headlessly |
 |---|---|---|---|
-| **Claude Code** *(default)* | `agent: claude` | [claude.com/claude-code](https://claude.com/claude-code) | `claude -p "hello"` |
-| **[OpenAI Codex](https://developers.openai.com/codex/cli)** | `agent: codex` | `npm i -g @openai/codex` · `codex login` | `codex login status` |
-| **[GitHub Copilot CLI](https://github.com/github/copilot-cli)** | `agent: copilot` | `npm i -g @github/copilot` · `copilot login` | `copilot --version` |
+| **[Claude Code](https://claude.com/claude-code)** *(default)* | `agent: claude` | `npm i -g @anthropic-ai/claude-code` · `claude auth login` | `claude -p "hello"` |
+| **[OpenAI Codex](https://developers.openai.com/codex/cli)** | `agent: codex` | `npm i -g @openai/codex` · `codex login` | `codex exec "hello"` |
+| **[GitHub Copilot CLI](https://github.com/github/copilot-cli)** | `agent: copilot` | `npm i -g @github/copilot` · `copilot login` | `copilot -p "hello"` |
+
+The **check** column is the one that matters: `agg` only ever drives the agent *headlessly*, so a
+version number or a login status proves nothing. If that one-shot prompt answers, `agg` can drive it.
 
 `agg doctor` verifies the agent is on your PATH **and** that it can do what your config asks —
 run it before your first loop. See [Choosing an agent](#choosing-an-agent) for what each one
