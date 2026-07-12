@@ -194,10 +194,6 @@ The supervisor reads only `.agg/state.json` — the small scoreboard snapshot �
 agent: claude     # claude (default) · codex · copilot
 ```
 
-**Agents are not interchangeable, and the gaps are not cosmetic.** Every row below was verified by
-running the real CLI and reading its event stream — not from its docs, which were wrong in three
-places for Copilot alone.
-
 | | Claude | Codex | Copilot |
 |---|---|---|---|
 | Runs the loop, edits files | ✅ | ✅ | ✅ |
@@ -210,34 +206,12 @@ places for Copilot alone.
 | Rate-limit backoff | ✅ | ✅ | ❌ |
 | **Dollar cost cap** (`cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
 
-Two honest gaps, and only two:
-
-- **Dollar cost.** Only Claude reports a per-session dollar figure. Codex reports none at all;
-  Copilot bills in AI Credits, not currency. So `cost.total` / `over_cost` is refused on those two —
-  it would be a guard that never fires. Copilot can still cap *itself*: pass
-  `--max-ai-credits <n>` via `worker_args`.
-- **Copilot rate-limit backoff.** Claude and Codex both put failure text on their terminal event, so
-  a usage limit is recognisable and the loop backs off. Copilot's terminal event carries no error
-  text at all, and GitHub documents that a limited session may pause and silently auto-retry — so
-  there is nothing to detect. Rather than guess, agg says so.
-
-`effort:` works everywhere, though the vocabulary differs: agg speaks `low|medium|high|xhigh|max`,
-and Codex tops out at `high`, so `max` clamps to it — you get as much reasoning as that agent offers.
-
-**How the LLM judge stays honest on every agent.** A judge must not be able to modify the artifact
-it is grading — but it *must* be able to read it. So the requirement is **"cannot write"**, not
-"has no tools", and each agent enforces that its own way: Claude omits
-`--dangerously-skip-permissions` (so tool execution is denied), Codex runs `--sandbox read-only`,
-and Copilot is not given `--allow-all-tools` (so writes are permission-denied). All three are
-verified by an escape probe: a judge explicitly *told* to write a file fails to. Each judge also
-refuses to load the repo's own agent-config files, so a worker cannot reconfigure its own judge.
-
-**agg refuses to start rather than silently ignoring a gap.** If you ask for something your agent
-can't do, you get an error at startup naming the key, what would break, and how to fix it:
+Ask for something your agent can't do and `agg run` refuses at startup — it never silently ignores
+a guard:
 
 ```
 $ agg run
-error: the `copilot` agent cannot do what this config asks of it (2 problem(s)).
+error: the `copilot` agent cannot do what this config asks of it (1 problem).
 
   ✗ cost.total / halt_when: over_cost
       would mean: the SPEND guard would NEVER fire — the loop would run unbounded,
@@ -247,8 +221,8 @@ error: the `copilot` agent cannot do what this config asks of it (2 problem(s)).
            can cap itself instead: pass `--max-ai-credits <n>` via `worker_args`
 ```
 
-That is deliberate. **A guard that never fires is worse than no guard** — an autonomous loop with a
-dead `over_cost` runs unbounded and spends real money with no error anywhere.
+Two notes: `effort:` takes `low|medium|high|xhigh|max`, and Codex tops out at `high` (`max` clamps
+to it). Codex picks its own model unless you set `model:`.
 
 ## Features
 
