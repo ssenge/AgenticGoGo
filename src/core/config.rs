@@ -301,6 +301,32 @@ fn default_memory_inject_kb() -> Option<u64> {
 }
 
 impl AggConfig {
+    /// Read ONLY the `agent:` key, without parsing the rest of the config.
+    ///
+    /// # Why this exists (a chicken-and-egg you must not re-break)
+    /// Several of this struct's serde defaults are BACKEND-SPECIFIC — `default_model` and
+    /// `default_summary_model` ask [`crate::backend::active`] what to use. But `active()` is a
+    /// `OnceLock` that latches on FIRST READ. So a full `load()` of an agg.yaml that omits `model:`
+    /// would resolve the default, latch the backend to Claude, and then `backend::init("copilot")`
+    /// would silently do nothing — first-wins. The loop would drive the wrong agent, and `doctor`
+    /// would cheerfully report the wrong one too.
+    ///
+    /// So the agent must be selected BEFORE the config that depends on it is parsed. This reads
+    /// the one key needed to do that. Missing file / unparseable / no `agent:` → `"claude"`, and
+    /// the real `load()` reports the actual error a moment later.
+    pub fn agent_name(path: &Path) -> String {
+        #[derive(serde::Deserialize)]
+        struct JustTheAgent {
+            #[serde(default = "default_agent")]
+            agent: String,
+        }
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_yaml::from_str::<JustTheAgent>(&t).ok())
+            .map(|j| j.agent)
+            .unwrap_or_else(default_agent)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let mut cfg: AggConfig = crate::util::load_yaml(path)?;
         cfg.apply_env_overrides();

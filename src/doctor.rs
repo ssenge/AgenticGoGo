@@ -18,12 +18,11 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path, goals: &Path) -> Resul
     let mut fail = 0;
 
     // 1) the agent CLI is present (same probe `agg run`'s preflight uses — see backend.rs).
-    // The agent comes from agg.yaml's `agent:`; if that file is broken we still probe the default,
-    // so doctor keeps working on exactly the setups it exists to diagnose.
-    if let Ok(c) = AggConfig::load(config) {
-        if let Err(e) = crate::backend::init(&c.agent) {
-            check(false, "agg.yaml names a known agent", &format!("{e}"), &mut fail);
-        }
+    // Select the agent BEFORE loading the config: agg.yaml's `model`/`summary.model` defaults are
+    // backend-specific, and resolving one latches `backend::active()` to the default. Reading just
+    // the `agent:` key first is what keeps doctor from confidently diagnosing the WRONG agent.
+    if let Err(e) = crate::backend::init(&AggConfig::agent_name(config)) {
+        check(false, "agg.yaml names a known agent", &format!("{e}"), &mut fail);
     }
     let agent = crate::backend::active();
     check(

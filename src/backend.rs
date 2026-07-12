@@ -22,7 +22,7 @@
 //! | event stream | `--output-format stream-json` | `--json` | `--output-format json` |
 //! | output tokens | `usage.output_tokens` on the TERMINAL event | `turn.completed.usage.output_tokens` | `assistant.message.data.outputTokens` — **per message, NOT on the terminal event** |
 //! | **dollar cost** | ✅ `total_cost_usd` | ❌ **NONE** (source-confirmed) | ❌ **NONE** — terminal `usage` holds `premiumRequests` + durations only |
-//! | tools-off one-shot | ✅ | ❌ no way found | ⚠️ maybe (`--available-tools=` + `--disable-builtin-mcps`), unverified |
+//! | tools-off one-shot | ✅ `--strict-mcp-config` | ❌ no way found | ❌ **probed: tools still OFFERED**, the write was only permission-denied at execution |
 //! | resume | `--resume <id>` | **subcommand** `codex exec resume <ID>` | `-r/--resume=<id>`; id = `result.sessionId` |
 //! | effort | `--effort` | ❌ no flag (only `-c model_reasoning_effort=…`) | `--effort` (same vocabulary) |
 //! | terminal event | `type:"result"` | `turn.completed` \| `turn.failed` \| bare `error` | `type:"result"` (`sessionId`, `exitCode`, `usage`) |
@@ -54,14 +54,16 @@
 //!    shape (`codex exec resume <ID> <PROMPT>`), not `--resume`. [`AgentBackend::session_command`]
 //!    returns the whole `Command` precisely so a backend can restructure argv, not just add flags.
 //! 3. **Terminal events are not uniform.** Codex can end with `turn.completed`, `turn.failed`, OR
-//!    a bare top-level `error` with no turn wrapper. Copilot ends with `session.shutdown` carrying
-//!    `shutdownType: routine|error`. Never treat one shape as "the" terminal — and keep PROCESS
-//!    EXIT as ground truth, which is what the loop already does.
+//!    a bare top-level `error` with no turn wrapper (all three confirmed on the wire). Copilot ends
+//!    with `result`, whose fields are TOP-LEVEL while every other event nests under `data`. Never
+//!    treat one shape as "the" terminal — and keep PROCESS EXIT as ground truth, which is what the
+//!    loop already does.
 //!
 //! # seam
 //! `agg run --sandbox` (ROADMAP P2) wraps what [`AgentBackend::session_command`] returns.
 
 pub mod claude;
+pub mod copilot;
 pub mod stream;
 pub mod worker;
 
@@ -246,12 +248,13 @@ pub trait AgentBackend: Send + Sync {
 // ---------------- selection ----------------
 
 /// Every backend agg knows how to drive. Adding one = a new `claude.rs`-shaped module + one arm.
-pub const KNOWN: &[&str] = &["claude"];
+pub const KNOWN: &[&str] = &["claude", "copilot"];
 
 /// Resolve an `agent:` name to its backend.
 pub fn for_name(name: &str) -> Result<&'static dyn AgentBackend> {
     match name {
         "claude" => Ok(&claude::Claude),
+        "copilot" => Ok(&copilot::Copilot),
         other => anyhow::bail!(
             "unknown agent `{other}` in agg.yaml.\n  known agents: {}\n  \
              (adding one means implementing `trait AgentBackend` — see src/backend.rs)",
@@ -293,6 +296,40 @@ mod tests {
     fn the_default_backend_is_claude() {
         assert_eq!(active().name(), "claude");
         assert_eq!(active().bin(), "claude");
+    }
+
+    #[test]
+    fn every_known_agent_actually_resolves() {
+        for name in KNOWN {
+            let b = for_name(name).unwrap_or_else(|_| panic!("KNOWN lists `{name}` but for_name rejects it"));
+            assert_eq!(&b.name(), name, "a backend's name() must match the `agent:` value that selects it");
+        }
+    }
+
+    /// REGRESSION (found by running `agg doctor` against `agent: copilot`, which reported
+    /// `claude`): agg.yaml's `model` / `summary.model` defaults are BACKEND-SPECIFIC, so resolving
+    /// one calls `active()` — which latches the OnceLock. A full config parse before
+    /// `backend::init` therefore pins the WRONG agent, silently, first-wins. `agent_name` reads
+    /// only the one key needed to select the backend, without touching any backend-specific
+    /// default. If this ever regresses, the loop drives an agent the user did not ask for.
+    #[test]
+    fn the_agent_key_is_readable_without_latching_the_backend() {
+        use crate::core::config::AggConfig;
+        let dir = std::env::temp_dir().join(format!("agg-agentkey-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // an agg.yaml that names copilot AND omits `model:` — the exact shape that triggered the
+        // bug, because the missing `model` is what forces the backend-specific default to resolve.
+        let p = dir.join("agg.yaml");
+        std::fs::write(&p, "project: x\nagent: copilot\nresume_prompt: R\n").unwrap();
+        assert_eq!(AggConfig::agent_name(&p), "copilot", "must read `agent:` without a full parse");
+
+        // absent / unparseable / no `agent:` all fall back to the default rather than exploding —
+        // the real `load()` reports the actual error a moment later.
+        std::fs::write(&p, "project: x\nresume_prompt: R\n").unwrap();
+        assert_eq!(AggConfig::agent_name(&p), "claude");
+        assert_eq!(AggConfig::agent_name(&dir.join("nope.yaml")), "claude");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The whole point of `Capabilities`: a backend that cannot price itself must SAY so. If this
