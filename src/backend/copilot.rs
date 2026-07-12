@@ -229,10 +229,24 @@ impl AgentBackend for Copilot {
             return None;
         }
         Some(SessionReport {
-            session_id: v.get("sessionId").and_then(|x| x.as_str()).map(str::to_string),
-            cost_usd: None, // AI Credits, not dollars — see capabilities()
+            cost_usd: None,      // AI Credits, not dollars — see capabilities()
             rate_limited: false, // not detectable today — see capabilities()
         })
+    }
+
+    /// On the TERMINAL `result` event, as `sessionId` — and note its fields are TOP-LEVEL, unlike
+    /// every other Copilot event, which nests under `data`.
+    fn parse_session_id(&self, line: &str) -> Option<String> {
+        let v: Value = serde_json::from_str(line).ok()?;
+        if v.get("type")?.as_str()? != "result" {
+            return None;
+        }
+        v.get("sessionId")?.as_str().map(str::to_string)
+    }
+
+    /// Copilot's `--effort` takes the same vocabulary Claude does, so agg's default carries over.
+    fn default_effort(&self) -> &'static str {
+        "max"
     }
 
     /// Unreachable: `supports_one_shot` is false, so `capability::check` refuses any config that
@@ -311,8 +325,12 @@ mod tests {
     fn the_terminal_event_yields_the_session_id_and_no_cost() {
         let terminal = CAPTURED.lines().find(|l| l.contains(r#""type":"result""#)).unwrap();
         let r = Copilot.parse_result(terminal).expect("`result` is the terminal event");
-        assert_eq!(r.session_id.as_deref(), Some("082721a3-5134-4949-855a-9bdabb35cd90"));
         assert_eq!(r.cost_usd, None, "copilot has no dollar figure anywhere — must be None, not 0.0");
+        // Copilot's resume handle IS on the terminal event (unlike Codex, whose is on the first).
+        assert_eq!(
+            Copilot.parse_session_id(terminal).as_deref(),
+            Some("082721a3-5134-4949-855a-9bdabb35cd90")
+        );
 
         // no other line is terminal
         let others = CAPTURED.lines().filter(|l| Copilot.parse_result(l).is_some()).count();

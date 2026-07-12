@@ -261,7 +261,7 @@ fn default_model() -> String {
     crate::backend::active().default_model().into()
 }
 fn default_effort() -> String {
-    "max".into()
+    crate::backend::active().default_effort().into()
 }
 fn default_branch_prefix() -> String {
     "agg".into()

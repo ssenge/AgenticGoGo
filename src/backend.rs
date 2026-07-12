@@ -63,6 +63,7 @@
 //! `agg run --sandbox` (ROADMAP P2) wraps what [`AgentBackend::session_command`] returns.
 
 pub mod claude;
+pub mod codex;
 pub mod copilot;
 pub mod stream;
 pub mod worker;
@@ -124,8 +125,6 @@ pub struct Capabilities {
 /// see that method for the empirical reason.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionReport {
-    /// handle for a later resume, if the agent exposes one.
-    pub session_id: Option<String>,
     /// dollars this session spent, if the agent prices itself. Cumulative — SET, don't add.
     pub cost_usd: Option<f64>,
     /// the terminal event reported a rate/usage limit.
@@ -211,6 +210,30 @@ pub trait AgentBackend: Send + Sync {
     /// which must also declare `reports_output_tokens: false`).
     fn parse_usage(&self, line: &str) -> Option<u64>;
 
+    /// The resume handle, if THIS line carries it. The worker keeps the last one seen.
+    ///
+    /// # Also per-line, and for the same reason as [`Self::parse_usage`]
+    /// Agents do not agree on WHERE the session id appears, and a terminal-only reader gets it
+    /// wrong for half of them. Observed:
+    ///
+    /// - **Claude** and **Copilot** put it on the TERMINAL event (`session_id` / `sessionId`).
+    /// - **Codex** puts it on `thread.started` — the FIRST event of the stream, not the last.
+    ///
+    /// So this fires on every line. An agent with no resume handle returns `None` always, and must
+    /// also declare `supports_resume: false`.
+    fn parse_session_id(&self, line: &str) -> Option<String>;
+
+    /// The `effort:` agg.yaml defaults to for THIS agent. Empty = don't pass an effort at all.
+    ///
+    /// Backend-specific because the vocabulary is: Claude and Copilot both take
+    /// `low|medium|high|xhigh|max`, and Codex takes no effort flag whatsoever. Without this, agg's
+    /// blanket default of `max` would be a demand no Codex config could satisfy, and
+    /// [`crate::capability::check`] would refuse EVERY Codex run out of the box — for an effort the
+    /// user never actually asked for.
+    fn default_effort(&self) -> &'static str {
+        ""
+    }
+
     /// Parse one line as the session's TERMINAL event. `None` = this line is not terminal.
     ///
     /// Returning `Some` with `None` fields is correct and expected for an agent that simply does
@@ -248,12 +271,13 @@ pub trait AgentBackend: Send + Sync {
 // ---------------- selection ----------------
 
 /// Every backend agg knows how to drive. Adding one = a new `claude.rs`-shaped module + one arm.
-pub const KNOWN: &[&str] = &["claude", "copilot"];
+pub const KNOWN: &[&str] = &["claude", "codex", "copilot"];
 
 /// Resolve an `agent:` name to its backend.
 pub fn for_name(name: &str) -> Result<&'static dyn AgentBackend> {
     match name {
         "claude" => Ok(&claude::Claude),
+        "codex" => Ok(&codex::Codex),
         "copilot" => Ok(&copilot::Copilot),
         other => anyhow::bail!(
             "unknown agent `{other}` in agg.yaml.\n  known agents: {}\n  \
@@ -287,9 +311,12 @@ mod tests {
     #[test]
     fn unknown_agent_is_a_loud_error_that_lists_the_known_ones() {
         // `.err()` not `.unwrap_err()`: the Ok type is `&dyn AgentBackend`, which has no Debug.
-        let e = for_name("codex").err().expect("an unknown agent must be an error").to_string();
-        assert!(e.contains("unknown agent `codex`"), "got: {e}");
-        assert!(e.contains("claude"), "the error must list what IS supported, got: {e}");
+        let e = for_name("gemini").err().expect("an unknown agent must be an error").to_string();
+        assert!(e.contains("unknown agent `gemini`"), "got: {e}");
+        // …and it must list what IS supported, so the user can fix it without reading the source.
+        for known in KNOWN {
+            assert!(e.contains(known), "the error must list `{known}`, got: {e}");
+        }
     }
 
     #[test]
@@ -373,12 +400,13 @@ mod tests {
     #[test]
     fn the_terminal_event_owns_the_cumulative_facts() {
         let b = active();
-        let r = b
-            .parse_result(r#"{"type":"result","total_cost_usd":0.25,"session_id":"s1"}"#)
-            .expect("a result line is terminal");
-        assert_eq!(r.session_id.as_deref(), Some("s1"));
+        let line = r#"{"type":"result","total_cost_usd":0.25,"session_id":"s1"}"#;
+        let r = b.parse_result(line).expect("a result line is terminal");
         assert_eq!(r.cost_usd, Some(0.25));
         assert!(!r.rate_limited);
+        // Claude's resume handle is on the terminal event; Codex's is on the FIRST — which is why
+        // it's a per-line method rather than a SessionReport field.
+        assert_eq!(b.parse_session_id(line).as_deref(), Some("s1"));
         // a non-terminal line is not a report at all
         assert!(b.parse_result(r#"{"type":"assistant"}"#).is_none());
         // …and an agent that reports no cost yields None, NOT Some(0.0)

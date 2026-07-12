@@ -271,10 +271,12 @@ fn spawn_reader(
             // DOES NOT REPORT IT, which is not the same as zero. We fold in only what was actually
             // reported; a config that *needs* a number the agent can't produce was already refused
             // at startup by `capability::check`, so a `None` here can never quietly disarm a guard.
+            // The resume handle can appear ANYWHERE: Claude/Copilot put it on the terminal event,
+            // Codex on the FIRST one (thread.started). Per-line, last one wins.
+            if let Some(id) = agent.parse_session_id(&line) {
+                session_id = Some(id);
+            }
             if let Some(report) = agent.parse_result(&line) {
-                if let Some(id) = report.session_id {
-                    session_id = Some(id); // for optional resume continuity
-                }
                 if report.rate_limited {
                     sh.rate_limited.store(true, Ordering::Relaxed);
                 }
