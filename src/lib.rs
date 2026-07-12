@@ -39,6 +39,7 @@ pub mod init;
 pub mod loop_;
 pub mod paths;
 pub mod project;
+pub mod skills;
 pub mod state;
 pub mod summary;
 pub mod util;

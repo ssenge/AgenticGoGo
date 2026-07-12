@@ -123,6 +123,29 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path, goals: &Path) -> Resul
               "create it (or run `agg init`); it's the prompt fed to every worker", &mut fail);
     }
 
+    // 5) are the /agg:* skills where THIS agent looks? Reported, never failed: the skills are the
+    //    onboarding path, not a runtime dependency — `agg run` works fine without them. But a user
+    //    who installed them for the wrong agent sees nothing at all in their session and has no way
+    //    to tell why, so naming the directory we checked is the whole value here.
+    let name = agent.name();
+    let (proj, user) =
+        (crate::skills::installed(name, dir, false), crate::skills::installed(name, dir, true));
+    if proj || user {
+        let where_ = if proj && user {
+            "project + user".to_string()
+        } else if proj {
+            "project".to_string()
+        } else {
+            "user".to_string()
+        };
+        eprintln!("  ✔ the /agg:* skills are installed for `{name}` ({where_})");
+    } else {
+        eprintln!(
+            "  · the /agg:* skills are not installed for `{name}` — optional; \
+             `agg skills install` adds them"
+        );
+    }
+
     eprintln!();
     if fail == 0 {
         eprintln!("✔ all checks passed — you're ready: `agg plan` then `agg run`.");
