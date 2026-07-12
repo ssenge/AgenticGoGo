@@ -356,6 +356,34 @@ mod tests {
         }
     }
 
+    /// REGRESSION — a backend's OWN defaults must not contradict each other.
+    ///
+    /// Copilot shipped `default_model() == "auto"` together with `default_effort() == "max"`, and
+    /// Copilot rejects that pair outright: *"Model `auto` does not support reasoning effort
+    /// configuration"*. The out-of-the-box config — which names neither, so both defaults apply —
+    /// therefore killed EVERY worker session in 4s with exit 1 and zero tokens, while the loop
+    /// happily ran its sessions and halted on `over_iterations` having achieved nothing.
+    ///
+    /// Only a live `agg run` caught it, because the contradiction lives in the agent's own argv
+    /// validation, not in ours. This test cannot re-run the CLI, so it enforces the invariant that
+    /// makes the trap impossible: `auto` means "you pick", and an agent picking its own model
+    /// cannot also be told how hard to think. If a backend defaults to `auto`, it must not also
+    /// default to an effort.
+    #[test]
+    fn no_backend_defaults_to_an_effort_its_default_model_cannot_accept() {
+        for name in KNOWN {
+            let b = for_name(name).unwrap();
+            if b.default_model() == "auto" {
+                assert!(
+                    b.default_effort().is_empty(),
+                    "`{name}` defaults to model `auto` AND effort `{}` — the agent will reject the \
+                     pair and every worker session dies instantly. One of them must give.",
+                    b.default_effort()
+                );
+            }
+        }
+    }
+
     /// REGRESSION (found by running `agg doctor` against `agent: copilot`, which reported
     /// `claude`): agg.yaml's `model` / `summary.model` defaults are BACKEND-SPECIFIC, so resolving
     /// one calls `active()` — which latches the OnceLock. A full config parse before
