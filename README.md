@@ -193,6 +193,7 @@ The supervisor reads only `.agg/state.json` — the small scoreboard snapshot �
 # agg.yaml
 agent: claude     # claude (default) · codex · copilot
 ```
+Supported features:
 
 | | Claude | Codex | Copilot |
 |---|---|---|---|
@@ -205,21 +206,6 @@ agent: claude     # claude (default) · codex · copilot
 | Thinking effort (`effort:`) | ✅ | ✅ | ✅ |
 | Rate-limit backoff | ✅ | ✅ | ❌ |
 | **Dollar cost cap** (`cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
-
-Ask for something your agent can't do and `agg run` refuses at startup — it never silently ignores
-a guard:
-
-```
-$ agg run
-error: the `copilot` agent cannot do what this config asks of it (1 problem).
-
-  ✗ cost.total / halt_when: over_cost
-      would mean: the SPEND guard would NEVER fire — the loop would run unbounded,
-                  spending real money
-      fix: remove the cost guard, or use an agent that reports a dollar cost.
-           DO NOT leave an autonomous loop with no spend ceiling at all — `copilot`
-           can cap itself instead: pass `--max-ai-credits <n>` via `worker_args`
-```
 
 Two notes: `effort:` takes `low|medium|high|xhigh|max`, and Codex tops out at `high` (`max` clamps
 to it). Codex picks its own model unless you set `model:`.
