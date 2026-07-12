@@ -29,10 +29,10 @@ inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading 
 compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two and tests_pass`) to
 say exactly what "done" means.
 
-> **Three agents.** `agg` drives **Claude Code**, **OpenAI Codex**, or **GitHub Copilot CLI** as its
-> inner agent — pick one with `agent:` in `agg.yaml`. They are *not* interchangeable, and agg
-> refuses at startup rather than silently ignoring what your chosen agent can't do. See
-> [Choosing an agent](#choosing-an-agent).
+The inner agent can be [**Claude Code**](https://claude.com/claude-code),
+[**OpenAI Codex**](https://developers.openai.com/codex/cli) or
+[**GitHub Copilot CLI**](https://github.com/github/copilot-cli) — one line in `agg.yaml`
+([Choosing an agent](#choosing-an-agent)).
 
 <p align="center">
   <img src="assets/loop.png" alt="The four stages of the agg loop — INJECT, RUN, VERIFY, GATE — arranged in a circle" width="620">
@@ -77,7 +77,12 @@ if __name__ == "__main__":
 yourself. It's here to show the mechanics; the real payoff is long, multi-hour work you'd otherwise
 have to babysit.)*
 
-**0 — Install.** The binary, then the `/agg:*` skills (inside Claude Code):
+> **This walkthrough uses Claude Code**, because the `/agg:*` skills that set the loop up for you
+> only exist there today. Codex and Copilot run the same loop just as well — you write the two
+> config files yourself with `agg init` instead of asking a skill to. See
+> [Choosing an agent](#choosing-an-agent).
+
+**0 — Install.** The binary, then the `/agg:*` skills (Claude Code only):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/install.sh | sh   # the agg binary
@@ -223,6 +228,30 @@ error: the `copilot` agent cannot do what this config asks of it (1 problem).
 
 Two notes: `effort:` takes `low|medium|high|xhigh|max`, and Codex tops out at `high` (`max` clamps
 to it). Codex picks its own model unless you set `model:`.
+
+### Setting up on Codex or Copilot
+
+The `/agg:*` skills (`/agg:new`, `/agg:status`, `/agg:supervise`) are a **Claude Code plugin** — they
+don't exist for Codex or Copilot yet. Everything they do is a convenience wrapper around the CLI, so
+you do it directly instead:
+
+| instead of | run |
+|---|---|
+| `/agg:new` | `agg init` — scaffolds `agg.yaml`, `goals.yaml`, `AGG_RESUME.md` and a starter judge, then edit them |
+| `/agg:status` | `agg status` (or `agg dashboard` for the live TUI) |
+| `/agg:supervise` | `agg send <cmd>` — steer a running loop from any terminal |
+
+Then set your agent and run:
+
+```bash
+agg init                                  # scaffold the config
+sed -i '' '1i\agent: codex' agg.yaml      # or: agent: copilot
+agg doctor                                # checks the agent + that it can do what your config asks
+agg run
+```
+
+The loop, judges, gates, memory, TUI and web UI are all agent-agnostic — only the setup skills are
+Claude-only today.
 
 ## Features
 
