@@ -2,7 +2,7 @@
 # AgenticGoGo (`agg`) installer — collapses the "download the right binary + chmod +
 # put it on PATH" dance into one line:
 #
-#   curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/install.sh | sh
 #
 # What it does: detect your OS/arch, download the matching release binary from the
 # latest GitHub Release, make it executable, and install it onto your PATH (preferring
