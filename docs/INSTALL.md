@@ -18,7 +18,7 @@ Your other Claude Code plugins and MCP servers keep working inside the `RUN` sta
 
 ```bash
 # A) one-liner — detects OS/arch; installs to /usr/local/bin, or ~/.local/bin if that's read-only
-curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/install.sh | sh
 
 # B) prebuilt binary — grab it from Releases (on Windows, take the .exe)
 #    https://github.com/ssenge/AgenticGoGo/releases

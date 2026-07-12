@@ -78,7 +78,7 @@ have to babysit.)*
 **0 — Install.** The binary, then the `/agg:*` skills (inside Claude Code):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/install.sh | sh   # the agg binary
+curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/install.sh | sh   # the agg binary
 ```
 ```
 /plugin marketplace add ssenge/AgenticGoGo && /plugin install agg@agenticgogo           # the /agg:* skills
