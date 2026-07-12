@@ -1152,6 +1152,147 @@ assert d.get('api_offline') is True or d.get('running') is False, d" \
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "13. agg skills install — the /agg:* skills reach all three agents"
+# The skills used to be a Claude-only plugin. Two things have to hold now, and they are
+# different claims:
+#   (a) the files land where each agent ACTUALLY looks   — asserted hermetically, below
+#   (b) the agent then DISCOVERS them                    — asserted against the real CLIs, free
+# and the one that actually matters:
+#   (c) the agg.yaml recipes /agg:new is told to emit are configs that agg will START.
+# (c) is the whole point of the phase: a setup skill that writes a config `capability::check`
+# refuses is worse than no setup skill at all.
+
+SK="$WS/skills"; mkdir -p "$SK"
+printf 'project: p\nagent: codex\nresume_prompt: R\n' > "$SK/agg.yaml"
+
+# --- (a) the right directory per agent. Claude and the other two do NOT share one. ----------
+"$AGG" --dir "$SK" skills install --agent claude  > "$SK/i-claude.log"  2>&1
+"$AGG" --dir "$SK" skills install --agent codex   > "$SK/i-codex.log"   2>&1
+"$AGG" --dir "$SK" skills install --agent copilot > "$SK/i-copilot.log" 2>&1
+for s in new status supervise; do
+  exists "claude finds agg-$s in .claude/skills/"  "$SK/.claude/skills/agg-$s/SKILL.md"
+  exists "codex+copilot find agg-$s in .agents/skills/" "$SK/.agents/skills/agg-$s/SKILL.md"
+done
+# codex and copilot share `.agents/` — that is the entire reason two dirs cover three agents.
+has "copilot installs to the SAME neutral dir as codex" "$SK/i-copilot.log" ".agents/skills"
+# Codex/Copilot name a skill after its DIRECTORY (no `name:` key), so the dir carries the
+# namespace. `new/` instead of `agg-new/` would surface as a skill called "new".
+absent "the un-namespaced dir name is never used" "$SK/.agents/skills/new"
+# the description is what Codex/Copilot ROUTE on — an empty copy would list a skill saying nothing
+has "the installed skill keeps its frontmatter"  "$SK/.agents/skills/agg-new/SKILL.md" "description:"
+has "…and the capability-aware agg.yaml template" "$SK/.agents/skills/agg-new/SKILL.md" "agent: <claude|codex|copilot>"
+
+# --- the ergonomics: no flags needed, and a bad agent writes nothing ------------------------
+D2="$WS/skills-default"; mkdir -p "$D2"
+printf 'project: p\nagent: copilot\nresume_prompt: R\n' > "$D2/agg.yaml"
+"$AGG" --dir "$D2" skills install > "$D2/i.log" 2>&1
+has "agg skills install defaults the agent to agg.yaml's 'agent:' key" "$D2/i.log" "for \`copilot\`"
+exists "…and installs it where copilot looks" "$D2/.agents/skills/agg-new/SKILL.md"
+
+D3="$WS/skills-bad"; mkdir -p "$D3"
+"$AGG" --dir "$D3" skills install --agent gemini > "$D3/i.log" 2>&1
+is  "an unknown agent exits non-zero" "$?" "1"
+has "…naming the agents that DO exist" "$D3/i.log" "known agents: claude, codex, copilot"
+absent "…and writing nothing at all"   "$D3/.agents"
+
+# --user resolves against $HOME, not the project (HOME overridden so we never touch the real one)
+HM="$WS/fakehome"; mkdir -p "$HM"
+( cd "$SK" && HOME="$HM" "$AGG" skills install --agent codex --user > "$SK/i-user.log" 2>&1 )
+exists "--user installs under \$HOME/.agents/skills/" "$HM/.agents/skills/agg-new/SKILL.md"
+( cd "$SK" && HOME="$HM" "$AGG" skills install --agent claude --user > /dev/null 2>&1 )
+exists "--user --agent claude installs under \$HOME/.claude/skills/" "$HM/.claude/skills/agg-new/SKILL.md"
+
+# doctor reports the install (as a fact — never a failure; the skills are optional)
+( cd "$SK" && "$AGG" doctor > "$SK/doc.log" 2>&1 )
+has "agg doctor reports the skills are installed for the active agent" "$SK/doc.log" \
+    "the /agg:* skills are installed for \`codex\`"
+DN="$WS/skills-none"; mkdir -p "$DN"
+printf 'project: p\nagent: codex\nresume_prompt: R\n' > "$DN/agg.yaml"
+( cd "$DN" && "$AGG" doctor > "$DN/doc.log" 2>&1 )
+has "…and says so, non-fatally, when they are not" "$DN/doc.log" "are not installed for \`codex\`"
+
+# --- (c) THE ONE THAT MATTERS: /agg:new's recipes must produce a config that STARTS ----------
+# Each block below is exactly what the skill's Step-0 rules tell it to emit. If `agg doctor`
+# refuses one of these, the skill is generating a config that `agg run` will not start — which
+# is the precise failure this whole phase exists to prevent.
+capcheck() { # capcheck <desc> <expect: ok|refused> <agg.yaml body>
+  local desc=$1 expect=$2 body=$3
+  local d="$WS/cap-$(echo "$desc" | tr -cd '[:alnum:]' | cut -c1-16)"
+  mkdir -p "$d"; printf '%s' "$body" > "$d/agg.yaml"
+  printf 'goals:\n  - id: g\n    type: binary\n    judge: { kind: script, cmd: "true" }\nstop_when: g\n' > "$d/goals.yaml"
+  : > "$d/R"
+  ( cd "$d" && "$AGG" doctor > "$d/doc.log" 2>&1 )
+  if grep -q "cannot do what this config asks" "$d/doc.log"; then
+    [ "$expect" = "refused" ] && ok "$desc" || bad "$desc" "agg REFUSED a config the skill tells /agg:new to write"
+  else
+    [ "$expect" = "ok" ] && ok "$desc" || bad "$desc" "agg ACCEPTED a config the skill forbids — the guard is dead"
+  fi
+}
+# the recipes the skill prescribes → must all start
+capcheck "the skill's claude recipe starts"  ok \
+  'project: p
+agent: claude
+model: "claude-opus-4-8[1m]"
+resume_prompt: R
+budget: { total: 100000 }
+cost:   { total: 5.0 }
+summary: { enabled: true, model: haiku }
+'
+capcheck "the skill's codex recipe starts (no model, no cost)" ok \
+  'project: p
+agent: codex
+resume_prompt: R
+budget: { total: 100000 }
+summary: { enabled: true }
+'
+capcheck "the skill's copilot recipe starts (model auto, no cost)" ok \
+  'project: p
+agent: copilot
+model: auto
+resume_prompt: R
+budget: { total: 100000 }
+summary: { enabled: true, model: auto }
+'
+# and the mistake the skill exists to prevent → must be refused, loudly, on BOTH agents
+capcheck "a Claude-shaped cost guard on codex is REFUSED" refused \
+  'project: p
+agent: codex
+resume_prompt: R
+cost: { total: 5.0 }
+'
+capcheck "a Claude-shaped cost guard on copilot is REFUSED" refused \
+  'project: p
+agent: copilot
+model: auto
+resume_prompt: R
+cost: { total: 5.0 }
+'
+
+# --- (b) the real agents actually DISCOVER what we installed --------------------------------
+# Both probes below are FREE: `copilot skill list` is a local command and `codex debug
+# prompt-input` renders the model-visible prompt without an API call. Copilot is on a limited
+# free tier — do not "improve" these into `copilot -p` calls, which would spend its quota.
+if command -v copilot >/dev/null 2>&1; then
+  ( cd "$SK" && copilot skill list > "$SK/copilot-skills.txt" 2>&1 )
+  for s in new status supervise; do
+    has "copilot DISCOVERS agg-$s (real CLI, no quota)" "$SK/copilot-skills.txt" "agg-$s"
+  done
+else
+  skip "copilot discovers the installed skills" "copilot not on PATH"
+fi
+
+if command -v codex >/dev/null 2>&1; then
+  ( cd "$SK" && codex debug prompt-input > "$SK/codex-prompt.json" 2>/dev/null )
+  for s in new status supervise; do
+    has "codex DISCOVERS agg-$s (real CLI, no API call)" "$SK/codex-prompt.json" "agg-$s"
+  done
+  # …and it must be reading OUR project dir, not some stale personal install
+  has "…from the project's .agents/skills/" "$SK/codex-prompt.json" ".agents/skills/agg-new/SKILL.md"
+else
+  skip "codex discovers the installed skills" "codex not on PATH"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 printf '\n\033[1m══ summary ══\033[0m\n'
 printf '  passed: \033[32m%d\033[0m   failed: \033[31m%d\033[0m   skipped: \033[33m%d\033[0m\n' "$PASS" "$FAIL" "$SKIP"
 if [ "$FAIL" -gt 0 ]; then
