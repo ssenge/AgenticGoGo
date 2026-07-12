@@ -200,9 +200,9 @@ fn run_cli() -> Result<ExitCode> {
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
             // `plan` RE-RUNS the judges, so an LLM judge would make a real model call — select the
             // agent (agg.yaml may be absent here; `plan` works off goals.yaml alone) and refuse an
-            // LLM judge the agent can't run with tools off.
+            // LLM judge the agent can't run with tools off. Agent BEFORE config — see the Run arm.
+            agg::backend::init(&config::AggConfig::agent_name(&p.config))?;
             if let Ok(agg_cfg) = config::AggConfig::load(&p.config) {
-                agg::backend::init(&agg_cfg.agent)?;
                 agg::capability::check(&agg_cfg, &goals_cfg, agg::backend::active())?;
             }
             let mut eng = engine::Engine::new(goals_cfg)?;
@@ -262,14 +262,18 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Run { max_sessions, detach } => {
             no_config_hint(&p.config)?;
-            // Config FIRST — it names the agent. Everything below depends on knowing which one.
-            // (This also validates it in the FOREGROUND on the --detach path, so a typo fails
-            // loudly here rather than silently inside a detached child the user can't see.)
+            // Select the backend BEFORE parsing the config that depends on it. Some of agg.yaml's
+            // defaults are backend-specific (`model`, `summary.model`), and reading one latches
+            // `backend::active()` — so a full load() first would pin the WRONG agent. See
+            // `AggConfig::agent_name`.
+            agg::backend::init(&config::AggConfig::agent_name(&p.config))?;
+
+            // Now the config. (This also validates it in the FOREGROUND on the --detach path, so a
+            // typo fails loudly here rather than silently inside a detached child the user can't
+            // see.)
             let agg_cfg = config::AggConfig::load(&p.config)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
 
-            // Select the backend this process drives…
-            agg::backend::init(&agg_cfg.agent)?;
             // …then REFUSE anything the config asks for that this agent cannot do. A spend guard
             // against an agent that can't report spend would never fire, and an autonomous loop
             // would run unbounded. Loud here beats silent later.
