@@ -1,8 +1,8 @@
 //! The Claude Code backend — `claude -p`.
 //!
-//! The reference implementation of [`AgentBackend`], and (today) the only one. Everything
-//! Claude-specific in the whole crate lives here or in [`super::stream`], which parses its
-//! `stream-json` wire format.
+//! The reference implementation of [`AgentBackend`] — one of three (see [`super::codex`] and
+//! [`super::copilot`]). Everything Claude-specific in the whole crate lives here or in
+//! [`super::stream`], which parses its `stream-json` wire format.
 //!
 //! Claude is the most capable backend of the ones surveyed: it is the only one that reports a
 //! DOLLAR cost, and the only one with a verified way to run a genuinely non-agentic one-shot call
