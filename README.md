@@ -18,7 +18,7 @@ quietly stop one step short — leaving you to babysit a terminal?
 **Then AgenticGoGo is for you.**
 
 AgenticGoGo (`agg`) is a deterministic outer **[Ralph loop](https://ghuntley.com/ralph/)** that
-drives a stochastic inner agent — relaunching a **fresh** session, verifying its work against gates
+drives a stochastic inner coding agent (currently supported: Claude Code, OpenAI Codex, GitHub Copilot) — relaunching a **fresh** session, verifying its work against gates
 *it can't fake* (the **judges**), and repeating until your goals are actually met. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done. *(A similar LLM-based approach — generate → verify → keep, as in evolutionary code search — was
 proposed years ago, outside the Ralph-loop community, by DeepMind's
 [AlphaCode](https://arxiv.org/abs/2203.07814) and its open-source variant
@@ -28,11 +28,6 @@ A **judge** is a small, incorruptible check that decides whether one goal is met
 inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading against a rubric. You
 compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two and tests_pass`) to
 say exactly what "done" means.
-
-> **Three agents.** `agg` drives **Claude Code**, **OpenAI Codex**, or **GitHub Copilot CLI** as its
-> inner agent — pick one with `agent:` in `agg.yaml`. They are *not* interchangeable, and agg
-> refuses at startup rather than silently ignoring what your chosen agent can't do. See
-> [Choosing an agent](#choosing-an-agent).
 
 <p align="center">
   <img src="assets/loop.png" alt="The four stages of the agg loop — INJECT, RUN, VERIFY, GATE — arranged in a circle" width="620">
