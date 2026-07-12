@@ -1268,6 +1268,16 @@ resume_prompt: R
 cost: { total: 5.0 }
 '
 
+# --- the OTHER silent-wrong-config trap: the skill must not GUESS the agent -----------------
+# Copilot cannot introspect its own identity, and an early draft of the skill told it to "default
+# to the agent you are running in". It wrote `agent: claude` + a claude-opus model. `agg doctor`
+# PASSED (a Claude config is perfectly valid), and the loop would have silently driven the wrong
+# agent. doctor cannot catch this — it has no idea which agent you MEANT. Only the detection
+# snippet does, so assert the skill still carries it.
+has "the skill tells the agent to DETECT itself, not guess" "$ROOT/plugin/skills/new/SKILL.md" 'COPILOT_CLI'
+has "…via all three env markers"                            "$ROOT/plugin/skills/new/SKILL.md" 'CODEX_THREAD_ID'
+has "…and forbids the silent claude fallback"               "$ROOT/plugin/skills/new/SKILL.md" 'There is no default'
+
 # --- (b) the real agents actually DISCOVER what we installed --------------------------------
 # Both probes below are FREE: `copilot skill list` is a local command and `codex debug
 # prompt-input` renders the model-visible prompt without an API call. Copilot is on a limited
@@ -1290,6 +1300,46 @@ if command -v codex >/dev/null 2>&1; then
   has "…from the project's .agents/skills/" "$SK/codex-prompt.json" ".agents/skills/agg-new/SKILL.md"
 else
   skip "codex discovers the installed skills" "codex not on PATH"
+fi
+
+# --- (d) the PLUGIN MARKETPLACE route -------------------------------------------------------
+# All three agents have a marketplace, and all three consume THIS repo's existing
+# .claude-plugin/marketplace.json — Codex and Copilot read Claude's manifest format verbatim. So
+# there is one plugin, not three, and nothing here needs a second manifest to maintain.
+#
+# The naming trap this guards: Copilot's plugin loader ignores the plugin namespace, so without an
+# explicit `name:` key it surfaces plugin/skills/new/ as a skill called plain `new`. Claude's
+# namespace still wins (/agg:new is unchanged), so the key is safe there. Assert both.
+for s in new status supervise; do
+  has "plugin skill $s declares name: agg-$s (or copilot calls it \"$s\")" \
+      "$ROOT/plugin/skills/$s/SKILL.md" "name: agg-$s"
+done
+has "the marketplace manifest still points at plugin/" "$ROOT/.claude-plugin/marketplace.json" '"source": "./plugin"'
+
+# Both live checks below run against a THROWAWAY agent home, so the suite never reads or mutates
+# the developer's real marketplace registrations. (An earlier version did, and failed the moment a
+# marketplace named `agenticgogo` was already registered from a different source.) Codex honours
+# CODEX_HOME; Copilot keys off HOME. Both operations are local — no network, no model, no quota.
+# codex bails with "failed to load configuration" if CODEX_HOME does not already exist.
+MKT="$WS/agenthome"; mkdir -p "$MKT/codex" "$MKT/copilot"
+
+if command -v codex >/dev/null 2>&1; then
+  CODEX_HOME="$MKT/codex" codex plugin marketplace add "$ROOT" > "$SK/cx-mkt.log" 2>&1
+  has "codex ACCEPTS our .claude-plugin/marketplace.json verbatim" "$SK/cx-mkt.log" "Added marketplace"
+  CODEX_HOME="$MKT/codex" codex plugin add agg@agenticgogo > "$SK/cx-add.log" 2>&1
+  has "…and installs the agg plugin from it" "$SK/cx-add.log" "Added plugin \`agg\`"
+else
+  skip "codex plugin marketplace" "codex not on PATH"
+fi
+
+if command -v copilot >/dev/null 2>&1; then
+  HOME="$MKT/copilot" copilot plugin marketplace add "$ROOT" > "$SK/cp-mkt.log" 2>&1
+  has "copilot ACCEPTS the SAME manifest (one plugin, not three)" "$SK/cp-mkt.log" "added successfully"
+  HOME="$MKT/copilot" copilot plugin install agg@agenticgogo > "$SK/cp-add.log" 2>&1
+  # "Installed 3 skills" is the assertion that matters: all three, not just the one it found first.
+  has "…and installs all 3 skills from it" "$SK/cp-add.log" "Installed 3 skills"
+else
+  skip "copilot plugin marketplace" "copilot not on PATH"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

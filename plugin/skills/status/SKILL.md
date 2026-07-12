@@ -1,4 +1,5 @@
 ---
+name: agg-status
 description: Show the current status of the AgenticGoGo loop for this project — the goal scoreboard, what's met/blocked, tokens spent, and the latest progress summary. Use when the user asks how the loop / agg run is doing.
 disable-model-invocation: false
 ---

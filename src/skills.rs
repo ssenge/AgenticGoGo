@@ -23,16 +23,31 @@
 //! two directories cover all three agents. No agent reads every location, so one shared directory
 //! is not possible.
 //!
-//! # Why the destination directory is named `agg-new` and not `new`
-//! **Codex and Copilot name a skill after its DIRECTORY** (neither SKILL.md carries a `name:` key).
-//! So the directory IS the namespace on those agents: `.agents/skills/agg-new/` surfaces as
-//! `agg-new`. Claude instead gets `/agg:new` from the plugin's own namespace, which is why the
-//! plugin is left alone and no `name:` key is added — adding one would rename Claude's command.
+//! # Naming: the `name:` frontmatter key, and why the directory ALSO says `agg-`
+//! Each SKILL.md carries `name: agg-new`. That key is what stops the skill being called plain
+//! `new` — Copilot's plugin loader ignores the plugin namespace entirely, so without it the skill
+//! surfaces as `new`, which is both useless and a collision. Verified on all three:
+//!
+//! | | via this installer | via the plugin marketplace |
+//! |---|---|---|
+//! | claude | `/agg-new` | **`/agg:new`** — the plugin namespace WINS over `name:` |
+//! | codex | `agg-new` | `agg-new` |
+//! | copilot | `agg-new` | `agg-new` (plain `new` without the key) |
+//!
+//! So `name:` is safe for Claude — its `/agg:new` is unchanged — and necessary for Copilot.
+//! The DIRECTORY is named `agg-new` too, belt-and-braces: Codex and Copilot both fall back to the
+//! directory name when a skill has no `name:` key.
 //!
 //! # There is no slash command on Codex or Copilot
 //! Neither has a slash registry; both select a skill by matching its `description:` — Codex injects
 //! every skill's name+description into the system prompt and lets the model choose. So an installed
 //! skill is invoked by ASKING for it in prose, not by typing `/agg:new`. Only Claude has the slash.
+//!
+//! # This installer is not the only route
+//! Codex and Copilot BOTH have plugin marketplaces, and both accept this repo's existing
+//! `.claude-plugin/marketplace.json` verbatim (`codex plugin marketplace add` / `copilot plugin
+//! marketplace add ssenge/AgenticGoGo`). That path needs no code here at all. This command exists
+//! for the project-local install, which a marketplace cannot do.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -189,5 +204,22 @@ mod tests {
             "agg-new must carry the capability-aware agg.yaml template — that is the whole point"
         );
         assert_eq!(SKILLS.len(), 3);
+    }
+
+    /// REGRESSION: every skill must declare `name: agg-*` in its frontmatter. Without it, Copilot's
+    /// PLUGIN loader (which ignores the plugin namespace) surfaces `plugin/skills/new/` as a skill
+    /// literally called `new` — a generic name that collides with anything. Claude is unaffected:
+    /// its plugin namespace still wins, so `/agg:new` keeps its name. All three verified on the
+    /// wire. If this ever drops, Copilot users get `new`/`status`/`supervise` in their skill list.
+    #[test]
+    fn every_skill_declares_its_namespaced_name() {
+        for (dir, body) in SKILLS {
+            let want = format!("\nname: {dir}\n");
+            assert!(
+                body.contains(&want),
+                "{dir}/SKILL.md must declare `name: {dir}` — without it Copilot names it `{}`",
+                dir.strip_prefix("agg-").unwrap_or(dir)
+            );
+        }
     }
 }

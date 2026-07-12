@@ -1,4 +1,5 @@
 ---
+name: agg-supervise
 description: Act as the outer supervisor for a running AgenticGoGo loop — a remote-controllable agent session you attach to (e.g. from mobile) to watch progress, answer questions, and steer the loop. Use when the user wants to oversee/steer an agg run from a supervisor session.
 disable-model-invocation: false
 ---
