@@ -82,13 +82,18 @@ have to babysit.)*
 > config files yourself with `agg init` instead of asking a skill to. See
 > [Choosing an agent](#choosing-an-agent).
 
-**0 — Install.** The binary, then the `/agg:*` skills (Claude Code only):
+**0 — Install.** The binary, then the `/agg:*` skills:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/install.sh | sh   # the agg binary
+agg skills install                                                                     # the /agg:* skills
 ```
+
+`agg skills install` works for **all three agents** — it puts the skills wherever your agent looks.
+Claude Code users can equally use the plugin marketplace, which is the same three skills:
+
 ```
-/plugin marketplace add ssenge/AgenticGoGo && /plugin install agg@agenticgogo           # the /agg:* skills
+/plugin marketplace add ssenge/AgenticGoGo && /plugin install agg@agenticgogo
 ```
 
 Full options (prebuilt binaries, from source, version pinning) →
@@ -107,9 +112,10 @@ you want, and check it works:
 run it before your first loop. See [Choosing an agent](#choosing-an-agent) for what each one
 can't do.
 
-**2 — Let Claude set up the loop.** Type `/agg:new` in Claude Code to turn *your*
-definition of "done" into config. Point it at a spec you already have (a PRD, ROADMAP, README,
-`.planning/`), or just say what you want in the chat or directly as a parameter to the skill — e.g.
+**2 — Let the agent set up the loop.** In Claude Code, type `/agg:new`. On Codex or Copilot there
+are no slash commands — just **ask** ("set up AgenticGoGo for this project"), and the agent picks the
+skill up by its description. Either way it turns *your* definition of "done" into config. Point it at
+a spec you already have (a PRD, ROADMAP, README, `.planning/`), or just say what you want — e.g.
 
 > `/agg:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes
 
@@ -231,27 +237,53 @@ to it). Codex picks its own model unless you set `model:`.
 
 ### Setting up on Codex or Copilot
 
-The `/agg:*` skills (`/agg:new`, `/agg:status`, `/agg:supervise`) are a **Claude Code plugin** — they
-don't exist for Codex or Copilot yet. Everything they do is a convenience wrapper around the CLI, so
-you do it directly instead:
-
-| instead of | run |
-|---|---|
-| `/agg:new` | `agg init` — scaffolds `agg.yaml`, `goals.yaml`, `AGG_RESUME.md` and a starter judge, then edit them |
-| `/agg:status` | `agg status` (or `agg dashboard` for the live TUI) |
-| `/agg:supervise` | `agg send <cmd>` — steer a running loop from any terminal |
-
-Then set your agent and run:
+The `/agg:*` skills work on **all three agents**. Install them with the binary you already have:
 
 ```bash
-agg init                                  # scaffold the config
-sed -i '' '1i\agent: codex' agg.yaml      # or: agent: copilot
-agg doctor                                # checks the agent + that it can do what your config asks
+agg skills install            # installs for the agent in agg.yaml (or --agent codex|copilot|claude)
+agg skills install --user     # …for your whole account instead of just this project
+```
+
+That copies `/agg:new`, `/agg:status` and `/agg:supervise` into the directory your agent actually
+reads. The directory differs, which is the only reason this is a command and not a `cp`:
+
+| agent | project install | `--user` install |
+|---|---|---|
+| Claude Code | `.claude/skills/` | `~/.claude/skills/` |
+| OpenAI Codex | `.agents/skills/` | `~/.agents/skills/` |
+| GitHub Copilot | `.agents/skills/` | `~/.agents/skills/` |
+
+`.agents/` is the emerging agent-neutral convention, and Codex and Copilot both honour it — so one
+directory serves both. Claude reads neither, hence two.
+
+**How you invoke them differs, and this part matters:**
+
+- **Claude Code** has slash commands: type `/agg:new`, `/agg:status`, `/agg:supervise`.
+  (Claude users can also install them the classic way, via the plugin marketplace — see
+  [Install](#install). Both routes work.)
+- **Codex and Copilot have no slash commands for skills.** They pick a skill by matching your
+  request against its description. So you just *ask*:
+
+  ```
+  set up AgenticGoGo for this project     → agg-new
+  how is the agg loop doing?              → agg-status
+  supervise the running agg loop          → agg-supervise
+  ```
+
+Then:
+
+```bash
+agg doctor     # checks the agent, that it can do what your config asks, and that the skills landed
 agg run
 ```
 
-The loop, judges, gates, memory, TUI and web UI are all agent-agnostic — only the setup skills are
-Claude-only today.
+`agg doctor` is the one to trust: agents are **not** interchangeable (no cost guard on Codex or
+Copilot — see [Which agent?](#which-agent)), and `/agg:new` writes a config shaped for the agent you
+chose. If doctor is green, `agg run` will start.
+
+**No skills at all?** `agg init` still scaffolds `agg.yaml`, `goals.yaml`, `AGG_RESUME.md` and a
+starter judge by hand. It is the fallback, not the recommended path — `/agg:new` reads your existing
+plans and derives goals and judges from them; `agg init` just writes a template.
 
 ## Features
 
@@ -431,7 +463,8 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | Command | What it does | Flags |
 |---|---|---|
 | `agg init` | Scaffold **placeholder** config you must then edit — a blank-slate fallback. Prefer `/agg:new`, which fills it in from your project. | `--force` overwrite · `--folder` scaffold into `agg/` |
-| `agg doctor` | Diagnose the setup: claude on PATH, config parses, conditions valid | |
+| `agg doctor` | Diagnose the setup: the agent is on PATH, config parses, conditions valid, **the agent can do what the config asks**, skills installed | |
+| `agg skills install` | Install the `/agg:*` skills where your agent looks (`.claude/skills/` for Claude, `.agents/skills/` for Codex + Copilot) | `--agent <a>` (default: agg.yaml's `agent:`) · `--user` install under `$HOME` |
 | `agg plan` | Run every judge once and print the starting scoreboard (a dry run) | |
 | `agg run` | Drive the loop until `stop_when` is met (or a guard fires) | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` |
 | `agg judge <id>` | Run **one** goal's judge and print its raw verdict — for authoring judges | |
