@@ -260,9 +260,28 @@ impl AgentBackend for Copilot {
         v.get("sessionId")?.as_str().map(str::to_string)
     }
 
-    /// Copilot's `--effort` takes the same vocabulary Claude does, so agg's default carries over.
+    /// **Empty on purpose — do NOT "restore" this to `max`.**
+    ///
+    /// This used to return `"max"`, on the reasoning that Copilot's `--effort` takes the same
+    /// vocabulary Claude's does, so agg's default could carry over. The flag does exist and the
+    /// vocabulary does match — but that was never tried against [`DEFAULT_MODEL`], and the two
+    /// defaults are mutually exclusive:
+    ///
+    /// ```text
+    /// $ copilot --model auto --effort max -p "Say OK"
+    /// Error: Model "auto" does not support reasoning effort configuration (requested: "max").
+    /// ```
+    ///
+    /// So the out-of-the-box Copilot config — no `model:`, no `effort:` in agg.yaml, both falling
+    /// back to these defaults — made **every worker session die in 4s with exit 1 and 0 tokens.**
+    /// The loop dutifully ran its sessions, judged, and halted on `over_iterations` having done
+    /// nothing at all. Caught by actually driving `agg run` against Copilot end-to-end; no unit
+    /// test would have, because the incompatibility lives in Copilot's argv validation.
+    ///
+    /// Effort stays *supported* ([`Capabilities::supports_effort`]) — set `effort:` explicitly and
+    /// it is passed through — but a default that breaks the default model is not a default.
     fn default_effort(&self) -> &'static str {
-        "max"
+        ""
     }
 
     /// A judging / summarizing call: the model may READ, but it cannot WRITE.
