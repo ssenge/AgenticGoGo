@@ -27,7 +27,7 @@ proposed years ago, outside the Ralph-loop community, by DeepMind's
 A **judge** is a small, incorruptible check that decides whether one goal is met — usually a script
 inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading against a rubric. You
 compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two and tests_pass`) to
-say exactly what "done" means.
+say exactly what *done* means.
 
 <p align="center">
   <img src="assets/loop.png" alt="The four stages of the agg loop — INJECT, RUN, VERIFY, GATE — arranged in a circle" width="620">
@@ -44,11 +44,11 @@ Three of the four stages are deterministic code; only the `RUN` stage is a (stoc
 The loop continues until all goals are met — potentially for hours, days, weeks (watch your token
 consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate that decides it's done.
 
-**A stronger model gets there faster; the judge is what makes "there" mean anything.** So the loop
-works when "done" is something *other than the agent* can check — *"`solve(Y)` returns `X`"*, *"18 of
-28 benchmarks pass"*, *"`f(x)` runs in under 200 ms"*, *"the report scores ≥ 85% against this
-rubric"* — or any boolean combination of such judges. A goal like *"make the code nicer"* gives the
-loop nothing to gate on, and a vague goal is a gameable one.
+**Your judges *are* that gate — your Definition of Done (DoD), made executable.** Good judges are
+built on quantifiable goals: *"`solve(Y)` returns `X`"*, *"18 of 28 benchmarks pass"*, *"`f(x)` runs
+in under 200 ms"*, *"the report scores ≥ 85% against this rubric"* — or any boolean combination of
+such judges. A vague DoD like *"make the code nicer"* gives an LLM-based assessment far too much
+slack, and is easily gamed.
 
 The overall architecture is captured in the following diagram:
 
@@ -135,8 +135,8 @@ can't do.
 **2 — Let the agent set up the loop.** Invoke the skill: **`/agg:new`** (Claude Code), **`/agg-new`**
 (Copilot), **`$agg-new`** (Codex — it uses `$`, not `/`). On any of them you can equally just *ask*
 ("set up AgenticGoGo for this project") and the agent picks the skill up by its description. Either
-way it turns *your* definition of "done" into config. Point it at a spec you already have (a PRD,
-ROADMAP, README, `.planning/`), or just say what you want — e.g.
+way it turns *your* DoD into config. Point it at a spec you already have (a PRD, ROADMAP, README,
+`.planning/`), or just say what you want — e.g.
 
 > `/agg:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes
 
@@ -144,7 +144,7 @@ It reads that plus your code, shows the `goals.yaml` it proposes, and lets you e
 into `agg/`. The result might look like:
 
 ```yaml
-# agg/goals.yaml — what "done" means, and who decides
+# agg/goals.yaml — your DoD, and who decides each clause of it
 goals:
   - id: outputs_two          # behaviour: the program actually prints 2
     type: binary
@@ -408,8 +408,12 @@ which is the only portable choice, and required on Codex**) and `agg`:
 Ready-made script judges live in [`plugin/judges/`](plugin/judges/) (`cargo_test`, `cmd_exit`,
 `grep_count`); rubrics in [`plugin/rubrics/`](plugin/rubrics/).
 
-**Compose judges with Boolean grammar.** `stop_when` (and the optional `halt_when`) is any boolean of goal
-ids — `a and b`, `a or b`, `not c`, with parentheses — so several judges together define "done":
+**Compose judges with Boolean grammar.** Each judge checks **one clause** of your DoD; `stop_when`
+composes them into the whole of it — any boolean of goal ids (`a and b`, `a or b`, `not c`, with
+parentheses). So `stop_when` *is* your DoD, as an expression.
+
+`halt_when` takes the same grammar but is **not** part of your DoD: it is a ceiling (budget, time,
+a regressed invariant) that aborts the run as a failure. Done is one thing; giving up is another:
 
 ```yaml
 stop_when: outputs_two and tests_pass          # both must hold
