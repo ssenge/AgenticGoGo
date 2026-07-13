@@ -44,6 +44,12 @@ Three of the four stages are deterministic code; only the `RUN` stage is a (stoc
 The loop continues until all goals are met — potentially for hours, days, weeks (watch your token
 consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate that decides it's done.
 
+**A stronger model gets there faster; the judge is what makes "there" mean anything.** So the loop
+works when "done" is something *other than the agent* can check — *"`solve(Y)` returns `X`"*, *"18 of
+28 benchmarks pass"*, *"`f(x)` runs in under 200 ms"*, *"the report scores ≥ 85% against this
+rubric"* — or any boolean combination of such judges. A goal like *"make the code nicer"* gives the
+loop nothing to gate on, and a vague goal is a gameable one.
+
 The overall architecture is captured in the following diagram:
 
 <p align="center">
