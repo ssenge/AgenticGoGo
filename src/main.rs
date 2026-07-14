@@ -44,10 +44,6 @@ enum Cmd {
         /// overwrite existing config files
         #[arg(long)]
         force: bool,
-        /// scaffold into an `agg/` config folder instead of the project root (keeps the root
-        /// tidy when you have judges/ + rubrics/). `agg run` auto-detects either layout.
-        #[arg(long)]
-        folder: bool,
     },
     /// Diagnose your setup (the agent is on PATH and can do what your config asks, config
     /// parses, conditions valid, skills installed).
@@ -55,7 +51,7 @@ enum Cmd {
     /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
     Plan,
     /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
-    /// re-run judges; reads .agg/state.json, same as the /agg:status skill).
+    /// re-run judges; reads agg/state/state.json, same as the /agg:status skill).
     Status {
         /// emit the raw snapshot as JSON (the full DashboardState) for scripting/piping.
         #[arg(long)]
@@ -66,7 +62,7 @@ enum Cmd {
         /// stop after this many sessions regardless (0 = unlimited)
         #[arg(long, default_value_t = 0)]
         max_sessions: u32,
-        /// run in the background: detach, write .agg/run.pid, log to .agg/run.log.
+        /// run in the background: detach, write agg/state/run.pid, log to agg/state/run.log.
         #[arg(long, short = 'd')]
         detach: bool,
     },
@@ -181,10 +177,10 @@ enum SendCmd {
 }
 
 struct Paths {
-    /// project root (cwd for judges + worker; runtime state lives in `<dir>/.agg/`).
+    /// project root (cwd for judges + worker; runtime state lives in `<dir>/agg/state/`).
     dir: PathBuf,
-    /// where user inputs live: `<dir>/agg/` if that folder exists, else `<dir>`. The resume
-    /// prompt and LLM-judge rubric files resolve against this base.
+    /// where user inputs live: `<dir>/agg/`. The resume prompt and LLM-judge rubric files
+    /// resolve against this base.
     config_base: PathBuf,
     config: PathBuf,
     goals: PathBuf,
@@ -194,9 +190,9 @@ impl Cli {
     fn paths(&self) -> Paths {
         let dir = self.dir.clone().unwrap_or_else(|| PathBuf::from("."));
         let config_base = agg::paths::config_base(&dir);
-        // An explicit --config/--goals wins; otherwise honour the optional `agg/` folder.
-        let config = self.config.clone().unwrap_or_else(|| agg::paths::config_file(&dir, "agg.yaml"));
-        let goals = self.goals.clone().unwrap_or_else(|| agg::paths::config_file(&dir, "goals.yaml"));
+        // An explicit --config/--goals wins; otherwise resolve inside the mandatory `agg/` folder.
+        let config = self.config.clone().unwrap_or_else(|| config_base.join("agg.yaml"));
+        let goals = self.goals.clone().unwrap_or_else(|| config_base.join("goals.yaml"));
         Paths { dir, config_base, config, goals }
     }
 }
@@ -220,7 +216,7 @@ fn run_cli() -> Result<ExitCode> {
     let p = cli.paths();
 
     match &cli.cmd {
-        Cmd::Init { agent, force, folder } => init::run(&p.dir, *force, *folder, agent.as_deref()),
+        Cmd::Init { agent, force } => init::run(&p.dir, *force, agent.as_deref()),
         Cmd::Doctor => doctor::run(&p.dir, &p.config_base, &p.config, &p.goals),
         Cmd::Plan => {
             no_config_hint(&p.goals)?;
@@ -429,7 +425,7 @@ fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
         eprintln!(
             "queued → {} — but NO loop is running in this dir right now.\n  \
              it will apply when one starts (a queued `stop` fires immediately at the next `agg run`;\n  \
-             delete .agg/bus/in/*.json to cancel).",
+             delete agg/state/bus/in/*.json to cancel).",
             path.display()
         );
     }
@@ -447,7 +443,7 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
         anyhow::bail!("nothing to spawn — pass the command after `--`, e.g. `agg spawn --name x --reason y -- sleep 60`");
     }
     let log_dir = spawns::Registry::log_dir(dir);
-    std::fs::create_dir_all(&log_dir).with_context(|| "creating .agg/spawns log dir")?;
+    std::fs::create_dir_all(&log_dir).with_context(|| "creating agg/state/spawns log dir")?;
     let log_path = log_dir.join(format!("{name}.log"));
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -495,7 +491,7 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
         started_session,
         status: "running".into(),
     })
-    .with_context(|| "registering spawn in .agg/spawns.json")?;
+    .with_context(|| "registering spawn in agg/state/spawns.json")?;
 
     eprintln!(
         "▶ spawned `{name}` (pid {pid}, pgid {pgid}) — survives session boundaries.\n  \

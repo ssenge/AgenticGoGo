@@ -4,32 +4,26 @@
 //! judge + the make-or-break AGG_RESUME.md from scratch, the user runs ONE command
 //! and gets a runnable starter that `agg plan` accepts immediately.
 //!
-//! `--folder` scaffolds into an `agg/` config subdir (config-adjacent files — goals/agg/
-//! resume/judges — kept out of the project root); `agg run` auto-detects either layout. The
-//! only layout-dependent value is the judge `cmd` path, which is relative to the PROJECT ROOT
-//! (scripts always run there), so the foldered judge is `./agg/judges/tests.sh`.
+//! All config-adjacent files (agg.yaml, goals.yaml, the resume prompt, judges/) scaffold into the
+//! mandatory `agg/` config subdir. The judge `cmd` path is relative to the PROJECT ROOT (scripts
+//! always run there, not from `agg/`), so the judge is `./agg/judges/tests.sh`.
 
 use anyhow::{bail, Result};
 use std::path::Path;
 
-/// Scaffold the four starter files. With `folder`, they go under `<dir>/agg/`; otherwise into
-/// `<dir>` directly. Refuses to clobber existing config unless `force` is set, so re-running
-/// init never silently destroys real work.
-pub fn run(dir: &Path, force: bool, folder: bool, agent: Option<&str>) -> Result<()> {
+/// Scaffold the four starter files under `<dir>/agg/`. Refuses to clobber existing config unless
+/// `force` is set, so re-running init never silently destroys real work.
+pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
     // Resolve the backend the scaffold is FOR. Every agent-specific choice below (`model`,
     // `summary.model`, whether `cost:` / `over_cost` are even legal) is read off it.
     // `--agent` wins; else the agent whose shell we are in; else Claude, the default.
     let chosen = agent.map(str::to_string).or_else(|| crate::skills::host_agent().map(str::to_string));
     // rejects an unknown agent before writing anything.
     let b = crate::backend::for_name(chosen.as_deref().unwrap_or("claude"))?;
-    // config_base = where the config files land; judge_cmd = how goals.yaml refers to the judge
-    // (relative to the PROJECT ROOT, since judge scripts run there regardless of layout).
-    let (base, judge_cmd) = if folder {
-        (dir.join(crate::paths::CONFIG_DIR), "./agg/judges/tests.sh")
-    } else {
-        (dir.to_path_buf(), "./judges/tests.sh")
-    };
-    let goals_yaml = GOALS_YAML.replace("./judges/tests.sh", judge_cmd);
+    // All config now lands in the mandatory `agg/` folder; the judge cmd is how goals.yaml refers
+    // to the judge, relative to the PROJECT ROOT (judge scripts run there, not from agg/).
+    let base = dir.join(crate::paths::CONFIG_DIR);
+    let goals_yaml = GOALS_YAML.replace("./judges/tests.sh", "./agg/judges/tests.sh");
 
     // The scaffold must be shaped for the agent it will actually DRIVE. Before this, `agg init`
     // wrote no `agent:` key at all and interpolated Claude's model — so the documented "no skill?
@@ -106,15 +100,15 @@ pub fn run(dir: &Path, force: bool, folder: bool, agent: Option<&str>) -> Result
         if executable {
             make_executable(&path);
         }
-        let shown = if folder { format!("{}/{}", crate::paths::CONFIG_DIR, name) } else { name.to_string() };
-        eprintln!("  created {shown}");
+        eprintln!("  created {}/{}", crate::paths::CONFIG_DIR, name);
     }
 
-    // Ensure `.agg/` (runtime state incl. transient memory scratch) is gitignored even when git
-    // isolation is OFF — memory works without isolation, so we can't lean on the isolation path.
-    // Guarded: `ensure_agg_gitignored` writes `.gitignore` + runs `git rm --cached` and is NOT a
-    // safe no-op outside a repo, so only call it inside one. (`AGG_MEMORY.md` lives at the project
-    // root and is intentionally NOT ignored — it's meant to be committed.)
+    // Ensure `agg/state/` (all runtime state, incl. the durable AGG_MEMORY.md + transient memory
+    // scratch) is gitignored even when git isolation is OFF — memory works without isolation, so we
+    // can't lean on the isolation path. Guarded: `ensure_agg_gitignored` writes `.gitignore` + runs
+    // `git rm --cached` and is NOT a safe no-op outside a repo, so only call it inside one. (The
+    // committed config under `agg/` — agg.yaml, goals.yaml, judges/ — stays tracked; only
+    // `agg/state/` is ignored.)
     if crate::git::is_repo(dir) {
         crate::git::ensure_agg_gitignored(dir);
     }
@@ -249,18 +243,18 @@ Make all the project's tests pass.
   orphans the task, and the next session relaunches a duplicate. Instead run it via
   `agg spawn --name <id> --reason "<why>" -- <cmd>`. agg keeps it alive past your session,
   PROTECTS it from the straggler reaper, and tells the next session it's running (and why).
-  Then EXIT. A later session is told about it and polls its log (`.agg/spawns/<id>.log`) —
+  Then EXIT. A later session is told about it and polls its log (`agg/state/spawns/<id>.log`) —
   consuming the result when it finishes — instead of starting over. One spawn per task; check
   the BACKGROUND TASKS block at the top of your prompt before launching anything.
 
 # Memory (OPTIONAL — agg captures memory either way)
-- agg keeps durable cross-session learnings in `AGG_MEMORY.md` at the project root and injects a
+- agg keeps durable cross-session learnings in `agg/state/AGG_MEMORY.md` and injects a
   recent slice of it (plus a LAST SESSION block) at the BOTTOM of this prompt, as lower-priority
   context. READ it — it's what prior sessions learned. You do NOT maintain it; agg folds a note
   after every session automatically (even if you crash or get killed mid-task).
 - If you have a crisp, durable learning worth carrying forward (a gotcha, a decision, the exact
-  next step), you MAY write it to `.agg/memory/session-<N>.md`, where `<N>` is THIS session number
-  from the "session #N" banner agg printed when it launched you (e.g. `.agg/memory/session-7.md`).
+  next step), you MAY write it to `agg/state/memory/session-<N>.md`, where `<N>` is THIS session number
+  from the "session #N" banner agg printed when it launched you (e.g. `agg/state/memory/session-7.md`).
   agg prefers your note on a clean session. This is OPTIONAL — skipping it loses nothing; agg
   still records a mechanical note from the goal scoreboard and your visible progress. Keep it
   short and plain; agg sanitizes and size-caps it.
@@ -303,29 +297,30 @@ mod tests {
     #[test]
     fn scaffold_parses_with_real_loaders() {
         let dir = tmpdir("root");
-        run(&dir, false, false, None).unwrap();
-        // the generated config must load with the ACTUAL loaders (no schema drift)
-        crate::core::config::AggConfig::load(&dir.join("agg.yaml")).expect("scaffolded agg.yaml must parse");
-        let g = crate::core::config::GoalsConfig::load(&dir.join("goals.yaml")).expect("scaffolded goals.yaml must parse");
+        run(&dir, false, None).unwrap();
+        // the generated config lands under the mandatory agg/ folder and must load with the ACTUAL
+        // loaders (no schema drift)
+        crate::core::config::AggConfig::load(&dir.join("agg/agg.yaml")).expect("scaffolded agg.yaml must parse");
+        let g = crate::core::config::GoalsConfig::load(&dir.join("agg/goals.yaml")).expect("scaffolded goals.yaml must parse");
         crate::core::engine::Engine::new(g).expect("scaffolded goals must build an engine (stop_when valid)");
         // refuses to clobber without force
-        assert!(run(&dir, false, false, None).is_err());
-        assert!(run(&dir, true, false, None).is_ok());
+        assert!(run(&dir, false, None).is_err());
+        assert!(run(&dir, true, None).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn folder_scaffold_lands_under_agg_and_resolves() {
+    fn scaffold_lands_under_agg_and_resolves() {
         let dir = tmpdir("folder");
-        run(&dir, false, true, None).unwrap();
+        run(&dir, false, None).unwrap();
         // files land under agg/, NOT the root
-        assert!(dir.join("agg/agg.yaml").exists(), "foldered agg.yaml under agg/");
+        assert!(dir.join("agg/agg.yaml").exists(), "agg.yaml under agg/");
         assert!(dir.join("agg/goals.yaml").exists());
         assert!(dir.join("agg/judges/tests.sh").exists());
-        assert!(!dir.join("agg.yaml").exists(), "root must stay clean in folder mode");
+        assert!(!dir.join("agg.yaml").exists(), "root must stay clean — config is always foldered");
         // the resolver finds the foldered config, and it loads + builds an engine
         assert_eq!(crate::paths::config_base(&dir), dir.join("agg"));
-        let cfg = crate::paths::config_file(&dir, "goals.yaml");
+        let cfg = crate::paths::config_base(&dir).join("goals.yaml");
         assert_eq!(cfg, dir.join("agg/goals.yaml"));
         let g = crate::core::config::GoalsConfig::load(&cfg).expect("foldered goals.yaml must parse");
         // the judge cmd points at the project-root-relative path
@@ -351,11 +346,11 @@ mod tests {
     fn the_scaffold_starts_on_every_agent() {
         for agent in crate::backend::KNOWN {
             let dir = tmpdir(&format!("scaffold-{agent}"));
-            run(&dir, false, false, Some(agent)).unwrap();
+            run(&dir, false, Some(agent)).unwrap();
 
-            let cfg = crate::core::config::AggConfig::load(&dir.join("agg.yaml"))
+            let cfg = crate::core::config::AggConfig::load(&dir.join("agg/agg.yaml"))
                 .unwrap_or_else(|e| panic!("`agg init --agent {agent}` must emit parseable YAML: {e}"));
-            let goals = crate::core::config::GoalsConfig::load(&dir.join("goals.yaml")).unwrap();
+            let goals = crate::core::config::GoalsConfig::load(&dir.join("agg/goals.yaml")).unwrap();
             let backend = crate::backend::for_name(agent).unwrap();
 
             assert_eq!(cfg.agent, *agent, "the scaffold must PIN the agent it was made for");
@@ -364,8 +359,8 @@ mod tests {
             });
 
             // and the two keys that cause that refusal must be absent for an agent that can't honour them
-            let yaml = std::fs::read_to_string(dir.join("agg.yaml")).unwrap();
-            let halt = std::fs::read_to_string(dir.join("goals.yaml")).unwrap();
+            let yaml = std::fs::read_to_string(dir.join("agg/agg.yaml")).unwrap();
+            let halt = std::fs::read_to_string(dir.join("agg/goals.yaml")).unwrap();
             // inspect the ACTIVE lines only — the templates explain `over_cost` in comments, and a
             // comment mentioning it is not a guard demanding it.
             let active = |s: &str, key: &str| {

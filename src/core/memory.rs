@@ -2,13 +2,13 @@
 //!
 //! Four layers, all driven by plain loop code (the worker is NEVER trusted to persist):
 //!   READ  (every prompt, pure code — bounded so it never blows the token budget):
-//!     1. the NEWEST `inject_kb` of the durable file `AGG_MEMORY.md` (project root —
-//!        user-visible, committable). Capped on the READ side independently of the on-disk
-//!        cap, so a large durable file does not balloon every prompt's input tokens.
+//!     1. the NEWEST `inject_kb` of the durable file `agg/state/AGG_MEMORY.md`. Capped on the
+//!        READ side independently of the on-disk cap, so a large durable file does not balloon
+//!        every prompt's input tokens.
 //!     2. an always-on "LAST SESSION" block carried in a loop-local String (the prior cycle's
 //!        deltas + scoreboard); empty on session 1 of an invocation.
 //!   WRITE (3-tier — first that yields content wins; runs even on crash/kill):
-//!     3a. a worker-written scratch note `.agg/memory/session-<N>.md` → SANITIZED, size-capped,
+//!     3a. a worker-written scratch note `agg/state/memory/session-<N>.md` → SANITIZED, size-capped,
 //!         fenced, and on a NON-clean session never allowed to stand alone (the failure fact is
 //!         always recorded). Deleted after reading and before each launch so a stale note from a
 //!         prior run can never be folded.
@@ -20,8 +20,8 @@
 //!
 //! All I/O is best-effort: a disk error degrades memory, it never breaks the loop. The durable
 //! file is written atomically (`.tmp` + rename), mirroring `state.rs`, so an interrupted write
-//! can never leave a torn/committable file. The durable file lives at the PROJECT ROOT (durable,
-//! committable); per-session worker scratch lives under `.agg/memory/` (transient, gitignored).
+//! can never leave a torn file. The durable file and per-session worker scratch both live under
+//! the gitignored `agg/state/` (`AGG_MEMORY.md` and `memory/session-<N>.md` respectively).
 //!
 //! SINGLE-WRITER ASSUMPTION: `AGG_MEMORY.md` is mutated by exactly one loop. Parallel workers
 //! (Tier C #1) are not yet supported; when they land, that work adds the append locking. Until
@@ -48,18 +48,20 @@ const BLOCK_MAX_BYTES: usize = 4 * 1024;
 /// memory exists to protect — the prompt never sees more than this, regardless of config.
 const READ_INJECT_HARD_MAX_KB: u64 = 32;
 
-/// The durable, user-visible rolled-up memory file at the PROJECT ROOT.
-/// Deliberately NOT under `.agg/`: meant to be read by humans and committed to git.
+/// The durable, rolled-up memory file: `agg/state/AGG_MEMORY.md`. It moved out of the project
+/// ROOT (where it was committed) into the gitignored `agg/state/` — §8 overrules the old
+/// "committed to git" rule so a machine-managed file never churns the user's git history. agg
+/// still injects a slice of it into every prompt, so the worker reads it without touching the file.
 pub fn memory_file(dir: &Path) -> PathBuf {
-    dir.join("AGG_MEMORY.md")
+    crate::paths::agg_dir(dir).join("AGG_MEMORY.md")
 }
 
-/// Directory for transient per-session worker scratch notes: `.agg/memory/`.
+/// Directory for transient per-session worker scratch notes: `agg/state/memory/`.
 pub fn scratch_dir(dir: &Path) -> PathBuf {
     crate::paths::agg_dir(dir).join("memory")
 }
 
-/// The worker's optional scratch note for session `n`: `.agg/memory/session-<N>.md`.
+/// The worker's optional scratch note for session `n`: `agg/state/memory/session-<N>.md`.
 /// This is the EXACT path the resume prompt tells the worker to write to (no session-id suffix —
 /// the worker can't know its own Claude session id from inside `-p`). Single-writer today; when
 /// parallel workers (Tier C #1) land they add namespacing here.
@@ -67,17 +69,17 @@ pub fn scratch_path(dir: &Path, n: u32) -> PathBuf {
     scratch_dir(dir).join(format!("session-{n}.md"))
 }
 
-/// Ensure `.agg/memory/` exists (best-effort). Called before telling the worker where to write
+/// Ensure `agg/state/memory/` exists (best-effort). Called before telling the worker where to write
 /// and before reading its note, so memory works WITHOUT git isolation.
 pub fn ensure_scratch_dir(dir: &Path) {
     let _ = std::fs::create_dir_all(scratch_dir(dir));
 }
 
-/// Delete EVERY `session-*.md` scratch note in `.agg/memory/` (best-effort). Called once at loop
+/// Delete EVERY `session-*.md` scratch note in `agg/state/memory/` (best-effort). Called once at loop
 /// start: the durable `AGG_MEMORY.md` is the only legitimate cross-run carrier, so any scratch
 /// note already on disk is by definition stale — left by a prior `agg run` that crashed before
 /// folding it, or written by a worker under a forged/wrong session number. Without this sweep
-/// `.agg/memory/` grows unbounded across runs (per-session `clear_scratch` only ever targets the
+/// `agg/state/memory/` grows unbounded across runs (per-session `clear_scratch` only ever targets the
 /// CURRENT run's monotonic counter, which resets each process). Sweeping here also hardens the
 /// fold path: a stale forged note can never be mistaken for the current session's learning.
 pub fn sweep_scratch(dir: &Path) {
@@ -93,7 +95,7 @@ pub fn sweep_scratch(dir: &Path) {
 
 /// Delete any stale scratch note for session `n` (best-effort). Called BEFORE launching the
 /// worker for session `n` so a note left by a PRIOR `agg run` (same N) can never be folded as
-/// if it belonged to this run, and AFTER folding so `.agg/memory/` does not grow unbounded.
+/// if it belonged to this run, and AFTER folding so `agg/state/memory/` does not grow unbounded.
 pub fn clear_scratch(dir: &Path, n: u32) {
     let _ = std::fs::remove_file(scratch_path(dir, n));
 }
@@ -405,7 +407,8 @@ mod tests {
             N.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        // memory_file now lives under agg/state/ — create it so the tests' direct writes land.
+        std::fs::create_dir_all(crate::paths::agg_dir(&d)).unwrap();
         d
     }
 
@@ -423,7 +426,7 @@ mod tests {
     #[test]
     fn scratch_path_is_session_scoped() {
         let d = Path::new("/proj");
-        assert_eq!(scratch_path(d, 3), Path::new("/proj/.agg/memory/session-3.md"));
+        assert_eq!(scratch_path(d, 3), Path::new("/proj/agg/state/memory/session-3.md"));
         assert_ne!(scratch_path(d, 3), scratch_path(d, 4));
     }
 

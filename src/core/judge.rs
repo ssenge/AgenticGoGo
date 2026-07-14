@@ -37,9 +37,8 @@ use std::process::Command;
 /// Run the judge for a goal and return its verdict.
 ///
 /// `cwd` is the project root: scripts run there and `inputs` (diff/status/log/file paths)
-/// resolve there. `config_base` is where config-adjacent files live (root, or the `agg/`
-/// folder) — the LLM judge's `rubric` file resolves against it, since rubrics live next to
-/// goals.yaml. The two are equal unless the `agg/` config folder is in use.
+/// resolve there. `config_base` is the `agg/` folder, where config-adjacent files live — the
+/// LLM judge's `rubric` file resolves against it, since rubrics live next to goals.yaml.
 ///
 /// `ruler` is the backend the LLM judge calls — passed in, never read from a global. It is the
 /// backend that JUDGES, which is not necessarily the one that WORKS (see
@@ -79,7 +78,7 @@ fn run_llm(
     ruler: &dyn AgentBackend,
 ) -> Verdict {
     // 1) read the rubric (the judge's prompt body) — it lives next to goals.yaml, so it
-    //    resolves against config_base (the `agg/` folder when in use, else the project root).
+    //    resolves against config_base (the `agg/` folder).
     let rubric_path = config_base.join(rubric);
     let rubric_text = match std::fs::read_to_string(&rubric_path) {
         Ok(t) => t,

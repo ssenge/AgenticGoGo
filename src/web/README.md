@@ -5,7 +5,7 @@ now, deployable (e.g. Vercel) later. It is decoupled from the `agg` binary: it t
 over HTTP.
 
 ```
-browser ──► this app (SvelteKit) ──HTTP──► agg serve ──► .agg/ ◄── agg run (the loop)
+browser ──► this app (SvelteKit) ──HTTP──► agg serve ──► agg/state/ ◄── agg run (the loop)
 ```
 
 The app's own server endpoints (a BFF, under `src/routes/api/`) proxy to `agg serve`; the browser

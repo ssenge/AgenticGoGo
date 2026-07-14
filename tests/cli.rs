@@ -102,9 +102,9 @@ fn init_then_plan_shows_scoreboard() {
 
     let out = agg(dir, &path).arg("init").output().unwrap();
     assert!(out.status.success(), "agg init failed: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(dir.join("agg.yaml").exists(), "init should scaffold agg.yaml");
-    assert!(dir.join("goals.yaml").exists(), "init should scaffold goals.yaml");
-    assert!(dir.join("AGG_RESUME.md").exists(), "init should scaffold the resume prompt");
+    assert!(dir.join("agg/agg.yaml").exists(), "init should scaffold agg.yaml");
+    assert!(dir.join("agg/goals.yaml").exists(), "init should scaffold goals.yaml");
+    assert!(dir.join("agg/AGG_RESUME.md").exists(), "init should scaffold the resume prompt");
 
     let out = agg(dir, &path).arg("plan").output().unwrap();
     assert!(out.status.success(), "agg plan failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -153,15 +153,15 @@ fn max_sessions_cap_exits_4_and_says_so() {
     chmod_x(&dir.join("judges/check.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: cap\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n",
     );
-    write(dir, "AGG_RESUME.md", "work\n");
+    write(dir, "agg/AGG_RESUME.md", "work\n");
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
     let combined = format!(
@@ -177,11 +177,11 @@ fn max_sessions_cap_exits_4_and_says_so() {
 }
 
 #[test]
-fn config_lives_in_the_optional_agg_folder() {
-    // Put ALL user config under `agg/` and prove the loop finds + uses it: agg.yaml,
-    // goals.yaml, the resume prompt, and the judge all resolve through config_base, while the
-    // judge SCRIPT still runs from the project root (so `did_work` lands where the next judge
-    // looks for it). This is the end-to-end proof of the opt-in config folder.
+fn config_lives_in_the_agg_folder() {
+    // ALL user config lives under the mandatory `agg/` folder and the loop finds + uses it:
+    // agg.yaml, goals.yaml, the resume prompt, and the judge all resolve through config_base,
+    // while the judge SCRIPT still runs from the project root (so `did_work` lands where the next
+    // judge looks for it). This is the end-to-end proof of the config folder.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
 
@@ -241,15 +241,15 @@ fi
 
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: itest\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n",
     );
-    write(dir, "AGG_RESUME.md", "create the file did_work\n");
+    write(dir, "agg/AGG_RESUME.md", "create the file did_work\n");
 
     // Cap sessions so a logic bug can't hang the test. One fake session should suffice:
     // baseline judge says not-met → launch worker (creates did_work) → judge met → stop.
@@ -293,15 +293,15 @@ fn run_stops_immediately_when_goal_already_met() {
     chmod_x(&dir.join("judges/check.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: itest\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n",
     );
-    write(dir, "AGG_RESUME.md", "noop\n");
+    write(dir, "agg/AGG_RESUME.md", "noop\n");
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
     let combined = format!(
@@ -315,7 +315,7 @@ fn run_stops_immediately_when_goal_already_met() {
         "an already-met goal should stop before any session, got:\n{combined}"
     );
     // and it burned ZERO sessions — the point of the baseline check is to spend nothing.
-    let snap = fs::read_to_string(dir.join(".agg/state.json")).expect("state.json published");
+    let snap = fs::read_to_string(dir.join("agg/state/state.json")).expect("state.json published");
     let v: serde_json::Value = serde_json::from_str(&snap).expect("state.json parses");
     assert_eq!(v["session"], 0, "a baseline-satisfied run must launch no worker:\n{snap}");
 }
@@ -351,11 +351,11 @@ fn judge_runs_one_goal_and_prints_raw_verdict() {
     let path = std::env::var("PATH").unwrap_or_default(); // no worker → real PATH is fine
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: ok\n    type: binary\n    judge: { kind: script, cmd: \"echo '{\\\"met\\\":true,\\\"rationale\\\":\\\"fine\\\"}'\" }\nstop_when: ok\n",
     );
-    write(dir, "agg.yaml", "project: jt\nresume_prompt: AGG_RESUME.md\n");
-    write(dir, "AGG_RESUME.md", "noop\n");
+    write(dir, "agg/agg.yaml", "project: jt\nresume_prompt: AGG_RESUME.md\n");
+    write(dir, "agg/AGG_RESUME.md", "noop\n");
 
     // a known goal: raw verdict JSON on stdout
     let out = agg(dir, &path).args(["judge", "ok"]).output().unwrap();
@@ -385,16 +385,16 @@ fn dollar_budget_halts_the_loop() {
     chmod_x(&dir.join("judges/never.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: impossible\n    type: binary\n    judge: { kind: script, cmd: \"./judges/never.sh\" }\nstop_when: impossible\nhalt_when: over_cost\n",
     );
     // cost.total: 0 → any spend (the stub's $0.05) is over budget.
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: itest\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\ncost: { total: 0 }\n",
     );
-    write(dir, "AGG_RESUME.md", "spend money\n");
+    write(dir, "agg/AGG_RESUME.md", "spend money\n");
 
     // generous session cap so the HALT (not the cap) is what stops us.
     let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output().unwrap();
@@ -429,15 +429,15 @@ fn status_and_history_json_are_machine_readable() {
     chmod_x(&dir.join("judges/check.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: jsonproj\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\ncost: { total: 5.0 }\n",
     );
-    write(dir, "AGG_RESUME.md", "create the file did_work\n");
+    write(dir, "agg/AGG_RESUME.md", "create the file did_work\n");
 
     // run once so both the snapshot (state.json) and the ledger (project.json) exist.
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
@@ -495,22 +495,22 @@ fn institutional_memory_is_written_without_worker_cooperation() {
     chmod_x(&dir.join("judges/never.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: impossible\n    type: binary\n    judge: { kind: script, cmd: \"./judges/never.sh\" }\nstop_when: impossible\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: memproj\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: true, max_kb: 64, inject_kb: 8 }\n",
     );
-    write(dir, "AGG_RESUME.md", "do work\n");
+    write(dir, "agg/AGG_RESUME.md", "do work\n");
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // goal is `impossible` → reaches the session cap unmet.
 
-    // the durable memory file must exist at the PROJECT ROOT, with a folded mechanical entry.
-    let mem = dir.join("AGG_MEMORY.md");
+    // the durable memory file must exist under agg/state/, with a folded mechanical entry.
+    let mem = dir.join("agg/state/AGG_MEMORY.md");
     assert!(mem.exists(), "AGG_MEMORY.md must be written even when the worker writes no note");
     let text = fs::read_to_string(&mem).unwrap();
     assert!(text.contains("## session 1"), "session 1 folded into memory, got:\n{text}");
@@ -530,29 +530,29 @@ fn lifetime_session_is_published_to_state_json() {
     chmod_x(&dir.join("judges/never.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: impossible\n    type: binary\n    judge: { kind: script, cmd: \"./judges/never.sh\" }\nstop_when: impossible\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: lifeproj\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n",
     );
-    write(dir, "AGG_RESUME.md", "do work\n");
+    write(dir, "agg/AGG_RESUME.md", "do work\n");
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
 
     let state: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(dir.join(".agg/state.json")).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(dir.join("agg/state/state.json")).unwrap()).unwrap();
     let lifetime = state["lifetime_session"].as_u64().unwrap_or(0);
     assert!(lifetime >= 2, "lifetime_session must be published (was the publish! bug); got {lifetime}\nstate: {state}");
 }
 
 #[test]
 fn worker_written_memory_note_is_folded() {
-    // #3 Tier 3a: when the worker writes .agg/memory/session-<N>.md on a clean session, agg folds
+    // #3 Tier 3a: when the worker writes agg/state/memory/session-<N>.md on a clean session, agg folds
     // that note (preferred over the mechanical fallback) into the durable AGG_MEMORY.md.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -567,8 +567,8 @@ fn worker_written_memory_note_is_folded() {
 for a in "$@"; do
   if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
 done
-mkdir -p .agg/memory
-printf 'GOTCHA: the frobnicator needs a warm cache before the second pass\n' > .agg/memory/session-1.md
+mkdir -p agg/state/memory
+printf 'GOTCHA: the frobnicator needs a warm cache before the second pass\n' > agg/state/memory/session-1.md
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
 exit 0
 "#,
@@ -580,22 +580,22 @@ exit 0
     chmod_x(&dir.join("judges/never.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: impossible\n    type: binary\n    judge: { kind: script, cmd: \"./judges/never.sh\" }\nstop_when: impossible\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: memproj2\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: true }\n",
     );
-    write(dir, "AGG_RESUME.md", "do work\n");
+    write(dir, "agg/AGG_RESUME.md", "do work\n");
     git_init(dir); // mandatory session isolation needs a git base
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // goal is `impossible` → reaches the session cap unmet.
 
-    let text = fs::read_to_string(dir.join("AGG_MEMORY.md")).unwrap();
+    let text = fs::read_to_string(dir.join("agg/state/AGG_MEMORY.md")).unwrap();
     assert!(text.contains("GOTCHA: the frobnicator"), "worker note folded into memory, got:\n{text}");
     // the worker note is appended as a fenced, lower-trust hint after the mechanical fact —
     // never standing alone — so the fold source is 'mechanical+worker'.
@@ -604,7 +604,7 @@ exit 0
     // exactly ONE entry for session 1 (the early floor was superseded, not double-folded).
     assert_eq!(text.matches("## session 1 (").count(), 1, "single entry per session, got:\n{text}");
     // the scratch note is cleaned up after folding.
-    assert!(!dir.join(".agg/memory/session-1.md").exists(), "scratch note deleted after fold");
+    assert!(!dir.join("agg/state/memory/session-1.md").exists(), "scratch note deleted after fold");
 }
 
 #[test]
@@ -649,17 +649,17 @@ exit 0
     chmod_x(&dir.join("judges/feature.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  \
          - id: build_ok\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: \"./judges/build.sh\" }\n  \
          - id: feature\n    type: binary\n    judge: { kind: script, cmd: \"./judges/feature.sh\" }\nstop_when: feature\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: rbk\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { rollback_on_regression: true }\n",
     );
-    write(dir, "AGG_RESUME.md", "do work\n");
+    write(dir, "agg/AGG_RESUME.md", "do work\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
@@ -717,17 +717,17 @@ exit 0
     chmod_x(&dir.join("judges/feature.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  \
          - id: build_ok\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: \"./judges/build.sh\" }\n  \
          - id: feature\n    type: binary\n    judge: { kind: script, cmd: \"./judges/feature.sh\" }\nstop_when: feature\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: flake\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { rollback_on_regression: true }\n",
     );
-    write(dir, "AGG_RESUME.md", "do work\n");
+    write(dir, "agg/AGG_RESUME.md", "do work\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
@@ -789,17 +789,17 @@ exit 0
     // fired through. build_ok is the invariant it ranges over.
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  \
          - id: build_ok\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: \"./judges/build.sh\" }\n  \
          - id: feature\n    type: binary\n    judge: { kind: script, cmd: \"./judges/feature.sh\" }\nstop_when: feature\nhalt_when: \"any_regressed(invariants)\"\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: brokenjudge\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { rollback_on_regression: true }\n",
     );
-    write(dir, "AGG_RESUME.md", "do work\n");
+    write(dir, "agg/AGG_RESUME.md", "do work\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
@@ -810,7 +810,7 @@ exit 0
     assert!(!combined.contains("HALT"), "a crashed judge must NOT halt the run as a phantom regression:\n{combined}");
 }
 
-/// The four deterministic outer-loop stages must be OBSERVABLE, in order, in `.agg/state.json`
+/// The four deterministic outer-loop stages must be OBSERVABLE, in order, in `agg/state/state.json`
 /// while the loop runs — the TUI's `phase_color` and the web UI's `phaseStatus` key off these
 /// exact strings, and nothing else asserts them.
 ///
@@ -826,7 +826,7 @@ fn record_phase_stub(dir: &Path) -> String {
         &bin,
         "rec",
         r#"#!/bin/sh
-printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' .agg/state.json)" >> trace.txt
+printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/state/state.json)" >> trace.txt
 "#,
     );
     chmod_x(&bin.join("rec"));
@@ -871,16 +871,16 @@ fi
 
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: phases\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n\
          hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
-    write(dir, "AGG_RESUME.md", "create the file did_work\n");
+    write(dir, "agg/AGG_RESUME.md", "create the file did_work\n");
     git_init(dir); // mandatory session isolation needs a git base
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
@@ -902,7 +902,7 @@ fi
     );
 
     // and the run must settle on the terminal phase.
-    let state = fs::read_to_string(dir.join(".agg/state.json")).unwrap();
+    let state = fs::read_to_string(dir.join("agg/state/state.json")).unwrap();
     assert!(state.contains(r#""phase":"done""#), "finished run should publish phase=done:\n{state}");
 }
 
@@ -924,16 +924,16 @@ fn a_baseline_satisfied_run_enters_no_stage() {
     chmod_x(&dir.join("judges/check.sh"));
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: baseline\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n\
          hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
-    write(dir, "AGG_RESUME.md", "noop\n");
+    write(dir, "agg/AGG_RESUME.md", "noop\n");
     git_init(dir); // mandatory session isolation needs a git base (did_work stays untracked → clean)
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
@@ -988,16 +988,16 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
 
     write(
         dir,
-        "goals.yaml",
+        "agg/goals.yaml",
         "goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: \"./judges/check.sh\" }\nstop_when: worked\n",
     );
     write(
         dir,
-        "agg.yaml",
+        "agg/agg.yaml",
         "project: intr\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n\
          hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
-    write(dir, "AGG_RESUME.md", "work\n");
+    write(dir, "agg/AGG_RESUME.md", "work\n");
     git_init(dir); // mandatory session isolation needs a git base
 
     let log = dir.join("run.log");
@@ -1046,5 +1046,5 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
         !err.contains("exited (code"),
         "an interrupted session must not log a normal session-exit line:\n{err}"
     );
-    assert!(!dir.join(".agg/run.pid").exists(), "the Drop guard must clear run.pid");
+    assert!(!dir.join("agg/state/run.pid").exists(), "the Drop guard must clear run.pid");
 }

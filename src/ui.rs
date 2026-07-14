@@ -1,6 +1,6 @@
 //! **ui** — the read-only views onto a run. None of these drive the loop.
 //!
-//! Every surface here is a *viewer*: it reads the snapshot the loop publishes to `.agg/state.json`
+//! Every surface here is a *viewer*: it reads the snapshot the loop publishes to `agg/state/state.json`
 //! and renders it. `dashboard` is the live TUI, `status` the one-shot text render (also the
 //! `--once` headless snapshot), `serve` the JSON API the standalone web UI polls, and `localtime`
 //! the zone conversion they all share so timestamps match the user's wall clock.

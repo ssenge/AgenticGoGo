@@ -183,7 +183,7 @@ impl Drop for StopHooks<'_> {
     }
 }
 
-/// Clears `.agg/run.pid` on any loop exit (clean, error, or panic) so a later `agg stop`
+/// Clears `agg/state/run.pid` on any loop exit (clean, error, or panic) so a later `agg stop`
 /// never targets a dead pid and the double-run guard never falsely reports a live loop.
 struct RunPidGuard<'a> {
     dir: &'a Path,
@@ -874,7 +874,7 @@ impl LoopState<'_> {
             // completed session (no double-fold).
             self.dash.memory_bytes =
                 crate::core::memory::fold_entry(self.dir, self.session, source, &body, self.cfg.memory.max_kb, true);
-            // delete the scratch note now that it's folded (bounds `.agg/memory/` growth; prevents
+            // delete the scratch note now that it's folded (bounds `agg/state/memory/` growth; prevents
             // a cross-run re-fold).
             crate::core::memory::clear_scratch(self.dir, self.session);
             // carry the always-on LAST SESSION block into the NEXT prompt's READ block.
@@ -927,7 +927,7 @@ pub fn run(
                 "a loop is already running in this project (pid {pid}).\n  \
                  watch it:   agg dashboard\n  \
                  stop it:    agg stop\n  \
-                 (if you're sure it's dead, remove .agg/run.pid and retry.)"
+                 (if you're sure it's dead, remove agg/state/run.pid and retry.)"
             );
         }
     }
@@ -1040,7 +1040,7 @@ pub fn run(
     );
 
     // ---- dashboard state: the loop + worker publish a compact snapshot to
-    //      .agg/state.json; `agg dashboard` renders it. Two-stream discipline:
+    //      agg/state/state.json; `agg dashboard` renders it. Two-stream discipline:
     //      the stdout log above stays the source of truth; this is just a view. ----
     let dash = DashboardState {
         project: cfg.project.clone(),
@@ -1054,7 +1054,7 @@ pub fn run(
     };
     let live = LiveState::new(dir, loop_start, dash.clone());
 
-    // Persistent project run-history ledger (.agg/project.json): append an in-flight record for
+    // Persistent project run-history ledger (agg/state/project.json): append an in-flight record for
     // THIS run, finalized on any exit via its Drop guard. Created BEFORE the baseline evaluation
     // so that even a run that is already-satisfied (or halts) at launch still leaves a history
     // record — `agg history` would otherwise miss zero-session runs. The lifetime session total
@@ -1141,7 +1141,7 @@ pub fn run(
     // institutional memory (#3): the LAST SESSION block carried into the NEXT prompt's READ
     // injection (prior cycle's deltas + scoreboard). Empty on session 1 of THIS invocation; the
     // durable file's newest entry is the cross-RUN carry. Make memory work WITHOUT git isolation
-    // by creating `.agg/memory/` ourselves (not via the isolation-only gitignore path).
+    // by creating `agg/state/memory/` ourselves (not via the isolation-only gitignore path).
     if cfg.memory.enabled {
         crate::core::memory::ensure_scratch_dir(dir);
         // sweep any scratch notes left by a prior run (crash / forged filename) — the durable

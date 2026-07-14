@@ -9,12 +9,8 @@ use std::path::Path;
 
 pub fn run(dir: &Path, config_base: &Path, config: &Path, goals: &Path) -> Result<()> {
     eprintln!("agg doctor — checking your setup in {}\n", dir.display());
-    // report which layout is in effect, so a surprising path resolution is visible up front.
-    if config_base == dir {
-        eprintln!("  config dir: project root");
-    } else {
-        eprintln!("  config dir: {}/ (the optional config folder)", crate::paths::CONFIG_DIR);
-    }
+    // config always lives in the mandatory agg/ folder — say so, so a surprising path is visible.
+    eprintln!("  config dir: {}/", crate::paths::CONFIG_DIR);
     let mut fail = 0;
 
     // 1) the agent CLI is present (same probe `agg run`'s preflight uses — see backend.rs).
