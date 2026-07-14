@@ -158,6 +158,21 @@ impl Val {
             Val::Missing => 0.0, // unreachable: parse_cmp short-circuits Missing to false first
         }
     }
+    fn is_goal_bool(self) -> bool {
+        matches!(self, Val::GoalBool(_))
+    }
+    /// A boolean result that KEEPS the `GoalBool` tag if an operand carried it. NOT/AND/OR over a
+    /// judge's `met` bool is still a judge bool, so the type check in `parse_cmp` must still fire:
+    /// otherwise `NOT coverage >= 80` — the most natural way to write "coverage is below 80" —
+    /// slips past `validate` and is silently always false, while `(coverage) >= 80` is caught.
+    /// Same rule, every shape.
+    fn boolean(b: bool, from_goal: bool) -> Val {
+        if from_goal {
+            Val::GoalBool(b)
+        } else {
+            Val::Bool(b)
+        }
+    }
 }
 
 // ---------------- tokens ----------------
@@ -284,7 +299,7 @@ impl<'a> Parser<'a> {
         while matches!(self.peek(), Some(Tok::Or)) {
             self.pos += 1;
             let right = self.parse_and()?;
-            left = Val::Bool(left.as_bool() || right.as_bool());
+            left = Val::boolean(left.as_bool() || right.as_bool(), left.is_goal_bool() || right.is_goal_bool());
         }
         Ok(left)
     }
@@ -294,7 +309,7 @@ impl<'a> Parser<'a> {
         while matches!(self.peek(), Some(Tok::And)) {
             self.pos += 1;
             let right = self.parse_cmp()?;
-            left = Val::Bool(left.as_bool() && right.as_bool());
+            left = Val::boolean(left.as_bool() && right.as_bool(), left.is_goal_bool() || right.is_goal_bool());
         }
         Ok(left)
     }
@@ -343,7 +358,12 @@ impl<'a> Parser<'a> {
     fn parse_atom(&mut self) -> Result<Val> {
         match self.next().cloned() {
             Some(Tok::Num(n)) => Ok(Val::Num(n)),
-            Some(Tok::Not) => Ok(Val::Bool(!self.parse_atom()?.as_bool())),
+            // NOT preserves the GoalBool tag: `NOT coverage` is still a judge's bool, so
+            // `NOT coverage >= 80` is still the always-false compare parse_cmp rejects.
+            Some(Tok::Not) => {
+                let v = self.parse_atom()?;
+                Ok(Val::boolean(!v.as_bool(), v.is_goal_bool()))
+            }
             Some(Tok::LParen) => {
                 let v = self.parse_expr()?;
                 match self.next() {
@@ -738,6 +758,27 @@ mod tests {
         // ...but the bool→num coercion is STILL load-bearing for run-level terms. Do not regress it.
         assert!(validate("over_budget == 1", &goals).is_ok());
         assert!(evaluate("over_budget == 0", &StopContext::from_goals(&goals)).unwrap());
+    }
+
+    #[test]
+    fn the_type_check_survives_not_and_or() {
+        // The hole this closes: the tag was dropped by NOT/AND/OR, so `NOT coverage >= 80` — how a
+        // user naturally writes "coverage is below 80" — validated clean and was silently always
+        // false, while `(coverage) >= 80` was caught. The rule is the same in every shape.
+        let goals = [unjudged("coverage", false), unjudged("lint", false)];
+        assert!(validate("NOT coverage >= 80", &goals).is_err());
+        assert!(validate("NOT (coverage) >= 80", &goals).is_err());
+        assert!(validate("(coverage OR lint) >= 80", &goals).is_err());
+        assert!(validate("(coverage AND lint) == 1", &goals).is_err());
+        assert!(validate("lint AND NOT coverage >= 80", &goals).is_err());
+        // ...and the tag must not leak into run-level bools: `over_budget == 1` still parses, and
+        // so does a NOT/OR over them.
+        assert!(validate("NOT over_budget == 1", &goals).is_ok());
+        assert!(validate("(over_budget OR over_cost) == 0", &goals).is_ok());
+        // a judge bool still COMPOSES as a bool — it is only comparing it to a number that is out.
+        assert!(validate("NOT coverage", &goals).is_ok());
+        assert!(validate("coverage AND NOT lint", &goals).is_ok());
+        assert!(validate("NOT coverage AND coverage.value >= 80", &goals).is_ok());
     }
 
     #[test]

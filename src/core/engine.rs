@@ -67,7 +67,17 @@ fn goal_should_skip_judge(goal: &Goal, cwd: &Path) -> bool {
 
 /// After judging, record recheck state: latch a `once_met` goal that is now met, and stamp
 /// the input signature for an `on_change` goal.
+///
+/// A judge that ERRORED records NOTHING — it must be retried next cycle. Stamping its signature
+/// would skip it until its inputs happen to change, and the two halves of the safety argument do
+/// not cover that gap: `judge.value` on an errored verdict is `Missing` (every comparison false)
+/// *forever*, while `any_judge_error` only reports judges that ran THIS step, so it goes false the
+/// moment the judge stops running. `done_if` could never be true, `abort_if` would never fire, and
+/// the loop would burn to its budget ceiling without ever saying why.
 fn update_recheck_state(goal: &mut Goal, cwd: &Path) {
+    if goal.last_verdict.as_ref().is_some_and(|v| v.error.is_some()) {
+        return;
+    }
     match goal.recheck {
         RecheckPolicy::OnceMet => {
             if goal.state == Lifecycle::Met {
@@ -451,6 +461,42 @@ mod tests {
         std::fs::write(&watched, "v2-changed").unwrap();
         eng.evaluate_cycle(&dir, &dir, &rs, ruler());                 // cycle 3: input changed → re-judge
         assert_eq!(run_count(&dir, "artifact_ok"), 2, "changed input → re-judge");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A script judge that counts its invocations and then CRASHES (emits no verdict JSON).
+    fn crashing_goal(id: &str, dir: &std::path::Path, inputs: Vec<String>) -> Goal {
+        let counter = dir.join(format!("{id}.count"));
+        let cmd = format!("printf x >> {c}; echo boom >&2; exit 1", c = counter.display());
+        Goal {
+            id: id.into(), goal_type: GoalType::Binary,
+            judge: JudgeSpec::Script { cmd, timeout: 10 },
+            target: 1.0, weight: 1.0, invariant: false, description: String::new(),
+            recheck: RecheckPolicy::OnChange, recheck_inputs: inputs,
+            state: Lifecycle::Pending, last_verdict: None, ever_met: false,
+            latched: false, recheck_sig: None,
+        }
+    }
+
+    #[test]
+    fn on_change_retries_a_crashed_judge() {
+        // A judge that BLEW UP must not stamp its signature. If it did, it would be skipped until
+        // its inputs happened to change — and then `coverage.value` stays Missing (every comparison
+        // false) forever, while `any_judge_error` is per-step and goes false as soon as the judge
+        // stops running. done_if could never be true, abort_if would never fire, and the loop would
+        // burn to the budget ceiling with nothing saying why.
+        let dir = tmpdir("crashed");
+        std::fs::write(dir.join("artifact.txt"), "v1").unwrap();
+        let g = crashing_goal("coverage", &dir, vec!["artifact.txt".into()]);
+        let mut eng = Engine::new(GoalsConfig {
+            goals: vec![g], stop_when: "coverage".into(), halt_when: None,
+        }).unwrap();
+        let rs = RunState::default();
+        eng.evaluate_cycle(&dir, &dir, &rs, ruler()); // cycle 1: the judge crashes
+        assert!(eng.goals[0].last_verdict.as_ref().unwrap().error.is_some(), "judge should have errored");
+        assert!(eng.goals[0].recheck_sig.is_none(), "a crashed judge must not stamp its signature");
+        eng.evaluate_cycle(&dir, &dir, &rs, ruler()); // cycle 2: input UNCHANGED → must retry anyway
+        assert_eq!(run_count(&dir, "coverage"), 2, "a crashed judge must be retried, not skipped forever");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
