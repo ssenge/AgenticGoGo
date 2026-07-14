@@ -3,6 +3,7 @@
 //! This is the goal logic the loop calls once per cycle (after a worker exits).
 //! `agg plan` exercises this engine for a single dry-run cycle.
 
+use crate::backend::AgentBackend;
 use crate::core::config::GoalsConfig;
 use crate::core::judge;
 use crate::core::model::{Goal, Lifecycle, RecheckPolicy, Verdict};
@@ -190,8 +191,14 @@ impl Engine {
     /// `cwd` is the project root: judge scripts run there, `inputs`/`recheck_inputs` resolve
     /// there. `config_base` is where config-adjacent files live (root, or the `agg/` folder):
     /// LLM-judge rubric files resolve against it. They're equal unless the `agg/` config folder
-    /// is in use.
-    pub fn evaluate_cycle(&mut self, cwd: &Path, config_base: &Path, run: &RunState) -> CycleResult {
+    /// is in use. `ruler` is the backend the LLM judges call — see [`judge::run`].
+    pub fn evaluate_cycle(
+        &mut self,
+        cwd: &Path,
+        config_base: &Path,
+        run: &RunState,
+        ruler: &dyn AgentBackend,
+    ) -> CycleResult {
         // snapshot before
         let before: Vec<(f64, Lifecycle)> = self
             .goals
@@ -201,7 +208,7 @@ impl Engine {
 
         // Judging (the expensive part) is separated from folding the results in (the cheap part)
         // so the former has ONE choke point — see `run_judges`.
-        let verdicts = self.run_judges(cwd, config_base);
+        let verdicts = self.run_judges(cwd, config_base, ruler);
         for (goal, verdict) in self.goals.iter_mut().zip(verdicts) {
             // None = skipped: status can't have changed → keep the last verdict, skip the (maybe
             // expensive) judge. `last_verdict`/`state` are left intact.
@@ -241,14 +248,14 @@ impl Engine {
     ///
     /// Today it is a plain sequential map. That is deliberate: the seam is the deliverable, not
     /// the parallelism.
-    fn run_judges(&self, cwd: &Path, config_base: &Path) -> Vec<Option<Verdict>> {
+    fn run_judges(&self, cwd: &Path, config_base: &Path, ruler: &dyn AgentBackend) -> Vec<Option<Verdict>> {
         self.goals
             .iter()
             .map(|goal| {
                 if goal_should_skip_judge(goal, cwd) {
                     None
                 } else {
-                    Some(judge::run(&goal.judge, cwd, config_base))
+                    Some(judge::run(&goal.judge, cwd, config_base, ruler))
                 }
             })
             .collect()
@@ -358,6 +365,12 @@ mod tests {
         d
     }
 
+    /// Every goal below uses a SCRIPT judge, which never calls the ruler — but the engine takes it
+    /// explicitly now, so there is no ambient agent left to fall back on.
+    fn ruler() -> &'static dyn AgentBackend {
+        crate::backend::for_name("claude").unwrap()
+    }
+
     /// A script judge that counts its invocations (appends to `counter`) and always reports met.
     fn counting_goal(id: &str, dir: &std::path::Path, recheck: RecheckPolicy, inputs: Vec<String>) -> Goal {
         let counter = dir.join(format!("{id}.count"));
@@ -387,9 +400,9 @@ mod tests {
             goals: vec![g], stop_when: "paper".into(), halt_when: None,
         }).unwrap();
         let rs = RunState::default();
-        eng.evaluate_cycle(&dir, &dir, &rs);  // cycle 1: judges (count=1), latches
-        eng.evaluate_cycle(&dir, &dir, &rs);  // cycle 2: skipped
-        eng.evaluate_cycle(&dir, &dir, &rs);  // cycle 3: skipped
+        eng.evaluate_cycle(&dir, &dir, &rs, ruler());  // cycle 1: judges (count=1), latches
+        eng.evaluate_cycle(&dir, &dir, &rs, ruler());  // cycle 2: skipped
+        eng.evaluate_cycle(&dir, &dir, &rs, ruler());  // cycle 3: skipped
         assert_eq!(run_count(&dir, "paper"), 1, "once_met judge must run exactly once then latch");
         assert!(eng.goals[0].latched);
         assert!(eng.goals[0].met()); // still reported met after skipping
@@ -404,7 +417,7 @@ mod tests {
             goals: vec![g], stop_when: "tests".into(), halt_when: None,
         }).unwrap();
         let rs = RunState::default();
-        for _ in 0..3 { eng.evaluate_cycle(&dir, &dir, &rs); }
+        for _ in 0..3 { eng.evaluate_cycle(&dir, &dir, &rs, ruler()); }
         assert_eq!(run_count(&dir, "tests"), 3, "always must re-judge every cycle");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -419,11 +432,11 @@ mod tests {
             goals: vec![g], stop_when: "artifact_ok".into(), halt_when: None,
         }).unwrap();
         let rs = RunState::default();
-        eng.evaluate_cycle(&dir, &dir, &rs);                 // cycle 1: judges (count=1), records sig
-        eng.evaluate_cycle(&dir, &dir, &rs);                 // cycle 2: input unchanged → skip
+        eng.evaluate_cycle(&dir, &dir, &rs, ruler());                 // cycle 1: judges (count=1), records sig
+        eng.evaluate_cycle(&dir, &dir, &rs, ruler());                 // cycle 2: input unchanged → skip
         assert_eq!(run_count(&dir, "artifact_ok"), 1, "unchanged input → no re-judge");
         std::fs::write(&watched, "v2-changed").unwrap();
-        eng.evaluate_cycle(&dir, &dir, &rs);                 // cycle 3: input changed → re-judge
+        eng.evaluate_cycle(&dir, &dir, &rs, ruler());                 // cycle 3: input changed → re-judge
         assert_eq!(run_count(&dir, "artifact_ok"), 2, "changed input → re-judge");
         let _ = std::fs::remove_dir_all(&dir);
     }

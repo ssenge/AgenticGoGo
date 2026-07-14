@@ -225,17 +225,18 @@ fn run_cli() -> Result<ExitCode> {
         Cmd::Plan => {
             no_config_hint(&p.goals)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
-            // `plan` RE-RUNS the judges, so an LLM judge would make a real model call — select the
-            // agent (agg.yaml may be absent here; `plan` works off goals.yaml alone) and refuse an
-            // LLM judge the agent can't run with tools off. Agent BEFORE config — see the Run arm.
-            agg::backend::init(&config::AggConfig::agent_name(&p.config))?;
+            // `plan` RE-RUNS the judges, so an LLM judge would make a real model call — resolve the
+            // RULER that will make it, and refuse an LLM judge it can't run with tools off.
+            // `agent_name` rather than a full load: agg.yaml may be absent, `plan` works off
+            // goals.yaml alone.
+            let ruler = ruler_for(&p.config)?;
             if let Ok(agg_cfg) = config::AggConfig::load(&p.config) {
-                agg::capability::check(&agg_cfg, &goals_cfg, agg::backend::active())?;
+                agg::capability::check(&agg_cfg, &goals_cfg, agg_cfg.worker_backend()?)?;
             }
             let mut eng = engine::Engine::new(goals_cfg)?;
             eprintln!("agg: evaluating {} goal(s) once (dry run)…", eng.goals.len());
             // dry run: no budget/wall-time accounting (default RunState)
-            let res = eng.evaluate_cycle(&p.dir, &p.config_base, &engine::RunState::default());
+            let res = eng.evaluate_cycle(&p.dir, &p.config_base, &engine::RunState::default(), ruler);
             print!("{}", eng.scoreboard());
             if res.halt {
                 println!("\n⚠ HALT condition is already true: {}", res.halt_reason.unwrap_or_default());
@@ -273,8 +274,14 @@ fn run_cli() -> Result<ExitCode> {
                 anyhow::anyhow!("no goal `{id}` in goals.yaml. available: {}", ids.join(", "))
             })?;
             // run the one judge exactly as the loop would (scripts from the project root,
-            // rubric from the config dir).
-            let verdict = judge::run(&goal.judge, &p.dir, &p.config_base);
+            // rubric from the config dir, on the RULER).
+            //
+            // THE BUG THIS FIXES: this arm never selected a backend at all, so an LLM judge fell
+            // through to `backend::active()`'s silent Claude default — `agg judge <id>` on an
+            // `agent: copilot` project ran the judge on CLAUDE, quietly, and printed a verdict as
+            // if nothing were wrong. Deleting `active()` turned that into a compile error, which
+            // is exactly what a wrong-agent call should be.
+            let verdict = judge::run(&goal.judge, &p.dir, &p.config_base, ruler_for(&p.config)?);
             // raw verdict JSON (the judge contract), then a one-line human summary.
             println!("{}", serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".into()));
             let mark = if verdict.met { "✔ met" } else { "✖ not met" };
@@ -289,25 +296,21 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Run { max_sessions, detach } => {
             no_config_hint(&p.config)?;
-            // Select the backend BEFORE parsing the config that depends on it. Some of agg.yaml's
-            // defaults are backend-specific (`model`, `summary.model`), and reading one latches
-            // `backend::active()` — so a full load() first would pin the WRONG agent. See
-            // `AggConfig::agent_name`.
-            agg::backend::init(&config::AggConfig::agent_name(&p.config))?;
-
-            // Now the config. (This also validates it in the FOREGROUND on the --detach path, so a
-            // typo fails loudly here rather than silently inside a detached child the user can't
-            // see.)
+            // The config parses on its own now — nothing in it resolves through a backend — so it
+            // is simply read FIRST, and the agent falls out of it. (This also validates it in the
+            // FOREGROUND on the --detach path, so a typo fails loudly here rather than silently
+            // inside a detached child the user can't see.)
             let agg_cfg = config::AggConfig::load(&p.config)?;
             let goals_cfg = config::GoalsConfig::load(&p.goals)?;
+            let agent = agg_cfg.worker_backend()?;
 
             // …then REFUSE anything the config asks for that this agent cannot do. A spend guard
             // against an agent that can't report spend would never fire, and an autonomous loop
             // would run unbounded. Loud here beats silent later.
-            agg::capability::check(&agg_cfg, &goals_cfg, agg::backend::active())?;
+            agg::capability::check(&agg_cfg, &goals_cfg, agent)?;
             // agent CLI on PATH BEFORE launching the loop, so a missing binary fails with a
             // clear message up front rather than a buried mid-run "FAILED to spawn".
-            agg::backend::active().preflight()?;
+            agent.preflight()?;
 
             if *detach {
                 // The config is validated (above); spawn the loop detached and return — the child
@@ -403,6 +406,14 @@ fn run_cli() -> Result<ExitCode> {
     // Every non-`run` subcommand yields `()` on success → exit 0. `agg run` returns its outcome
     // code earlier via an explicit `return`, so it never reaches here.
     .map(|()| ExitCode::SUCCESS)
+}
+
+/// The RULER — the backend that runs LLM judges and the summarizer — for a command that may have
+/// NO agg.yaml at all (`plan` and `judge` both work off goals.yaml alone). Hence `agent_name`,
+/// which tolerates a missing/broken config, rather than a full load. `agg run` doesn't use this:
+/// it requires agg.yaml, so it reads the ruler off the parsed config.
+fn ruler_for(config: &std::path::Path) -> Result<&'static dyn agg::backend::AgentBackend> {
+    agg::backend::for_name(&config::AggConfig::agent_name(config))
 }
 
 /// Queue one steering command onto a running loop's bus. Shared by `agg send …` and

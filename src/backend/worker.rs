@@ -41,8 +41,13 @@ pub struct SessionOutcome {
 /// Run one worker session to completion and return its outcome. If `resume_id` is
 /// Some, the worker continues that prior session's context (`--resume`) instead of
 /// a fresh context — opt-in (see `resume_sessions` config; default fresh).
+///
+/// `agent` is the backend this session runs on, handed in by the loop. `&'static` because the
+/// stream-reader thread below needs it inside a `move` closure — every backend is a unit struct,
+/// so this costs nothing.
 pub fn run_session(
     cfg: &AggConfig,
+    agent: &'static dyn backend::AgentBackend,
     prompt: &str,
     dir: &std::path::Path,
     session: u32,
@@ -52,12 +57,13 @@ pub fn run_session(
     let start = Instant::now();
 
     // WHAT to run is the backend's business (binary, flags, prompt placement); HOW to supervise
-    // it is ours (process group, stream reader, heartbeat, watchdog, reaping).
-    let agent = backend::active();
+    // it is ours (process group, stream reader, heartbeat, watchdog, reaping). The model/effort
+    // defaults are resolved HERE, against the agent actually being spawned — not at config-parse
+    // time, when no agent is known yet.
     let mut command = agent.session_command(&backend::SessionSpec {
         prompt,
-        model: &cfg.model,
-        effort: &cfg.effort,
+        model: cfg.model(agent),
+        effort: cfg.effort(agent),
         resume_id,
         extra_args: &cfg.worker_args,
         cwd: dir,
@@ -98,7 +104,7 @@ pub fn run_session(
 
     // ---- the three helper threads ----
     let stdout = child.stdout.take().expect("piped stdout");
-    let reader_rx = spawn_reader(sh.clone(), stdout, live.clone());
+    let reader_rx = spawn_reader(sh.clone(), stdout, live.clone(), agent);
     let heartbeat = spawn_heartbeat(sh.clone(), live.clone(), session, cfg.heartbeat_secs, start);
     let watchdog = spawn_watchdog(sh.clone(), pid, cfg.watchdog.idle_secs, cfg.watchdog.cpu_grace);
 
@@ -227,14 +233,16 @@ fn spawn_reader(
     sh: Arc<Shared>,
     stdout: std::process::ChildStdout,
     live: LiveState,
+    agent: &'static dyn backend::AgentBackend,
 ) -> std::sync::mpsc::Receiver<(Vec<String>, Option<String>)> {
     let (tx, rx) = std::sync::mpsc::channel::<(Vec<String>, Option<String>)>();
     // Throttle disk writes of the live stream so we don't rewrite state.json on every token. The
     // in-memory snapshot still updates on every event; only the atomic file write (and seq bump)
     // is rate-limited to ~once a second.
     let throttle = Duration::from_millis(800);
+    // `agent` moves into the closure: the trait is Send+Sync and every backend is a ZST unit
+    // struct, so a `&'static dyn` is Copy and costs nothing to hand to the thread.
     std::thread::spawn(move || {
-        let agent = backend::active();
         let mut tracker = ActivityTracker::default();
         let mut session_id: Option<String> = None;
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {

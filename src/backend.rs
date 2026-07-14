@@ -1,8 +1,23 @@
 //! The agent backend — **the abstraction over which coding agent the loop drives.**
 //!
-//! One process drives exactly one agent, chosen at startup by `agg.yaml`'s `agent:` key and held
-//! in [`active`]. Everything agent-specific lives behind [`AgentBackend`]: the binary name, the
-//! flag vocabulary, the event-stream wire format, the model defaults, the install probe.
+//! Which agent drives a given piece of work is resolved from config with [`for_name`] and then
+//! **threaded explicitly** — there is no process-wide "current agent". Everything agent-specific
+//! lives behind [`AgentBackend`]: the binary name, the flag vocabulary, the event-stream wire
+//! format, the model defaults, the install probe.
+//!
+//! # Why there is no `active()` singleton
+//! There was one: a `OnceLock` that latched on FIRST READ and **silently defaulted to Claude**.
+//! The config's `model` / `effort` / `summary.model` / LLM-judge `model` defaults resolved
+//! THROUGH it — so `agg.yaml` could not be PARSED without already knowing the agent, and any
+//! parse in the wrong order pinned the wrong agent, silently, first-wins. It shipped that bug
+//! three times: `agg init --agent codex` (fixed by using `for_name` locally), `agg doctor` on a
+//! `copilot` project (reported `claude`), and `agg judge <id>`, which never selected a backend at
+//! all and so ran the LLM judge on Claude for every non-Claude project.
+//!
+//! Those defaults are now `Option`s, resolved at **use time** against the backend actually doing
+//! that piece of work (see [`crate::core::config::AggConfig::model`]). Which also means the
+//! worker and the **ruler** — the backend that runs LLM judges and the summarizer — are separate
+//! values that can differ, instead of one latched global that cannot.
 //!
 //! # Why this is a trait and not a set of free functions
 //! Phase 2 of REFACTOR_1 deliberately built the *seam* (one module, no trait) on the reasoning
@@ -71,7 +86,6 @@ pub mod worker;
 use anyhow::Result;
 use std::path::Path;
 use std::process::Command;
-use std::sync::OnceLock;
 
 // ---------------- what a backend can and cannot do ----------------
 
@@ -353,23 +367,6 @@ pub fn for_name(name: &str) -> Result<&'static dyn AgentBackend> {
     }
 }
 
-/// The backend this process drives. One process, one agent — selected once at startup.
-static ACTIVE: OnceLock<&'static dyn AgentBackend> = OnceLock::new();
-
-/// Select the backend for this process. Call once, at startup, from the `agent:` config key.
-/// Idempotent; a second call with a different agent is ignored (the first wins).
-pub fn init(name: &str) -> Result<()> {
-    let b = for_name(name)?;
-    let _ = ACTIVE.set(b);
-    Ok(())
-}
-
-/// The active backend. Defaults to Claude when [`init`] was never called — which is what every
-/// path that predates multi-agent support (and every test that doesn't care) gets.
-pub fn active() -> &'static dyn AgentBackend {
-    *ACTIVE.get_or_init(|| &claude::Claude)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,10 +382,16 @@ mod tests {
         }
     }
 
+    /// The claude backend used by the tests below as a concrete stand-in. It is resolved BY NAME,
+    /// like production does — there is no ambient default to fall back on any more.
+    fn claude() -> &'static dyn AgentBackend {
+        for_name("claude").expect("claude is a known agent")
+    }
+
     #[test]
-    fn the_default_backend_is_claude() {
-        assert_eq!(active().name(), "claude");
-        assert_eq!(active().bin(), "claude");
+    fn the_default_agent_key_is_claude() {
+        assert_eq!(claude().name(), "claude");
+        assert_eq!(claude().bin(), "claude");
     }
 
     #[test]
@@ -469,26 +472,50 @@ mod tests {
         }
     }
 
-    /// REGRESSION (found by running `agg doctor` against `agent: copilot`, which reported
-    /// `claude`): agg.yaml's `model` / `summary.model` defaults are BACKEND-SPECIFIC, so resolving
-    /// one calls `active()` — which latches the OnceLock. A full config parse before
-    /// `backend::init` therefore pins the WRONG agent, silently, first-wins. `agent_name` reads
-    /// only the one key needed to select the backend, without touching any backend-specific
-    /// default. If this ever regresses, the loop drives an agent the user did not ask for.
+    /// REGRESSION — the successor to `the_agent_key_is_readable_without_latching_the_backend`, and
+    /// the test for the whole class of bug that killed `active()`.
+    ///
+    /// The old shape: agg.yaml's `model` / `summary.model` defaults were BACKEND-SPECIFIC, so
+    /// resolving one read the `active()` OnceLock — which LATCHED, silently, on Claude. A config
+    /// parse before the agent was selected therefore pinned the WRONG agent for the whole process
+    /// (first-wins), and the loop drove an agent the user never asked for. The old test worked
+    /// around it, by proving `agent:` could be read WITHOUT a full parse. This one pins the fix:
+    /// there is nothing to latch, so a full parse is safe in ANY order, and an absent `model:` is
+    /// `None` — "ask the backend at USE time" — rather than a value baked in at PARSE time.
     #[test]
-    fn the_agent_key_is_readable_without_latching_the_backend() {
+    fn config_parses_without_a_backend_and_defaults_resolve_at_use_time() {
         use crate::core::config::AggConfig;
         let dir = std::env::temp_dir().join(format!("agg-agentkey-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // an agg.yaml that names copilot AND omits `model:` — the exact shape that triggered the
-        // bug, because the missing `model` is what forces the backend-specific default to resolve.
+        // The exact shape that triggered the bug: names copilot, and OMITS `model:` — the missing
+        // key is what used to force a backend-specific default to resolve mid-parse.
         let p = dir.join("agg.yaml");
         std::fs::write(&p, "project: x\nagent: copilot\nresume_prompt: R\n").unwrap();
-        assert_eq!(AggConfig::agent_name(&p), "copilot", "must read `agent:` without a full parse");
+        let cfg = AggConfig::load(&p).expect("a full parse must not need a backend");
+        assert_eq!(cfg.agent, "copilot");
+        assert!(cfg.model.is_none(), "an absent `model:` must stay None, not bake in a default");
+        assert!(cfg.summary.model.is_none());
+        // BOTH readers must see the SAME key. `agent_name` parses its own private `JustTheAgent`,
+        // and it — not `load()` — is what picks the backend for `judge`, `plan`, `doctor` and
+        // `skills install`. Let the two drift (a `#[serde(rename)]` on one, say) and `agg judge`
+        // silently runs the LLM judge on Claude for a copilot project: the exact bug this test is
+        // named for, back again, with the full-parse assertion above still green.
+        assert_eq!(AggConfig::agent_name(&p), "copilot", "agent_name must read the real key");
 
-        // absent / unparseable / no `agent:` all fall back to the default rather than exploding —
-        // the real `load()` reports the actual error a moment later.
+        // …and it resolves against the agent the CONFIG names — not whichever backend was touched
+        // first. This is the assertion the OnceLock could not have satisfied.
+        let copilot = for_name(&cfg.agent).unwrap();
+        assert_eq!(cfg.model(copilot), copilot.default_model());
+        assert_ne!(cfg.model(copilot), claude().default_model(), "…and it is NOT claude's");
+        // an EXPLICIT model wins over any backend default, on every backend.
+        std::fs::write(&p, "project: x\nagent: copilot\nmodel: pinned\nresume_prompt: R\n").unwrap();
+        let cfg = AggConfig::load(&p).unwrap();
+        assert_eq!(cfg.model(copilot), "pinned");
+        assert_eq!(cfg.model(claude()), "pinned");
+
+        // `agent_name` survives for the paths where agg.yaml may not exist or may not parse
+        // (doctor / plan / judge / skills install): absent or agent-less → the default.
         std::fs::write(&p, "project: x\nresume_prompt: R\n").unwrap();
         assert_eq!(AggConfig::agent_name(&p), "claude");
         assert_eq!(AggConfig::agent_name(&dir.join("nope.yaml")), "claude");
@@ -499,7 +526,7 @@ mod tests {
     /// ever flips to a blanket `true` for a non-reporting agent, the spend guard dies silently.
     #[test]
     fn claude_declares_the_capabilities_it_actually_has() {
-        let c = active().capabilities();
+        let c = claude().capabilities();
         assert!(c.reports_output_tokens && c.reports_cost_usd, "claude reports both");
         assert!(c.supports_one_shot, "claude can run a tools-off judge call");
         assert!(c.supports_resume && c.supports_effort && c.detects_rate_limits);
@@ -513,7 +540,7 @@ mod tests {
     /// tokens perfectly well. Summing serves both; totalling does not.
     #[test]
     fn usage_is_an_increment_so_report_once_and_report_per_message_both_work() {
-        let b = active();
+        let b = claude();
         // Claude's shape: usage rides the terminal `result` event, once.
         let result_line = r#"{"type":"result","usage":{"output_tokens":100,"cache_creation_input_tokens":5},"total_cost_usd":0.25,"session_id":"s1"}"#;
         assert_eq!(b.parse_usage(result_line), Some(105), "output + cache-creation are both output-priced");
@@ -535,7 +562,7 @@ mod tests {
     /// not summed, and must not be confused with the incremental usage above.
     #[test]
     fn the_terminal_event_owns_the_cumulative_facts() {
-        let b = active();
+        let b = claude();
         let line = r#"{"type":"result","total_cost_usd":0.25,"session_id":"s1"}"#;
         let r = b.parse_result(line).expect("a result line is terminal");
         assert_eq!(r.cost_usd, Some(0.25));

@@ -121,7 +121,11 @@ impl DashboardState {
                 let prev_value = prev.iter().find(|p| p.id == g.id).map(|p| p.value).unwrap_or(value);
                 let judge_kind = match &g.judge {
                     crate::core::model::JudgeSpec::Script { .. } => "script".to_string(),
-                    crate::core::model::JudgeSpec::Llm { model, .. } => format!("llm:{model}"),
+                    // no `model:` = the ruler's own default, only known at judge time — say so
+                    // rather than invent a name the config never contained.
+                    crate::core::model::JudgeSpec::Llm { model, .. } => {
+                        format!("llm:{}", model.as_deref().unwrap_or("default"))
+                    }
                 };
                 GoalView {
                     id: g.id.clone(),

@@ -19,15 +19,9 @@ pub fn run(dir: &Path, force: bool, folder: bool, agent: Option<&str>) -> Result
     // Resolve the backend the scaffold is FOR. Every agent-specific choice below (`model`,
     // `summary.model`, whether `cost:` / `over_cost` are even legal) is read off it.
     // `--agent` wins; else the agent whose shell we are in; else Claude, the default.
-    //
-    // Deliberately `for_name`, NOT `backend::init` + `active()`: `active()` is a OnceLock, so it
-    // returns whatever was latched FIRST in this process, not what was asked for here. Resolving
-    // locally keeps `agg init --agent codex` correct no matter what else ran before it.
     let chosen = agent.map(str::to_string).or_else(|| crate::skills::host_agent().map(str::to_string));
-    let b: &dyn crate::backend::AgentBackend = match &chosen {
-        Some(a) => crate::backend::for_name(a)?, // rejects an unknown agent before writing anything
-        None => crate::backend::active(),
-    };
+    // rejects an unknown agent before writing anything.
+    let b = crate::backend::for_name(chosen.as_deref().unwrap_or("claude"))?;
     // config_base = where the config files land; judge_cmd = how goals.yaml refers to the judge
     // (relative to the PROJECT ROOT, since judge scripts run there regardless of layout).
     let (base, judge_cmd) = if folder {

@@ -2,6 +2,7 @@
 //!
 //! Both are plain YAML. Env vars (`AGG_*`) override a few hot knobs for CI.
 
+use crate::backend::AgentBackend;
 use crate::core::model::Goal;
 use anyhow::Result;
 use serde::Deserialize;
@@ -19,17 +20,23 @@ pub struct AggConfig {
     /// ignored.
     #[serde(default = "default_agent")]
     pub agent: String,
-    /// model id for the inner worker
-    #[serde(default = "default_model")]
-    pub model: String,
+    /// model id for the inner worker. `None` (the key omitted) = **ask the backend at USE time**
+    /// ([`AggConfig::model`]) — NOT "resolve a default now". The difference is the whole reason
+    /// `backend::active()` is gone: a backend-specific serde default made this file unparseable
+    /// without already knowing the agent. See the `backend` module docs.
+    #[serde(default)]
+    pub model: Option<String>,
     /// `--effort` level passed to each headless worker (`claude -p`). Valid CLI
-    /// values: low | medium | high | xhigh | max. Defaults to `max` — the top of
+    /// values: low | medium | high | xhigh | max. Claude defaults to `max` — the top of
     /// the `-p` flag enum (the interactive-only `ultracode` tier is NOT reachable
     /// from `-p`; workers opt into multi-agent orchestration via the prompt instead,
     /// see `worker_prompt_prefix`). An unrecognized value makes the CLI fall back to
     /// its default effort (with a warning), so keep it to the valid set.
-    #[serde(default = "default_effort")]
-    pub effort: String,
+    ///
+    /// `None` = the backend's own default ([`AggConfig::effort`]); `Some("")` = pass no effort at
+    /// all. They differ: Codex's default IS empty, Claude's is not.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// path to the fat resume prompt fed to each worker (`-p` argument)
     pub resume_prompt: String,
     #[serde(default = "default_heartbeat")]
@@ -156,9 +163,10 @@ pub struct Summary {
     /// master switch
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// cheap model for the summarizer (haiku by default)
-    #[serde(default = "default_summary_model")]
-    pub model: String,
+    /// cheap model for the summarizer (haiku by default). `None` = the RULER's own cheap-model
+    /// default, resolved at use time ([`Summary::model`]) — see [`AggConfig::model`].
+    #[serde(default)]
+    pub model: Option<String>,
     /// minimum seconds between summaries (rate-limit the summarizer itself)
     #[serde(default = "default_summary_interval")]
     pub min_interval_secs: u64,
@@ -168,9 +176,17 @@ impl Default for Summary {
     fn default() -> Self {
         Summary {
             enabled: default_true(),
-            model: default_summary_model(),
+            model: None,
             min_interval_secs: default_summary_interval(),
         }
+    }
+}
+
+impl Summary {
+    /// The summarizer's model, resolved against the backend that will actually make the call —
+    /// the RULER, not the worker. Absent = that backend's own cheap default.
+    pub fn model<'a>(&'a self, ruler: &dyn AgentBackend) -> &'a str {
+        self.model.as_deref().unwrap_or_else(|| ruler.default_summary_model())
     }
 }
 
@@ -258,12 +274,6 @@ pub struct GoalsConfig {
 fn default_agent() -> String {
     "claude".into()
 }
-fn default_model() -> String {
-    crate::backend::active().default_model().into()
-}
-fn default_effort() -> String {
-    crate::backend::active().default_effort().into()
-}
 fn default_branch_prefix() -> String {
     "agg".into()
 }
@@ -288,9 +298,6 @@ fn default_stop() -> String {
 fn default_true() -> bool {
     true
 }
-fn default_summary_model() -> String {
-    crate::backend::active().default_summary_model().into()
-}
 fn default_summary_interval() -> u64 {
     300
 }
@@ -302,19 +309,42 @@ fn default_memory_inject_kb() -> Option<u64> {
 }
 
 impl AggConfig {
+    /// The backend the WORKER runs on — the `agent:` key, resolved.
+    pub fn worker_backend(&self) -> Result<&'static dyn AgentBackend> {
+        crate::backend::for_name(&self.agent)
+    }
+
+    /// The **RULER**: the backend that runs the LLM judges and the summarizer.
+    ///
+    /// It is deliberately a SEPARATE resolution from [`Self::worker_backend`], even though today
+    /// it returns the same backend. The judge is the thing that decides whether the worker is
+    /// done; letting the worker's own agent be the judge's agent by construction is a coupling
+    /// nobody chose. There is no `judge:` config block yet (SEQUENCES §7.5), so for now the ruler
+    /// IS the worker's backend — but it is threaded as its own value everywhere downstream, so
+    /// giving it its own key is a change to this one function.
+    pub fn ruler_backend(&self) -> Result<&'static dyn AgentBackend> {
+        self.worker_backend()
+    }
+
+    /// The worker's model, resolved against the backend that will actually run it. Absent =
+    /// that backend's own default — resolved HERE, at use time, never at parse time.
+    pub fn model<'a>(&'a self, agent: &dyn AgentBackend) -> &'a str {
+        self.model.as_deref().unwrap_or_else(|| agent.default_model())
+    }
+
+    /// The worker's thinking effort, same resolution as [`Self::model`]. Empty = pass no effort
+    /// flag at all (which is Codex's default, and a legal explicit choice on the others).
+    pub fn effort<'a>(&'a self, agent: &dyn AgentBackend) -> &'a str {
+        self.effort.as_deref().unwrap_or_else(|| agent.default_effort())
+    }
+
     /// Read ONLY the `agent:` key, without parsing the rest of the config.
     ///
-    /// # Why this exists (a chicken-and-egg you must not re-break)
-    /// Several of this struct's serde defaults are BACKEND-SPECIFIC — `default_model` and
-    /// `default_summary_model` ask [`crate::backend::active`] what to use. But `active()` is a
-    /// `OnceLock` that latches on FIRST READ. So a full `load()` of an agg.yaml that omits `model:`
-    /// would resolve the default, latch the backend to Claude, and then `backend::init("copilot")`
-    /// would silently do nothing — first-wins. The loop would drive the wrong agent, and `doctor`
-    /// would cheerfully report the wrong one too.
-    ///
-    /// So the agent must be selected BEFORE the config that depends on it is parsed. This reads
-    /// the one key needed to do that. Missing file / unparseable / no `agent:` → `"claude"`, and
-    /// the real `load()` reports the actual error a moment later.
+    /// This is NOT the ordering workaround it used to be — a full `load()` no longer needs a
+    /// backend (see the `backend` module docs). It survives for the commands that must name an
+    /// agent when agg.yaml may be MISSING or BROKEN: `doctor` (diagnosing the broken config is
+    /// the job), `plan` and `judge` (both run off goals.yaml alone), and `skills install` (runs
+    /// before the project is set up at all). Missing / unparseable / no `agent:` → `"claude"`.
     pub fn agent_name(path: &Path) -> String {
         #[derive(serde::Deserialize)]
         struct JustTheAgent {
@@ -337,7 +367,7 @@ impl AggConfig {
     /// CI-friendly env overrides for the hot knobs.
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("AGG_MODEL") {
-            self.model = v;
+            self.model = Some(v);
         }
         if let Some(v) = env_u64("AGG_HEARTBEAT_SECS") {
             self.heartbeat_secs = v;
