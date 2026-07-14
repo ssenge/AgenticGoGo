@@ -12,18 +12,26 @@
 //!   and    := cmp (("AND"|"&&") cmp)*
 //!   cmp    := atom (("=="|"!="|">="|"<="|">"|"<") atom)?
 //!   atom   := NUMBER | ident | "(" expr ")" | "NOT" atom
-//!   ident  := goal-id | aggregate | aggregate "(" subset ")"
+//!   ident  := goal-id | goal-id "." ("value"|"max") | aggregate | aggregate "(" subset ")"
 //!
 //! Aggregates: count_met, total, met_fraction, weighted_fraction,
 //!             any_regressed, count_regressed. The `(invariants)` subset restricts
 //!             an aggregate to invariant goals.
+//!
+//! A bare goal id is its **`met` bool**. To compare the NUMBER a judge emitted, use the dotted
+//! accessor — `coverage.value >= 80`, never `coverage >= 80` (the latter is a hard error: see
+//! [`Val::GoalBool`]).
 
 use crate::core::model::Goal;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 /// The facts the evaluator needs about the current goal set + run.
 pub struct StopContext<'a> {
     pub goals: &'a [Goal],
+    /// ids of the judges that RAN this step and returned an `error` (backs `any_judge_error`).
+    /// Empty when no judge ran — a step whose judges were skipped is not "stale true", it is
+    /// honestly false: no judge ran, so no judge errored.
+    pub judge_errors: &'a [String],
     /// cumulative output tokens spent this run (for budget guards)
     pub tokens_spent: u64,
     /// budget ceiling, if configured (`budget.total`)
@@ -45,6 +53,7 @@ impl<'a> StopContext<'a> {
     pub fn from_goals(goals: &'a [Goal]) -> Self {
         StopContext {
             goals,
+            judge_errors: &[],
             tokens_spent: 0,
             budget_total: None,
             cost_spent: 0.0,
@@ -85,6 +94,9 @@ impl<'a> StopContext<'a> {
     fn goal_met(&self, id: &str) -> Option<bool> {
         self.goals.iter().find(|g| g.id == id).map(|g| g.met())
     }
+    fn goal(&self, id: &str) -> Option<&Goal> {
+        self.goals.iter().find(|g| g.id == id)
+    }
 }
 
 /// Evaluate a stop expression against the current goals. Returns the bool result.
@@ -98,10 +110,14 @@ pub fn evaluate(expr: &str, ctx: &StopContext) -> Result<bool> {
     Ok(v.as_bool())
 }
 
-/// Validate an expression at config-load time (parse only, with a dummy context).
+/// Validate an expression at config-load time (with a dummy context: no verdicts yet).
+///
+/// This is where `coverage >= 80` — a judge's `met` bool compared to a number, which coerces to a
+/// silently-always-false `1.0 >= 80.0` — is caught. The type error lives in [`Parser::parse_cmp`],
+/// so it fires here at STARTUP rather than 3 sessions into a run.
 pub fn validate(expr: &str, goals: &[Goal]) -> Result<()> {
     let ctx = StopContext::from_goals(goals);
-    evaluate(expr, &ctx).map(|_| ())
+    evaluate(expr, &ctx).map(|_| ()).with_context(|| format!("invalid condition `{expr}`"))
 }
 
 // ---------------- value ----------------
@@ -109,18 +125,29 @@ pub fn validate(expr: &str, goals: &[Goal]) -> Result<()> {
 #[derive(Clone, Copy)]
 enum Val {
     Bool(bool),
+    /// A JUDGE's `met` bool. Distinct from `Bool` for exactly one reason: it is a TYPE ERROR to
+    /// compare it against a number (`coverage >= 80`), because the bool→num coercion below makes
+    /// that `1.0 >= 80.0` — silently always false. The coercion itself stays: run-level bools
+    /// (`over_budget == 1`) rely on it.
+    GoalBool(bool),
     Num(f64),
+    /// A judge with no usable number: `.value`/`.max` on a judge that hasn't run yet or errored.
+    /// Any comparison against it is **false** — see `parse_cmp`. Deliberately NOT NaN: a NaN
+    /// operand hard-bails, and that `Err` is swallowed into `false` by `engine::eval_or_log`, so
+    /// NaN here would mean a stop condition that can never be true and never says why.
+    Missing,
 }
 impl Val {
     fn as_bool(self) -> bool {
         match self {
-            Val::Bool(b) => b,
+            Val::Bool(b) | Val::GoalBool(b) => b,
             Val::Num(n) => n != 0.0,
+            Val::Missing => false,
         }
     }
     fn as_num(self) -> f64 {
         match self {
-            Val::Bool(b) => {
+            Val::Bool(b) | Val::GoalBool(b) => {
                 if b {
                     1.0
                 } else {
@@ -128,6 +155,7 @@ impl Val {
                 }
             }
             Val::Num(n) => n,
+            Val::Missing => 0.0, // unreachable: parse_cmp short-circuits Missing to false first
         }
     }
 }
@@ -151,6 +179,15 @@ fn tokenize(s: &str) -> Result<Vec<Tok>> {
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() {
+        // This loop walks RAW BYTES and slices the &str on those byte offsets. A multi-byte char
+        // (one umlaut in a user's YAML) would make `b[i] as char` a lone continuation byte, and the
+        // slice below would land mid-character and PANIC. The grammar is ASCII-only — say so, and
+        // error instead. `s[i..]` is safe here: every byte consumed so far was ASCII, so `i` is on
+        // a char boundary.
+        if !b[i].is_ascii() {
+            let ch = s[i..].chars().next().unwrap_or('?');
+            bail!("unexpected character `{ch}` in stop condition (the grammar is ASCII-only)");
+        }
         let c = b[i] as char;
         if c.is_whitespace() {
             i += 1;
@@ -167,8 +204,10 @@ fn tokenize(s: &str) -> Result<Vec<Tok>> {
             out.push(Tok::And);
             i += 2;
         } else if matches!(c, '=' | '!' | '>' | '<') {
-            // two-char ops first
-            let two = if i + 1 < b.len() { &s[i..i + 2] } else { "" };
+            // two-char ops first. The `is_ascii` guard is not cosmetic: `>ö` would slice s[i..i+2]
+            // straight through the middle of `ö` and panic. A non-ASCII second byte falls through
+            // to the single-char op (or the error), and the loop head above then rejects it.
+            let two = if i + 1 < b.len() && b[i + 1].is_ascii() { &s[i..i + 2] } else { "" };
             if matches!(two, "==" | "!=" | ">=" | "<=") {
                 out.push(Tok::Op(two.to_string()));
                 i += 2;
@@ -179,15 +218,27 @@ fn tokenize(s: &str) -> Result<Vec<Tok>> {
                 bail!("unexpected `{c}` in stop condition");
             }
         } else if c.is_ascii_digit() || c == '.' {
+            // A LEADING `.` still starts a number, so the leading-dot float `.5` keeps working.
+            // That is what makes the accessor below safe to fold into the identifier charset:
+            // `.` after an identifier char continues the identifier, `.` anywhere else is a number.
             let start = i;
             while i < b.len() && ((b[i] as char).is_ascii_digit() || b[i] == b'.') {
                 i += 1;
             }
             let n: f64 = s[start..i].parse().map_err(|_| anyhow!("bad number `{}`", &s[start..i]))?;
             out.push(Tok::Num(n));
-        } else if c.is_alphabetic() || c == '_' {
+        } else if c.is_ascii_alphabetic() || c == '_' {
+            // `.` is an identifier CONTINUATION char (never a start char), so `coverage.value`
+            // lexes as one Ident and `met_fraction >= 0.75` still lexes as Ident, Op, Num. This is
+            // why there is no `Dot` token: a Dot token would have to steal `.` from the number
+            // branch and would silently break `.5`.
+            //
+            // `is_ascii_alphanumeric`, NOT `is_alphanumeric`: the latter is true for the lead byte
+            // of `ö` (0xC3 as char == 'Ã'), so it would swallow half a char and then slice on the
+            // boundary — the panic this guards. Stopping here hands the byte back to the loop head,
+            // which errors.
             let start = i;
-            while i < b.len() && ((b[i] as char).is_alphanumeric() || b[i] == b'_') {
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.') {
                 i += 1;
             }
             let word = &s[start..i];
@@ -253,6 +304,21 @@ impl<'a> Parser<'a> {
         if let Some(Tok::Op(op)) = self.peek().cloned() {
             self.pos += 1;
             let right = self.parse_atom()?;
+            // THE TYPE CHECK. A bare judge name is a `met` BOOL, and a bool has no ordering against
+            // a number: `coverage >= 80` coerces met→1.0 and is silently ALWAYS FALSE. `validate`
+            // runs this at config load, so it is a startup error, not a run that never finishes.
+            if matches!(left, Val::GoalBool(_)) || matches!(right, Val::GoalBool(_)) {
+                bail!(
+                    "a judge's name is its `met` BOOL — comparing it to a number is always false. \
+                     Use the accessor: `judge.value >= 80`, not `judge >= 80`"
+                );
+            }
+            // A judge with no usable number (never ran, or errored) makes the comparison FALSE.
+            // `any_judge_error` is what surfaces the error case — this must not error, because an
+            // Err is swallowed into `false` upstream and would look identical while hiding why.
+            if matches!(left, Val::Missing) || matches!(right, Val::Missing) {
+                return Ok(Val::Bool(false));
+            }
             let (l, r) = (left.as_num(), right.as_num());
             // A NaN operand makes EVERY comparison meaningless (and `!=` would return
             // true, silently inverting a guard). Fail loud rather than mislead — a
@@ -290,8 +356,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Resolve an identifier to a value: a goal id, or an aggregate (optionally
-    /// with an `(invariants)` subset).
+    /// Resolve an identifier to a value: a goal id, a dotted accessor on one (`coverage.value`),
+    /// or an aggregate (optionally with an `(invariants)` subset).
     fn resolve_ident(&mut self, name: &str) -> Result<Val> {
         // optional subset arg, e.g. any_regressed(invariants)
         let mut invariants_only = false;
@@ -314,6 +380,12 @@ impl<'a> Parser<'a> {
             && !matches!(name, "count_met" | "count_regressed" | "total" | "met_fraction" | "any_regressed")
         {
             bail!("`{name}` does not take an (invariants) subset");
+        }
+
+        // Dotted accessor: the ONLY way to read the number a judge emitted. (The bare name is its
+        // `met` bool — see `Val::GoalBool`.)
+        if let Some((base, field)) = name.split_once('.') {
+            return self.resolve_accessor(base, field);
         }
 
         let c = self.ctx;
@@ -356,13 +428,53 @@ impl<'a> Parser<'a> {
                 Some(t) => t > 0 && c.sessions_done >= t,
                 None => false, // no cap (0/unset) => never over
             }),
-            // otherwise: a goal id -> its met bool
+            // "any judge that RAN this step returned error". No judge ran => false: a skipped
+            // step reports no errors because there were none to have, not because it forgot.
+            "any_judge_error" => Val::Bool(!c.judge_errors.is_empty()),
+            // otherwise: a goal id -> its met bool. GoalBool, not Bool: comparing it to a number
+            // is a type error (`coverage >= 80`), while `over_budget == 1` stays legal.
             other => match c.goal_met(other) {
-                Some(b) => Val::Bool(b),
+                Some(b) => Val::GoalBool(b),
                 None => bail!("unknown goal or aggregate `{other}` in stop condition"),
             },
         };
         Ok(v)
+    }
+
+    /// `judge.value` / `judge.max` — the NUMBER the judge emitted, not its `met` bool.
+    fn resolve_accessor(&self, base: &str, field: &str) -> Result<Val> {
+        let goal = match self.ctx.goal(base) {
+            Some(g) => g,
+            None => bail!("unknown judge `{base}` in stop condition (in `{base}.{field}`)"),
+        };
+        // The FIELD NAME is checked before the verdict is read, and that order is load-bearing: at
+        // `validate` time no judge has run, so a bad accessor would otherwise short-circuit to
+        // `Missing` and sail through startup.
+        match field {
+            "value" | "max" => {}
+            // `.target` is NOT an accessor, deliberately: a judge's target is presentational (it
+            // draws the progress bar). A threshold has ONE owner — the condition. Two would
+            // silently disagree, and the loop would obey the one you weren't reading.
+            "target" => bail!(
+                "`{base}.target` is not readable — a judge's `target` is presentational only. \
+                 Put the threshold in the condition itself: `{base}.value >= <n>`"
+            ),
+            other => bail!("unknown accessor `{base}.{other}` — a judge exposes `.value` and `.max`"),
+        }
+
+        // No verdict yet, or the judge ERRORED => no usable number. `Missing` makes the comparison
+        // false; `any_judge_error` is what tells you the judge blew up.
+        //
+        // ponytail: "the judge emitted no `value`" is NOT distinguishable here — `Verdict.value` is
+        // a `#[serde(default)]` f64, so an absent field and a real `0` are the same 0.0. Treating
+        // that as Missing would break honest `judge.value == 0` checks. Ceiling: it needs
+        // `Option<f64>` on the wire (verdicts.jsonl + state.json), a bigger cut than this commit.
+        match goal.last_verdict.as_ref() {
+            Some(v) if v.error.is_none() => {
+                Ok(Val::Num(if field == "value" { v.value } else { v.max }))
+            }
+            _ => Ok(Val::Missing),
+        }
     }
 }
 
@@ -371,8 +483,9 @@ mod tests {
     use super::*;
     use crate::core::model::{Goal, GoalType, JudgeSpec, Lifecycle, Verdict};
 
-    fn g(id: &str, met: bool, invariant: bool) -> Goal {
-        let mut goal = Goal {
+    /// A goal that has never been judged (no verdict). The state `validate` sees at startup.
+    fn unjudged(id: &str, invariant: bool) -> Goal {
+        Goal {
             id: id.into(),
             goal_type: GoalType::Binary,
             judge: JudgeSpec::Script { cmd: "true".into(), timeout: 1 },
@@ -387,7 +500,11 @@ mod tests {
             ever_met: false,
             latched: false,
             recheck_sig: None,
-        };
+        }
+    }
+
+    fn g(id: &str, met: bool, invariant: bool) -> Goal {
+        let mut goal = unjudged(id, invariant);
         goal.apply(Verdict {
             met,
             value: if met { 1.0 } else { 0.0 },
@@ -567,5 +684,135 @@ mod tests {
     fn unknown_identifier_is_error() {
         assert!(evaluate("frobnicate", &StopContext::from_goals(&[])).is_err());
         assert!(evaluate("goal_x", &StopContext::from_goals(&[g("goal_y", true, false)])).is_err());
+    }
+
+    // ---------------- dotted accessors ----------------
+
+    /// A judge that ran and emitted a number.
+    fn scored(id: &str, value: f64, max: f64) -> Goal {
+        let mut goal = unjudged(id, false);
+        goal.apply(Verdict {
+            met: value >= max,
+            value,
+            max,
+            target: max,
+            rationale: String::new(),
+            evidence: vec![],
+            error: None,
+        });
+        goal
+    }
+
+    /// A judge that FAILED TO RUN — no usable number.
+    fn errored(id: &str) -> Goal {
+        let mut goal = unjudged(id, false);
+        goal.apply(Verdict::failed("judge exploded"));
+        goal
+    }
+
+    #[test]
+    fn dotted_accessor_reads_the_judges_number() {
+        // THE BUG THIS FIXES: `coverage` is a bool, so `coverage >= 80` was `1.0 >= 80.0` — always
+        // false. `coverage.value` is the number the judge actually emitted.
+        let goals = [scored("coverage", 87.0, 100.0)];
+        assert!(ev("coverage.value >= 80", &goals));
+        assert!(!ev("coverage.value >= 90", &goals));
+        assert!(ev("coverage.max == 100", &goals));
+        // the bare name still means `met` (87 < 100 → not met), and still composes as a bool
+        assert!(!ev("coverage", &goals));
+        assert!(ev("NOT coverage", &goals));
+        // a met judge: bare name true, and the number is still readable
+        let done = [scored("coverage", 100.0, 100.0)];
+        assert!(ev("coverage AND coverage.value >= 80", &done));
+    }
+
+    #[test]
+    fn bare_judge_name_compared_to_a_number_is_a_startup_error() {
+        // The headline fix: this used to parse, evaluate `1.0 >= 80.0`, and be silently always false.
+        let goals = [unjudged("coverage", false)];
+        assert!(validate("coverage >= 80", &goals).is_err());
+        assert!(validate("coverage == 1", &goals).is_err());
+        assert!(validate("all_goals OR coverage > 0.5", &goals).is_err());
+        // the accessor is the way to say it, and it validates clean
+        assert!(validate("coverage.value >= 80", &goals).is_ok());
+        // ...but the bool→num coercion is STILL load-bearing for run-level terms. Do not regress it.
+        assert!(validate("over_budget == 1", &goals).is_ok());
+        assert!(evaluate("over_budget == 0", &StopContext::from_goals(&goals)).unwrap());
+    }
+
+    #[test]
+    fn target_accessor_is_rejected_at_startup() {
+        // a judge's `target` is presentational; the threshold belongs in the condition.
+        let goals = [scored("coverage", 87.0, 100.0)];
+        assert!(validate("coverage.target >= 80", &goals).is_err());
+        assert!(validate("coverage.value >= coverage.target", &goals).is_err());
+        // any other accessor is a startup error too — note this must fire with NO verdict present,
+        // which is exactly the state `validate` runs in.
+        assert!(validate("coverage.rationale == 1", &[unjudged("coverage", false)]).is_err());
+        assert!(validate("coverage.value", &[unjudged("coverage", false)]).is_ok());
+        // unknown judge behind an accessor
+        assert!(validate("nope.value >= 1", &goals).is_err());
+    }
+
+    #[test]
+    fn accessor_with_no_usable_number_makes_the_comparison_false() {
+        // A judge that errored has no number. The comparison is FALSE — never an Err (an Err is
+        // swallowed into `false` by engine::eval_or_log anyway, but silently) and never NaN (which
+        // hard-bails). Crucially `!=` must ALSO be false, or a guard silently inverts.
+        let goals = [errored("coverage")];
+        assert!(!ev("coverage.value >= 80", &goals));
+        assert!(!ev("coverage.value < 80", &goals));
+        assert!(!ev("coverage.value != 80", &goals));
+        assert!(!ev("coverage.value == 0", &goals));
+        // same for a judge that has not run yet (this is the startup state)
+        let fresh = [unjudged("coverage", false)];
+        assert!(!ev("coverage.value >= 80", &fresh));
+        assert!(!ev("coverage.value != 80", &fresh));
+    }
+
+    #[test]
+    fn float_literals_survive_the_dotted_lexer() {
+        let goals = [g("a", true, false), g("b", true, false), g("c", true, false), g("d", false, false)];
+        // the regression the accessor could have broken: a normal float literal
+        assert!(ev("met_fraction >= 0.75", &goals));
+        assert!(!ev("met_fraction >= 0.8", &goals));
+        // ...and the LEADING-DOT float, which the lexer accepts today. Pinned: `.` still STARTS a
+        // number. It only continues an identifier, which is what keeps `coverage.value` lexable.
+        assert!(ev("met_fraction >= .75", &goals));
+        assert!(!ev("met_fraction >= .8", &goals));
+        assert!(ev("coverage.value >= .5", &[scored("coverage", 0.9, 1.0)]));
+    }
+
+    // ---------------- any_judge_error ----------------
+
+    #[test]
+    fn any_judge_error_is_true_only_when_a_judge_that_ran_errored() {
+        let goals = [g("a", true, false)];
+        // no judge errored this step
+        assert!(!evaluate("any_judge_error", &StopContext::from_goals(&goals)).unwrap());
+        // a judge that RAN this step errored
+        let errs = vec!["coverage".to_string()];
+        let ctx = StopContext { judge_errors: &errs, ..StopContext::from_goals(&goals) };
+        assert!(evaluate("any_judge_error", &ctx).unwrap());
+        // composes into a real abort guard
+        assert!(evaluate("all_goals OR any_judge_error", &ctx).unwrap());
+        // NOT stale: the set is per-step, so a step where no judge ran is false even though the
+        // goal's own last_verdict may still carry an old error.
+        let stale = [errored("coverage")];
+        assert!(!evaluate("any_judge_error", &StopContext::from_goals(&stale)).unwrap());
+    }
+
+    // ---------------- tokenizer robustness ----------------
+
+    #[test]
+    fn non_ascii_input_errors_instead_of_panicking() {
+        // The tokenizer walks raw bytes and slices on them; a multi-byte char used to slice
+        // mid-character and PANIC. Expressions come straight from user YAML.
+        for expr in ["cöverage", "all_goals ✓", "goal_ä.value >= 1", "count_met ≥ 3"] {
+            assert!(
+                evaluate(expr, &StopContext::from_goals(&[])).is_err(),
+                "`{expr}` must error, not panic"
+            );
+        }
     }
 }
