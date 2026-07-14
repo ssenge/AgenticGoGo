@@ -183,7 +183,26 @@ fn default_timeout() -> u64 {
 
 impl Goal {
     /// Fold a fresh verdict into the goal's lifecycle state. Returns the new state.
+    ///
+    /// # A BROKEN JUDGE IS NOT A FAILING JUDGE
+    /// A verdict carrying `error` (spawn failure, timeout, garbage stdout — every
+    /// [`Verdict::failed`] path) is the judge saying *"I could not grade this"*, NOT *"this is not
+    /// met"*. It therefore **never changes the lifecycle**: it is never a regression, never satisfies
+    /// `stop_when`, and never marks a goal met. We record the verdict — its `rationale` carries the
+    /// error text, so the scoreboard and the memory fold show it — and leave `state`/`ever_met`
+    /// exactly as they were. `any_judge_error` (see `core::stop`) is the front-door signal, and
+    /// `abort_if: … OR any_judge_error` the explicit policy.
+    ///
+    /// This FIXES a shipped bug. Before it, `met: false` from a `Verdict::failed` fell through to
+    /// the `ever_met` branch below, so a crashed judge on a previously-met goal became
+    /// `Regressed` → `any_regressed(invariants)` → the default `halt_when` → **the run halted**,
+    /// blaming a regression that never happened. (`latched`/`recheck_sig` are guarded separately, in
+    /// `engine::update_recheck_state`, which returns early on the same condition.)
     pub fn apply(&mut self, verdict: Verdict) -> Lifecycle {
+        if verdict.error.is_some() {
+            self.last_verdict = Some(verdict);
+            return self.state;
+        }
         let met = verdict.met;
         let value = verdict.value;
         self.last_verdict = Some(verdict);
@@ -271,5 +290,39 @@ mod tests {
         // a later cycle says not-met -> regressed, not just in_progress
         assert_eq!(g.apply(verdict(false, 27.0, 28.0)), Lifecycle::Regressed);
         assert!(g.regressed());
+    }
+
+    #[test]
+    fn a_broken_judge_is_not_a_regression() {
+        // THE BUG: `Verdict::failed` has `met: false`, so a crashed/timed-out/garbage judge on a
+        // previously-MET goal used to land in `Regressed` — which `any_regressed(invariants)` in the
+        // shipped default `halt_when` turns into a HALT. The run died blaming a regression that
+        // never happened. An error says "I could not grade this", not "this is not met".
+        let mut g = cardinal("g", 28.0);
+        g.apply(verdict(true, 28.0, 28.0));
+        assert_eq!(g.state, Lifecycle::Met);
+
+        assert_eq!(g.apply(Verdict::failed("judge timed out after 300s")), Lifecycle::Met);
+        assert!(g.met(), "a met goal STAYS met when its judge blows up");
+        assert!(!g.regressed());
+        // the verdict IS recorded — the error text has to be visible somewhere.
+        let v = g.last_verdict.as_ref().unwrap();
+        assert!(v.error.is_some());
+        assert!(v.rationale.contains("timed out"));
+        // and the real state is still there underneath: a genuine not-met still regresses.
+        assert_eq!(g.apply(verdict(false, 27.0, 28.0)), Lifecycle::Regressed);
+    }
+
+    #[test]
+    fn a_broken_judge_never_moves_a_goal_that_was_never_met() {
+        // The other half of the rule: an error must not INVENT progress either. A goal that never
+        // got past Pending stays Pending — it does not become InProgress, Met, or Regressed.
+        let mut g = cardinal("g", 28.0);
+        assert_eq!(g.apply(Verdict::failed("no such file: ./judges/build.sh")), Lifecycle::Pending);
+        assert!(!g.ever_met);
+        // ...and it does not freeze the goal: the next honest verdict still lands.
+        assert_eq!(g.apply(verdict(false, 18.0, 28.0)), Lifecycle::InProgress);
+        assert_eq!(g.apply(Verdict::failed("judge exploded")), Lifecycle::InProgress);
+        assert_eq!(g.apply(verdict(true, 28.0, 28.0)), Lifecycle::Met);
     }
 }

@@ -234,6 +234,12 @@ impl Engine {
             }
         }
 
+        // ponytail: an ERRORED judge's delta reads `28 → 0 [Met] judge failed: …`. The 0 is
+        // `Verdict::failed`'s placeholder, not a measurement — but the state column is honest
+        // (`Goal::apply` no longer moves it) and the rationale says "judge failed", so the line is
+        // self-describing and the breakage stays LOUD in memory/summary, which is what you want when
+        // your grader is broken. Ceiling: making it read `28 → 28` would need `value: Option<f64>`
+        // on the wire (§5.2). Nothing downstream branches on it — deltas feed only the prose.
         let deltas: Vec<GoalDelta> = self
             .goals
             .iter()
@@ -497,6 +503,149 @@ mod tests {
         assert!(eng.goals[0].recheck_sig.is_none(), "a crashed judge must not stamp its signature");
         eng.evaluate_cycle(&dir, &dir, &rs, ruler()); // cycle 2: input UNCHANGED → must retry anyway
         assert_eq!(run_count(&dir, "coverage"), 2, "a crashed judge must be retried, not skipped forever");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- a broken judge is not a failing judge ----------------
+
+    /// An INVARIANT goal whose script judge reads its behaviour from a `mode` file, so one engine
+    /// can be walked from "judge works, goal is met" into each of the three ways a judge can be
+    /// BROKEN rather than merely not-met.
+    fn moded_invariant(id: &str, dir: &std::path::Path) -> Goal {
+        let mode = dir.join("mode");
+        let cmd = format!(
+            r#"case "$(cat {m} 2>/dev/null || echo ok)" in
+                 crash)   echo 'boom' >&2; exit 1 ;;
+                 garbage) echo 'compiling... 47 warnings emitted'; exit 0 ;;
+                 timeout) sleep 30 ;;
+                 *)       echo '{{"met":true,"value":1,"max":1,"target":1,"rationale":"build ok"}}' ;;
+               esac"#,
+            m = mode.display()
+        );
+        Goal {
+            id: id.into(), goal_type: GoalType::Binary,
+            // 1s so the `timeout` mode is a fast test — proc.rs group-kills the sleep.
+            judge: JudgeSpec::Script { cmd, timeout: 1 },
+            target: 1.0, weight: 1.0, invariant: true, description: String::new(),
+            recheck: RecheckPolicy::Always, recheck_inputs: vec![],
+            state: Lifecycle::Pending, last_verdict: None, ever_met: false,
+            latched: false, recheck_sig: None,
+        }
+    }
+
+    /// A judge that is honestly, cleanly NOT met — so `all_goals` stays false and the run has a
+    /// reason to keep going. (Without it, `stop_when` would be satisfied and the halt question moot.)
+    fn never_met(id: &str) -> Goal {
+        Goal {
+            id: id.into(), goal_type: GoalType::Binary,
+            judge: JudgeSpec::Script {
+                cmd: r#"echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'"#.into(),
+                timeout: 10,
+            },
+            target: 1.0, weight: 1.0, invariant: false, description: String::new(),
+            recheck: RecheckPolicy::Always, recheck_inputs: vec![],
+            state: Lifecycle::Pending, last_verdict: None, ever_met: false,
+            latched: false, recheck_sig: None,
+        }
+    }
+
+    /// THE SHIPPED BUG, at the level that decides the run's fate. `Verdict::failed` carries
+    /// `met: false`; `Goal::apply` used to fold that into `Lifecycle::Regressed` for a previously-met
+    /// goal, which `any_regressed(invariants)` — the regression term of the `halt_when` `agg init`
+    /// writes (`init.rs`) — turns into a HALT. So a judge that merely *crashed* killed the run,
+    /// wearing a regression's clothes. Run each way a judge can break, through the real judge runner.
+    fn broken_judge_does_not_halt(tag: &str, mode: &str) {
+        let dir = tmpdir(tag);
+        let mut eng = Engine::new(GoalsConfig {
+            goals: vec![moded_invariant("build_ok", &dir), never_met("feature")],
+            stop_when: "all_goals".into(),
+            // the regression term of the halt_when `agg init` ships, verbatim.
+            halt_when: Some("any_regressed(invariants)".into()),
+        })
+        .unwrap();
+        let rs = RunState::default();
+
+        // cycle 1: the judge works and the invariant is MET.
+        let first = eng.evaluate_cycle(&dir, &dir, &rs, ruler());
+        assert!(eng.goals[0].met(), "{mode}: cycle 1 must leave the invariant met");
+        assert!(!first.halt, "{mode}: nothing to halt on yet");
+
+        // cycle 2: the judge BREAKS. The code under it did not change.
+        std::fs::write(dir.join("mode"), mode).unwrap();
+        let res = eng.evaluate_cycle(&dir, &dir, &rs, ruler());
+
+        let v = eng.goals[0].last_verdict.as_ref().unwrap();
+        assert!(v.error.is_some(), "{mode}: the judge must report an ERROR, not a clean not-met");
+        assert_eq!(eng.goals[0].state, Lifecycle::Met, "{mode}: a met goal STAYS met when its judge breaks");
+        assert!(!eng.goals[0].regressed(), "{mode}: a broken judge is not a regression");
+        assert!(!res.halt, "{mode}: THE BUG — the run must NOT halt blaming a regression that never happened");
+        assert!(!res.stop, "{mode}: `feature` is honestly not met, so the run is not done either");
+
+        // ...and the breakage is not swallowed: it comes out the front door instead.
+        let errs = ["build_ok".to_string()];
+        let ctx = StopContext { judge_errors: &errs, ..StopContext::from_goals(&eng.goals) };
+        assert!(stop::evaluate("any_judge_error", &ctx).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_crashed_judge_does_not_halt_the_run() {
+        broken_judge_does_not_halt("brk-crash", "crash");
+    }
+
+    #[test]
+    fn a_timed_out_judge_does_not_halt_the_run() {
+        broken_judge_does_not_halt("brk-timeout", "timeout");
+    }
+
+    #[test]
+    fn a_judge_emitting_garbage_does_not_halt_the_run() {
+        broken_judge_does_not_halt("brk-garbage", "garbage");
+    }
+
+    #[test]
+    fn a_broken_judge_raises_any_judge_error_from_the_real_cycle() {
+        // The `judge_errors` set the cycle hands to the evaluator must carry REAL data — the ids of
+        // the judges that RAN and errored. Asserted through the halt expression, which is the only
+        // thing that consumes it.
+        let dir = tmpdir("brk-anyerr");
+        let mut eng = Engine::new(GoalsConfig {
+            goals: vec![moded_invariant("build_ok", &dir), never_met("feature")],
+            stop_when: "all_goals".into(),
+            // the abort_if this fix makes usable: the EXPLICIT, front-door policy for a broken judge.
+            halt_when: Some("any_regressed(invariants) OR any_judge_error".into()),
+        })
+        .unwrap();
+        let rs = RunState::default();
+        let first = eng.evaluate_cycle(&dir, &dir, &rs, ruler());
+        assert!(!first.halt, "no judge errored in cycle 1");
+
+        std::fs::write(dir.join("mode"), "crash").unwrap();
+        let res = eng.evaluate_cycle(&dir, &dir, &rs, ruler());
+        assert!(res.halt, "a broken judge must halt through `any_judge_error` — the front door");
+        assert!(res.halt_reason.unwrap().contains("any_judge_error"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_broken_judge_on_a_never_met_goal_stays_pending() {
+        // The other half: an error must not invent progress. A goal that never got past Pending is
+        // Pending, not Regressed — and `any_regressed(invariants)` stays false, so no halt.
+        let dir = tmpdir("brk-pending");
+        std::fs::write(dir.join("mode"), "crash").unwrap();
+        let mut eng = Engine::new(GoalsConfig {
+            goals: vec![moded_invariant("build_ok", &dir), never_met("feature")],
+            stop_when: "all_goals".into(),
+            halt_when: Some("any_regressed(invariants)".into()),
+        })
+        .unwrap();
+        let rs = RunState::default();
+        let res = eng.evaluate_cycle(&dir, &dir, &rs, ruler());
+        assert!(eng.goals[0].last_verdict.as_ref().unwrap().error.is_some());
+        assert_eq!(eng.goals[0].state, Lifecycle::Pending, "never met → stays Pending, never Regressed");
+        assert!(!eng.goals[0].ever_met);
+        assert!(!res.halt);
+        assert!(!res.stop);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

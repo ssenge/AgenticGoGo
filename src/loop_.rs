@@ -734,10 +734,23 @@ impl LoopState<'_> {
 
         // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
         // A goal REGRESSED this cycle iff a delta went from a met state to a not-met state AND the
-        // judge actually RAN. The "judge ran" gate is LOAD-BEARING: a judge that merely couldn't
-        // run (rate-limited/timeout/spawn-fail/bad-JSON → Verdict::failed with error:Some →
-        // Goal::apply marks a previously-met goal Regressed) must NOT count as a regression, or a
-        // transient flake would discard a good session's work.
+        // judge actually RAN.
+        //
+        // ⚠ DO NOT DELETE `judge_ran` AS DEAD CODE. It is now BELT AND BRACES, not load-bearing —
+        // and the difference matters. It used to be the ONLY thing standing between a flaky judge
+        // and a discarded good session: `Verdict::failed` carries `met: false`, and `Goal::apply`
+        // folded that straight into `Regressed`, producing a phantom Met→Regressed delta. `apply`
+        // now REFUSES to move the lifecycle on an `error` verdict (see `core::model::Goal::apply`),
+        // so a broken judge can no longer manufacture that delta at all, here or anywhere else. This
+        // clause is the second lock on the same door: it keeps the gate correct on its own terms
+        // without depending on a rule enforced two modules away.
+        //
+        // ⚠ AND NOTE WHAT IT IS NOT: despite the name, it does NOT check FRESHNESS. It reads
+        // `last_verdict.error.is_none()`, and a judge SKIPPED this cycle (`recheck: once_met` /
+        // `on_change` → `engine::run_judges` returns None) keeps its previous verdict. A skipped
+        // judge is safe here only because its `before == after`, so the delta clause cannot fire
+        // regardless. Anything that decouples "was met" from the per-cycle delta LOSES that
+        // accidental protection and must bring a real freshness check with it.
         //
         // We rely ONLY on the per-cycle delta — NOT on `g.state == Regressed`. `Regressed` is
         // sticky (recomputed every cycle while unmet), so an engine-state clause vetoed every

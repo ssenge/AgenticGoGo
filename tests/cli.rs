@@ -723,6 +723,75 @@ exit 0
     assert!(content.contains("good-work"), "the worker's good work must be KEPT despite the judge flake, got: {content:?}");
 }
 
+#[test]
+fn a_broken_judge_does_not_halt_the_run_wearing_a_regressions_clothes() {
+    // The HALF the flake test above does not cover: it proves the gate KEEPS the merge, but says
+    // nothing about `halt_when`. This is the shipped bug end-to-end. A previously-MET invariant
+    // judge that CRASHES has `met: false` on its `Verdict::failed` — which USED to fold into
+    // `Lifecycle::Regressed`, which `any_regressed(invariants)` (the halt term `agg init` writes)
+    // turned into a HALT (exit 3). The run died blaming a regression that never happened. With the
+    // fix, a broken judge leaves the goal Met, nothing regresses, the run does NOT halt, and it
+    // simply reaches the session cap (exit 4) like any other run that hasn't met its goals.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // worker: makes the invariant judge start CRASHING (drops `.flake`), does otherwise-clean work.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+printf 'work\n' >> tracked.txt
+touch .flake
+git add -A >/dev/null 2>&1
+git commit -qm "worker change" >/dev/null 2>&1
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    write(dir, "tracked.txt", "ok\n");
+    // build_ok (invariant): met at baseline; once `.flake` exists the judge CRASHES — exits
+    // non-zero with no verdict JSON → Verdict::failed (error set), NOT a clean not-met.
+    write(dir, "judges/build.sh", "#!/bin/sh\nif [ -f .flake ]; then echo 'judge crashed' >&2; exit 1; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    chmod_x(&dir.join("judges/build.sh"));
+    // feature: never met, so the loop runs sessions and does not stop at baseline.
+    write(dir, "judges/feature.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    chmod_x(&dir.join("judges/feature.sh"));
+    // halt_when carries `any_regressed(invariants)` — the exact term `agg init` ships that the bug
+    // fired through. build_ok is the invariant it ranges over.
+    write(
+        dir,
+        "goals.yaml",
+        "goals:\n  \
+         - id: build_ok\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: \"./judges/build.sh\" }\n  \
+         - id: feature\n    type: binary\n    judge: { kind: script, cmd: \"./judges/feature.sh\" }\nstop_when: feature\nhalt_when: \"any_regressed(invariants)\"\n",
+    );
+    write(
+        dir,
+        "agg.yaml",
+        "project: brokenjudge\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: true }\n",
+    );
+    write(dir, "AGG_RESUME.md", "do work\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    // exit 4 (session cap), NOT 3 (HALT). A crashed judge must not masquerade as a regression.
+    assert_exit(&out, 4, &combined);
+    assert!(!combined.contains("HALT"), "a crashed judge must NOT halt the run as a phantom regression:\n{combined}");
+}
+
 /// The four deterministic outer-loop stages must be OBSERVABLE, in order, in `.agg/state.json`
 /// while the loop runs — the TUI's `phase_color` and the web UI's `phaseStatus` key off these
 /// exact strings, and nothing else asserts them.
