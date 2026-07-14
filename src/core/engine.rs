@@ -199,9 +199,9 @@ impl Engine {
     /// current run-state (tokens/budget/wall-time). Computes per-goal deltas for the summarizer.
     ///
     /// `cwd` is the project root: judge scripts run there, `inputs`/`recheck_inputs` resolve
-    /// there. `config_base` is where config-adjacent files live (root, or the `agg/` folder):
-    /// LLM-judge rubric files resolve against it. They're equal unless the `agg/` config folder
-    /// is in use. `ruler` is the backend the LLM judges call — see [`judge::run`].
+    /// there. `config_base` is the `agg/` folder, where config-adjacent files live: LLM-judge
+    /// rubric files resolve against it. `ruler` is the backend the LLM judges call — see
+    /// [`judge::run`].
     pub fn evaluate_cycle(
         &mut self,
         cwd: &Path,

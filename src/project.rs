@@ -1,4 +1,4 @@
-//! Persistent per-project state: `.agg/project.json`.
+//! Persistent per-project state: `agg/state/project.json`.
 //!
 //! Each `agg run` is otherwise amnesiac — the per-run session counter resets to
 //! 0, so a restart looks like the work started over even when a project has run
@@ -42,7 +42,7 @@ pub struct RunRecord {
     pub end_reason: String,
 }
 
-/// The whole `.agg/project.json` document: stable identity + the run ledger.
+/// The whole `agg/state/project.json` document: stable identity + the run ledger.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Project {
@@ -96,7 +96,7 @@ impl Project {
     /// plus a lifetime total. Pure (no I/O) so it's unit-testable.
     pub fn render_history(&self) -> String {
         if self.runs.is_empty() {
-            return "no run history yet (.agg/project.json is empty).\n  \
+            return "no run history yet (agg/state/project.json is empty).\n  \
                     run `agg run` at least once — each invocation appends a record here."
                 .to_string();
         }
@@ -236,7 +236,7 @@ mod tests {
         // must be unique per test to avoid cross-test ledger contamination).
         let p = std::env::temp_dir().join(format!("agg-proj-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(p.join(".agg")).unwrap();
+        std::fs::create_dir_all(crate::paths::agg_dir(&p)).unwrap();
         p
     }
 

@@ -1,4 +1,4 @@
-//! `agg serve` — a thin JSON HTTP API over a project's `.agg/` state, for the standalone web UI.
+//! `agg serve` — a thin JSON HTTP API over a project's `agg/state/` state, for the standalone web UI.
 //!
 //! This is deliberately UI-free: no HTML, no embedded assets. It exposes exactly the read/control
 //! surface `agg dashboard` + `agg send` already use (state.json, project.json, run.pid liveness,

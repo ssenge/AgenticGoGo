@@ -1,7 +1,7 @@
 //! `agg status` — a cheap, read-only snapshot of a run.
 //!
 //! Unlike `agg plan` (which RE-RUNS every judge — possibly an expensive LLM call — to compute a
-//! fresh scoreboard), `status` just reads the `.agg/state.json` snapshot the running loop
+//! fresh scoreboard), `status` just reads the `agg/state/state.json` snapshot the running loop
 //! already publishes and renders it. That matches the `/agg:status` skill's "read the digest,
 //! don't re-judge" discipline, so the same word means the same (cheap) thing in both places.
 
@@ -13,7 +13,7 @@ use std::path::Path;
 pub fn render(dir: &Path) -> String {
     match DashboardState::read(dir) {
         Some(s) => render_state(&s),
-        None => "no run snapshot yet (.agg/state.json not found).\n  \
+        None => "no run snapshot yet (agg/state/state.json not found).\n  \
                  • `agg run` to start the loop (it publishes state as it goes), or\n  \
                  • `agg plan` to evaluate the judges once now (a dry run — this re-judges)."
             .to_string(),
@@ -27,7 +27,7 @@ pub fn render_json(dir: &Path) -> anyhow::Result<String> {
     match DashboardState::read(dir) {
         Some(s) => Ok(serde_json::to_string_pretty(&s)?),
         None => anyhow::bail!(
-            "no run snapshot yet (.agg/state.json not found) — run `agg run` first \
+            "no run snapshot yet (agg/state/state.json not found) — run `agg run` first \
              (it publishes state as it goes)."
         ),
     }

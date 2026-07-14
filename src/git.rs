@@ -42,14 +42,16 @@ pub fn current_branch(dir: &Path) -> Option<String> {
 }
 
 /// Is the work tree clean enough to branch (no tracked modifications OUTSIDE agg's own runtime
-/// state)? Untracked files are allowed (they carry across a checkout). agg's `.agg/` runtime
+/// state)? Untracked files are allowed (they carry across a checkout). agg's `agg/state/` runtime
 /// state (state.json/project.json/run.pid) churns every cycle and MUST NOT count as dirty —
-/// it's runtime, not project content (and ideally gitignored). We exclude it via a pathspec.
+/// it's runtime, not project content (and gitignored). We exclude it via a pathspec. The
+/// pathspec is `agg/state/**` (NOT `agg`): the committed config + judge library under `agg/`
+/// must still be checked, only `agg/state/` is runtime churn.
 pub fn is_clean(dir: &Path) -> bool {
-    // pathspec `:(exclude).agg/**` drops agg's state churn; `--untracked-files=no` ignores untracked.
+    // pathspec `:(exclude)agg/state/**` drops agg's state churn; `--untracked-files=no` ignores untracked.
     git(
         dir,
-        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude).agg", ":(exclude).agg/**"],
+        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)agg/state/**"],
     )
     .1
     .is_empty()
@@ -112,19 +114,21 @@ pub fn checkout(dir: &Path, branch: &str) -> bool {
 /// branch after the worker exits: the worker was told to commit its work, so anything still
 /// uncommitted is not a durable result (the exact out-of-context-stop case). Only tracked
 /// modifications are reset (`git checkout -- .`) — untracked files (build artifacts a judge may
-/// read) are left, and `.agg/` runtime state is never touched. Returns true if there was
+/// read) are left, and `agg/state/` runtime state is never touched. Returns true if there was
 /// something to discard (for logging).
 pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
     let dirty = !git(
         dir,
-        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude).agg", ":(exclude).agg/**"],
+        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)agg/state/**"],
     )
     .1
     .is_empty();
     if dirty {
         // restore tracked files to HEAD of the (session) branch; pathspec form leaves untracked
-        // files and can't over-reach into base — we are still ON the session branch here.
-        let _ = git(dir, &["checkout", "--", ".", ":(exclude).agg", ":(exclude).agg/**"]);
+        // files and can't over-reach into base — we are still ON the session branch here. The
+        // exclude is `agg/state/**` ONLY: the committed `agg/` config + judges MUST be restored
+        // (a rolled-back session must not keep the worker's edits to the judges that graded it).
+        let _ = git(dir, &["checkout", "--", ".", ":(exclude)agg/state/**"]);
     }
     dirty
 }
@@ -211,25 +215,32 @@ pub fn remove_file(dir: &Path, path: &str) {
     let _ = std::fs::remove_file(dir.join(path));
 }
 
-/// Ensure `.agg/` is gitignored (so agg's runtime state never gets committed onto session
-/// branches or merged into base). Idempotent: appends the entry only if absent. Best-effort.
+/// Ensure `agg/state/` is gitignored (so agg's runtime state never gets committed onto session
+/// branches or merged into base). Idempotent. MIGRATION: runtime state used to live at
+/// `<project>/.agg/`, so a pre-move project already ignores that now-stale path — we DROP it while
+/// writing the new entry rather than leave two contradictory lines. Only `agg/state/` is ignored:
+/// the committed config + judge library under `agg/` must stay tracked. Best-effort.
 pub fn ensure_agg_gitignored(dir: &Path) {
     let gi = dir.join(".gitignore");
     let existing = std::fs::read_to_string(&gi).unwrap_or_default();
-    if existing.lines().any(|l| {
-        let t = l.trim();
-        t == ".agg" || t == ".agg/" || t == "/.agg" || t == "/.agg/"
-    }) {
-        return;
+    let is_new = |t: &str| matches!(t, "agg/state" | "agg/state/" | "/agg/state" | "/agg/state/");
+    let is_stale = |t: &str| matches!(t, ".agg" | ".agg/" | "/.agg" | "/.agg/");
+    if existing.lines().any(|l| is_new(l.trim())) {
+        return; // already migrated
     }
-    let mut new = existing;
-    if !new.is_empty() && !new.ends_with('\n') {
-        new.push('\n');
-    }
-    new.push_str(".agg/\n");
+    // Re-emit every line except the stale pre-move `.agg/` entry, then append the new one, so a
+    // migrated project ends with exactly one (correct) entry, never two contradictory ones.
+    let mut new: String = existing
+        .lines()
+        .filter(|l| !is_stale(l.trim()))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    new.push_str("agg/state/\n");
     let _ = std::fs::write(&gi, new);
-    // also stop tracking it if it was already committed (keeps the file on disk).
-    let _ = git(dir, &["rm", "-r", "--cached", "--quiet", ".agg"]);
+    // also stop tracking runtime state if it was committed under the OLD layout (keeps files on
+    // disk). Target `agg/state` ONLY — `git rm --cached agg` would untrack the whole committed
+    // config + judge library, inverting the moat.
+    let _ = git(dir, &["rm", "-r", "--cached", "--quiet", "agg/state"]);
 }
 
 /// The session branch name for a given project + session number.
@@ -648,6 +659,32 @@ mod tests {
         // agg must NOT touch a merge it didn't start.
         assert!(!recover_stranded_merge(&d, "agg"), "must not abort a user's own merge");
         assert!(merge_in_progress(&d), "user's merge left intact");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// §6.2 migration: a pre-move project already ignores the now-stale `.agg/`. The writer must
+    /// switch it to `agg/state/`, DROP the stale line (never leave two contradictory ones), keep
+    /// unrelated entries, and stay idempotent.
+    #[test]
+    fn ensure_agg_gitignored_migrates_the_stale_dot_agg_line() {
+        let d = std::env::temp_dir().join(format!("agg-git-{}-gitignore", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git_t(&d, &["init", "-q", "-b", "main"]);
+        // a pre-move .gitignore: real content + the now-stale `.agg/` runtime entry.
+        std::fs::write(d.join(".gitignore"), "target/\n.agg/\n").unwrap();
+
+        ensure_agg_gitignored(&d);
+        let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();
+        let lines: Vec<&str> = gi.lines().map(str::trim).collect();
+        assert!(lines.contains(&"agg/state/"), "new runtime path must be ignored: {gi:?}");
+        assert!(!lines.iter().any(|l| *l == ".agg/" || *l == ".agg"), "stale .agg/ line must be dropped: {gi:?}");
+        assert!(lines.contains(&"target/"), "unrelated entries must survive: {gi:?}");
+
+        // idempotent: a second call recognises the new spelling and appends nothing.
+        ensure_agg_gitignored(&d);
+        let gi2 = std::fs::read_to_string(d.join(".gitignore")).unwrap();
+        assert_eq!(gi2.matches("agg/state/").count(), 1, "must not append a duplicate: {gi2:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

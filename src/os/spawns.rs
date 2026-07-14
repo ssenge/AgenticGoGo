@@ -55,7 +55,7 @@ pub struct SpawnEntry {
     pub reason: String,
     /// the command line, for the operator and the next worker to recognize the task.
     pub cmd: String,
-    /// path to the task's combined stdout+stderr log (under `.agg/spawns/<name>.log`).
+    /// path to the task's combined stdout+stderr log (under `agg/state/spawns/<name>.log`).
     pub log: String,
     /// the session number that launched it (for the "started session N" breadcrumb).
     pub started_session: u32,
@@ -203,7 +203,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         d.push(format!("agg-spawns-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(d.join(".agg")).unwrap();
+        std::fs::create_dir_all(crate::paths::agg_dir(&d)).unwrap();
         d
     }
 
