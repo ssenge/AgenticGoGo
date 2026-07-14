@@ -952,6 +952,57 @@ pub fn run(
     // when in use, else the project root).
     let resume_prompt = read_resume_prompt(config_base, &cfg.resume_prompt)?;
 
+    // ── per-session git isolation (MANDATORY) ──────────────────────────────────────────────
+    // Isolation is the product's guarantee, not an opt-in: every session runs on its own branch
+    // off a captured base and is gated back in, so a bad session can never land on the user's
+    // work. That guarantee is only sound when the repo is in a usable state — so we REFUSE to
+    // start otherwise, with a fix-it message, instead of silently degrading to committing straight
+    // onto the current branch (the exact "loop made it worse" failure isolation exists to prevent).
+    // Checked HERE — before hooks/watchers/ledger/banner and the baseline pass — so a bad repo
+    // never runs a user hook, spawns a watcher, or burns a baseline judge run; and so an
+    // already-satisfied baseline can't `return` past this check further down.
+    let iso = &cfg.session_isolation;
+    // Recover a staged merge stranded by an interrupted previous run (Ctrl-C/crash/kill during the
+    // rollback-gate judging window) BEFORE the is_clean check — otherwise the leftover MERGE_HEAD
+    // makes is_clean false. No-op if not a repo.
+    if crate::git::is_repo(dir) {
+        crate::git::recover_stranded_merge(dir, &iso.branch_prefix);
+    }
+    if !crate::git::is_repo(dir) {
+        anyhow::bail!(
+            "session isolation is mandatory, but this is not a git repository.\n  \
+             agg runs every session on its own branch and gates it back in, so a bad session can\n  \
+             never land on your work — that requires git.\n  \
+             fix:  git init && git add -A && git commit -m 'agg baseline'"
+        );
+    }
+    if !crate::git::is_clean(dir) {
+        anyhow::bail!(
+            "session isolation is mandatory, but the work tree has uncommitted tracked changes.\n  \
+             They would be swept onto the session branch agg cuts for every run.\n  \
+             fix:  commit or stash your changes first  (git status shows them)"
+        );
+    }
+    // keep agg's runtime state out of git so it never lands on session branches / base.
+    crate::git::ensure_agg_gitignored(dir);
+    let iso_base: String = if iso.base_branch.is_empty() {
+        match crate::git::current_branch(dir) {
+            Some(b) => b,
+            None => anyhow::bail!(
+                "session isolation is mandatory, but HEAD is detached.\n  \
+                 agg cuts each session's branch off the branch it was launched on; a detached HEAD\n  \
+                 has no branch to merge back into.\n  \
+                 fix:  git switch -c <branch>   (or check out an existing branch)"
+            ),
+        }
+    } else {
+        iso.base_branch.clone()
+    };
+    eprintln!(
+        "  [iso] per-session branch isolation ON — base branch '{iso_base}', merge unless '{}' present",
+        iso.red_file
+    );
+
     // Honesty notice: AgenticGoGo is unix-first. On Windows the core loop (launch → judge →
     // stop) works, but two safety features degrade and we say so rather than pretend otherwise:
     //   • the watchdog can't detect a CPU-flat hang (no `ps -o time`), so a wedged worker is
@@ -1046,7 +1097,7 @@ pub fn run(
         dud_streak: 0,
         cumulative: String::new(),
         last_summary: loop_start, // real value set below, after the baseline evaluation
-        iso_base: None,
+        iso_base: Some(iso_base), // isolation is mandatory — the base was resolved (or we bailed) above
         session_branch: None,
     };
     st.publish();
@@ -1101,43 +1152,6 @@ pub fn run(
     // ---- bus: operator/outer-Claude steering, drained at each session boundary
     //      (the only safe injection point for headless workers). ----
     st.bus = Bus::open(dir).ok();
-
-    // ── per-session git isolation (opt-in) ────────────────────────────────────────────────
-    // Capture the base branch ONCE at startup. Each session runs on its own branch off this
-    // base and is merged back UNLESS the worker vetoed it (red file). Disabled cleanly if the
-    // repo isn't in a usable state (not a repo / detached HEAD / dirty tree) — isolation is an
-    // enhancement, never a correctness requirement.
-    let iso = &cfg.session_isolation;
-    st.iso_base = if iso.enabled {
-        // Recover a staged merge stranded by an interrupted previous run (Ctrl-C/crash/kill during
-        // the rollback-gate judging window) BEFORE the is_clean check — otherwise the leftover
-        // MERGE_HEAD makes is_clean false and silently disables isolation. No-op if not a repo.
-        if crate::git::is_repo(dir) {
-            crate::git::recover_stranded_merge(dir, &iso.branch_prefix);
-        }
-        if !crate::git::is_repo(dir) {
-            eprintln!("  [iso] session_isolation enabled but not a git repo — running on current branch");
-            None
-        } else if !crate::git::is_clean(dir) {
-            eprintln!("  [iso] session_isolation enabled but work tree has tracked changes — commit/stash first; running on current branch");
-            None
-        } else {
-            // keep agg's runtime state out of git so it never lands on session branches / base.
-            crate::git::ensure_agg_gitignored(dir);
-            let base = if iso.base_branch.is_empty() {
-                crate::git::current_branch(dir)
-            } else {
-                Some(iso.base_branch.clone())
-            };
-            match &base {
-                Some(b) => eprintln!("  [iso] per-session branch isolation ON — base branch '{b}', merge unless '{}' present", iso.red_file),
-                None => eprintln!("  [iso] session_isolation enabled but HEAD is detached — running on current branch"),
-            }
-            base
-        }
-    } else {
-        None
-    };
 
     // ── the deterministic outer loop ──────────────────────────────────────────────────────
     // Four stages, in order, every cycle. The `max_sessions` cap is a pre-check on the

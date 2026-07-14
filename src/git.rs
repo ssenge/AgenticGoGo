@@ -1,15 +1,15 @@
 //! Per-session git isolation primitives.
 //!
-//! When `session_isolation.enabled`, the loop runs each worker session on its own branch
+//! Session isolation is MANDATORY: the loop runs each worker session on its own branch
 //! (`<prefix>/<project>/session-<N>`) cut from a base branch. After the session, the branch
 //! is merged back into the base UNLESS the worker vetoed it (wrote the red file), in which
 //! case the branch is discarded and the base is untouched.
 //!
 //! All operations shell out to `git` (no libgit2 dependency — agg stays lean). Every call is
-//! best-effort-logged: a git failure is surfaced but never panics the loop. If isolation
-//! can't proceed cleanly (dirty tree, detached HEAD, not a repo), the caller falls back to
-//! running the session directly on the current branch — isolation is an enhancement, not a
-//! correctness requirement.
+//! best-effort-logged: a git failure is surfaced but never panics the loop. Isolation can only
+//! proceed on a usable repo (a git repo, a clean tree, a non-detached HEAD), so `agg run`
+//! REFUSES to start otherwise (see `loop_::run`) rather than degrading — isolation is the
+//! product's correctness guarantee, not an enhancement.
 
 use std::path::Path;
 use std::process::Command;

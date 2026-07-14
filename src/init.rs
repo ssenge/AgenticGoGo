@@ -215,14 +215,14 @@ resume_sessions: false            # fresh context per session (recommended)
 # prompt_includes:
 #   - "AGG_TOOLING.md"
 #
-# ── Optional: per-session git isolation (needs a clean git repo). Each session runs on
-#    its own branch off the base; the result is merged back UNLESS the worker vetoed it
-#    (wrote red_file). With rollback_on_regression (default on), agg stages the merge,
-#    re-runs the judges against the merged tree, and ROLLS BACK if a previously-met goal
-#    (e.g. an invariant) regressed — so a bad session can never land on base. ──
-# session_isolation:
-#   enabled: true
-#   rollback_on_regression: true   # stage→re-test→commit|rollback (base never regresses)
+# ── Session isolation is MANDATORY — `agg run` refuses to start without a git repo, a clean
+#    tree and a non-detached HEAD. Each session runs on its own branch off the base; the result
+#    is merged back UNLESS the worker vetoed it (wrote red_file). With rollback_on_regression
+#    (default on), agg stages the merge, re-runs the judges against the merged tree, and ROLLS
+#    BACK if a previously-met goal (e.g. an invariant) regressed — so a bad session can never
+#    land on base. Every key below is optional (shown here with its default). ──
+session_isolation:
+  rollback_on_regression: true   # stage→re-test→commit|rollback (base never regresses)
 "#;
 
 const RESUME_MD: &str = r#"<!-- AGG_RESUME.md — the prompt fed to EVERY fresh worker session.
