@@ -26,6 +26,7 @@
 //! deterministic too — judges that execute against the filesystem, never the agent grading its own
 //! homework. The determinism of the GATE is what makes it safe to trust a stochastic worker.
 
+use crate::backend::AgentBackend;
 use crate::bus::{Bus, Command};
 use crate::core::config::AggConfig;
 use crate::core::engine::{CycleResult, Engine, GoalRuntime, RunState};
@@ -213,6 +214,12 @@ impl Drop for RunPidGuard<'_> {
 struct LoopState<'a> {
     // ── borrowed inputs (one shared lifetime; all read-only) ──
     cfg: &'a AggConfig,
+    /// the backend the WORKER runs on. Threaded, not global: see the `backend` module docs.
+    agent: &'static dyn AgentBackend,
+    /// the backend the LLM JUDGES and the summarizer run on. Same value as `agent` today (there is
+    /// no `judge:` key yet), a separate field on purpose — the thing that decides "done" should
+    /// not be pinned to the worker's agent by construction.
+    ruler: &'static dyn AgentBackend,
     dir: &'a Path,
     config_base: &'a Path,
     /// read once at launch, re-used to build every prompt
@@ -542,7 +549,8 @@ impl LoopState<'_> {
         // --resume continuity (opt-in): continue the prior session's context. Default
         // is fresh-context-per-session (the core no-runaway-cost discipline).
         let resume_id = if self.cfg.resume_sessions { self.last_session_id.as_deref() } else { None };
-        let outcome = worker::run_session(self.cfg, prompt, self.dir, self.session, resume_id, &self.live);
+        let outcome =
+            worker::run_session(self.cfg, self.agent, prompt, self.dir, self.session, resume_id, &self.live);
         self.last_session_id = outcome.session_id.clone();
         self.tokens_spent += outcome.output_tokens;
         self.cost_spent += outcome.cost_usd;
@@ -595,7 +603,9 @@ impl LoopState<'_> {
     fn worker_is_broken(&self) -> Option<anyhow::Error> {
         const LIMIT: u32 = 3;
         (self.dud_streak >= LIMIT).then(|| {
-            let agent = crate::backend::active().name();
+            // the STEP's agent, not a process-wide one — in a mixed run, blaming the wrong CLI
+            // sends the user to debug a binary that never ran.
+            let agent = self.agent.name();
             anyhow::anyhow!(
                 "the `{agent}` worker failed to start {LIMIT} times in a row — non-zero exit, ZERO \
                  tokens, every time.\n\
@@ -702,7 +712,7 @@ impl LoopState<'_> {
         self.emit(LifecycleEvent::Verify);
         let pre_cycle_goals = self.eng.snapshot_goal_state();
         let rs = self.run_state();
-        let res = self.eng.evaluate_cycle(self.dir, self.config_base, &rs);
+        let res = self.eng.evaluate_cycle(self.dir, self.config_base, &rs, self.ruler);
         eprint!("{}", indent(&self.eng.scoreboard()));
         self.publish();
 
@@ -788,7 +798,8 @@ impl LoopState<'_> {
             && self.last_summary.elapsed().as_secs() >= self.cfg.summary.min_interval_secs
         {
             if let Some(s) = summary::summarize(
-                &self.cfg.summary.model,
+                self.ruler,
+                self.cfg.summary.model(self.ruler),
                 &self.cumulative,
                 &outcome.thoughts,
                 &res.deltas,
@@ -918,6 +929,12 @@ pub fn run(
     // phase boundaries below via signals::interrupted().
     crate::os::signals::install();
 
+    // WHO runs what, resolved once, from the config — no process-wide latch. The ruler (judges +
+    // summarizer) is a separate resolution from the worker's agent even though they coincide
+    // today; see `AggConfig::ruler_backend`.
+    let agent = cfg.worker_backend()?;
+    let ruler = cfg.ruler_backend()?;
+
     // the resume prompt sits next to agg.yaml → resolve against config_base (the `agg/` folder
     // when in use, else the project root).
     let resume_prompt = read_resume_prompt(config_base, &cfg.resume_prompt)?;
@@ -953,7 +970,9 @@ pub fn run(
          ▶ watch live:  run `agg dashboard` in another terminal\n\
          ⏱ first session may take a minute — the worker is warming up, not hung\n\
          ⏹ stop anytime: `agg stop`",
-        cfg.project, cfg.model, eng.stop_when
+        cfg.project,
+        cfg.model(agent),
+        eng.stop_when
     );
 
     // ---- dashboard state: the loop + worker publish a compact snapshot to
@@ -961,7 +980,7 @@ pub fn run(
     //      the stdout log above stays the source of truth; this is just a view. ----
     let dash = DashboardState {
         project: cfg.project.clone(),
-        model: cfg.model.clone(),
+        model: cfg.model(agent).to_string(),
         stop_when: eng.stop_when.clone(),
         halt_when: eng.halt_when.clone().unwrap_or_default(),
         budget_total: cfg.budget.total,
@@ -986,6 +1005,8 @@ pub fn run(
     // exactly as it did when these were separate locals.
     let mut st = LoopState {
         cfg: &cfg,
+        agent,
+        ruler,
         dir,
         config_base,
         resume_prompt,
@@ -1024,7 +1045,7 @@ pub fn run(
     st.dash.phase = Phase::Verify;
     st.publish();
     let rs = st.run_state();
-    let pre = st.eng.evaluate_cycle(dir, config_base, &rs);
+    let pre = st.eng.evaluate_cycle(dir, config_base, &rs, ruler);
     eprint!("{}", indent(&st.eng.scoreboard()));
     st.publish();
     if pre.halt {

@@ -1,10 +1,12 @@
 //! Judge execution. A judge yields a [`Verdict`].
 //!
 //! - `script` judge: run a command, parse its stdout as verdict JSON.
-//! - `llm` judge: build a prompt from a rubric + inputs, hand it to [`crate::backend::one_shot`],
-//!   and extract the verdict JSON from the model's answer. The invocation itself — including the
-//!   isolation flags the trust boundary below depends on — lives in `backend.rs`, which is the
-//!   one module that knows what agent we drive.
+//! - `llm` judge: build a prompt from a rubric + inputs, hand it to the RULER's
+//!   [`AgentBackend::one_shot`], and extract the verdict JSON from the model's answer. The
+//!   invocation itself — including the isolation flags the trust boundary below depends on —
+//!   lives in the backend, which is the only layer that knows any agent's flag vocabulary. WHICH
+//!   backend is passed in: the judge decides whether the worker is done, so it must not be
+//!   coupled to the worker's own agent by construction.
 //!
 //! ## Trust boundary (the moat)
 //! The worker is untrusted; the judge must not be steerable by anything the worker writes.
@@ -25,7 +27,7 @@
 //! Both kinds are crash-safe: any failure (spawn, timeout, malformed output)
 //! yields `Verdict::failed(...)` rather than panicking.
 
-use crate::backend;
+use crate::backend::AgentBackend;
 use crate::core::model::{JudgeSpec, Verdict};
 use crate::os::proc::{self, Captured};
 use crate::util::last_json_object;
@@ -38,11 +40,18 @@ use std::process::Command;
 /// resolve there. `config_base` is where config-adjacent files live (root, or the `agg/`
 /// folder) — the LLM judge's `rubric` file resolves against it, since rubrics live next to
 /// goals.yaml. The two are equal unless the `agg/` config folder is in use.
-pub fn run(spec: &JudgeSpec, cwd: &Path, config_base: &Path) -> Verdict {
+///
+/// `ruler` is the backend the LLM judge calls — passed in, never read from a global. It is the
+/// backend that JUDGES, which is not necessarily the one that WORKS (see
+/// `AggConfig::ruler_backend`). A script judge ignores it entirely.
+pub fn run(spec: &JudgeSpec, cwd: &Path, config_base: &Path, ruler: &dyn AgentBackend) -> Verdict {
     match spec {
         JudgeSpec::Script { cmd, timeout } => run_script(cmd, *timeout, cwd),
         JudgeSpec::Llm { model, rubric, inputs, timeout } => {
-            run_llm(model, rubric, inputs, *timeout, cwd, config_base)
+            // absent `model:` = the ruler's own cheap default, resolved HERE — at use time,
+            // against the backend that is actually going to make the call.
+            let model = model.as_deref().unwrap_or_else(|| ruler.default_summary_model());
+            run_llm(model, rubric, inputs, *timeout, cwd, config_base, ruler)
         }
     }
 }
@@ -67,6 +76,7 @@ fn run_llm(
     timeout_secs: u64,
     cwd: &Path,
     config_base: &Path,
+    ruler: &dyn AgentBackend,
 ) -> Verdict {
     // 1) read the rubric (the judge's prompt body) — it lives next to goals.yaml, so it
     //    resolves against config_base (the `agg/` folder when in use, else the project root).
@@ -106,7 +116,7 @@ fn run_llm(
     // steering its own judge via repo config — live in `backend::one_shot`; `cwd` is passed
     // because the judge must see the project it is judging. The JSON envelope is unwrapped
     // there too, so `body` is already the model's text.
-    let out = match backend::active().one_shot(&prompt, model, timeout_secs, Some(cwd)) {
+    let out = match ruler.one_shot(&prompt, model, timeout_secs, Some(cwd)) {
         Ok(o) => o,
         Err(e) => return Verdict::failed(format!("llm judge: {e}")),
     };
@@ -258,13 +268,20 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// The ruler these tests pass in. Every judge here is a SCRIPT judge, which never touches it —
+    /// but `run` takes it explicitly now, precisely so nothing can quietly fall back to a default
+    /// agent.
+    fn ruler() -> &'static dyn AgentBackend {
+        crate::backend::for_name("claude").unwrap()
+    }
+
     #[test]
     fn script_judge_parses_clean_json() {
         let spec = JudgeSpec::Script {
             cmd: r#"echo '{"met":true,"value":28,"max":28,"target":28}'"#.into(),
             timeout: 10,
         };
-        let v = run(&spec, Path::new("."), Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."), ruler());
         assert!(v.met);
         assert_eq!(v.value, 28.0);
         assert!(v.error.is_none());
@@ -378,7 +395,7 @@ mod tests {
             cmd: r#"for i in $(seq 1 4000); do echo "noisy log line padding padding padding padding $i"; done; echo '{"met":true,"value":1,"max":1,"target":1}'"#.into(),
             timeout: 15,
         };
-        let v = run(&spec, Path::new("."), Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."), ruler());
         assert!(v.met, "verdict should parse despite huge preceding output; got {:?}", v.error);
         assert!(v.error.is_none());
     }
@@ -389,7 +406,7 @@ mod tests {
             cmd: r#"echo 'building...'; echo 'done'; echo '{"met":false,"value":18,"max":28}'"#.into(),
             timeout: 10,
         };
-        let v = run(&spec, Path::new("."), Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."), ruler());
         assert!(!v.met);
         assert_eq!(v.value, 18.0);
     }
@@ -397,7 +414,7 @@ mod tests {
     #[test]
     fn malformed_judge_yields_failed_verdict() {
         let spec = JudgeSpec::Script { cmd: "echo not-json".into(), timeout: 10 };
-        let v = run(&spec, Path::new("."), Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."), ruler());
         assert!(!v.met);
         assert!(v.error.is_some());
     }
@@ -405,7 +422,7 @@ mod tests {
     #[test]
     fn script_judge_times_out() {
         let spec = JudgeSpec::Script { cmd: "sleep 5".into(), timeout: 1 };
-        let v = run(&spec, Path::new("."), Path::new("."));
+        let v = run(&spec, Path::new("."), Path::new("."), ruler());
         assert!(v.error.as_deref().unwrap().contains("timed out"));
     }
 

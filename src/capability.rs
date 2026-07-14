@@ -50,6 +50,11 @@ struct Demand {
 pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -> Result<()> {
     let caps = backend.capabilities();
     let agent = backend.name();
+    // `model` / `effort` are only meaningful once resolved AGAINST this backend: an absent key
+    // means "whatever this agent defaults to", and those defaults differ (Codex takes no effort at
+    // all). Checking the raw Option would refuse Codex for an effort nobody asked for.
+    let model = cfg.model(backend);
+    let effort = cfg.effort(backend);
 
     // an LLM judge or the summarizer both need a non-agentic, tools-off call.
     let uses_llm_judge = goals.goals.iter().any(|g| matches!(g.judge, JudgeSpec::Llm { .. }));
@@ -102,7 +107,7 @@ pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -
                 .to_string(),
         },
         Demand {
-            wanted: !cfg.effort.is_empty(),
+            wanted: !effort.is_empty(),
             provided: caps.supports_effort,
             key: "effort",
             consequence: "the effort level would be silently ignored",
@@ -130,7 +135,7 @@ pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -
     // that no per-feature capability flag can express. Copilot supports `--effort` and supports
     // `model: auto`, so both flags are honestly true, yet asking for both makes it refuse every
     // invocation. Without this, `doctor` green-lit a config in which no session could ever run.
-    let conflict = backend.config_conflict(&cfg.model, &cfg.effort);
+    let conflict = backend.config_conflict(model, effort);
 
     let unmet: Vec<&Demand> = demands.iter().filter(|d| d.wanted && !d.provided).collect();
     if unmet.is_empty() && conflict.is_none() {
@@ -339,7 +344,8 @@ mod tests {
             "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: true }\n\
              effort: max\ncost: { total: 5.0 }\nbudget: { total: 10 }\nresume_sessions: true\n",
         );
-        check(&cfg, &goals_yaml(SCRIPT_GOALS), crate::backend::active()).expect("claude does it all");
+        let claude = crate::backend::for_name("claude").unwrap();
+        check(&cfg, &goals_yaml(SCRIPT_GOALS), claude).expect("claude does it all");
     }
 
     /// A config that asks for nothing special runs on ANY agent, however limited.

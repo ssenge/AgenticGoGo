@@ -160,11 +160,15 @@ pub enum JudgeSpec {
         #[serde(default = "default_timeout")]
         timeout: u64,
     },
-    /// A cheap, READ-ONLY one-shot model call that scores artifacts against a rubric prompt. Runs on
-/// whichever agent `agent:` selects — see `backend::AgentBackend::one_shot`.
+    /// A cheap, READ-ONLY one-shot model call that scores artifacts against a rubric prompt. Runs
+    /// on the RULER — the backend that judges, which is not necessarily the one that works. See
+    /// `core::config::AggConfig::ruler_backend` and `backend::AgentBackend::one_shot`.
     Llm {
-        #[serde(default = "default_model")]
-        model: String,
+        /// `None` = the ruler's own cheap-model default, resolved at USE time (`core::judge`).
+        /// It was a backend-specific serde default, which is what made goals.yaml — not just
+        /// agg.yaml — unparseable without a latched backend. See the `backend` module docs.
+        #[serde(default)]
+        model: Option<String>,
         rubric: String,
         #[serde(default)]
         inputs: Vec<String>,
@@ -175,9 +179,6 @@ pub enum JudgeSpec {
 
 fn default_timeout() -> u64 {
     300
-}
-fn default_model() -> String {
-    crate::backend::active().default_summary_model().to_string()
 }
 
 impl Goal {

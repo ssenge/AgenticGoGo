@@ -4,10 +4,11 @@
 //!   - **windowed**: just this session/window, independent.
 //!
 //! One cheap agent call per cycle returns BOTH (as JSON) to minimize cost. It goes through
-//! [`crate::backend::one_shot`] — the same call the LLM judge makes; this module used to carry a
-//! near-verbatim clone of it, envelope-unwrap included.
+//! [`AgentBackend::one_shot`] — the same call the LLM judge makes; this module used to carry a
+//! near-verbatim clone of it, envelope-unwrap included. And like the judge, it runs on the RULER,
+//! which is handed in rather than read off a global (see `core::config::AggConfig::ruler_backend`).
 
-use crate::backend;
+use crate::backend::AgentBackend;
 use crate::core::engine::GoalDelta;
 use crate::util::last_json_object;
 use serde::Deserialize;
@@ -28,7 +29,11 @@ struct RawSummaries {
 /// Build the summarizer prompt and call the model. `prev_cumulative` is the last
 /// cumulative summary (empty on the first cycle). Returns `None` on any failure —
 /// summaries are best-effort and must never break the loop.
+///
+/// `ruler` makes the call (and supplies the model default when `summary.model` is unset) — the
+/// summarizer is not the worker, and must not be pinned to the worker's agent by a global.
 pub fn summarize(
+    ruler: &dyn AgentBackend,
     model: &str,
     prev_cumulative: &str,
     thoughts: &[String],
@@ -78,7 +83,7 @@ pub fn summarize(
     // unwrap included). `cwd: None` — the summarizer only reads text it was handed, so unlike
     // the judge it has no business looking at the project.
     // Best-effort: any failure (spawn/timeout) → None, never breaks the loop.
-    let out = backend::active().one_shot(&prompt, model, timeout_secs, None).ok()?;
+    let out = ruler.one_shot(&prompt, model, timeout_secs, None).ok()?;
 
     let raw = parse_summaries(&out.body)?;
     Some(Summaries { cumulative: raw.cumulative, windowed: raw.windowed })
@@ -140,7 +145,8 @@ mod tests {
             after_state: Lifecycle::InProgress,
             rationale: "the nested-group case now passes".into(),
         }];
-        let s = summarize("haiku", "Building the expression parser; not all tests passing yet.", &thoughts, &deltas, 120)
+        let ruler = crate::backend::for_name("claude").unwrap();
+        let s = summarize(ruler, "haiku", "Building the expression parser; not all tests passing yet.", &thoughts, &deltas, 120)
             .expect("summarizer returned None (real claude call failed?)");
         println!("\nCUMULATIVE: {}\nWINDOWED:   {}\n", s.cumulative, s.windowed);
         assert!(!s.cumulative.is_empty());
