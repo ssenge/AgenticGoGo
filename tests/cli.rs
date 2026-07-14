@@ -31,6 +31,21 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
+/// Turn `dir` into a clean git repo on `main` with one (empty) commit. Session isolation is
+/// MANDATORY, so `agg run` refuses to start without a git repo + clean tree + non-detached HEAD;
+/// every test that drives the loop needs this. The commit is empty so the config, the fake
+/// `claude`, and the worker's output all stay UNTRACKED — which `is_clean` ignores, so the tree
+/// reads clean and sessions branch from a born `main`.
+fn git_init(dir: &Path) {
+    let g = |args: &[&str]| {
+        Command::new("git").args(args).current_dir(dir).output().unwrap()
+    };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    g(&["commit", "-q", "--allow-empty", "-m", "agg baseline"]);
+}
+
 /// Assert `agg run` ended with a specific exit code. Codes: 0 goals-met/stopped, 3 halt,
 /// 4 max-sessions, 1 hard error. (A run that reaches the session cap with goals unmet exits 4.)
 fn assert_exit(out: &std::process::Output, code: i32, combined: &str) {
@@ -64,6 +79,8 @@ exit 0
 "#,
     );
     chmod_x(&claude);
+    // mandatory session isolation needs a clean git base to branch from.
+    git_init(tmp.path());
 
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     (tmp, path)
@@ -572,6 +589,7 @@ exit 0
         "project: memproj2\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: true }\n",
     );
     write(dir, "AGG_RESUME.md", "do work\n");
+    git_init(dir); // mandatory session isolation needs a git base
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -639,7 +657,7 @@ exit 0
     write(
         dir,
         "agg.yaml",
-        "project: rbk\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: true }\n",
+        "project: rbk\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { rollback_on_regression: true }\n",
     );
     write(dir, "AGG_RESUME.md", "do work\n");
     g(&["add", "-A"]);
@@ -707,7 +725,7 @@ exit 0
     write(
         dir,
         "agg.yaml",
-        "project: flake\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: true }\n",
+        "project: flake\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { rollback_on_regression: true }\n",
     );
     write(dir, "AGG_RESUME.md", "do work\n");
     g(&["add", "-A"]);
@@ -779,7 +797,7 @@ exit 0
     write(
         dir,
         "agg.yaml",
-        "project: brokenjudge\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: true }\n",
+        "project: brokenjudge\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { rollback_on_regression: true }\n",
     );
     write(dir, "AGG_RESUME.md", "do work\n");
     g(&["add", "-A"]);
@@ -863,6 +881,7 @@ fi
          hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
     write(dir, "AGG_RESUME.md", "create the file did_work\n");
+    git_init(dir); // mandatory session isolation needs a git base
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
     let combined = format!(
@@ -915,6 +934,7 @@ fn a_baseline_satisfied_run_enters_no_stage() {
          hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
     write(dir, "AGG_RESUME.md", "noop\n");
+    git_init(dir); // mandatory session isolation needs a git base (did_work stays untracked → clean)
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
     let combined = format!(
@@ -978,6 +998,7 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
          hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
     write(dir, "AGG_RESUME.md", "work\n");
+    git_init(dir); // mandatory session isolation needs a git base
 
     let log = dir.join("run.log");
     let mut child = agg(dir, &path)

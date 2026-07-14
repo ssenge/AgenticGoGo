@@ -86,17 +86,17 @@ pub struct AggConfig {
     pub session_isolation: SessionIsolation,
 }
 
-/// Per-session git isolation. Each session runs on `<branch_prefix>/<project>/session-<N>`
-/// branched from `base_branch`. After the session, agg merges that branch back into the base
-/// — DEFAULT = merge — UNLESS the worker wrote the `red_file` (a veto), in which case the
-/// session branch is discarded and the base is left untouched. A crashed/killed worker that
-/// never wrote the red file still merges its partial commits (default-merge). The worker is
-/// the authority on green/red; agg only acts on the veto file.
+/// Per-session git isolation — MANDATORY, no master switch. Each session runs on
+/// `<branch_prefix>/<project>/session-<N>` branched from `base_branch`. After the session, agg
+/// merges that branch back into the base — DEFAULT = merge — UNLESS the worker wrote the
+/// `red_file` (a veto), in which case the session branch is discarded and the base is left
+/// untouched. A crashed/killed worker that never wrote the red file still merges its partial
+/// commits (default-merge). The worker is the authority on green/red; agg only acts on the veto
+/// file. Isolation is what makes "the loop never makes it worse" true, so it is not optional:
+/// `agg run` REFUSES to start without a git repo, a clean tree and a non-detached HEAD
+/// (see `loop_::run`) rather than silently committing straight onto the user's branch.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionIsolation {
-    /// master switch (default OFF — existing projects keep committing to the current branch).
-    #[serde(default)]
-    pub enabled: bool,
     /// branch name prefix; full name is `<prefix>/<project>/session-<N>`.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
@@ -121,7 +121,6 @@ pub struct SessionIsolation {
 impl Default for SessionIsolation {
     fn default() -> Self {
         Self {
-            enabled: false,
             branch_prefix: default_branch_prefix(),
             base_branch: String::new(),
             red_file: default_red_file(),
