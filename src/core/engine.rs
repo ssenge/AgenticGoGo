@@ -209,10 +209,16 @@ impl Engine {
         // Judging (the expensive part) is separated from folding the results in (the cheap part)
         // so the former has ONE choke point — see `run_judges`.
         let verdicts = self.run_judges(cwd, config_base, ruler);
+        // Judges that RAN this cycle and errored — backs `any_judge_error`. Only the ones that ran:
+        // a skipped judge cannot have errored, and reporting a stale error would be a lie.
+        let mut judge_errors: Vec<String> = Vec::new();
         for (goal, verdict) in self.goals.iter_mut().zip(verdicts) {
             // None = skipped: status can't have changed → keep the last verdict, skip the (maybe
             // expensive) judge. `last_verdict`/`state` are left intact.
             if let Some(v) = verdict {
+                if v.error.is_some() {
+                    judge_errors.push(goal.id.clone());
+                }
                 goal.apply(v);
                 update_recheck_state(goal, cwd);
             }
@@ -232,7 +238,7 @@ impl Engine {
             })
             .collect();
 
-        self.conditions_with_deltas(run, deltas)
+        self.conditions_with_deltas(run, deltas, &judge_errors)
     }
 
     /// Run the judge for every goal that needs one, and return the verdicts POSITIONALLY —
@@ -298,12 +304,19 @@ impl Engine {
     /// cost). Used after a rollback restores base truth, so `res.stop`/`res.halt` reflect what
     /// actually landed on base — not the discarded merge. Returns empty deltas.
     pub fn conditions_only(&self, run: &RunState) -> CycleResult {
-        self.conditions_with_deltas(run, Vec::new())
+        // no judge ran here (that is the whole point) → `any_judge_error` is honestly false.
+        self.conditions_with_deltas(run, Vec::new(), &[])
     }
 
-    fn conditions_with_deltas(&self, run: &RunState, deltas: Vec<GoalDelta>) -> CycleResult {
+    fn conditions_with_deltas(
+        &self,
+        run: &RunState,
+        deltas: Vec<GoalDelta>,
+        judge_errors: &[String],
+    ) -> CycleResult {
         let ctx = StopContext {
             goals: &self.goals,
+            judge_errors,
             tokens_spent: run.tokens_spent,
             budget_total: run.budget_total,
             cost_spent: run.cost_spent,
