@@ -11,7 +11,9 @@
 pub mod config;
 pub mod engine;
 pub mod judge;
+pub mod judges;
 pub mod memory;
 pub mod model;
+pub mod sequence;
 pub mod stop;
 pub mod verdicts;

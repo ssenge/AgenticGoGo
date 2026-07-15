@@ -1,44 +1,42 @@
-//! Configuration loading: `agg.yaml` (harness) and `goals.yaml` (goals + stop).
+//! Configuration loading: `agg.yaml` (harness + steps + sequence). One file now — `goals.yaml`
+//! is DELETED (§7.1): a judge IS a goal, resolved by name from disk.
 //!
-//! Both are plain YAML. Env vars (`AGG_*`) override a few hot knobs for CI.
+//! `#[serde(deny_unknown_fields)]` is on EVERY struct here (§4.1): without it a stale top-level
+//! `budget:` after the config move is silently ignored — an autonomous loop whose spend ceiling is
+//! a decorative key. That guard is also what makes "any other key in a step body (esp `judge_*`) is
+//! a HARD ERROR" true.
 
-use crate::backend::AgentBackend;
-use crate::core::model::Goal;
-use anyhow::Result;
+use crate::backend::{for_name, AgentBackend};
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Harness configuration (`agg.yaml`).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AggConfig {
     pub project: String,
-    /// which coding agent drives the RUN stage. See `crate::backend::KNOWN`.
-    ///
-    /// Agents are NOT interchangeable — they differ in whether they can report a dollar cost,
-    /// resume a session, or make a tools-off judge call. Anything this config asks for that the
-    /// chosen agent cannot do is refused at STARTUP (`crate::capability::check`), never silently
-    /// ignored.
-    #[serde(default = "default_agent")]
-    pub agent: String,
-    /// model id for the inner worker. `None` (the key omitted) = **ask the backend at USE time**
-    /// ([`AggConfig::model`]) — NOT "resolve a default now". The difference is the whole reason
-    /// `backend::active()` is gone: a backend-specific serde default made this file unparseable
-    /// without already knowing the agent. See the `backend` module docs.
+
+    /// Inherited by EVERY step; a step may override any of these (§4).
     #[serde(default)]
-    pub model: Option<String>,
-    /// `--effort` level passed to each headless worker (`claude -p`). Valid CLI
-    /// values: low | medium | high | xhigh | max. Claude defaults to `max` — the top of
-    /// the `-p` flag enum (the interactive-only `ultracode` tier is NOT reachable
-    /// from `-p`; workers opt into multi-agent orchestration via the prompt instead,
-    /// see `worker_prompt_prefix`). An unrecognized value makes the CLI fall back to
-    /// its default effort (with a warning), so keep it to the valid set.
-    ///
-    /// `None` = the backend's own default ([`AggConfig::effort`]); `Some("")` = pass no effort at
-    /// all. They differ: Codex's default IS empty, Claude's is not.
+    pub defaults: Defaults,
+
+    /// THE RULER — a run-level, immutable block. Naming any of these keys in a step body is a HARD
+    /// ERROR (a grader that moves makes verdicts incomparable across cycles). This is what
+    /// [`Self::ruler_backend`] reads.
     #[serde(default)]
-    pub effort: Option<String>,
-    /// path to the fat resume prompt fed to each worker (`-p` argument)
-    pub resume_prompt: String,
+    pub judge: JudgeCfg,
+
+    /// The step palette. NAME → a body of overrides. The name is a user string literal; any key in
+    /// the body other than the [`StepBody`] fields (esp `judge_*`) is a HARD ERROR (deny_unknown).
+    #[serde(default)]
+    pub steps: BTreeMap<String, StepBody>,
+
+    /// The repeating list of statements + the run-level ceilings/DoD.
+    pub sequence: Sequence,
+
+    // ---- top-level survivors (unchanged, §4.1) ----
     #[serde(default = "default_heartbeat")]
     pub heartbeat_secs: u64,
     #[serde(default)]
@@ -46,150 +44,182 @@ pub struct AggConfig {
     #[serde(default = "default_backoff")]
     pub ratelimit_backoff_secs: u64,
     #[serde(default)]
-    pub budget: Budget,
-    #[serde(default)]
-    pub cost: Cost,
-    #[serde(default)]
-    pub summary: Summary,
-    /// Institutional memory (#3) — durable cross-session learnings. See [`Memory`].
-    #[serde(default)]
     pub memory: Memory,
-    /// Continue each session from the previous one's context (`--resume`) instead of
-    /// a fresh context. DEFAULT false: fresh-context-per-session is the core discipline
-    /// (no context accumulation = no runaway cost). Enable only for short, tightly-scoped
-    /// runs where carrying context across sessions genuinely helps and won't balloon.
-    #[serde(default)]
-    pub resume_sessions: bool,
-    /// Generic lifecycle hooks — shell commands agg runs at defined moments. TOOL-AGNOSTIC:
-    /// agg knows nothing about what they do. Use them to wire in YOUR tools (a code-graph
-    /// builder, a memory-cache refresh, a linter, …). See [`Hooks`].
     #[serde(default)]
     pub hooks: Hooks,
-    /// Files whose contents are prepended to every worker prompt (after any operator
-    /// instruction, before the resume prompt). Compose reusable tooling/guidance fragments
-    /// here instead of baking them into agg. Paths are relative to the project dir.
     #[serde(default)]
     pub prompt_includes: Vec<String>,
-    /// Extra flags appended VERBATIM to every worker invocation — so the vocabulary is your AGENT's
-/// own (`--allowedTools` is Claude's; Copilot takes `--max-ai-credits`). The worker ALWAYS runs with
-    /// `--dangerously-skip-permissions` (a headless `-p` worker cannot answer permission prompts,
-    /// so it needs full host access — see the README "What the worker can do"). Use this to
-    /// constrain it: e.g. `worker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "src"]`, or
-    /// to add any other `claude` flag agg doesn't manage. Applied after agg's own flags, before
-    /// `-p <prompt>`. Empty by default.
     #[serde(default)]
-    pub worker_args: Vec<String>,
-    /// Per-session git branch isolation. When enabled, each worker session runs on its own
-    /// branch and is merged back to the base ONLY if the worker did not veto it. See
-    /// [`SessionIsolation`].
+    pub summary: Summary,
     #[serde(default)]
     pub session_isolation: SessionIsolation,
 }
 
-/// Per-session git isolation — MANDATORY, no master switch. Each session runs on
-/// `<branch_prefix>/<project>/session-<N>` branched from `base_branch`. After the session, agg
-/// merges that branch back into the base — DEFAULT = merge — UNLESS the worker wrote the
-/// `red_file` (a veto), in which case the session branch is discarded and the base is left
-/// untouched. A crashed/killed worker that never wrote the red file still merges its partial
-/// commits (default-merge). The worker is the authority on green/red; agg only acts on the veto
-/// file. Isolation is what makes "the loop never makes it worse" true, so it is not optional:
-/// `agg run` REFUSES to start without a git repo, a clean tree and a non-detached HEAD
-/// (see `loop_::run`) rather than silently committing straight onto the user's branch.
+/// Values inherited by every step (§4). A step body overrides any of them.
 #[derive(Debug, Clone, Deserialize)]
-pub struct SessionIsolation {
-    /// branch name prefix; full name is `<prefix>/<project>/session-<N>`.
-    #[serde(default = "default_branch_prefix")]
-    pub branch_prefix: String,
-    /// base branch sessions are cut from + merged into. Empty = whatever branch agg was
-    /// launched on (captured at startup).
+#[serde(deny_unknown_fields)]
+pub struct Defaults {
+    /// the WORKER default agent.
+    #[serde(default = "default_agent")]
+    pub agent: String,
+    /// worker model; `None` = the step's backend default, resolved at USE time.
     #[serde(default)]
-    pub base_branch: String,
-    /// the worker's veto file (relative to project dir). Present after a session ⇒ DO NOT
-    /// merge (discard the session branch). agg deletes it before each session so a stale
-    /// veto never blocks a later merge.
-    #[serde(default = "default_red_file")]
-    pub red_file: String,
-    /// ROLLBACK GATE (#11): stage the session's merge, re-run the judges against the merged tree,
-    /// and ROLL BACK the merge if a previously-met goal regressed because of it (base stays put,
-    /// the branch is kept for inspection). DEFAULT on when isolation is on — it can only prevent a
-    /// known-bad merge from landing. A judge that merely *couldn't run* (timeout/spawn-fail/
-    /// rate-limit/bad-JSON) never triggers rollback — only a real regression does.
-    #[serde(default = "default_true")]
-    pub rollback_on_regression: bool,
+    pub model: Option<String>,
+    /// thinking effort; `None` = the backend default; `Some("")` = pass none.
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// the sandbox constraint — inheritable, so an operator sets it once (§4.1).
+    #[serde(default)]
+    pub worker_args: Vec<String>,
+    /// the forward state file (`AGG_STATE.md`), resolved against the project dir; the AGENT writes
+    /// it best-effort (§5.6). Renamed from the old `resume_prompt`.
+    #[serde(default = "default_state")]
+    pub state: String,
 }
 
-impl Default for SessionIsolation {
+impl Default for Defaults {
     fn default() -> Self {
-        Self {
-            branch_prefix: default_branch_prefix(),
-            base_branch: String::new(),
-            red_file: default_red_file(),
-            rollback_on_regression: default_true(),
+        Defaults {
+            agent: default_agent(),
+            model: None,
+            effort: None,
+            worker_args: vec![],
+            state: default_state(),
         }
     }
 }
 
-/// Generic lifecycle hooks. Each is a list of shell commands run (in order) at that moment,
-/// from the project dir. agg is tool-agnostic — these are whatever YOU put in them.
-///
-/// `background` commands are long-lived (e.g. a file watcher): agg spawns them at loop start
-/// in the worker's reaping domain and they are cleaned up by the straggler reaper, so a
-/// `--watch`-style process can't leak.
+/// THE RULER (§4): the backend that runs LLM judges and the summarizer. Run-level and immutable.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeCfg {
+    #[serde(default = "default_agent")]
+    pub agent: String,
+    /// `None` = the ruler's own cheap-model default, resolved at USE time.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// EVERY judge's timeout, script and LLM alike (seconds).
+    #[serde(default = "default_judge_timeout")]
+    pub timeout: u64,
+}
+
+impl Default for JudgeCfg {
+    fn default() -> Self {
+        JudgeCfg { agent: default_agent(), model: None, timeout: default_judge_timeout() }
+    }
+}
+
+/// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_judges`. The
+/// COMPLETE legal key list (§4.1); any other key is a HARD ERROR (deny_unknown), which is what
+/// makes naming a `judge_*` key in a step fail loudly.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepBody {
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub worker_args: Option<Vec<String>>,
+    #[serde(default)]
+    pub state: Option<String>,
+    /// ADDITIVE to the composed prompt (§5.6), never replacing.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// no DoD judges run after this step ⇒ nothing merges; the work STAGES (§5.7).
+    #[serde(default)]
+    pub skip_judges: bool,
+}
+
+/// The sequence: a repeating statement list + the run-level ceilings and Definition of Done. Budget,
+/// cost and max_sessions MOVED here from top level / the CLI (§4.1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sequence {
+    /// statement lines (`worker x4`, `if stalled then reconsider`) — parsed by `core::sequence`.
+    pub steps: Vec<String>,
+    /// output-token ceiling — WORKER *and* JUDGE spend (§5.6). MOVED from top level.
+    #[serde(default)]
+    pub budget: Budget,
+    /// dollar ceiling. MOVED from top level.
+    #[serde(default)]
+    pub cost: Cost,
+    /// 0 = unlimited. Backs `over_iterations`. MOVED from the `--max-sessions` CLI flag (which
+    /// survives and WINS when passed — §4.1).
+    #[serde(default)]
+    pub max_sessions: u32,
+    /// RENAME of the shipped `session_isolation.rollback_on_regression` (§5.7).
+    #[serde(default = "default_true")]
+    pub gate_regressions: bool,
+    /// judges that must STAY met.
+    #[serde(default)]
+    pub invariants: Vec<String>,
+    /// the Definition of Done — success stop (exit 0). RENAME of `stop_when`.
+    #[serde(default = "default_done_if")]
+    pub done_if: String,
+    /// the giving-up guard (exit 3). RENAME of `halt_when`.
+    #[serde(default)]
+    pub abort_if: Option<String>,
+}
+
+/// Per-session git isolation — MANDATORY, no master switch. The keep/rollback decision moved to
+/// `sequence.gate_regressions`; only these three keys survive here (§4.1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionIsolation {
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
+    #[serde(default)]
+    pub base_branch: String,
+    #[serde(default = "default_red_file")]
+    pub red_file: String,
+}
+
+impl Default for SessionIsolation {
+    fn default() -> Self {
+        SessionIsolation {
+            branch_prefix: default_branch_prefix(),
+            base_branch: String::new(),
+            red_file: default_red_file(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Hooks {
-    /// run once, at loop startup (before the first session). e.g. build a code graph.
     #[serde(default)]
     pub on_start: Vec<String>,
-    /// run before each worker session. e.g. incremental refresh of a cache/graph.
     #[serde(default)]
     pub on_session_start: Vec<String>,
-    /// run after each session's judging. e.g. persist a memory note, update an index.
     #[serde(default)]
     pub on_session_end: Vec<String>,
-    /// run once, when the loop stops (success/halt/bus-stop). e.g. teardown, final export.
     #[serde(default)]
     pub on_stop: Vec<String>,
-    /// long-lived commands spawned at loop start (e.g. a `--watch`). Reaped on stop.
     #[serde(default)]
     pub background: Vec<String>,
 }
 
-/// LLM-summary settings. After each cycle (or every N secs), a cheap
-/// model condenses recent worker thoughts + goal deltas into a cumulative + a
-/// windowed one-liner.
+/// LLM-summary settings. `model` is dropped (§4.1) — the summarizer runs on the RULER.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Summary {
-    /// master switch
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// cheap model for the summarizer (haiku by default). `None` = the RULER's own cheap-model
-    /// default, resolved at use time ([`Summary::model`]) — see [`AggConfig::model`].
-    #[serde(default)]
-    pub model: Option<String>,
-    /// minimum seconds between summaries (rate-limit the summarizer itself)
     #[serde(default = "default_summary_interval")]
     pub min_interval_secs: u64,
 }
 
 impl Default for Summary {
     fn default() -> Self {
-        Summary {
-            enabled: default_true(),
-            model: None,
-            min_interval_secs: default_summary_interval(),
-        }
-    }
-}
-
-impl Summary {
-    /// The summarizer's model, resolved against the backend that will actually make the call —
-    /// the RULER, not the worker. Absent = that backend's own cheap default.
-    pub fn model<'a>(&'a self, ruler: &dyn AgentBackend) -> &'a str {
-        self.model.as_deref().unwrap_or_else(|| ruler.default_summary_model())
+        Summary { enabled: default_true(), min_interval_secs: default_summary_interval() }
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Watchdog {
     #[serde(default = "default_wd_idle")]
     pub idle_secs: u64,
@@ -204,45 +234,26 @@ impl Default for Watchdog {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Budget {
-    /// total output-token ceiling; `None` = unlimited
     #[serde(default)]
     pub total: Option<u64>,
 }
 
-/// Dollar-spend ceiling (`cost.total`). Distinct from [`Budget`] (tokens). We don't price
-/// anything ourselves — Claude reports `total_cost_usd` on each session's result event
-/// (correctly per-model, `[1m]`-variant- and cache-aware) and we just sum it. The `over_cost`
-/// stop term trips once the sum exceeds `total`.
-///
-/// NOTE: `total_cost_usd` is the API-EQUIVALENT list price of the work, not necessarily money
-/// billed. On a Max/Pro **subscription** the user is not charged per token, so this is a usage
-/// proxy — the dashboard/`agg status` label it `(API-eq)`. It's still a valid runaway ceiling
-/// (relative spend); users wanting a plan-agnostic cap should use `over_budget`/`over_iterations`.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Cost {
-    /// total dollar ceiling; `None` = unlimited
     #[serde(default)]
     pub total: Option<f64>,
 }
 
-/// Institutional-memory settings (#3). agg maintains a durable `AGG_MEMORY.md` at the project
-/// root (rolled-up learnings) and injects a BOUNDED slice of it + a last-session block into every
-/// worker prompt. ENFORCED — agg writes memory itself even if the worker crashes / is killed /
-/// ignores it. Two independent caps: `max_kb` bounds the file on disk; `inject_kb` bounds how
-/// much is injected per prompt (token-cost control — a large audit file must not balloon prompts).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Memory {
-    /// master switch (DEFAULT on — memory is a core continuity feature).
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// on-disk cap for `AGG_MEMORY.md`; when exceeded the OLDEST entries drop first.
-    /// `None` = no cap. `AGG_MEMORY_MAX_KB` overrides (0 ⇒ uncapped).
     #[serde(default = "default_memory_max_kb")]
     pub max_kb: Option<u64>,
-    /// READ-side cap: only the NEWEST `inject_kb` of the durable file is injected into each
-    /// prompt, independent of `max_kb`. Bounds per-prompt input tokens. `None` = inject all
-    /// (NOT recommended). `AGG_MEMORY_INJECT_KB` overrides (0 ⇒ inject all).
     #[serde(default = "default_memory_inject_kb")]
     pub inject_kb: Option<u64>,
 }
@@ -257,21 +268,12 @@ impl Default for Memory {
     }
 }
 
-/// Goals file (`goals.yaml`): the goal list + stop/halt conditions.
-#[derive(Debug, Clone, Deserialize)]
-pub struct GoalsConfig {
-    pub goals: Vec<Goal>,
-    /// expression that, when true, stops the loop (success). Default: all goals met.
-    #[serde(default = "default_stop")]
-    pub stop_when: String,
-    /// expression that, when true, halts immediately (failure/guard). Optional.
-    #[serde(default)]
-    pub halt_when: Option<String>,
-}
-
 // ---- defaults ----
 fn default_agent() -> String {
     "claude".into()
+}
+fn default_state() -> String {
+    "AGG_STATE.md".into()
 }
 fn default_branch_prefix() -> String {
     "agg".into()
@@ -291,70 +293,116 @@ fn default_wd_idle() -> u64 {
 fn default_wd_cpu() -> u64 {
     180
 }
-fn default_stop() -> String {
+fn default_done_if() -> String {
     "all_goals".into()
 }
 fn default_true() -> bool {
     true
 }
+fn default_judge_timeout() -> u64 {
+    300
+}
 fn default_summary_interval() -> u64 {
     300
 }
 fn default_memory_max_kb() -> Option<u64> {
-    Some(64) // 64 KB on disk — generous for rolled-up learnings, bounded so it can't balloon.
+    Some(64)
 }
 fn default_memory_inject_kb() -> Option<u64> {
-    Some(8) // 8 KB into each prompt (~2k tokens) — keeps memory from undermining the budget.
+    Some(8)
+}
+
+/// A step body merged over [`Defaults`] — everything one worker session needs, resolved. The loop
+/// builds one per step at session-build time (§5.5). Agent/model/effort resolve against the STEP's
+/// backend, not a process-wide one.
+#[derive(Debug, Clone)]
+pub struct ResolvedStep {
+    pub name: String,
+    pub agent: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub worker_args: Vec<String>,
+    pub state: String,
+    pub prompt: Option<String>,
+    pub skip_judges: bool,
+}
+
+impl ResolvedStep {
+    /// The backend this step runs on.
+    pub fn backend(&self) -> Result<&'static dyn AgentBackend> {
+        for_name(&self.agent)
+    }
+    /// The worker model, resolved against the step's backend. Absent = the backend's own default.
+    pub fn model<'a>(&'a self, b: &dyn AgentBackend) -> &'a str {
+        self.model.as_deref().unwrap_or_else(|| b.default_model())
+    }
+    /// The worker effort, same resolution. Empty = pass no effort flag.
+    pub fn effort<'a>(&'a self, b: &dyn AgentBackend) -> &'a str {
+        self.effort.as_deref().unwrap_or_else(|| b.default_effort())
+    }
 }
 
 impl AggConfig {
-    /// The backend the WORKER runs on — the `agent:` key, resolved.
-    pub fn worker_backend(&self) -> Result<&'static dyn AgentBackend> {
-        crate::backend::for_name(&self.agent)
-    }
-
-    /// The **RULER**: the backend that runs the LLM judges and the summarizer.
-    ///
-    /// It is deliberately a SEPARATE resolution from [`Self::worker_backend`], even though today
-    /// it returns the same backend. The judge is the thing that decides whether the worker is
-    /// done; letting the worker's own agent be the judge's agent by construction is a coupling
-    /// nobody chose. There is no `judge:` config block yet (SEQUENCES §7.5), so for now the ruler
-    /// IS the worker's backend — but it is threaded as its own value everywhere downstream, so
-    /// giving it its own key is a change to this one function.
+    /// The **RULER**: the backend that runs the LLM judges and the summarizer. Reads `judge.agent`.
     pub fn ruler_backend(&self) -> Result<&'static dyn AgentBackend> {
-        self.worker_backend()
+        for_name(&self.judge.agent)
     }
 
-    /// The worker's model, resolved against the backend that will actually run it. Absent =
-    /// that backend's own default — resolved HERE, at use time, never at parse time.
-    pub fn model<'a>(&'a self, agent: &dyn AgentBackend) -> &'a str {
-        self.model.as_deref().unwrap_or_else(|| agent.default_model())
+    /// The default WORKER backend (`defaults.agent`) — for the banner/dashboard and for the paths
+    /// that want "the primary agent" without a specific step. Per-step, use [`Self::resolve_step`].
+    pub fn worker_backend(&self) -> Result<&'static dyn AgentBackend> {
+        for_name(&self.defaults.agent)
     }
 
-    /// The worker's thinking effort, same resolution as [`Self::model`]. Empty = pass no effort
-    /// flag at all (which is Codex's default, and a legal explicit choice on the others).
-    pub fn effort<'a>(&'a self, agent: &dyn AgentBackend) -> &'a str {
-        self.effort.as_deref().unwrap_or_else(|| agent.default_effort())
+    /// The judge model (`judge.model`), resolved against the ruler. Absent = the ruler's cheap default.
+    pub fn judge_model(&self, ruler: &dyn AgentBackend) -> String {
+        self.judge.model.clone().unwrap_or_else(|| ruler.default_summary_model().to_string())
     }
 
-    /// Read ONLY the `agent:` key, without parsing the rest of the config.
-    ///
-    /// This is NOT the ordering workaround it used to be — a full `load()` no longer needs a
-    /// backend (see the `backend` module docs). It survives for the commands that must name an
-    /// agent when agg.yaml may be MISSING or BROKEN: `doctor` (diagnosing the broken config is
-    /// the job), `plan` and `judge` (both run off goals.yaml alone), and `skills install` (runs
-    /// before the project is set up at all). Missing / unparseable / no `agent:` → `"claude"`.
-    pub fn agent_name(path: &Path) -> String {
-        #[derive(serde::Deserialize)]
-        struct JustTheAgent {
-            #[serde(default = "default_agent")]
-            agent: String,
+    /// Merge a named step's body over [`Defaults`] into a [`ResolvedStep`]. Errors (listing the
+    /// palette) if the name is not a key in `steps:` — a startup hard error, never a runtime surprise.
+    pub fn resolve_step(&self, name: &str) -> Result<ResolvedStep> {
+        let body = self.steps.get(name).ok_or_else(|| {
+            let names: Vec<&str> = self.steps.keys().map(String::as_str).collect();
+            anyhow!("unknown step `{name}` — not a key in `steps:`. defined: {}", names.join(", "))
+        })?;
+        Ok(ResolvedStep {
+            name: name.to_string(),
+            agent: body.agent.clone().unwrap_or_else(|| self.defaults.agent.clone()),
+            model: body.model.clone().or_else(|| self.defaults.model.clone()),
+            effort: body.effort.clone().or_else(|| self.defaults.effort.clone()),
+            worker_args: body.worker_args.clone().unwrap_or_else(|| self.defaults.worker_args.clone()),
+            state: body.state.clone().unwrap_or_else(|| self.defaults.state.clone()),
+            prompt: body.prompt.clone(),
+            skip_judges: body.skip_judges,
+        })
+    }
+
+    /// Every distinct agent named anywhere (defaults + judge + each step) — so `agg doctor` and the
+    /// capability check can cover EVERY agent the sequence names (§7.3), not just one.
+    pub fn agent_names(&self) -> Vec<String> {
+        let mut names = vec![self.defaults.agent.clone(), self.judge.agent.clone()];
+        for body in self.steps.values() {
+            if let Some(a) = &body.agent {
+                names.push(a.clone());
+            }
         }
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_yaml::from_str::<JustTheAgent>(&t).ok())
-            .map(|j| j.agent)
-            .unwrap_or_else(default_agent)
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Read ONLY the worker agent (`defaults.agent`), tolerating a missing / unparseable / partial
+    /// config — for `doctor` / `skills install`, which must name an agent when agg.yaml may be
+    /// absent or broken. Missing → `"claude"`.
+    pub fn agent_name(path: &Path) -> String {
+        read_agent(path, false)
+    }
+
+    /// Read ONLY the ruler agent (`judge.agent`, else `defaults.agent`) — for `plan` / `judge`,
+    /// which run judges on the RULER off agg.yaml alone.
+    pub fn ruler_name(path: &Path) -> String {
+        read_agent(path, true)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -363,10 +411,11 @@ impl AggConfig {
         Ok(cfg)
     }
 
-    /// CI-friendly env overrides for the hot knobs.
+    /// CI-friendly env overrides, re-homed under the new shape (§4.1). `AGG_MODEL` → defaults.model,
+    /// `AGG_COST_TOTAL` → sequence.cost.total, the rest unchanged.
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("AGG_MODEL") {
-            self.model = Some(v);
+            self.defaults.model = Some(v);
         }
         if let Some(v) = env_u64("AGG_HEARTBEAT_SECS") {
             self.heartbeat_secs = v;
@@ -380,11 +429,9 @@ impl AggConfig {
         if let Some(v) = env_u64("AGG_RATELIMIT_BACKOFF") {
             self.ratelimit_backoff_secs = v;
         }
-        // CI safety knob: clamp the dollar ceiling without editing agg.yaml.
         if let Some(v) = env_f64("AGG_COST_TOTAL") {
-            self.cost.total = Some(v);
+            self.sequence.cost.total = Some(v);
         }
-        // memory caps (CI / quick experiments): 0 ⇒ uncapped/inject-all.
         if let Some(v) = env_u64("AGG_MEMORY_MAX_KB") {
             self.memory.max_kb = if v == 0 { None } else { Some(v) };
         }
@@ -394,12 +441,29 @@ impl AggConfig {
     }
 }
 
-impl GoalsConfig {
-    pub fn load(path: &Path) -> Result<Self> {
-        let cfg: GoalsConfig = crate::util::load_yaml(path)?;
-        anyhow::ensure!(!cfg.goals.is_empty(), "goals.yaml has no goals");
-        Ok(cfg)
+/// Partial-parse the agent name(s) from agg.yaml without the deny_unknown_fields full parse, so it
+/// survives a config that is missing / broken / half-written. `ruler` picks `judge.agent`.
+fn read_agent(path: &Path, ruler: bool) -> String {
+    #[derive(Deserialize, Default)]
+    struct AgentOnly {
+        agent: Option<String>,
     }
+    #[derive(Deserialize, Default)]
+    struct Partial {
+        #[serde(default)]
+        defaults: AgentOnly,
+        #[serde(default)]
+        judge: AgentOnly,
+    }
+    let parsed: Option<Partial> =
+        std::fs::read_to_string(path).ok().and_then(|t| serde_yaml::from_str(&t).ok());
+    let p = parsed.unwrap_or_default();
+    if ruler {
+        p.judge.agent.or(p.defaults.agent)
+    } else {
+        p.defaults.agent
+    }
+    .unwrap_or_else(default_agent)
 }
 
 fn env_u64(key: &str) -> Option<u64> {
