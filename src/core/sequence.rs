@@ -188,3 +188,166 @@ impl Cursor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------- parse_statement (§5.4) ----------------
+
+    #[test]
+    fn a_bare_name_is_a_step_ref() {
+        assert_eq!(parse_statement("worker").unwrap(), Statement::Step("worker".into()));
+        // surrounding whitespace is trimmed.
+        assert_eq!(parse_statement("  reconsider  ").unwrap(), Statement::Step("reconsider".into()));
+    }
+
+    #[test]
+    fn repeat_accepts_both_the_glued_and_spaced_forms() {
+        // `worker x4` (2 tokens) and `worker x 4` (3 tokens) both mean "run worker 4 times".
+        assert_eq!(parse_statement("worker x4").unwrap(), Statement::Repeat("worker".into(), 4));
+        assert_eq!(parse_statement("worker x 4").unwrap(), Statement::Repeat("worker".into(), 4));
+        // the `x` keyword is case-insensitive in both forms.
+        assert_eq!(parse_statement("worker X4").unwrap(), Statement::Repeat("worker".into(), 4));
+        assert_eq!(parse_statement("worker X 4").unwrap(), Statement::Repeat("worker".into(), 4));
+    }
+
+    #[test]
+    fn a_repeat_count_must_be_a_positive_integer() {
+        assert!(parse_statement("worker x0").unwrap_err().to_string().contains(">= 1"));
+        let e = parse_statement("worker x abc").unwrap_err().to_string();
+        assert!(e.contains("must be an integer"), "got: {e}");
+    }
+
+    #[test]
+    fn a_branch_parses_condition_then_and_optional_else() {
+        assert_eq!(
+            parse_statement("if stalled then reconsider").unwrap(),
+            Statement::Branch { cond: "stalled".into(), then: "reconsider".into(), els: None }
+        );
+        assert_eq!(
+            parse_statement("if stalled then reconsider else worker").unwrap(),
+            Statement::Branch {
+                cond: "stalled".into(),
+                then: "reconsider".into(),
+                els: Some("worker".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_branch_condition_may_be_a_multi_token_expression() {
+        // the condition is the whole §5.3 grammar — it survives spaces and operators.
+        assert_eq!(
+            parse_statement("if coverage.value >= 80 then ship").unwrap(),
+            Statement::Branch { cond: "coverage.value >= 80".into(), then: "ship".into(), els: None }
+        );
+    }
+
+    #[test]
+    fn branch_keywords_are_case_insensitive() {
+        assert_eq!(
+            parse_statement("IF stalled THEN reconsider ELSE worker").unwrap(),
+            Statement::Branch {
+                cond: "stalled".into(),
+                then: "reconsider".into(),
+                els: Some("worker".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_branch_target_must_be_a_single_step_name() {
+        // no nesting, no list (§5.4): more than one token after `then`/`else` is an error.
+        assert!(parse_statement("if x then a b").unwrap_err().to_string().contains("single step name"));
+        assert!(parse_statement("if x then a else b c").unwrap_err().to_string().contains("single step name"));
+    }
+
+    #[test]
+    fn a_branch_without_then_or_condition_is_an_error() {
+        assert!(parse_statement("if stalled reconsider").unwrap_err().to_string().contains("missing `then`"));
+        assert!(parse_statement("if then reconsider").unwrap_err().to_string().contains("empty condition"));
+    }
+
+    #[test]
+    fn parse_refuses_an_empty_sequence() {
+        assert!(parse(&[]).unwrap_err().to_string().contains("at least one step"));
+    }
+
+    #[test]
+    fn step_names_and_condition_expose_the_run_set_pieces() {
+        let b = parse_statement("if stalled then reconsider else worker").unwrap();
+        assert_eq!(b.step_names(), vec!["reconsider", "worker"]);
+        assert_eq!(b.condition(), Some("stalled"));
+        let s = parse_statement("worker x3").unwrap();
+        assert_eq!(s.step_names(), vec!["worker"]);
+        assert_eq!(s.condition(), None);
+    }
+
+    // ---------------- Cursor (§5.5) ----------------
+
+    /// A cursor whose branches never fire — the common all-unconditional case.
+    fn no_branches(c: &mut Cursor, n: usize) -> Vec<String> {
+        (0..n).map(|_| c.next_step(&mut |_| Ok(false)).unwrap()).collect()
+    }
+
+    #[test]
+    fn a_repeat_yields_the_step_n_times_then_moves_on() {
+        let mut c = Cursor::new(vec![Statement::Repeat("w".into(), 3), Statement::Step("r".into())]);
+        // w w w r, then it wraps: w w w r …
+        assert_eq!(no_branches(&mut c, 5), vec!["w", "w", "w", "r", "w"]);
+    }
+
+    #[test]
+    fn a_branch_takes_then_when_true_and_falls_through_when_false() {
+        // `w`, then `if cond then r` (no else). When cond is false the branch falls through and the
+        // lap wraps back to `w`; when true it yields `r`.
+        let stmts = vec![
+            Statement::Step("w".into()),
+            Statement::Branch { cond: "cond".into(), then: "r".into(), els: None },
+        ];
+        let mut c = Cursor::new(stmts.clone());
+        // cond=false forever → only `w` ever runs.
+        assert_eq!(no_branches(&mut c, 3), vec!["w", "w", "w"]);
+
+        let mut c2 = Cursor::new(stmts);
+        // `w`, then the branch (its FIRST encounter) is true → `r`, then the lap wraps to `w`.
+        let mut evals = [true].into_iter();
+        let got: Vec<String> = (0..3)
+            .map(|_| c2.next_step(&mut |_| Ok(evals.next().unwrap_or(false))).unwrap())
+            .collect();
+        assert_eq!(got, vec!["w", "r", "w"]);
+    }
+
+    #[test]
+    fn a_missing_else_falls_through_to_the_next_statement() {
+        // `if cond then a` (false) must NOT yield `a`; it falls through to the unconditional `b`.
+        let mut c = Cursor::new(vec![
+            Statement::Branch { cond: "cond".into(), then: "a".into(), els: None },
+            Statement::Step("b".into()),
+        ]);
+        assert_eq!(no_branches(&mut c, 2), vec!["b", "b"]);
+    }
+
+    #[test]
+    fn an_else_is_taken_when_the_condition_is_false() {
+        let mut c = Cursor::new(vec![Statement::Branch {
+            cond: "cond".into(),
+            then: "a".into(),
+            els: Some("b".into()),
+        }]);
+        assert_eq!(no_branches(&mut c, 2), vec!["b", "b"]);
+    }
+
+    #[test]
+    fn an_all_false_branch_lap_errors_instead_of_spinning_forever() {
+        // a pathological config of ONLY if-branches, all false, would loop with no step to dispatch.
+        // The cursor detects the full no-yield lap and errors rather than hang.
+        let mut c = Cursor::new(vec![
+            Statement::Branch { cond: "x".into(), then: "a".into(), els: None },
+            Statement::Branch { cond: "y".into(), then: "b".into(), els: None },
+        ]);
+        let err = c.next_step(&mut |_| Ok(false)).unwrap_err().to_string();
+        assert!(err.contains("without dispatching any step"), "got: {err}");
+    }
+}

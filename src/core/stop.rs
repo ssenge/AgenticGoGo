@@ -685,6 +685,26 @@ mod tests {
     }
 
     #[test]
+    fn aggregates_range_over_the_dod_set_not_the_run_set() {
+        // THE quantifier split (§5.3): `stalled` is a run-set-only judge (in an `if` condition, so
+        // in_dod:false) and is UNMET; `feature` is in the DoD-set and met. If the aggregates ranged
+        // over the run-set, `done_if: all_goals` could not fire until `stalled` was met — i.e. the
+        // loop would "succeed" only once it got stuck. They must range over the DoD-set, so:
+        let feature = g("feature", true, false); // in_dod:true (via the helper)
+        let mut stalled = g("stalled", false, false);
+        stalled.in_dod = false; // run-set only — an `if stalled then …` condition judge
+        let judges = [feature, stalled];
+
+        // all_goals ignores the unmet run-set-only judge → the DoD (just `feature`) is fully met.
+        assert!(ev("all_goals", &judges), "all_goals ranges over the DoD-set only");
+        // count_met / total / met_fraction likewise ignore it.
+        assert!(ev("count_met >= 1", &judges) && !ev("count_met >= 2", &judges));
+        assert!(ev("met_fraction >= 1.0", &judges), "1/1 of the DoD-set, not 1/2 of the run-set");
+        // but the BARE name still reads the run-set judge's (unmet) met bool — an `if` can see it.
+        assert!(!ev("stalled", &judges), "the bare name reads stalled's own met state");
+    }
+
+    #[test]
     fn boolean_over_ids() {
         let goals = [g("goal_a", true, false), g("goal_b", false, false)];
         assert!(ev("goal_a OR goal_b", &goals));

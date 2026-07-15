@@ -2,6 +2,9 @@
 //! `agg run`, with the right `outcome` per session disposition, and it SURVIVES across separate
 //! invocations. A fake, committing `claude` on PATH drives the loop — no model, no network.
 //!
+//! A judge IS a goal now (§7.1): there is no `goals.yaml`; the judge is a file at
+//! `agg/judges/<name>.sh` resolved by the NAME in `done_if` / `invariants`.
+//!
 //! Unix-only (the stub + PATH shimming use sh), like `tests/cli.rs`.
 
 #![cfg(unix)]
@@ -27,6 +30,13 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
+/// Write a script judge to `agg/judges/<name>.sh` (the project judges dir, §5.1) and make it
+/// executable. The NAME is what `done_if` / `invariants` reference.
+fn write_judge(dir: &Path, name: &str, body: &str) {
+    let p = write(dir, &format!("agg/judges/{name}.sh"), body);
+    chmod_x(&p);
+}
+
 fn git(dir: &Path, args: &[&str]) {
     Command::new("git").args(args).current_dir(dir).output().unwrap();
 }
@@ -41,9 +51,12 @@ fn git_init(dir: &Path) {
     git(dir, &["commit", "-q", "--allow-empty", "-m", "agg baseline"]);
 }
 
+/// `agg` rooted at `dir` with the fake agent on PATH. HOME is redirected into the project temp so
+/// `ensure_library` writes the `~/.agg/judges` standard library there (never the real home) — the
+/// tests stay hermetic and never touch the developer's machine.
 fn agg(dir: &Path, path: &str) -> Command {
     let mut c = Command::cargo_bin("agg").expect("agg binary built");
-    c.current_dir(dir).env("PATH", path);
+    c.current_dir(dir).env("PATH", path).env("HOME", dir.join(".home"));
     c
 }
 
@@ -60,10 +73,23 @@ fn read_rows(dir: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// A single-worker config whose Definition of Done is the judge named `feature`.
+fn base_config(project: &str) -> String {
+    format!(
+        "project: {project}\n\
+         defaults: {{ model: fake }}\n\
+         steps:\n  worker: {{}}\n\
+         sequence:\n  steps: [worker]\n  done_if: \"feature\"\n\
+         summary: {{ enabled: false }}\n\
+         memory: {{ enabled: false }}\n"
+    )
+}
+
 /// A fake `claude` on a private `bin/` that, on a `-p` run, creates `feature_done` and COMMITS it
 /// on the session branch (so the merge stages something real), then emits one stream-json result.
-/// Returns (project_dir, PATH-with-fake-claude-first).
-fn committing_project(project: &str, goals: &str) -> (tempfile::TempDir, String) {
+/// Returns (project_dir, PATH-with-fake-claude-first). The `feature` judge is met once the file
+/// exists; the DoD is `done_if: feature`.
+fn committing_project(project: &str) -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
@@ -84,15 +110,9 @@ exit 0
     );
     chmod_x(&bin.join("claude"));
 
-    write(dir, "judges/feature.sh", "#!/bin/sh\n[ -f feature_done ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
-    chmod_x(&dir.join("judges/feature.sh"));
-    write(dir, "agg/goals.yaml", goals);
-    write(
-        dir,
-        "agg/agg.yaml",
-        &format!("project: {project}\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: {{ enabled: false }}\nmemory: {{ enabled: false }}\n"),
-    );
-    write(dir, "agg/AGG_RESUME.md", "create feature_done\n");
+    write_judge(dir, "feature", "#!/bin/sh\n[ -f feature_done ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write(dir, "agg/agg.yaml", &base_config(project));
+    write(dir, "agg/AGG_STATE.md", "create feature_done\n");
     git_init(dir);
 
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
@@ -105,8 +125,7 @@ fn baseline_and_merged_rows_are_written_and_survive_a_restart() {
     // → one `baseline` row (session null, met false) and one `merged` row (session 1, met true).
     // Run 2 on the SAME dir: `feature` is already satisfied at launch, so it stops after the
     // baseline — but the run-1 rows must still be there, with a second `baseline` row appended.
-    let goals = "goals:\n  - id: feature\n    type: binary\n    judge: { kind: script, cmd: \"./judges/feature.sh\" }\nstop_when: feature\n";
-    let (tmp, path) = committing_project("verd", goals);
+    let (tmp, path) = committing_project("verd");
     let dir = tmp.path();
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
@@ -129,8 +148,16 @@ fn baseline_and_merged_rows_are_written_and_survive_a_restart() {
             && r["met"].as_bool() == Some(true)),
         "a merged session must append a merged row stamped with its session:\n{rows:#?}"
     );
-    // envelope fields the spec fixes: `step` is the constant, `ts` is a real epoch second.
-    assert!(rows.iter().all(|r| r["step"].as_str() == Some("worker")), "step is the 'worker' constant:\n{rows:#?}");
+    // envelope fields the spec adds (§5.8): `step` is threaded through per row — the baseline pass
+    // stamps "baseline", a session's rows carry the actual step name ("worker"). `ts` is real.
+    assert!(
+        rows.iter().any(|r| r["step"].as_str() == Some("baseline")),
+        "the baseline pass stamps step=baseline:\n{rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|r| r["step"].as_str() == Some("worker") && r["outcome"].as_str() == Some("merged")),
+        "a merged session row carries its step name:\n{rows:#?}"
+    );
     assert!(rows.iter().all(|r| r["ts"].as_u64().unwrap_or(0) > 0), "ts is a real wall-clock epoch second:\n{rows:#?}");
     let n_run1 = rows.len();
     assert!(n_run1 >= 2, "run 1 writes at least a baseline + a merged row, got {n_run1}");
@@ -187,24 +214,19 @@ exit 0
     git(dir, &["config", "user.name", "t"]);
     write(dir, "tracked.txt", "ok\n");
     // build_ok invariant: met at baseline, REGRESSES once `.regressed` exists on the merged tree.
-    write(dir, "judges/build.sh", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"broke the build\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
-    chmod_x(&dir.join("judges/build.sh"));
+    write_judge(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"broke the build\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
     // feature: never met, so the loop actually launches a worker (doesn't stop at baseline).
-    write(dir, "judges/feature.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
-    chmod_x(&dir.join("judges/feature.sh"));
-    write(
-        dir,
-        "agg/goals.yaml",
-        "goals:\n  \
-         - id: build_ok\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: \"./judges/build.sh\" }\n  \
-         - id: feature\n    type: binary\n    judge: { kind: script, cmd: \"./judges/feature.sh\" }\nstop_when: feature\n",
-    );
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    // done_if: feature (never met); build_ok is the invariant that must STAY met. gate_regressions
+    // defaults ON, so the regression rolls the session back.
     write(
         dir,
         "agg/agg.yaml",
-        "project: rbkv\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: false }\nsession_isolation: { rollback_on_regression: true }\n",
+        "project: rbkv\ndefaults: { model: fake }\nsteps:\n  worker: {}\n\
+         sequence:\n  steps: [worker]\n  done_if: \"feature\"\n  invariants: [build_ok]\n\
+         summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_RESUME.md", "do work\n");
+    write(dir, "agg/AGG_STATE.md", "do work\n");
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "base"]);
 
