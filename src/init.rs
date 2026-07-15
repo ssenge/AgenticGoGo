@@ -22,7 +22,7 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
     };
     let effort_line = match b.default_effort() {
         "" => "  effort: \"\"                       # this agent cannot combine effort with model: auto\n".to_string(),
-        e => format!("  effort: {e}                    # thinking effort: low|medium|high|xhigh|max\n"),
+        e => format!("  effort: \"{e}\"                  # thinking effort: low|medium|high|xhigh|max\n"),
     };
     let judge_model = match b.default_summary_model() {
         "" => "  # model:                        # codex omits it, same hard-400 reason\n".to_string(),
@@ -113,18 +113,18 @@ fn make_executable(_path: &Path) {}
 // ---- starter file contents ----
 
 const AGG_YAML: &str = r#"# agg.yaml — harness + steps + sequence. One file: a judge IS a goal, resolved by NAME from
-# agg/judges/<name>.{sh,md} (then ~/.agg/judges/). There is no goals.yaml.
-project: my-project
+# agg/judges/<name>.{sh,md} (then ~/.agg/judges/).
+project: "my-project"
 
 # Inherited by EVERY step; a step body may override any of these.
 defaults:
-  agent: {{AGENT}}
+  agent: "{{AGENT}}"
 {{MODEL_LINE}}{{EFFORT_LINE}}  state: "AGG_STATE.md"            # the forward state file the AGENT maintains (best-effort)
 
 # THE RULER — runs the LLM judges + the summarizer. Immutable; naming any of these in a step is a
 # HARD ERROR (a grader that moves makes verdicts incomparable across cycles).
 judge:
-  agent: {{AGENT}}
+  agent: "{{AGENT}}"
 {{JUDGE_MODEL}}  timeout: 300                     # seconds, EVERY judge (script + LLM)
 
 # The step palette. The NAME is your own label; the body is overrides only.
@@ -134,7 +134,7 @@ steps:
 # The repeating sequence + the run-level ceilings and Definition of Done.
 sequence:
   steps:
-    - worker                       # run `worker`, forever, until done_if fires
+    - "worker"                     # run `worker`, forever, until done_if fires
   # Run-level ceilings, unified under one block — each null = unlimited.
   limits:
     tokens: null                   # output-token ceiling — worker AND judge spend → over_budget

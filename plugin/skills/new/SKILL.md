@@ -12,7 +12,7 @@ planning material already exists into the files the loop reads, all under the ma
 
 - `agg/agg.yaml` — the whole config: `defaults` / `judge` / `steps` / `sequence`
 - `agg/judges/<name>.sh` (a script judge) or `agg/judges/<name>.md` (an LLM rubric judge) — one per
-  clause of the Definition of Done. **A judge IS a goal.** There is no `goals.yaml`.
+  clause of the Definition of Done. **A judge IS a goal.**
 - `agg/AGG_STATE.md` — the standing instructions fed to every worker session
 
 **Core principle: do NOT replicate spec tooling.** Read what's already there and *translate* it into
@@ -238,15 +238,15 @@ the cost argument. Offer this when the project is open-ended/research-shaped:
 steps:
   worker: {}                       # pure defaults — the grunt worker
   reconsider:
-    agent: codex                   # a DIFFERENT vendor — perspective diversity
+    agent: "codex"                 # a DIFFERENT vendor — perspective diversity
     prompt: >
       Assume the current approach is wrong. Name 2-3 fundamentally different approaches, pick one,
       and write the rejected ones and WHY into your scratch note — agg will persist them.
     skip_judges: true              # stages; the next worker step gates it
 sequence:
   steps:
-    - worker x4
-    - if stalled then reconsider
+    - "worker x4"
+    - "if stalled then reconsider"
 ```
 
 `stalled` is the library judge (it reads the verdict history). If you use `if stalled then …`, the
@@ -313,16 +313,16 @@ Everything agg reads lives under `agg/` (committed); everything it writes lives 
 ### `agg/agg.yaml`
 
 ```yaml
-project: <name>
+project: "<name>"
 
 defaults:
-  agent: <claude|codex|copilot>          # from Step 0 — REQUIRED (the worker default)
+  agent: "<claude|codex|copilot>"        # from Step 0 — REQUIRED (the worker default)
   # model: "<model>"                     # claude: "claude-opus-4-8[1m]" · copilot: auto · codex: OMIT
   # effort: <low|medium|high|xhigh|max>  # NOT with copilot's model: auto
   state: "AGG_STATE.md"
 
 judge:                                   # THE RULER — runs LLM judges + the summarizer; immutable
-  agent: <claude|codex|copilot>          # usually the same as defaults.agent
+  agent: "<claude|codex|copilot>"        # usually the same as defaults.agent
   # model: "<cheap model>"               # claude: a haiku · copilot: auto · codex: OMIT
   timeout: 300                           # seconds, EVERY judge (script + LLM)
 
@@ -331,7 +331,7 @@ steps:
 
 sequence:
   steps:
-    - worker
+    - "worker"
   limits:                                # run ceilings — omit a key or use null for "unlimited"
     tokens: <int or null>                # output-token ceiling → over_budget. Works on ALL agents.
     # cost: <dollars or null>            # → over_cost. CLAUDE-ONLY, all-Claude sequences only.

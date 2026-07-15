@@ -1,7 +1,7 @@
 # `agg` configuration reference
 
 One file, `agg/agg.yaml`, holds everything: `defaults` / `judge` / `steps` / `sequence` plus a few
-top-level survivors. **There is no `goals.yaml`** — a judge IS a goal, resolved by name from disk
+top-level survivors. A judge IS a goal, resolved by name from disk
 (see [Judges](#judges-resolved-by-name)). Every struct is parsed with `deny_unknown_fields`, so a
 misspelled or misplaced key is a **hard error at startup**, never a silent no-op. (That guard is what
 makes a stray top-level `budget:` — the three ceilings now live unified under `sequence.limits:` — fail
@@ -14,16 +14,16 @@ project: "my-project"
 
 # Inherited by EVERY step; a step body may override any of these.
 defaults:
-  agent: claude                    # the WORKER default: claude · codex · copilot
+  agent: "claude"                  # the WORKER default: claude · codex · copilot
   model: "claude-opus-4-8[1m]"     # None ⇒ the agent's own default (codex: OMIT; copilot: auto)
-  effort: high                     # low|medium|high|xhigh|max — None ⇒ backend default; "" ⇒ none
+  effort: "high"                   # low|medium|high|xhigh|max — None ⇒ backend default; "" ⇒ none
   worker_args: []                  # extra flags passed VERBATIM to the worker (the sandbox constraint)
   state: "AGG_STATE.md"            # the forward state file, resolved against agg/
 
 # THE RULER — runs LLM judges + the summarizer. Run-level and IMMUTABLE: naming any of these keys
 # in a step body is a hard error (a grader that moves makes verdicts incomparable across cycles).
 judge:
-  agent: claude
+  agent: "claude"
   model: "claude-haiku-4-5-20251001"   # None ⇒ the ruler's cheap default. A cheap model grades.
   timeout: 300                         # seconds — EVERY judge, script and LLM alike
 
@@ -31,21 +31,21 @@ judge:
 steps:
   worker: {}                       # pure defaults
   reconsider:                      # (example) a stall-triggered step-back on a different vendor
-    agent: codex
+    agent: "codex"
     prompt: "Assume the current approach is wrong. Name 2-3 different approaches…"
     skip_judges: true
 
 # The repeating sequence + the run-level ceilings and Definition of Done.
 sequence:
   steps:
-    - worker x4
-    - if stalled then reconsider
+    - "worker x4"
+    - "if stalled then reconsider"
   limits:                          # the run-level ceilings, unified. Each null/absent = unlimited.
     tokens: 5000000                # output-token ceiling (worker AND judge spend) → over_budget
     cost: null                     # dollar ceiling → over_cost. CLAUDE-ONLY (null = unlimited)
     sessions: null                 # session cap → over_iterations (null = unlimited)
   gate_regressions: true           # roll a session back if a previously-met judge regresses
-  invariants: [no_regression]      # judge names that must STAY met
+  invariants: ["no_regression"]    # judge names that must STAY met
   done_if: "correct_result AND all_tests_pass AND coverage.value >= 80"
   abort_if: "over_budget OR wall_hours >= 8 OR any_regressed(invariants) OR any_judge_error"
 

@@ -9,7 +9,7 @@ Definition of Done, made executable.**
 ## Layout
 
 Everything agg reads lives under `agg/` (committed); everything it writes lives under `agg/state/`
-(gitignored). One config file — there is no `goals.yaml`: a judge is resolved by NAME from
+(gitignored). One config file, `agg/agg.yaml` — a judge is resolved by NAME from
 `agg/judges/`.
 
 ```
@@ -55,19 +55,19 @@ keys in `agg/agg.yaml` are. Edit `defaults:` (and `judge:`) and re-run, or let
 ```yaml
 # Claude Code (as shipped)
 defaults:
-  agent: claude
-  model: claude-haiku-4-5-20251001
+  agent: "claude"
+  model: "claude-haiku-4-5-20251001"
 ```
 ```yaml
 # OpenAI Codex — omit `model:` entirely; Codex picks one that fits your account
 defaults:
-  agent: codex
+  agent: "codex"
 ```
 ```yaml
 # GitHub Copilot CLI
 defaults:
-  agent: copilot
-  model: auto
+  agent: "copilot"
+  model: "auto"
 ```
 
 Then `agg doctor` (checks the agent is installed and can do what this config asks) and `agg run`.
@@ -115,20 +115,20 @@ one that emits only `{"met":…}` is binary.
 **3. `agg/agg.yaml`** — the config, with a Definition of Done and a wall-clock ceiling:
 
 ```yaml
-project: calc
+project: "calc"
 defaults:
-  agent: claude                    # ⚠️ CLAUDE-SHAPED — see "Run it on another agent" above
+  agent: "claude"                  # ⚠️ CLAUDE-SHAPED — see "Run it on another agent" above
   model: "claude-opus-4-8[1m]"
   state: "AGG_STATE.md"
 judge:
-  agent: claude
-  model: claude-haiku-4-5-20251001 # the cheap RULER model for any LLM judges
+  agent: "claude"
+  model: "claude-haiku-4-5-20251001" # the cheap RULER model for any LLM judges
   timeout: 300
 steps:
   worker: {}
 sequence:
   steps:
-    - worker
+    - "worker"
   limits: { tokens: 2000000 }      # output-token ceiling → over_budget. Works on ANY agent.
   done_if: "tests_pass"            # the Definition of Done: the suite is green
   abort_if: "over_budget OR wall_hours >= 0.5"   # give up after 30 min or the token ceiling

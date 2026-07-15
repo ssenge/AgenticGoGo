@@ -261,7 +261,7 @@ mod tests {
         let (_, new) = SKILLS[0];
         assert!(new.contains("AgenticGoGo"), "agg-new must be the real skill");
         assert!(
-            new.contains("agent: <claude|codex|copilot>"),
+            new.contains("agent: \"<claude|codex|copilot>\""),
             "agg-new must carry the capability-aware agg.yaml template — that is the whole point"
         );
         assert_eq!(SKILLS.len(), 3);

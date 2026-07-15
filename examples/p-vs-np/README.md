@@ -13,7 +13,7 @@ lemmas* (real progress) and a paper.
 
 ## Layout
 
-There is no `goals.yaml`: **a judge IS a goal, resolved by NAME** from `agg/judges/<name>.{sh,md}`.
+**A judge IS a goal, resolved by NAME** from `agg/judges/<name>.{sh,md}`.
 The name a judge is referenced by in `done_if` / `invariants` **is its filename**.
 
 ```
@@ -101,13 +101,13 @@ and the next worker step gates the whole span. The rejected routes reach institu
 steps:
   worker: {}
   reconsider:
-    agent: codex                 # a DIFFERENT VENDOR — perspective diversity breaks a local optimum
+    agent: "codex"               # a DIFFERENT VENDOR — perspective diversity breaks a local optimum
     prompt: "Assume the current strategy is a dead end. Name 2-3 different routes…"
     skip_judges: true            # stages; the next worker step gates it
 sequence:
   steps:
-    - worker x4
-    - if stalled then reconsider
+    - "worker x4"
+    - "if stalled then reconsider"
 ```
 
 ## Porting to another agent
