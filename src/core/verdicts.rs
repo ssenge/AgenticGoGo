@@ -18,13 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// The only step name there is until the red cut introduces the steps/sequence model. Every row
-/// records it so a future reader can attribute a verdict to its step without a schema migration.
-const STEP: &str = "worker";
-
 /// What the GATE decided about the session that produced a verdict. Rows are stamped once the
 /// session's fate is known (§5.8) — never at judge time. Only `Merged`/`Baseline` rows count as
-/// "was met"; `RolledBack` describes code that did not land.
+/// "was met"; `RolledBack` describes code that did not land, `Staged` is unmerged span work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -34,6 +30,9 @@ pub enum Outcome {
     Merged,
     /// a previously-met judge regressed → the whole session's merge was discarded.
     RolledBack,
+    /// a `skip_judges` span's verdicts while it is unmerged (§5.7/§5.8). Re-appended as `merged`
+    /// when the span later merges; readers of "was met" and `stalled` ignore `staged` rows.
+    Staged,
 }
 
 /// One line in `verdicts.jsonl`: a [`Verdict`] flattened into an envelope with the fields a
@@ -42,7 +41,7 @@ pub enum Outcome {
 pub struct VerdictRecord {
     /// the session that produced it; `None` for the baseline pass (§5.5.1).
     pub session: Option<u32>,
-    /// which step ran the judge. No step model yet → the constant [`STEP`].
+    /// which step's session ran the judge (§5.4 step name).
     pub step: String,
     /// the judge / goal id.
     pub judge: String,
@@ -101,6 +100,7 @@ pub fn landed_met(dir: &Path) -> HashMap<String, bool> {
 pub fn append(
     dir: &Path,
     session: Option<u32>,
+    step: &str,
     verdicts: &[(String, Verdict)],
     outcome: Outcome,
 ) -> Result<()> {
@@ -121,7 +121,7 @@ pub fn append(
     for (judge, v) in verdicts {
         let rec = VerdictRecord {
             session,
-            step: STEP.to_string(),
+            step: step.to_string(),
             judge: judge.clone(),
             met: v.met,
             value: v.value,
