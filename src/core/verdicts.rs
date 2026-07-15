@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn append_then_landed_met_roundtrips() {
         let d = tmpdir("roundtrip");
-        append(&d, None, &[("build".into(), v(true)), ("feat".into(), v(false))], Outcome::Baseline)
+        append(&d, None, "baseline", &[("build".into(), v(true)), ("feat".into(), v(false))], Outcome::Baseline)
             .unwrap();
         let m = landed_met(&d);
         assert_eq!(m.get("build"), Some(&true));
@@ -196,8 +196,8 @@ mod tests {
     #[test]
     fn most_recent_merged_or_baseline_wins() {
         let d = tmpdir("recent");
-        append(&d, None, &[("g".into(), v(false))], Outcome::Baseline).unwrap();
-        append(&d, Some(1), &[("g".into(), v(true))], Outcome::Merged).unwrap();
+        append(&d, None, "baseline", &[("g".into(), v(false))], Outcome::Baseline).unwrap();
+        append(&d, Some(1), "worker", &[("g".into(), v(true))], Outcome::Merged).unwrap();
         assert_eq!(landed_met(&d).get("g"), Some(&true), "the newer merged row wins over baseline");
     }
 
@@ -207,8 +207,8 @@ mod tests {
         // describes code that no longer exists. If it counted, the gate would compare the NEXT
         // session against a phantom.
         let d = tmpdir("rolledback");
-        append(&d, None, &[("build".into(), v(true))], Outcome::Baseline).unwrap();
-        append(&d, Some(1), &[("build".into(), v(false))], Outcome::RolledBack).unwrap();
+        append(&d, None, "baseline", &[("build".into(), v(true))], Outcome::Baseline).unwrap();
+        append(&d, Some(1), "worker", &[("build".into(), v(false))], Outcome::RolledBack).unwrap();
         assert_eq!(
             landed_met(&d).get("build"),
             Some(&true),
@@ -221,8 +221,8 @@ mod tests {
         // §5.2: a judge that could not grade said "I don't know", not "not met". Its row is kept
         // for the audit trail but must not flip 'was met' off.
         let d = tmpdir("errored");
-        append(&d, None, &[("build".into(), v(true))], Outcome::Baseline).unwrap();
-        append(&d, Some(1), &[("build".into(), Verdict::failed("boom"))], Outcome::Merged).unwrap();
+        append(&d, None, "baseline", &[("build".into(), v(true))], Outcome::Baseline).unwrap();
+        append(&d, Some(1), "worker", &[("build".into(), Verdict::failed("boom"))], Outcome::Merged).unwrap();
         assert_eq!(landed_met(&d).get("build"), Some(&true), "an errored merged row is ignored");
     }
 
@@ -231,7 +231,7 @@ mod tests {
         // The freshness floor: never-met → cannot regress. No file, then only a rolled_back row.
         let d = tmpdir("never");
         assert!(!landed_met(&d).contains_key("ghost"), "no file → no history");
-        append(&d, Some(1), &[("ghost".into(), v(false))], Outcome::RolledBack).unwrap();
+        append(&d, Some(1), "worker", &[("ghost".into(), v(false))], Outcome::RolledBack).unwrap();
         assert!(!landed_met(&d).contains_key("ghost"), "only a rolled_back row → still never met");
     }
 
@@ -241,14 +241,14 @@ mod tests {
         // fails. Unlike bus.rs, append must PROPAGATE that, not swallow it: this is gate state.
         let d = tmpdir("hard");
         std::fs::write(d.join("agg"), "not a dir").unwrap();
-        let r = append(&d, None, &[("g".into(), v(true))], Outcome::Baseline);
+        let r = append(&d, None, "baseline", &[("g".into(), v(true))], Outcome::Baseline);
         assert!(r.is_err(), "a verdicts.jsonl write failure must be a hard error");
     }
 
     #[test]
     fn empty_verdicts_writes_nothing() {
         let d = tmpdir("empty");
-        append(&d, None, &[], Outcome::Baseline).unwrap();
+        append(&d, None, "baseline", &[], Outcome::Baseline).unwrap();
         assert!(!crate::paths::verdicts_jsonl(&d).exists(), "no verdicts → no file created");
     }
 
@@ -266,7 +266,7 @@ mod tests {
             evidence: vec![],
             error: None,
         };
-        append(&d, None, &[("g".into(), numberless)], Outcome::Baseline).unwrap();
+        append(&d, None, "baseline", &[("g".into(), numberless)], Outcome::Baseline).unwrap();
         let line = std::fs::read_to_string(crate::paths::verdicts_jsonl(&d)).unwrap();
         assert!(!line.contains("value"), "absent value must not serialize: {line}");
         assert!(!line.contains("max"), "absent max must not serialize: {line}");

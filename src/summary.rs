@@ -147,7 +147,7 @@ mod tests {
             rationale: "the nested-group case now passes".into(),
         }];
         let ruler = crate::backend::for_name("claude").unwrap();
-        let s = summarize(ruler, "haiku", "Building the expression parser; not all tests passing yet.", &thoughts, &deltas, 120)
+        let (s, _spend) = summarize(ruler, "haiku", "Building the expression parser; not all tests passing yet.", &thoughts, &deltas, 120)
             .expect("summarizer returned None (real claude call failed?)");
         println!("\nCUMULATIVE: {}\nWINDOWED:   {}\n", s.cumulative, s.windowed);
         assert!(!s.cumulative.is_empty());

@@ -542,35 +542,39 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agg-agentkey-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // The exact shape that triggered the bug: names copilot, and OMITS `model:` — the missing
-        // key is what used to force a backend-specific default to resolve mid-parse.
+        // The exact shape that triggered the bug: names copilot under `defaults:`, and OMITS
+        // `model:` — the missing key is what used to force a backend-specific default to resolve
+        // mid-parse. (`resume_prompt` is gone; `deny_unknown_fields` would now reject it outright.)
         let p = dir.join("agg.yaml");
-        std::fs::write(&p, "project: x\nagent: copilot\nresume_prompt: R\n").unwrap();
+        let copilot_cfg = "project: x\ndefaults: { agent: copilot }\nsteps: { work: {} }\nsequence: { steps: [work] }\n";
+        std::fs::write(&p, copilot_cfg).unwrap();
         let cfg = AggConfig::load(&p).expect("a full parse must not need a backend");
-        assert_eq!(cfg.agent, "copilot");
-        assert!(cfg.model.is_none(), "an absent `model:` must stay None, not bake in a default");
-        assert!(cfg.summary.model.is_none());
-        // BOTH readers must see the SAME key. `agent_name` parses its own private `JustTheAgent`,
-        // and it — not `load()` — is what picks the backend for `judge`, `plan`, `doctor` and
-        // `skills install`. Let the two drift (a `#[serde(rename)]` on one, say) and `agg judge`
-        // silently runs the LLM judge on Claude for a copilot project: the exact bug this test is
-        // named for, back again, with the full-parse assertion above still green.
+        assert_eq!(cfg.defaults.agent, "copilot");
+        assert!(cfg.defaults.model.is_none(), "an absent `model:` must stay None, not bake in a default");
+        // BOTH readers must see the SAME key. `agent_name` parses its own private partial, and it —
+        // not `load()` — is what picks the backend for `judge`, `plan`, `doctor` and `skills
+        // install`. Let the two drift (a `#[serde(rename)]` on one, say) and `agg judge` silently
+        // runs the LLM judge on Claude for a copilot project: the exact bug this test is named for,
+        // back again, with the full-parse assertion above still green.
         assert_eq!(AggConfig::agent_name(&p), "copilot", "agent_name must read the real key");
 
-        // …and it resolves against the agent the CONFIG names — not whichever backend was touched
-        // first. This is the assertion the OnceLock could not have satisfied.
-        let copilot = for_name(&cfg.agent).unwrap();
-        assert_eq!(cfg.model(copilot), copilot.default_model());
-        assert_ne!(cfg.model(copilot), claude().default_model(), "…and it is NOT claude's");
+        // …and the WORKER model resolves against the agent the CONFIG names — not whichever backend
+        // was touched first. Absent `model:` means "ask the step's backend at USE time". This is the
+        // assertion the OnceLock could not have satisfied.
+        let copilot = for_name(&cfg.defaults.agent).unwrap();
+        let step = cfg.resolve_step("work").unwrap();
+        assert_eq!(step.model(copilot), copilot.default_model());
+        assert_ne!(step.model(copilot), claude().default_model(), "…and it is NOT claude's");
         // an EXPLICIT model wins over any backend default, on every backend.
-        std::fs::write(&p, "project: x\nagent: copilot\nmodel: pinned\nresume_prompt: R\n").unwrap();
+        std::fs::write(&p, "project: x\ndefaults: { agent: copilot, model: pinned }\nsteps: { work: {} }\nsequence: { steps: [work] }\n").unwrap();
         let cfg = AggConfig::load(&p).unwrap();
-        assert_eq!(cfg.model(copilot), "pinned");
-        assert_eq!(cfg.model(claude()), "pinned");
+        let step = cfg.resolve_step("work").unwrap();
+        assert_eq!(step.model(copilot), "pinned");
+        assert_eq!(step.model(claude()), "pinned");
 
         // `agent_name` survives for the paths where agg.yaml may not exist or may not parse
         // (doctor / plan / judge / skills install): absent or agent-less → the default.
-        std::fs::write(&p, "project: x\nresume_prompt: R\n").unwrap();
+        std::fs::write(&p, "project: x\nsequence: { steps: [work] }\n").unwrap();
         assert_eq!(AggConfig::agent_name(&p), "claude");
         assert_eq!(AggConfig::agent_name(&dir.join("nope.yaml")), "claude");
         let _ = std::fs::remove_dir_all(&dir);

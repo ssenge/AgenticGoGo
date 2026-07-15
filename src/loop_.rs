@@ -314,6 +314,14 @@ impl LoopState<'_> {
         self.dash.up_secs = self.loop_start.elapsed().as_secs();
         self.dash.tokens_spent = self.tokens_spent;
         self.dash.cost_spent = self.cost_spent;
+        // Surface the current step so a mixed run is interpretable from state.json (§7.4). Pure
+        // display copy — never touches control flow or accounting.
+        // ponytail: aggregate spend only. A PER-AGENT tokens/cost breakdown (§7.4) needs new
+        // accounting threaded through every spend site; the aggregate is correct (guards work), and
+        // the UI split belongs with the deferred dashboard rework. cur_step.agent is in the banner.
+        if let Some(cs) = &self.cur_step {
+            self.dash.step = cs.name.clone();
+        }
         let (m, t) = self.eng.tally();
         self.dash.goals_met = m;
         self.dash.goals_total = t;
