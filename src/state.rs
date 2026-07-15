@@ -13,6 +13,7 @@
 use crate::core::engine::Engine;
 use crate::core::model::Lifecycle;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -44,6 +45,69 @@ pub struct GoalView {
     pub latched: bool,
 }
 
+/// One judge's view for the §7.4 per-judge scoreboard — the successor to [`GoalView`].
+///
+/// Three things the old `GoalView` could not say, that §7.4 requires:
+///   * `value`/`max` are `Option`: a *binary* judge emits NO number and a *broken* judge emits
+///     nothing usable, so both are `None` — rendered `met`/`unmet`, NEVER a lying `0` (a real
+///     measured `0.0` is a distinct, different thing).
+///   * `met` is explicit, so a reader never has to infer it from the `state` string.
+///   * `error` carries a broken judge's reason (`Some` ⇒ "I could not grade this", not "not met").
+///
+/// `in_dod` lets the reader mark a run-set-only control judge (e.g. `stalled`) apart from the
+/// DoD-set the aggregates range over (§5.3) — so "why we stalled" is surfaceable without polluting
+/// the `judges met/total` count.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JudgeView {
+    pub name: String,
+    pub kind: String, // "script" | "llm"
+    pub in_dod: bool,
+    pub invariant: bool,
+    pub state: String, // "pending"/"in_progress"/"met"/"regressed"
+    pub met: bool,
+    /// numeric measure, or `None` for a binary/errored judge — NOT `0` (§7.4).
+    pub value: Option<f64>,
+    pub max: Option<f64>,
+    pub target: f64,
+    pub delta: f64,
+    pub rationale: String,
+    /// set when the judge itself failed to run (vs. a clean "not met").
+    pub error: Option<String>,
+}
+
+impl JudgeView {
+    /// Bridge a legacy [`GoalView`] into a judge view, so a state.json written by a pre-§7.4 `agg`
+    /// still renders on the new scoreboard. Recovers the lost Option-ness from the goal type: a
+    /// `binary` goal carried no real number, so `value`/`max` come back as `None`.
+    fn from_goal(g: &GoalView) -> Self {
+        let numeric = g.goal_type != "binary";
+        JudgeView {
+            name: g.id.clone(),
+            kind: g.judge_kind.clone(),
+            in_dod: true, // the legacy `goals` set was DoD-only (state.rs filtered to `in_dod`).
+            invariant: g.invariant,
+            state: g.state.clone(),
+            met: g.state == "met",
+            value: numeric.then_some(g.value),
+            max: numeric.then_some(g.max),
+            target: g.target,
+            delta: g.delta,
+            rationale: g.rationale.clone(),
+            error: None,
+        }
+    }
+}
+
+/// One agent's token + cost tally for the §7.4 per-agent breakdown. `cost` is `Option` because an
+/// agent that cannot report a price (a subscription CLI) must show "—", never a lying `$0.00`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentUsage {
+    pub tokens: u64,
+    pub cost: Option<f64>,
+}
+
 /// One formatted activity line for the real-time tail. `kind` is the leading glyph
 /// category so the dashboard can color it; `text` is the line WITHOUT the glyph.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -70,6 +134,10 @@ pub struct DashboardState {
     /// `tokens_spent`/`cost_spent` below already sum worker + judge across agents (§5.6), so the
     /// spend guards stay correct without it.
     pub step: String,
+    /// the current step's AGENT and its resolved MODEL (§7.4). A mixed claude/codex run is
+    /// uninterpretable without knowing who ran THIS step. Empty before the first step / off-cycle.
+    pub step_agent: String,
+    pub step_model: String,
     pub stop_when: String,
     pub halt_when: String,
     /// epoch secs the loop started (for an absolute "started at" in the Info block)
@@ -93,6 +161,14 @@ pub struct DashboardState {
     pub goals_met: usize,
     pub goals_total: usize,
     pub goals: Vec<GoalView>,
+    /// the §7.4 per-judge scoreboard — the successor to `goals` (Option value/max, explicit `met`,
+    /// broken-judge `error`, and run-set judges like `stalled`). `goals` stays populated alongside
+    /// until every reader (the web UI still reads `goals`) has migrated; §7.1 forbids a bridge, so
+    /// this is a superset window, not a translation layer.
+    pub judges: Vec<JudgeView>,
+    /// per-agent token + cost breakdown (§7.4); sums to `tokens_spent`/`cost_spent`. Empty on a
+    /// single-agent run, or a state.json written before per-agent accounting existed.
+    pub per_agent: BTreeMap<String, AgentUsage>,
     pub now: String,         // current activity line (last 🔧/💬)
     pub think: String,       // last 💬 thought
     /// rolling tail of recent formatted events (capped at [`RECENT_CAP`]) — drives the
@@ -143,6 +219,51 @@ impl DashboardState {
                 }
             })
             .collect()
+    }
+
+    /// Snapshot the FULL judge set (§7.4) into judge views — both the DoD-set AND the run-set, so a
+    /// control judge like `stalled` (`in_dod: false`) is visible and the reader can surface "why we
+    /// stalled". Unlike [`Self::goals_from_engine`], this preserves the Option-ness of `value`/`max`:
+    /// a binary or broken judge stays numberless on the wire, so the reader renders met/unmet rather
+    /// than a fabricated `0`.
+    pub fn judges_from_engine(eng: &Engine, prev: &[JudgeView]) -> Vec<JudgeView> {
+        eng.judges
+            .iter()
+            .map(|g| {
+                let v = g.last_verdict.as_ref();
+                let value = v.and_then(|v| v.value);
+                // delta only where both this and the prior step carried a real number.
+                let prev_value = prev.iter().find(|p| p.name == g.name).and_then(|p| p.value);
+                let delta = match (value, prev_value) {
+                    (Some(now), Some(was)) => now - was,
+                    _ => 0.0,
+                };
+                JudgeView {
+                    name: g.name.clone(),
+                    kind: g.kind.tag().to_string(),
+                    in_dod: g.in_dod,
+                    invariant: g.invariant,
+                    state: state_str(g.state),
+                    met: g.met(),
+                    value,
+                    max: v.and_then(|v| v.max),
+                    target: v.map(|v| v.target).unwrap_or(1.0),
+                    delta,
+                    rationale: v.map(|v| v.rationale.clone()).unwrap_or_default(),
+                    error: v.and_then(|v| v.error.clone()),
+                }
+            })
+            .collect()
+    }
+
+    /// The per-judge scoreboard the readers render (§7.4). Prefers the native `judges`; falls back
+    /// to mapping the legacy `goals` so a state.json written by a pre-§7.4 `agg` still renders
+    /// (the cross-version contract the whole struct is `#[serde(default)]` for).
+    pub fn judge_views(&self) -> Vec<JudgeView> {
+        if !self.judges.is_empty() {
+            return self.judges.clone();
+        }
+        self.goals.iter().map(JudgeView::from_goal).collect()
     }
 
     /// Push one activity event onto the rolling tail, capping at [`RECENT_CAP`]
