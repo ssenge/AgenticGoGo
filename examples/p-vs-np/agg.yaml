@@ -1,8 +1,0 @@
-project: p-vs-np
-model: "claude-opus-4-8[1m]"
-resume_prompt: AGG_RESUME.md
-budget: { total: 50000000 }            # hard token ceiling — a hopeless run can't run forever
-cost:   { total: 100.0 }               # hard dollar ceiling — stop before $100, via over_cost
-hooks:
-  on_start: ["lake build || true"]      # fetch/build the Lean project + Mathlib once at startup
-summary: { enabled: true, model: haiku }
