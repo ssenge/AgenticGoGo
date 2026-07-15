@@ -115,6 +115,11 @@ pub struct CycleResult {
     pub halt_reason: Option<String>,
     /// per-goal changes this cycle (feeds the LLM summarizer)
     pub deltas: Vec<GoalDelta>,
+    /// the verdicts that a judge actually PRODUCED this cycle (id + verdict), in goal order —
+    /// skipped judges (recheck) are absent. This is what the GATE stamps and appends to
+    /// `verdicts.jsonl` (§5.8), and its "produced this cycle" membership is the freshness signal
+    /// the gate's regression check needs: a skipped judge can never be read as "now fails".
+    pub fresh_verdicts: Vec<(String, Verdict)>,
 }
 
 /// What changed for one goal across a cycle. The summarizer turns these into
@@ -222,6 +227,10 @@ impl Engine {
         // Judges that RAN this cycle and errored — backs `any_judge_error`. Only the ones that ran:
         // a skipped judge cannot have errored, and reporting a stale error would be a lie.
         let mut judge_errors: Vec<String> = Vec::new();
+        // The verdicts produced this cycle, captured BEFORE `apply` consumes them — the GATE
+        // stamps and appends these to `verdicts.jsonl`, and their membership is the freshness
+        // signal for the regression check (a skipped judge is simply absent).
+        let mut fresh: Vec<(String, Verdict)> = Vec::new();
         for (goal, verdict) in self.goals.iter_mut().zip(verdicts) {
             // None = skipped: status can't have changed → keep the last verdict, skip the (maybe
             // expensive) judge. `last_verdict`/`state` are left intact.
@@ -229,6 +238,7 @@ impl Engine {
                 if v.error.is_some() {
                     judge_errors.push(goal.id.clone());
                 }
+                fresh.push((goal.id.clone(), v.clone()));
                 goal.apply(v);
                 update_recheck_state(goal, cwd);
             }
@@ -255,7 +265,9 @@ impl Engine {
             })
             .collect();
 
-        self.conditions_with_deltas(run, deltas, &judge_errors)
+        let mut result = self.conditions_with_deltas(run, deltas, &judge_errors);
+        result.fresh_verdicts = fresh;
+        result
     }
 
     /// Run the judge for every goal that needs one, and return the verdicts POSITIONALLY —
@@ -354,7 +366,9 @@ impl Engine {
             }
             None => (false, None),
         };
-        CycleResult { stop, halt, halt_reason, deltas }
+        // fresh_verdicts is filled by `evaluate_cycle` (which has the verdicts); a
+        // conditions-only re-evaluation ran no judges, so it is empty here.
+        CycleResult { stop, halt, halt_reason, deltas, fresh_verdicts: Vec::new() }
     }
 
     /// Counts for the scoreboard header: (met, total).

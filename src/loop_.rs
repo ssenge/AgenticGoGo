@@ -724,7 +724,7 @@ impl LoopState<'_> {
     /// The deterministic decision that makes it safe to trust a stochastic worker: a staged merge
     /// is committed only if THIS cycle regressed no goal, and everything downstream (memory,
     /// summary, stop/halt) sees the post-gate truth.
-    fn gate(&mut self, v: Verified, outcome: &SessionOutcome) -> GateDecision {
+    fn gate(&mut self, v: Verified, outcome: &SessionOutcome) -> Result<GateDecision> {
         let Verified { mut res, staged, pre_cycle_goals, mem_folded } = v;
 
         // GATE's own publish: the summarizer below can take seconds, and every publish after this
@@ -733,48 +733,42 @@ impl LoopState<'_> {
         self.emit(LifecycleEvent::Gate);
 
         // ── rollback gate: keep the staged merge unless THIS cycle caused a regression ─────────
-        // A goal REGRESSED this cycle iff a delta went from a met state to a not-met state AND the
-        // judge actually RAN.
+        // A judge REGRESSED iff it was MET before this session and now fails on the merged tree.
         //
-        // ⚠ DO NOT DELETE `judge_ran` AS DEAD CODE. It is now BELT AND BRACES, not load-bearing —
-        // and the difference matters. It used to be the ONLY thing standing between a flaky judge
-        // and a discarded good session: `Verdict::failed` carries `met: false`, and `Goal::apply`
-        // folded that straight into `Regressed`, producing a phantom Met→Regressed delta. `apply`
-        // now REFUSES to move the lifecycle on an `error` verdict (see `core::model::Goal::apply`),
-        // so a broken judge can no longer manufacture that delta at all, here or anywhere else. This
-        // clause is the second lock on the same door: it keeps the gate correct on its own terms
-        // without depending on a rule enforced two modules away.
+        // "Was met" is now DURABLE (§5.7): the most recent `merged`-or-`baseline` verdict for that
+        // judge, read from `verdicts.jsonl` (`landed_met`), NOT the in-memory `GoalDelta` that
+        // reset to `Pending` every restart. A judge with no landed row was never met → cannot
+        // regress. This makes the gate cross-run: after a restart, session 1 can be rolled back for
+        // regressing against a verdict a previous run committed.
         //
-        // ⚠ AND NOTE WHAT IT IS NOT: despite the name, it does NOT check FRESHNESS. It reads
-        // `last_verdict.error.is_none()`, and a judge SKIPPED this cycle (`recheck: once_met` /
-        // `on_change` → `engine::run_judges` returns None) keeps its previous verdict. A skipped
-        // judge is safe here only because its `before == after`, so the delta clause cannot fire
-        // regardless. Anything that decouples "was met" from the per-cycle delta LOSES that
-        // accidental protection and must bring a real freshness check with it.
+        // "Now fails" reads THIS cycle's FRESH verdicts (`res.fresh_verdicts`) — the judges that
+        // actually produced a verdict. That IS the freshness check the old `judge_ran` closure only
+        // pretended to be: a judge SKIPPED this cycle (`recheck`) is simply absent from the list,
+        // so a stale verdict can never be resurrected as "now fails". The old delta clause was safe
+        // only because a skipped judge's `before == after`; decoupling "was met" from the delta
+        // loses that accident, so freshness is now explicit.
         //
-        // We rely ONLY on the per-cycle delta — NOT on `g.state == Regressed`. `Regressed` is
-        // sticky (recomputed every cycle while unmet), so an engine-state clause vetoed every
-        // future merge after one regression and cascaded after a rollback (W4). The delta clause,
-        // gated on judge-ran, is necessary and sufficient once engine state is kept base-true
-        // (which the rollback branch below now guarantees).
+        // An errored verdict is never a regression (§5.2): `error.is_none()` here does the job the
+        // deleted `judge_ran` closure did — a judge that "could not grade" said "I don't know", not
+        // "not met". (`Goal::apply` already refuses to move the lifecycle on an error, so engine
+        // state stays base-true for the restore below.)
         let mut rolled_back = false;
         if let Some((br, crate::git::StagedSession::Staged)) = &staged {
-            let judge_ran = |id: &str| {
-                self.eng
-                    .goals
-                    .iter()
-                    .find(|g| g.id == id)
-                    .and_then(|g| g.last_verdict.as_ref())
-                    .map(|v| v.error.is_none())
-                    .unwrap_or(false)
-            };
-            let regressed = res.deltas.iter().any(|d| {
-                d.before_state == crate::core::model::Lifecycle::Met
-                    && d.after_state != crate::core::model::Lifecycle::Met
-                    && judge_ran(&d.id)
+            let landed = crate::core::verdicts::landed_met(self.dir);
+            let regressed = res.fresh_verdicts.iter().any(|(id, v)| {
+                v.error.is_none() && !v.met && landed.get(id).copied().unwrap_or(false)
             });
             let keep = !regressed;
             crate::git::finalize_session(self.dir, br, self.session, keep);
+            // §5.8: the verdicts were held in memory until the gate decided — append them now,
+            // once, stamped with the session's final disposition. A failed write is a HARD ERROR
+            // (this is the gate's own seed, not an audit log), so it propagates out of the loop.
+            let outcome_tag = if keep {
+                crate::core::verdicts::Outcome::Merged
+            } else {
+                crate::core::verdicts::Outcome::RolledBack
+            };
+            crate::core::verdicts::append(self.dir, Some(self.session), &res.fresh_verdicts, outcome_tag)?;
             if !keep {
                 // W5: the merged tree was discarded. Restore engine state to pre-cycle (base)
                 // truth so we never (a) report success on discarded work, (b) latch a once_met
@@ -792,6 +786,9 @@ impl LoopState<'_> {
                     halt: recomputed.halt,
                     halt_reason: recomputed.halt_reason,
                     deltas: Vec::new(),
+                    // the verdicts were already appended (rolled_back) just above; blank them so
+                    // the memory fold below reflects discarded work.
+                    fresh_verdicts: Vec::new(),
                 };
             }
             self.publish();
@@ -892,7 +889,7 @@ impl LoopState<'_> {
                 reason: format!("HALT: {reason}"),
                 ledger_tag: format!("halt:{reason}"),
             });
-            return GateDecision::Stop(RunOutcome::Halt);
+            return Ok(GateDecision::Stop(RunOutcome::Halt));
         }
         if res.stop {
             let (mt, tt) = self.eng.tally();
@@ -901,9 +898,9 @@ impl LoopState<'_> {
                 reason: format!("{mt}/{tt} goals met after {} session(s)", self.session),
                 ledger_tag: "goals-met".into(),
             });
-            return GateDecision::Stop(RunOutcome::GoalsMet);
+            return Ok(GateDecision::Stop(RunOutcome::GoalsMet));
         }
-        GateDecision::Loop
+        Ok(GateDecision::Loop)
     }
 }
 
@@ -1112,6 +1109,11 @@ pub fn run(
     let pre = st.eng.evaluate_cycle(dir, config_base, &rs, ruler);
     eprint!("{}", indent(&st.eng.scoreboard()));
     st.publish();
+    // §5.5.1: the baseline verdicts are the GATE's seed for session 1 (§5.7). Write them with
+    // `outcome:"baseline"` and `session:null` BEFORE the early-exit checks below — an
+    // already-satisfied or already-aborting baseline still owes session 1 a "was met" to regress
+    // against, and without it session 1 could never be rolled back. A failed write is a hard error.
+    crate::core::verdicts::append(dir, None, &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
     if pre.halt {
         eprintln!("⚠ HALT at baseline — guard already true: {}", pre.halt_reason.clone().unwrap_or_default());
         st.dash.phase = Phase::Done;
@@ -1183,7 +1185,7 @@ pub fn run(
             continue; // rate-limited: incomplete session, not judged — just go round again
         };
 
-        match st.gate(verified, &outcome) {
+        match st.gate(verified, &outcome)? {
             // GATE
             GateDecision::Loop => continue,
             GateDecision::Stop(outcome) => return Ok(outcome),
