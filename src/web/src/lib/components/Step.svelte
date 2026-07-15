@@ -6,7 +6,7 @@
   // falls back to the worker-default `model` so an older state.json (no per-step model) still shows.
   const step = $derived(state?.step || '—');
   const agent = $derived(state?.step_agent || '—');
-  const model = $derived(state?.step_model || state?.model || '—');
+  const model = $derived(state?.step_model || state?.model || 'agent default');
   const phase = $derived(state?.phase || '—');
 </script>
 

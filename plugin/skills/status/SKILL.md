@@ -54,5 +54,5 @@ view, suggest `agg dashboard` in a second terminal.
 - Stalled (high idle, no token growth) → the watchdog should auto-recover; if not, the
   worker may be wedged — suggest checking `agg/state/run.log` / restarting `agg run`.
 - Close to done (e.g. `met_fraction` high) → let it run.
-- Out of budget (`over_budget`) → raise `sequence.budget.total` in `agg/agg.yaml` and restart,
+- Out of budget (`over_budget`) → raise `sequence.limits.tokens` in `agg/agg.yaml` and restart,
   or accept the partial result.

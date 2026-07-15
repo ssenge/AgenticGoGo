@@ -46,7 +46,9 @@ fn render_state(s: &DashboardState) -> String {
     // the current STEP and who ran it (§7.4) — a mixed run is uninterpretable without the agent+model.
     if !s.step.is_empty() {
         let agent = if s.step_agent.is_empty() { "—" } else { s.step_agent.as_str() };
-        let model = if s.step_model.is_empty() { "—" } else { s.step_model.as_str() };
+        // empty model = agg pins no `--model`, the agent uses its own default (e.g. codex, whose
+        // DEFAULT_MODEL is "" on purpose). Say so rather than showing a bare em-dash.
+        let model = if s.step_model.is_empty() { "agent default" } else { s.step_model.as_str() };
         out.push_str(&format!("step   {}  ·  {agent} / {model}\n", s.step));
     }
     // budget line (only when a ceiling is set)

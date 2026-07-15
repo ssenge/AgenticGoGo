@@ -68,17 +68,17 @@ matrix below.
 | script judges | ✅ | ✅ | ✅ |
 | LLM judges (an `.md` rubric judge) | ✅ | ✅ | ✅ |
 | summaries (`summary.enabled`) | ✅ | ✅ | ✅ |
-| token budget (`sequence.budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
+| token budget (`sequence.limits.tokens`, `over_budget`) | ✅ | ✅ | ✅ |
 | thinking effort (`effort:`) | ✅ | ✅ (clamps `max`→`high`) | ⚠️ **not with `model: auto`** |
 | rate-limit backoff | ✅ | ✅ | ❌ |
-| **dollar cost (`sequence.cost.total`, `over_cost`)** | ✅ | ❌ | ❌ |
+| **dollar cost (`sequence.limits.cost`, `over_cost`)** | ✅ | ❌ | ❌ |
 
 ### Four hard rules. Break one and the config you write CANNOT START.
 
-1. **`sequence.cost.total` and `abort_if: over_cost` are CLAUDE-ONLY.** Codex and Copilot cannot
+1. **`sequence.limits.cost` and `abort_if: over_cost` are CLAUDE-ONLY.** Codex and Copilot cannot
    price a session in dollars, so `agg` refuses the config outright rather than let a spend guard
    silently never fire. **This is checked per step:** even one `agent: codex` step in an otherwise
-   Claude sequence makes a `cost:` guard uncoverable — use **`sequence.budget.total` (output
+   Claude sequence makes a `cost` guard uncoverable — use **`sequence.limits.tokens` (output
    tokens)** instead, which works on all three. (Copilot can additionally cap itself with
    `--max-ai-credits <n>` via `worker_args`.)
 2. **Codex: OMIT `model:` entirely** unless the user explicitly names one. Guessing (e.g.
@@ -206,7 +206,7 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   back any session that regresses one, and `any_regressed(invariants)` in `abort_if` gives up on it.
 
 **Never leave an autonomous loop with no ceiling at all.** If you drop `over_cost` for codex/copilot,
-you MUST keep `over_budget` (with a real `sequence.budget.total`) in its place. **Never put a judge
+you MUST keep `over_budget` (with a real `sequence.limits.tokens`) in its place. **Never put a judge
 that only appears in an `if` branch (like `stalled`) into `done_if`** — the loop would "succeed" by
 getting stuck.
 
@@ -332,9 +332,10 @@ steps:
 sequence:
   steps:
     - worker
-  budget: { total: <tokens or null> }    # output-token ceiling → over_budget. Works on ALL agents.
-  # cost: { total: <dollars or null> }   # → over_cost. CLAUDE-ONLY, all-Claude sequences only.
-  max_sessions: 0                        # 0 = unlimited (or pass `agg run --max-sessions <n>`)
+  limits:                                # run ceilings — omit a key or use null for "unlimited"
+    tokens: <int or null>                # output-token ceiling → over_budget. Works on ALL agents.
+    # cost: <dollars or null>            # → over_cost. CLAUDE-ONLY, all-Claude sequences only.
+    sessions: <int or null>              # worker-session cap → over_iterations (or `agg run --max-sessions <n>`)
   invariants: [<judge names that must STAY met>]
   done_if: "<expression over judge names>"
   abort_if: "<ceiling expression>"       # see Step 4

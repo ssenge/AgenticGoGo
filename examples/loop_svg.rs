@@ -27,7 +27,7 @@ const STAGES: [(&str, &str, f64); 4] = [
     ("INJECT", "state + steering → prompt", 0.0),
     ("RUN", "Claude Code — one fresh `claude -p` session", 90.0),
     ("VERIFY", "judges run against the filesystem", 180.0),
-    ("GATE", "keep or roll back · repeat until stop_when", 270.0),
+    ("GATE", "keep or roll back · repeat until done_if", 270.0),
 ];
 
 fn pos(angle_deg: f64, radius: f64) -> (f64, f64) {

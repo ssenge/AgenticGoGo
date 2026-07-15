@@ -390,7 +390,7 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
     } else if !s.model.is_empty() {
         s.model.as_str()
     } else {
-        "—"
+        "agent default"
     };
 
     let line1 = Line::from(vec![
@@ -436,10 +436,10 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
     }
     segments.push(vec![
         sep(),
-        label("stop "),
+        label("done_if "),
         Span::styled(s.stop_when.clone(), Style::default().fg(Color::Green)),
         sep(),
-        label("halt "),
+        label("abort_if "),
         Span::styled(halt, Style::default().fg(Color::Yellow)),
     ]);
     if s.memory_bytes > 0 {
