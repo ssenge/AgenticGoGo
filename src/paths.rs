@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! <project>/
-//!   agg/                  user config — COMMITTED (agg.yaml, goals.yaml, judges/, rubrics/)
+//!   agg/                  user config — COMMITTED (agg.yaml, AGG_STATE.md, judges/<name>.{sh,md})
 //!     state/              ALL runtime state — GITIGNORED (one folder, one rule)
 //!       AGG_MEMORY.md       durable institutional memory (#3) — moved here from the project root
 //!       state.json          live dashboard snapshot (loop writes, `agg dashboard` reads)
@@ -23,14 +23,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// The MANDATORY config-dir name. User inputs (agg.yaml, goals.yaml, the resume prompt, judges/,
-/// rubrics/) live under `<project>/agg/`, and all runtime state under `<project>/agg/state/`.
+/// The MANDATORY config-dir name. User inputs (agg.yaml, the state file, the judges under judges/)
+/// live under `<project>/agg/`, and all runtime state under `<project>/agg/state/`.
 /// (Runtime state living inside `agg/` is what makes the folder mandatory.)
 pub const CONFIG_DIR: &str = "agg";
 
 /// Where user-provided config lives for `dir`: `<dir>/agg/`. This is the base that `agg.yaml`,
-/// `goals.yaml`, the resume prompt, and rubric files resolve against. (Judge *commands* still run
-/// from the project root, so a goal's `cmd`/`inputs` reference real project files — only
+/// the state file, and `.md` judge rubrics resolve against. (Judge *scripts* still run
+/// from the project root, so a judge's `cmd`/`inputs` reference real project files — only
 /// config-adjacent files live here.)
 pub fn config_base(dir: &Path) -> PathBuf {
     dir.join(CONFIG_DIR)

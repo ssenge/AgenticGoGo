@@ -52,7 +52,7 @@
 //! ## The dangerous one: cost
 //! `over_cost` is `cost_spent >= cost_limit`. If a backend never reports cost, `cost_spent` stays
 //! 0.0, the predicate is never true, and the guard is **silently dead** — an autonomous loop with
-//! `halt_when: over_cost` runs unbounded, spending real money, with no error anywhere. Same shape
+//! `abort_if: over_cost` runs unbounded, spending real money, with no error anywhere. Same shape
 //! for `over_budget`. **Neither Codex nor Copilot can price a session in dollars.**
 //!
 //! So a backend must DECLARE what it can report ([`Capabilities`]), the parse layer returns

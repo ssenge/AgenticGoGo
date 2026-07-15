@@ -3,9 +3,9 @@
 #
 # scripts/e2e.sh stubs the worker so it is fast, free and deterministic. This one does not.
 # It spends real tokens, and it is the only test that exercises the worker integration for
-# real: the live stream-json shapes, the real `session_id` and `--resume` continuity, the real
-# `total_cost_usd` and `usage.output_tokens`, the real activity events, and a real agent
-# actually satisfying an external judge.
+# real: the live stream-json shapes, the real `total_cost_usd` and `usage.output_tokens`, the
+# real activity events, and a real agent actually satisfying an external judge — then COMMITTING
+# its work so mandatory session isolation keeps it.
 #
 # The `claude` on PATH is a PASSTHROUGH WRAPPER, not a stub: it records argv, records the
 # phase agg had published when the worker started, and then `exec`s the real binary. Nothing
@@ -17,7 +17,11 @@
 #
 # The `usage (API-eq)` figure it prints is `total_cost_usd` as the CLI reports it: the
 # API-equivalent list price of the work. On a Max/Pro subscription you are NOT charged it —
-# it is the same number `cost.total` / `over_cost` gate on. See README "usage (API-eq)".
+# it is the same number `sequence.limits.cost` / `over_cost` gate on. See README "usage (API-eq)".
+#
+# Config is the CURRENT judge/step model: a judge IS a goal (agg/judges/<name>.{sh,md}), the DoD
+# is `done_if`, ceilings live in `sequence.limits`, and continuity across sessions is carried by
+# COMMITTED git state + AGG_MEMORY.md — there is no `--resume` (every worker session is fresh).
 #
 # Exits 0 only if every check passed.
 set -uo pipefail
@@ -49,9 +53,12 @@ printf 'model: %s   claude: %s\nworkspace: %s\n' "$MODEL" "$REAL_CLAUDE" "$WS"
 printf '\033[33mthis spends real subscription usage (not dollars).\033[0m\n'
 ( cd "$ROOT" && cargo build --quiet ) || { bad "cargo build"; exit 1; }
 
-# ── fixture: a passthrough-instrumented `claude` + a deterministic external judge ─────────
-mkproj() { # mkproj <name> <goals.yaml body> <agg.yaml extra> <resume prompt>
-  local d="$WS/$1"; mkdir -p "$d/bin" "$d/judges"
+# ── fixture: a passthrough-instrumented `claude` + a named external judge + a git repo ────────
+# mkproj <name> <judge_name> <done_if_expr> <state/AGG_STATE.md body>
+# Writes agg/agg.yaml (judge/step model), agg/AGG_STATE.md, agg/judges/<judge_name>.sh stub,
+# and inits a git repo (session isolation is mandatory). The section fills in the judge body after.
+mkproj() {
+  local d="$WS/$1"; mkdir -p "$d/bin" "$d/agg/judges"
   cat > "$d/bin/claude" <<EOF
 #!/bin/sh
 # PASSTHROUGH: record what agg invoked us with, note the live phase, then run the REAL claude.
@@ -65,27 +72,30 @@ EOF
 printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/state/state.json)" >> trace.txt
 EOF
   chmod +x "$d/bin/claude" "$d/rec"
-  printf '%s' "$2" > "$d/goals.yaml"
-  { printf 'project: %s\nmodel: %s\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n' "$1" "$MODEL"
-    printf 'cost: { total: 1.0 }\nhalt_when: over_cost\n'
+  { printf 'project: %s\n' "$1"
+    printf 'defaults: { agent: claude, model: %s, state: AGG_STATE.md }\n' "$MODEL"
+    printf 'judge: { agent: claude, model: %s, timeout: 120 }\n' "$MODEL"
+    printf 'steps: { worker: {} }\n'
+    printf 'summary: { enabled: false }\n'
     printf 'hooks:\n  on_session_start: ["sh ./rec INJECT"]\n  on_session_end: ["sh ./rec GATE"]\n'
-    printf '%s' "$3"; } > "$d/agg.yaml"
-  printf '%s' "$4" > "$d/AGG_RESUME.md"
+    printf 'sequence:\n'
+    printf '  steps: [ worker ]\n'
+    printf '  limits: { cost: 1.0 }\n'
+    printf '  done_if: "%s"\n' "$3"
+    printf '  abort_if: "over_cost OR over_iterations"\n'
+  } > "$d/agg/agg.yaml"
+  printf '%s' "$4" > "$d/agg/AGG_STATE.md"
+  ( cd "$d" && git init -q -b main && git config user.email t@t && git config user.name t \
+      && git add -A && git commit -q -m seed )
   echo "$d"
 }
 run_agg() { local d=$1; shift; ( cd "$d" && PATH="$d/bin:$PATH" "$AGG" "$@" ); }
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
-sec "1. a real agent, driven by agg, satisfying a real external judge"
-A="$(mkproj oneshot \
-'goals:
-  - id: answered
-    type: binary
-    judge: { kind: script, cmd: "./judges/check.sh" }
-stop_when: answered
-' '' 'Create a file named `answer.txt` in the current directory whose entire contents are the number 42 followed by a newline. Nothing else. Then stop.
+sec "1. a real agent, driven by agg, satisfying a real external judge (and committing its work)"
+A="$(mkproj oneshot answered 'answered' 'Create a file named `answer.txt` in the current directory whose entire contents are the number 42 followed by a newline. Nothing else. Then run `git add answer.txt && git commit -m answer` to commit it (uncommitted work is discarded by the harness). Then stop.
 ')"
-cat > "$A/judges/check.sh" <<'EOF'
+cat > "$A/agg/judges/answered.sh" <<'EOF'
 #!/bin/sh
 sh ./rec VERIFY
 if [ -f answer.txt ] && grep -qx '42' answer.txt; then
@@ -94,23 +104,27 @@ else
   echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"answer.txt missing or wrong"}'
 fi
 EOF
-chmod +x "$A/judges/check.sh"
+chmod +x "$A/agg/judges/answered.sh"
 
 T0=$(date +%s)
 run_agg "$A" run --max-sessions 3 > "$A/out.log" 2>&1
 RC=$?
 E1=$(( $(date +%s) - T0 ))
 printf '  (%ss)\n' "$E1"
-is "the loop reaches its stop condition (exit 0)" "$RC" "0"
-has "…and says so"                                "$A/out.log" "STOP condition satisfied"
-exists "the REAL agent created the file"          "$A/answer.txt"
-is "…with exactly the content the goal demands"   "$(cat "$A/answer.txt" 2>/dev/null)" "42"
+is "the loop reaches its Definition of Done (exit 0)" "$RC" "0"
+has "…and says so (done_if satisfied)"            "$A/out.log" "done_if satisfied"
+exists "the REAL agent created the file"           "$A/answer.txt"
+is "…with exactly the content the judge demands"   "$(cat "$A/answer.txt" 2>/dev/null)" "42"
+has "…and the session merged (worker committed → isolation kept it)" "$A/out.log" "merged → kept"
 
 sec "2. the four outer-loop stages, observed on a real run"
 TRACE=$(tr '\n' ' ' < "$A/trace.txt" 2>/dev/null)
 printf '  trace: %s\n' "$TRACE"
-is "baseline VERIFY → INJECT → RUN → VERIFY → GATE" \
-   "$TRACE" "VERIFY=verify INJECT=inject RUN=run VERIFY=verify GATE=gate "
+# baseline judging fires VERIFY once before session 1, then INJECT→RUN→VERIFY→GATE per session.
+has "a baseline VERIFY runs before the first session" "$A/trace.txt" "VERIFY="
+has "…then INJECT (on_session_start hook)"            "$A/trace.txt" "INJECT="
+has "…then RUN (the real worker launches)"            "$A/trace.txt" "RUN="
+has "…then GATE (on_session_end hook)"                "$A/trace.txt" "GATE="
 is "the run settles on phase=done" "$(snap "$A" phase)" "done"
 
 sec "3. real worker accounting (what a stub can never prove)"
@@ -141,32 +155,30 @@ sec "5. the flags agg actually hands the real CLI"
 has "…--dangerously-skip-permissions" "$A/claude_args.txt" "--dangerously-skip-permissions"
 has "…--output-format stream-json"    "$A/claude_args.txt" "--output-format stream-json"
 has "…--model <the configured model>" "$A/claude_args.txt" "$MODEL"
-hasnt "…and NO --resume by default (fresh context per session)" "$A/claude_args.txt" "--resume"
+hasnt "…and NO --resume (every session is fresh context — the moat)" "$A/claude_args.txt" "--resume"
 
 sec "6. durable side effects of a real run"
-exists "institutional memory was written" "$A/AGG_MEMORY.md"
-has    "…recording the real session"      "$A/AGG_MEMORY.md" "session 1"
+exists "institutional memory was written" "$A/agg/state/AGG_MEMORY.md"
+has    "…recording the real session"      "$A/agg/state/AGG_MEMORY.md" "## session 1"
 is "the ledger is finalized as goals-met" \
    "$(python3 -c "import json;print(json.load(open('$A/agg/state/project.json'))['runs'][-1]['end_reason'])" 2>/dev/null)" "goals-met"
 [ ! -f "$A/agg/state/run.pid" ] && ok "run.pid cleared by the Drop guard" || bad "run.pid left behind"
 run_agg "$A" status > "$A/status.log" 2>&1
 has "agg status renders the finished real run" "$A/status.log" "done"
+is "…the worker's committed file is on main (isolation merged it)" \
+   "$(cd "$A" && git show main:answer.txt 2>/dev/null | tr -d '[:space:]')" "42"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
-sec "7. TWO real sessions: --resume continuity + memory carried across the boundary"
-# a counter goal: one increment per session, so the loop MUST take two sessions.
-B="$(mkproj resume \
-'goals:
-  - id: counted
-    type: binary
-    judge: { kind: script, cmd: "./judges/check.sh" }
-stop_when: counted
-' 'resume_sessions: true
-' 'Read the file `count.txt` in the current directory (if it does not exist, treat its value as 0).
+sec "7. TWO real sessions: fresh-context continuity via COMMITTED state + memory (no --resume)"
+# a counter that needs exactly two increments — the loop MUST take two sessions, and session 2
+# (a FRESH context) must pick up session 1's committed count.txt + the folded memory. This is the
+# whole point of the rewrite: continuity carried by git + AGG_MEMORY.md, not a --resume handle.
+B="$(mkproj resume counted 'counted' 'Read the file `count.txt` in the current directory (if it does not exist, treat its value as 0).
 Increment that number by exactly ONE. Write the new number back to `count.txt` as the only
-contents, followed by a newline. Increment exactly once, then stop. Do not skip ahead.
+contents, followed by a newline. Then run `git add count.txt && git commit -m increment` to commit
+it (uncommitted work is discarded). Increment exactly once, then stop. Do not skip ahead.
 ')"
-cat > "$B/judges/check.sh" <<'EOF'
+cat > "$B/agg/judges/counted.sh" <<'EOF'
 #!/bin/sh
 sh ./rec VERIFY
 n=$(cat count.txt 2>/dev/null | tr -d '[:space:]')
@@ -176,7 +188,7 @@ else
   printf '{"met":false,"value":0,"max":2,"target":2,"rationale":"count is %s"}\n' "${n:-0}"
 fi
 EOF
-chmod +x "$B/judges/check.sh"
+chmod +x "$B/agg/judges/counted.sh"
 
 T0=$(date +%s)
 run_agg "$B" run --max-sessions 4 > "$B/out.log" 2>&1
@@ -189,21 +201,13 @@ SESS=$(snap "$B" session)
 [ "${SESS:-0}" -ge 2 ] && ok "…and it genuinely took ≥2 real sessions (session=$SESS)" \
                        || bad "expected ≥2 sessions, got $SESS"
 is "the counter really reached 2" "$(tr -d '[:space:]' < "$B/count.txt" 2>/dev/null)" "2"
-has "session 2 was launched with --resume (resume_sessions: true)" "$B/claude_args.txt" "--resume"
-python3 - "$B" <<'PY'
-import re, sys
-args = open(sys.argv[1] + "/claude_args.txt").read().splitlines()
-ids = [m.group(1) for l in args for m in [re.search(r"--resume (\S+)", l)] if m]
-print(f"  --resume ids seen: {ids}")
-ok = bool(ids) and all(re.fullmatch(r"[0-9a-f-]{16,}", i) for i in ids)
-sys.exit(0 if ok else 1)
-PY
-[ $? -eq 0 ] && ok "…with a real session_id agg extracted from the prior result event" \
-             || bad "the --resume id is not a real session_id"
-COUNT_FOLDS=$(grep -c "^## session" "$B/AGG_MEMORY.md" 2>/dev/null || echo 0)
+hasnt "…and did so with NO --resume — pure fresh context each session" "$B/claude_args.txt" "--resume"
+COUNT_FOLDS=$(grep -c "^## session" "$B/agg/state/AGG_MEMORY.md" 2>/dev/null || echo 0)
 [ "$COUNT_FOLDS" -ge 2 ] && ok "memory folded one entry per real session ($COUNT_FOLDS)" \
                          || bad "expected ≥2 memory entries, got $COUNT_FOLDS"
-has "…and the prior session's record was INJECTed into session 2's prompt" "$B/out.log" "[memory] session #1 folded"
+has "…and session #1's record was INJECTed into session 2's prompt" "$B/out.log" "[memory] session #1 folded"
+is "…the committed count on main reached 2 (each session's work merged)" \
+   "$(cd "$B" && git show main:count.txt 2>/dev/null | tr -d '[:space:]')" "2"
 
 TOTAL=$(python3 -c "print(round(float('$(snap "$A" cost_spent)') + float('$(snap "$B" cost_spent)'), 4))" 2>/dev/null)
 printf '\n\033[1m══ summary ══\033[0m\n  passed: \033[32m%d\033[0m   failed: \033[31m%d\033[0m\n' "$PASS" "$FAIL"
