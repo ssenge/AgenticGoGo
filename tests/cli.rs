@@ -1137,3 +1137,379 @@ fn done_if_all_goals_ignores_an_if_condition_judge() {
         "all_goals must fire over the DoD-set even while the if-condition judge `stalled` is unmet:\n{combined}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BACKFILL — runtime regressions that executed with no checked-in test (audit gap). Each drives
+// the real loop through the fake-claude shim and would go RED if the behaviour regressed.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// #1 — JUDGE-TOKEN BUDGETING (a money path, previously untested end-to-end). The LLM judge's OWN
+/// output tokens count against `limits.tokens` (§5.6). The worker reports 5 tok/session — 100 over
+/// the whole 20-session cap, well UNDER the 1000 ceiling — so worker spend ALONE can never trip
+/// `over_budget`. The `.md` judge reports 600 tok per run; once worker+judge crosses 1000, the guard
+/// must ABORT (exit 3). If judge spend were uncounted, only the worker's ~100 tok would accrue and the
+/// run would sail to the session cap (exit 4). That exit-3-vs-4 split is the whole test.
+#[test]
+fn judge_tokens_count_toward_the_token_ceiling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // ONE binary, BOTH roles: `--output-format json` is the ruler one-shot (the LLM judge), which
+    // reports 600 output_tokens on a `result`-shaped envelope so `tally_one_shot` sums them (§5.6) and
+    // whose verdict (in `.result`) is NEVER met; `stream-json` is the worker, reporting 5 tok.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+fmt=""; prev=""
+for a in "$@"; do [ "$prev" = "--output-format" ] && fmt="$a"; prev="$a"; done
+if [ "$fmt" = "json" ]; then
+  printf '{"type":"result","result":"{\\"met\\":false,\\"value\\":0,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"never\\"}","usage":{"output_tokens":600},"total_cost_usd":0}\n'
+  exit 0
+fi
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":5},"total_cost_usd":0}\n'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    // the `.md` judge IS the DoD (an LLM judge), never met — so ONLY over_budget can end the loop.
+    write(dir, "agg/judges/reviewed.md", "---\ninputs: []\n---\nDecide if the work is done. Output the verdict JSON on the last line.\n");
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: judgetok\ndefaults: { model: fake }\njudge: { agent: claude, model: fake }\n\
+         steps:\n  worker: {}\n\
+         sequence:\n  steps: [worker]\n  done_if: \"reviewed\"\n  abort_if: \"over_budget\"\n  limits: { tokens: 1000 }\n\
+         summary: { enabled: false }\nmemory: { enabled: false }\n",
+    );
+    write(dir, "agg/AGG_STATE.md", "do work\n");
+    git_init(dir);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    // over_budget aborts (exit 3) — NOT the session cap (exit 4). The ONLY way tokens reach 1000 is by
+    // counting the judge's 600/run, so this asserts exactly the money path.
+    assert_exit(&out, 3, &combined);
+    assert!(
+        combined.contains("ABORT") && combined.contains("over_budget"),
+        "the judge's own tokens must push worker+judge over limits.tokens and trip over_budget:\n{combined}"
+    );
+    assert!(
+        !combined.contains("reached max_sessions"),
+        "over_budget (judge tokens counted), not the session cap, must end the run:\n{combined}"
+    );
+}
+
+/// #2 — CEILINGS ARE CHECKED AFTER A `skip_judges` STEP TOO. A skip step runs NO judges, but the
+/// run-level ceilings must still be evaluated after it — else a run of skip steps sails past
+/// `limits.sessions`/`limits.tokens`. Sequence `[worker, stage]`: `stage` (skip_judges) is session 2,
+/// which is exactly when `over_iterations` (limits.sessions: 2) first trips, so the abort (exit 3)
+/// lands ON the skip step. If the skip path stopped checking ceilings, the loop would slip to the
+/// loop's own exit-4 session-cap precheck instead.
+#[test]
+fn ceilings_are_checked_after_a_skip_judges_step_too() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: skipceil\ndefaults: { model: fake }\n\
+         steps:\n  worker: {}\n  stage: { skip_judges: true }\n\
+         sequence:\n  steps: [worker, stage]\n  done_if: \"feature\"\n  abort_if: \"over_iterations\"\n  limits: { sessions: 2 }\n\
+         summary: { enabled: false }\nmemory: { enabled: false }\n",
+    );
+    write(dir, "agg/AGG_STATE.md", "do work\n");
+
+    // No --max-sessions flag on purpose: the ceiling under test is `limits.sessions`, and a non-zero
+    // flag would OVERRIDE it (§4.1). limits.sessions=2 ALSO backs the loop's own exit-4 precheck, so
+    // if the skip-path ceiling check regressed the run still terminates (exit 4) rather than hanging.
+    let out = agg(dir, &path).arg("run").output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 3, &combined);
+    assert!(combined.contains("over_iterations"), "the ceiling must abort ON the skip step (exit 3):\n{combined}");
+    assert!(
+        !combined.contains("reached max_sessions"),
+        "over_iterations (checked after the skip step), not the exit-4 cap, must end the run:\n{combined}"
+    );
+}
+
+/// #3 — a CRASHING judge with `abort_if: any_judge_error` ABORTS the run (exit 3). Distinct from a
+/// regression: a crashed judge's `Verdict::failed` never changes lifecycle (model.rs), so
+/// `any_regressed` stays false — only `any_judge_error` surfaces it. (The companion below proves the
+/// negative half: a clean not-met does NOT trip it.)
+#[test]
+fn a_crashing_judge_aborts_the_run_via_any_judge_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // worker: makes the invariant judge start CRASHING (drops `.flake`), then commits clean work.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+printf 'work\n' >> tracked.txt
+touch .flake
+git add -A >/dev/null 2>&1
+git commit -qm "worker change" >/dev/null 2>&1
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.0}\n'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let g = |args: &[&str]| { Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    write(dir, "tracked.txt", "ok\n");
+    // build_ok (invariant): met at baseline; once `.flake` exists it CRASHES (exit non-zero, no JSON →
+    // Verdict::failed, error set), NOT a clean not-met.
+    write_judge(dir, "build_ok", "#!/bin/sh\nif [ -f .flake ]; then echo 'judge crashed' >&2; exit 1; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "crashjudge", "feature", "  invariants: [build_ok]\n  abort_if: \"any_judge_error\"\n", "memory: { enabled: false }\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 3, &combined);
+    assert!(
+        combined.contains("ABORT") && combined.contains("any_judge_error"),
+        "a crashing judge under `abort_if: any_judge_error` must abort (exit 3):\n{combined}"
+    );
+}
+
+/// #3 companion — the DISCRIMINATOR for the test above. A judge that runs cleanly and returns
+/// `met:false` (NO error) must NOT populate `any_judge_error`. With `abort_if: any_judge_error` and a
+/// DoD that is simply never met, the run reaches the session cap (exit 4), never aborting (exit 3).
+#[test]
+fn a_clean_not_met_judge_does_not_trip_any_judge_error() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"cleanly not yet\"}'\n");
+    write_cfg(dir, "cleanjudge", "feature", "  abort_if: \"any_judge_error\"\n", "memory: { enabled: false }\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined);
+    assert!(!combined.contains("ABORT"), "a cleanly not-met judge must NOT trip any_judge_error:\n{combined}");
+}
+
+/// Build a two-step project (`plan` then `build`) whose fake worker APPENDS its full argv to
+/// `sessions.txt` (one block per session, separated by `=== SESSION ===`), never meets the DoD, runs
+/// exactly two sessions (plan then build) and exits 4 at the cap. Returns the two recorded argv blocks
+/// `(plan_argv, build_argv)`. The worker echoing its own args is the only honest observation channel
+/// for per-step overrides — agg logs none of `--model`/`--effort`/`worker_args`. `defaults_body` /
+/// `build_body` are the YAML flow-mapping bodies for `defaults:` and the `build` step.
+fn two_step_argv(defaults_body: &str, build_body: &str) -> (String, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+{ echo "=== SESSION ==="; for a in "$@"; do printf '%s\n' "$a"; done; } >> sessions.txt
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    write_judge(dir, "nope", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    write(
+        dir,
+        "agg/agg.yaml",
+        &format!(
+            "project: argv\ndefaults: {defaults_body}\n\
+             steps:\n  plan: {{}}\n  build: {build_body}\n\
+             sequence:\n  steps: [plan, build]\n  done_if: \"nope\"\n\
+             summary: {{ enabled: false }}\nmemory: {{ enabled: false }}\n"
+        ),
+    );
+    write(dir, "agg/AGG_STATE.md", "do work\n");
+    git_init(dir);
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined); // never-met DoD → the 2-session cap ends it (plan, then build)
+    let sessions = fs::read_to_string(dir.join("sessions.txt")).expect("the worker should have recorded its argv");
+    let blocks: Vec<String> = sessions.split("=== SESSION ===").skip(1).map(|b| b.trim().to_string()).collect();
+    assert_eq!(blocks.len(), 2, "exactly two sessions (plan, build) must have run:\n{sessions}");
+    (blocks[0].clone(), blocks[1].clone())
+}
+
+/// The value following `flag` in a newline-separated argv block (the worker records one arg per line).
+fn arg_value(argv: &str, flag: &str) -> Option<String> {
+    let lines: Vec<&str> = argv.lines().collect();
+    lines.iter().position(|l| *l == flag).and_then(|i| lines.get(i + 1)).map(|s| s.to_string())
+}
+
+/// #4 — a per-step MODEL override reaches the worker's `--model` argv. `build` overrides
+/// `defaults.model`; the two sessions must carry DIFFERENT `--model` values. If the per-step override
+/// regressed (build fell back to defaults.model), `model-bravo` would never reach argv.
+#[test]
+fn per_step_model_override_reaches_the_worker_argv() {
+    let (plan, build) = two_step_argv("{ model: model-alpha }", "{ model: model-bravo }");
+    assert_eq!(arg_value(&plan, "--model").as_deref(), Some("model-alpha"), "plan uses the default model:\n{plan}");
+    assert_eq!(
+        arg_value(&build, "--model").as_deref(),
+        Some("model-bravo"),
+        "build's per-step model override must reach --model for THAT step's worker:\n{build}"
+    );
+}
+
+/// #5 — a per-step EFFORT OVERRIDE (not merely the inherited default) reaches `--effort`. `plan`
+/// inherits `defaults.effort: low`; `build` overrides to `high`. If the per-step override regressed,
+/// build would inherit `low` and `high` would never reach argv.
+#[test]
+fn per_step_effort_override_reaches_the_worker_argv() {
+    let (plan, build) = two_step_argv("{ model: fake, effort: low }", "{ effort: high }");
+    assert_eq!(arg_value(&plan, "--effort").as_deref(), Some("low"), "plan inherits defaults.effort:\n{plan}");
+    assert_eq!(
+        arg_value(&build, "--effort").as_deref(),
+        Some("high"),
+        "build's per-step effort override must reach --effort:\n{build}"
+    );
+}
+
+/// #6 — an EMPTIED `worker_args: []` in a step overrides the inherited defaults list. `plan` inherits
+/// the sentinel flag; `build` empties the list and must carry NONE of it. If `Some([])` were treated
+/// like `None` (unset → inherit), build would carry the sentinel too.
+#[test]
+fn an_emptied_worker_args_list_overrides_the_inherited_defaults() {
+    let (plan, build) = two_step_argv(
+        "{ model: fake, worker_args: [\"--SENTINEL-ARG\", \"sentinel-val\"] }",
+        "{ worker_args: [] }",
+    );
+    assert!(plan.contains("--SENTINEL-ARG"), "plan inherits defaults.worker_args:\n{plan}");
+    assert!(
+        !build.contains("--SENTINEL-ARG"),
+        "an emptied worker_args: [] must DROP the inherited flag, not inherit it:\n{build}"
+    );
+}
+
+/// #7 — a non-empty `inputs:` in an `.md` judge's frontmatter is resolved and its content REACHES the
+/// judge prompt. `evidence.txt` carries a sentinel; the judge declares `inputs: [evidence.txt]`; the
+/// ruler one-shot records the prompt it was handed. Both the sentinel and the input's label must be in
+/// it. If frontmatter parsing regressed to empty, the judge would see "(no inputs specified)".
+#[test]
+fn an_md_judge_resolves_its_frontmatter_inputs_into_the_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // ONE binary: the `--output-format json` one-shot records the judge prompt and reports a verdict
+    // (met once `did_work` exists); the stream-json worker creates + commits `did_work`.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+fmt=""; prompt=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--output-format" ] && fmt="$a"
+  [ "$prev" = "-p" ] && prompt="$a"
+  prev="$a"
+done
+if [ "$fmt" = "json" ]; then
+  printf '%s' "$prompt" > judge_prompt.txt
+  if [ -f did_work ]; then
+    printf '{"result":"{\\"met\\":true,\\"value\\":1,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"ok\\"}"}\n'
+  else
+    printf '{"result":"{\\"met\\":false,\\"value\\":0,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"not yet\\"}"}\n'
+  fi
+  exit 0
+fi
+: > did_work
+git add did_work >/dev/null 2>&1
+git commit -qm "worker: did_work" >/dev/null 2>&1
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    write(dir, "evidence.txt", "INPUT_SENTINEL_ABC\n");
+    write(dir, "agg/judges/reviewed.md", "---\ninputs: [evidence.txt]\n---\nApply the rubric. Output the verdict JSON on the last line.\n");
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: mdinputs\ndefaults: { model: fake }\njudge: { agent: claude, model: fake }\n\
+         steps:\n  worker: {}\n\
+         sequence:\n  steps: [worker]\n  done_if: \"reviewed\"\n\
+         summary: { enabled: false }\nmemory: { enabled: false }\n",
+    );
+    write(dir, "agg/AGG_STATE.md", "create the file did_work\n");
+    git_init(dir);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "the llm-judged loop should reach done:\n{combined}");
+    let jp = fs::read_to_string(dir.join("judge_prompt.txt")).expect("the ruler one-shot should have recorded its prompt");
+    assert!(jp.contains("INPUT_SENTINEL_ABC"), "the declared input's CONTENT must reach the judge prompt:\n{jp}");
+    assert!(jp.contains("evidence.txt"), "…under its input label:\n{jp}");
+}
+
+/// #8 — a run-set-only `if`-condition judge is EVALUATED and its verdict drives its branch (the
+/// execution half; the DoD-EXCLUSION half is already covered by `done_if_all_goals_ignores_…`).
+/// `stalled` is named ONLY in `if stalled then reconsider`, so it is in the run-set but not the
+/// DoD-set. It must actually RUN each judged step (a filesystem side-effect proves it) AND, once met,
+/// fire the reconsider step (whose per-step prompt marker then appears). If `if`-condition judges were
+/// left out of the run-set, `stalled` would never run and the branch would never fire.
+#[test]
+fn a_run_set_only_if_condition_judge_is_evaluated_and_fires_its_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // the worker records every -p prompt (so the reconsider marker is observable) and, on its first
+    // run, COMMITS `.signal` — which flips `stalled` to met on the next evaluation.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s\n===8<===\n' "$a" >> prompts.txt; prev="$a"; done
+if [ ! -f .signal ]; then : > .signal; git add .signal >/dev/null 2>&1; git commit -qm signal >/dev/null 2>&1; fi
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    // `stalled` leaves a side-effect each time it RUNS, and reports met once `.signal` is present.
+    write_judge(dir, "stalled", "#!/bin/sh\necho STALLED_RAN >> stalled_ran.txt\n[ -f .signal ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"stalled\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    // `feature` is the DoD and is NEVER met → the loop runs to the cap, giving the branch time to fire.
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: ifcond\ndefaults: { model: fake }\n\
+         steps:\n  worker: {}\n  reconsider: { skip_judges: true, prompt: \"RECONSIDER_MARKER_888\" }\n\
+         sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  done_if: \"feature\"\n\
+         summary: { enabled: false }\nmemory: { enabled: false }\n",
+    );
+    write(dir, "agg/AGG_STATE.md", "do work\n");
+    git_init(dir);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined); // feature never met → the session cap ends it
+    // (a) `stalled` actually EXECUTED — the run-set really contains it.
+    let ran = fs::read_to_string(dir.join("stalled_ran.txt")).expect("`stalled` should have run at least once");
+    assert!(ran.contains("STALLED_RAN"), "the if-condition judge `stalled` must be EVALUATED (run):\n{ran}");
+    // (b) its evaluated verdict drove the branch — reconsider fired, injecting its per-step prompt.
+    let prompts = fs::read_to_string(dir.join("prompts.txt")).unwrap_or_default();
+    assert!(
+        prompts.contains("RECONSIDER_MARKER_888"),
+        "`if stalled then reconsider` must fire once stalled evaluates met:\n{combined}"
+    );
+}
