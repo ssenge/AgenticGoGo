@@ -9,7 +9,7 @@
 #      exactly the loophole a "just make the judge green" worker will find.
 #
 # We strip Lean comments first (line `-- …` and block `/- … -/`) so matches are real tactics /
-# declarations, not prose. Any hit halts the loop (this goal is an invariant in goals.yaml).
+# declarations, not prose. Any hit halts the loop (this goal is an invariant in agg.yaml).
 #
 # NOTE ON COVERAGE: the truly rigorous check is `#print axioms <mainThm>` asserting the axiom
 # set ⊆ {propext, Classical.choice, Quot.sound}. That needs a fixed target declaration name;
