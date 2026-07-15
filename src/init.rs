@@ -89,9 +89,9 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
     eprintln!(
         "\n✔ Scaffolded an AgenticGoGo starter in {}.\n\n\
          Next steps:\n  \
-         1. Edit agg.yaml `done_if` + agg/judges/ to match YOUR project.\n  \
-         2. Edit AGG_STATE.md — the standing instructions each worker session reads.\n  \
-         3. agg plan            # dry-run: see the starting scoreboard\n  \
+         1. Edit agg/agg.yaml `done_if` + agg/judges/ to match YOUR project.\n  \
+         2. Edit agg/AGG_STATE.md — the standing instructions each worker session reads.\n  \
+         3. agg plan            # dry-run: see the starting scoreboard (run from the project root)\n  \
          4. agg run             # launch the loop until done_if is met\n",
         base.display()
     );
