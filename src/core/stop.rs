@@ -131,7 +131,8 @@ enum Val {
     /// (`over_budget == 1`) rely on it.
     GoalBool(bool),
     Num(f64),
-    /// A judge with no usable number: `.value`/`.max` on a judge that hasn't run yet or errored.
+    /// A judge with no usable number: `.value`/`.max` on a judge that hasn't run yet, errored, or
+    /// emitted no number (`value: None`).
     /// Any comparison against it is **false** — see `parse_cmp`. Deliberately NOT NaN: a NaN
     /// operand hard-bails, and that `Err` is swallowed into `false` by `engine::eval_or_log`, so
     /// NaN here would mean a stop condition that can never be true and never says why.
@@ -482,17 +483,16 @@ impl<'a> Parser<'a> {
             other => bail!("unknown accessor `{base}.{other}` — a judge exposes `.value` and `.max`"),
         }
 
-        // No verdict yet, or the judge ERRORED => no usable number. `Missing` makes the comparison
-        // false; `any_judge_error` is what tells you the judge blew up.
-        //
-        // ponytail: "the judge emitted no `value`" is NOT distinguishable here — `Verdict.value` is
-        // a `#[serde(default)]` f64, so an absent field and a real `0` are the same 0.0. Treating
-        // that as Missing would break honest `judge.value == 0` checks. Ceiling: it needs
-        // `Option<f64>` on the wire (verdicts.jsonl + state.json), a bigger cut than this commit.
+        // No verdict yet, the judge ERRORED, or it emitted no number => no usable number. `Missing`
+        // makes the comparison false; `any_judge_error` is what tells you the judge blew up. A real
+        // `Some(0.0)` is a MEASURED zero and stays a `Num`, so `coverage.value == 0` reads true and
+        // is finally distinct from an absent number — the ceiling the old ponytail note flagged is
+        // lifted now that `Verdict.value`/`max` are `Option<f64>` (§5.2).
         match goal.last_verdict.as_ref() {
-            Some(v) if v.error.is_none() => {
-                Ok(Val::Num(if field == "value" { v.value } else { v.max }))
-            }
+            Some(v) if v.error.is_none() => match if field == "value" { v.value } else { v.max } {
+                Some(n) => Ok(Val::Num(n)),
+                None => Ok(Val::Missing),
+            },
             _ => Ok(Val::Missing),
         }
     }
@@ -527,8 +527,8 @@ mod tests {
         let mut goal = unjudged(id, invariant);
         goal.apply(Verdict {
             met,
-            value: if met { 1.0 } else { 0.0 },
-            max: 1.0,
+            value: Some(if met { 1.0 } else { 0.0 }),
+            max: Some(1.0),
             target: 1.0,
             rationale: String::new(),
             evidence: vec![],
@@ -540,7 +540,7 @@ mod tests {
     fn regressed(id: &str, invariant: bool) -> Goal {
         let mut goal = g(id, true, invariant);
         // flip to not-met -> regressed
-        goal.apply(Verdict { met: false, value: 0.0, max: 1.0, target: 1.0, rationale: String::new(), evidence: vec![], error: None });
+        goal.apply(Verdict { met: false, value: Some(0.0), max: Some(1.0), target: 1.0, rationale: String::new(), evidence: vec![], error: None });
         assert!(goal.regressed());
         goal
     }
@@ -713,8 +713,8 @@ mod tests {
         let mut goal = unjudged(id, false);
         goal.apply(Verdict {
             met: value >= max,
-            value,
-            max,
+            value: Some(value),
+            max: Some(max),
             target: max,
             rationale: String::new(),
             evidence: vec![],
@@ -809,6 +809,30 @@ mod tests {
         let fresh = [unjudged("coverage", false)];
         assert!(!ev("coverage.value >= 80", &fresh));
         assert!(!ev("coverage.value != 80", &fresh));
+    }
+
+    #[test]
+    fn a_measured_zero_is_distinct_from_no_number() {
+        // The capability `Option<f64>` buys us: a judge that emitted `value: 0` is a MEASURED zero,
+        // so `coverage.value == 0` is TRUE. A judge that emitted NO number has no usable value, so
+        // the SAME comparison is FALSE — Missing, not a smuggled 0.0. Before Option, both were 0.0
+        // and indistinguishable.
+        let measured_zero = [scored("coverage", 0.0, 100.0)];
+        assert!(ev("coverage.value == 0", &measured_zero));
+        assert!(ev("coverage.value < 1", &measured_zero));
+        assert!(!ev("coverage.value >= 1", &measured_zero));
+
+        // a genuine (non-errored) verdict that carries no number at all
+        let mut numberless = unjudged("coverage", false);
+        numberless.apply(Verdict {
+            met: true, value: None, max: None, target: 1.0,
+            rationale: String::new(), evidence: vec![], error: None,
+        });
+        let numberless = [numberless];
+        assert!(!ev("coverage.value == 0", &numberless));
+        assert!(!ev("coverage.value >= 0", &numberless));
+        // the bare name still reads its `met` bool — a numberless verdict is not a broken one.
+        assert!(ev("coverage", &numberless));
     }
 
     #[test]

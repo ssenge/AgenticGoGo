@@ -282,8 +282,24 @@ mod tests {
         };
         let v = run(&spec, Path::new("."), Path::new("."), ruler());
         assert!(v.met);
-        assert_eq!(v.value, 28.0);
+        assert_eq!(v.value, Some(28.0));
         assert!(v.error.is_none());
+    }
+
+    #[test]
+    fn numberless_verdict_parses_to_none_not_a_smuggled_zero() {
+        // A binary judge emits only `met`. Through the REAL script pipeline that must land as
+        // `value: None` — an absent number, not a measured 0 — so a MET binary goal is never mistaken
+        // for "no progress" and `verdicts.jsonl` records it faithfully.
+        let numberless = JudgeSpec::Script { cmd: r#"echo '{"met":true}'"#.into(), timeout: 10 };
+        let v = run(&numberless, Path::new("."), Path::new("."), ruler());
+        assert!(v.met);
+        assert_eq!(v.value, None);
+        assert_eq!(v.max, None);
+        // ...while an explicit `value:0` is a real zero and stays `Some(0.0)`.
+        let zero = JudgeSpec::Script { cmd: r#"echo '{"met":false,"value":0}'"#.into(), timeout: 10 };
+        let z = run(&zero, Path::new("."), Path::new("."), ruler());
+        assert_eq!(z.value, Some(0.0));
     }
 
     #[test]
@@ -407,7 +423,7 @@ mod tests {
         };
         let v = run(&spec, Path::new("."), Path::new("."), ruler());
         assert!(!v.met);
-        assert_eq!(v.value, 18.0);
+        assert_eq!(v.value, Some(18.0));
     }
 
     #[test]
@@ -439,7 +455,7 @@ mod tests {
             .to_string();
         let v = parse_verdict(&inner).unwrap();
         assert!(v.met);
-        assert_eq!(v.value, 90.0);
+        assert_eq!(v.value, Some(90.0));
         assert_eq!(v.rationale, "clean");
     }
 }
