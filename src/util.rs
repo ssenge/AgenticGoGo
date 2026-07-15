@@ -12,7 +12,7 @@ pub fn now_epoch() -> u64 {
 
 /// Read + parse a YAML config file, naming the file in BOTH failure modes (can't read it vs.
 /// can't parse it) — the distinction a user needs to fix the problem. Used for every config the
-/// loop refuses to start without: agg.yaml, goals.yaml.
+/// loop refuses to start without: agg.yaml.
 ///
 /// Contrast [`load_json_or_default`]: config errors are fatal and must be loud; runtime state is
 /// best-effort and must never fail the loop.

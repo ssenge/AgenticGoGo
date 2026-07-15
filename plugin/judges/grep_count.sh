@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Built-in judge: count matches of $AGG_PATTERN; met when count <= $AGG_TARGET (default 0).
 # Good for "no TODOs left", "no `unwrap()` in src", etc. Cardinal (lower is better → invert).
-# Usage: cmd: "AGG_PATTERN='TODO' AGG_PATH='src' AGG_TARGET=0 ${CLAUDE_PLUGIN_ROOT}/judges/grep_count.sh"
+# Usage: a template — copy into your agg/judges/<name>.sh, set AGG_PATTERN/AGG_PATH/AGG_TARGET, and
+# name <name> in a condition. Library judges resolve by NAME and take no config parameters.
 #
-# AGG_PATTERN/AGG_PATH come from goals.yaml, which is TRUSTED-AUTHOR config (the worker cannot
-# edit the config that governs it). Even so we harden two footguns so a `-`-leading or
+# AGG_PATTERN/AGG_PATH are baked into the judge file (TRUSTED-AUTHOR — the worker cannot edit the
+# judge that governs it). Even so we harden two footguns so a `-`-leading or
 # quote-containing pattern behaves predictably rather than corrupting the verdict:
 #   • pass the pattern after `-e … --` so it is never parsed as a grep option;
 #   • JSON-escape the pattern before echoing it into the rationale, so a `"` or `\` can't

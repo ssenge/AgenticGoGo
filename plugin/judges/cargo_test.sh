@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Built-in judge: cargo test → verdict JSON. Counts passed/total from the summary.
-# met when all tests pass. Usage in goals.yaml: cmd: "${CLAUDE_PLUGIN_ROOT}/judges/cargo_test.sh"
+# met when all tests pass. Parameterless: name `cargo_test` in a done_if/abort_if condition and it resolves by NAME.
 out="$(cargo test 2>&1)"
 # parse "test result: ok. N passed; M failed"
 passed=$(printf '%s' "$out" | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}')
