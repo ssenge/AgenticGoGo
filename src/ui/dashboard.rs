@@ -649,7 +649,9 @@ fn phase_color(phase: &Phase) -> Color {
 
 fn measure_str(g: &GoalView) -> String {
     match g.goal_type.as_str() {
-        "binary" => if g.value > 0.0 { "yes".into() } else { "no".into() },
+        // A binary judge emits no `value` (it is `None` on the wire → 0.0 here), so read met from
+        // the lifecycle STATE, not the number — else every MET binary goal would render "no".
+        "binary" => if g.state == "met" { "yes".into() } else { "no".into() },
         "percentage" => format!("{:.0}/{:.0}%", g.value, g.target),
         _ => format!("{:.0}/{:.0}", g.value, g.max),
     }

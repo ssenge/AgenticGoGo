@@ -49,12 +49,18 @@ impl Lifecycle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Verdict {
     pub met: bool,
-    /// numeric measure: a count, a percent, or 0/1
-    #[serde(default)]
-    pub value: f64,
-    /// denominator for cardinal/percentage goals
-    #[serde(default = "one")]
-    pub max: f64,
+    /// numeric measure the judge emitted: a count, a percent, or 0/1. `None` = the judge emitted NO
+    /// number (a binary goal says only `met`; a broken judge emits nothing usable). `Some(0.0)` is a
+    /// REAL, measured zero and is DISTINCT from absent — `coverage.value == 0` must tell the two
+    /// apart (`core::stop`), and `verdicts.jsonl` records the difference faithfully. Was a
+    /// `#[serde(default)] f64`, where absent and a real 0 collapsed to the same 0.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    /// denominator for cardinal/percentage goals. Absent (`None`) for the same reasons as `value`;
+    /// was `#[serde(default = "one")]`, where absent was indistinguishable from a real `1.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// presentational only (draws the progress bar) — deliberately NOT readable in a stop condition.
     #[serde(default = "one")]
     pub target: f64,
     #[serde(default)]
@@ -76,8 +82,9 @@ impl Verdict {
         let error = error.into();
         Verdict {
             met: false,
-            value: 0.0,
-            max: 1.0,
+            // a broken judge emitted no number — not a measured 0.
+            value: None,
+            max: None,
             target: 1.0,
             rationale: format!("judge failed: {error}"),
             evidence: vec![],
@@ -212,7 +219,9 @@ impl Goal {
         } else if self.ever_met {
             // was met before, now not -> regression
             Lifecycle::Regressed
-        } else if value > 0.0 {
+        } else if value.is_some_and(|v| v > 0.0) {
+            // a measured value above 0 = partial progress. `None` (a binary/numberless judge) is not
+            // progress — it stays Pending.
             Lifecycle::InProgress
         } else {
             Lifecycle::Pending
@@ -233,8 +242,8 @@ impl Goal {
         let measure = match (&self.last_verdict, self.goal_type) {
             (None, _) => "—".to_string(),
             (Some(v), GoalType::Binary) => if v.met { "yes".into() } else { "no".into() },
-            (Some(v), GoalType::Percentage) => format!("{:.0}/{:.0}%", v.value, self.target),
-            (Some(v), GoalType::Cardinal) => format!("{:.0}/{:.0}", v.value, v.max),
+            (Some(v), GoalType::Percentage) => format!("{:.0}/{:.0}%", v.value.unwrap_or(0.0), self.target),
+            (Some(v), GoalType::Cardinal) => format!("{:.0}/{:.0}", v.value.unwrap_or(0.0), v.max.unwrap_or(1.0)),
         };
         format!(
             "{} {:<18} {:<10} {}",
@@ -270,7 +279,25 @@ mod tests {
     }
 
     fn verdict(met: bool, value: f64, max: f64) -> Verdict {
-        Verdict { met, value, max, target: max, rationale: String::new(), evidence: vec![], error: None }
+        Verdict { met, value: Some(value), max: Some(max), target: max, rationale: String::new(), evidence: vec![], error: None }
+    }
+
+    #[test]
+    fn absent_value_is_none_and_a_real_zero_stays_some() {
+        // The whole point of `Option<f64>`: `{"met":true}` (a binary judge, no number) MUST be
+        // distinguishable from `{"met":true,"value":0}` (a real measured zero). Before this both
+        // deserialized to 0.0, which made "the judge emitted no number" unrepresentable.
+        let numberless: Verdict = serde_json::from_str(r#"{"met":true}"#).unwrap();
+        assert_eq!(numberless.value, None);
+        assert_eq!(numberless.max, None);
+        let zero: Verdict = serde_json::from_str(r#"{"met":true,"value":0}"#).unwrap();
+        assert_eq!(zero.value, Some(0.0));
+        // ...and an absent value stays ABSENT on the wire (skip_serializing_if), so verdicts.jsonl
+        // records "no number" faithfully instead of inventing a 0.
+        let out = serde_json::to_string(&numberless).unwrap();
+        assert!(!out.contains("value"), "absent value must not serialize: {out}");
+        assert!(!out.contains("max"), "absent max must not serialize: {out}");
+        assert!(serde_json::to_string(&zero).unwrap().contains("\"value\":0"));
     }
 
     #[test]

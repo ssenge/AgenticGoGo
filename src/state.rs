@@ -117,7 +117,7 @@ impl DashboardState {
         eng.goals
             .iter()
             .map(|g| {
-                let value = g.last_verdict.as_ref().map(|v| v.value).unwrap_or(0.0);
+                let value = g.last_verdict.as_ref().and_then(|v| v.value).unwrap_or(0.0);
                 let prev_value = prev.iter().find(|p| p.id == g.id).map(|p| p.value).unwrap_or(value);
                 let judge_kind = match &g.judge {
                     crate::core::model::JudgeSpec::Script { .. } => "script".to_string(),
@@ -133,7 +133,7 @@ impl DashboardState {
                     state: state_str(g.state),
                     invariant: g.invariant,
                     value,
-                    max: g.last_verdict.as_ref().map(|v| v.max).unwrap_or(1.0),
+                    max: g.last_verdict.as_ref().and_then(|v| v.max).unwrap_or(1.0),
                     target: g.target,
                     weight: g.weight,
                     delta: value - prev_value,

@@ -284,7 +284,7 @@ fn run_cli() -> Result<ExitCode> {
             eprintln!(
                 "  {mark} — {} (value {} / target {}{})",
                 if verdict.rationale.is_empty() { "(no rationale)" } else { &verdict.rationale },
-                verdict.value,
+                verdict.value.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
                 verdict.target,
                 verdict.error.as_ref().map(|e| format!("; ERROR: {e}")).unwrap_or_default(),
             );

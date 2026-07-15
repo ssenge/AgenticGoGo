@@ -213,7 +213,7 @@ impl Engine {
         let before: Vec<(f64, Lifecycle)> = self
             .goals
             .iter()
-            .map(|g| (g.last_verdict.as_ref().map(|v| v.value).unwrap_or(0.0), g.state))
+            .map(|g| (g.last_verdict.as_ref().and_then(|v| v.value).unwrap_or(0.0), g.state))
             .collect();
 
         // Judging (the expensive part) is separated from folding the results in (the cheap part)
@@ -234,12 +234,13 @@ impl Engine {
             }
         }
 
-        // ponytail: an ERRORED judge's delta reads `28 → 0 [Met] judge failed: …`. The 0 is
-        // `Verdict::failed`'s placeholder, not a measurement — but the state column is honest
-        // (`Goal::apply` no longer moves it) and the rationale says "judge failed", so the line is
-        // self-describing and the breakage stays LOUD in memory/summary, which is what you want when
-        // your grader is broken. Ceiling: making it read `28 → 28` would need `value: Option<f64>`
-        // on the wire (§5.2). Nothing downstream branches on it — deltas feed only the prose.
+        // ponytail: an ERRORED judge's delta reads `28 → 0 [Met] judge failed: …`. Its value is now
+        // `None` (§5.2), which this `unwrap_or(0.0)` renders as a 0 — a placeholder, not a
+        // measurement. The state column is honest (`Goal::apply` no longer moves it) and the
+        // rationale says "judge failed", so the line is self-describing and the breakage stays LOUD
+        // in memory/summary — what you want when your grader is broken. Making it read `28 → 28`
+        // (carry the last real value) is the readers' later rework, not this cut. Nothing downstream
+        // branches on it — deltas feed only the prose.
         let deltas: Vec<GoalDelta> = self
             .goals
             .iter()
@@ -247,7 +248,7 @@ impl Engine {
             .map(|(g, (bv, bs))| GoalDelta {
                 id: g.id.clone(),
                 before_value: bv,
-                after_value: g.last_verdict.as_ref().map(|v| v.value).unwrap_or(0.0),
+                after_value: g.last_verdict.as_ref().and_then(|v| v.value).unwrap_or(0.0),
                 before_state: bs,
                 after_state: g.state,
                 rationale: g.last_verdict.as_ref().map(|v| v.rationale.clone()).unwrap_or_default(),
