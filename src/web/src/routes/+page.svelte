@@ -3,7 +3,9 @@
   import { loop } from '$lib/loop.svelte.js';
   import Header from '$lib/components/Header.svelte';
   import Stats from '$lib/components/Stats.svelte';
-  import Goals from '$lib/components/Goals.svelte';
+  import Step from '$lib/components/Step.svelte';
+  import Judges from '$lib/components/Judges.svelte';
+  import PerAgent from '$lib/components/PerAgent.svelte';
   import Activity from '$lib/components/Activity.svelte';
   import Controls from '$lib/components/Controls.svelte';
 
@@ -34,12 +36,14 @@
 
   {#if hasState}
     <Stats state={s} />
+    <Step state={s} />
     <div class="grid">
       <div class="col-main">
-        <Goals state={s} />
+        <Judges state={s} />
         <Activity state={s} />
       </div>
       <div class="col-side">
+        <PerAgent state={s} />
         <Controls health={loop.health} />
       </div>
     </div>
