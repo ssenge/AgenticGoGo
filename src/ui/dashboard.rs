@@ -420,6 +420,9 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
     let idle_color = if s.idle_secs >= 240 { Color::Red } else { Color::DarkGray };
     // Ordered by importance so the LEAST critical items (memory/idle/started) are the ones a narrow
     // terminal truncates first — the spend guards and the run's done/abort conditions survive.
+    // The mandatory head (up + tokens) always renders; the rest are droppable SEGMENTS, each led by
+    // its own separator, so a segment that won't fit is omitted WHOLE rather than clipped mid-token
+    // (ratatui would otherwise leave "memory 13" — a KB value cut to a bogus standalone number).
     let mut line2_spans = vec![
         label("up "),
         Span::raw(crate::util::fmt_dur(s.up_secs)),
@@ -427,12 +430,11 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         label("tokens "),
         Span::raw(tokens),
     ];
+    let mut segments: Vec<Vec<Span>> = Vec::new();
     if let Some(cost) = cost {
-        line2_spans.push(sep());
-        line2_spans.push(label("usage "));
-        line2_spans.push(Span::styled(cost, Style::default().fg(Color::Magenta)));
+        segments.push(vec![sep(), label("usage "), Span::styled(cost, Style::default().fg(Color::Magenta))]);
     }
-    line2_spans.extend([
+    segments.push(vec![
         sep(),
         label("stop "),
         Span::styled(s.stop_when.clone(), Style::default().fg(Color::Green)),
@@ -441,18 +443,24 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         Span::styled(halt, Style::default().fg(Color::Yellow)),
     ]);
     if s.memory_bytes > 0 {
-        line2_spans.push(sep());
-        line2_spans.push(label("memory "));
-        line2_spans.push(Span::styled(crate::util::human_bytes(s.memory_bytes), Style::default().fg(Color::Cyan)));
+        segments.push(vec![sep(), label("memory "), Span::styled(crate::util::human_bytes(s.memory_bytes), Style::default().fg(Color::Cyan))]);
     }
-    line2_spans.extend([
-        sep(),
-        label("idle "),
-        Span::styled(format!("{}s", s.idle_secs), Style::default().fg(idle_color)),
-        sep(),
-        label("started "),
-        Span::raw(fmt_started(s.started_at_epoch)),
-    ]);
+    segments.push(vec![sep(), label("idle "), Span::styled(format!("{}s", s.idle_secs), Style::default().fg(idle_color))]);
+    segments.push(vec![sep(), label("started "), Span::raw(fmt_started(s.started_at_epoch))]);
+
+    // Greedily append segments while they fit the inner width; stop at the first that doesn't (the
+    // ordering is by importance, so we never skip a spend guard to squeeze in a lesser trailing item).
+    let span_w = |spans: &[Span]| spans.iter().map(|sp| sp.content.chars().count()).sum::<usize>();
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let mut used = span_w(&line2_spans);
+    for seg in segments {
+        let w = span_w(&seg);
+        if used + w > inner_w {
+            break;
+        }
+        used += w;
+        line2_spans.extend(seg);
+    }
     let line2 = Line::from(line2_spans);
 
     let p = Paragraph::new(vec![line1, line2]).block(title_block(" Info "));
@@ -590,10 +598,13 @@ fn judge_detail_line(j: &JudgeView) -> Line<'static> {
         Span::styled(format!("{:<18}", fit(&j.name, 18)), Style::default().fg(color).bold()),
     ];
     spans.extend(judge_measure_spans(j, color));
+    // `judge:kind` starts at a CONSTANT column for every row: measure is a fixed 22 cols (below),
+    // delta a fixed 7, and the variable-width `[guard]` flag trails the kind rather than shoving it
+    // right — so the kind column no longer ratchets across guarded/numeric/binary rows.
     spans.extend([
         Span::styled(format!("{:<7}", delta), Style::default().fg(Color::Green)),
-        Span::styled(flag.to_string(), Style::default().fg(Color::Yellow)),
         Span::styled(format!("  judge:{}", j.kind), Style::default().fg(Color::Blue)),
+        Span::styled(flag.to_string(), Style::default().fg(Color::Yellow)),
     ]);
     Line::from(spans)
 }
@@ -620,8 +631,10 @@ fn judge_measure_spans(j: &JudgeView, color: Color) -> Vec<Span<'static>> {
             let bar_w = 8usize;
             let filled = ((frac * bar_w as f64).round() as usize).min(bar_w);
             let num = format!("{:.0}/{:.0} ", v, j.target);
+            // 12 (num) + 8 (bar) + 2 (trailing) = 22, matching the binary/error branches' `{:<22}`
+            // so the column after the measure lands identically on every judge row.
             vec![
-                Span::styled(format!("{num:<8}"), Style::default().fg(color)),
+                Span::styled(format!("{num:<12}"), Style::default().fg(color)),
                 Span::styled("█".repeat(filled), Style::default().fg(color)),
                 Span::styled(format!("{}  ", "░".repeat(bar_w - filled)), Style::default().fg(Color::DarkGray)),
             ]
@@ -705,23 +718,21 @@ fn draw_summary(f: &mut Frame, area: Rect, s: &DashboardState) {
             Style::default().fg(Color::Green).bold(),
         ))]
     } else {
-        let mut v = Vec::new();
+        // The panel is a fixed 3 content lines. Cap the cumulative story at 2 wrapped lines so the
+        // windowed `recent:` line ALWAYS survives (it used to be shoved out entirely when the story
+        // was long); the story ellipsizes on clip instead of vanishing mid-sentence (§7.4 finding).
+        let inner_w = area.width.saturating_sub(2) as usize;
         let story = if s.summary_cumulative.is_empty() { "(no summary yet)" } else { &s.summary_cumulative };
-        v.push(Line::from(vec![
-            Span::styled("story:  ", Style::default().fg(Color::Green).bold()),
-            Span::raw(story.to_string()),
-        ]));
+        let mut v = wrapped_block("story:  ", Color::Green, story, 2, inner_w);
         if !s.summary_windowed.is_empty() {
-            v.push(Line::from(vec![
-                Span::styled("recent: ", Style::default().fg(Color::Blue).bold()),
-                Span::raw(s.summary_windowed.clone()),
-            ]));
+            v.extend(wrapped_block("recent: ", Color::Blue, &s.summary_windowed, 1, inner_w));
         }
         v
     };
-    let p = Paragraph::new(body)
-        .block(title_block(" Summary   (Tab=focus · ↑↓=scroll · f=follow · q=quit) "))
-        .wrap(Wrap { trim: true });
+    // No `.wrap()`: `wrapped_block` has already wrapped every line to the inner width and clamped the
+    // line count, and Wrap{trim} would eat the continuation indent. Pre-wrapping is what lets us
+    // reserve a line for `recent:` instead of letting the story consume the whole panel.
+    let p = Paragraph::new(body).block(title_block(" Summary   (Tab=focus · ↑↓=scroll · f=follow · q=quit) "));
     f.render_widget(p, area);
 }
 
@@ -860,6 +871,35 @@ fn wrap_indent(text: &str, first: &str, cont: &str, width: usize) -> Vec<String>
     out.into_iter()
         .enumerate()
         .map(|(i, l)| if i == 0 { format!("{first}{l}") } else { format!("{cont}{l}") })
+        .collect()
+}
+
+/// Render `text` under a colored `prefix`, wrapped to `inner_w` and HARD-CAPPED at `max` lines — so a
+/// fixed-height panel can't let a long block crowd out whatever renders below it. The last kept line
+/// gets an ellipsis when the text was clipped, instead of ending mid-sentence with no signal.
+fn wrapped_block(prefix: &'static str, color: Color, text: &str, max: usize, inner_w: usize) -> Vec<Line<'static>> {
+    let pw = prefix.chars().count();
+    let body_w = inner_w.saturating_sub(pw).max(8);
+    let indent = " ".repeat(pw);
+    let mut lines = wrap_indent(text, "", "", body_w);
+    let clipped = lines.len() > max;
+    lines.truncate(max.max(1));
+    if clipped {
+        if let Some(last) = lines.last_mut() {
+            let t: String = last.chars().take(body_w.saturating_sub(1)).collect();
+            *last = format!("{t}…");
+        }
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                Line::from(vec![Span::styled(prefix, Style::default().fg(color).bold()), Span::raw(l)])
+            } else {
+                Line::from(Span::raw(format!("{indent}{l}")))
+            }
+        })
         .collect()
 }
 

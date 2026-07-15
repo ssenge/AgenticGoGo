@@ -33,11 +33,14 @@
       <span class="id mono">{j.name}</span>
       {#if j.invariant}<span class="tag" title="invariant — a guard that must hold">guard</span>{/if}
     </div>
-    <div class="measure">
+    <!-- binary judge: the measure cell is kept (blank) so the desktop grid columns stay aligned, but
+         carries no word — the glyph + right-hand state label already say met/unmet; a "met" word here
+         would just duplicate the state label. On mobile the blank cell is collapsed (below). -->
+    <div class="measure" class:blank={m.kind === 'binary'}>
       {#if m.kind === 'numeric'}
         <span class="num mono">{m.text}</span>
         <span class="mini"><span class="mini-fill" data-c={s.css} style="width: {m.frac * 100}%"></span></span>
-      {:else}
+      {:else if m.kind === 'error'}
         <span class="word mono" data-c={s.css}>{m.text}</span>
       {/if}
     </div>
@@ -96,17 +99,19 @@
   .panel { padding: 18px 20px; }
   .phead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
   h2 { font-size: 14px; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.6px; }
-  .score { font-size: 14px; color: var(--ink); }
+  /* The met fraction is the Definition-of-Done headline — the single most important number on the
+     page — so it reads at hero scale, not as a 14px afterthought next to the cost tile. */
+  .score { font-size: 22px; font-weight: 700; color: var(--ink); }
   .sep { color: var(--ink-3); margin: 0 2px; }
 
   .bar {
-    height: 10px;
+    height: 14px;
     background: var(--progress-track);
-    border-radius: 5px;
+    border-radius: 7px;
     overflow: hidden;
     margin-bottom: 12px;
   }
-  .fill { height: 100%; background: var(--progress); border-radius: 5px; transition: width 0.5s ease; }
+  .fill { height: 100%; background: var(--progress); border-radius: 7px; transition: width 0.5s ease; }
 
   .tally { display: flex; gap: 14px; font-size: 13px; margin-bottom: 4px; }
   .tally span[data-c='good'] { color: var(--good); }
@@ -179,7 +184,21 @@
   .judges.run .id { color: var(--ink-2); }
 
   @media (max-width: 720px) {
-    li { grid-template-columns: 22px 1fr auto; }
-    .measure, .judge, .statelabel, .delta { display: none; }
+    /* Two-line row so the numeric measure (value + bar) SURVIVES on phones — it's the core §7.4
+       value/target signal and must not vanish on the mobile-supervision surface. The state label
+       stays (top-right) to carry lifecycle; only the delta and judge:kind columns drop. */
+    li {
+      grid-template-columns: 22px 1fr auto;
+      row-gap: 6px;
+    }
+    .glyph { grid-column: 1; grid-row: 1; }
+    .idcol { grid-column: 2; grid-row: 1; }
+    .statelabel { grid-column: 3; grid-row: 1; display: block; }
+    /* measure + rationale drop to their own full-width rows via auto-flow (no pinned grid-row), so a
+       binary judge with no measure doesn't leave an empty second line. */
+    .measure { grid-column: 2 / -1; display: flex; }
+    .measure.blank { display: none; }
+    .judge, .delta { display: none; }
+    .rationale { grid-column: 2 / -1; }
   }
 </style>
