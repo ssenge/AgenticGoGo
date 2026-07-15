@@ -67,8 +67,14 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
         );
     }
 
-    // 5) are the /agg:* skills where the worker agent looks? Reported, never failed.
-    let name = agent_names.first().cloned().unwrap_or_else(|| "claude".into());
+    // 5) are the /agg:* skills where the worker agent looks? Reported, never failed. Report on the
+    //    WORKER agent (`defaults.agent`) specifically — NOT `agent_names().first()`, which sorts, so
+    //    a codex-worker/claude-judge config would misreport "claude" (the human invokes /agg:* in
+    //    the agent they drive the project with, i.e. the worker).
+    let name = match &cfg {
+        Some(c) => c.defaults.agent.clone(),
+        None => AggConfig::agent_name(config),
+    };
     let (proj, user) = (crate::skills::installed(&name, dir, false), crate::skills::installed(&name, dir, true));
     if proj || user {
         eprintln!("  ✔ the /agg:* skills are installed for `{name}`");
