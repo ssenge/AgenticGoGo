@@ -1,38 +1,73 @@
 # hello-agg — the smallest possible loop
 
-The whole idea in five files: a worker does a task, a **judge** (any script that prints one
-line of JSON `{"met": …}`) checks it, and the loop repeats until the judge says met.
+The whole idea in four files: a worker does a task, a **judge** (any script that prints one line
+of JSON `{"met": …}`) checks it, and the loop repeats until the judge says met. **The judge IS your
+Definition of Done, made executable.**
 
 `add.py` starts WRONG on purpose (prints 3) so you can watch the correction loop happen.
 
+## Layout
+
+Everything agg reads lives under `agg/` (committed); everything it writes lives under `agg/state/`
+(gitignored). One config file — there is no `goals.yaml`: a judge is resolved by NAME from
+`agg/judges/`.
+
+```
+hello-agg/
+  add.py                    # the (broken) target the worker fixes  — at the project root
+  agg/
+    agg.yaml                # defaults / judge / steps / sequence — the whole config
+    AGG_STATE.md            # the worker's standing instructions
+    judges/
+      prints_two.sh         # the judge — resolved by the NAME `prints_two` in `done_if`
+```
+
 ## Run it
 ```bash
-cp AGG_RESUME.md.template AGG_RESUME.md   # the worker's standing instruction
-chmod +x check.sh
-agg run
+agg plan        # dry run: evaluate the judge once, print the scoreboard. No agent launched.
+agg run         # drive the loop until done_if (`prints_two`) is met
+```
+
+`agg plan` prints:
+
+```
+Goals: 0/1   done_if: prints_two
+  · prints_two         script     no   — add.py did not print 2
 ```
 
 The judge rejects `3` → the worker edits `add.py` to `print(1 + 1)` → the judge sees `2` →
-`met:true` → the loop stops. That's the entire model.
+`met:true` → `done_if` fires → the loop stops. That's the entire model.
+
+## How `done_if` works
+
+`done_if` is your Definition of Done, written as a boolean over judge names. Here it is a single
+judge, `prints_two`. A real project composes several — `done_if: "outputs_two AND tests_pass"` — so
+the loop only stops when every clause holds. The judge NAME in `done_if` resolves to
+`agg/judges/<name>.sh` (a script judge) or `agg/judges/<name>.md` (an LLM rubric judge); the file
+extension decides.
 
 ## Run it on another agent
 
-The judge is a shell script, so nothing here is Claude-specific — only the `agent:` and `model:` keys
-in `agg.yaml` are. Edit them and re-run (or let `agg init --agent <a>` write a correct one):
+The judge is a shell script, so nothing here is Claude-specific — only the `agent:` and `model:`
+keys in `agg/agg.yaml` are. Edit `defaults:` (and `judge:`) and re-run, or let
+`agg init --agent <a>` write a correct config for you:
 
 ```yaml
 # Claude Code (as shipped)
-agent: claude
-model: claude-haiku-4-5-20251001
+defaults:
+  agent: claude
+  model: claude-haiku-4-5-20251001
 ```
 ```yaml
-# OpenAI Codex — delete `model:` entirely; Codex picks one that fits your account
-agent: codex
+# OpenAI Codex — omit `model:` entirely; Codex picks one that fits your account
+defaults:
+  agent: codex
 ```
 ```yaml
 # GitHub Copilot CLI
-agent: copilot
-model: auto
+defaults:
+  agent: copilot
+  model: auto
 ```
 
 Then `agg doctor` (checks the agent is installed and can do what this config asks) and `agg run`.
@@ -40,10 +75,9 @@ The loop, the judge and the gate behave identically on all three.
 
 ## Files
 - `add.py` — the (broken) target the worker fixes
-- `check.sh` — the judge (prints `{"met":...}`) — a plain script, so it works on any agent
-- `goals.yaml` — one binary goal, `stop_when: prints_two`
-- `agg.yaml` — minimal config (`agent:` + `model:`)
-- `AGG_RESUME.md.template` — copy to `AGG_RESUME.md` (the live prompt is gitignored)
+- `agg/agg.yaml` — the config: one `worker` step, `done_if: prints_two`
+- `agg/AGG_STATE.md` — the worker's standing instructions (read into every session)
+- `agg/judges/prints_two.sh` — the judge; prints `{"met":…}` — a plain script, so it works on any agent
 
 ---
 
@@ -61,7 +95,7 @@ def factorial(n):    raise NotImplementedError
 def is_prime(n):     raise NotImplementedError
 ```
 
-**2. A judge** (`VERIFY`) — `judges/tests.sh` runs the suite and prints a verdict:
+**2. A judge** (`VERIFY`) — `agg/judges/tests_pass.sh` runs the suite and prints a verdict:
 
 ```bash
 #!/usr/bin/env bash
@@ -74,73 +108,64 @@ printf '{"met":%s,"value":%s,"max":%s,"target":%s,"rationale":"%s/%s tests pass"
   "$met" "${passed:-0}" "$total" "$total" "${passed:-0}" "$total"
 ```
 
-**3. `goals.yaml`** — one cardinal goal, met when all 3 tests pass; the `GATE` halts after 30 min:
+The judge emits `value`/`max` so the dashboard shows partial progress (`18/28`), but `met` is what
+decides. There is no `type:` field any more — a judge that emits a `value` is displayed as a count;
+one that emits only `{"met":…}` is binary.
+
+**3. `agg/agg.yaml`** — the config, with a Definition of Done and a wall-clock ceiling:
 
 ```yaml
-goals:
-  - id: tests_pass
-    type: cardinal
-    target: 3
-    description: "All calc tests pass"
-    judge: { kind: script, cmd: "./judges/tests.sh", timeout: 60 }
-stop_when: "tests_pass"
-halt_when: "wall_hours >= 0.5"
-```
-
-**4. `agg.yaml`** — outer-loop config + the resume prompt `INJECT`ed into each session:
-
-```yaml
-agent: claude                    # ⚠️ this file is CLAUDE-SHAPED — see "Run it on another agent"
 project: calc
-model: "claude-opus-4-8[1m]"
-resume_prompt: "AGG_RESUME.md"
-budget: { total: 2000000 }       # token ceiling  → over_budget  (a GATE guard). Works on ANY agent.
-cost:   { total: 5.0 }           # $ ceiling → over_cost. CLAUDE ONLY — agg REFUSES this config on
-                                 #   codex/copilot, which cannot report dollars. (API-equivalent
-                                 #   price Claude reports; a usage proxy, NOT a subscription
-                                 #   charge — see note below)
-summary: { enabled: true, model: haiku, min_interval_secs: 1 }
-memory: { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md, on by default
+defaults:
+  agent: claude                    # ⚠️ CLAUDE-SHAPED — see "Run it on another agent" above
+  model: "claude-opus-4-8[1m]"
+  state: "AGG_STATE.md"
+judge:
+  agent: claude
+  model: claude-haiku-4-5-20251001 # the cheap RULER model for any LLM judges
+  timeout: 300
+steps:
+  worker: {}
+sequence:
+  steps:
+    - worker
+  budget: { total: 2000000 }       # output-token ceiling → over_budget. Works on ANY agent.
+  done_if: "tests_pass"            # the Definition of Done: the suite is green
+  abort_if: "over_budget OR wall_hours >= 0.5"   # give up after 30 min or the token ceiling
 ```
 
-> **Running this on Codex or Copilot?** Three Claude-shaped keys have to go:
-> drop `cost:` (only Claude reports dollars — `budget:` above already caps the run and works
-> everywhere), drop the `model:` **inside `summary:`** (`haiku` is a Claude name), and for the
-> worker `model:` — omit it entirely on Codex (naming one is a hard 400), or use `auto` on Copilot.
-> `agg doctor` catches the first and third; the summary model it cannot, so do not miss it.
-> Easier: `agg init --agent codex` scaffolds a correct one for you.
+`budget` and `cost` and `max_sessions` all live **under `sequence:`** now — a stray top-level
+`budget:` is a hard error at startup (so a spend ceiling can never silently become decorative).
+`cost: { total: … }` is Claude-only; on Codex/Copilot omit it and rely on `budget` (tokens).
 
-> **A note on `cost` / `over_cost`.** The dollar figure is `total_cost_usd` as reported by the
-> `claude` CLI — the **API-equivalent list price** of the work. On a **Max/Pro subscription you are
-> not billed per token**, so this is a **usage proxy, not money charged to you**; the dashboard and
-> `agg status` label it `(API-eq)` for that reason. It's still a useful ceiling (`over_cost` halts a
-> runaway loop by relative spend), but read it as "how much work" not "how much money" unless you're
-> actually on pay-as-you-go API billing. Prefer `over_budget` (tokens) or `over_iterations` if you
-> want a plan-agnostic cap.
-
-**5. `AGG_RESUME.md`** — the prompt `INJECT`ed into *every* fresh session:
+**4. `agg/AGG_STATE.md`** — the standing instructions `INJECT`ed into *every* fresh session:
 
 ```
-GOAL: make all tests in test_calc.py pass.
+# Goal
+Make all tests in test_calc.py pass.
 calc.py has add(a,b), factorial(n), is_prime(n) stubbed with NotImplementedError.
 
-THIS SESSION:
+# This session
 1. Run `python3 -m pytest -q` to see what's failing.
 2. Implement the failing function(s) in calc.py — real, correct implementations.
-3. Re-run pytest to confirm. You are autonomous; do the work and exit.
+3. Re-run pytest to confirm. Update this file with the next task, commit, and exit.
 ```
 
-**6. Run it:**
+The agent maintains this file forward across sessions (best-effort — agg warns if a session leaves
+it untouched). Institutional memory (`AGG_MEMORY.md`, "what we tried and rejected") is written by
+agg, never the worker, and lives under `agg/state/`.
+
+**5. Run it:**
 
 ```bash
-agg plan        # dry run: one VERIFY pass, no RUN — shows "tests_pass cardinal 0/3 — loop would continue"
+agg plan        # dry run: one VERIFY pass — shows "tests_pass  0/3 — loop would continue"
 agg run         # the outer loop: RUN real agents until VERIFY passes, then GATE stops
 agg dashboard   # (optional, second terminal) live colored TUI
 ```
 
 What happens: a fresh agent reads the injected prompt, runs pytest, implements the functions,
-re-runs pytest → green, exits. `VERIFY` flips the goal `0/3 → 3/3`; `GATE` sees the stop condition
-met → the loop exits after one session. A one-line summary records what it did.
+re-runs pytest → green, exits. `VERIFY` flips the judge `0/3 → 3/3`; `GATE` sees `done_if` met →
+the loop exits after one session. A one-line summary records what it did.
 
 ### Or let `/agg:new` write it for you
 
@@ -161,7 +186,6 @@ $agg-new                                  # OpenAI Codex — it uses $, not /
 
 Or just **ask** on any of them: "set up AgenticGoGo for this project".
 
-It **translates** whatever plan exists into goals + judges (it doesn't replicate your spec tooling),
-asks only about genuine gaps, and writes an `agg.yaml` shaped for **your** agent — no cost guard on
-Codex or Copilot, which cannot report one. Then exit the agent and `agg run`.
-
+It **translates** whatever plan exists into a `done_if` plus a judge per clause (it doesn't replicate
+your spec tooling), asks only about genuine gaps, and writes an `agg.yaml` shaped for **your** agent —
+no cost guard on Codex or Copilot, which cannot report one. Then exit the agent and `agg run`.

@@ -1,5 +1,0 @@
-goals:
-  - id: prints_two
-    type: binary
-    judge: { kind: script, cmd: "./check.sh" }
-stop_when: prints_two

@@ -1,3 +1,6 @@
+---
+inputs: ["PAPER.md"]
+---
 # Rubric — is PAPER.md a credible write-up of the P vs NP attempt?
 
 You are reviewing PAPER.md, a research write-up accompanying a (formal, Lean) attempt at

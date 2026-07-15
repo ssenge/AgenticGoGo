@@ -1,4 +1,0 @@
-agent: claude                      # swap to `codex` or `copilot` — see "Run it on another agent"
-project: hello-agg
-model: claude-haiku-4-5-20251001   # haiku — costs next to nothing to try
-resume_prompt: AGG_RESUME.md
