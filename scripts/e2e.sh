@@ -6,6 +6,15 @@
 # emits valid stream-json), because a real model is non-deterministic, costs money and needs
 # network. Everything else is the shipping code.
 #
+# The model this suite drives (§4/§5/§7 of internal/SEQUENCES.md):
+#   - a judge IS a goal, resolved by NAME from agg/judges/<name>.{sh,md}. There is no goals.yaml.
+#   - one config file, agg/agg.yaml (defaults / judge / steps / sequence). done_if / abort_if.
+#   - session isolation is MANDATORY: every `agg run` needs a git repo, a clean tree, a born HEAD,
+#     and stages + gates every session — so the fixtures git-init and the workers COMMIT their work
+#     (uncommitted work resolves as NoChanges and the gate restores base, so a met verdict on it
+#     never counts).
+#   - all runtime state lives under agg/state/ (gitignored).
+#
 #   ./scripts/e2e.sh              # everything
 #   ./scripts/e2e.sh --no-web     # skip the SvelteKit app (no node needed)
 #   ./scripts/e2e.sh --no-tui     # skip the interactive pty check
@@ -64,15 +73,20 @@ finish_reason() { snap "$1" finish_reason; }
 deansi() { LC_ALL=C sed -e $'s/\x1b\[[0-9;?]*[A-Za-z]//g' -e $'s/\x1b[()][AB0]//g' -e 's/\r//g' "$1" > "$2"; }
 
 # ---------------------------------------------------------------------------
-# fixture: a project with a fake `claude` on PATH.
+# fixture: a project with a fake `claude` on PATH, in a CLEAN git repo (session isolation is
+# mandatory — an `agg run` refuses to start without a repo + clean tree + born HEAD).
 #   the worker records the live phase, dumps the prompt it was handed, honours
-#   WORKER_SLEEP / NO_WORK / WORKER_TOKENS / WORKER_COST toggle-files.
-#   the judge records the live phase and honours JUDGE_FAIL.
+#   WORKER_SLEEP / NO_WORK / WORKER_TOKENS / WORKER_COST toggle-files, and — unless NO_WORK —
+#   COMMITS its `did_work` marker on the session branch (uncommitted work is NoChanges and the
+#   gate would restore base, so its met verdict would never count).
+#   the judge `worked` records the live phase and honours JUDGE_FAIL.
+# git_init leaves ONE empty commit, so every fixture file the caller writes stays UNTRACKED —
+# which `is_clean` ignores, so the tree reads clean and sessions branch from a born `main`.
 # ---------------------------------------------------------------------------
-mkproj() { # mkproj <name> [extra agg.yaml lines]
-  local name=$1 extra=${2:-}
+mkproj() { # mkproj <name>
+  local name=$1
   local d="$WS/$name"
-  mkdir -p "$d/bin" "$d/judges"
+  mkdir -p "$d/bin" "$d/agg/judges"
 
   cat > "$d/bin/rec" <<'EOF'
 #!/bin/sh
@@ -89,14 +103,18 @@ for a in "$@"; do
 done
 sh bin/rec RUN
 [ -f WORKER_SLEEP ] && sleep "$(cat WORKER_SLEEP)"
-[ -f NO_WORK ] || : > did_work
+if [ ! -f NO_WORK ]; then
+  : > did_work
+  git add did_work >/dev/null 2>&1
+  git commit -qm "worker: did_work" >/dev/null 2>&1
+fi
 tok=1;   [ -f WORKER_TOKENS ] && tok=$(cat WORKER_TOKENS)
 cost=0;  [ -f WORKER_COST ]   && cost=$(cat WORKER_COST)
 printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":%s},"total_cost_usd":%s}\n' "$tok" "$cost"
 exit 0
 EOF
 
-  cat > "$d/judges/check.sh" <<'EOF'
+  cat > "$d/agg/judges/worked.sh" <<'EOF'
 #!/bin/sh
 sh bin/rec VERIFY
 if [ -f JUDGE_FAIL ] || [ ! -f did_work ]; then
@@ -106,20 +124,31 @@ else
 fi
 EOF
 
-  chmod +x "$d/bin/rec" "$d/bin/claude" "$d/judges/check.sh"
-  cat > "$d/goals.yaml" <<'EOF'
-goals:
-  - id: worked
-    type: binary
-    judge: { kind: script, cmd: "./judges/check.sh" }
-stop_when: worked
+  chmod +x "$d/bin/rec" "$d/bin/claude" "$d/agg/judges/worked.sh"
+
+  cat > "$d/agg/agg.yaml" <<EOF
+project: $name
+defaults: { model: fake }
+steps:
+  worker: {}
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+hooks:
+  on_session_start: ["sh bin/rec INJECT"]
+  on_session_end: ["sh bin/rec GATE"]
 EOF
-  { printf 'project: %s\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n' "$name"
-    printf 'hooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n'
-    [ -n "$extra" ] && printf '%s\n' "$extra"; } > "$d/agg.yaml"
-  echo "create the file did_work" > "$d/AGG_RESUME.md"
+  echo "create the file did_work" > "$d/agg/AGG_STATE.md"
+
+  ( cd "$d" && git init -q -b main && git config user.email t@t && git config user.name t \
+    && git commit -q --allow-empty -m init )
   echo "$d"
 }
+
+# commit whatever the fixture has written so far onto `main` (for the git-isolation sections that
+# need a TRACKED base file, e.g. tracked.txt, so a worker's edit-and-commit can merge/roll back).
+gitbase() { ( cd "$1" && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1; true ); }
 
 # run `agg` inside a project with the fake claude first on PATH
 agg_do() { local d=$1; shift; ( cd "$d" && PATH="$d/bin:$PATH" "$AGG" "$@" ); }
@@ -156,27 +185,33 @@ sec "0. build"
 [ -x "$AGG" ] && ok "agg binary at target/debug/agg" || bad "agg binary missing"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════════════
 # 1-4, 6. scaffolding · exit codes · stage trace · status/history/dashboard · interrupt
 #
 # DELETED — these are covered by `cargo test --test cli` (tests/cli.rs), which drives the
 # same paths against the same fake-claude shim, in-process and in CI. Kept here only as a
 # map so a future reader does not think the coverage vanished:
 #
-#   init/doctor/plan/judge      → init_then_plan_shows_scoreboard · doctor_passes_a_good_setup
-#                                 doctor_flags_a_broken_setup · judge_runs_one_goal_and_prints_raw_verdict
-#                                 config_lives_in_the_optional_agg_folder
-#   exit codes 0/1/3/4          → run_drives_a_correction_loop_to_stop · run_without_config_gives_actionable_hint
-#                                 dollar_budget_halts_the_loop · max_sessions_cap_exits_4_and_says_so
+#   init/plan/judge/doctor      → init_then_plan_shows_scoreboard · doctor_passes_a_good_setup
+#                                 doctor_flags_a_broken_setup · judge_runs_one_name_and_prints_raw_verdict
+#                                 config_lives_in_the_agg_folder
+#   exit codes 0/3/4            → run_drives_a_correction_loop_to_stop · run_without_config_gives_actionable_hint
+#                                 dollar_budget_aborts_the_loop · max_sessions_cap_exits_4_and_says_so
 #                                 run_stops_immediately_when_goal_already_met
 #   four-stage trace            → phase_names_the_four_outer_loop_stages
 #   baseline enters no stage    → a_baseline_satisfied_run_enters_no_stage
 #   status/history/dashboard    → status_and_history_json_are_machine_readable
 #   interrupt (Ctrl-C)          → interrupt_during_run_skips_verify_and_the_exit_log
+#   the rollback GATE (moat)    → rollback_gate_unlands_a_regressing_merge ·
+#                                 rollback_gate_keeps_merge_when_a_judge_merely_flakes ·
+#                                 a_broken_judge_does_not_abort_the_run_wearing_a_regressions_clothes
+#   the new step/sequence model → an_unknown_step_in_the_sequence_is_a_startup_error ·
+#                                 a_sequence_of_only_skip_judges_is_refused_at_startup ·
+#                                 a_skip_judges_span_is_gated_and_merged_by_the_next_judged_step ·
+#                                 done_if_all_goals_ignores_an_if_condition_judge
 #
 # What REMAINS in this file is what cli.rs cannot or does not drive: live loops steered over
 # the bus, detached runs, spawn, the watchdog, git merge/conflict/recovery paths, the HTTP API,
-# a real pty TUI, and the browser.
+# a real pty TUI, the browser, and the observable end-to-end shape of the sequence grammar.
 sec "5. steering a LIVE loop over the bus  (inject · note · pause/resume · budget · stop)"
 
 # a queued command with no loop running is accepted but warns
@@ -194,7 +229,7 @@ agg_do "$S" send note "hello-bus" > /dev/null 2>&1
 agg_do "$S" send inject "OPERATOR_MARKER_XYZ" > /dev/null 2>&1
 waitfor 30 "injected instruction reaches the NEXT worker prompt" grep -q "OPERATOR_MARKER_XYZ" "$S/prompt_latest.txt"
 has "…as a HIGH-PRIORITY header"     "$S/prompt_latest.txt" "HIGH-PRIORITY OPERATOR INSTRUCTION"
-has "…and the resume prompt survives" "$S/prompt_latest.txt" "create the file did_work"
+has "…and the AGG_STATE.md survives"  "$S/prompt_latest.txt" "create the file did_work"
 has "agg send note is logged by the loop" "$S/run.log" "[bus] note: hello-bus"
 
 agg_do "$S" send pause > /dev/null 2>&1
@@ -215,9 +250,18 @@ absent "…run.pid cleared by the Drop guard" "$S/agg/state/run.pid"
 is  "…ledger finalized as stopped" \
     "$(python3 -c "import json;print(json.load(open('$S/agg/state/project.json'))['runs'][-1]['end_reason'])")" "stopped"
 
-# --- budget steering halts a live loop
+# --- budget steering halts a live loop (budget + abort_if live under `sequence:` now, §4.1)
 B="$(mkproj budget)"; : > "$B/NO_WORK"; echo 2 > "$B/WORKER_SLEEP"; echo 500 > "$B/WORKER_TOKENS"
-printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: worked\nhalt_when: over_budget\n' > "$B/goals.yaml"
+cat > "$B/agg/agg.yaml" <<'EOF'
+project: budget
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  abort_if: "over_budget"
+summary: { enabled: false }
+EOF
 agg_bg BLOOP "$B" run.log run --max-sessions 6
 waitfor 30 "live loop for budget test reaches RUN" grep -q "RUN=run" "$B/trace.txt"
 agg_do "$B" send budget 1 > /dev/null 2>&1
@@ -280,11 +324,6 @@ sec "9b. git session isolation + the rollback GATE"
 # NOTE: agg discards a session branch that has UNCOMMITTED edits ("commit your work to keep it"),
 # so the worker must commit — that is the real contract with the worker, not a test artifact.
 # The repo must also be clean when `agg run` starts, so every fixture file is committed first.
-mkrepo() { # mkrepo <dir>  — commit everything the fixture made so far, on `main`
-  ( cd "$1" && git init -q -b main && git config user.email e@e && git config user.name e \
-    && printf 'did_work\ntrace.txt\nprompt*.txt\nargv.txt\n.sess\n.n\nNO_WORK\nWORKER_SLEEP\nWORKER_TOKENS\nWORKER_COST\nJUDGE_FAIL\nrun.log\nAGG_MEMORY.md\nAGG_RED\n' > .gitignore \
-    && echo base > tracked.txt && git add -A && git commit -qm init )
-}
 
 GI="$(mkproj iso)"
 cat > "$GI/bin/claude" <<'EOF'
@@ -292,21 +331,32 @@ cat > "$GI/bin/claude" <<'EOF'
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 sh bin/rec RUN
 echo worker-edit > tracked.txt
-git add -A && git commit -qm "worker: session work"   # the worker commits on its session branch
+git add tracked.txt && git commit -qm "worker: session work"   # the worker commits on its branch
 : > did_work
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$GI/bin/claude"
-printf 'project: iso\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true }\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$GI/agg.yaml"
-mkrepo "$GI"
+cat > "$GI/agg/agg.yaml" <<'EOF'
+project: iso
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+memory: { enabled: false }
+EOF
+echo base > "$GI/tracked.txt"
+gitbase "$GI"
 agg_do "$GI" run --max-sessions 1 > "$GI/run.log" 2>&1
 has "isolation cuts a per-session branch off the base"  "$GI/run.log" "[iso] session #1 on branch"
-has "…and a green session is MERGED back"               "$GI/run.log" "merged → kept"
+has "…and a green session is MERGED and KEPT"           "$GI/run.log" "merged → kept"
 is  "…so the worker's commit is on base" \
     "$( cd "$GI" && git show HEAD:tracked.txt 2>/dev/null )" "worker-edit"
 
-# now regress a previously-met goal → the GATE must roll the merge back.
-# a second, never-met goal keeps the loop alive past session 1.
+# now regress a previously-met judge → the GATE must roll the merge back.
+# `worked` is an INVARIANT (in the DoD-set, which the regression gate scopes to); a second,
+# never-met `endless` judge is the done_if that keeps the loop alive past session 1.
 GR="$(mkproj rollback)"
 cat > "$GR/bin/claude" <<'EOF'
 #!/bin/sh
@@ -314,26 +364,35 @@ for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 sh bin/rec RUN
 n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
 echo "sess-$n" > tracked.txt
-git add -A && git commit -qm "worker: session $n"
+git add tracked.txt && git commit -qm "worker: session $n"
 : > did_work
 [ "$n" -ge 2 ] && : > JUDGE_FAIL   # session 2 REGRESSES the goal session 1 had met
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$GR/bin/claude"
-cat > "$GR/judges/never.sh" <<'EOF'
+cat > "$GR/agg/judges/endless.sh" <<'EOF'
 #!/bin/sh
 echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
 EOF
-chmod +x "$GR/judges/never.sh"
-printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\n  - id: endless\n    type: binary\n    judge: { kind: script, cmd: "./judges/never.sh" }\nstop_when: endless\n' > "$GR/goals.yaml"
-printf 'project: rollback\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: true }\n' > "$GR/agg.yaml"
-mkrepo "$GR"
+chmod +x "$GR/agg/judges/endless.sh"
+cat > "$GR/agg/agg.yaml" <<'EOF'
+project: rollback
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "endless"
+  invariants: [worked]
+summary: { enabled: false }
+EOF
+echo base > "$GR/tracked.txt"
+gitbase "$GR"
 agg_do "$GR" run --max-sessions 2 > "$GR/run.log" 2>&1
 has "session 1 (green) is merged onto base"          "$GR/run.log" "session #1 merged → kept"
 has "session 2 (regressing) is ROLLED BACK"          "$GR/run.log" "session #2 ROLLED BACK"
 is  "…and its work NEVER lands on base (base still holds session 1)" \
     "$( cd "$GR" && git show HEAD:tracked.txt 2>/dev/null )" "sess-1"
-has "…the durable memory says the work is NOT on base" "$GR/AGG_MEMORY.md" "NOT on the base branch"
+has "…the durable memory says the work is NOT on base" "$GR/agg/state/AGG_MEMORY.md" "NOT on the base branch"
 has "…and the session branch is kept for inspection"   "$GR/run.log" "kept for inspection"
 
 # the worker's own veto: writing the red file discards the session, merged or not
@@ -343,21 +402,30 @@ cat > "$GV/bin/claude" <<'EOF'
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 sh bin/rec RUN
 echo vetoed-work > tracked.txt
-git add -A && git commit -qm "worker: work I do not trust"
+git add tracked.txt && git commit -qm "worker: work I do not trust"
 : > AGG_RED            # the worker vetoes its own session
-: > did_work
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$GV/bin/claude"
-printf 'project: veto\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, red_file: "AGG_RED" }\n' > "$GV/agg.yaml"
-mkrepo "$GV"
+cat > "$GV/agg/agg.yaml" <<'EOF'
+project: veto
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+session_isolation: { red_file: "AGG_RED" }
+EOF
+echo base > "$GV/tracked.txt"
+gitbase "$GV"
 agg_do "$GV" run --max-sessions 1 > "$GV/run.log" 2>&1
 has "a worker that writes the red file VETOES its own session" "$GV/run.log" "VETOED"
 is  "…and none of its work reaches base" \
     "$( cd "$GV" && git show HEAD:tracked.txt 2>/dev/null )" "base"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9c. worker-failure paths (rate-limit backoff · hung-worker watchdog)"
+sec "9c. worker-failure paths (rate-limit backoff · dud-worker abort · hung-worker watchdog)"
 RL="$(mkproj ratelimit)"
 # `worker.rs`: "a clean exit 0 is never a rate-limit, even if a transient event looked like one" —
 # detection is exit-code AND terminal-event gated, so the stub must also exit non-zero.
@@ -369,12 +437,24 @@ printf '{"type":"result","subtype":"error","is_error":true,"result":"rate_limit_
 exit 1
 EOF
 chmod +x "$RL/bin/claude"
-printf 'project: ratelimit\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nratelimit_backoff_secs: 1\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$RL/agg.yaml"
+cat > "$RL/agg/agg.yaml" <<'EOF'
+project: ratelimit
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+ratelimit_backoff_secs: 1
+hooks:
+  on_session_start: ["sh bin/rec INJECT"]
+  on_session_end: ["sh bin/rec GATE"]
+EOF
 agg_do "$RL" run --max-sessions 2 > "$RL/run.log" 2>&1
 has "a rate-limited session backs off"        "$RL/run.log" "rate limit detected"
 has "…and is flagged on the exit line"        "$RL/run.log" "[RATE-LIMITED]"
 hasnt "…and is NEVER judged"                  "$RL/run.log" "running judges…"
-absent "…and leaves NO durable memory entry"  "$RL/AGG_MEMORY.md"
+absent "…and leaves NO durable memory entry"  "$RL/agg/state/AGG_MEMORY.md"
 is "…the trace shows no VERIFY/GATE after RUN" \
    "$(tr '\n' ' ' < "$RL/trace.txt")" "VERIFY=verify INJECT=inject RUN=run INJECT=inject RUN=run "
 
@@ -394,7 +474,6 @@ echo "Error: unknown model" >&2
 exit 1
 EOF
 chmod +x "$DUD/bin/claude"
-printf 'project: dud\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\n' > "$DUD/agg.yaml"
 # NO --max-sessions: this is the unbounded case that used to spin forever.
 agg_do "$DUD" run > "$DUD/run.log" 2>&1
 is  "a worker that never starts ABORTS the run (exit 1)" "$?" "1"
@@ -416,7 +495,16 @@ sh bin/rec RUN
 sleep 300      # stream-idle and cpu-flat: exactly the hang the watchdog exists to kill
 EOF
 chmod +x "$WD/bin/claude"
-printf 'project: watchdog\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nwatchdog: { idle_secs: 3, cpu_grace: 2 }\n' > "$WD/agg.yaml"
+cat > "$WD/agg/agg.yaml" <<'EOF'
+project: watchdog
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+watchdog: { idle_secs: 3, cpu_grace: 2 }
+EOF
 : > "$WD/NO_WORK"
 WDS=$(date +%s)
 agg_do "$WD" run --max-sessions 1 > "$WD/run.log" 2>&1
@@ -429,7 +517,9 @@ has "…and flags it on the session exit line" "$WD/run.log" "WATCHDOG-KILLED"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9d. prompt composition (prompt_includes · --resume) and lifecycle hooks"
+sec "9d. prompt composition (prompt_includes) and lifecycle hooks"
+# resume_sessions is GONE (§4.1/§7.3): a per-agent session id cannot cross a mixed sequence, so the
+# key is refused at parse time — there is no `--resume` plumbing left to assert.
 PI="$(mkproj promptinc)"; : > "$PI/NO_WORK"
 echo "TOOLING_FRAGMENT_ZZZ" > "$PI/frag.md"
 cat > "$PI/bin/claude" <<'EOF'
@@ -437,24 +527,39 @@ cat > "$PI/bin/claude" <<'EOF'
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 prev=""; for a in "$@"; do
   [ "$prev" = "-p" ] && printf '%s' "$a" > prompt_latest.txt
-  [ "$prev" = "--resume" ] && echo "$a" >> resumed_with.txt
   prev="$a"
 done
 sh bin/rec RUN
-printf '{"type":"result","subtype":"success","is_error":false,"session_id":"sess-abc-123","result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$PI/bin/claude"
-printf 'project: promptinc\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nresume_sessions: true\nprompt_includes: ["frag.md"]\nhooks:\n  on_start: ["echo HOOK_ON_START"]\n  on_stop: ["echo HOOK_ON_STOP"]\n  background: ["sleep 30"]\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$PI/agg.yaml"
+cat > "$PI/agg/agg.yaml" <<'EOF'
+project: promptinc
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+prompt_includes: ["frag.md"]
+hooks:
+  on_start: ["echo HOOK_ON_START"]
+  on_stop: ["echo HOOK_ON_STOP"]
+  background: ["sleep 30"]
+  on_session_start: ["sh bin/rec INJECT"]
+  on_session_end: ["sh bin/rec GATE"]
+EOF
 agg_do "$PI" run --max-sessions 2 > "$PI/run.log" 2>&1
 has "prompt_includes are prepended to every prompt" "$PI/prompt_latest.txt" "TOOLING_FRAGMENT_ZZZ"
-has "…above the resume prompt"                      "$PI/prompt_latest.txt" "create the file did_work"
-has "resume_sessions passes --resume <session_id>"  "$PI/resumed_with.txt" "sess-abc-123"
+has "…above the AGG_STATE.md standing instructions"  "$PI/prompt_latest.txt" "create the file did_work"
 has "on_start hook runs once at launch"             "$PI/run.log" "HOOK_ON_START"
 has "on_stop hook runs on exit (Drop guard)"        "$PI/run.log" "HOOK_ON_STOP"
 has "background hook is spawned"                    "$PI/run.log" "[hook:background]"
 
 # ═══════════════════════════════════════════════════════════════════════════
 sec "9e. LLM-backed pieces (llm judge · summarizer) against a stubbed model"
+# A judge with a `.md` extension is an LLM judge (§5.1): the rubric IS the file, inputs come from
+# its own frontmatter. It runs on the RULER (`judge:` block), as does the summarizer.
 LJ="$(mkproj llmjudge)"
 # `--output-format json` marks the judge/summary calls; the worker uses stream-json.
 cat > "$LJ/bin/claude" <<'EOF'
@@ -480,12 +585,28 @@ if [ "$fmt" = "json" ]; then
 fi
 sh bin/rec RUN
 : > did_work
+git add did_work >/dev/null 2>&1
+git commit -qm "worker: did_work" >/dev/null 2>&1
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$LJ/bin/claude"
-echo "Decide whether the work is done." > "$LJ/rubric.md"
-printf 'goals:\n  - id: reviewed\n    type: binary\n    judge: { kind: llm, model: fake, rubric: "rubric.md", inputs: [] }\nstop_when: reviewed\n' > "$LJ/goals.yaml"
-printf 'project: llmjudge\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: true, model: fake, min_interval_secs: 0 }\n' > "$LJ/agg.yaml"
+cat > "$LJ/agg/judges/reviewed.md" <<'EOF'
+---
+inputs: []
+---
+Decide whether the work is done. Output ONLY the verdict JSON on the last line.
+EOF
+rm -f "$LJ/agg/judges/worked.sh"   # this project's DoD is the LLM judge, not the script judge
+cat > "$LJ/agg/agg.yaml" <<'EOF'
+project: llmjudge
+defaults: { model: fake }
+judge: { agent: claude, model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "reviewed"
+summary: { enabled: true, min_interval_secs: 0 }
+EOF
 agg_do "$LJ" run --max-sessions 2 > "$LJ/run.log" 2>&1
 is  "an llm judge drives the loop to its stop condition (exit 0)" "$?" "0"
 has "…it reports not-met at baseline"          "$LJ/run.log" "LLM_JUDGE_SAYS_NOT_YET"
@@ -495,12 +616,12 @@ has "…and a windowed summary"                           "$LJ/run.log" "WINDOWE
 is  "…and the summary is published to state.json" "$(snap "$LJ" summary_cumulative)" "CUMULATIVE_SUMMARY_X"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9f. worker_args · goal types · over_iterations · wall_hours"
+sec "9f. worker_args · numeric judges · over_iterations · wall_hours"
 
 # ── worker_args: extra flags agg must hand the worker, in the right POSITION ──────────────
-# There is NO agg log line for worker_args (worker.rs:73 just appends them), so the only
-# honest observation channel is the worker recording its own argv. Asserting on run.log
-# would pass for the wrong reason.
+# `worker_args` lives under `defaults:` now (§4.1 — inheritable, the sandbox constraint). There is
+# NO agg log line for it (worker.rs just appends them), so the only honest observation channel is
+# the worker recording its own argv. Asserting on run.log would pass for the wrong reason.
 WA="$(mkproj workerargs)"
 cat > "$WA/bin/claude" <<'EOF'
 #!/bin/sh
@@ -509,10 +630,25 @@ for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 : > argv.txt; for a in "$@"; do printf '%s\n' "$a" >> argv.txt; done
 sh bin/rec RUN
 : > did_work
+git add did_work >/dev/null 2>&1
+git commit -qm "worker: did_work" >/dev/null 2>&1
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$WA/bin/claude"
-printf 'project: workerargs\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nworker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "SENTINEL_SRC"]\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$WA/agg.yaml"
+cat > "$WA/agg/agg.yaml" <<'EOF'
+project: workerargs
+defaults:
+  model: fake
+  worker_args: ["--allowedTools", "Edit,Bash", "--add-dir", "SENTINEL_SRC"]
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+hooks:
+  on_session_start: ["sh bin/rec INJECT"]
+  on_session_end: ["sh bin/rec GATE"]
+EOF
 agg_do "$WA" run --max-sessions 2 > "$WA/run.log" 2>&1
 is  "worker_args: the run still succeeds" "$?" "0"
 has "…--allowedTools reached the worker" "$WA/argv.txt" "--allowedTools"
@@ -529,65 +665,101 @@ PY
 [ $? -eq 0 ] && ok "…and they sit AFTER agg's flags and BEFORE -p" \
              || bad "worker_args are in the wrong argv position"
 
-# ── percentage + cardinal goal types ─────────────────────────────────────────────────────
-# `met` comes from the judge's verdict (model.rs:185); `value` only decides InProgress vs
-# Pending. So the judge must report met:false with a rising value, then met:true at target.
-GT="$(mkproj goaltypes)"
-cat > "$GT/judges/pct.sh" <<'EOF'
+# ── numeric judges: the scoreboard renders value/max, and a `.value` accessor gates on it ─────
+# Goal TYPES are gone (§7.1): a judge emitting a `value` renders `value/max`; the number is read in
+# a condition via the dotted `.value` accessor (§5.3 extension 1). `coverage.value >= 100 AND
+# solved.value >= 28` is the DoD — a BARE `coverage >= 100` would be a hard error (a bool has no
+# ordering against a number), which is exactly what the accessor fixes.
+GT="$(mkproj numeric)"
+cat > "$GT/agg/judges/coverage.sh" <<'EOF'
 #!/bin/sh
 sh bin/rec VERIFY
 n=$(cat .n 2>/dev/null || echo 0)
 if [ "$n" -ge 1 ]; then echo '{"met":true,"value":100,"max":100,"target":100,"rationale":"done"}'
 else echo '{"met":false,"value":50,"max":100,"target":100,"rationale":"halfway"}'; fi
 EOF
-cat > "$GT/judges/card.sh" <<'EOF'
+cat > "$GT/agg/judges/solved.sh" <<'EOF'
 #!/bin/sh
 n=$(cat .n 2>/dev/null || echo 0)
 if [ "$n" -ge 1 ]; then echo '{"met":true,"value":28,"max":28,"target":28,"rationale":"all 28"}'
 else echo '{"met":false,"value":18,"max":28,"target":28,"rationale":"18 of 28"}'; fi
 EOF
-chmod +x "$GT/judges/pct.sh" "$GT/judges/card.sh"
+chmod +x "$GT/agg/judges/coverage.sh" "$GT/agg/judges/solved.sh"
 cat > "$GT/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 sh bin/rec RUN
 echo 1 > .n
+git add .n >/dev/null 2>&1
+git commit -qm "worker: .n" >/dev/null 2>&1
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$GT/bin/claude"
-printf 'goals:\n  - id: coverage\n    type: percentage\n    target: 100\n    judge: { kind: script, cmd: "./judges/pct.sh" }\n  - id: solved\n    type: cardinal\n    target: 28\n    judge: { kind: script, cmd: "./judges/card.sh" }\nstop_when: coverage AND solved\n' > "$GT/goals.yaml"
-printf 'project: goaltypes\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$GT/agg.yaml"
+cat > "$GT/agg/agg.yaml" <<'EOF'
+project: numeric
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "coverage.value >= 100 AND solved.value >= 28"
+summary: { enabled: false }
+hooks:
+  on_session_start: ["sh bin/rec INJECT"]
+  on_session_end: ["sh bin/rec GATE"]
+EOF
 agg_do "$GT" run --max-sessions 3 > "$GT/run.log" 2>&1
-is  "percentage+cardinal goals drive the loop to stop (exit 0)" "$?" "0"
-has "…baseline renders the percentage measure" "$GT/run.log" "50/100%"
-has "…and the cardinal measure"                "$GT/run.log" "18/28"
-has "…the percentage goal reaches target"      "$GT/run.log" "100/100%"
-has "…and the cardinal goal reaches target"    "$GT/run.log" "28/28"
-has "…the compound stop_when (AND) fires"      "$GT/run.log" "2/2 goals met"
+is  "numeric judges + a .value DoD drive the loop to stop (exit 0)" "$?" "0"
+has "…baseline renders the coverage measure as value/max" "$GT/run.log" "50/100"
+has "…and the solved measure"                             "$GT/run.log" "18/28"
+has "…coverage reaches its full value"                    "$GT/run.log" "100/100"
+has "…and solved reaches its full value"                  "$GT/run.log" "28/28"
+has "…and the compound .value DoD (AND) fires"            "$GT/run.log" "2/2 goals met"
 
 # ── over_iterations: a GUARD (exit 3), distinct from the max-sessions cap (exit 4) ───────
-# stop.rs:355 — sessions_done >= max_sessions. It is evaluated in GATE, so it halts BEFORE
-# the loop's own top-of-cycle max-sessions pre-check ever fires.
+# stop.rs — sessions_done >= max_sessions. It is evaluated in GATE, so it halts BEFORE the loop's
+# own top-of-cycle max-sessions pre-check ever fires. (over_iterations reads the SAME ceiling the
+# --max-sessions flag sets, §4.1.)
 OI="$(mkproj overiter)"; : > "$OI/NO_WORK"
-printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: worked\nhalt_when: over_iterations\n' > "$OI/goals.yaml"
+cat > "$OI/agg/agg.yaml" <<'EOF'
+project: overiter
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  abort_if: "over_iterations"
+summary: { enabled: false }
+EOF
 agg_do "$OI" run --max-sessions 2 > "$OI/run.log" 2>&1
 is    "over_iterations HALTS the loop (exit 3, a guard — not the exit-4 cap)" "$?" "3"
 has   "…and names the guard"                 "$OI/run.log" "over_iterations"
 hasnt "…the max-sessions cap never fired"    "$OI/run.log" "reached max_sessions"
 
-# ── wall_hours: a raw counter usable in any halt expression (stop.rs:338) ────────────────
+# ── wall_hours: a raw counter usable in any abort expression (stop.rs) ────────────────────
 WH="$(mkproj wallhours)"; : > "$WH/NO_WORK"; echo 4 > "$WH/WORKER_SLEEP"
 # baseline sits at ~0.00001h; one 4s session puts wall_hours at ~0.0012h.
-printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: worked\nhalt_when: wall_hours >= 0.0005\n' > "$WH/goals.yaml"
+cat > "$WH/agg/agg.yaml" <<'EOF'
+project: wallhours
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  abort_if: "wall_hours >= 0.0005"
+summary: { enabled: false }
+EOF
 agg_do "$WH" run --max-sessions 5 > "$WH/run.log" 2>&1
 is    "a wall_hours ceiling HALTS the loop (exit 3)" "$?" "3"
 has   "…and names the expression"                    "$WH/run.log" "wall_hours"
 hasnt "…it did not simply run out of sessions"       "$WH/run.log" "reached max_sessions"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9g. the git paths the rollback gate does NOT take (eager merge · conflict · recovery)"
+sec "9g. the git paths the rollback gate does NOT take (auto-accept · conflict · recovery)"
 
-# ── eager merge: rollback_on_regression:false → resolve_session commits BEFORE judging ───
+# ── gate_regressions:false → auto-accept: a regressing session is KEPT, never rolled back ───────
+# The loop ALWAYS stages+gates now (the old eager `resolve_session` is unreachable); `gate_regressions:
+# false` just makes the gate keep every session. A regressing session therefore LANDS on base — the
+# opposite of the default gate — which is the whole point of the knob.
 EM="$(mkproj eager)"
 cat > "$EM/bin/claude" <<'EOF'
 #!/bin/sh
@@ -595,23 +767,32 @@ for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 sh bin/rec RUN
 n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
 echo "sess-$n" > tracked.txt
-git add -A && git commit -qm "worker: session $n"
+git add tracked.txt && git commit -qm "worker: session $n"
 : > did_work
-[ "$n" -ge 2 ] && : > JUDGE_FAIL     # session 2 regresses — but there is NO gate to catch it
+[ "$n" -ge 2 ] && : > JUDGE_FAIL     # session 2 regresses — but gate_regressions:false keeps it
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$EM/bin/claude"
-cat > "$EM/judges/never.sh" <<'EOF'
+cat > "$EM/agg/judges/endless.sh" <<'EOF'
 #!/bin/sh
 echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
 EOF
-chmod +x "$EM/judges/never.sh"
-printf 'goals:\n  - id: worked\n    type: binary\n    judge: { kind: script, cmd: "./judges/check.sh" }\n  - id: endless\n    type: binary\n    judge: { kind: script, cmd: "./judges/never.sh" }\nstop_when: endless\n' > "$EM/goals.yaml"
-printf 'project: eager\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: false }\n' > "$EM/agg.yaml"
-mkrepo "$EM"
+chmod +x "$EM/agg/judges/endless.sh"
+cat > "$EM/agg/agg.yaml" <<'EOF'
+project: eager
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "endless"
+  invariants: [worked]
+  gate_regressions: false
+summary: { enabled: false }
+EOF
+echo base > "$EM/tracked.txt"
+gitbase "$EM"
 agg_do "$EM" run --max-sessions 2 > "$EM/run.log" 2>&1
-has   "eager path merges without a post-merge re-test"  "$EM/run.log" "session #1 merged → "
-hasnt "…and never takes the rollback-gate wording"      "$EM/run.log" "merged → kept"
+has  "gate_regressions:false keeps every session"       "$EM/run.log" "session #1 merged → kept"
 hasnt "…so a regressing session is NOT rolled back"     "$EM/run.log" "ROLLED BACK"
 is    "…and session 2's regressing work LANDS on base (that is the trade-off)" \
       "$( cd "$EM" && git show HEAD:tracked.txt 2>/dev/null )" "sess-2"
@@ -626,14 +807,22 @@ BR=$(git rev-parse --abbrev-ref HEAD)
 echo branch-side > tracked.txt && git commit -qam "branch edit"
 git checkout -q main && echo base-side > tracked.txt && git commit -qam "base moved"
 git checkout -q "$BR"          # leave HEAD where agg expects it
-: > did_work
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$MC/bin/claude"
-printf 'project: conflict\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, rollback_on_regression: false }\n' > "$MC/agg.yaml"
-mkrepo "$MC"
+cat > "$MC/agg/agg.yaml" <<'EOF'
+project: conflict
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+EOF
+echo base > "$MC/tracked.txt"
+gitbase "$MC"
 agg_do "$MC" run --max-sessions 1 > "$MC/run.log" 2>&1
-has "a conflicting merge FAILS loudly"              "$MC/run.log" "merge FAILED (conflict)"
+has "a conflicting merge FAILS loudly"              "$MC/run.log" "FAILED (conflict)"
 has "…and the branch is kept for inspection"        "$MC/run.log" "kept for inspection"
 is  "…base is left exactly as it was"               "$( cd "$MC" && git show main:tracked.txt 2>/dev/null )" "base-side"
 ( cd "$MC" && git rev-parse -q --verify MERGE_HEAD >/dev/null ) \
@@ -641,18 +830,28 @@ is  "…base is left exactly as it was"               "$( cd "$MC" && git show m
   || ok "…and no MERGE_HEAD is stranded (the merge was aborted)"
 
 # ── startup recovery of a merge stranded by an interrupted run ───────────────────────────
-# The discriminator is .git/MERGE_MSG (git.rs:79): agg's own merge names the branch_prefix.
-# GOTCHA: baseline stop runs BEFORE recovery, so the goal must NOT be met at launch.
+# The discriminator is .git/MERGE_MSG (git.rs): agg's own merge names the branch_prefix.
+# GOTCHA: recovery runs BEFORE the baseline pass; the goal need not be met, the strand just has
+# to exist. The default worker (creates + commits did_work) then drives the run to done.
 strand() { # strand <dir> <branch-name>  → leaves a conflicted, uncommitted merge
-  # both sides must differ from mkrepo's committed "base", or `git commit` finds nothing to do
+  # both sides must differ from the committed "base", or `git commit` finds nothing to do
   # and the `&&` chain dies before the merge ever runs.
   ( cd "$1" && git checkout -q -b "$2" && echo branch-side > tracked.txt && git commit -qam b \
      && git checkout -q main && echo main-side > tracked.txt && git commit -qam m \
      && git merge --no-commit "$2" >/dev/null 2>&1; true )
 }
 SR="$(mkproj recover)"
-printf 'project: recover\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true }\n' > "$SR/agg.yaml"
-mkrepo "$SR"; strand "$SR" "agg/recover/session-1"      # name contains the `agg` branch_prefix
+cat > "$SR/agg/agg.yaml" <<'EOF'
+project: recover
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+EOF
+echo base > "$SR/tracked.txt"; gitbase "$SR"
+strand "$SR" "agg/recover/session-1"      # name contains the `agg` branch_prefix
 ( cd "$SR" && git rev-parse -q --verify MERGE_HEAD >/dev/null ) && ok "fixture: a merge is genuinely stranded" || bad "fixture failed to strand a merge"
 agg_do "$SR" run --max-sessions 1 > "$SR/run.log" 2>&1
 has "agg recovers its OWN stranded merge at startup" "$SR/run.log" "found a leftover staged merge from an interrupted session"
@@ -660,12 +859,25 @@ has "…so isolation still turns ON"                   "$SR/run.log" "per-sessio
 ( cd "$SR" && git rev-parse -q --verify MERGE_HEAD >/dev/null ) \
   && bad "MERGE_HEAD survived recovery" || ok "…and MERGE_HEAD is cleared"
 
-SU="$(mkproj unrelated)"; : > "$SU/NO_WORK"   # baseline must NOT be met, or recovery never runs
-printf 'project: unrelated\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true }\n' > "$SU/agg.yaml"
-mkrepo "$SU"; strand "$SU" "hotfix/urgent"              # no `agg` anywhere in the merge message
+# a merge agg did NOT start: it is left alone, and because isolation is MANDATORY and needs a clean
+# tree, agg REFUSES to start (rather than the old "disable isolation, run on current branch" — that
+# escape hatch is gone). The user's merge survives untouched.
+SU="$(mkproj unrelated)"
+cat > "$SU/agg/agg.yaml" <<'EOF'
+project: unrelated
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+EOF
+echo base > "$SU/tracked.txt"; gitbase "$SU"
+strand "$SU" "hotfix/urgent"              # no `agg` anywhere in the merge message
 agg_do "$SU" run --max-sessions 1 > "$SU/run.log" 2>&1
+is  "…agg refuses to start (a foreign merge is a dirty tree)" "$?" "1"
 has "a merge agg did NOT start is left alone, with a warning" "$SU/run.log" "WARNING a merge is in progress that agg did not start"
-has "…and isolation disables itself rather than trample it"   "$SU/run.log" "running on current branch"
+has "…and isolation refuses rather than trample it"          "$SU/run.log" "uncommitted tracked changes"
 ( cd "$SU" && git rev-parse -q --verify MERGE_HEAD >/dev/null ) \
   && ok "…and the user's merge is still there, untouched" || bad "agg destroyed a merge it did not start"
 
@@ -684,15 +896,27 @@ i=0; while [ $i -lt 40 ]; do printf 'padding line %s for session %s\n' "$i" "$n"
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$MK/bin/claude"
-printf 'project: memcap\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nmemory: { enabled: true, max_kb: 1, inject_kb: 1 }\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$MK/agg.yaml"
+cat > "$MK/agg/agg.yaml" <<'EOF'
+project: memcap
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+memory: { enabled: true, max_kb: 1, inject_kb: 1 }
+hooks:
+  on_session_start: ["sh bin/rec INJECT"]
+  on_session_end: ["sh bin/rec GATE"]
+EOF
 agg_do "$MK" run --max-sessions 4 > "$MK/run.log" 2>&1
-exists "AGG_MEMORY.md exists after 4 sessions" "$MK/AGG_MEMORY.md"
-SZ=$(wc -c < "$MK/AGG_MEMORY.md" | tr -d ' ')
+exists "AGG_MEMORY.md exists after 4 sessions" "$MK/agg/state/AGG_MEMORY.md"
+SZ=$(wc -c < "$MK/agg/state/AGG_MEMORY.md" | tr -d ' ')
 printf '  AGG_MEMORY.md = %s bytes (cap = 1 KB)\n' "$SZ"
 [ "$SZ" -le 1100 ] && ok "…and max_kb=1 caps the durable file (${SZ}B)" \
                    || bad "max_kb not enforced" "${SZ}B > 1 KB"
-has "…dropping the OLDEST entries, and saying so" "$MK/AGG_MEMORY.md" "older entries dropped"
-has "…the newest session survives the rotation"   "$MK/AGG_MEMORY.md" "session 4"
+has "…dropping the OLDEST entries, and saying so" "$MK/agg/state/AGG_MEMORY.md" "older entries dropped"
+has "…the newest session survives the rotation"   "$MK/agg/state/AGG_MEMORY.md" "session 4"
 # inject_kb bounds the per-prompt slice independently of the on-disk file
 PB=$(python3 - "$MK/prompt_latest.txt" <<'PY'
 import sys
@@ -707,114 +931,120 @@ printf '  injected memory block = %s bytes (inject_kb = 1 KB)\n' "$PB"
                    || bad "inject_kb not enforced" "${PB}B"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9i. the rest of the surface (effort · base_branch · invariants · recheck · flags)"
+sec "9i. the rest of the surface (effort · base_branch · invariants · judge.timeout · env · flags)"
 
-# ── effort: passed through to the worker as `--effort <value>` (worker.rs:64) ────────────
+# ── effort: passed through to the worker as `--effort <value>` (worker.rs) ────────────────
+# `effort` lives under `defaults:` now (§4.1).
 EF="$(mkproj effort)"
 cat > "$EF/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 : > argv.txt; for a in "$@"; do printf '%s\n' "$a" >> argv.txt; done
-sh bin/rec RUN; : > did_work
+sh bin/rec RUN
+: > did_work
+git add did_work >/dev/null 2>&1
+git commit -qm "worker: did_work" >/dev/null 2>&1
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$EF/bin/claude"
-printf 'project: effort\nmodel: fake\neffort: low\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nhooks:\n  on_session_start: ["sh bin/rec INJECT"]\n  on_session_end: ["sh bin/rec GATE"]\n' > "$EF/agg.yaml"
+cat > "$EF/agg/agg.yaml" <<'EOF'
+project: effort
+defaults: { model: fake, effort: low }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+hooks:
+  on_session_start: ["sh bin/rec INJECT"]
+  on_session_end: ["sh bin/rec GATE"]
+EOF
 agg_do "$EF" run --max-sessions 2 > "$EF/run.log" 2>&1
 has "effort is handed to the worker as --effort" "$EF/argv.txt" "--effort"
 has "…with the configured value"                 "$EF/argv.txt" "low"
 
 # ── session_isolation.base_branch: cut sessions from a branch that is NOT the current one ─
 BB="$(mkproj basebranch)"
-printf 'project: basebranch\nmodel: fake\nresume_prompt: AGG_RESUME.md\nsummary: { enabled: false }\nsession_isolation: { enabled: true, base_branch: "trunk" }\n' > "$BB/agg.yaml"
-mkrepo "$BB"
+cat > "$BB/agg/agg.yaml" <<'EOF'
+project: basebranch
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+session_isolation: { base_branch: "trunk" }
+EOF
+echo base > "$BB/tracked.txt"; gitbase "$BB"
 ( cd "$BB" && git branch trunk )
 agg_do "$BB" run --max-sessions 1 > "$BB/run.log" 2>&1
 has "base_branch overrides the launch branch" "$BB/run.log" "base branch 'trunk'"
 has "…and sessions are cut off it"            "$BB/run.log" "(off trunk)"
 
-# ── invariants + any_regressed(invariants) ───────────────────────────────────────────────
+# ── invariants + any_regressed(invariants) as an ABORT ───────────────────────────────────
+# With the default gate a regression is rolled back (any_regressed then reads the RESTORED state and
+# never fires). To exercise any_regressed(invariants) as an abort we turn the gate OFF, so the
+# regression LANDS and the term can see it. The worker commits its break so it stages (an
+# uncommitted break is NoChanges and would be undone).
 IV="$(mkproj invariant)"
-cat > "$IV/judges/safe.sh" <<'EOF'
+cat > "$IV/agg/judges/safe.sh" <<'EOF'
 #!/bin/sh
 if [ -f BREAK ]; then echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"safety broke"}'
 else echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"safe"}'; fi
 EOF
-cat > "$IV/judges/never.sh" <<'EOF'
+cat > "$IV/agg/judges/endless.sh" <<'EOF'
 #!/bin/sh
 echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
 EOF
-chmod +x "$IV/judges/safe.sh" "$IV/judges/never.sh"
+chmod +x "$IV/agg/judges/safe.sh" "$IV/agg/judges/endless.sh"
 cat > "$IV/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-sh bin/rec RUN; : > BREAK      # the worker breaks the invariant it was told to preserve
+sh bin/rec RUN
+echo broke > BREAK           # the worker breaks the invariant it was told to preserve
+git add BREAK && git commit -qm "worker: break"
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$IV/bin/claude"
-printf 'goals:\n  - id: safe\n    type: binary\n    invariant: true\n    judge: { kind: script, cmd: "./judges/safe.sh" }\n  - id: endless\n    type: binary\n    judge: { kind: script, cmd: "./judges/never.sh" }\nstop_when: endless\nhalt_when: any_regressed(invariants)\n' > "$IV/goals.yaml"
+cat > "$IV/agg/agg.yaml" <<'EOF'
+project: invariant
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "endless"
+  invariants: [safe]
+  abort_if: "any_regressed(invariants)"
+  gate_regressions: false
+summary: { enabled: false }
+EOF
+echo base > "$IV/tracked.txt"; gitbase "$IV"
 agg_do "$IV" run --max-sessions 3 > "$IV/run.log" 2>&1
 is    "a regressed INVARIANT halts the loop (exit 3)"  "$?" "3"
 has   "…naming the guard"                              "$IV/run.log" "any_regressed"
 hasnt "…and it is not the session cap"                 "$IV/run.log" "reached max_sessions"
 
-# ── recheck: once_met  → the judge LATCHES and is never run again ────────────────────────
-OM="$(mkproj oncemet)"
-cat > "$OM/judges/counted.sh" <<'EOF'
-#!/bin/sh
-n=$(cat .judged 2>/dev/null || echo 0); echo $((n+1)) > .judged
-echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"done once"}'
-EOF
-cat > "$OM/judges/never.sh" <<'EOF'
-#!/bin/sh
-echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"alive"}'
-EOF
-chmod +x "$OM/judges/counted.sh" "$OM/judges/never.sh"
-printf 'goals:\n  - id: latched\n    type: binary\n    recheck: once_met\n    judge: { kind: script, cmd: "./judges/counted.sh" }\n  - id: endless\n    type: binary\n    judge: { kind: script, cmd: "./judges/never.sh" }\nstop_when: endless\n' > "$OM/goals.yaml"
-agg_do "$OM" run --max-sessions 2 > "$OM/run.log" 2>&1
-is "recheck: once_met judges exactly ONCE, then latches (baseline only)" \
-   "$(cat "$OM/.judged" 2>/dev/null)" "1"
-
-# ── recheck: on_change → re-judged only when a declared input changes ────────────────────
-OC="$(mkproj onchange)"
-cat > "$OC/judges/counted.sh" <<'EOF'
-#!/bin/sh
-n=$(cat .judged 2>/dev/null || echo 0); echo $((n+1)) > .judged
-echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
-EOF
-chmod +x "$OC/judges/counted.sh"
-echo original > "$OC/watched.txt"
-cat > "$OC/bin/claude" <<'EOF'
-#!/bin/sh
-for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-sh bin/rec RUN
-n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
-[ "$n" = "2" ] && echo changed > watched.txt   # only session 2 touches the watched input
-printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
-EOF
-chmod +x "$OC/bin/claude"
-printf 'goals:\n  - id: gated\n    type: binary\n    recheck: on_change\n    recheck_inputs: ["watched.txt"]\n    judge: { kind: script, cmd: "./judges/counted.sh" }\nstop_when: gated\n' > "$OC/goals.yaml"
-agg_do "$OC" run --max-sessions 2 > "$OC/run.log" 2>&1
-is "recheck: on_change re-judges only when the input changed (baseline + session 2)" \
-   "$(cat "$OC/.judged" 2>/dev/null)" "2"
-
-# ── validate_recheck rejects a latched invariant (it could never see its own regression) ──
-BAD="$(mkproj badrecheck)"
-printf 'goals:\n  - id: safe\n    type: binary\n    invariant: true\n    recheck: once_met\n    judge: { kind: script, cmd: "./judges/check.sh" }\nstop_when: safe\n' > "$BAD/goals.yaml"
-agg_do "$BAD" run --max-sessions 1 > "$BAD/run.log" 2>&1
-[ $? -ne 0 ] && ok "an invariant with recheck: once_met is REJECTED, not silently latched" \
-             || bad "a latched invariant was accepted"
-has "…with an actionable message" "$BAD/run.log" "invariants must"
-
-# ── a hanging judge is killed by its timeout; the loop survives (judges are crash-safe) ──
+# ── judge.timeout: a hanging judge is killed by the run-level timeout; the loop survives ──
+# The per-judge timeout moved to the run-level `judge:` block (§5.2). A judge that hangs past it is
+# killed → Verdict::failed (an error, NOT a clean not-met), so it never meets and never regresses;
+# the loop simply reaches the cap.
 JT="$(mkproj judgetimeout)"; : > "$JT/NO_WORK"
-cat > "$JT/judges/slow.sh" <<'EOF'
+cat > "$JT/agg/judges/worked.sh" <<'EOF'
 #!/bin/sh
 sleep 30
 echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"never gets here"}'
 EOF
-chmod +x "$JT/judges/slow.sh"
-printf 'goals:\n  - id: slow\n    type: binary\n    judge: { kind: script, cmd: "./judges/slow.sh", timeout: 1 }\nstop_when: slow\n' > "$JT/goals.yaml"
+chmod +x "$JT/agg/judges/worked.sh"
+cat > "$JT/agg/agg.yaml" <<'EOF'
+project: judgetimeout
+defaults: { model: fake }
+judge: { timeout: 1 }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+EOF
 JTS=$(date +%s)
 agg_do "$JT" run --max-sessions 1 > "$JT/run.log" 2>&1
 is "a judge that hangs does not hang the loop (exit 4, the cap)" "$?" "4"
@@ -822,7 +1052,7 @@ is "a judge that hangs does not hang the loop (exit 4, the cap)" "$?" "4"
                                     || bad "the judge ran to completion; timeout ignored"
 hasnt "…and the hung judge never reports met" "$JT/run.log" "never gets here"
 
-# ── AGG_MEMORY_MAX_KB env override (config.rs:324) ───────────────────────────────────────
+# ── AGG_MEMORY_MAX_KB env override (config.rs apply_env_overrides) ────────────────────────
 EV="$(mkproj memenv)"; : > "$EV/NO_WORK"
 cat > "$EV/bin/claude" <<'EOF'
 #!/bin/sh
@@ -837,27 +1067,27 @@ chmod +x "$EV/bin/claude"
 # CONTROL first: without the override the file must exceed 1 KB, or the assertion below is
 # vacuous (it would "pass" simply because nothing was ever big enough to cap).
 ( cd "$EV" && PATH="$EV/bin:$PATH" "$AGG" run --max-sessions 4 > uncapped.log 2>&1 )
-RAW=$(wc -c < "$EV/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
+RAW=$(wc -c < "$EV/agg/state/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
 [ "${RAW:-0}" -gt 1100 ] && ok "control: uncapped memory really does exceed 1 KB (${RAW}B)" \
                          || bad "control failed — the memcap assertion would be vacuous" "${RAW}B"
-rm -f "$EV/AGG_MEMORY.md" "$EV/.sess"; rm -rf "$EV/agg/state"
+rm -f "$EV/.sess"; rm -rf "$EV/agg/state"
 ( cd "$EV" && PATH="$EV/bin:$PATH" AGG_MEMORY_MAX_KB=1 "$AGG" run --max-sessions 4 > run.log 2>&1 )
-SZ=$(wc -c < "$EV/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
+SZ=$(wc -c < "$EV/agg/state/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
 [ "${SZ:-99999}" -le 1100 ] && ok "AGG_MEMORY_MAX_KB=1 overrides the config default (${RAW}B → ${SZ}B)" \
                             || bad "the env override was ignored" "${SZ}B"
-has "…and the rotation notice proves the cap actually fired" "$EV/AGG_MEMORY.md" "older entries dropped"
+has "…and the rotation notice proves the cap actually fired" "$EV/agg/state/AGG_MEMORY.md" "older entries dropped"
 
-# ── global flags: --dir, --config, --goals ───────────────────────────────────────────────
+# ── global flags: --dir, --config (--goals is GONE, §7.1) ─────────────────────────────────
 GF="$(mkproj globalflags)"
 ( cd "$WS" && PATH="$GF/bin:$PATH" "$AGG" --dir "$GF" run --max-sessions 2 > "$GF/dirrun.log" 2>&1 )
 is  "--dir runs the loop in another directory (exit 0)" "$?" "0"
 exists "…and the worker really worked there"           "$GF/did_work"
 
 GC="$(mkproj cfgflags)"
-mv "$GC/agg.yaml" "$GC/custom.yaml"; mv "$GC/goals.yaml" "$GC/custom-goals.yaml"
-agg_do "$GC" --config "$GC/custom.yaml" --goals "$GC/custom-goals.yaml" run --max-sessions 2 > "$GC/run.log" 2>&1
-is  "--config/--goals accept non-default filenames (exit 0)" "$?" "0"
-has "…and the run really reached its goal"                   "$GC/run.log" "STOP condition satisfied"
+mv "$GC/agg/agg.yaml" "$GC/custom.yaml"        # the config file at a NON-default path; judges still resolve from agg/judges/
+agg_do "$GC" --config "$GC/custom.yaml" run --max-sessions 2 > "$GC/run.log" 2>&1
+is  "--config accepts a non-default filename (exit 0)" "$?" "0"
+has "…and the run really reached its Definition of Done" "$GC/run.log" "done_if satisfied"
 
 # ── `agg send …` subcommands (the aliases the web UI mirrors) ────────────────────────────
 SN="$(mkproj sendcmds)"; : > "$SN/NO_WORK"; echo 2 > "$SN/WORKER_SLEEP"
@@ -873,6 +1103,130 @@ agg_do "$SN" send stop "via send" > /dev/null 2>&1
 waitfor 40 "agg send stop ends the loop" bash -c "! kill -0 $SNL 2>/dev/null"
 wait $SNL; is "…exit 0" "$?" "0"
 is "…with the reason that send stop gave" "$(finish_reason "$SN")" "stopped via bus: via send"
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9k. the sequence/step model, observed end-to-end (§5.4 · §5.7 · §4.1)"
+
+# ── `worker x4` — a repeat runs the step four times before the sequence wraps ────────────
+RX="$(mkproj repeatx)"; : > "$RX/NO_WORK"
+cat > "$RX/agg/agg.yaml" <<'EOF'
+project: repeatx
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps:
+    - worker x4
+  done_if: "worked"
+summary: { enabled: false }
+hooks:
+  on_session_start: ["sh bin/rec INJECT"]
+EOF
+agg_do "$RX" run --max-sessions 4 > "$RX/run.log" 2>&1
+# NB: the backticks below MUST be escaped. Unescaped, bash runs `worker x4` as a command
+# substitution while expanding this line's args — that clobbers $? (to 127, "command not found")
+# BEFORE the "$?" arg is read, so the assertion would test the wrong exit code entirely.
+is  "a \`worker x4\` repeat runs to the session cap (exit 4, DoD never met)" "$?" "4"
+RUNS=$(grep -c 'RUN=run' "$RX/trace.txt" 2>/dev/null || echo 0)
+[ "$RUNS" -eq 4 ] && ok "…dispatching the worker step exactly 4 times" \
+                  || bad "\`worker x4\` ran the step $RUNS times, expected 4"
+
+# ── `if <cond> then <step>` — the branch fires its step only when the condition is met ────
+# `flip` is a run-set-only control judge (named ONLY in the if-condition): met once .flip is
+# COMMITTED, which the FIRST worker session does (uncommitted work is NoChanges and the gate would
+# restore flip to not-met, so the branch would never fire). So session 1 = worker; session 2 = the
+# branch target `reconsider` (skip_judges), which STAGES. A per-step override proves reconsider ran:
+# it names a distinct `prompt:` that lands in that worker's prompt additively (§5.6). We assert
+# against prompts.txt (which accumulates every prompt) so the check is independent of session order.
+BR="$(mkproj branch)"
+cat > "$BR/agg/judges/flip.sh" <<'EOF'
+#!/bin/sh
+[ -f .flip ] && echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"flipped"}' \
+             || echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
+EOF
+chmod +x "$BR/agg/judges/flip.sh"
+cat > "$BR/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s\n===8<===\n' "$a" >> prompts.txt; prev="$a"; done
+sh bin/rec RUN
+if [ ! -f .flip ]; then : > .flip; git add .flip >/dev/null 2>&1; git commit -qm flip >/dev/null 2>&1; fi
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$BR/bin/claude"
+cat > "$BR/agg/agg.yaml" <<'EOF'
+project: branch
+defaults: { model: fake }
+steps:
+  worker: {}
+  reconsider: { skip_judges: true, prompt: "RECONSIDER_MARKER_QRS" }
+sequence:
+  steps:
+    - worker
+    - if flip then reconsider
+  done_if: "worked"
+summary: { enabled: false }
+EOF
+echo base > "$BR/tracked.txt"; gitbase "$BR"
+agg_do "$BR" run --max-sessions 3 > "$BR/run.log" 2>&1
+has "an `if <cond> then <step>` fires its target once the condition holds" "$BR/run.log" "(skip_judges) — nothing merged yet"
+has "…and the branch target's per-step prompt reaches that worker"         "$BR/prompts.txt" "RECONSIDER_MARKER_QRS"
+
+# ── a per-step AGENT override is honoured (the whole point: perspective diversity, §3) ────
+# `build` overrides the worker agent to `codex`; the loop must launch THAT agent for that step. We
+# shim BOTH `claude` and `codex` on PATH so the override is observable without a real second vendor.
+PA="$(mkproj peragent)"; : > "$PA/NO_WORK"
+cp "$PA/bin/claude" "$PA/bin/codex"
+# make each shim announce which binary ran, so we can see the override took effect.
+cat > "$PA/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+echo "AGENT=claude" >> whoran.txt
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+cat > "$PA/bin/codex" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+echo "AGENT=codex" >> whoran.txt
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$PA/bin/claude" "$PA/bin/codex"
+cat > "$PA/agg/agg.yaml" <<'EOF'
+project: peragent
+defaults: { agent: claude, model: fake }
+judge: { agent: claude, model: fake }
+steps:
+  plan: {}
+  build: { agent: codex }
+sequence:
+  steps:
+    - plan
+    - build
+  done_if: "worked"
+summary: { enabled: false }
+EOF
+agg_do "$PA" run --max-sessions 2 > "$PA/run.log" 2>&1
+has "the default step runs the default agent (claude)"     "$PA/whoran.txt" "AGENT=claude"
+has "…and a per-step `agent:` override runs the other one (codex)" "$PA/whoran.txt" "AGENT=codex"
+
+# ── deny_unknown_fields: a stray/mistyped config key is a HARD ERROR at startup (§4.1) ────
+# The guard the config move depends on — a stale top-level `budget:` (its new home is under
+# `sequence:`) must be REFUSED, not silently ignored (a decorative spend ceiling = an unbounded loop).
+DK="$(mkproj denyunknown)"
+cat > "$DK/agg/agg.yaml" <<'EOF'
+project: denyunknown
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+budget: { total: 5 }
+EOF
+agg_do "$DK" run --max-sessions 1 > "$DK/run.log" 2>&1
+# escaped backticks (see the `worker x4` note above): an unescaped `budget:` would run as a command
+# substitution and clobber $? to 127 before the exit code is asserted.
+is  "a stray top-level \`budget:\` (its home is under sequence:) is refused, not ignored" "$?" "1"
+has "…naming the unknown field"                                                          "$DK/run.log" "unknown field \`budget\`"
 
 # ═══════════════════════════════════════════════════════════════════════════
 sec "9j. the docs describe the tool that actually exists"
@@ -944,7 +1298,7 @@ import json;d=json.load(open('$SV/state.json'))
 assert d['project']=='serve', d['project']
 assert d['phase'] in ('inject','run','verify','gate'), d['phase']
 assert isinstance(d['goals'],list) and d['goals'][0]['id']=='worked'" \
-  && ok "GET /api/state → live snapshot with a four-stage phase" || bad "/api/state malformed"
+  && ok "GET /api/state → live snapshot with a four-stage phase + the judge scoreboard" || bad "/api/state malformed"
 
 curl -sf "http://127.0.0.1:$PORT/api/history" -o "$SV/hist.json"
 python3 -c "import json;d=json.load(open('$SV/hist.json'));assert 'runs' in d" \
@@ -962,7 +1316,7 @@ while [ "$(date +%s)" -lt "$SDL" ]; do
   sleep 0.1
 done
 sort -u "$SV/phases.txt" | grep -v '^$' > "$SV/phases.uniq"
-UNKNOWN=$(grep -vE '^(inject|run|verify|gate|backoff|starting|done)$' "$SV/phases.uniq" | tr '\n' ' ')
+UNKNOWN=$(grep -vE '^(inject|run|verify|gate|backoff|staging|starting|done)$' "$SV/phases.uniq" | tr '\n' ' ')
 [ -z "$UNKNOWN" ] && ok "…/api/state only ever exposes known phases" \
                   || bad "/api/state exposed an unknown phase" "saw: $UNKNOWN"
 grep -qE '^(inject|run|verify|gate)$' "$SV/phases.uniq" \
@@ -1007,7 +1361,7 @@ else
   DRIVE="$ROOT/scripts/tui_drive.py"   # `script(1)` gives no window size → ratatui paints 0 cells
   T="$(mkproj tuidemo)"
   # the Activity pane must OVERFLOW, or there is nothing to scroll and follow-mode is moot:
-  # emit ~60 `assistant` text events so max_scroll > 0.
+  # emit ~60 `assistant` text events so max_scroll > 0. It commits did_work so the run reaches done.
   cat > "$T/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
@@ -1016,6 +1370,8 @@ i=1; while [ $i -le 60 ]; do
   i=$((i+1))
 done
 : > did_work
+git add did_work >/dev/null 2>&1
+git commit -qm "worker: did_work" >/dev/null 2>&1
 printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
   chmod +x "$T/bin/claude"
@@ -1031,7 +1387,7 @@ EOF
   drive base "2.0:q" 25
   is "TUI launches on a pty and quits on 'q'" "$?" "0"
   has "…paints the project name"    "$T/base.txt" "tuidemo"
-  has "…paints the goal"            "$T/base.txt" "worked"
+  has "…paints the judge"           "$T/base.txt" "worked"
   has "…paints the phase field"     "$T/base.txt" "phase"
   has "…paints the worker's activity stream" "$T/base.txt" "thinking step"
   has "…paints the finished banner" "$T/base.txt" "FINISHED"
@@ -1039,13 +1395,13 @@ EOF
   # focus starts on Activity, follow-mode starts on
   has "…Activity starts focused (▸)"        "$T/base.txt" "▸ Activity"
   has "…and auto-follow starts on (⏵live)"  "$T/base.txt" "⏵live"
-  hasnt "…Goals is not focused to begin with" "$T/base.txt" "▸ Goals"
+  hasnt "…Judges is not focused to begin with" "$T/base.txt" "▸ Judges"
   hasnt "…and follow is not paused"           "$T/base.txt" "paused"
 
   # a user presses Tab to move focus, f to toggle follow, arrows to scroll
   drive tab "1.5:Tab,0.6:RESIZE,0.8:q" 25
   is  "Tab is accepted and the TUI still quits" "$?" "0"
-  has "…Tab moves focus to Goals (▸ Goals)"     "$T/tab.txt" "▸ Goals"
+  has "…Tab moves focus to Judges (▸ Judges)"   "$T/tab.txt" "▸ Judges"
 
   # `f` at the bottom used to be a no-op: draw_activity re-pinned anything at max_scroll,
   # so the pause was undone by the very next repaint.
@@ -1186,8 +1542,8 @@ sec "13. agg skills install — the /agg:* skills reach all three agents"
 # (c) is the whole point of the phase: a setup skill that writes a config `capability::check`
 # refuses is worse than no setup skill at all.
 
-SK="$WS/skills"; mkdir -p "$SK"
-printf 'project: p\nagent: codex\nresume_prompt: R\n' > "$SK/agg.yaml"
+SK="$WS/skills"; mkdir -p "$SK/agg"
+printf 'project: p\ndefaults: { agent: codex }\nsteps: { worker: {} }\nsequence: { steps: [worker] }\n' > "$SK/agg/agg.yaml"
 
 # --- (a) the right directory per agent. Claude and the other two do NOT share one. ----------
 "$AGG" --dir "$SK" skills install --agent claude  > "$SK/i-claude.log"  2>&1
@@ -1207,8 +1563,8 @@ has "the installed skill keeps its frontmatter"  "$SK/.agents/skills/agg-new/SKI
 has "…and the capability-aware agg.yaml template" "$SK/.agents/skills/agg-new/SKILL.md" "agent: <claude|codex|copilot>"
 
 # --- the ergonomics: no flags needed, and a bad agent writes nothing ------------------------
-D2="$WS/skills-default"; mkdir -p "$D2"
-printf 'project: p\nagent: copilot\nresume_prompt: R\n' > "$D2/agg.yaml"
+D2="$WS/skills-default"; mkdir -p "$D2/agg"
+printf 'project: p\ndefaults: { agent: copilot }\nsteps: { worker: {} }\nsequence: { steps: [worker] }\n' > "$D2/agg/agg.yaml"
 "$AGG" --dir "$D2" skills install > "$D2/i.log" 2>&1
 has "agg skills install defaults the agent to agg.yaml's 'agent:' key" "$D2/i.log" "for \`copilot\`"
 exists "…and installs it where copilot looks" "$D2/.agents/skills/agg-new/SKILL.md"
@@ -1230,24 +1586,31 @@ exists "--user --agent claude installs under \$HOME/.claude/skills/" "$HM/.claud
 ( cd "$SK" && "$AGG" doctor > "$SK/doc.log" 2>&1 )
 has "agg doctor reports the skills are installed for the active agent" "$SK/doc.log" \
     "the /agg:* skills are installed for \`codex\`"
-DN="$WS/skills-none"; mkdir -p "$DN"
-printf 'project: p\nagent: codex\nresume_prompt: R\n' > "$DN/agg.yaml"
+DN="$WS/skills-none"; mkdir -p "$DN/agg"
+printf 'project: p\ndefaults: { agent: codex }\nsteps: { worker: {} }\nsequence: { steps: [worker] }\n' > "$DN/agg/agg.yaml"
 ( cd "$DN" && "$AGG" doctor > "$DN/doc.log" 2>&1 )
 has "…and says so, non-fatally, when they are not" "$DN/doc.log" "are not installed for \`codex\`"
 
 # --- (c) THE ONE THAT MATTERS: /agg:new's recipes must produce a config that STARTS ----------
 # Each block below is exactly what the skill's Step-0 rules tell it to emit. If `agg doctor`
 # refuses one of these, the skill is generating a config that `agg run` will not start — which
-# is the precise failure this whole phase exists to prevent.
-capcheck() { # capcheck <desc> <expect: ok|refused> <agg.yaml body>
+# is the precise failure this whole phase exists to prevent. (budget/cost live under `sequence:`
+# now; only claude REPORTS `cost:` in dollars — so a cost guard is REFUSED on codex, but merely
+# INERT-but-loud on copilot, which self-caps via `--max-ai-credits`. §4.1/§7.3.)
+capcheck() { # capcheck <desc> <expect: ok|refused|inert> <agg.yaml body>
   local desc=$1 expect=$2 body=$3
   local d="$WS/cap-$(echo "$desc" | tr -cd '[:alnum:]' | cut -c1-16)"
-  mkdir -p "$d"; printf '%s' "$body" > "$d/agg.yaml"
-  printf 'goals:\n  - id: g\n    type: binary\n    judge: { kind: script, cmd: "true" }\nstop_when: g\n' > "$d/goals.yaml"
-  : > "$d/R"
+  mkdir -p "$d/agg/judges"; printf '%s' "$body" > "$d/agg/agg.yaml"
+  printf '#!/bin/sh\necho "{\\"met\\":true}"\n' > "$d/agg/judges/g.sh"; chmod +x "$d/agg/judges/g.sh"
+  printf 'do work\n' > "$d/agg/AGG_STATE.md"
   ( cd "$d" && "$AGG" doctor > "$d/doc.log" 2>&1 )
-  if grep -q "cannot do what this config asks" "$d/doc.log"; then
+  if grep -q "cannot do" "$d/doc.log"; then
     [ "$expect" = "refused" ] && ok "$desc" || bad "$desc" "agg REFUSED a config the skill tells /agg:new to write"
+  elif [ "$expect" = "inert" ]; then
+    # §7.3: the guard is accepted (the agent self-caps) but its inertness MUST be surfaced loudly —
+    # an accepted-and-silent cost guard would be the exact quiet no-op this whole check forbids.
+    grep -q "INERT" "$d/doc.log" && ok "$desc" \
+      || bad "$desc" "agg accepted the inert cost guard but never WARNED it will not fire — a silent no-op"
   else
     [ "$expect" = "ok" ] && ok "$desc" || bad "$desc" "agg ACCEPTED a config the skill forbids — the guard is dead"
   fi
@@ -1255,41 +1618,58 @@ capcheck() { # capcheck <desc> <expect: ok|refused> <agg.yaml body>
 # the recipes the skill prescribes → must all start
 capcheck "the skill's claude recipe starts"  ok \
   'project: p
-agent: claude
-model: "claude-opus-4-8[1m]"
-resume_prompt: R
-budget: { total: 100000 }
-cost:   { total: 5.0 }
-summary: { enabled: true, model: haiku }
+defaults: { agent: claude, model: "claude-opus-4-8[1m]" }
+judge: { agent: claude, model: haiku }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: g
+  budget: { total: 100000 }
+  cost: { total: 5.0 }
+summary: { enabled: true }
 '
 capcheck "the skill's codex recipe starts (no model, no cost)" ok \
   'project: p
-agent: codex
-resume_prompt: R
-budget: { total: 100000 }
+defaults: { agent: codex }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: g
+  budget: { total: 100000 }
 summary: { enabled: true }
 '
 capcheck "the skill's copilot recipe starts (model auto, no cost)" ok \
   'project: p
-agent: copilot
-model: auto
-resume_prompt: R
-budget: { total: 100000 }
-summary: { enabled: true, model: auto }
+defaults: { agent: copilot, model: auto }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: g
+  budget: { total: 100000 }
+summary: { enabled: true }
 '
-# and the mistake the skill exists to prevent → must be refused, loudly, on BOTH agents
-capcheck "a Claude-shaped cost guard on codex is REFUSED" refused \
+# and the mistake the skill exists to prevent → a dollar guard on an agent that cannot report USD.
+# §7.3 splits by whether the agent can still bound itself:
+#   · codex has NO self-cap → the guard leaves the loop unbounded → REFUSED, loudly ("cannot do").
+#   · copilot self-caps (--max-ai-credits) → the dollar guard is merely INERT → ACCEPTED, but the
+#     inertness is surfaced LOUDLY (never a silent no-op). Both verified on the wire.
+capcheck "a Claude-shaped cost guard on codex is REFUSED (no self-cap → unbounded)" refused \
   'project: p
-agent: codex
-resume_prompt: R
-cost: { total: 5.0 }
+defaults: { agent: codex }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: g
+  cost: { total: 5.0 }
 '
-capcheck "a Claude-shaped cost guard on copilot is REFUSED" refused \
+capcheck "a Claude-shaped cost guard on copilot is INERT-but-loud (it self-caps, §7.3)" inert \
   'project: p
-agent: copilot
-model: auto
-resume_prompt: R
-cost: { total: 5.0 }
+defaults: { agent: copilot, model: auto }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: g
+  cost: { total: 5.0 }
 '
 
 # --- the OTHER silent-wrong-config trap: the skill must not GUESS the agent -----------------

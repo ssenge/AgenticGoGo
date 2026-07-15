@@ -75,7 +75,8 @@ def prompt():
 
 
 def state():
-    p = PROJ / ".agg" / "state.json"
+    # runtime state lives under agg/state/ now (was .agg/ pre-rework); mirrors e2e.sh's snap().
+    p = PROJ / "agg" / "state" / "state.json"
     return json.loads(p.read_text()) if p.exists() else {}
 
 
