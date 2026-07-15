@@ -36,7 +36,7 @@ is()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected [$3], got [$2]"; }
 has()  { grep -qF -- "$3" "$2" 2>/dev/null && ok "$1" || bad "$1" "'$3' not found in $2"; }
 hasnt(){ grep -qF -- "$3" "$2" 2>/dev/null && bad "$1" "'$3' unexpectedly present" || ok "$1"; }
 exists(){ [ -e "$2" ] && ok "$1" || bad "$1" "missing: $2"; }
-snap() { python3 -c "import json;print(json.load(open('$1/.agg/state.json'))['$2'])" 2>/dev/null; }
+snap() { python3 -c "import json;print(json.load(open('$1/agg/state/state.json'))['$2'])" 2>/dev/null; }
 
 trap '[ -n "${KEEP:-}" ] || rm -rf "$WS"' EXIT
 mkdir -p "$WS"
@@ -62,7 +62,7 @@ exec "$REAL_CLAUDE" "\$@"
 EOF
   cat > "$d/rec" <<'EOF'
 #!/bin/sh
-printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' .agg/state.json)" >> trace.txt
+printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/state/state.json)" >> trace.txt
 EOF
   chmod +x "$d/bin/claude" "$d/rec"
   printf '%s' "$2" > "$d/goals.yaml"
@@ -128,7 +128,7 @@ has "…and the session-exit line reports both" "$A/out.log" "out-tok"
 sec "4. real stream-json parsing"
 python3 - "$A" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1] + "/.agg/state.json"))
+d = json.load(open(sys.argv[1] + "/agg/state/state.json"))
 r = d.get("recent", [])
 kinds = sorted({e["kind"] for e in r})
 print(f"  activity events: {len(r)}  kinds={kinds}")
@@ -147,8 +147,8 @@ sec "6. durable side effects of a real run"
 exists "institutional memory was written" "$A/AGG_MEMORY.md"
 has    "…recording the real session"      "$A/AGG_MEMORY.md" "session 1"
 is "the ledger is finalized as goals-met" \
-   "$(python3 -c "import json;print(json.load(open('$A/.agg/project.json'))['runs'][-1]['end_reason'])" 2>/dev/null)" "goals-met"
-[ ! -f "$A/.agg/run.pid" ] && ok "run.pid cleared by the Drop guard" || bad "run.pid left behind"
+   "$(python3 -c "import json;print(json.load(open('$A/agg/state/project.json'))['runs'][-1]['end_reason'])" 2>/dev/null)" "goals-met"
+[ ! -f "$A/agg/state/run.pid" ] && ok "run.pid cleared by the Drop guard" || bad "run.pid left behind"
 run_agg "$A" status > "$A/status.log" 2>&1
 has "agg status renders the finished real run" "$A/status.log" "done"
 

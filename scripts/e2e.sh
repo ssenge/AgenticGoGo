@@ -56,7 +56,7 @@ waitfor() { # waitfor <secs> <desc> <cmd...>
 }
 
 free_port()     { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
-snap()          { python3 -c "import json;print(json.load(open('$1/.agg/state.json'))['$2'])" 2>/dev/null; }
+snap()          { python3 -c "import json;print(json.load(open('$1/agg/state/state.json'))['$2'])" 2>/dev/null; }
 phase_of()      { snap "$1" phase; }
 finish_reason() { snap "$1" finish_reason; }
 
@@ -76,7 +76,7 @@ mkproj() { # mkproj <name> [extra agg.yaml lines]
 
   cat > "$d/bin/rec" <<'EOF'
 #!/bin/sh
-printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' .agg/state.json)" >> trace.txt
+printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/state/state.json)" >> trace.txt
 EOF
 
   cat > "$d/bin/claude" <<'EOF'
@@ -211,9 +211,9 @@ is  "…exit 0 (an operator stop is a clean end)" "$RC" "0"
 # "stopped via bus: …" is never printed to the log.
 has "…the loop logs the bus stop"      "$S/run.log" "[bus] stop → e2e-stop-reason"
 is  "…and records the finish reason"   "$(finish_reason "$S")" "stopped via bus: e2e-stop-reason"
-absent "…run.pid cleared by the Drop guard" "$S/.agg/run.pid"
+absent "…run.pid cleared by the Drop guard" "$S/agg/state/run.pid"
 is  "…ledger finalized as stopped" \
-    "$(python3 -c "import json;print(json.load(open('$S/.agg/project.json'))['runs'][-1]['end_reason'])")" "stopped"
+    "$(python3 -c "import json;print(json.load(open('$S/agg/state/project.json'))['runs'][-1]['end_reason'])")" "stopped"
 
 # --- budget steering halts a live loop
 B="$(mkproj budget)"; : > "$B/NO_WORK"; echo 2 > "$B/WORKER_SLEEP"; echo 500 > "$B/WORKER_TOKENS"
@@ -231,14 +231,14 @@ sec "7. detached run + agg stop"
 DT="$(mkproj detach)"; : > "$DT/NO_WORK"; echo 2 > "$DT/WORKER_SLEEP"
 agg_do "$DT" run --detach --max-sessions 6 > "$DT/detach.log" 2>&1
 is  "agg run --detach returns immediately (exit 0)" "$?" "0"
-waitfor 30 "…writes .agg/run.pid" test -f "$DT/.agg/run.pid"
-exists "…and logs to .agg/run.log" "$DT/.agg/run.log"
+waitfor 30 "…writes agg/state/run.pid" test -f "$DT/agg/state/run.pid"
+exists "…and logs to agg/state/run.log" "$DT/agg/state/run.log"
 waitfor 30 "…the detached loop really runs" grep -q "RUN=run" "$DT/trace.txt"
 agg_do "$DT" run --max-sessions 1 > "$DT/second.log" 2>&1
 [ $? -ne 0 ] && ok "double-run guard refuses a second loop" || bad "a second concurrent loop was allowed"
 has "…and says which pid holds it" "$DT/second.log" "already running"
 agg_do "$DT" stop "detached-stop" > /dev/null 2>&1
-waitfor 40 "agg stop ends the detached loop" bash -c "! test -f '$DT/.agg/run.pid'"
+waitfor 40 "agg stop ends the detached loop" bash -c "! test -f '$DT/agg/state/run.pid'"
 ok "…run.pid cleared after the detached loop exits"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -246,9 +246,9 @@ sec "8. agg spawn — long tasks that outlive a session"
 SP="$(mkproj spawn)"
 agg_do "$SP" spawn --name e2e-task --reason "long sim" -- sleep 20 > "$SP/spawn.log" 2>&1
 is  "agg spawn exits 0" "$?" "0"
-exists "…registers the task in .agg/spawns.json" "$SP/.agg/spawns.json"
+exists "…registers the task in agg/state/spawns.json" "$SP/agg/state/spawns.json"
 python3 -c "
-import json;d=json.load(open('$SP/.agg/spawns.json'))
+import json;d=json.load(open('$SP/agg/state/spawns.json'))
 e=[x for x in d['spawns'] if x['name']=='e2e-task']
 assert e, 'task not registered'
 assert e[0]['status']=='running', e[0]['status']
@@ -257,7 +257,7 @@ agg_do "$SP" run --max-sessions 1 > "$SP/run.log" 2>&1
 has "…the next session's prompt is told about it" "$SP/prompt_latest.txt" "e2e-task"
 has "…including WHY, so it polls instead of relaunching" "$SP/prompt_latest.txt" "long sim"
 # kill exactly the pid we registered — never a blanket pkill of the user's processes
-SPID=$(python3 -c "import json;print([x for x in json.load(open('$SP/.agg/spawns.json'))['spawns'] if x['name']=='e2e-task'][0]['pid'])" 2>/dev/null || true)
+SPID=$(python3 -c "import json;print([x for x in json.load(open('$SP/agg/state/spawns.json'))['spawns'] if x['name']=='e2e-task'][0]['pid'])" 2>/dev/null || true)
 [ -n "${SPID:-}" ] && kill -9 "$SPID" 2>/dev/null || true
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -679,8 +679,8 @@ for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s' "$a" > prompt_latest.txt; prev="$a"; done
 sh bin/rec RUN
 n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
-mkdir -p .agg/memory
-i=0; while [ $i -lt 40 ]; do printf 'padding line %s for session %s\n' "$i" "$n" >> ".agg/memory/session-$n.md"; i=$((i+1)); done
+mkdir -p agg/state/memory
+i=0; while [ $i -lt 40 ]; do printf 'padding line %s for session %s\n' "$i" "$n" >> "agg/state/memory/session-$n.md"; i=$((i+1)); done
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$MK/bin/claude"
@@ -829,8 +829,8 @@ cat > "$EV/bin/claude" <<'EOF'
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 sh bin/rec RUN
 n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
-mkdir -p .agg/memory
-i=0; while [ $i -lt 200 ]; do printf 'padding line %s of session %s\n' "$i" "$n" >> ".agg/memory/session-$n.md"; i=$((i+1)); done
+mkdir -p agg/state/memory
+i=0; while [ $i -lt 200 ]; do printf 'padding line %s of session %s\n' "$i" "$n" >> "agg/state/memory/session-$n.md"; i=$((i+1)); done
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$EV/bin/claude"
@@ -840,7 +840,7 @@ chmod +x "$EV/bin/claude"
 RAW=$(wc -c < "$EV/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
 [ "${RAW:-0}" -gt 1100 ] && ok "control: uncapped memory really does exceed 1 KB (${RAW}B)" \
                          || bad "control failed — the memcap assertion would be vacuous" "${RAW}B"
-rm -f "$EV/AGG_MEMORY.md" "$EV/.sess"; rm -rf "$EV/.agg"
+rm -f "$EV/AGG_MEMORY.md" "$EV/.sess"; rm -rf "$EV/agg/state"
 ( cd "$EV" && PATH="$EV/bin:$PATH" AGG_MEMORY_MAX_KB=1 "$AGG" run --max-sessions 4 > run.log 2>&1 )
 SZ=$(wc -c < "$EV/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
 [ "${SZ:-99999}" -le 1100 ] && ok "AGG_MEMORY_MAX_KB=1 overrides the config default (${RAW}B → ${SZ}B)" \
@@ -1089,7 +1089,7 @@ EOF
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "12. the web interface (SvelteKit BFF → agg serve → .agg/)"
+sec "12. the web interface (SvelteKit BFF → agg serve → agg/state/)"
 if [ "$WEB" = "0" ]; then
   skip "web interface" "--no-web"
 elif ! command -v node >/dev/null 2>&1; then
