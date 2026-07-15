@@ -14,3 +14,4 @@ pub mod judge;
 pub mod memory;
 pub mod model;
 pub mod stop;
+pub mod verdicts;

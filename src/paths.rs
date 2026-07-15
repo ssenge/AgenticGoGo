@@ -12,6 +12,7 @@
 //!       AGG_MEMORY.md       durable institutional memory (#3) — moved here from the project root
 //!       state.json          live dashboard snapshot (loop writes, `agg dashboard` reads)
 //!       project.json        persistent run-history ledger (lifetime sessions/tokens)
+//!       verdicts.jsonl      append-only, safety-critical GATE record — one line per verdict (§5.8)
 //!       memory/             transient per-session worker memory scratch (session-<N>.md)
 //!       spawns.json         long-task registry (`agg spawn`)
 //!       spawns/<name>.log   per-spawn combined stdout+stderr
@@ -50,6 +51,11 @@ pub fn project_json(dir: &Path) -> PathBuf {
     agg_dir(dir).join("project.json")
 }
 
+/// Append-only, safety-critical GATE record (§5.8): `agg/state/verdicts.jsonl`.
+pub fn verdicts_jsonl(dir: &Path) -> PathBuf {
+    agg_dir(dir).join("verdicts.jsonl")
+}
+
 /// Long-task registry: `agg/state/spawns.json`.
 pub fn spawns_json(dir: &Path) -> PathBuf {
     agg_dir(dir).join("spawns.json")
@@ -86,6 +92,7 @@ mod tests {
         assert_eq!(agg_dir(d), Path::new("/proj/agg/state"));
         assert_eq!(state_json(d), Path::new("/proj/agg/state/state.json"));
         assert_eq!(project_json(d), Path::new("/proj/agg/state/project.json"));
+        assert_eq!(verdicts_jsonl(d), Path::new("/proj/agg/state/verdicts.jsonl"));
         assert_eq!(spawns_json(d), Path::new("/proj/agg/state/spawns.json"));
         assert_eq!(spawns_log_dir(d), Path::new("/proj/agg/state/spawns"));
         assert_eq!(bus_dir(d), Path::new("/proj/agg/state/bus"));
