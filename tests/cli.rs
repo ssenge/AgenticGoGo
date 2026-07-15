@@ -643,6 +643,72 @@ exit 0
 }
 
 #[test]
+fn rollback_gate_ignores_a_run_set_only_control_judge_flipping() {
+    // SAFETY-CRITICAL (§5.7 / §5.3): the regression gate ranges over the DoD-set ONLY, exactly as
+    // `any_regressed` does. A run-set-only control judge named solely in an `if` condition (here
+    // `stalled`) is DESIGNED to flip met→unmet — that flip is the signal that fires `reconsider`. If
+    // the gate treated the flip as a regression it would ROLL BACK the very work that escaped the
+    // stall, and since rolled-back rows never land, every later step would keep "regressing" on the
+    // stale window → livelock. The good work must be KEPT. (The buggy gate scanned ALL fresh_verdicts.)
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // worker: does clean, GOOD work (adds a wanted line + commits) AND drops `.escaped`, which flips
+    // the control judge `stalled` from met (at baseline) to not-met on this session's merged tree.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+printf 'good-work\n' >> tracked.txt
+touch .escaped
+git add -A >/dev/null 2>&1
+git commit -qm "worker change" >/dev/null 2>&1
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    write(dir, "tracked.txt", "ok\n");
+    // stalled (run-set-only, named ONLY in the `if` condition → NOT in the DoD-set): met at baseline
+    // (`.escaped` absent), then FLIPS to not-met once the worker drops `.escaped`. Its landed baseline
+    // `met:true` is exactly what a naive gate would read as a regression when it goes false.
+    write_judge(dir, "stalled", "#!/bin/sh\n[ -f .escaped ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"escaped the stall\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"stalled\"}'\n");
+    // feature (the DoD judge, via done_if): never met → the loop runs a real session and reaches the
+    // cap rather than stopping at baseline. false→false is not a regression, so it never rolls back.
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: stallflip\ndefaults: { model: fake }\n\
+         steps:\n  worker: {}\n  reconsider: { skip_judges: true }\n\
+         sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  \
+         done_if: \"feature\"\nsummary: { enabled: false }\nmemory: { enabled: false }\n",
+    );
+    write(dir, "agg/AGG_STATE.md", "do work\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
+    // the control judge's flip must NOT have rolled anything back — the good work is KEPT on main.
+    assert!(!combined.contains("ROLLED BACK"), "a run-set-only control judge flipping must NOT trigger rollback:\n{combined}");
+    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();
+    let content = String::from_utf8_lossy(&on_main.stdout);
+    assert!(content.contains("good-work"), "the worker's good work must be KEPT despite `stalled` flipping, got: {content:?}");
+}
+
+#[test]
 fn a_broken_judge_does_not_abort_the_run_wearing_a_regressions_clothes() {
     // The HALF the flake test above does not cover: it proves the gate KEEPS the merge, but says
     // nothing about `abort_if`. This is the shipped bug end-to-end. A previously-MET invariant judge
