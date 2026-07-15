@@ -64,6 +64,12 @@ pub struct ActivityEvent {
 pub struct DashboardState {
     pub project: String,
     pub model: String,
+    /// the CURRENT step's name (§7.4) — empty before the first step / off-cycle. The step's AGENT
+    /// is already in the session banner (the source-of-truth log, per the two-stream discipline
+    /// above); a per-agent token/cost BREAKDOWN is deferred to the UI workflow — the aggregate
+    /// `tokens_spent`/`cost_spent` below already sum worker + judge across agents (§5.6), so the
+    /// spend guards stay correct without it.
+    pub step: String,
     pub stop_when: String,
     pub halt_when: String,
     /// epoch secs the loop started (for an absolute "started at" in the Info block)

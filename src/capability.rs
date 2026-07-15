@@ -4,7 +4,7 @@
 //! Agents are not interchangeable, and the gaps are silent by default. The worst case:
 //!
 //! ```text
-//!   halt_when: over_cost        # "stop when I've spent $5"
+//!   abort_if: over_cost         # "stop when I've spent $5"
 //!   cost: { total: 5.0 }
 //!   agent: <one that does not report dollar cost>
 //! ```
@@ -15,9 +15,10 @@
 //! agents surveyed (Claude, Codex, Copilot) **only Claude reports dollars at all**: Codex reports
 //! none, Copilot reports a credit multiplier that is not USD.
 //!
-//! The same trap applies to `over_budget` (needs output tokens), `resume_sessions` (needs a resume
-//! handle), LLM judges and the summarizer (need a read-only one-shot call — which all three agents
-//! can do, each by its own mechanism), and `effort:`.
+//! The same trap applies to `over_budget` (needs output tokens), LLM judges and the summarizer
+//! (need a read-only one-shot call — which all three agents can do, each by its own mechanism),
+//! and `effort:`. (`resume_sessions` is gone entirely — a per-agent session id can't cross a mixed
+//! sequence, so `deny_unknown_fields` refuses the key at PARSE time now, §7.3.)
 //!
 //! So: every such demand is checked ONCE, at startup, against the backend's declared
 //! [`Capabilities`], and a mismatch is a hard error naming the config key, the agent, and the fix.
@@ -35,6 +36,9 @@ use anyhow::Result;
 /// worse than no guard.
 pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
     let mut problems: Vec<String> = Vec::new();
+    // Non-fatal but LOUD (§7.3): a guard that is inert on a given agent, yet the loop still has a
+    // working ceiling (the agent caps itself). Printed whether or not we go on to bail.
+    let mut warnings: Vec<String> = Vec::new();
 
     // ── one-shot demands land on the RULER (§7.3) ──
     let ruler = cfg.ruler_backend()?;
@@ -71,14 +75,23 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
             ));
         }
         if cost_wanted && !caps.reports_cost_usd {
-            let hint = match b.spend_ceiling_hint() {
-                Some(h) => format!("`{agent}` can cap itself instead: {h}"),
-                None => "remove the cost guard, or use an agent that reports a dollar cost".to_string(),
-            };
-            problems.push(format!(
-                "step `{step_name}` (agent `{agent}`): `cost.total`/`over_cost` set, but it cannot \
-                 report dollars — the SPEND guard would NEVER fire, spending real money. {hint}"
-            ));
+            // §7.3: only Claude reports dollars, and the owner's ruling is acceptable-but-LOUD. If
+            // the agent can cap ITSELF, the loop is not left unbounded — the dollar guard is merely
+            // inert on this agent, so WARN, don't refuse. Refuse ONLY when there is no working
+            // ceiling at all (no dollar reporting AND no self-cap): an autonomous loop with no bound
+            // on real money. `spend_ceiling_hint()` is exactly the "does it have a ceiling?" oracle.
+            match b.spend_ceiling_hint() {
+                Some(h) => warnings.push(format!(
+                    "cost.total/over_cost is INERT on `{agent}` (step `{step_name}`) — it cannot \
+                     report dollars, so this guard will never fire. Cap it directly instead: {h}"
+                )),
+                None => problems.push(format!(
+                    "step `{step_name}` (agent `{agent}`): `cost.total`/`over_cost` set, but it \
+                     cannot report dollars and has no self-cap — the SPEND guard would NEVER fire, \
+                     leaving an autonomous loop spending real money with no ceiling at all. Remove \
+                     the cost guard, or use an agent that reports a dollar cost."
+                )),
+            }
         }
         if !effort.is_empty() && !caps.supports_effort {
             problems.push(format!(
@@ -91,6 +104,11 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
         }
     }
 
+    // Loud but non-fatal (§7.3): an inert-but-still-bounded guard. Surface it whether or not we
+    // then bail on a hard problem — a run that proceeds should still know its cost guard is inert.
+    for w in &warnings {
+        eprintln!("⚠ {w}");
+    }
     if problems.is_empty() {
         return Ok(());
     }
@@ -109,197 +127,154 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{Capabilities, OneShot, SessionReport, SessionSpec};
-    use std::path::Path;
-    use std::process::Command;
+    use crate::core::model::{Judge, JudgeKind, Lifecycle};
 
-    /// A deliberately minimal agent: it can run a worker and nothing else. This is not a straw man
-    /// — it is roughly the floor that the Copilot survey describes (no dollar cost, no verified
-    /// tools-off one-shot).
-    struct Barebones;
-    impl crate::backend::AgentBackend for Barebones {
-        fn name(&self) -> &'static str { "barebones" }
-        fn bin(&self) -> &'static str { "barebones" }
-        fn capabilities(&self) -> Capabilities {
-            Capabilities {
-                reports_output_tokens: false,
-                reports_cost_usd: false,
-                supports_resume: false,
-                supports_effort: false,
-                detects_rate_limits: false,
-                supports_one_shot: false,
-            }
-        }
-        fn default_model(&self) -> &'static str { "m" }
-        fn default_summary_model(&self) -> &'static str { "m" }
-        fn session_command(&self, _s: &SessionSpec) -> Command { Command::new("true") }
-        fn parse_event(&self, _l: &str) -> Option<crate::backend::stream::Event> { None }
-        fn parse_usage(&self, _l: &str) -> Option<u64> { None }
-        fn parse_session_id(&self, _l: &str) -> Option<String> { None }
-        fn parse_result(&self, _l: &str) -> Option<SessionReport> { None }
-        fn one_shot(&self, _p: &str, _m: &str, _t: u64, _c: Option<&Path>) -> Result<OneShot, String> {
-            unreachable!("gated by supports_one_shot")
-        }
-        fn is_installed(&self) -> bool { true }
-        fn preflight(&self) -> Result<()> { Ok(()) }
-    }
-
-    /// Like Barebones, but it CAN cap its own spend — the shape Copilot actually has
-    /// (`--max-ai-credits`: it bills in credits, so it cannot report dollars, but it is not
-    /// therefore unboundable).
-    struct SelfCapping;
-    impl crate::backend::AgentBackend for SelfCapping {
-        fn name(&self) -> &'static str { "selfcapping" }
-        fn bin(&self) -> &'static str { "selfcapping" }
-        fn capabilities(&self) -> Capabilities { Barebones.capabilities() }
-        fn spend_ceiling_hint(&self) -> Option<&'static str> {
-            Some("pass `--max-ai-credits <n>` via agg.yaml `worker_args`")
-        }
-        fn default_model(&self) -> &'static str { "m" }
-        fn default_summary_model(&self) -> &'static str { "m" }
-        fn session_command(&self, _s: &SessionSpec) -> Command { Command::new("true") }
-        fn parse_event(&self, _l: &str) -> Option<crate::backend::stream::Event> { None }
-        fn parse_usage(&self, _l: &str) -> Option<u64> { None }
-        fn parse_session_id(&self, _l: &str) -> Option<String> { None }
-        fn parse_result(&self, _l: &str) -> Option<SessionReport> { None }
-        fn one_shot(&self, _p: &str, _m: &str, _t: u64, _c: Option<&Path>) -> Result<OneShot, String> {
-            unreachable!("gated by supports_one_shot")
-        }
-        fn is_installed(&self) -> bool { true }
-        fn preflight(&self) -> Result<()> { Ok(()) }
-    }
-
-    /// Refusing the cost guard is right, but it must not leave the operator with NO ceiling at
-    /// all. When the agent can cap itself, the refusal has to SAY SO — otherwise the safest
-    /// reading of the error ("just delete the cost guard") is the most dangerous action.
-    #[test]
-    fn a_refused_cost_guard_points_at_the_agents_own_ceiling_when_it_has_one() {
-        let cfg = cfg_yaml(
-            "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: false }\n\
-             effort: \"\"\ncost: { total: 5.0 }\n",
-        );
-        let err = check(&cfg, &goals_yaml(SCRIPT_GOALS), &SelfCapping).unwrap_err().to_string();
-        assert!(err.contains("--max-ai-credits"), "must name the agent's own ceiling:\n{err}");
-        assert!(
-            err.contains("DO NOT leave an autonomous loop with no spend ceiling"),
-            "must warn against the naive fix:\n{err}"
-        );
-    }
-
-    fn goals_yaml(body: &str) -> GoalsConfig {
-        serde_yaml::from_str(body).expect("test goals parse")
-    }
     fn cfg_yaml(body: &str) -> AggConfig {
         serde_yaml::from_str(body).expect("test config parse")
     }
 
-    const SCRIPT_GOALS: &str =
-        "goals:\n  - id: g\n    type: binary\n    judge: { kind: script, cmd: \"true\" }\nstop_when: g\n";
-
-    /// THE bug this module exists to prevent: a spend guard against an agent that cannot report
-    /// spend must be a startup ERROR, not a guard that quietly never fires.
-    #[test]
-    fn a_cost_guard_on_an_agent_that_cannot_report_cost_is_refused() {
-        let cfg = cfg_yaml(
-            "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: false }\n\
-             effort: \"\"\ncost: { total: 5.0 }\n",
-        );
-        let err = check(&cfg, &goals_yaml(SCRIPT_GOALS), &Barebones).unwrap_err().to_string();
-        assert!(err.contains("cost.total"), "must name the offending key:\n{err}");
-        assert!(err.contains("spending real money"), "must say what breaks:\n{err}");
-        assert!(err.contains("barebones"), "must name the agent:\n{err}");
-    }
-
-    #[test]
-    fn a_token_budget_on_an_agent_that_cannot_report_tokens_is_refused() {
-        let cfg = cfg_yaml(
-            "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: false }\n\
-             effort: \"\"\nbudget: { total: 1000 }\n",
-        );
-        let err = check(&cfg, &goals_yaml(SCRIPT_GOALS), &Barebones).unwrap_err().to_string();
-        assert!(err.contains("budget.total"), "got:\n{err}");
-        assert!(err.contains("run unbounded"), "got:\n{err}");
-    }
-
-    /// An LLM judge needs a READ-ONLY call — a judge that can WRITE can edit what it is grading.
-    /// All three real agents can do this (each by its own mechanism); `Barebones` cannot, which is
-    /// what this test pins: the refusal must fire for ANY backend that declares it cannot.
-    #[test]
-    fn an_llm_judge_on_an_agent_without_a_one_shot_call_is_refused() {
-        let cfg = cfg_yaml(
-            "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: false }\neffort: \"\"\n",
-        );
-        let goals = goals_yaml(
-            "goals:\n  - id: g\n    type: binary\n    \
-             judge: { kind: llm, model: m, rubric: r.md, inputs: [] }\nstop_when: g\n",
-        );
-        let err = check(&cfg, &goals, &Barebones).unwrap_err().to_string();
-        assert!(err.contains("kind: llm"), "got:\n{err}");
-        assert!(err.contains("edit the very thing it is grading"), "got:\n{err}");
-    }
-
-    /// Every unmet demand at once — a user switching agents gets the whole list, not whack-a-mole.
-    #[test]
-    fn all_unmet_demands_are_reported_together() {
-        let cfg = cfg_yaml(
-            "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: true }\n\
-             effort: max\ncost: { total: 5.0 }\nbudget: { total: 10 }\nresume_sessions: true\n",
-        );
-        let err = check(&cfg, &goals_yaml(SCRIPT_GOALS), &Barebones).unwrap_err().to_string();
-        for key in ["cost.total", "budget.total", "resume_sessions", "effort", "summary.enabled"] {
-            assert!(err.contains(key), "every unmet demand must be listed; missing {key}:\n{err}");
+    /// A resolved script judge in the DoD-set — the common case.
+    fn script_judge(name: &str) -> Judge {
+        Judge {
+            name: name.into(),
+            kind: JudgeKind::Script { path: format!("{name}.sh").into() },
+            invariant: false,
+            in_dod: true,
+            state: Lifecycle::Pending,
+            last_verdict: None,
+            ever_met: false,
         }
     }
 
-    /// REGRESSION: a pair of keys that are each individually legal but MUTUALLY exclusive must be
-    /// refused. Copilot declares `supports_effort: true` (honestly — the flag exists) and defaults
-    /// to `model: auto`, so every per-feature check passes; but Copilot rejects the two together
-    /// and EVERY worker session dies in seconds with 0 tokens, while the loop halts on
-    /// over_iterations having done nothing. `agg doctor` used to print
-    /// "✔ agent `copilot` can do everything this config asks" for precisely that config.
+    /// A resolved LLM (`.md`) judge — the one that demands a tools-off one-shot call on the RULER.
+    fn llm_judge(name: &str) -> Judge {
+        Judge {
+            name: name.into(),
+            kind: JudgeKind::Llm { path: format!("{name}.md").into(), inputs: vec![] },
+            invariant: false,
+            in_dod: true,
+            state: Lifecycle::Pending,
+            last_verdict: None,
+            ever_met: false,
+        }
+    }
+
+    // NOTE (C2 rewrite): the old fixtures injected a hand-rolled `Barebones`/`SelfCapping` backend
+    // as the third arg to `check`. The per-step check (§7.3) resolves each agent from the CONFIG via
+    // `for_name`, so a capability floor can only be expressed by a REAL agent now. The three shipped
+    // agents all report tokens and support a one-shot call, so the "no token report" and "no
+    // one-shot" refusal paths are defensive-only and no longer reachable through the config route.
+    // codex (no dollars, no self-cap) and copilot (no dollars, self-caps via `--max-ai-credits`)
+    // cover the cost policy — the branch §7.3 actually changed.
+
+    /// THE bug this module exists to prevent: a spend guard on an agent that cannot report dollars
+    /// AND cannot cap itself (codex) is a startup ERROR, not a guard that quietly never fires.
     #[test]
-    fn a_pair_of_individually_legal_keys_the_agent_cannot_combine_is_refused() {
-        let cop = crate::backend::for_name("copilot").unwrap();
-        let bad = cfg_yaml(
-            "project: p\nagent: copilot\nmodel: auto\neffort: high\nresume_prompt: R\n\
-             summary: { enabled: false }\n",
+    fn a_cost_guard_on_an_agent_that_cannot_self_cap_is_refused() {
+        let cfg = cfg_yaml(
+            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
+             summary: { enabled: false }\nsteps: { work: {} }\n\
+             sequence: { steps: [work], cost: { total: 5.0 } }\n",
         );
-        let err = check(&bad, &goals_yaml(SCRIPT_GOALS), cop).unwrap_err().to_string();
+        let err = check(&cfg, &[script_judge("g")]).unwrap_err().to_string();
+        assert!(err.contains("cost.total"), "must name the offending key:\n{err}");
+        assert!(err.contains("spending real money"), "must say what breaks:\n{err}");
+        assert!(err.contains("codex"), "must name the agent:\n{err}");
+    }
+
+    /// §7.3's policy change: a cost guard on an agent that CANNOT report dollars but CAN cap itself
+    /// (copilot, via `--max-ai-credits`) is acceptable-but-loud — a WARNING, not a refusal. The loop
+    /// is not left unbounded, so it must be allowed to start.
+    #[test]
+    fn a_cost_guard_on_a_self_capping_agent_is_allowed() {
+        let cfg = cfg_yaml(
+            "project: p\ndefaults: { agent: copilot }\njudge: { agent: claude }\n\
+             summary: { enabled: false }\nsteps: { work: {} }\n\
+             sequence: { steps: [work], cost: { total: 5.0 } }\n",
+        );
+        check(&cfg, &[script_judge("g")])
+            .expect("copilot self-caps (--max-ai-credits), so an inert dollar guard only warns");
+    }
+
+    /// REGRESSION: a pair of keys each individually legal but MUTUALLY exclusive must be refused.
+    /// Copilot declares `supports_effort: true` and defaults to `model: auto`, so every per-feature
+    /// check passes; but Copilot rejects the two together and every worker session dies in seconds
+    /// with 0 tokens, while the loop halts on over_iterations having done nothing.
+    #[test]
+    fn a_model_effort_pair_the_agent_cannot_combine_is_refused() {
+        let bad = cfg_yaml(
+            "project: p\ndefaults: { agent: copilot, model: auto, effort: high }\n\
+             judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
+             sequence: { steps: [work] }\n",
+        );
+        let err = check(&bad, &[script_judge("g")]).unwrap_err().to_string();
         assert!(err.contains("model: auto"), "must name the offending pair:\n{err}");
         assert!(err.contains("0 tokens"), "must say what actually breaks:\n{err}");
 
-        // …and each key ALONE is still perfectly fine — this must not become a blanket ban.
+        // …and each key ALONE is still fine — this must not become a blanket ban.
         let auto_no_effort = cfg_yaml(
-            "project: p\nagent: copilot\nmodel: auto\neffort: \"\"\nresume_prompt: R\n\
-             summary: { enabled: false }\n",
+            "project: p\ndefaults: { agent: copilot, model: auto, effort: \"\" }\n\
+             judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
+             sequence: { steps: [work] }\n",
         );
-        check(&auto_no_effort, &goals_yaml(SCRIPT_GOALS), cop).expect("`auto` with no effort is the default, and works");
+        check(&auto_no_effort, &[script_judge("g")]).expect("`auto` with no effort is the default, and works");
 
         let named_model_with_effort = cfg_yaml(
-            "project: p\nagent: copilot\nmodel: claude-sonnet-4.5\neffort: high\nresume_prompt: R\n\
-             summary: { enabled: false }\n",
+            "project: p\ndefaults: { agent: copilot, model: claude-sonnet-4.5, effort: high }\n\
+             judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
+             sequence: { steps: [work] }\n",
         );
-        check(&named_model_with_effort, &goals_yaml(SCRIPT_GOALS), cop)
-            .expect("a concrete model may carry an effort");
+        check(&named_model_with_effort, &[script_judge("g")]).expect("a concrete model may carry an effort");
+    }
+
+    /// §7.3: the one-shot demand (an LLM judge / the summarizer) lands on the RULER, not the worker.
+    /// The exact config the old code wrongly refused: a Codex worker with a Claude ruler and an
+    /// `.md` judge. The one-shot host is the ruler (claude), so this must be ACCEPTED — the old
+    /// check demanded it of the worker and refused a perfectly valid config.
+    #[test]
+    fn an_llm_judge_demand_lands_on_the_ruler_not_the_worker() {
+        let cfg = cfg_yaml(
+            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
+             summary: { enabled: true }\nsteps: { work: {} }\nsequence: { steps: [work] }\n",
+        );
+        check(&cfg, &[llm_judge("rubric")]).expect("the ruler (claude) hosts the one-shot; the codex worker is irrelevant");
     }
 
     /// Claude can do everything, so a full-featured config must pass cleanly.
     #[test]
     fn claude_satisfies_a_fully_loaded_config() {
         let cfg = cfg_yaml(
-            "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: true }\n\
-             effort: max\ncost: { total: 5.0 }\nbudget: { total: 10 }\nresume_sessions: true\n",
+            "project: p\ndefaults: { agent: claude, effort: max }\njudge: { agent: claude }\n\
+             summary: { enabled: true }\nsteps: { work: {} }\n\
+             sequence: { steps: [work], cost: { total: 5.0 }, budget: { total: 10 } }\n",
         );
-        let claude = crate::backend::for_name("claude").unwrap();
-        check(&cfg, &goals_yaml(SCRIPT_GOALS), claude).expect("claude does it all");
+        check(&cfg, &[llm_judge("rubric"), script_judge("build")]).expect("claude does it all");
     }
 
     /// A config that asks for nothing special runs on ANY agent, however limited.
     #[test]
-    fn a_modest_config_runs_on_the_barebones_agent() {
+    fn a_modest_config_runs_on_any_agent() {
         let cfg = cfg_yaml(
-            "project: p\nmodel: m\nresume_prompt: R\nsummary: { enabled: false }\neffort: \"\"\n",
+            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
+             summary: { enabled: false }\nsteps: { work: {} }\nsequence: { steps: [work] }\n",
         );
-        check(&cfg, &goals_yaml(SCRIPT_GOALS), &Barebones).expect("nothing demanded, nothing refused");
+        check(&cfg, &[script_judge("g")]).expect("nothing demanded, nothing refused");
+    }
+
+    /// §7.3: the check is PER STEP. A mixed sequence — a claude step (reports dollars) and a codex
+    /// step (does not, and cannot self-cap) — under a cost guard must be refused, and the refusal
+    /// must name the CODEX step, not blanket-refuse or silently pass over it.
+    #[test]
+    fn the_check_is_per_step() {
+        let cfg = cfg_yaml(
+            "project: p\ndefaults: { agent: claude }\njudge: { agent: claude }\n\
+             summary: { enabled: false }\n\
+             steps: { plan: {}, build: { agent: codex } }\n\
+             sequence: { steps: [plan, build], cost: { total: 5.0 } }\n",
+        );
+        let err = check(&cfg, &[script_judge("g")]).unwrap_err().to_string();
+        assert!(err.contains("build"), "must name the codex STEP:\n{err}");
+        assert!(err.contains("codex"), "must name the agent:\n{err}");
+        assert!(!err.contains("step `plan`"), "the claude step reports dollars — it must NOT be flagged:\n{err}");
     }
 }

@@ -531,29 +531,24 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::model::{Goal, GoalType, JudgeSpec, Lifecycle, Verdict};
+    use crate::core::model::{Judge, JudgeKind, Lifecycle, Verdict};
 
-    /// A goal that has never been judged (no verdict). The state `validate` sees at startup.
-    fn unjudged(id: &str, invariant: bool) -> Goal {
-        Goal {
-            id: id.into(),
-            goal_type: GoalType::Binary,
-            judge: JudgeSpec::Script { cmd: "true".into(), timeout: 1 },
-            target: 1.0,
-            weight: 1.0,
+    /// A judge that has never been evaluated (no verdict). The state `validate` sees at startup.
+    /// `in_dod: true` everywhere — the old `Goal` had no run-set/DoD-set split and every goal
+    /// counted toward the aggregates, so these judges must range under `count_met`/`met_fraction`.
+    fn unjudged(id: &str, invariant: bool) -> Judge {
+        Judge {
+            name: id.into(),
+            kind: JudgeKind::Script { path: "true".into() },
             invariant,
-            description: String::new(),
-            recheck: crate::core::model::RecheckPolicy::Always,
-            recheck_inputs: vec![],
+            in_dod: true,
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,
-            latched: false,
-            recheck_sig: None,
         }
     }
 
-    fn g(id: &str, met: bool, invariant: bool) -> Goal {
+    fn g(id: &str, met: bool, invariant: bool) -> Judge {
         let mut goal = unjudged(id, invariant);
         goal.apply(Verdict {
             met,
@@ -567,7 +562,7 @@ mod tests {
         goal
     }
 
-    fn regressed(id: &str, invariant: bool) -> Goal {
+    fn regressed(id: &str, invariant: bool) -> Judge {
         let mut goal = g(id, true, invariant);
         // flip to not-met -> regressed
         goal.apply(Verdict { met: false, value: Some(0.0), max: Some(1.0), target: 1.0, rationale: String::new(), evidence: vec![], error: None });
@@ -575,16 +570,16 @@ mod tests {
         goal
     }
 
-    fn ev(expr: &str, goals: &[Goal]) -> bool {
-        evaluate(expr, &StopContext::from_goals(goals)).unwrap()
+    fn ev(expr: &str, goals: &[Judge]) -> bool {
+        evaluate(expr, &StopContext::from_judges(goals)).unwrap()
     }
 
-    fn ev_run(expr: &str, goals: &[Goal], tokens: u64, budget: Option<u64>, hours: f64) -> bool {
+    fn ev_run(expr: &str, goals: &[Judge], tokens: u64, budget: Option<u64>, hours: f64) -> bool {
         let ctx = StopContext {
             tokens_spent: tokens,
             budget_total: budget,
             wall_hours: hours,
-            ..StopContext::from_goals(goals)
+            ..StopContext::from_judges(goals)
         };
         evaluate(expr, &ctx).unwrap()
     }
@@ -592,11 +587,11 @@ mod tests {
     #[test]
     fn nan_comparison_is_an_error_not_a_silent_invert() {
         // wall_hours = NaN: `wall_hours >= 8` must ERROR, not silently return false/true.
-        let ctx = StopContext { wall_hours: f64::NAN, ..StopContext::from_goals(&[]) };
+        let ctx = StopContext { wall_hours: f64::NAN, ..StopContext::from_judges(&[]) };
         assert!(evaluate("wall_hours >= 8", &ctx).is_err());
         assert!(evaluate("wall_hours != 0", &ctx).is_err()); // the dangerous `!=` case
         // infinity is well-defined for ordering and must NOT error
-        let ctx2 = StopContext { tokens_spent: 5, ..StopContext::from_goals(&[]) };
+        let ctx2 = StopContext { tokens_spent: 5, ..StopContext::from_judges(&[]) };
         assert!(!ev_run_ctx(&ctx2, "tokens_spent > budget_total")); // budget_total = inf when unset
     }
 
@@ -625,7 +620,7 @@ mod tests {
         let cost = |spent: f64, limit: Option<f64>| StopContext {
             cost_spent: spent,
             cost_limit: limit,
-            ..StopContext::from_goals(&goals)
+            ..StopContext::from_judges(&goals)
         };
         // under the dollar cap → not over
         assert!(!evaluate("over_cost", &cost(3.50, Some(5.0))).unwrap());
@@ -645,7 +640,7 @@ mod tests {
         let iter = |done: u32, max: Option<u32>| StopContext {
             sessions_done: done,
             max_sessions: max,
-            ..StopContext::from_goals(&goals)
+            ..StopContext::from_judges(&goals)
         };
         // below the cap → not over
         assert!(!evaluate("over_iterations", &iter(3, Some(5))).unwrap());
@@ -673,7 +668,7 @@ mod tests {
             cost_limit: Some(5.0),
             sessions_done,
             max_sessions: Some(20),
-            ..StopContext::from_goals(&goals)
+            ..StopContext::from_judges(&goals)
         };
         // nothing tripped yet → keep going
         assert!(!evaluate(expr, &base(1.0, 1)).unwrap());
@@ -709,11 +704,11 @@ mod tests {
     #[test]
     fn invariants_subset_rejected_on_unsupported_aggregates() {
         // all_goals + weighted_fraction must NOT silently accept-and-ignore the subset
-        assert!(evaluate("all_goals(invariants)", &StopContext::from_goals(&[])).is_err());
-        assert!(evaluate("weighted_fraction(invariants) >= 0.5", &StopContext::from_goals(&[])).is_err());
+        assert!(evaluate("all_goals(invariants)", &StopContext::from_judges(&[])).is_err());
+        assert!(evaluate("weighted_fraction(invariants) >= 0.5", &StopContext::from_judges(&[])).is_err());
         // count_met / any_regressed DO support it
         let goals = [g("a", true, true)];
-        assert!(evaluate("count_met(invariants) >= 1", &StopContext::from_goals(&goals)).is_ok());
+        assert!(evaluate("count_met(invariants) >= 1", &StopContext::from_judges(&goals)).is_ok());
     }
 
     #[test]
@@ -732,14 +727,14 @@ mod tests {
 
     #[test]
     fn unknown_identifier_is_error() {
-        assert!(evaluate("frobnicate", &StopContext::from_goals(&[])).is_err());
-        assert!(evaluate("goal_x", &StopContext::from_goals(&[g("goal_y", true, false)])).is_err());
+        assert!(evaluate("frobnicate", &StopContext::from_judges(&[])).is_err());
+        assert!(evaluate("goal_x", &StopContext::from_judges(&[g("goal_y", true, false)])).is_err());
     }
 
     // ---------------- dotted accessors ----------------
 
     /// A judge that ran and emitted a number.
-    fn scored(id: &str, value: f64, max: f64) -> Goal {
+    fn scored(id: &str, value: f64, max: f64) -> Judge {
         let mut goal = unjudged(id, false);
         goal.apply(Verdict {
             met: value >= max,
@@ -754,7 +749,7 @@ mod tests {
     }
 
     /// A judge that FAILED TO RUN — no usable number.
-    fn errored(id: &str) -> Goal {
+    fn errored(id: &str) -> Judge {
         let mut goal = unjudged(id, false);
         goal.apply(Verdict::failed("judge exploded"));
         goal
@@ -787,7 +782,7 @@ mod tests {
         assert!(validate("coverage.value >= 80", &goals).is_ok());
         // ...but the bool→num coercion is STILL load-bearing for run-level terms. Do not regress it.
         assert!(validate("over_budget == 1", &goals).is_ok());
-        assert!(evaluate("over_budget == 0", &StopContext::from_goals(&goals)).unwrap());
+        assert!(evaluate("over_budget == 0", &StopContext::from_judges(&goals)).unwrap());
     }
 
     #[test]
@@ -884,17 +879,17 @@ mod tests {
     fn any_judge_error_is_true_only_when_a_judge_that_ran_errored() {
         let goals = [g("a", true, false)];
         // no judge errored this step
-        assert!(!evaluate("any_judge_error", &StopContext::from_goals(&goals)).unwrap());
+        assert!(!evaluate("any_judge_error", &StopContext::from_judges(&goals)).unwrap());
         // a judge that RAN this step errored
         let errs = vec!["coverage".to_string()];
-        let ctx = StopContext { judge_errors: &errs, ..StopContext::from_goals(&goals) };
+        let ctx = StopContext { judge_errors: &errs, ..StopContext::from_judges(&goals) };
         assert!(evaluate("any_judge_error", &ctx).unwrap());
         // composes into a real abort guard
         assert!(evaluate("all_goals OR any_judge_error", &ctx).unwrap());
         // NOT stale: the set is per-step, so a step where no judge ran is false even though the
         // goal's own last_verdict may still carry an old error.
         let stale = [errored("coverage")];
-        assert!(!evaluate("any_judge_error", &StopContext::from_goals(&stale)).unwrap());
+        assert!(!evaluate("any_judge_error", &StopContext::from_judges(&stale)).unwrap());
     }
 
     // ---------------- tokenizer robustness ----------------
@@ -905,7 +900,7 @@ mod tests {
         // mid-character and PANIC. Expressions come straight from user YAML.
         for expr in ["cöverage", "all_goals ✓", "goal_ä.value >= 1", "count_met ≥ 3"] {
             assert!(
-                evaluate(expr, &StopContext::from_goals(&[])).is_err(),
+                evaluate(expr, &StopContext::from_judges(&[])).is_err(),
                 "`{expr}` must error, not panic"
             );
         }

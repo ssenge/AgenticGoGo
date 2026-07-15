@@ -189,6 +189,7 @@ pub fn sample_state() -> DashboardState {
     DashboardState {
         project: "prove-p-vs-np".into(),
         model: "claude-opus-4-8".into(),
+        step: "prove".into(),
         stop_when: "proof_verified AND paper_written".into(),
         halt_when: "not no_sorry OR over_cost".into(),
         started_at_epoch: 1_751_000_000,
@@ -736,6 +737,7 @@ mod tests {
         DashboardState {
             project: "myproject".into(),
             model: "claude-opus-4-8".into(),
+            step: "worker".into(),
             stop_when: "all_goals".into(),
             halt_when: "regressed".into(),
             started_at_epoch: 1_700_000_000,

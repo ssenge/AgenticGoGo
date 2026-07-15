@@ -32,8 +32,8 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         ("  cost: { total: null }          # dollar ceiling (null = unlimited) → over_cost\n".to_string(), " OR over_cost")
     } else {
         (format!(
-            "  # cost: NOT supported by `{agent}` — it cannot report dollars, and agg refuses the\n\
-             #       config rather than leave a spend guard that could never fire. Use `budget`.\n"
+            "  # cost: INERT on `{agent}` — it cannot report dollars, so over_cost can never fire.\n\
+             #       agg warns (or refuses, if the agent can't self-cap either). Use `budget` instead.\n"
         ), "")
     };
 
