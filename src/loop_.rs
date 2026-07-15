@@ -112,6 +112,21 @@ enum GateDecision {
     Stop(RunOutcome),
 }
 
+/// The worker prompt is handed to the agent CLI as a `-p <value>` argument. If it begins with `-`,
+/// the CLI's arg-parser reads it as an (unknown) flag and the session dies INSTANTLY with zero
+/// tokens — no error the loop can see beyond a non-zero exit. This is exactly what memory injection
+/// triggers on session ≥2: the institutional-memory block starts with `--- INSTITUTIONAL MEMORY`,
+/// so the composed prompt leads with `---`. A leading newline is semantically inert to the model
+/// but makes the value un-flag-like for every backend. (Regression: a fake-worker harness never
+/// catches this, because a shell stub doesn't parse `-p` the way a real CLI does.)
+fn dash_safe_prompt(p: String) -> String {
+    if p.starts_with('-') {
+        format!("\n{p}")
+    } else {
+        p
+    }
+}
+
 /// The engine + parsed sequence, assembled from config. Built once, before the loop (and by
 /// `agg plan`).
 pub struct Assembly {
@@ -554,7 +569,7 @@ impl LoopState<'_> {
                 parts.push(s);
             }
         }
-        parts.join("\n\n")
+        dash_safe_prompt(parts.join("\n\n"))
     }
 
     /// **RUN** — the fresh worker for THIS step's (agent, model, effort). `None` = interrupted.
@@ -1177,3 +1192,23 @@ fn indent(s: &str) -> String {
 }
 
 use crate::util::now_epoch;
+
+#[cfg(test)]
+mod tests {
+    use super::dash_safe_prompt;
+
+    #[test]
+    fn a_prompt_that_would_start_with_a_dash_is_made_arg_safe() {
+        // The real bug: memory injection makes session ≥2's `-p` value begin with
+        // `--- INSTITUTIONAL MEMORY`, which a real agent CLI rejects as an unknown flag — the
+        // worker dies with 0 tokens. The guard must neutralise a leading dash without touching
+        // ordinary prompts.
+        assert_eq!(
+            dash_safe_prompt("--- INSTITUTIONAL MEMORY (durable) ---\n…".into()),
+            "\n--- INSTITUTIONAL MEMORY (durable) ---\n…"
+        );
+        assert!(!dash_safe_prompt("-p is not a prompt".into()).starts_with('-'));
+        // an ordinary prompt is passed through byte-for-byte
+        assert_eq!(dash_safe_prompt("Make the tests pass.".into()), "Make the tests pass.");
+    }
+}
