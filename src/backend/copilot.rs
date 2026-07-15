@@ -319,10 +319,17 @@ impl AgentBackend for Copilot {
             command.current_dir(dir);
         }
         let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
+        // ponytail: Copilot's one-shot stream reports neither tokens nor cost (§5.6) — tally yields
+        // (0, None), a LOUD hole the ceilings must treat as "unknown", not "free". The visible
+        // capability warning belongs in `capability::check` for a Copilot ruler; not re-emitted per
+        // call here to avoid spamming the log every judge. REPORTED as a judgement call.
+        let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
         Ok(OneShot {
             body: last_assistant_message(&out.stdout),
             stderr: out.stderr,
             success: out.success,
+            output_tokens,
+            cost_usd,
         })
     }
 

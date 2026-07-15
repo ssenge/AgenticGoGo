@@ -149,10 +149,35 @@ pub struct SessionReport {
 
 /// A completed one-shot call: the model's TEXT (envelope already stripped), plus the exit status
 /// and stderr the caller needs to tell "the model said no" from "the call itself failed".
+///
+/// It also carries USAGE (§5.6): an `.md` judge and the summarizer are LLM calls on the ruler that
+/// run every step, so their spend must count against `budget`/`cost`. Before this, `one_shot` had
+/// nowhere to report it and judge spend was simply uncounted.
 pub struct OneShot {
     pub body: String,
     pub stderr: Vec<u8>,
     pub success: bool,
+    /// output tokens this call reported (summed per line; 0 if the agent reports none).
+    pub output_tokens: u64,
+    /// dollars this call reported. `None` = the agent cannot price itself — a hole to surface, not a
+    /// silent 0 (same discipline as [`SessionReport::cost_usd`]).
+    pub cost_usd: Option<f64>,
+}
+
+/// Token + dollar spend of a single ruler call (LLM judge / summarizer), so the ceilings can sum
+/// worker + judge + summarizer across agents (§5.6). `cost_usd` is `None` when the agent cannot
+/// price itself — a hole to surface, never a silent 0.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Spend {
+    pub tokens: u64,
+    pub cost_usd: Option<f64>,
+}
+
+impl Spend {
+    /// From a completed one-shot's reported usage.
+    pub fn from_one_shot(o: &OneShot) -> Self {
+        Spend { tokens: o.output_tokens, cost_usd: o.cost_usd }
+    }
 }
 
 /// Everything a backend needs to build one worker invocation. Agent-agnostic by construction — a
@@ -262,6 +287,35 @@ pub trait AgentBackend: Send + Sync {
     /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
     fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String>;
+
+    /// Tally a one-shot's usage from its RAW stdout by re-using this backend's own per-line parsers
+    /// ([`Self::parse_usage`] / [`Self::parse_result`]) — so `OneShot` carries token/cost spend
+    /// (§5.6) without every backend hand-rolling it. Claude emits ONE JSON object (parse the blob);
+    /// Codex/Copilot stream one per line (sum them). Returns `(output_tokens, cost_usd)`.
+    fn tally_one_shot(&self, raw_stdout: &[u8]) -> (u64, Option<f64>) {
+        let text = String::from_utf8_lossy(raw_stdout);
+        let whole = text.trim();
+        // single-object shape (Claude's `--output-format json`): read the blob, don't also sum lines.
+        if self.parse_usage(whole).is_some() || self.parse_result(whole).is_some() {
+            let tokens = self.parse_usage(whole).unwrap_or(0);
+            let cost = self.parse_result(whole).and_then(|r| r.cost_usd);
+            return (tokens, cost);
+        }
+        // streamed shape (Codex/Copilot): sum per line, last cost wins.
+        let mut tokens = 0u64;
+        let mut cost = None;
+        for line in text.lines() {
+            if let Some(t) = self.parse_usage(line) {
+                tokens += t;
+            }
+            if let Some(r) = self.parse_result(line) {
+                if let Some(c) = r.cost_usd {
+                    cost = Some(c);
+                }
+            }
+        }
+        (tokens, cost)
+    }
 
     /// Two config keys that are each individually LEGAL, but that this agent cannot accept
     /// TOGETHER. Return the explanation; `None` (the default) means the agent has no such pair.

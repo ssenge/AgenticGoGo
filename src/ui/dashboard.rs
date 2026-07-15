@@ -641,6 +641,7 @@ fn phase_color(phase: &Phase) -> Color {
         Phase::Verify => Color::Cyan,
         Phase::Gate => Color::Magenta,
         Phase::Backoff => Color::Yellow,
+        Phase::Staging => Color::Yellow,
         Phase::Done => Color::Green,
         // `Starting` is pre-loop; `Other` is a stage from a different agg build (see Phase).
         Phase::Starting | Phase::Other(_) => Color::Gray,

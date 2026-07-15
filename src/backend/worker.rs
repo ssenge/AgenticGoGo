@@ -38,34 +38,35 @@ pub struct SessionOutcome {
     pub session_id: Option<String>,
 }
 
-/// Run one worker session to completion and return its outcome. If `resume_id` is
-/// Some, the worker continues that prior session's context (`--resume`) instead of
-/// a fresh context — opt-in (see `resume_sessions` config; default fresh).
+/// Run one worker session to completion and return its outcome.
 ///
-/// `agent` is the backend this session runs on, handed in by the loop. `&'static` because the
-/// stream-reader thread below needs it inside a `move` closure — every backend is a unit struct,
-/// so this costs nothing.
+/// `agent`/`model`/`effort`/`worker_args` are this STEP's resolved values (over `defaults`), handed
+/// in by the loop — no process-wide agent, no config read here. `agent` is `&'static` because the
+/// stream-reader thread below needs it inside a `move` closure; every backend is a unit struct, so
+/// this costs nothing.
+#[allow(clippy::too_many_arguments)]
 pub fn run_session(
     cfg: &AggConfig,
     agent: &'static dyn backend::AgentBackend,
+    model: &str,
+    effort: &str,
+    worker_args: &[String],
     prompt: &str,
     dir: &std::path::Path,
     session: u32,
-    resume_id: Option<&str>,
     live: &LiveState,
 ) -> SessionOutcome {
     let start = Instant::now();
 
     // WHAT to run is the backend's business (binary, flags, prompt placement); HOW to supervise
-    // it is ours (process group, stream reader, heartbeat, watchdog, reaping). The model/effort
-    // defaults are resolved HERE, against the agent actually being spawned — not at config-parse
-    // time, when no agent is known yet.
+    // it is ours (process group, stream reader, heartbeat, watchdog, reaping). Resume is dropped
+    // (§4.1: a session id is per-agent, so it cannot cross a mixed sequence) — always fresh context.
     let mut command = agent.session_command(&backend::SessionSpec {
         prompt,
-        model: cfg.model(agent),
-        effort: cfg.effort(agent),
-        resume_id,
-        extra_args: &cfg.worker_args,
+        model,
+        effort,
+        resume_id: None,
+        extra_args: worker_args,
         cwd: dir,
     });
     // Own process group (pgid == pid) so the watchdog can SIGKILL the WHOLE tree —

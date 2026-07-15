@@ -23,139 +23,85 @@
 //! [`Capabilities`], and a mismatch is a hard error naming the config key, the agent, and the fix.
 //! **A capability the agent lacks must never degrade into a quiet no-op.**
 
-use crate::backend::AgentBackend;
 use crate::core::config::AggConfig;
-use crate::core::config::GoalsConfig;
-use crate::core::model::JudgeSpec;
+use crate::core::model::{Judge, JudgeKind};
 use anyhow::Result;
 
-/// One thing the config asks of the agent, and the capability it needs.
-struct Demand {
-    /// true when the config actually asks for this.
-    wanted: bool,
-    /// true when the backend can deliver it.
-    provided: bool,
-    /// the agg.yaml / goals.yaml key that asked for it.
-    key: &'static str,
-    /// what breaks, in the user's terms, if we let this through.
-    consequence: &'static str,
-    /// how to resolve it.
-    fix: String,
-}
-
-/// Check the config against the active backend. Called once, before the loop starts.
+/// Check the config + resolved run-set against EVERY agent the sequence names (§7.3). The
+/// one-shot demands (LLM judges + summarizer) fall on the RULER; the token/cost/effort demands fall
+/// on each STEP's worker backend. Returns an error listing EVERY problem at once.
 ///
-/// Returns an error listing EVERY unmet demand (not just the first), because a user switching
-/// agents wants the whole list in one go, not a game of whack-a-mole.
-pub fn check(cfg: &AggConfig, goals: &GoalsConfig, backend: &dyn AgentBackend) -> Result<()> {
-    let caps = backend.capabilities();
-    let agent = backend.name();
-    // `model` / `effort` are only meaningful once resolved AGAINST this backend: an absent key
-    // means "whatever this agent defaults to", and those defaults differ (Codex takes no effort at
-    // all). Checking the raw Option would refuse Codex for an effort nobody asked for.
-    let model = cfg.model(backend);
-    let effort = cfg.effort(backend);
+/// A capability the agent lacks must never degrade into a quiet no-op: a guard that never fires is
+/// worse than no guard.
+pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
+    let mut problems: Vec<String> = Vec::new();
 
-    // an LLM judge or the summarizer both need a non-agentic, tools-off call.
-    let uses_llm_judge = goals.goals.iter().any(|g| matches!(g.judge, JudgeSpec::Llm { .. }));
+    // ── one-shot demands land on the RULER (§7.3) ──
+    let ruler = cfg.ruler_backend()?;
+    let uses_llm_judge = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
     let uses_summarizer = cfg.summary.enabled;
-
-    // A guard can be asked for two ways: a ceiling in agg.yaml, or the predicate named in a
-    // stop/halt condition in goals.yaml. Either one means the user expects it to fire.
-    let named = |predicate: &str| {
-        goals.stop_when.contains(predicate)
-            || goals.halt_when.as_deref().unwrap_or("").contains(predicate)
-    };
-
-    // Refusing a cost guard is right, but on its own it leaves the operator with NO spend
-    // protection — the very outcome the refusal exists to prevent. If the agent can cap itself
-    // some other way (Copilot: `--max-ai-credits`), say so.
-    let cost_fix = match backend.spend_ceiling_hint() {
-        Some(hint) => format!(
-            "remove the cost guard, or use an agent that reports a dollar cost.\n           \
-             DO NOT leave an autonomous loop with no spend ceiling at all — `{agent}` can cap \
-             itself instead: {hint}"
-        ),
-        None => "remove the cost guard (an unbounded autonomous loop is a real risk), \
-                 or use an agent that reports a dollar cost"
-            .to_string(),
-    };
-
-    let demands = [
-        Demand {
-            wanted: cfg.budget.total.is_some() || named("over_budget"),
-            provided: caps.reports_output_tokens,
-            key: "budget.total / halt_when: over_budget",
-            consequence: "the token guard would NEVER fire — the loop would run unbounded",
-            fix: "remove the budget guard, or use an agent that reports token usage".to_string(),
-        },
-        Demand {
-            wanted: cfg.cost.total.is_some() || named("over_cost"),
-            provided: caps.reports_cost_usd,
-            key: "cost.total / halt_when: over_cost",
-            consequence: "the SPEND guard would NEVER fire — the loop would run unbounded, \
-                          spending real money",
-            fix: cost_fix,
-        },
-        Demand {
-            wanted: cfg.resume_sessions,
-            provided: caps.supports_resume,
-            key: "resume_sessions: true",
-            consequence: "every session would silently start with a FRESH context instead of \
-                          continuing the last one",
-            fix: "set `resume_sessions: false`, or use an agent that supports resuming a session"
-                .to_string(),
-        },
-        Demand {
-            wanted: !effort.is_empty(),
-            provided: caps.supports_effort,
-            key: "effort",
-            consequence: "the effort level would be silently ignored",
-            fix: "set `effort: \"\"`, or use an agent that accepts a thinking-effort level".to_string(),
-        },
-        Demand {
-            wanted: uses_llm_judge,
-            provided: caps.supports_one_shot,
-            key: "a goal with `judge: { kind: llm }`",
-            consequence: "the judge could not be run with tools disabled — an LLM judge that can \
-                          run tools is not a judge, it can edit the very thing it is grading",
-            fix: "use script judges, or use an agent that can make a tools-off one-shot call".to_string(),
-        },
-        Demand {
-            wanted: uses_summarizer,
-            provided: caps.supports_one_shot,
-            key: "summary.enabled: true",
-            consequence: "the summarizer has no way to make a plain, non-agentic model call",
-            fix: "set `summary: { enabled: false }`, or use an agent that supports a one-shot call"
-                .to_string(),
-        },
-    ];
-
-    // Beyond "can it do X?" there is "can it do X AND Y at once?" — a property of the COMBINATION
-    // that no per-feature capability flag can express. Copilot supports `--effort` and supports
-    // `model: auto`, so both flags are honestly true, yet asking for both makes it refuse every
-    // invocation. Without this, `doctor` green-lit a config in which no session could ever run.
-    let conflict = backend.config_conflict(model, effort);
-
-    let unmet: Vec<&Demand> = demands.iter().filter(|d| d.wanted && !d.provided).collect();
-    if unmet.is_empty() && conflict.is_none() {
-        return Ok(());
-    }
-
-    let mut msg = format!(
-        "the `{agent}` agent cannot do what this config asks of it ({} problem(s)).\n\
-         These are refused at startup rather than silently ignored — a guard that never fires is \
-         worse than no guard.\n",
-        unmet.len() + usize::from(conflict.is_some())
-    );
-    for d in unmet {
-        msg.push_str(&format!(
-            "\n  ✗ {}\n      would mean: {}\n      fix: {}\n",
-            d.key, d.consequence, d.fix
+    if (uses_llm_judge || uses_summarizer) && !ruler.capabilities().supports_one_shot {
+        problems.push(format!(
+            "the ruler `{}` cannot make a tools-off one-shot call, which {} need.\n      \
+             fix: use script judges + `summary.enabled: false`, or a ruler that supports it",
+            ruler.name(),
+            if uses_llm_judge { "LLM judges / the summarizer" } else { "the summarizer" },
         ));
     }
-    if let Some(c) = conflict {
-        msg.push_str(&format!("\n  ✗ model + effort\n      {c}\n"));
+
+    // ── token / cost / effort demands land on each WORKER agent the sequence names ──
+    let named = |p: &str| {
+        cfg.sequence.done_if.contains(p) || cfg.sequence.abort_if.as_deref().unwrap_or("").contains(p)
+    };
+    let budget_wanted = cfg.sequence.budget.total.is_some() || named("over_budget");
+    let cost_wanted = cfg.sequence.cost.total.is_some() || named("over_cost");
+
+    for step_name in cfg.steps.keys() {
+        let step = cfg.resolve_step(step_name)?;
+        let b = step.backend()?;
+        let caps = b.capabilities();
+        let agent = b.name();
+        let model = step.model(b).to_string();
+        let effort = step.effort(b).to_string();
+
+        if budget_wanted && !caps.reports_output_tokens {
+            problems.push(format!(
+                "step `{step_name}` (agent `{agent}`): `budget.total`/`over_budget` set, but it \
+                 does not report token usage — the token guard would NEVER fire."
+            ));
+        }
+        if cost_wanted && !caps.reports_cost_usd {
+            let hint = match b.spend_ceiling_hint() {
+                Some(h) => format!("`{agent}` can cap itself instead: {h}"),
+                None => "remove the cost guard, or use an agent that reports a dollar cost".to_string(),
+            };
+            problems.push(format!(
+                "step `{step_name}` (agent `{agent}`): `cost.total`/`over_cost` set, but it cannot \
+                 report dollars — the SPEND guard would NEVER fire, spending real money. {hint}"
+            ));
+        }
+        if !effort.is_empty() && !caps.supports_effort {
+            problems.push(format!(
+                "step `{step_name}` (agent `{agent}`): `effort: {effort}` set, but the agent does \
+                 not accept a thinking-effort level."
+            ));
+        }
+        if let Some(c) = b.config_conflict(&model, &effort) {
+            problems.push(format!("step `{step_name}` (agent `{agent}`): model + effort — {c}"));
+        }
+    }
+
+    if problems.is_empty() {
+        return Ok(());
+    }
+    let mut msg = format!(
+        "the config asks for {} thing(s) the chosen agent(s) cannot do.\n\
+         These are refused at startup rather than silently ignored — a guard that never fires is \
+         worse than no guard.\n",
+        problems.len()
+    );
+    for p in problems {
+        msg.push_str(&format!("\n  ✗ {p}\n"));
     }
     anyhow::bail!(msg)
 }
