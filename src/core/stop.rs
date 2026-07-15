@@ -14,20 +14,23 @@
 //!   atom   := NUMBER | ident | "(" expr ")" | "NOT" atom
 //!   ident  := goal-id | goal-id "." ("value"|"max") | aggregate | aggregate "(" subset ")"
 //!
-//! Aggregates: count_met, total, met_fraction, weighted_fraction,
-//!             any_regressed, count_regressed. The `(invariants)` subset restricts
-//!             an aggregate to invariant goals.
+//! Aggregates: count_met, total, met_fraction, any_regressed, count_regressed. The `(invariants)`
+//! subset restricts an aggregate to invariant judges. **The aggregates range over the DoD-set**
+//! (`done_if` ∪ `invariants`) — NOT the whole run-set — so `done_if: all_goals` cannot mean "done
+//! when stuck" (§5.3). `weighted_fraction` is DROPPED.
 //!
-//! A bare goal id is its **`met` bool**. To compare the NUMBER a judge emitted, use the dotted
-//! accessor — `coverage.value >= 80`, never `coverage >= 80` (the latter is a hard error: see
-//! [`Val::GoalBool`]).
+//! A bare judge id is its **`met` bool**, resolved over the WHOLE run-set (so `if stalled` reads
+//! `stalled`). To compare the NUMBER a judge emitted, use the dotted accessor — `coverage.value >=
+//! 80`, never `coverage >= 80` (the latter is a hard error: see [`Val::GoalBool`]).
 
-use crate::core::model::Goal;
+use crate::core::model::Judge;
 use anyhow::{anyhow, bail, Context, Result};
 
-/// The facts the evaluator needs about the current goal set + run.
+/// The facts the evaluator needs about the current run-set + run.
 pub struct StopContext<'a> {
-    pub goals: &'a [Goal],
+    /// the WHOLE run-set. Aggregates filter to `judge.in_dod` (the DoD-set); bare names / accessors
+    /// resolve over all of them.
+    pub judges: &'a [Judge],
     /// ids of the judges that RAN this step and returned an `error` (backs `any_judge_error`).
     /// Empty when no judge ran — a step whose judges were skipped is not "stale true", it is
     /// honestly false: no judge ran, so no judge errored.
@@ -49,10 +52,10 @@ pub struct StopContext<'a> {
 }
 
 impl<'a> StopContext<'a> {
-    /// Convenience for callers that only have goals (plan/validate paths).
-    pub fn from_goals(goals: &'a [Goal]) -> Self {
+    /// Convenience for callers that only have the judge set (plan/validate paths).
+    pub fn from_judges(judges: &'a [Judge]) -> Self {
         StopContext {
-            goals,
+            judges,
             judge_errors: &[],
             tokens_spent: 0,
             budget_total: None,
@@ -66,36 +69,39 @@ impl<'a> StopContext<'a> {
 }
 
 impl<'a> StopContext<'a> {
+    /// The DoD-set filter the aggregates range over (§5.3): `in_dod` normally, `invariant` when the
+    /// `(invariants)` subset is named. Invariants are a subset of the DoD-set, so both are correct.
+    fn in_scope(g: &Judge, invariants_only: bool) -> bool {
+        if invariants_only {
+            g.invariant
+        } else {
+            g.in_dod
+        }
+    }
     fn count_met(&self, invariants_only: bool) -> f64 {
-        self.goals
+        self.judges
             .iter()
-            .filter(|g| !invariants_only || g.invariant)
+            .filter(|g| Self::in_scope(g, invariants_only))
             .filter(|g| g.met())
             .count() as f64
     }
     fn count_regressed(&self, invariants_only: bool) -> f64 {
-        self.goals
+        self.judges
             .iter()
-            .filter(|g| !invariants_only || g.invariant)
+            .filter(|g| Self::in_scope(g, invariants_only))
             .filter(|g| g.regressed())
             .count() as f64
     }
     fn total(&self, invariants_only: bool) -> f64 {
-        self.goals.iter().filter(|g| !invariants_only || g.invariant).count() as f64
+        self.judges.iter().filter(|g| Self::in_scope(g, invariants_only)).count() as f64
     }
-    fn weighted_fraction(&self) -> f64 {
-        let total: f64 = self.goals.iter().map(|g| g.weight).sum();
-        if total == 0.0 {
-            return 0.0;
-        }
-        let met: f64 = self.goals.iter().filter(|g| g.met()).map(|g| g.weight).sum();
-        met / total
+    /// Bare-name lookup ranges over the WHOLE run-set (an `if stalled` condition must read `stalled`,
+    /// which is not in the DoD-set).
+    fn judge_met(&self, id: &str) -> Option<bool> {
+        self.judges.iter().find(|g| g.name == id).map(|g| g.met())
     }
-    fn goal_met(&self, id: &str) -> Option<bool> {
-        self.goals.iter().find(|g| g.id == id).map(|g| g.met())
-    }
-    fn goal(&self, id: &str) -> Option<&Goal> {
-        self.goals.iter().find(|g| g.id == id)
+    fn judge(&self, id: &str) -> Option<&Judge> {
+        self.judges.iter().find(|g| g.name == id)
     }
 }
 
@@ -115,9 +121,34 @@ pub fn evaluate(expr: &str, ctx: &StopContext) -> Result<bool> {
 /// This is where `coverage >= 80` — a judge's `met` bool compared to a number, which coerces to a
 /// silently-always-false `1.0 >= 80.0` — is caught. The type error lives in [`Parser::parse_cmp`],
 /// so it fires here at STARTUP rather than 3 sessions into a run.
-pub fn validate(expr: &str, goals: &[Goal]) -> Result<()> {
-    let ctx = StopContext::from_goals(goals);
+pub fn validate(expr: &str, judges: &[Judge]) -> Result<()> {
+    let ctx = StopContext::from_judges(judges);
     evaluate(expr, &ctx).map(|_| ()).with_context(|| format!("invalid condition `{expr}`"))
+}
+
+/// The judge NAMES an expression references — everything that is neither an aggregate, a run-level
+/// term, nor the `invariants` subset keyword. Used to compute the run-set / DoD-set (§5.3): resolve
+/// each returned name against the judge library. Dotted accessors (`coverage.value`) yield `coverage`.
+pub fn judge_names(expr: &str) -> Result<Vec<String>> {
+    const RESERVED: &[&str] = &[
+        "all_goals", "count_met", "count_regressed", "total", "met_fraction", "any_regressed",
+        "tokens_spent", "budget_total", "wall_hours", "over_budget", "cost_spent", "cost_limit",
+        "over_cost", "iterations", "max_iterations", "over_iterations", "any_judge_error",
+        "invariants",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for t in tokenize(expr)? {
+        if let Tok::Ident(name) = t {
+            let base = name.split('.').next().unwrap_or(&name);
+            if RESERVED.contains(&base) {
+                continue;
+            }
+            if !out.iter().any(|n| n == base) {
+                out.push(base.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ---------------- value ----------------
@@ -419,7 +450,6 @@ impl<'a> Parser<'a> {
                 let t = c.total(invariants_only);
                 Val::Num(if t == 0.0 { 0.0 } else { c.count_met(invariants_only) / t })
             }
-            "weighted_fraction" => Val::Num(c.weighted_fraction()),
             "any_regressed" => Val::Bool(c.count_regressed(invariants_only) > 0.0),
             // ── run-level ceiling guards ──────────────────────────────────────────────
             // Each ceiling has ONE user-facing predicate: over_budget (tokens),
@@ -452,11 +482,11 @@ impl<'a> Parser<'a> {
             // "any judge that RAN this step returned error". No judge ran => false: a skipped
             // step reports no errors because there were none to have, not because it forgot.
             "any_judge_error" => Val::Bool(!c.judge_errors.is_empty()),
-            // otherwise: a goal id -> its met bool. GoalBool, not Bool: comparing it to a number
+            // otherwise: a judge name -> its met bool. GoalBool, not Bool: comparing it to a number
             // is a type error (`coverage >= 80`), while `over_budget == 1` stays legal.
-            other => match c.goal_met(other) {
+            other => match c.judge_met(other) {
                 Some(b) => Val::GoalBool(b),
-                None => bail!("unknown goal or aggregate `{other}` in stop condition"),
+                None => bail!("unknown judge or aggregate `{other}` in condition"),
             },
         };
         Ok(v)
@@ -464,9 +494,9 @@ impl<'a> Parser<'a> {
 
     /// `judge.value` / `judge.max` — the NUMBER the judge emitted, not its `met` bool.
     fn resolve_accessor(&self, base: &str, field: &str) -> Result<Val> {
-        let goal = match self.ctx.goal(base) {
+        let goal = match self.ctx.judge(base) {
             Some(g) => g,
-            None => bail!("unknown judge `{base}` in stop condition (in `{base}.{field}`)"),
+            None => bail!("unknown judge `{base}` in condition (in `{base}.{field}`)"),
         };
         // The FIELD NAME is checked before the verdict is read, and that order is load-bearing: at
         // `validate` time no judge has run, so a bad accessor would otherwise short-circuit to
