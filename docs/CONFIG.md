@@ -132,7 +132,7 @@ The sequence repeats from the top, forever, until `done_if` fires (exit **0**) o
 |---|---|---|
 | `budget: { total }` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. |
 | `cost: { total }` | unlimited | **dollar** ceiling → `over_cost`. **CLAUDE-ONLY** — see [Choosing an agent](#agent-specific-rules). |
-| `max_sessions` | `0` | `0` = unlimited. Backs `over_iterations`. The `agg run --max-sessions <n>` flag **overrides** it. |
+| `max_sessions` | `0` | `0` = unlimited. Backs `over_iterations`. A **non-zero** `agg run --max-sessions <n>` overrides it; the flag's default `0` falls back to this key (not to unlimited). |
 | `gate_regressions` | `true` | roll a session back if a previously-met judge now fails. The rename of the old `rollback_on_regression`. |
 | `invariants` | `[]` | judge names that must STAY met. The gate protects them; `any_regressed(invariants)` gives up on them. |
 | `done_if` | `all_goals` | the **Definition of Done** — success stop (exit 0). |
