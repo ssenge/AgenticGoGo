@@ -16,7 +16,7 @@
 //! Keys: ↑/↓ scroll focused pane · PgUp/PgDn · g/G top/bottom · Tab switch focus
 //!       (Goals↔Activity) · f toggle activity auto-follow · q/Esc quit.
 
-use crate::state::{ActivityEvent, DashboardState, GoalView, Phase};
+use crate::state::{ActivityEvent, AgentUsage, DashboardState, JudgeView, Phase};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::{execute, terminal};
@@ -29,14 +29,14 @@ use std::time::Duration;
 /// Which scrollable pane currently has the keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
-    Goals,
+    Judges,
     Activity,
 }
 
 /// Persistent UI state across repaints (scroll positions, focus, follow mode).
 struct DashboardUi {
     focus: Focus,
-    goals_scroll: u16,
+    judges_scroll: u16,
     activity_scroll: u16,
     /// when true, the Activity pane sticks to the newest event (the default);
     /// scrolling up in Activity turns it off, `f` or scrolling to the bottom restores it.
@@ -47,7 +47,7 @@ impl Default for DashboardUi {
     fn default() -> Self {
         DashboardUi {
             focus: Focus::Activity,
-            goals_scroll: 0,
+            judges_scroll: 0,
             activity_scroll: 0,
             activity_follow: true,
         }
@@ -118,8 +118,8 @@ fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
         KeyCode::Char('q') | KeyCode::Esc => return KeyAction::Quit,
         KeyCode::Tab => {
             ui.focus = match ui.focus {
-                Focus::Goals => Focus::Activity,
-                Focus::Activity => Focus::Goals,
+                Focus::Judges => Focus::Activity,
+                Focus::Activity => Focus::Judges,
             };
         }
         KeyCode::Char('f') => {
@@ -137,14 +137,14 @@ fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
         KeyCode::PageUp => scroll(ui, -10),
         KeyCode::PageDown => scroll(ui, 10),
         KeyCode::Char('g') | KeyCode::Home => match ui.focus {
-            Focus::Goals => ui.goals_scroll = 0,
+            Focus::Judges => ui.judges_scroll = 0,
             Focus::Activity => {
                 ui.activity_scroll = 0;
                 ui.activity_follow = false;
             }
         },
         KeyCode::Char('G') | KeyCode::End => match ui.focus {
-            Focus::Goals => ui.goals_scroll = u16::MAX, // clamped at draw time
+            Focus::Judges => ui.judges_scroll = u16::MAX, // clamped at draw time
             Focus::Activity => ui.activity_follow = true,
         },
         _ => {}
@@ -156,8 +156,8 @@ fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
 /// drops out of follow-mode; scrolling back to the top of follow re-enables it.
 fn scroll(ui: &mut DashboardUi, delta: i32) {
     match ui.focus {
-        Focus::Goals => {
-            ui.goals_scroll = (ui.goals_scroll as i32 + delta).max(0) as u16;
+        Focus::Judges => {
+            ui.judges_scroll = (ui.judges_scroll as i32 + delta).max(0) as u16;
         }
         Focus::Activity => {
             // in follow mode "scroll up" means "look back" → leave follow.
@@ -182,98 +182,107 @@ pub fn render_buffer(state: &DashboardState, w: u16, h: u16) -> ratatui::buffer:
     term.backend().buffer().clone()
 }
 
-/// A representative snapshot for documentation/screenshots — a mid-run P≠NP showcase loop with a
-/// cardinal goal climbing, a latched paper goal, and a soundness invariant holding.
+/// A representative snapshot for documentation/screenshots — a mixed claude+codex run mid-sequence,
+/// in a `reconsider` (staging) step: a binary invariant holding, a numeric judge climbing, a broken
+/// judge surfaced, and the run-set `stalled` control judge that triggered the reconsider.
 #[doc(hidden)]
 pub fn sample_state() -> DashboardState {
+    let mut per_agent = std::collections::BTreeMap::new();
+    per_agent.insert("claude".to_string(), AgentUsage { tokens: 903_411, cost: Some(7.12) });
+    per_agent.insert("codex".to_string(), AgentUsage { tokens: 381_491, cost: Some(1.05) });
     DashboardState {
-        project: "prove-p-vs-np".into(),
+        project: "telos".into(),
         model: "claude-opus-4-8".into(),
-        step: "prove".into(),
-        stop_when: "proof_verified AND paper_written".into(),
-        halt_when: "not no_sorry OR over_cost".into(),
+        step: "reconsider".into(),
+        step_agent: "claude".into(),
+        step_model: "claude-opus-4-8".into(),
+        stop_when: "all_goals".into(),
+        halt_when: "session > 40 OR over_cost".into(),
         started_at_epoch: 1_751_000_000,
-        up_secs: 11_520, // 3h12m
-        session: 7,
-        lifetime_session: 23,
-        phase: Phase::Verify,
-        idle_secs: 4,
-        tokens_spent: 2_100_000,
-        budget_total: Some(5_000_000),
-        cost_spent: 12.40,
-        cost_limit: Some(100.0),
-        goals_met: 2,
-        goals_total: 4,
-        goals: vec![
-            GoalView {
-                id: "lemmas_verified".into(),
-                goal_type: "cardinal".into(),
-                state: "in_progress".into(),
-                invariant: false,
-                value: 14.0,
-                max: 20.0,
-                target: 20.0,
-                weight: 1.0,
-                delta: 3.0,
-                rationale: "14 Lean-verified supporting lemmas (sorry-free, project builds)".into(),
-                judge_kind: "script".into(),
-                latched: false,
-            },
-            GoalView {
-                id: "paper_written".into(),
-                goal_type: "binary".into(),
-                state: "met".into(),
-                invariant: false,
-                value: 1.0,
-                max: 1.0,
-                target: 1.0,
-                weight: 1.0,
-                delta: 0.0,
-                rationale: "PAPER.md covers the approach, results, and limitations".into(),
-                judge_kind: "llm:haiku".into(),
-                latched: true,
-            },
-            GoalView {
-                id: "no_sorry".into(),
-                goal_type: "binary".into(),
-                state: "met".into(),
+        up_secs: 5_231, // 1h27m
+        session: 3,
+        lifetime_session: 17,
+        phase: Phase::Staging,
+        idle_secs: 0,
+        tokens_spent: 1_284_902,
+        budget_total: Some(4_000_000),
+        cost_spent: 8.17,
+        cost_limit: Some(25.0),
+        goals_met: 1,
+        goals_total: 3,
+        goals: Vec::new(), // the successor `judges` below drives every reader now.
+        per_agent,
+        judges: vec![
+            JudgeView {
+                name: "build_passes".into(),
+                kind: "script".into(),
+                in_dod: true,
                 invariant: true,
-                value: 1.0,
-                max: 1.0,
+                state: "met".into(),
+                met: true,
+                value: None,
+                max: None,
                 target: 1.0,
-                weight: 2.0,
                 delta: 0.0,
-                rationale: "no gap, no smuggled axiom, no unsound decide anywhere in proof/".into(),
-                judge_kind: "script".into(),
-                latched: false,
+                rationale: "cargo build: 0 warnings, 0 errors".into(),
+                error: None,
             },
-            GoalView {
-                id: "proof_verified".into(),
-                goal_type: "binary".into(),
-                state: "in_progress".into(),
+            JudgeView {
+                name: "coverage".into(),
+                kind: "llm".into(),
+                in_dod: true,
                 invariant: false,
-                value: 0.0,
-                max: 1.0,
+                state: "in_progress".into(),
+                met: false,
+                value: Some(64.0),
+                max: Some(100.0),
+                target: 80.0,
+                delta: 12.0,
+                rationale: "64% of modules covered (was 52% last step)".into(),
+                error: None,
+            },
+            JudgeView {
+                name: "no_todos".into(),
+                kind: "script".into(),
+                in_dod: true,
+                invariant: false,
+                state: "pending".into(),
+                met: false,
+                value: None,
+                max: None,
                 target: 1.0,
-                weight: 1.0,
                 delta: 0.0,
-                rationale: "Lean does not accept the full proof yet — 6 lemmas to go".into(),
-                judge_kind: "script".into(),
-                latched: false,
+                rationale: "judge failed: judges/no_todos.sh: exit 127 (rg: command not found)".into(),
+                error: Some("judges/no_todos.sh: exit 127 (rg: command not found)".into()),
+            },
+            JudgeView {
+                name: "stalled".into(),
+                kind: "script".into(),
+                in_dod: false,
+                invariant: false,
+                state: "met".into(),
+                met: true,
+                value: None,
+                max: None,
+                target: 1.0,
+                delta: 0.0,
+                rationale: "no state-file change across 2 sessions — reconsider triggered".into(),
+                error: None,
             },
         ],
-        now: "🔧 $ lake build".into(),
-        think: "the pigeonhole bound tightens the reduction; wiring it into lemma 14".into(),
+        now: "🔧 reading judges/no_todos.sh to fix the broken judge".into(),
+        think: "build is green but no_todos has errored for two sessions and coverage stalled at 64% — fix the judge before pushing more code".into(),
         recent: vec![
-            ActivityEvent { ts: "14:07:01".into(), kind: "tool".into(), text: "$ lake build".into() },
-            ActivityEvent { ts: "14:07:22".into(), kind: "tool_result".into(), text: "Build completed successfully (14 lemmas)".into() },
-            ActivityEvent { ts: "14:07:24".into(), kind: "think".into(), text: "lemma 14 verified — the counting argument holds".into() },
-            ActivityEvent { ts: "14:07:26".into(), kind: "tool".into(), text: "$ ./judges/count_lemmas.sh".into() },
+            ActivityEvent { ts: "14:31:02".into(), kind: "init".into(), text: "session #3 · step `reconsider` [claude] · Reconsider role".into() },
+            ActivityEvent { ts: "14:31:04".into(), kind: "think".into(), text: "coverage stalled at 64%, no_todos judge erroring — diagnose before continuing".into() },
+            ActivityEvent { ts: "14:31:09".into(), kind: "tool".into(), text: "$ cat judges/no_todos.sh".into() },
+            ActivityEvent { ts: "14:31:16".into(), kind: "tool_result".into(), text: "rg not found — judge depends on a tool the runner lacks".into() },
+            ActivityEvent { ts: "14:31:22".into(), kind: "think".into(), text: "rewrite the judge to use grep -rn instead of rg".into() },
         ],
-        summary_cumulative: "Formalizing the separation: 14/20 supporting lemmas verified, paper drafted, soundness invariant holding — no sorry, no smuggled axioms.".into(),
-        summary_windowed: "Landed lemma 14 (the counting bound); lemma count 11→14 this session.".into(),
-        memory_bytes: 9216,
-        seq: 42,
+        summary_cumulative: "17 lifetime sessions. Endpoints wired, build green since session 2. Coverage climbing (52%→64%). no_todos judge broken since session 2. Codex handled the implement steps; Claude handles reconsider + rules the judges.".into(),
+        summary_windowed: "This run: brought build to 0 warnings, raised coverage to 64%, hit a stall — now in a reconsider step to repair the judge.".into(),
+        memory_bytes: 14_208,
+        seq: 342,
         finished: false,
         finish_reason: String::new(),
     }
@@ -292,24 +301,31 @@ fn draw(f: &mut Frame, dir: &Path, state: Option<&DashboardState>, ui: &mut Dash
         return;
     };
 
-    // Vertical split. A thin title row (name only) tops the screen; then Info +
-    // Progress are fixed-height; Goals and Activity flex; Summary is compact.
+    // Vertical split. A thin title row (name only) tops the screen; Info + the Progress/Per-agent
+    // band are fixed-height; Judges and Activity flex; Summary is compact.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // title row: "AgenticGoGo" only
-            Constraint::Length(4), // Info  (border + 2 lines)
-            Constraint::Length(3), // Progress (border + 1 line)
-            Constraint::Min(7),    // Goals  (scrollable)
+            Constraint::Length(4), // Info  (border + 2 lines: run/step + spend/conditions)
+            Constraint::Length(6), // band: Progress | Per-agent (border + 4 lines)
+            Constraint::Min(8),    // Judges (scrollable scoreboard)
             Constraint::Min(6),    // Activity (real-time tail)
             Constraint::Length(5), // Summary (border + ~3 lines)
         ])
         .split(area);
 
+    // the band splits horizontally: judge progress on the left, per-agent spend on the right (§7.4).
+    let band = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(chunks[2]);
+
     draw_title(f, chunks[0]);
     draw_info(f, chunks[1], s);
-    draw_progress(f, chunks[2], s);
-    draw_goals(f, chunks[3], s, ui);
+    draw_progress(f, band[0], s);
+    draw_per_agent(f, band[1], s);
+    draw_judges(f, chunks[3], s, ui);
     draw_activity(f, chunks[4], s, ui);
     draw_summary(f, chunks[5], s);
 }
@@ -345,11 +361,11 @@ fn focusable_block(title: &str, focused: bool) -> Block<'_> {
         .title(Span::styled(format!("{marker}{title}"), style))
 }
 
-/// Info block: everything that used to clutter the title bar — project, when it
-/// started (absolute), uptime, model, stop/halt conditions, tokens/budget, session.
+/// Info block: the run's identity + spend. Line 1 is WHO/WHERE — project, session, phase, and the
+/// current step with its agent + resolved model (§7.4: a mixed run is uninterpretable without it).
+/// Line 2 is the ledger — tokens, usage, memory, idle, and the stop/abort conditions.
 fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
     let project = if s.project.is_empty() { "—" } else { &s.project };
-    let model = if s.model.is_empty() { "—" } else { &s.model };
     let tokens = match s.budget_total {
         Some(t) => format!("{} / {}", human(s.tokens_spent), human(t)),
         None => human(s.tokens_spent),
@@ -365,6 +381,17 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
     };
     let halt = if s.halt_when.is_empty() { "—".to_string() } else { s.halt_when.clone() };
     let phase = Span::styled(s.phase.to_string(), Style::default().fg(phase_color(&s.phase)).bold());
+    // the current step + its agent/model (§7.4). `step_model` falls back to the worker-default
+    // `model` so an older state.json (no per-step model) still shows something real.
+    let step = if s.step.is_empty() { "—" } else { s.step.as_str() };
+    let step_agent = if s.step_agent.is_empty() { "—" } else { s.step_agent.as_str() };
+    let step_model = if !s.step_model.is_empty() {
+        s.step_model.as_str()
+    } else if !s.model.is_empty() {
+        s.model.as_str()
+    } else {
+        "—"
+    };
 
     let line1 = Line::from(vec![
         label("project "),
@@ -386,16 +413,16 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         label("phase "),
         phase,
         sep(),
-        label("up "),
-        Span::raw(crate::util::fmt_dur(s.up_secs)),
-        sep(),
-        label("started "),
-        Span::raw(fmt_started(s.started_at_epoch)),
+        label("step "),
+        Span::styled(step.to_string(), Style::default().fg(Color::Cyan).bold()),
+        Span::styled(format!(" [{step_agent} · {step_model}]"), Style::default().fg(Color::Blue)),
     ]);
     let idle_color = if s.idle_secs >= 240 { Color::Red } else { Color::DarkGray };
+    // Ordered by importance so the LEAST critical items (memory/idle/started) are the ones a narrow
+    // terminal truncates first — the spend guards and the run's done/abort conditions survive.
     let mut line2_spans = vec![
-        label("model "),
-        Span::raw(model.to_string()),
+        label("up "),
+        Span::raw(crate::util::fmt_dur(s.up_secs)),
         sep(),
         label("tokens "),
         Span::raw(tokens),
@@ -405,15 +432,7 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         line2_spans.push(label("usage "));
         line2_spans.push(Span::styled(cost, Style::default().fg(Color::Magenta)));
     }
-    if s.memory_bytes > 0 {
-        line2_spans.push(sep());
-        line2_spans.push(label("memory "));
-        line2_spans.push(Span::styled(crate::util::human_bytes(s.memory_bytes), Style::default().fg(Color::Cyan)));
-    }
-    line2_spans.extend(vec![
-        sep(),
-        label("idle "),
-        Span::styled(format!("{}s", s.idle_secs), Style::default().fg(idle_color)),
+    line2_spans.extend([
         sep(),
         label("stop "),
         Span::styled(s.stop_when.clone(), Style::default().fg(Color::Green)),
@@ -421,91 +440,207 @@ fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         label("halt "),
         Span::styled(halt, Style::default().fg(Color::Yellow)),
     ]);
+    if s.memory_bytes > 0 {
+        line2_spans.push(sep());
+        line2_spans.push(label("memory "));
+        line2_spans.push(Span::styled(crate::util::human_bytes(s.memory_bytes), Style::default().fg(Color::Cyan)));
+    }
+    line2_spans.extend([
+        sep(),
+        label("idle "),
+        Span::styled(format!("{}s", s.idle_secs), Style::default().fg(idle_color)),
+        sep(),
+        label("started "),
+        Span::raw(fmt_started(s.started_at_epoch)),
+    ]);
     let line2 = Line::from(line2_spans);
 
     let p = Paragraph::new(vec![line1, line2]).block(title_block(" Info "));
     f.render_widget(p, area);
 }
 
-/// Progress: a custom segmented blocks bar (replaces the crude half-filled Gauge).
-/// Width-proportional `█` fill on a `░` track, color-graded green→red by fraction,
-/// with an `N/M  P%` label. Reads cleanly at any terminal width.
+/// Progress: the DoD-set aggregate (§5.3 — the count ranges over the DoD-set, NOT the run-set) as a
+/// segmented bar, plus a one-line tally of judge lifecycle states so "1/3" says WHICH three.
 fn draw_progress(f: &mut Frame, area: Rect, s: &DashboardState) {
     let frac = if s.goals_total == 0 { 0.0 } else { s.goals_met as f64 / s.goals_total as f64 };
     let color = grade_color(frac);
 
-    // inner width minus borders(2) minus the label we append.
-    let label = format!(" {}/{} goals · {:.0}%", s.goals_met, s.goals_total, frac * 100.0);
+    let label = format!(" {}/{} · {:.0}%", s.goals_met, s.goals_total, frac * 100.0);
     let inner_w = area.width.saturating_sub(2) as usize;
     let track_w = inner_w.saturating_sub(label.chars().count() + 1).max(1);
     let filled = ((frac * track_w as f64).round() as usize).min(track_w);
-    let bar_filled = "█".repeat(filled);
-    let bar_empty = "░".repeat(track_w - filled);
-
-    let line = Line::from(vec![
-        Span::styled(bar_filled, Style::default().fg(color)),
-        Span::styled(bar_empty, Style::default().fg(Color::DarkGray)),
+    let bar = Line::from(vec![
+        Span::styled("█".repeat(filled), Style::default().fg(color)),
+        Span::styled("░".repeat(track_w - filled), Style::default().fg(Color::DarkGray)),
         Span::styled(label, Style::default().fg(color).bold()),
     ]);
-    let p = Paragraph::new(line).block(title_block(" Progress "));
+
+    // lifecycle tally across the DoD-set — met / in-progress / pending / regressed / errored.
+    let dod: Vec<JudgeView> = s.judge_views().into_iter().filter(|j| j.in_dod).collect();
+    let n = |pred: fn(&JudgeView) -> bool| dod.iter().filter(|&j| pred(j)).count();
+    let errored = n(|j| j.error.is_some());
+    let tally = Line::from(vec![
+        Span::styled(format!("✔{} ", n(|j| j.met)), Style::default().fg(Color::Green)),
+        Span::styled(format!("◑{} ", n(|j| j.state == "in_progress")), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("·{} ", n(|j| j.state == "pending" && j.error.is_none())), Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("⚠{} ", n(|j| j.state == "regressed")), Style::default().fg(Color::Red)),
+        Span::styled(format!("⊘{errored}"), Style::default().fg(if errored > 0 { Color::Red } else { Color::DarkGray })),
+    ]);
+    let p = Paragraph::new(vec![bar, Line::default(), tally]).block(title_block(" Progress "));
     f.render_widget(p, area);
 }
 
-/// Goals: scrollable list. Each goal renders a detail line (glyph, id, type,
-/// measure, ▲delta, weight, guard flag, judge) plus its full rationale, wrapped
-/// (not truncated) and indented. A "(n more ↓)" hint shows when content overflows.
-fn draw_goals(f: &mut Frame, area: Rect, s: &DashboardState, ui: &mut DashboardUi) {
-    let focused = ui.focus == Focus::Goals;
-    let inner_w = area.width.saturating_sub(2) as usize;
+/// Per-agent (§7.4): a token + cost row per agent, then a total. A mixed claude/codex run's
+/// aggregate is meaningless without this. An agent that cannot report a price shows "—", never
+/// "$0.00" (that would lie). Empty ⇒ a single-agent run; fall back to a one-line aggregate.
+fn draw_per_agent(f: &mut Frame, area: Rect, s: &DashboardState) {
     let mut lines: Vec<Line> = Vec::new();
-    for g in &s.goals {
-        lines.push(goal_detail_line(g));
-        if !g.rationale.is_empty() {
-            for wrapped in wrap_indent(&g.rationale, "    ↳ ", "      ", inner_w) {
-                lines.push(Line::from(Span::styled(wrapped, Style::default().fg(Color::DarkGray))));
+    if s.per_agent.is_empty() {
+        lines.push(Line::from(vec![
+            label("all "),
+            Span::raw(human(s.tokens_spent)),
+            Span::raw(" tok  "),
+            Span::styled(money(agg_cost(s)), Style::default().fg(Color::Magenta)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "  (single agent — no per-agent split)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for (agent, u) in &s.per_agent {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<9}", fit(agent, 9)), Style::default().fg(agent_color(agent)).bold()),
+                Span::styled(format!("{:>8} tok  ", human(u.tokens)), Style::default().fg(Color::Cyan)),
+                Span::styled(money(u.cost), Style::default().fg(Color::Magenta)),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<9}", "total"), Style::default().bold()),
+            Span::styled(format!("{:>8} tok  ", human(s.tokens_spent)), Style::default().fg(Color::Cyan).bold()),
+            Span::styled(money(agg_cost(s)), Style::default().fg(Color::Magenta).bold()),
+        ]));
+    }
+    let p = Paragraph::new(lines).block(title_block(" Per-agent "));
+    f.render_widget(p, area);
+}
+
+/// Judges: the §7.4 per-judge scoreboard (successor to the goal list). Each judge renders a detail
+/// line — glyph, name, measure (met/unmet for binary, value/target + bar for numeric, `error` for a
+/// broken judge), ▲delta, guard/run-set flags, kind — plus its wrapped rationale. DoD-set first,
+/// then a divider and any run-set control judges (e.g. `stalled`), so "why we stalled" is visible.
+fn draw_judges(f: &mut Frame, area: Rect, s: &DashboardState, ui: &mut DashboardUi) {
+    let focused = ui.focus == Focus::Judges;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let judges = s.judge_views();
+    let (dod, run): (Vec<JudgeView>, Vec<JudgeView>) = judges.into_iter().partition(|j| j.in_dod);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let push_judge = |lines: &mut Vec<Line>, j: &JudgeView| {
+        lines.push(judge_detail_line(j));
+        if !j.rationale.is_empty() {
+            for wrapped in wrap_indent(&j.rationale, "    ↳ ", "      ", inner_w) {
+                let c = if j.error.is_some() { Color::Red } else { Color::DarkGray };
+                lines.push(Line::from(Span::styled(wrapped, Style::default().fg(c))));
             }
         }
+    };
+    for j in &dod {
+        push_judge(&mut lines, j);
+    }
+    if !run.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "── run-set (not counted toward done) ──",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for j in &run {
+            push_judge(&mut lines, j);
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("  (no judges in snapshot)", Style::default().fg(Color::DarkGray))));
     }
 
     let total = lines.len() as u16;
     let view_h = area.height.saturating_sub(2); // minus borders
     let max_scroll = total.saturating_sub(view_h);
-    ui.goals_scroll = ui.goals_scroll.min(max_scroll);
+    ui.judges_scroll = ui.judges_scroll.min(max_scroll);
 
     let title = if max_scroll > 0 {
-        format!(" Goals  [{}/{}]  ↑↓ ", (ui.goals_scroll + view_h).min(total), total)
+        format!(" Judges  [{}/{}]  ↑↓ ", (ui.judges_scroll + view_h).min(total), total)
     } else {
-        " Goals ".to_string()
+        " Judges ".to_string()
     };
     let p = Paragraph::new(lines)
         .block(focusable_block(&title, focused))
-        .scroll((ui.goals_scroll, 0));
+        .scroll((ui.judges_scroll, 0));
     f.render_widget(p, area);
 }
 
-/// One goal's detail line.
-fn goal_detail_line(g: &GoalView) -> Line<'static> {
-    let (glyph, color) = state_glyph(&g.state);
-    let measure = measure_str(g);
-    let delta = if g.delta.abs() > f64::EPSILON {
-        format!("  ▲{:+.0}", g.delta)
+/// One judge's detail line: glyph · name · measure · ▲delta · flags · kind.
+fn judge_detail_line(j: &JudgeView) -> Line<'static> {
+    let (glyph, color) = judge_glyph(j);
+    let delta = if j.value.is_some() && j.delta.abs() > f64::EPSILON {
+        format!("  ▲{:+.0}", j.delta)
     } else {
         String::new()
     };
-    let guard = if g.invariant { "  [guard]" } else { "" };
-    // 🔒 = latched (recheck: once_met, judge no longer re-runs — saves tokens)
-    let lock = if g.latched { "  🔒" } else { "" };
-    Line::from(vec![
+    let flag = if j.invariant { "  [guard]" } else { "" };
+    let mut spans = vec![
         Span::styled(format!("{glyph} "), Style::default().fg(color)),
-        Span::styled(format!("{:<20}", fit(&g.id, 20)), Style::default().fg(color).bold()),
-        Span::raw(format!("{:<11}", g.goal_type)),
-        Span::styled(format!("{:<11}", measure), Style::default().fg(color)),
-        Span::styled(format!("{:<8}", delta), Style::default().fg(Color::Green)),
-        Span::styled(format!("w{:<4}", fmt_num(g.weight)), Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("judge:{}", g.judge_kind), Style::default().fg(Color::Blue)),
-        Span::styled(guard.to_string(), Style::default().fg(Color::Yellow)),
-        Span::styled(lock.to_string(), Style::default().fg(Color::Cyan)),
-    ])
+        Span::styled(format!("{:<18}", fit(&j.name, 18)), Style::default().fg(color).bold()),
+    ];
+    spans.extend(judge_measure_spans(j, color));
+    spans.extend([
+        Span::styled(format!("{:<7}", delta), Style::default().fg(Color::Green)),
+        Span::styled(flag.to_string(), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("  judge:{}", j.kind), Style::default().fg(Color::Blue)),
+    ]);
+    Line::from(spans)
+}
+
+/// The measure column as colored spans: binary ⇒ met/unmet (never `0`, §7.4); numeric ⇒
+/// `value/target` + a proportional bar; broken ⇒ `error`.
+fn judge_measure_spans(j: &JudgeView, color: Color) -> Vec<Span<'static>> {
+    if j.error.is_some() {
+        return vec![Span::styled(format!("{:<22}", "error"), Style::default().fg(Color::Red).bold())];
+    }
+    match j.value {
+        None => {
+            let word = if j.met { "met" } else { "unmet" };
+            vec![Span::styled(format!("{word:<22}"), Style::default().fg(color))]
+        }
+        Some(v) => {
+            let frac = if j.target > 0.0 {
+                (v / j.target).clamp(0.0, 1.0)
+            } else if j.met {
+                1.0
+            } else {
+                0.0
+            };
+            let bar_w = 8usize;
+            let filled = ((frac * bar_w as f64).round() as usize).min(bar_w);
+            let num = format!("{:.0}/{:.0} ", v, j.target);
+            vec![
+                Span::styled(format!("{num:<8}"), Style::default().fg(color)),
+                Span::styled("█".repeat(filled), Style::default().fg(color)),
+                Span::styled(format!("{}  ", "░".repeat(bar_w - filled)), Style::default().fg(Color::DarkGray)),
+            ]
+        }
+    }
+}
+
+/// State glyph + color for a judge. A broken judge (`error`) gets its own ⊘, distinct from a clean
+/// "not met" — a reader must never confuse "I could not grade this" with "this is not met" (§5.2).
+fn judge_glyph(j: &JudgeView) -> (&'static str, Color) {
+    if j.error.is_some() {
+        return ("⊘", Color::Red);
+    }
+    match j.state.as_str() {
+        "met" => ("✔", Color::Green),
+        "regressed" => ("⚠", Color::Red),
+        "in_progress" => ("◑", Color::Yellow),
+        _ => ("·", Color::DarkGray),
+    }
 }
 
 /// Activity: the REAL-TIME event tail. Renders `recent` events newest-at-bottom,
@@ -612,12 +747,32 @@ fn grade_color(frac: f64) -> Color {
     }
 }
 
-fn state_glyph(state: &str) -> (&'static str, Color) {
-    match state {
-        "met" => ("✔", Color::Green),
-        "regressed" => ("⚠", Color::Red),
-        "in_progress" => ("◑", Color::Yellow),
-        _ => ("·", Color::DarkGray),
+/// A per-agent cost cell: a real price, or "—" for an agent that cannot report one (never "$0.00").
+fn money(c: Option<f64>) -> String {
+    match c {
+        Some(c) => format!("${c:.2}"),
+        None => "—".to_string(),
+    }
+}
+
+/// The total cost to show for the per-agent panel: the aggregate spend, or `None` (→ "—") when NO
+/// agent could report a price — so a fully non-reporting run never prints a lying "$0.00".
+fn agg_cost(s: &DashboardState) -> Option<f64> {
+    let reported = if s.per_agent.is_empty() {
+        s.cost_spent > 0.0
+    } else {
+        s.per_agent.values().any(|u| u.cost.is_some())
+    };
+    reported.then_some(s.cost_spent)
+}
+
+/// A stable accent per agent so claude/codex/copilot read apart at a glance.
+fn agent_color(agent: &str) -> Color {
+    match agent {
+        "claude" => Color::Magenta,
+        "codex" => Color::Green,
+        "copilot" => Color::Blue,
+        _ => Color::Cyan,
     }
 }
 
@@ -649,16 +804,6 @@ fn phase_color(phase: &Phase) -> Color {
     }
 }
 
-fn measure_str(g: &GoalView) -> String {
-    match g.goal_type.as_str() {
-        // A binary judge emits no `value` (it is `None` on the wire → 0.0 here), so read met from
-        // the lifecycle STATE, not the number — else every MET binary goal would render "no".
-        "binary" => if g.state == "met" { "yes".into() } else { "no".into() },
-        "percentage" => format!("{:.0}/{:.0}%", g.value, g.target),
-        _ => format!("{:.0}/{:.0}", g.value, g.max),
-    }
-}
-
 /// Absolute local wall-clock for the loop's start, as `HH:MM:SS <zone>`. The local offset comes
 /// from `localtime`, so a user in CEST sees their wall clock, not UTC. The zone label
 /// (e.g. `UTC+2`) names what's being shown.
@@ -677,15 +822,6 @@ fn human(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1e3)
     } else {
         n.to_string()
-    }
-}
-
-/// Compact a weight like 1.0 → "1", 1.5 → "1.5".
-fn fmt_num(n: f64) -> String {
-    if (n - n.round()).abs() < 1e-9 {
-        format!("{}", n.round() as i64)
-    } else {
-        format!("{n:.1}")
     }
 }
 
@@ -730,14 +866,19 @@ fn wrap_indent(text: &str, first: &str, cont: &str, width: usize) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ActivityEvent, DashboardState, GoalView};
+    use crate::state::{ActivityEvent, AgentUsage, DashboardState, JudgeView};
     use ratatui::backend::TestBackend;
 
     fn demo_state() -> DashboardState {
+        let mut per_agent = std::collections::BTreeMap::new();
+        per_agent.insert("claude".to_string(), AgentUsage { tokens: 1_500_000, cost: Some(1.10) });
+        per_agent.insert("codex".to_string(), AgentUsage { tokens: 600_000, cost: Some(0.15) });
         DashboardState {
             project: "myproject".into(),
             model: "claude-opus-4-8".into(),
             step: "worker".into(),
+            step_agent: "codex".into(),
+            step_model: "gpt-5-codex".into(),
             stop_when: "all_goals".into(),
             halt_when: "regressed".into(),
             started_at_epoch: 1_700_000_000,
@@ -753,36 +894,52 @@ mod tests {
             memory_bytes: 2048,
             goals_met: 1,
             goals_total: 2,
-            goals: vec![
-                GoalView {
-                    id: "tests_pass".into(),
-                    goal_type: "cardinal".into(),
-                    state: "in_progress".into(),
+            goals: Vec::new(), // the successor `judges` below drives every reader now.
+            per_agent,
+            judges: vec![
+                JudgeView {
+                    name: "tests_pass".into(),
+                    kind: "script".into(),
+                    in_dod: true,
                     invariant: false,
-                    value: 18.0,
-                    max: 28.0,
+                    state: "in_progress".into(),
+                    met: false,
+                    value: Some(18.0),
+                    max: Some(28.0),
                     target: 28.0,
-                    weight: 1.0,
                     delta: 3.0,
                     rationale: "18/28 tests passing; the remaining ten exercise the BOUND-limited \
                                 instances that need the conflict-analysis bound-climb lever to land."
                         .into(),
-                    judge_kind: "script".into(),
-                    latched: false,
+                    error: None,
                 },
-                GoalView {
-                    id: "no_regressions".into(),
-                    goal_type: "binary".into(),
-                    state: "met".into(),
+                JudgeView {
+                    name: "no_regressions".into(),
+                    kind: "script".into(),
+                    in_dod: true,
                     invariant: true,
-                    value: 1.0,
-                    max: 1.0,
+                    state: "met".into(),
+                    met: true,
+                    value: None,
+                    max: None,
                     target: 1.0,
-                    weight: 2.0,
                     delta: 0.0,
                     rationale: "build green".into(),
-                    judge_kind: "script".into(),
-                    latched: true,
+                    error: None,
+                },
+                JudgeView {
+                    name: "stalled".into(),
+                    kind: "script".into(),
+                    in_dod: false,
+                    invariant: false,
+                    state: "pending".into(),
+                    met: false,
+                    value: None,
+                    max: None,
+                    target: 1.0,
+                    delta: 0.0,
+                    rationale: "state file changed this session — not stalled".into(),
+                    error: None,
                 },
             ],
             now: "🔧 $ Run the test suite".into(),
@@ -818,19 +975,36 @@ mod tests {
         assert!(text.contains("AgenticGoGo")); // title (waiting screen reuses it too)
         assert!(text.contains("Info"));
         assert!(text.contains("myproject"));
-        assert!(text.contains("session"));      // info label
         assert!(text.contains("#7"));            // session number
-        assert!(text.contains("claude-opus-4-8")); // model in Info, not title
+        // the current step + its agent/model live in Info (§7.4).
+        assert!(text.contains("worker"));        // step name
+        assert!(text.contains("gpt-5-codex"));   // step model (a mixed-run codex step)
         assert!(text.contains("Progress"));
-        assert!(text.contains("1/2 goals"));     // segmented bar label
-        assert!(text.contains("Goals"));
+        assert!(text.contains("1/2"));           // DoD aggregate label
+        assert!(text.contains("Per-agent"));     // §7.4 per-agent panel
+        assert!(text.contains("claude"));        // a per-agent row
+        assert!(text.contains("codex"));         // the other agent / the step agent
+        assert!(text.contains("Judges"));        // scoreboard title
         assert!(text.contains("tests_pass"));
-        assert!(text.contains("18/28"));         // cardinal measure
+        assert!(text.contains("18/28"));         // numeric judge shows value/target
         assert!(text.contains("Activity"));
         assert!(text.contains("14:07:05"));      // activity tail timestamp
         assert!(text.contains("bound improved")); // activity tail text
         assert!(text.contains("Summary"));
         assert!(text.contains("Building the parser")); // cumulative summary
+    }
+
+    /// The §7.4 defect this migration fixes, at the TUI: a binary judge renders met/unmet, NOT a
+    /// fabricated `0`; a run-set judge is shown under its own divider.
+    #[test]
+    fn binary_judge_reads_met_and_run_set_is_divided() {
+        let s = demo_state();
+        let text = render(&s, 100, 44);
+        assert!(text.contains("no_regressions"));
+        assert!(text.contains("met")); // the binary invariant reads "met", never "0/0"
+        assert!(!text.contains("0/0"), "a binary judge must never render a fabricated 0/0");
+        assert!(text.contains("run-set")); // the divider before `stalled`
+        assert!(text.contains("stalled"));
     }
 
     /// The title row must carry the name ONLY — project/model/stop must NOT bleed into
@@ -926,11 +1100,11 @@ mod tests {
     }
 
     #[test]
-    fn tab_toggles_focus_between_goals_and_activity() {
+    fn tab_toggles_focus_between_judges_and_activity() {
         let mut ui = DashboardUi::default(); // starts on Activity
         assert_eq!(ui.focus, Focus::Activity);
         handle_key(&mut ui, KeyCode::Tab);
-        assert_eq!(ui.focus, Focus::Goals);
+        assert_eq!(ui.focus, Focus::Judges);
         handle_key(&mut ui, KeyCode::Tab);
         assert_eq!(ui.focus, Focus::Activity);
     }
@@ -990,18 +1164,18 @@ mod tests {
     }
 
     #[test]
-    fn goals_pane_scrolls_and_clamps_at_top() {
+    fn judges_pane_scrolls_and_clamps_at_top() {
         let mut ui = DashboardUi::default();
-        handle_key(&mut ui, KeyCode::Tab); // focus Goals
+        handle_key(&mut ui, KeyCode::Tab); // focus Judges
         handle_key(&mut ui, KeyCode::Down);
         handle_key(&mut ui, KeyCode::Down);
-        assert_eq!(ui.goals_scroll, 2);
+        assert_eq!(ui.judges_scroll, 2);
         handle_key(&mut ui, KeyCode::PageUp); // -10, clamped at 0
-        assert_eq!(ui.goals_scroll, 0, "scroll must never go negative");
+        assert_eq!(ui.judges_scroll, 0, "scroll must never go negative");
         handle_key(&mut ui, KeyCode::Char('G')); // jump to bottom (clamped at draw time)
-        assert_eq!(ui.goals_scroll, u16::MAX);
+        assert_eq!(ui.judges_scroll, u16::MAX);
         handle_key(&mut ui, KeyCode::Char('g')); // back to top
-        assert_eq!(ui.goals_scroll, 0);
+        assert_eq!(ui.judges_scroll, 0);
     }
 
     #[test]
@@ -1009,6 +1183,6 @@ mod tests {
         let mut ui = DashboardUi::default(); // Activity focus
         handle_key(&mut ui, KeyCode::Down);
         assert_eq!(ui.activity_scroll, 1);
-        assert_eq!(ui.goals_scroll, 0, "goals pane untouched while Activity is focused");
+        assert_eq!(ui.judges_scroll, 0, "judges pane untouched while Activity is focused");
     }
 }

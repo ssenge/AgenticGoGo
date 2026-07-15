@@ -278,6 +278,9 @@ struct LoopState<'a> {
     session: u32,
     tokens_spent: u64,
     cost_spent: f64,
+    /// per-agent token + cost tally (§7.4), attributed at each spend site (worker / ruler judges /
+    /// summarizer). Sums to `tokens_spent`/`cost_spent`; makes a mixed run's totals interpretable.
+    per_agent: std::collections::BTreeMap<String, crate::state::AgentUsage>,
 
     pending_instruction: Option<String>,
     last_session: String,
@@ -310,22 +313,35 @@ impl LoopState<'_> {
         self.publish();
     }
 
+    /// Attribute one spend to an agent's running tally (§7.4). A `None` cost is an agent that cannot
+    /// report a price — it never fabricates a `0`, so that agent's cost stays `None` (rendered "—")
+    /// until a real price arrives, then it accumulates only the reported part.
+    fn charge(&mut self, agent: &str, tokens: u64, cost: Option<f64>) {
+        let e = self.per_agent.entry(agent.to_string()).or_default();
+        e.tokens += tokens;
+        if let Some(c) = cost {
+            e.cost = Some(e.cost.unwrap_or(0.0) + c);
+        }
+    }
+
     fn publish(&mut self) {
         self.dash.up_secs = self.loop_start.elapsed().as_secs();
         self.dash.tokens_spent = self.tokens_spent;
         self.dash.cost_spent = self.cost_spent;
-        // Surface the current step so a mixed run is interpretable from state.json (§7.4). Pure
-        // display copy — never touches control flow or accounting.
-        // ponytail: aggregate spend only. A PER-AGENT tokens/cost breakdown (§7.4) needs new
-        // accounting threaded through every spend site; the aggregate is correct (guards work), and
-        // the UI split belongs with the deferred dashboard rework. cur_step.agent is in the banner.
+        self.dash.per_agent = self.per_agent.clone();
+        // Surface the current step + its agent/model so a mixed run is interpretable from state.json
+        // (§7.4). Pure display copy — never touches control flow or accounting.
         if let Some(cs) = &self.cur_step {
             self.dash.step = cs.name.clone();
+            self.dash.step_agent = cs.agent.clone();
+            // the RESOLVED model (step override, else the agent's default) — what actually ran.
+            self.dash.step_model = cs.backend().map(|b| cs.model(b).to_string()).unwrap_or_default();
         }
         let (m, t) = self.eng.tally();
         self.dash.goals_met = m;
         self.dash.goals_total = t;
         self.dash.goals = DashboardState::goals_from_engine(&self.eng, &self.dash.goals);
+        self.dash.judges = DashboardState::judges_from_engine(&self.eng, &self.dash.judges);
         let snapshot = self.dash.clone();
         self.live.update(|s| {
             let now = std::mem::take(&mut s.now);
@@ -576,6 +592,7 @@ impl LoopState<'_> {
         );
         self.tokens_spent += outcome.output_tokens;
         self.cost_spent += outcome.cost_usd;
+        self.charge(&step.agent, outcome.output_tokens, Some(outcome.cost_usd));
 
         if crate::os::signals::interrupted() {
             return None;
@@ -731,11 +748,13 @@ impl LoopState<'_> {
         self.emit(LifecycleEvent::Verify);
         let rs = self.run_state();
         let res = self.eng.run_step(self.dir, &rs, self.ruler, &self.judge_model, self.judge_timeout, &step.name, Some(self.session), false);
-        // §5.6: judge spend counts against the ceilings.
+        // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
         self.tokens_spent += res.judge_tokens;
         if let Some(c) = res.judge_cost {
             self.cost_spent += c;
         }
+        let ruler_agent = self.cfg.judge.agent.clone();
+        self.charge(&ruler_agent, res.judge_tokens, res.judge_cost);
         eprint!("{}", indent(&self.eng.scoreboard()));
         self.publish();
 
@@ -860,11 +879,13 @@ impl LoopState<'_> {
                 self.dash.summary_windowed = s.windowed;
                 self.last_summary = Instant::now();
                 summarized_this_cycle = true;
-                // §5.6: summarizer spend counts too.
+                // §5.6: summarizer spend counts too — the summarizer runs on the ruler.
                 self.tokens_spent += spend.tokens;
                 if let Some(c) = spend.cost_usd {
                     self.cost_spent += c;
                 }
+                let ruler_agent = self.cfg.judge.agent.clone();
+                self.charge(&ruler_agent, spend.tokens, spend.cost_usd);
                 self.publish();
             }
         }
@@ -1063,6 +1084,7 @@ pub fn run(
         session: 0,
         tokens_spent: 0,
         cost_spent: 0.0,
+        per_agent: std::collections::BTreeMap::new(),
         pending_instruction: None,
         last_session: String::new(),
         dud_streak: 0,
@@ -1087,6 +1109,8 @@ pub fn run(
     if let Some(c) = pre.judge_cost {
         st.cost_spent += c;
     }
+    let ruler_agent = st.cfg.judge.agent.clone();
+    st.charge(&ruler_agent, pre.judge_tokens, pre.judge_cost);
     eprint!("{}", indent(&st.eng.scoreboard()));
     st.publish();
     crate::core::verdicts::append(dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
