@@ -38,26 +38,28 @@ say exactly what *done* means.
 | **`INJECT`** | Builds the agent's prompt: your standing instruction, what past sessions learned, any steering you queued. | code |
 | **`RUN`** | Launches one **fresh** agent session (`claude -p` · `codex exec` · `copilot -p`). It edits files. It never decides whether it succeeded. | **the agent** |
 | **`VERIFY`** | `agg` runs your **judges** itself. The agent is never asked to grade its own homework. | code |
-| **`GATE`** | Keeps or rolls back the work, checks `stop_when`, carries state forward — or stops. | code |
+| **`GATE`** | Keeps or rolls back the work, checks `done_if`, carries state forward — or stops. | code |
 
 Three of the four stages are deterministic code; only the `RUN` stage is a (stochastic) coding agent.
-The loop continues until all goals are met — potentially for hours, days, weeks (watch your token
-consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate that decides it's done.
+The loop continues until your Definition of Done is met — potentially for hours, days, weeks (watch
+your token consumption 😉). Because the agent never runs `VERIFY`, it can't fake the gate that decides
+it's done.
 
-**Your judges *are* that gate — your Definition of Done (DoD), made executable.** Good judges are
-built on quantifiable goals: *"`solve(Y)` returns `X`"*, *"18 of 28 benchmarks pass"*, *"`f(x)` runs
-in under 200 ms"*, *"the report scores ≥ 85% against this rubric"* — or any boolean combination of
-such judges. A vague DoD like *"make the code nicer"* gives an LLM-based assessment far too much
-slack, and is easily gamed.
+**Your judges *are* that gate — your Definition of Done (DoD), made executable.** You compose them
+into one expression, `done_if`, that says exactly what *done* means. Good judges are built on
+quantifiable goals: *"`solve(Y)` returns `X`"*, *"18 of 28 benchmarks pass"*, *"`f(x)` runs in under
+200 ms"*, *"the report scores ≥ 85% against this rubric"* — or any boolean combination of such judges
+(`done_if: "solves AND fast_enough"`). A vague DoD like *"make the code nicer"* gives an LLM-based
+assessment far too much slack, and is easily gamed.
 
 The overall architecture is captured in the following diagram:
 
 <p align="center">
-  <img src="assets/arch.png" alt="AgenticGoGo architecture: the agg outer loop drives one fresh agent worker (claude -p / codex exec / copilot -p) and writes plain state files under .agg/, which the TUI, the web UI, and an agent supervisor session (reachable from your phone) all read" width="760">
+  <img src="assets/arch.png" alt="AgenticGoGo architecture: the agg outer loop drives one fresh agent worker (claude -p / codex exec / copilot -p) and writes plain state files under agg/state/, which the TUI, the web UI, and an agent supervisor session (reachable from your phone) all read" width="760">
 </p>
 
 The whole system is **the loop plus plain files**: `agg` drives one fresh worker and writes state to
-`.agg/`; the TUI, the web UI, and an `/agg:supervise` agent session (reachable from your phone, via Claude
+`agg/state/`; the TUI, the web UI, and an `/agg:supervise` agent session (reachable from your phone, via Claude
 Code's mobile app) all just *read* those files (and the supervisor can *steer* via the bus). More on that in
 [State and memory](#state-and-memory) and [Interfaces](#interfaces).
 
@@ -140,39 +142,48 @@ way it turns *your* DoD into config. Point it at a spec you already have (a PRD,
 
 > `/agg:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes
 
-It reads that plus your code, shows the `goals.yaml` it proposes, and lets you edit before writing it
-into `agg/`. The result might look like:
+It reads that plus your code, shows the `agg/agg.yaml` it proposes, and lets you edit before writing.
+There is **no `goals.yaml`** — a judge IS a goal, resolved by name from `agg/judges/`. The config the
+skill writes might look like:
 
 ```yaml
-# agg/goals.yaml — your DoD, and who decides each clause of it
-goals:
-  - id: outputs_two          # behaviour: the program actually prints 2
-    type: binary
-    judge: { kind: script, cmd: "./agg/judges/outputs_two.sh" }
-  - id: tests_pass           # regression safety: the whole suite is green (an inline judge)
-    type: binary
-    judge: { kind: script, cmd: "pytest -q >/dev/null 2>&1 && echo '{\"met\":true}' || echo '{\"met\":false}'" }
-stop_when: outputs_two and tests_pass
-```
-
-```yaml
-# agg/agg.yaml — how the loop runs
-agent: claude              # claude (default) · codex · copilot — see "Choosing an agent"
+# agg/agg.yaml — the whole config: defaults / judge / steps / sequence
 project: calc
-model: "claude-opus-4-8[1m]"   # claude only. On codex: OMIT this line. On copilot: `auto`.
-resume_prompt: AGG_RESUME.md
+
+defaults:
+  agent: claude                    # claude (default) · codex · copilot — see "Choosing an agent"
+  model: "claude-opus-4-8[1m]"     # claude only. On codex: OMIT this line. On copilot: `auto`.
+  state: "AGG_STATE.md"            # the standing instructions each fresh session reads
+
+judge:                             # THE RULER — runs LLM judges + the summarizer
+  agent: claude
+  model: "claude-haiku-4-5-20251001"   # a cheap model grades; the worker stays on Opus
+  timeout: 300
+
+steps:
+  worker: {}                       # one plain worker step
+
+sequence:
+  steps:
+    - worker                       # run `worker`, forever, until done_if fires
+  done_if: "outputs_two AND tests_pass"        # your Definition of Done — a boolean over judge names
+  abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
 ```
 
-`AGG_RESUME.md` is the standing instruction `INJECT`ed into *every* session — "fix `calc.py` so
-`python3 calc.py` prints 2 and the tests pass". In case of multiple iterations (i.e. multiple subsequent **`RUN`** stages), this file gets adapted to track the progress so far accordingly (see [State and memory](#state-and-memory)).
-Also note the `stop_when: outputs_two and tests_pass` line in the `goals.yaml` file: it composes two judges with an `and`, and the next step explains how to create such judges.
+`AGG_STATE.md` is the standing instruction `INJECT`ed into *every* session — "fix `calc.py` so
+`python3 calc.py` prints 2 and the tests pass". Across iterations (multiple subsequent **`RUN`**
+stages) the agent maintains this file forward to track progress (see
+[State and memory](#state-and-memory)).
+Note the `done_if: "outputs_two AND tests_pass"` line: it composes two judges with `AND`, and each
+name resolves to a file in `agg/judges/`. The next step writes them.
 
-**3 — Have the agent write the judge.** A judge is any command that prints a verdict as JSON (see
-[Building judges](#building-judges)). You can write one by hand, but asking your agent is the easy way:
+**3 — Have the agent write the judges.** A judge is a **file named for the judge** that prints a
+verdict as JSON — `outputs_two` → `agg/judges/outputs_two.sh` (see [Building judges](#building-judges)).
+You can write one by hand, but asking your agent is the easy way:
 
 > **Prompt:** Write the judge `agg/judges/outputs_two.sh`: run `python3 calc.py`, print `{"met":true}` if its
 > output is exactly `2`, else `{"met":false,"rationale":"calc.py did not print 2"}`. Nothing else on
-> stdout.
+> stdout. And `agg/judges/tests_pass.sh`: `pytest -q` must exit 0.
 
 The result might look like:
 
@@ -184,24 +195,30 @@ The result might look like:
   || echo '{"met":false,"rationale":"calc.py did not print 2"}'
 ```
 
-The second goal, `tests_pass`, needs no script at all — an inline shell command that prints the verdict is a perfectly good judge (`pytest -q` must exit 0).
-The `stop_when: outputs_two and tests_pass` line above requires **both**. Why chain them? Each catches
+```bash
+#!/usr/bin/env bash
+# agg/judges/tests_pass.sh — the whole suite is green
+pytest -q >/dev/null 2>&1 && echo '{"met":true}' || echo '{"met":false}'
+```
+
+The `done_if: "outputs_two AND tests_pass"` line requires **both**. Why chain them? Each catches
 what the other misses: `outputs_two` alone is gameable — the agent could just hardcode `print(2)` —
-but `tests_pass`, which checks `add(2, 3) == 5`, would still be red. That `and` is judge chaining:
-any boolean of goal ids (`and` / `or` / `not`, with parentheses) is a valid `stop_when`.
+but `tests_pass`, which checks `add(2, 3) == 5`, would still be red. That `AND` is judge chaining:
+any boolean of judge names (`AND` / `OR` / `NOT`, with parentheses) is a valid `done_if`. (Need a
+numeric threshold? Use the accessor: `done_if: "tests_pass AND coverage.value >= 80"`.)
 
 **4 — Run it, and watch.**
 
 ```bash
 agg plan                # dry run: one VERIFY pass, prints the scoreboard. No agent launched.
-agg run --detach        # drive the loop until stop_when is met; logs to .agg/run.log
+agg run --detach        # drive the loop until done_if is met; logs to agg/state/run.log
 agg dashboard           # live TUI  (or: agg serve + the web UI — see Interfaces)
 ```
 
 `VERIFY` rejects the broken `calc.py` → the agent fixes `a * b` → `a + b` → `VERIFY` re-runs both
-judges → `GATE` sees `stop_when` met → the loop stops. This toy finishes in a **single iteration**,
-and there's no knob to force more — the loop stops the moment `stop_when` is true. Real projects run
-as many iterations as it takes to satisfy every goal, sometimes hundreds, each a fresh session.
+judges → `GATE` sees `done_if` met → the loop stops. This toy finishes in a **single iteration**,
+and there's no knob to force more — the loop stops the moment `done_if` is true. Real projects run
+as many iterations as it takes to satisfy every clause, sometimes hundreds, each a fresh session.
 
 **5 — Optionally, supervise from a second agent session.** Open a second session **in the same project
 folder** and invoke the supervisor skill — `/agg:supervise` (Claude), `/agg-supervise` (Copilot),
@@ -217,28 +234,28 @@ course-correct from your phone:
 > inject: the auth refactor is the blocker — do that first
 ```
 
-The supervisor reads only `.agg/state.json` — the small scoreboard snapshot — and `agg status`. It
+The supervisor reads only `agg/state/state.json` — the small scoreboard snapshot — and `agg status`. It
 **never** tails the workers' output, so supervising a long run costs you almost nothing.
 
 ## Choosing an agent
 
 ```yaml
-# agg.yaml
-agent: claude     # claude (default) · codex · copilot
+# agg/agg.yaml
+defaults:
+  agent: claude     # claude (default) · codex · copilot — the worker default
 ```
 Supported features:
 
 | | Claude | Codex | Copilot |
 |---|---|---|---|
 | Runs the loop, edits files | ✅ | ✅ | ✅ |
-| Script judges | ✅ | ✅ | ✅ |
-| **LLM judges** (`judge: { kind: llm }`) | ✅ | ✅ | ✅ |
+| Script judges (a `.sh` file) | ✅ | ✅ | ✅ |
+| **LLM judges** (a `.md` rubric file) | ✅ | ✅ | ✅ |
 | **Progress summaries** (`summary.enabled`) | ✅ | ✅ | ✅ |
-| Token budget (`budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
-| Session resume (`resume_sessions`) | ✅ | ✅ | ✅ |
+| Token budget (`sequence.budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
 | Thinking effort (`effort:`) | ✅ | ✅ | ⚠️ ¹ |
 | Rate-limit backoff | ✅ | ✅ | ❌ |
-| **Dollar cost cap** (`cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
+| **Dollar cost cap** (`sequence.cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
 
 - **`model:`** — **Codex: omit it entirely.** Which models you may use depends on how you
   authenticated, and naming a wrong one is a hard 400 at runtime. **Copilot: `model: auto`.**
@@ -247,9 +264,11 @@ Supported features:
   model, or leave `effort:` empty. `agg` refuses the pair at startup rather than letting every
   session die.
 - **Dollar cost** is Claude-only: Codex reports no cost at all, Copilot bills in AI Credits, not
-  dollars. Ask for `cost.total` / `over_cost` on either and `agg run` **refuses to start** — a spend
-  guard that can never fire is worse than none. Use `budget.total` (tokens), which works everywhere.
-  Copilot can also cap itself: `worker_args: ["--max-ai-credits", "50"]`.
+  dollars. Ask for `sequence.cost.total` / `over_cost` on either and `agg run` **refuses to start** — a
+  spend guard that can never fire is worse than none. This is checked **per step**: even one
+  `agent: codex` step in an otherwise-Claude sequence makes the cost guard uncoverable. Use
+  `sequence.budget.total` (tokens), which works everywhere. Copilot can also cap itself:
+  `worker_args: ["--max-ai-credits", "50"]`.
 
 ### Setting up on Codex or Copilot
 
@@ -310,10 +329,10 @@ agg run
 Copilot — see [Choosing an agent](#choosing-an-agent)), and `/agg:new` writes a config shaped for the agent you
 chose. If doctor is green, `agg run` will start.
 
-**No skills at all?** `agg init --agent codex` still scaffolds `agg.yaml`, `goals.yaml`,
-`AGG_RESUME.md` and a starter judge — shaped for that agent (it omits the keys your agent cannot
+**No skills at all?** `agg init --agent codex` still scaffolds `agg/agg.yaml`, `agg/AGG_STATE.md`
+and a starter judge under `agg/judges/` — shaped for that agent (it omits the keys your agent cannot
 honour, so the result starts).</br> It is the fallback, not the recommended path — `/agg:new` reads your existing
-plans and derives goals and judges from them; `agg init` just writes a template.
+plans and derives judges from them; `agg init` just writes a template.
 
 ## Features
 
@@ -324,8 +343,9 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Deterministic four-stage loop** — INJECT → RUN → VERIFY → GATE; only RUN is stochastic.
 - **Fresh session every iteration** — no context degradation; git + memory carry state, not a long chat.
 - **Incorruptible judges** — agg runs them, the agent never grades itself ([script or LLM-as-judge](#building-judges)).
-- **Boolean goal DSL** — compose judges with `and` / `or` / `not`; binary / percentage / cardinal goals + invariants.
-- **Post-merge rollback gate** — a red session is reverted; the base never advances broken.
+- **Judges-as-DoD** — compose judge names with `AND` / `OR` / `NOT` (plus numeric accessors like `coverage.value >= 80`) into one `done_if` expression; resolved by name from disk, no registry.
+- **Per-step agents + sequences** — a repeating list of steps, each with its own agent/model; step back on a *different vendor* when the run stalls ([Steps and sequences](#steps-and-sequences)).
+- **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
 
 **Guardrails for unattended runs**
 - **Rate-limit backoff** *(Claude + Codex)* — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
@@ -384,64 +404,122 @@ are optional:
 }
 ```
 
-So a `binary` goal can print just `{"met": true}`; a cardinal one might print, as **one** example:
+So a **binary** judge can print just `{"met": true}`; a numeric one might print, as **one** example:
 
 ```json
 {"met": false, "value": 18, "max": 28, "target": 28, "rationale": "18/28 tests pass"}
 ```
 
-`agg` uses the last JSON object on stdout, so a judge can log freely and print its verdict last.
+`agg` uses the last JSON object on stdout, so a judge can log freely and print its verdict last. There
+is no `type:` field — a judge that emits a `value` shows partial progress; one that emits only `met`
+is binary.
 
-**Two flavours, same contract.** Judges are typically deterministic **scripts** or **LLM-as-judge** —
-and to `agg` there's no difference: anything that emits the verdict JSON is a judge (a `script` judge
-can even shell out to `claude -p` itself). The built-in **`llm`** kind is a convenience that also
-*hardens* the LLM case against gaming. Give it a `rubric` + `inputs` (and optionally a `model` — **omit it to take your agent's default,
-which is the only portable choice, and required on Codex**) and `agg`:
+**Two flavours, chosen by extension.** A judge is a **file whose name is the judge name**, resolved
+from `agg/judges/<name>.{sh,md}`, then the standard library at `~/.agg/judges/`:
 
-- **builds the prompt** — your rubric plus the declared input files, wrapped so the repo's content is
-  fed as *untrusted data* the judge is told never to obey (a file can't talk the judge into a pass);
-- **runs it isolated** — `--setting-sources user` (only *your* Claude settings, never the
-  agent-mutated repo's `.claude/` config or hooks) and `--strict-mcp-config` (no MCP servers), so the
-  agent can't steer the judge that grades it — and with no `--dangerously-skip-permissions`;
-- **extracts the verdict** from the model's reply.
+- **`.sh` → a script judge.** Its stdout is the verdict JSON. It runs from the project root with
+  `AGG_SESSION` / `AGG_STEP` / `AGG_JUDGE` / `AGG_PROJECT_DIR` in the env (a script judge can even
+  shell out to `claude -p` itself).
+- **`.md` → an LLM judge, and the file IS the rubric.** It declares the files it reads in its own YAML
+  **frontmatter** (`inputs: ["diff", "src/main.rs"]`) — one self-contained file, no `kind:` tag, no
+  registry. `agg` builds the prompt from your rubric plus those inputs (wrapped so the repo content is
+  fed as *untrusted data* the judge is told never to obey), runs it **isolated** on the RULER (the
+  `judge:` block) — `--setting-sources user` + `--strict-mcp-config`, no `--dangerously-skip-permissions`
+  — and extracts the verdict. The judge model is the RULER's, set once for the whole run.
 
-Ready-made script judges live in [`plugin/judges/`](plugin/judges/) (`cargo_test`, `cmd_exit`,
-`grep_count`); rubrics in [`plugin/rubrics/`](plugin/rubrics/).
+Ready-made **parameterless** judges ship inside the binary and install to `~/.agg/judges/`
+(`cargo_test`, `build_ok`, `lint_clean`, `git_clean`, `no_regression`, `stalled`, `cmd_exit`,
+`grep_count`) — name any of them in a condition and it just resolves. Copy one into `agg/judges/` to
+shadow it by name. The source lives in [`plugin/judges/`](plugin/judges/) + [`plugin/rubrics/`](plugin/rubrics/).
 
-**Compose judges with Boolean grammar.** Each judge checks **one clause** of your DoD; `stop_when`
-composes them into the whole of it — any boolean of goal ids (`a and b`, `a or b`, `not c`, with
-parentheses). So `stop_when` *is* your DoD, as an expression.
+**Compose judges into your DoD.** Each judge checks **one clause**; `done_if` composes them into the
+whole of it — any boolean of judge names (`a AND b`, `a OR b`, `NOT c`, with parentheses), plus numeric
+accessors (`coverage.value >= 80`) and aggregates (`met_fraction >= 0.75`, `count_met >= 3`). So
+`done_if` *is* your DoD, as an expression.
 
-`halt_when` takes the same grammar but is **not** part of your DoD: it is a ceiling (budget, time,
-a regressed invariant) that aborts the run as a failure. Done is one thing; giving up is another:
+`abort_if` takes the same grammar but is **not** part of your DoD: it is a ceiling (budget, time,
+a regressed invariant, a judge error) that aborts the run as a failure. Done is one thing; giving up
+is another:
 
 ```yaml
-stop_when: outputs_two and tests_pass          # both must hold
-halt_when: any_regressed(invariants) or over_budget   # optional guard — see docs/CONFIG.md
+sequence:
+  done_if: "outputs_two AND tests_pass"                  # both must hold — exit 0
+  abort_if: "any_regressed(invariants) OR over_budget"   # optional guard — exit 3 — see docs/CONFIG.md
 ```
 
 The rule that makes it a moat: **`agg` runs the judges, never the agent.** So make the judges check
 the resulting artifacts — tests, a compiler, a proof checker — not the agent's claim about it — the agent will often enough hallucinate that a job is done.
 
+## Steps and sequences
+
+`done_if` says *what done means*. A **sequence** says *how the loop spends its sessions getting
+there*. Most projects need one plain step; the power shows up on long, open-ended runs.
+
+A **step** is an `(agent, model, role)` triple — a body of overrides over `defaults:`. A **sequence**
+is a repeating list of statements over those steps:
+
+```yaml
+steps:
+  worker: {}                       # pure defaults — the grunt worker
+  reconsider:
+    agent: codex                   # a DIFFERENT vendor — the perspective diversity is the point
+                                   # (no model: — Codex picks its own; naming one is a hard 400)
+    prompt: >
+      Assume the current approach is wrong. Name 2-3 fundamentally different approaches,
+      pick one, and write the rejected ones and WHY into your scratch note.
+    skip_judges: true              # no DoD judges run → nothing merges; this step's work STAGES
+
+sequence:
+  steps:
+    - worker x4                    # four grunt sessions…
+    - if stalled then reconsider   # …then, only if progress has flat-lined, step back on Codex
+```
+
+The statement grammar is tiny: `NAME`, `NAME xN`, and `if <expr> then NAME [else NAME]` (the `<expr>`
+is the same `done_if` grammar). The list repeats from the top until `done_if` or `abort_if` fires.
+
+**Why per-step *agents* is the headline, not a bonus.** The clearest finding in the reflection
+literature is that an agent reflecting on its own reasoning tends to *reinforce* the flaw rather than
+escape it — unless the reflection comes from a **different perspective**. A different **vendor** is the
+strongest diversity available (different training, priors, failure modes): **a Claude rabbit hole is
+not necessarily a Codex rabbit hole.** So a stall-triggered `reconsider` step on a *different agent* is
+a sharper instrument than "a stronger model of the same agent". And because `agg` already resets
+context every session and carries state in git + memory (both agent-agnostic), swapping vendor between
+sessions **costs nothing** — there is no conversation to hand over.
+
+**Plus cost.** Most sessions in a long run are grunt work — run them on a cheap model/agent, and spend
+the strong one only on the step-back. `worker x4` on a cheap worker, `reconsider` on the expensive one.
+
+The `stalled` builtin (a library judge over the verdict history) is what triggers the step-back; a
+`skip_judges: true` step **stages** its work rather than merging it, and the next judged step gates the
+whole span — so a red-team detour can never get the *next* session rolled back in its place. See
+[`examples/p-vs-np/`](examples/p-vs-np/) for a full sequence, and [`docs/CONFIG.md`](docs/CONFIG.md)
+for the complete grammar.
+
 ## State and memory
 
-`agg` keeps **no state in a database or a long-running daemon**. Everything is a plain file under
-`<project>/.agg/` (gitignored), plus git itself. The loop is the single *writer*; every *reader* (the
-TUI, the web UI, `/agg:supervise`, `agg status`) reads the same files — so you can attach any number
-of views to a running loop without coupling any of them to it.
+`agg` keeps **no state in a database or a long-running daemon**. Everything agg **reads** lives under
+`<project>/agg/` (committed: config + judges); everything it **writes** lives under
+`<project>/agg/state/` (gitignored, auto-created) — one folder, one rule — plus git itself. The loop
+is the single *writer*; every *reader* (the TUI, the web UI, `/agg:supervise`, `agg status`) reads the
+same files, so you can attach any number of views to a running loop without coupling any of them to it.
 
-- **`.agg/state.json`** — the live scoreboard snapshot (goals, tokens, phase, activity tail), written
-  atomically after each change. This is what the TUI, `agg serve`, and the supervisor read.
-- **`.agg/run.pid`** · **`.agg/run.log`** — the loop's liveness (double-run guard, `agg stop` target)
-  and its log when detached.
-- **`.agg/bus/`** — the steering queue: `agg send …` writes a command here; the loop drains it at the
-  next `INJECT`.
-- **`.agg/sessions.count`** + run history (`agg history`) — counters that persist across every run.
-- **`AGG_MEMORY.md`** (project root, committable) + **`.agg/memory/`** — durable cross-session memory
-  the loop injects into every prompt.
-- **git commits** — the actual *work* state. Each session commits; the next **fresh** session resumes
-  from the filesystem + `AGG_MEMORY.md`, not from a held-open context. Git *is* the memory between
-  sessions.
+- **`agg/state/state.json`** — the live scoreboard snapshot (judges, the current step + its agent,
+  tokens, phase, activity tail), written atomically after each change. The TUI, `agg serve`, and the
+  supervisor read this.
+- **`agg/state/verdicts.jsonl`** — the append-only, safety-critical GATE record: one line per verdict,
+  stamped with its merge outcome. The gate's "was previously met" and `stalled` both read it.
+- **`agg/state/run.pid`** · **`agg/state/run.log`** — the loop's liveness (double-run guard, `agg stop`
+  target) and its log when detached.
+- **`agg/state/bus/`** — the steering queue: `agg send …` writes a command here; the loop drains it at
+  the next `INJECT`.
+- **`agg/state/project.json`** — the run-history ledger (`agg history`): lifetime sessions/tokens across runs.
+- **`agg/AGG_STATE.md`** (committed) — the forward standing-instructions file the **agent** maintains.
+  **`agg/state/AGG_MEMORY.md`** — durable cross-session memory (`what we tried and rejected`), written
+  by **agg** (never the worker) and injected into every prompt.
+- **git commits** — the actual *work* state. Each session commits on its own branch and is gated; the
+  next **fresh** session resumes from the filesystem + `AGG_MEMORY.md`, not from a held-open context.
+  Git *is* the memory between sessions.
 
 Because the log on stdout is the source of truth and `state.json` is just a view of it, a run is
 **crash-safe and observable**: `tail`/`grep`/`cat` the files, kill and restart, inspect mid-run —
@@ -458,7 +536,7 @@ whatever your agent has, the worker gets.
 Running an agent headlessly does impose real limits — worth knowing up front:
 
 - **Don't rely on invoking a skill by name** inside the worker. Inline the content you need into
-  `AGG_RESUME.md` rather than calling `/some-skill`.
+  `AGG_STATE.md` rather than calling `/some-skill`.
 - **No mid-session interruption** (a platform limit on all three), so steering is session-granular —
   queued on the bus, applied at the next `INJECT`.
 - **The worker runs with full tool access**, because a headless agent can't answer permission
@@ -497,16 +575,16 @@ cd src/web && npm install && npm run dev   # the web UI on :5173
 ## CLI reference
 
 Global flags, valid on every subcommand: `--dir <path>` (project root, default `.`),
-`--config <file>` (default `<dir>/agg.yaml`), `--goals <file>` (default `<dir>/goals.yaml`).
+`--config <file>` (default `<dir>/agg/agg.yaml`). There is no `--goals` flag — `goals.yaml` is gone.
 
 | Command | What it does | Flags |
 |---|---|---|
-| `agg init` | Scaffold **placeholder** config you must then edit — a blank-slate fallback. Prefer `/agg:new`, which fills it in from your project. | `--force` overwrite · `--folder` scaffold into `agg/` |
-| `agg doctor` | Diagnose the setup: the agent is on PATH, config parses, conditions valid, **the agent can do what the config asks**, skills installed | |
+| `agg init` | Scaffold **placeholder** config you must then edit — a blank-slate fallback. Prefer `/agg:new`, which fills it in from your project. Writes `agg/agg.yaml` + `agg/AGG_STATE.md` + a starter judge. | `--agent <a>` shape it for that agent · `--force` overwrite |
+| `agg doctor` | Diagnose the setup: **every agent the sequence names** is on PATH, config parses, conditions valid, judges resolve, **the agents can do what the config asks**, skills installed | |
 | `agg skills install` | Install the `agg-*` skills where your agent looks (`.claude/skills/` for Claude, `.agents/skills/` for Codex + Copilot) | `--agent <a>` (default: agg.yaml's `agent:`) · `--user` install under `$HOME` |
-| `agg plan` | Run every judge once and print the starting scoreboard (a dry run) | |
-| `agg run` | Drive the loop until `stop_when` is met (or a guard fires) | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` |
-| `agg judge <id>` | Run **one** goal's judge and print its raw verdict — for authoring judges | |
+| `agg plan` | Run every run-set judge once and print the starting scoreboard (a dry run) | |
+| `agg run` | Drive the loop until `done_if` is met (or a guard fires) | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` |
+| `agg judge <name>` | Resolve **one** judge by name and print its raw verdict — for authoring judges | |
 | `agg status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no judges) | `--json` |
 | `agg history` | This project's run history, newest first, plus lifetime totals | `--json` |
 | `agg dashboard` | Live TUI | `--once` one-shot text snapshot |
@@ -515,17 +593,17 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg stop [reason]` | Graceful stop at the next session boundary (the one top-level steering alias) | |
 | `agg send <cmd>` | All steering, applied at the next session boundary | `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` |
 
-`agg run` exit codes, so automation can branch on the outcome: **0** goals met (or an operator
-stop) · **1** hard error · **3** a guard fired (`halt_when`) · **4** hit `--max-sessions`.
+`agg run` exit codes, so automation can branch on the outcome: **0** `done_if` met (or an operator
+stop) · **1** hard error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions`.
 
 ## Configuration
 
-You don't normally write this by hand — `/agg:new` generates `agg/agg.yaml` and `agg/goals.yaml`
-for your project, and `agg run` auto-detects the `agg/` folder. When you want to tune it: the
-`agent:` (see [Choosing an agent](#choosing-an-agent)), token and dollar ceilings, the rolling
-summary, cross-session memory, per-session git isolation with a rollback gate, lifecycle hooks,
-watchdog thresholds, goal types and the stop/halt condition DSL are all documented in
-**[`docs/CONFIG.md`](docs/CONFIG.md)**.
+You don't normally write this by hand — `/agg:new` generates `agg/agg.yaml` (and the judge files
+under `agg/judges/`) for your project, and `agg run` reads `agg/agg.yaml` by default. When you want to
+tune it: the `agent:` (see [Choosing an agent](#choosing-an-agent)), the `steps` / `sequence` model,
+token and dollar ceilings, the rolling summary, cross-session memory, mandatory per-session git
+isolation with a rollback gate, lifecycle hooks, watchdog thresholds, judges-by-name resolution, and
+the `done_if` / `abort_if` grammar are all documented in **[`docs/CONFIG.md`](docs/CONFIG.md)**.
 
 ## Examples
 
