@@ -4,8 +4,8 @@
 //! Agents are not interchangeable, and the gaps are silent by default. The worst case:
 //!
 //! ```text
-//!   abort_if: over_cost         # "stop when I've spent $5"
-//!   cost: { total: 5.0 }
+//!   abort_if: over_cost              # "stop when I've spent $5"
+//!   limits: { cost: 5.0 }
 //!   agent: <one that does not report dollar cost>
 //! ```
 //!
@@ -57,8 +57,8 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
     let named = |p: &str| {
         cfg.sequence.done_if.contains(p) || cfg.sequence.abort_if.as_deref().unwrap_or("").contains(p)
     };
-    let budget_wanted = cfg.sequence.budget.total.is_some() || named("over_budget");
-    let cost_wanted = cfg.sequence.cost.total.is_some() || named("over_cost");
+    let budget_wanted = cfg.sequence.limits.tokens.is_some() || named("over_budget");
+    let cost_wanted = cfg.sequence.limits.cost.is_some() || named("over_cost");
 
     for step_name in cfg.steps.keys() {
         let step = cfg.resolve_step(step_name)?;
@@ -70,7 +70,7 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
 
         if budget_wanted && !caps.reports_output_tokens {
             problems.push(format!(
-                "step `{step_name}` (agent `{agent}`): `budget.total`/`over_budget` set, but it \
+                "step `{step_name}` (agent `{agent}`): `limits.tokens`/`over_budget` set, but it \
                  does not report token usage — the token guard would NEVER fire."
             ));
         }
@@ -82,11 +82,11 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
             // on real money. `spend_ceiling_hint()` is exactly the "does it have a ceiling?" oracle.
             match b.spend_ceiling_hint() {
                 Some(h) => warnings.push(format!(
-                    "cost.total/over_cost is INERT on `{agent}` (step `{step_name}`) — it cannot \
+                    "limits.cost/over_cost is INERT on `{agent}` (step `{step_name}`) — it cannot \
                      report dollars, so this guard will never fire. Cap it directly instead: {h}"
                 )),
                 None => problems.push(format!(
-                    "step `{step_name}` (agent `{agent}`): `cost.total`/`over_cost` set, but it \
+                    "step `{step_name}` (agent `{agent}`): `limits.cost`/`over_cost` set, but it \
                      cannot report dollars and has no self-cap — the SPEND guard would NEVER fire, \
                      leaving an autonomous loop spending real money with no ceiling at all. Remove \
                      the cost guard, or use an agent that reports a dollar cost."
@@ -174,10 +174,10 @@ mod tests {
         let cfg = cfg_yaml(
             "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
              summary: { enabled: false }\nsteps: { work: {} }\n\
-             sequence: { steps: [work], cost: { total: 5.0 } }\n",
+             sequence: { steps: [work], limits: { cost: 5.0 } }\n",
         );
         let err = check(&cfg, &[script_judge("g")]).unwrap_err().to_string();
-        assert!(err.contains("cost.total"), "must name the offending key:\n{err}");
+        assert!(err.contains("limits.cost"), "must name the offending key:\n{err}");
         assert!(err.contains("spending real money"), "must say what breaks:\n{err}");
         assert!(err.contains("codex"), "must name the agent:\n{err}");
     }
@@ -190,7 +190,7 @@ mod tests {
         let cfg = cfg_yaml(
             "project: p\ndefaults: { agent: copilot }\njudge: { agent: claude }\n\
              summary: { enabled: false }\nsteps: { work: {} }\n\
-             sequence: { steps: [work], cost: { total: 5.0 } }\n",
+             sequence: { steps: [work], limits: { cost: 5.0 } }\n",
         );
         check(&cfg, &[script_judge("g")])
             .expect("copilot self-caps (--max-ai-credits), so an inert dollar guard only warns");
@@ -246,7 +246,7 @@ mod tests {
         let cfg = cfg_yaml(
             "project: p\ndefaults: { agent: claude, effort: max }\njudge: { agent: claude }\n\
              summary: { enabled: true }\nsteps: { work: {} }\n\
-             sequence: { steps: [work], cost: { total: 5.0 }, budget: { total: 10 } }\n",
+             sequence: { steps: [work], limits: { cost: 5.0, tokens: 10 } }\n",
         );
         check(&cfg, &[llm_judge("rubric"), script_judge("build")]).expect("claude does it all");
     }
@@ -270,7 +270,7 @@ mod tests {
             "project: p\ndefaults: { agent: claude }\njudge: { agent: claude }\n\
              summary: { enabled: false }\n\
              steps: { plan: {}, build: { agent: codex } }\n\
-             sequence: { steps: [plan, build], cost: { total: 5.0 } }\n",
+             sequence: { steps: [plan, build], limits: { cost: 5.0 } }\n",
         );
         let err = check(&cfg, &[script_judge("g")]).unwrap_err().to_string();
         assert!(err.contains("build"), "must name the codex STEP:\n{err}");

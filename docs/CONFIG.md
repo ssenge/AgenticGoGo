@@ -4,8 +4,8 @@ One file, `agg/agg.yaml`, holds everything: `defaults` / `judge` / `steps` / `se
 top-level survivors. **There is no `goals.yaml`** — a judge IS a goal, resolved by name from disk
 (see [Judges](#judges-resolved-by-name)). Every struct is parsed with `deny_unknown_fields`, so a
 misspelled or misplaced key is a **hard error at startup**, never a silent no-op. (That guard is what
-makes a stray top-level `budget:` — which now belongs under `sequence:` — fail loudly instead of
-becoming a decorative spend ceiling.)
+makes a stray top-level `budget:` — the three ceilings now live unified under `sequence.limits:` — fail
+loudly instead of becoming a decorative spend ceiling.)
 
 The only required keys are `project` and `sequence`. Everything else has a default.
 
@@ -40,9 +40,10 @@ sequence:
   steps:
     - worker x4
     - if stalled then reconsider
-  budget: { total: 5000000 }       # output-token ceiling (worker AND judge spend) → over_budget
-  cost:   { total: null }          # dollar ceiling → over_cost. CLAUDE-ONLY (null = unlimited)
-  max_sessions: 0                  # 0 = unlimited. Backs over_iterations
+  limits:                          # the run-level ceilings, unified. Each null/absent = unlimited.
+    tokens: 5000000                # output-token ceiling (worker AND judge spend) → over_budget
+    cost: null                     # dollar ceiling → over_cost. CLAUDE-ONLY (null = unlimited)
+    sessions: null                 # session cap → over_iterations (null = unlimited)
   gate_regressions: true           # roll a session back if a previously-met judge regresses
   invariants: [no_regression]      # judge names that must STAY met
   done_if: "correct_result AND all_tests_pass AND coverage.value >= 80"
@@ -130,9 +131,10 @@ The sequence repeats from the top, forever, until `done_if` fires (exit **0**) o
 
 | key | default | notes |
 |---|---|---|
-| `budget: { total }` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. |
-| `cost: { total }` | unlimited | **dollar** ceiling → `over_cost`. **CLAUDE-ONLY** — see [Choosing an agent](#agent-specific-rules). |
-| `max_sessions` | `0` | `0` = unlimited. Backs `over_iterations`. A **non-zero** `agg run --max-sessions <n>` overrides it; the flag's default `0` falls back to this key (not to unlimited). |
+| `limits: { tokens, cost, sessions }` | all unlimited | The run-level ceilings, unified. Each key `null`/absent = unlimited. The three subkeys below. |
+| `limits.tokens` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. |
+| `limits.cost` | unlimited | **dollar** ceiling → `over_cost`. **CLAUDE-ONLY** — see [Choosing an agent](#agent-specific-rules). |
+| `limits.sessions` | unlimited (`null`) | session cap → `over_iterations`. A **non-zero** `agg run --max-sessions <n>` overrides it; the flag's default `0` falls back to this key (not to unlimited). |
 | `gate_regressions` | `true` | roll a session back if a previously-met judge now fails. The rename of the old `rollback_on_regression`. |
 | `invariants` | `[]` | judge names that must STAY met. The gate protects them; `any_regressed(invariants)` gives up on them. |
 | `done_if` | `all_goals` | the **Definition of Done** — success stop (exit 0). |
@@ -288,7 +290,7 @@ startup** — checked for **every** agent the sequence names. The full matrix is
 |---|---|
 | `model:` | **Codex: omit it** (naming a model you aren't entitled to is a hard 400). **Copilot: `auto`.** Applies to both `defaults.model` and `judge.model`. |
 | `effort:` | **Copilot cannot combine `effort:` with `model: auto`** (its default) — agg refuses the pair. Codex clamps `max`→`high`. |
-| `cost:` / `over_cost` | **Claude only.** Codex reports no dollars; Copilot bills in AI Credits. **Checked per step** — even one `agent: codex` step makes a `cost:` guard uncoverable, so agg refuses it. Use `sequence.budget:` (tokens); Copilot can self-cap with `worker_args: ["--max-ai-credits", "50"]`. |
+| `limits.cost` / `over_cost` | **Claude only.** Codex reports no dollars; Copilot bills in AI Credits. **Checked per step** — even one `agent: codex` step makes a `limits.cost` guard uncoverable, so agg refuses it. Use `sequence.limits.tokens`; Copilot can self-cap with `worker_args: ["--max-ai-credits", "50"]`. |
 
 ## Session isolation (mandatory) and the gate
 
@@ -372,7 +374,8 @@ These override the config at load time:
 | env var | overrides |
 |---|---|
 | `AGG_MODEL` | `defaults.model` (not a step that names its own model) |
-| `AGG_COST_TOTAL` | `sequence.cost.total` |
+| `AGG_COST_TOTAL` | `sequence.limits.cost` |
+| `AGG_TOKEN_BUDGET` | `sequence.limits.tokens` |
 | `AGG_HEARTBEAT_SECS`, `AGG_WATCHDOG_IDLE_SECS`, `AGG_WATCHDOG_CPU_GRACE`, `AGG_RATELIMIT_BACKOFF`, `AGG_MEMORY_MAX_KB`, `AGG_MEMORY_INJECT_KB` | the matching top-level keys |
 
 > **Platform note.** `agg` is **unix-first** (macOS + Linux). The Windows binary builds and the core

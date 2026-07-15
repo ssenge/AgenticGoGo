@@ -29,11 +29,11 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         m => format!("  model: \"{m}\"                 # the cheap RULER model for LLM judges\n"),
     };
     let (cost_line, over_cost) = if b.capabilities().reports_cost_usd {
-        ("  cost: { total: null }          # dollar ceiling (null = unlimited) → over_cost\n".to_string(), " OR over_cost")
+        ("    cost: null                     # dollar ceiling (null = unlimited) → over_cost\n".to_string(), " OR over_cost")
     } else {
+        // cost omitted (not null) so the block stays minimal; a comment says why it's absent.
         (format!(
-            "  # cost: INERT on `{agent}` — it cannot report dollars, so over_cost can never fire.\n\
-             #       agg warns (or refuses, if the agent can't self-cap either). Use `budget` instead.\n"
+            "    # cost: omitted — `{agent}` cannot report dollars, so over_cost can never fire (agg warns/refuses). Use `tokens`.\n"
         ), "")
     };
 
@@ -135,8 +135,10 @@ steps:
 sequence:
   steps:
     - worker                       # run `worker`, forever, until done_if fires
-  budget: { total: null }          # output-token ceiling — worker AND judge spend (null = unlimited)
-{{COST_LINE}}  max_sessions: 0                  # 0 = unlimited (or pass `agg run --max-sessions <n>`)
+  # Run-level ceilings, unified under one block — each null = unlimited.
+  limits:
+    tokens: null                   # output-token ceiling — worker AND judge spend → over_budget
+{{COST_LINE}}    sessions: null                 # session cap → over_iterations (or pass `agg run --max-sessions <n>`)
   gate_regressions: true           # roll a session back if a previously-met judge regresses
   invariants: []                   # judge names that must STAY met
   done_if: "tests_pass"            # your Definition of Done — judge names, all_goals, count_met, …

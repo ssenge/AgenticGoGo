@@ -370,8 +370,8 @@ fn dollar_budget_aborts_the_loop() {
     // a judge that can never be met, so ONLY the cost guard can end the loop — if cost weren't
     // wired, the loop would run to max_sessions instead.
     write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
-    // cost.total: 0 → any spend (the stub's $0.05) is over budget.
-    write_cfg(dir, "itest", "impossible", "  abort_if: \"over_cost\"\n  cost: { total: 0 }\n", "");
+    // limits.cost: 0 → any spend (the stub's $0.05) is over budget.
+    write_cfg(dir, "itest", "impossible", "  abort_if: \"over_cost\"\n  limits: { cost: 0 }\n", "");
 
     // generous session cap so the ABORT (not the cap) is what stops us.
     let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output().unwrap();
@@ -399,7 +399,7 @@ fn status_and_history_json_are_machine_readable() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
     write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
-    write_cfg(dir, "jsonproj", "worked", "  cost: { total: 5.0 }\n", "");
+    write_cfg(dir, "jsonproj", "worked", "  limits: { cost: 5.0 }\n", "");
     write(dir, "agg/AGG_STATE.md", "create the file did_work\n");
 
     // run once so both the snapshot (state.json) and the ledger (project.json) exist.

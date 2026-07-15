@@ -35,10 +35,10 @@ sequence:
   steps:
     - worker x4                          # four grunt sessions on Opus…
     - if stalled then reconsider         # …then, only if progress has flat-lined, step back on Codex
-  budget: { total: 50000000 }            # output-token ceiling → over_budget. A hopeless run can't run forever.
-                                         # NOTE: no `cost:` here — it is Claude-only, and this sequence
+  limits: { tokens: 50000000 }           # output-token ceiling → over_budget. A hopeless run can't run forever.
+                                         # NOTE: no `cost` here — it is Claude-only, and this sequence
                                          # names a `codex` step, so a dollar guard could never cover the
-                                         # whole run. `budget` (tokens) works on every agent. See the README.
+                                         # whole run. `limits.tokens` works on every agent. See the README.
   invariants: [no_sorry]                 # the soundness guard must STAY met — the gate protects it
   done_if: "proof_verified AND paper_written"        # the prize (don't hold your breath)
   abort_if: "any_regressed(invariants) OR over_budget"   # bail on a smuggled gap or the token ceiling

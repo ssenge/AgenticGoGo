@@ -1036,8 +1036,11 @@ pub fn run(
         cfg.project, eng.done_if
     );
 
-    // max_sessions: the CLI flag WINS when passed (§4.1), else the config key.
-    let max_sessions = if max_sessions_flag > 0 { max_sessions_flag } else { cfg.sequence.max_sessions };
+    // max_sessions: the CLI flag WINS when passed (§4.1), else the config key. The flag keeps its
+    // 0=unlimited convention (clap default); `limits.sessions` is None=unlimited — map None→0 so the
+    // loop's internal 0-sentinel (over_max_sessions, max_iter) is unchanged.
+    let max_sessions =
+        if max_sessions_flag > 0 { max_sessions_flag } else { cfg.sequence.limits.sessions.unwrap_or(0) };
 
     let worker_model_display = cfg
         .defaults
@@ -1049,8 +1052,8 @@ pub fn run(
         model: worker_model_display,
         stop_when: eng.done_if.clone(),
         halt_when: eng.abort_if.clone().unwrap_or_default(),
-        budget_total: cfg.sequence.budget.total,
-        cost_limit: cfg.sequence.cost.total,
+        budget_total: cfg.sequence.limits.tokens,
+        cost_limit: cfg.sequence.limits.cost,
         phase: Phase::Starting,
         ..Default::default()
     };
@@ -1074,8 +1077,8 @@ pub fn run(
         live,
         ledger,
         bus: None,
-        budget_total: cfg.sequence.budget.total,
-        cost_limit: cfg.sequence.cost.total,
+        budget_total: cfg.sequence.limits.tokens,
+        cost_limit: cfg.sequence.limits.cost,
         max_iter: if max_sessions == 0 { None } else { Some(max_sessions) },
         max_sessions,
         gate_regressions: cfg.sequence.gate_regressions,
