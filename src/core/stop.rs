@@ -427,7 +427,7 @@ impl<'a> Parser<'a> {
 
         // The `(invariants)` subset is only meaningful on count/fraction aggregates.
         // Reject it on anything else rather than silently ignoring it — a silent
-        // "accepted but ignored" subset is a real footgun in a user's goals.yaml.
+        // "accepted but ignored" subset is a real footgun in a user's agg.yaml.
         if invariants_only
             && !matches!(name, "count_met" | "count_regressed" | "total" | "met_fraction" | "any_regressed")
         {
