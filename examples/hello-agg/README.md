@@ -129,14 +129,15 @@ steps:
 sequence:
   steps:
     - worker
-  budget: { total: 2000000 }       # output-token ceiling → over_budget. Works on ANY agent.
+  limits: { tokens: 2000000 }      # output-token ceiling → over_budget. Works on ANY agent.
   done_if: "tests_pass"            # the Definition of Done: the suite is green
   abort_if: "over_budget OR wall_hours >= 0.5"   # give up after 30 min or the token ceiling
 ```
 
-`budget` and `cost` and `max_sessions` all live **under `sequence:`** now — a stray top-level
-`budget:` is a hard error at startup (so a spend ceiling can never silently become decorative).
-`cost: { total: … }` is Claude-only; on Codex/Copilot omit it and rely on `budget` (tokens).
+The three ceilings — tokens, cost, sessions — are unified under **`sequence.limits:`** now. A stray
+top-level `budget:` (or the retired `budget:`/`cost:`/`max_sessions:` keys) is a hard error at startup
+(so a spend ceiling can never silently become decorative). `limits.cost` is Claude-only; on
+Codex/Copilot omit it and rely on `limits.tokens`.
 
 **4. `agg/AGG_STATE.md`** — the standing instructions `INJECT`ed into *every* fresh session:
 

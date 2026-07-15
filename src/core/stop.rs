@@ -37,11 +37,11 @@ pub struct StopContext<'a> {
     pub judge_errors: &'a [String],
     /// cumulative output tokens spent this run (for budget guards)
     pub tokens_spent: u64,
-    /// budget ceiling, if configured (`budget.total`)
+    /// budget ceiling, if configured (source: `sequence.limits.tokens`)
     pub budget_total: Option<u64>,
     /// cumulative dollars spent this run (backs `over_cost`)
     pub cost_spent: f64,
-    /// dollar ceiling, if configured (`cost.total`)
+    /// dollar ceiling, if configured (source: `sequence.limits.cost`)
     pub cost_limit: Option<f64>,
     /// sessions completed so far this run (backs `over_iterations`)
     pub sessions_done: u32,

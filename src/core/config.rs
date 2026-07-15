@@ -133,23 +133,19 @@ pub struct StepBody {
     pub skip_judges: bool,
 }
 
-/// The sequence: a repeating statement list + the run-level ceilings and Definition of Done. Budget,
-/// cost and max_sessions MOVED here from top level / the CLI (§4.1).
+/// The sequence: a repeating statement list + the run-level ceilings and Definition of Done. The
+/// three ceilings (tokens, cost, sessions) are UNIFIED under one `limits:` block (§4.1) — previously
+/// separate `budget:`/`cost:`/`max_sessions:` keys.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sequence {
     /// statement lines (`worker x4`, `if stalled then reconsider`) — parsed by `core::sequence`.
     pub steps: Vec<String>,
-    /// output-token ceiling — WORKER *and* JUDGE spend (§5.6). MOVED from top level.
+    /// the run-level ceilings — tokens (worker AND judge spend), dollars, sessions. Each null/absent
+    /// = unlimited. The loop reads these into the `budget_total`/`cost_limit`/`max_sessions` fields
+    /// that back the stable `over_budget`/`over_cost`/`over_iterations` grammar.
     #[serde(default)]
-    pub budget: Budget,
-    /// dollar ceiling. MOVED from top level.
-    #[serde(default)]
-    pub cost: Cost,
-    /// 0 = unlimited. Backs `over_iterations`. MOVED from the `--max-sessions` CLI flag (which
-    /// survives and WINS when passed — §4.1).
-    #[serde(default)]
-    pub max_sessions: u32,
+    pub limits: Limits,
     /// RENAME of the shipped `session_isolation.rollback_on_regression` (§5.7).
     #[serde(default = "default_true")]
     pub gate_regressions: bool,
@@ -233,18 +229,23 @@ impl Default for Watchdog {
     }
 }
 
+/// The run-level spend/iteration ceilings, unified (§4.1). Every field null/absent = unlimited. The
+/// loop reads these into the StopContext/state.json `budget_total`/`cost_limit`/`max_sessions`
+/// fields, which back the stable `over_budget`/`over_cost`/`over_iterations` grammar — the SOURCE of
+/// those values moved here; the grammar terms and state.json field names did NOT change.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Budget {
+pub struct Limits {
+    /// output-token ceiling — WORKER *and* JUDGE spend (§5.6). null = unlimited. Backs `over_budget`.
     #[serde(default)]
-    pub total: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Cost {
+    pub tokens: Option<u64>,
+    /// dollar ceiling. null = unlimited. CLAUDE-only in practice (only it reports dollars). Backs `over_cost`.
     #[serde(default)]
-    pub total: Option<f64>,
+    pub cost: Option<f64>,
+    /// session cap. null = unlimited (was the old `max_sessions: 0` sentinel). Backs `over_iterations`.
+    /// A non-zero `--max-sessions <n>` flag overrides it when passed (§4.1).
+    #[serde(default)]
+    pub sessions: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -412,7 +413,7 @@ impl AggConfig {
     }
 
     /// CI-friendly env overrides, re-homed under the new shape (§4.1). `AGG_MODEL` → defaults.model,
-    /// `AGG_COST_TOTAL` → sequence.cost.total, the rest unchanged.
+    /// `AGG_COST_TOTAL` → sequence.limits.cost, `AGG_TOKEN_BUDGET` → sequence.limits.tokens.
     fn apply_env_overrides(&mut self) {
         if let Ok(v) = std::env::var("AGG_MODEL") {
             self.defaults.model = Some(v);
@@ -430,7 +431,10 @@ impl AggConfig {
             self.ratelimit_backoff_secs = v;
         }
         if let Some(v) = env_f64("AGG_COST_TOTAL") {
-            self.sequence.cost.total = Some(v);
+            self.sequence.limits.cost = Some(v);
+        }
+        if let Some(v) = env_u64("AGG_TOKEN_BUDGET") {
+            self.sequence.limits.tokens = Some(v);
         }
         if let Some(v) = env_u64("AGG_MEMORY_MAX_KB") {
             self.memory.max_kb = if v == 0 { None } else { Some(v) };
@@ -496,16 +500,24 @@ mod tests {
         assert!(cfg.sequence.gate_regressions, "gate_regressions defaults ON (the rename default)");
     }
 
-    /// §4.1: `budget`/`cost` MOVED under `sequence:`; a stale top-level `budget:` after the move
-    /// would be a decorative spend ceiling — an unbounded loop. `deny_unknown_fields` makes it a HARD
+    /// §4.1: the three ceilings are UNIFIED under `sequence.limits:`; the old `budget:`/`cost:`/
+    /// `max_sessions:` keys are RETIRED everywhere. A stale top-level `budget:` would be a decorative
+    /// spend ceiling — an unbounded loop — and even the pre-unification `sequence.budget:` is gone now
+    /// (the intended clean break; internal tool, no users). `deny_unknown_fields` makes each a HARD
     /// ERROR instead of a silent no-op. This is THE guard the config move depends on.
     #[test]
-    fn a_stray_top_level_budget_is_a_hard_error_not_silently_ignored() {
-        let err = parse(&format!("{MINIMAL}budget: {{ total: 5 }}\n")).unwrap_err().to_string();
-        assert!(err.contains("unknown field `budget`"), "must reject the moved key, got: {err}");
-        // and the SAME key is legal in its new home, under `sequence:`.
-        parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], budget: { total: 5 } }\n")
-            .expect("`budget` under `sequence:` is its new home and must parse");
+    fn the_retired_ceiling_keys_are_a_hard_error_not_silently_ignored() {
+        // a stray TOP-LEVEL budget: (its pre-move home) is refused.
+        let top = parse(&format!("{MINIMAL}budget: {{ total: 5 }}\n")).unwrap_err().to_string();
+        assert!(top.contains("unknown field `budget`"), "must reject the retired key, got: {top}");
+        // and the PRE-UNIFICATION `sequence.budget:` is gone too — an OLD config hard-errors.
+        let old = parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], budget: { total: 5 } }\n")
+            .unwrap_err()
+            .to_string();
+        assert!(old.contains("unknown field `budget`"), "the pre-unification `sequence.budget:` is retired, got: {old}");
+        // …and the unified block IS the new home and must parse (all three keys, null-able).
+        parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], limits: { tokens: 5, cost: 1.5, sessions: 3 } }\n")
+            .expect("`limits` under `sequence:` is the unified home and must parse");
     }
 
     /// §4.1: the RULER block is immutable; naming any `judge*` key (or any non-[`StepBody`] key) in a
@@ -586,17 +598,21 @@ mod tests {
     }
 
     /// The env overrides re-home onto the new shape (§4.1): `AGG_MODEL` → `defaults.model`,
-    /// `AGG_COST_TOTAL` → `sequence.cost.total`. (Serial: mutates process env.)
+    /// `AGG_COST_TOTAL` → `sequence.limits.cost`, `AGG_TOKEN_BUDGET` → `sequence.limits.tokens`.
+    /// (Serial: mutates process env.)
     #[test]
     fn env_overrides_land_on_the_new_shape() {
         // guard against parallel env races by scoping tightly and restoring.
         std::env::set_var("AGG_MODEL", "haiku-from-env");
         std::env::set_var("AGG_COST_TOTAL", "12.5");
+        std::env::set_var("AGG_TOKEN_BUDGET", "700000");
         let mut cfg = parse(MINIMAL).unwrap();
         cfg.apply_env_overrides();
         std::env::remove_var("AGG_MODEL");
         std::env::remove_var("AGG_COST_TOTAL");
+        std::env::remove_var("AGG_TOKEN_BUDGET");
         assert_eq!(cfg.defaults.model.as_deref(), Some("haiku-from-env"));
-        assert_eq!(cfg.sequence.cost.total, Some(12.5));
+        assert_eq!(cfg.sequence.limits.cost, Some(12.5));
+        assert_eq!(cfg.sequence.limits.tokens, Some(700_000));
     }
 }

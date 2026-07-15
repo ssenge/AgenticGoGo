@@ -115,9 +115,9 @@ sequence:
 The config names two agents already (`claude` worker, `codex` reconsider). To change either, edit
 `defaults.agent` / the step's `agent:`. Two rules the capability check enforces at startup:
 
-- **`cost:` is Claude-only.** Because this sequence names a `codex` step, a dollar guard could never
-  cover the whole run — so this config uses **`budget:` (tokens)**, which works on every agent. Add
-  `cost:` back only in an all-Claude sequence. `agg doctor` refuses the contradiction outright.
+- **`limits.cost` is Claude-only.** Because this sequence names a `codex` step, a dollar guard could
+  never cover the whole run — so this config uses **`limits.tokens`**, which works on every agent. Add
+  `limits.cost` back only in an all-Claude sequence. `agg doctor` refuses the contradiction outright.
 - **Codex: omit `model:`** (naming one is a hard 400). **Copilot: `model: auto`** with no `effort:`.
 
 `agg doctor` checks **every** agent the sequence names, not just one.

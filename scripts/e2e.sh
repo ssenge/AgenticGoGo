@@ -1209,8 +1209,9 @@ has "the default step runs the default agent (claude)"     "$PA/whoran.txt" "AGE
 has "…and a per-step `agent:` override runs the other one (codex)" "$PA/whoran.txt" "AGENT=codex"
 
 # ── deny_unknown_fields: a stray/mistyped config key is a HARD ERROR at startup (§4.1) ────
-# The guard the config move depends on — a stale top-level `budget:` (its new home is under
-# `sequence:`) must be REFUSED, not silently ignored (a decorative spend ceiling = an unbounded loop).
+# The guard the config move depends on — the ceilings now live unified under `sequence.limits:`, so a
+# stale top-level `budget:` (a retired key) must be REFUSED, not silently ignored (a decorative spend
+# ceiling = an unbounded loop).
 DK="$(mkproj denyunknown)"
 cat > "$DK/agg/agg.yaml" <<'EOF'
 project: denyunknown
@@ -1225,7 +1226,7 @@ EOF
 agg_do "$DK" run --max-sessions 1 > "$DK/run.log" 2>&1
 # escaped backticks (see the `worker x4` note above): an unescaped `budget:` would run as a command
 # substitution and clobber $? to 127 before the exit code is asserted.
-is  "a stray top-level \`budget:\` (its home is under sequence:) is refused, not ignored" "$?" "1"
+is  "a stray top-level \`budget:\` (retired — ceilings live under sequence.limits) is refused, not ignored" "$?" "1"
 has "…naming the unknown field"                                                          "$DK/run.log" "unknown field \`budget\`"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1594,9 +1595,9 @@ has "…and says so, non-fatally, when they are not" "$DN/doc.log" "are not inst
 # --- (c) THE ONE THAT MATTERS: /agg:new's recipes must produce a config that STARTS ----------
 # Each block below is exactly what the skill's Step-0 rules tell it to emit. If `agg doctor`
 # refuses one of these, the skill is generating a config that `agg run` will not start — which
-# is the precise failure this whole phase exists to prevent. (budget/cost live under `sequence:`
-# now; only claude REPORTS `cost:` in dollars — so a cost guard is REFUSED on codex, but merely
-# INERT-but-loud on copilot, which self-caps via `--max-ai-credits`. §4.1/§7.3.)
+# is the precise failure this whole phase exists to prevent. (the ceilings live under
+# `sequence.limits:` now; only claude REPORTS dollars (`limits.cost`) — so a cost guard is REFUSED on
+# codex, but merely INERT-but-loud on copilot, which self-caps via `--max-ai-credits`. §4.1/§7.3.)
 capcheck() { # capcheck <desc> <expect: ok|refused|inert> <agg.yaml body>
   local desc=$1 expect=$2 body=$3
   local d="$WS/cap-$(echo "$desc" | tr -cd '[:alnum:]' | cut -c1-16)"
@@ -1624,8 +1625,7 @@ steps: { worker: {} }
 sequence:
   steps: [worker]
   done_if: g
-  budget: { total: 100000 }
-  cost: { total: 5.0 }
+  limits: { tokens: 100000, cost: 5.0 }
 summary: { enabled: true }
 '
 capcheck "the skill's codex recipe starts (no model, no cost)" ok \
@@ -1635,7 +1635,7 @@ steps: { worker: {} }
 sequence:
   steps: [worker]
   done_if: g
-  budget: { total: 100000 }
+  limits: { tokens: 100000 }
 summary: { enabled: true }
 '
 capcheck "the skill's copilot recipe starts (model auto, no cost)" ok \
@@ -1645,7 +1645,7 @@ steps: { worker: {} }
 sequence:
   steps: [worker]
   done_if: g
-  budget: { total: 100000 }
+  limits: { tokens: 100000 }
 summary: { enabled: true }
 '
 # and the mistake the skill exists to prevent → a dollar guard on an agent that cannot report USD.
@@ -1660,7 +1660,7 @@ steps: { worker: {} }
 sequence:
   steps: [worker]
   done_if: g
-  cost: { total: 5.0 }
+  limits: { cost: 5.0 }
 '
 capcheck "a Claude-shaped cost guard on copilot is INERT-but-loud (it self-caps, §7.3)" inert \
   'project: p
@@ -1669,7 +1669,7 @@ steps: { worker: {} }
 sequence:
   steps: [worker]
   done_if: g
-  cost: { total: 5.0 }
+  limits: { cost: 5.0 }
 '
 
 # --- the OTHER silent-wrong-config trap: the skill must not GUESS the agent -----------------

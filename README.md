@@ -252,10 +252,10 @@ Supported features:
 | Script judges (a `.sh` file) | ✅ | ✅ | ✅ |
 | **LLM judges** (a `.md` rubric file) | ✅ | ✅ | ✅ |
 | **Progress summaries** (`summary.enabled`) | ✅ | ✅ | ✅ |
-| Token budget (`sequence.budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
+| Token budget (`sequence.limits.tokens`, `over_budget`) | ✅ | ✅ | ✅ |
 | Thinking effort (`effort:`) | ✅ | ✅ | ⚠️ ¹ |
 | Rate-limit backoff | ✅ | ✅ | ❌ |
-| **Dollar cost cap** (`sequence.cost.total`, `over_cost`) | ✅ | ❌ | ❌ |
+| **Dollar cost cap** (`sequence.limits.cost`, `over_cost`) | ✅ | ❌ | ❌ |
 
 - **`model:`** — **Codex: omit it entirely.** Which models you may use depends on how you
   authenticated, and naming a wrong one is a hard 400 at runtime. **Copilot: `model: auto`.**
@@ -264,10 +264,10 @@ Supported features:
   model, or leave `effort:` empty. `agg` refuses the pair at startup rather than letting every
   session die.
 - **Dollar cost** is Claude-only: Codex reports no cost at all, Copilot bills in AI Credits, not
-  dollars. Ask for `sequence.cost.total` / `over_cost` on either and `agg run` **refuses to start** — a
+  dollars. Ask for `sequence.limits.cost` / `over_cost` on either and `agg run` **refuses to start** — a
   spend guard that can never fire is worse than none. This is checked **per step**: even one
   `agent: codex` step in an otherwise-Claude sequence makes the cost guard uncoverable. Use
-  `sequence.budget.total` (tokens), which works everywhere. Copilot can also cap itself:
+  `sequence.limits.tokens` (tokens), which works everywhere. Copilot can also cap itself:
   `worker_args: ["--max-ai-credits", "50"]`.
 
 ### Setting up on Codex or Copilot
