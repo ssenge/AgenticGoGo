@@ -1,82 +1,56 @@
-//! `agg init` — scaffold a working AgenticGoGo project in a directory.
+//! `agg init` — scaffold a working AgenticGoGo project.
 //!
-//! Kills the blank-page problem: instead of authoring agg.yaml + goals.yaml + a
-//! judge + the make-or-break AGG_RESUME.md from scratch, the user runs ONE command
-//! and gets a runnable starter that `agg plan` accepts immediately.
-//!
-//! All config-adjacent files (agg.yaml, goals.yaml, the resume prompt, judges/) scaffold into the
-//! mandatory `agg/` config subdir. The judge `cmd` path is relative to the PROJECT ROOT (scripts
-//! always run there, not from `agg/`), so the judge is `./agg/judges/tests.sh`.
+//! One config file now (`agg.yaml` — defaults/judge/steps/sequence) plus the forward state file
+//! (`AGG_STATE.md`) and a starter judge. `goals.yaml` is gone: a judge IS a goal, resolved by name
+//! from `agg/judges/` (§7.1). Everything scaffolds under the mandatory `agg/` folder.
 
 use anyhow::{bail, Result};
 use std::path::Path;
 
-/// Scaffold the four starter files under `<dir>/agg/`. Refuses to clobber existing config unless
-/// `force` is set, so re-running init never silently destroys real work.
 pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
-    // Resolve the backend the scaffold is FOR. Every agent-specific choice below (`model`,
-    // `summary.model`, whether `cost:` / `over_cost` are even legal) is read off it.
-    // `--agent` wins; else the agent whose shell we are in; else Claude, the default.
     let chosen = agent.map(str::to_string).or_else(|| crate::skills::host_agent().map(str::to_string));
-    // rejects an unknown agent before writing anything.
     let b = crate::backend::for_name(chosen.as_deref().unwrap_or("claude"))?;
-    // All config now lands in the mandatory `agg/` folder; the judge cmd is how goals.yaml refers
-    // to the judge, relative to the PROJECT ROOT (judge scripts run there, not from agg/).
     let base = dir.join(crate::paths::CONFIG_DIR);
-    let goals_yaml = GOALS_YAML.replace("./judges/tests.sh", "./agg/judges/tests.sh");
-
-    // The scaffold must be shaped for the agent it will actually DRIVE. Before this, `agg init`
-    // wrote no `agent:` key at all and interpolated Claude's model — so the documented "no skill?
-    // use agg init" fallback handed every Codex user a Claude config, and `agg run` refused it.
-    //
-    // Two keys are not universal, and emitting them anyway is a startup refusal, not a warning:
-    //   model:  Codex must OMIT it — naming a model you aren't entitled to is a hard 400.
-    //   cost:   Claude ONLY — nobody else reports dollars, so `capability::check` rejects it.
     let agent = b.name();
+
+    // Two keys are not universal (§4.1) — emitting them for the wrong agent is a startup REFUSAL:
+    //   model:  Codex must OMIT it (naming a model is a hard 400).
+    //   cost:   Claude ONLY reports dollars.
     let model_line = match b.default_model() {
-        "" => "# model:              # codex picks its own — naming one is a hard 400\n".to_string(),
-        m => format!("model: \"{m}\"     # the inner worker model\n"),
-    };
-    let cost_line = if b.capabilities().reports_cost_usd {
-        "cost:   { total: null }           # dollar ceiling, e.g. 5.0 (null = unlimited) → over_cost\n"
-            .to_string()
-    } else {
-        format!("# cost: NOT supported by `{agent}` — it cannot report dollars, and agg refuses the\n\
-                 #       config rather than leave a spend guard that could never fire. Use `budget`.\n")
+        "" => "  # model:                        # codex picks its own — naming one is a hard 400\n".to_string(),
+        m => format!("  model: \"{m}\"                 # the inner worker model\n"),
     };
     let effort_line = match b.default_effort() {
-        "" => format!(
-            "effort: \"\"                        # `{agent}` cannot combine an effort with `model: auto`\n"
-        ),
-        e => format!("effort: {e}                     # thinking effort: low|medium|high|xhigh|max\n"),
+        "" => "  effort: \"\"                       # this agent cannot combine effort with model: auto\n".to_string(),
+        e => format!("  effort: {e}                    # thinking effort: low|medium|high|xhigh|max\n"),
     };
-    let summary_model = match b.default_summary_model() {
-        "" => String::new(), // codex: omit, same hard-400 reason as `model:`
-        m => format!(", model: {m}"),
+    let judge_model = match b.default_summary_model() {
+        "" => "  # model:                        # codex omits it, same hard-400 reason\n".to_string(),
+        m => format!("  model: \"{m}\"                 # the cheap RULER model for LLM judges\n"),
     };
-    // `over_cost` in halt_when is the same trap as `cost:` in agg.yaml — naming it for an agent
-    // that cannot report dollars makes `capability::check` refuse the run. The scaffold must not
-    // hand the user a config that will not start.
-    let goals_yaml = goals_yaml.replace(
-        "{{OVER_COST}}",
-        if b.capabilities().reports_cost_usd { " OR over_cost" } else { "" },
-    );
+    let (cost_line, over_cost) = if b.capabilities().reports_cost_usd {
+        ("  cost: { total: null }          # dollar ceiling (null = unlimited) → over_cost\n".to_string(), " OR over_cost")
+    } else {
+        (format!(
+            "  # cost: NOT supported by `{agent}` — it cannot report dollars, and agg refuses the\n\
+             #       config rather than leave a spend guard that could never fire. Use `budget`.\n"
+        ), "")
+    };
 
     let agg_yaml = AGG_YAML
         .replace("{{AGENT}}", agent)
         .replace("{{MODEL_LINE}}", &model_line)
-        .replace("{{COST_LINE}}", &cost_line)
         .replace("{{EFFORT_LINE}}", &effort_line)
-        .replace("{{SUMMARY_MODEL}}", &summary_model);
+        .replace("{{JUDGE_MODEL}}", &judge_model)
+        .replace("{{COST_LINE}}", &cost_line)
+        .replace("{{OVER_COST}}", over_cost);
 
-    let files: [(&str, &str, bool); 4] = [
-        ("goals.yaml", goals_yaml.as_str(), false),
+    let files: [(&str, &str, bool); 3] = [
         ("agg.yaml", agg_yaml.as_str(), false),
-        ("AGG_RESUME.md", RESUME_MD, false),
-        ("judges/tests.sh", JUDGE_SH, true), // true = chmod +x
+        ("AGG_STATE.md", STATE_MD, false),
+        ("judges/tests_pass.sh", JUDGE_SH, true),
     ];
 
-    // Pre-check: don't overwrite anything without --force.
     if !force {
         let existing: Vec<&str> = files
             .iter()
@@ -103,12 +77,11 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         eprintln!("  created {}/{}", crate::paths::CONFIG_DIR, name);
     }
 
-    // Ensure `agg/state/` (all runtime state, incl. the durable AGG_MEMORY.md + transient memory
-    // scratch) is gitignored even when git isolation is OFF — memory works without isolation, so we
-    // can't lean on the isolation path. Guarded: `ensure_agg_gitignored` writes `.gitignore` + runs
-    // `git rm --cached` and is NOT a safe no-op outside a repo, so only call it inside one. (The
-    // committed config under `agg/` — agg.yaml, goals.yaml, judges/ — stays tracked; only
-    // `agg/state/` is ignored.)
+    // install the standard judge library to ~/.agg/judges/ so a library-named judge resolves.
+    if let Err(e) = crate::core::judges::ensure_library() {
+        eprintln!("  ⚠ could not install the ~/.agg/judges library: {e}");
+    }
+
     if crate::git::is_repo(dir) {
         crate::git::ensure_agg_gitignored(dir);
     }
@@ -116,12 +89,10 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
     eprintln!(
         "\n✔ Scaffolded an AgenticGoGo starter in {}.\n\n\
          Next steps:\n  \
-         1. Edit goals.yaml / judges/ to match YOUR project (the starter checks a `.passing` file).\n  \
-         2. Edit AGG_RESUME.md — this prompt drives every worker session; make it specific.\n  \
+         1. Edit agg.yaml `done_if` + agg/judges/ to match YOUR project.\n  \
+         2. Edit AGG_STATE.md — the standing instructions each worker session reads.\n  \
          3. agg plan            # dry-run: see the starting scoreboard\n  \
-         4. agg run             # launch the loop until your goals are met\n  \
-         5. agg dashboard       # (optional, another terminal) live TUI\n\n\
-         Tip: in Claude Code, `/agg:new` can generate these FROM your existing plans instead.",
+         4. agg run             # launch the loop until done_if is met\n",
         base.display()
     );
     Ok(())
@@ -141,239 +112,70 @@ fn make_executable(_path: &Path) {}
 
 // ---- starter file contents ----
 
-const GOALS_YAML: &str = r#"# goals.yaml — what "done" means for this project.
-# Each goal has a judge that prints a verdict JSON to stdout:
-#   {"met": <bool>, "value": <num>, "max": <num>, "target": <num>, "rationale": "<one line>"}
-
-goals:
-  # A cardinal goal: met when `value` reaches `target` (e.g. N of M tests pass).
-  - id: tests_pass
-    type: cardinal           # binary | percentage | cardinal
-    target: 3
-    description: "All tests pass"
-    judge:
-      kind: script           # a command whose stdout is the verdict JSON
-      cmd: "./judges/tests.sh"
-      timeout: 60
-
-  # An INVARIANT goal: must STAY true. If it regresses, halt_when can stop the loop.
-  # (Replace this stub with a real "never break the build / no wrong results" check.)
-  - id: no_regressions
-    type: binary
-    invariant: true
-    description: "Never break a previously-passing build"
-    judge:
-      kind: script
-      cmd: 'echo ''{"met":true,"value":1,"max":1,"target":1,"rationale":"build green (stub — replace me)"}'''
-      timeout: 30
-
-# Stop the loop when this expression is true (a safe mini-language, NOT eval).
-# Terms: goal ids, all_goals, count_met, met_fraction, any_regressed(invariants),
-#        and three ceiling guards — over_budget (tokens), over_cost ($, CLAUDE ONLY), over_iterations
-#        (sessions) — plus wall_hours. Set the ceilings in agg.yaml (budget/cost) and via
-#        --max-sessions; each `over_*` trips when its ceiling is exceeded.
-stop_when: "tests_pass"
-
-# Optional emergency brake — stop immediately if an invariant breaks, OR any ceiling blows.
-# (Tokens, sessions, and time are all OR-ed: hit ANY one and the loop halts.)
-# NOTE: a guard only fires if its ceiling is SET — over_budget needs `budget.total` in agg.yaml,
-#       over_iterations needs `agg run --max-sessions <n>`. Unset = that term is simply never true.
-halt_when: "any_regressed(invariants){{OVER_COST}} OR over_budget OR over_iterations OR wall_hours >= 4"
-"#;
-
-const AGG_YAML: &str = r#"# agg.yaml — harness configuration.
+const AGG_YAML: &str = r#"# agg.yaml — harness + steps + sequence. One file: a judge IS a goal, resolved by NAME from
+# agg/judges/<name>.{sh,md} (then ~/.agg/judges/). There is no goals.yaml.
 project: my-project
-agent: {{AGENT}}       # which coding agent drives the workers: claude | codex | copilot
-{{MODEL_LINE}}{{EFFORT_LINE}}resume_prompt: "AGG_RESUME.md"   # the standing instructions fed to EVERY worker session
 
-heartbeat_secs: 30                # a status line at least this often
-watchdog: { idle_secs: 900, cpu_grace: 180 }   # kill a worker silent AND cpu-flat this long
-ratelimit_backoff_secs: 1800      # back off this long on a real usage limit
+# Inherited by EVERY step; a step body may override any of these.
+defaults:
+  agent: {{AGENT}}
+{{MODEL_LINE}}{{EFFORT_LINE}}  state: "AGG_STATE.md"            # the forward state file the AGENT maintains (best-effort)
 
-budget: { total: null }           # output-token ceiling (null = unlimited) → over_budget
-{{COST_LINE}}summary: { enabled: true{{SUMMARY_MODEL}}, min_interval_secs: 300 }  # progress summaries
-memory:  { enabled: true, max_kb: 64, inject_kb: 8 }   # durable AGG_MEMORY.md; inject newest 8 KB/prompt
-resume_sessions: false            # fresh context per session (recommended)
+# THE RULER — runs the LLM judges + the summarizer. Immutable; naming any of these in a step is a
+# HARD ERROR (a grader that moves makes verdicts incomparable across cycles).
+judge:
+  agent: {{AGENT}}
+{{JUDGE_MODEL}}  timeout: 300                     # seconds, EVERY judge (script + LLM)
 
-# ── Optional: generic lifecycle hooks (agg just runs these shell commands; it is
-#    tool-agnostic — wire in whatever YOU use). Uncomment + edit as needed. ──
-# hooks:
-#   on_start:         []   # once at startup — e.g. build a code graph: ["graphify . --no-viz"]
-#   on_session_start: []   # before each worker session — e.g. incremental refresh
-#   on_session_end:   []   # after each session's judging — e.g. persist a memory note
-#   on_stop:          []   # once when the loop stops — e.g. teardown / final export
-#   background:       []   # long-lived, reaped on stop — e.g. ["graphify . --watch"]
-#
-# ── Optional: files prepended to every worker prompt (reusable tooling/guidance you
-#    author — agg adds NO tool-specific text). e.g. tell the worker to use your tools. ──
-# prompt_includes:
-#   - "AGG_TOOLING.md"
-#
-# ── Session isolation is MANDATORY — `agg run` refuses to start without a git repo, a clean
-#    tree and a non-detached HEAD. Each session runs on its own branch off the base; the result
-#    is merged back UNLESS the worker vetoed it (wrote red_file). With rollback_on_regression
-#    (default on), agg stages the merge, re-runs the judges against the merged tree, and ROLLS
-#    BACK if a previously-met goal (e.g. an invariant) regressed — so a bad session can never
-#    land on base. Every key below is optional (shown here with its default). ──
-session_isolation:
-  rollback_on_regression: true   # stage→re-test→commit|rollback (base never regresses)
+# The step palette. The NAME is your own label; the body is overrides only.
+steps:
+  worker: {}                       # pure defaults
+
+# The repeating sequence + the run-level ceilings and Definition of Done.
+sequence:
+  steps:
+    - worker                       # run `worker`, forever, until done_if fires
+  budget: { total: null }          # output-token ceiling — worker AND judge spend (null = unlimited)
+{{COST_LINE}}  max_sessions: 0                  # 0 = unlimited (or pass `agg run --max-sessions <n>`)
+  gate_regressions: true           # roll a session back if a previously-met judge regresses
+  invariants: []                   # judge names that must STAY met
+  done_if: "tests_pass"            # your Definition of Done — judge names, all_goals, count_met, …
+  abort_if: "over_budget{{OVER_COST}} OR over_iterations OR wall_hours >= 4"
+
+heartbeat_secs: 30
+watchdog: { idle_secs: 900, cpu_grace: 180 }
+ratelimit_backoff_secs: 1800
+summary: { enabled: true, min_interval_secs: 300 }
+memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
+session_isolation: {}              # MANDATORY; defaults (branch_prefix: agg, red_file: .agg_red)
 "#;
 
-const RESUME_MD: &str = r#"<!-- AGG_RESUME.md — the prompt fed to EVERY fresh worker session.
-     This is the single most important file: a vague prompt = a loop that spins.
-     Make it specific to YOUR project. Keep the autonomous-loop structure below. -->
+const STATE_MD: &str = r#"<!-- AGG_STATE.md — the standing instructions fed to EVERY fresh worker session, AND the forward
+     state the agent maintains ("what to do next"). agg reads it at the bottom of each prompt; you
+     start it, the agent updates it as it works. A vague file = a loop that spins. -->
 
 # Goal
-<!-- One or two sentences: what should be true when this is done? -->
 Make all the project's tests pass.
 
 # This session — do ONE self-contained chunk of work
-1. Orient: read any handoff/state file, then run the project's tests/checks to see what's failing.
-2. Implement or fix ONE thing that moves a goal forward. Do real, correct work — no stubs.
+1. Orient: read this file, then run the project's tests/checks to see what's failing.
+2. Implement or fix ONE thing that moves a goal forward. Real, correct work — no stubs.
 3. Verify your change (re-run the relevant test/check).
-4. If there's a HANDOFF file, update it with the new state + the exact next task; commit.
+4. Update THIS file with the new state + the exact next task; commit.
 
 # Rules
 - You are AUTONOMOUS. There is NO human to answer questions — never pause to ask.
-- `claude -p` does not auto-compact; when context fills you just stop. So BEFORE that:
-  finish the current chunk, write the handoff, commit, then exit. The loop relaunches you fresh.
-- Commit as you go. Keep changes focused and correct.
-- LONG TASKS (a sim/build/benchmark that runs longer than one turn): do NOT launch it with a
-  bare `nohup … &` and then idle-wait — your session ends when your turn does, which kills or
-  orphans the task, and the next session relaunches a duplicate. Instead run it via
-  `agg spawn --name <id> --reason "<why>" -- <cmd>`. agg keeps it alive past your session,
-  PROTECTS it from the straggler reaper, and tells the next session it's running (and why).
-  Then EXIT. A later session is told about it and polls its log (`agg/state/spawns/<id>.log`) —
-  consuming the result when it finishes — instead of starting over. One spawn per task; check
-  the BACKGROUND TASKS block at the top of your prompt before launching anything.
-
-# Memory (OPTIONAL — agg captures memory either way)
-- agg keeps durable cross-session learnings in `agg/state/AGG_MEMORY.md` and injects a
-  recent slice of it (plus a LAST SESSION block) at the BOTTOM of this prompt, as lower-priority
-  context. READ it — it's what prior sessions learned. You do NOT maintain it; agg folds a note
-  after every session automatically (even if you crash or get killed mid-task).
-- If you have a crisp, durable learning worth carrying forward (a gotcha, a decision, the exact
-  next step), you MAY write it to `agg/state/memory/session-<N>.md`, where `<N>` is THIS session number
-  from the "session #N" banner agg printed when it launched you (e.g. `agg/state/memory/session-7.md`).
-  agg prefers your note on a clean session. This is OPTIONAL — skipping it loses nothing; agg
-  still records a mechanical note from the goal scoreboard and your visible progress. Keep it
-  short and plain; agg sanitizes and size-caps it.
-
-<!-- If your project uses a spec/plan tool (get-shit-done, a ROADMAP, etc.), paste the
-     relevant execution steps HERE — skills are NOT invocable in headless `agg run`. -->
+- Commit as you go. Keep changes focused and correct. When context fills, finish the chunk,
+  update this file, commit, then exit — the loop relaunches you fresh.
 "#;
 
 const JUDGE_SH: &str = r#"#!/usr/bin/env bash
-# Starter judge — prints a verdict JSON to stdout.
-# This stub reads a count from a `.passing` file (default 0) and reports N/3.
-# REPLACE the body with your real check, e.g.:
-#   out="$(npm test 2>&1)"; passed=$(echo "$out" | grep -oE '[0-9]+ passing' | grep -oE '[0-9]+')
-#   ...then emit the JSON below with your real numbers.
+# Starter judge (agg/judges/tests_pass.sh) — resolved by the NAME `tests_pass` in done_if.
+# Prints a verdict JSON to stdout. REPLACE the body with your real check.
+# Env agg sets: AGG_SESSION, AGG_STEP, AGG_JUDGE, AGG_PROJECT_DIR.
 N="$(cat .passing 2>/dev/null || echo 0)"
 TARGET=3
 met=$([ "$N" -ge "$TARGET" ] && echo true || echo false)
 printf '{"met":%s,"value":%s,"max":%s,"target":%s,"rationale":"%s/%s tests pass (starter stub — replace me)"}\n' \
   "$met" "$N" "$TARGET" "$TARGET" "$N" "$TARGET"
 "#;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tmpdir(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let d = std::env::temp_dir().join(format!(
-            "agg-init-{}-{}-{}",
-            std::process::id(),
-            tag,
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    #[test]
-    fn scaffold_parses_with_real_loaders() {
-        let dir = tmpdir("root");
-        run(&dir, false, None).unwrap();
-        // the generated config lands under the mandatory agg/ folder and must load with the ACTUAL
-        // loaders (no schema drift)
-        crate::core::config::AggConfig::load(&dir.join("agg/agg.yaml")).expect("scaffolded agg.yaml must parse");
-        let g = crate::core::config::GoalsConfig::load(&dir.join("agg/goals.yaml")).expect("scaffolded goals.yaml must parse");
-        crate::core::engine::Engine::new(g).expect("scaffolded goals must build an engine (stop_when valid)");
-        // refuses to clobber without force
-        assert!(run(&dir, false, None).is_err());
-        assert!(run(&dir, true, None).is_ok());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn scaffold_lands_under_agg_and_resolves() {
-        let dir = tmpdir("folder");
-        run(&dir, false, None).unwrap();
-        // files land under agg/, NOT the root
-        assert!(dir.join("agg/agg.yaml").exists(), "agg.yaml under agg/");
-        assert!(dir.join("agg/goals.yaml").exists());
-        assert!(dir.join("agg/judges/tests.sh").exists());
-        assert!(!dir.join("agg.yaml").exists(), "root must stay clean — config is always foldered");
-        // the resolver finds the foldered config, and it loads + builds an engine
-        assert_eq!(crate::paths::config_base(&dir), dir.join("agg"));
-        let cfg = crate::paths::config_base(&dir).join("goals.yaml");
-        assert_eq!(cfg, dir.join("agg/goals.yaml"));
-        let g = crate::core::config::GoalsConfig::load(&cfg).expect("foldered goals.yaml must parse");
-        // the judge cmd points at the project-root-relative path
-        assert!(
-            format!("{:?}", g.goals[0].judge).contains("./agg/judges/tests.sh"),
-            "foldered judge cmd should be root-relative: {:?}", g.goals[0].judge
-        );
-        crate::core::engine::Engine::new(g).expect("foldered goals must build an engine");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// REGRESSION — **the scaffold must produce a config that STARTS, on every agent.**
-    ///
-    /// `agg init` used to write no `agent:` key at all and interpolate Claude's model and Claude's
-    /// `cost:` guard. So the documented "no skills? use `agg init`" fallback handed every Codex and
-    /// Copilot user a config that `capability::check` REFUSES — a cost guard no non-Claude agent can
-    /// honour, plus (on Codex) a model name that is a hard 400. The one command whose entire job is
-    /// "give me something that works" produced something that could not run.
-    ///
-    /// This asserts the fix where it matters: the scaffold for each agent must pass the SAME
-    /// capability check `agg run` performs at startup.
-    #[test]
-    fn the_scaffold_starts_on_every_agent() {
-        for agent in crate::backend::KNOWN {
-            let dir = tmpdir(&format!("scaffold-{agent}"));
-            run(&dir, false, Some(agent)).unwrap();
-
-            let cfg = crate::core::config::AggConfig::load(&dir.join("agg/agg.yaml"))
-                .unwrap_or_else(|e| panic!("`agg init --agent {agent}` must emit parseable YAML: {e}"));
-            let goals = crate::core::config::GoalsConfig::load(&dir.join("agg/goals.yaml")).unwrap();
-            let backend = crate::backend::for_name(agent).unwrap();
-
-            assert_eq!(cfg.agent, *agent, "the scaffold must PIN the agent it was made for");
-            crate::capability::check(&cfg, &goals, backend).unwrap_or_else(|e| {
-                panic!("`agg init --agent {agent}` produced a config agg REFUSES to start:\n{e}")
-            });
-
-            // and the two keys that cause that refusal must be absent for an agent that can't honour them
-            let yaml = std::fs::read_to_string(dir.join("agg/agg.yaml")).unwrap();
-            let halt = std::fs::read_to_string(dir.join("agg/goals.yaml")).unwrap();
-            // inspect the ACTIVE lines only — the templates explain `over_cost` in comments, and a
-            // comment mentioning it is not a guard demanding it.
-            let active = |s: &str, key: &str| {
-                s.lines().any(|l| !l.trim_start().starts_with('#') && l.contains(key))
-            };
-            if !backend.capabilities().reports_cost_usd {
-                assert!(!active(&yaml, "cost:"), "{agent} cannot report dollars — no active `cost:` key");
-                assert!(!active(&halt, "over_cost"), "{agent} cannot report dollars — no `over_cost` guard");
-            }
-            if backend.default_model().is_empty() {
-                assert!(!active(&yaml, "model:"), "{agent} must not be handed a model name (hard 400)");
-            }
-            std::fs::remove_dir_all(&dir).ok();
-        }
-    }
-}

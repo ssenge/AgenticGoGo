@@ -11,7 +11,7 @@
 //! and the live `now`/`think` fields populated mid-session.
 
 use crate::core::engine::Engine;
-use crate::core::model::{GoalType, Lifecycle};
+use crate::core::model::Lifecycle;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -112,34 +112,28 @@ impl DashboardState {
         crate::paths::state_json(dir)
     }
 
-    /// Snapshot the current goal set from the engine into goal views.
+    /// Snapshot the current judge set from the engine into goal views. Only the DoD-set judges are
+    /// shown as goals; a run-set-only judge (e.g. `stalled`) is machinery, not a goal.
     pub fn goals_from_engine(eng: &Engine, prev: &[GoalView]) -> Vec<GoalView> {
-        eng.goals
+        eng.judges
             .iter()
+            .filter(|g| g.in_dod)
             .map(|g| {
                 let value = g.last_verdict.as_ref().and_then(|v| v.value).unwrap_or(0.0);
-                let prev_value = prev.iter().find(|p| p.id == g.id).map(|p| p.value).unwrap_or(value);
-                let judge_kind = match &g.judge {
-                    crate::core::model::JudgeSpec::Script { .. } => "script".to_string(),
-                    // no `model:` = the ruler's own default, only known at judge time — say so
-                    // rather than invent a name the config never contained.
-                    crate::core::model::JudgeSpec::Llm { model, .. } => {
-                        format!("llm:{}", model.as_deref().unwrap_or("default"))
-                    }
-                };
+                let prev_value = prev.iter().find(|p| p.id == g.name).map(|p| p.value).unwrap_or(value);
                 GoalView {
-                    id: g.id.clone(),
-                    goal_type: type_str(g.goal_type),
+                    id: g.name.clone(),
+                    goal_type: g.type_str().to_string(),
                     state: state_str(g.state),
                     invariant: g.invariant,
                     value,
                     max: g.last_verdict.as_ref().and_then(|v| v.max).unwrap_or(1.0),
-                    target: g.target,
-                    weight: g.weight,
+                    target: g.last_verdict.as_ref().map(|v| v.target).unwrap_or(1.0),
+                    weight: 1.0,
                     delta: value - prev_value,
                     rationale: g.last_verdict.as_ref().map(|v| v.rationale.clone()).unwrap_or_default(),
-                    judge_kind,
-                    latched: g.latched,
+                    judge_kind: g.kind.tag().to_string(),
+                    latched: false,
                 }
             })
             .collect()
@@ -251,15 +245,6 @@ impl LiveState {
 
 use crate::util::now_epoch;
 
-fn type_str(t: GoalType) -> String {
-    match t {
-        GoalType::Binary => "binary",
-        GoalType::Percentage => "percentage",
-        GoalType::Cardinal => "cardinal",
-    }
-    .to_string()
-}
-
 fn state_str(s: Lifecycle) -> String {
     match s {
         Lifecycle::Pending => "pending",
@@ -296,6 +281,8 @@ pub enum Phase {
     Verify,
     Gate,
     Backoff,
+    /// a `skip_judges` step whose work is staged onto the span (§7.4).
+    Staging,
     Done,
     /// A stage name this build doesn't know — from a state.json written by another agg version.
     /// Held verbatim so it survives a read/write round-trip instead of being flattened.
@@ -312,6 +299,7 @@ impl Phase {
             Phase::Verify => "verify",
             Phase::Gate => "gate",
             Phase::Backoff => "backoff",
+            Phase::Staging => "staging",
             Phase::Done => "done",
             Phase::Other(s) => s,
         }
@@ -333,6 +321,7 @@ impl From<&str> for Phase {
             "verify" => Phase::Verify,
             "gate" => Phase::Gate,
             "backoff" => Phase::Backoff,
+            "staging" => Phase::Staging,
             "done" => Phase::Done,
             other => Phase::Other(other.to_string()),
         }

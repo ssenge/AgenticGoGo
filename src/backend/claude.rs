@@ -142,7 +142,14 @@ impl AgentBackend for Claude {
             command.current_dir(dir);
         }
         let out: Captured = proc::run_with_timeout(command, timeout_secs)?;
-        Ok(OneShot { body: unwrap_envelope(&out.stdout), stderr: out.stderr, success: out.success })
+        let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
+        Ok(OneShot {
+            body: unwrap_envelope(&out.stdout),
+            stderr: out.stderr,
+            success: out.success,
+            output_tokens,
+            cost_usd,
+        })
     }
 
     fn is_installed(&self) -> bool {

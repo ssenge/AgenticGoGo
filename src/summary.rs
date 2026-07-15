@@ -8,7 +8,7 @@
 //! near-verbatim clone of it, envelope-unwrap included. And like the judge, it runs on the RULER,
 //! which is handed in rather than read off a global (see `core::config::AggConfig::ruler_backend`).
 
-use crate::backend::AgentBackend;
+use crate::backend::{AgentBackend, Spend};
 use crate::core::engine::GoalDelta;
 use crate::util::last_json_object;
 use serde::Deserialize;
@@ -39,7 +39,7 @@ pub fn summarize(
     thoughts: &[String],
     deltas: &[GoalDelta],
     timeout_secs: u64,
-) -> Option<Summaries> {
+) -> Option<(Summaries, Spend)> {
     // keep input small + cheap: last ~30 thoughts, only changed deltas.
     let recent: Vec<&String> = thoughts.iter().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
     let thoughts_block = if recent.is_empty() {
@@ -85,8 +85,9 @@ pub fn summarize(
     // Best-effort: any failure (spawn/timeout) → None, never breaks the loop.
     let out = ruler.one_shot(&prompt, model, timeout_secs, None).ok()?;
 
+    let spend = Spend::from_one_shot(&out);
     let raw = parse_summaries(&out.body)?;
-    Some(Summaries { cumulative: raw.cumulative, windowed: raw.windowed })
+    Some((Summaries { cumulative: raw.cumulative, windowed: raw.windowed }, spend))
 }
 
 /// Extract the summaries JSON (tolerant: handles ```json fences / trailing prose).

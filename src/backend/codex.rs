@@ -263,10 +263,13 @@ impl AgentBackend for Codex {
             command.current_dir(dir);
         }
         let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
+        let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
         Ok(OneShot {
             body: last_agent_message(&out.stdout),
             stderr: out.stderr,
             success: out.success,
+            output_tokens,
+            cost_usd,
         })
     }
 
