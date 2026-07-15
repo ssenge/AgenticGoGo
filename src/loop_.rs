@@ -759,10 +759,19 @@ impl LoopState<'_> {
         if !skip {
             match &staged {
                 Some((br, crate::git::StagedSession::Staged)) => {
-                    // the regression gate: a judge MET before (durable, §5.7) that now fails.
+                    // the regression gate: a DoD-set judge MET before (durable, §5.7) that now fails.
+                    // Scope to the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs
+                    // `in_scope` → `g.in_dod`). A run-set-only control judge like `stalled` is DESIGNED
+                    // to flip met→unmet — that flip is the very signal that fired `reconsider` — so
+                    // counting its flip as a regression would roll back the work that escaped the stall
+                    // (and, because rolled-back rows never land, livelock the loop). §5.7 protects the
+                    // DoD-set; a judge named only in an `if` condition is not in it.
                     let landed = crate::core::verdicts::landed_met(self.dir);
                     let regressed = res.fresh_verdicts.iter().any(|(id, v)| {
-                        v.error.is_none() && !v.met && landed.get(id).copied().unwrap_or(false)
+                        self.eng.judges.iter().any(|g| g.in_dod && &g.name == id)
+                            && v.error.is_none()
+                            && !v.met
+                            && landed.get(id).copied().unwrap_or(false)
                     });
                     let keep = if self.gate_regressions { !regressed } else { true };
                     crate::git::finalize_session(self.dir, br, self.session, keep);
