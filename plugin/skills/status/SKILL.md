@@ -39,7 +39,7 @@ Summarize from the state JSON:
 - **Current step**: which step is running, and its **agent + model** (a mixed sequence runs
   different agents at different steps — say which one is live).
 - **Run health**: current `session`, `phase`, `idle_secs` (flag if ≥240 = possible stall),
-  `tokens_spent` vs the `budget.total` ceiling, `up_secs`. Note the **per-agent** token/cost
+  `tokens_spent` vs the `sequence.limits.tokens` ceiling, `up_secs`. Note the **per-agent** token/cost
   breakdown if present — a mixed run's single total is otherwise uninterpretable.
 - **Latest progress**: the `summary_cumulative` (story so far) and `summary_windowed`
   (last cycle) lines, plus the live `now`/`think` activity.

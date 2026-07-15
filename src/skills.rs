@@ -148,6 +148,36 @@ pub fn installed(agent: &str, dir: &Path, user: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// The skills are `include_str!`'d into the binary, so stale content compiles cleanly and the
+    /// green build never notices — that already shipped a `/agg:new` scaffold generating retired
+    /// keys, and prose references (e.g. a `status` skill citing `budget.total`) slipped past several
+    /// hand sweeps. The scaffold-parse guard (config.rs) covers the config block; this covers the
+    /// PROSE. Every token here is unambiguously retired and has no live homonym (`over_budget`,
+    /// `--max-sessions`, and the `budget_total` state.json field do NOT match these patterns).
+    #[test]
+    fn no_skill_body_mentions_a_retired_config_key() {
+        const RETIRED: &[&str] = &[
+            "stop_when",       // → done_if
+            "halt_when",       // → abort_if
+            "budget.total",    // → sequence.limits.tokens
+            "cost.total",      // → sequence.limits.cost
+            "sequence.budget", // → sequence.limits
+            "sequence.cost",   // → sequence.limits
+            "max_sessions:",   // → sequence.limits.sessions (the --max-sessions FLAG survives)
+            // NB: `goals.yaml` is deliberately NOT here — the skills legitimately say "there is no
+            // goals.yaml", which is correct prose, not a stale reference.
+        ];
+        for (name, body) in SKILLS {
+            for tok in RETIRED {
+                assert!(
+                    !body.contains(tok),
+                    "skill `{name}` mentions the retired `{tok}` — the SEQUENCES rewrite renamed it; \
+                     update plugin/skills/*/SKILL.md (this skill ships inside the binary)"
+                );
+            }
+        }
+    }
+
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("agg-skills-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
