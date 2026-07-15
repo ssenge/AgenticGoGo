@@ -1513,3 +1513,88 @@ exit 0
         "`if stalled then reconsider` must fire once stalled evaluates met:\n{combined}"
     );
 }
+
+/// FLAGSHIP CIRCUIT-BREAKER, end-to-end: the BUILTIN `stalled` judge — the one that ships inside the
+/// binary and reads `agg/state/verdicts.jsonl` (met when, across the last K=3 MERGED steps, no binary
+/// judge changed `met` and no numeric judge changed `value`) — must actually flip to met on a
+/// no-progress run and fire `if stalled then reconsider`. Unlike `…fires_its_branch` above (which
+/// FAKES `stalled` with a `.signal` file), this writes NO `agg/judges/stalled.sh`: it exercises the
+/// real library judge resolved from `~/.agg/judges/` (installed by `ensure_library`), driven purely
+/// by the verdict history the loop records.
+///
+/// Setup: `done_if: feature`, and `feature` is NEVER met and constant → flat across every merged
+/// step. The fake worker COMMITS a unique no-op line each session (so worker steps MERGE — stalled
+/// counts only merged rows) while touching nothing any judge reads, and records every `-p` prompt to
+/// an UNTRACKED file (survives all branch churn). After 3 flat merged worker steps the builtin
+/// `stalled` flips to met, so `if stalled then reconsider` dispatches `reconsider`, whose injected
+/// marker prompt reaches the worker — that marker's presence PROVES the mechanism fired.
+#[test]
+fn the_builtin_stalled_judge_fires_reconsider_on_a_no_progress_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // The fake worker: (1) records every `-p` prompt to prompts.txt — left UNTRACKED so it survives
+    // session branch resets and accumulates the reconsider marker; (2) commits a UNIQUE no-op line
+    // per session to a TRACKED file so the worker step MERGES (the builtin stalled counts only
+    // `merged` verdict rows) while moving NO judge's met/value. `agg/state/` is auto-gitignored by
+    // agg, so the verdicts.jsonl stalled reads is never committed or clobbered.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s\n===8<===\n' "$a" >> prompts.txt; prev="$a"; done
+n=$(cat noop.txt 2>/dev/null | wc -l | tr -d ' ')
+printf 'noop %s\n' "$n" >> noop.txt
+git add noop.txt >/dev/null 2>&1
+git commit -qm "worker noop-$n" >/dev/null 2>&1
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    // `feature` (the DoD) is NEVER met and CONSTANT — flat across every merged step, so the builtin
+    // stalled sees no movement. It is the ONLY non-`stalled` judge in the run-set (stalled ignores
+    // its own rows), so nothing masks the stall.
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    // NB: deliberately NO agg/judges/stalled.sh — `stalled` must resolve to the shipped library judge.
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: stallfire\ndefaults: { model: fake }\n\
+         steps:\n  worker: {}\n  reconsider: { skip_judges: true, prompt: \"RECONSIDER_FIRED_MARKER\" }\n\
+         sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  done_if: \"feature\"\n\
+         summary: { enabled: false }\nmemory: { enabled: false }\n",
+    );
+    write(dir, "agg/AGG_STATE.md", "do work\n");
+    git_init(dir);
+
+    // feature never met + no abort_if → the ONLY terminator is the session cap (exit 4). 8 is ample:
+    // stalled fires during session 4's verify (it then sees 3 flat merged steps), so reconsider is
+    // dispatched at session 5.
+    let out = agg(dir, &path).args(["run", "--max-sessions", "8"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined);
+
+    // guard the SETUP: no project shadow may exist — the BUILTIN is the judge under test.
+    assert!(
+        !dir.join("agg/judges/stalled.sh").exists(),
+        "this test must exercise the builtin stalled judge, not a project shadow"
+    );
+    // THE proof: the builtin stalled→reconsider circuit-breaker fired. reconsider's injected marker
+    // reached the worker, which only happens if `if stalled then reconsider` took its branch.
+    let prompts = fs::read_to_string(dir.join("prompts.txt")).unwrap_or_default();
+    assert!(
+        prompts.contains("RECONSIDER_FIRED_MARKER"),
+        "the builtin `stalled` must flip to met after K=3 merged no-progress steps and fire \
+         `if stalled then reconsider` — its marker prompt never reached the worker:\n{combined}"
+    );
+    // …and the loop actually dispatched the reconsider STEP (the session banner names it).
+    assert!(
+        combined.contains("`reconsider`"),
+        "the loop must dispatch the reconsider step, not merely evaluate the condition:\n{combined}"
+    );
+}

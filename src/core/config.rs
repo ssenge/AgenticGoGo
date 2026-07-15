@@ -520,6 +520,88 @@ mod tests {
             .expect("`limits` under `sequence:` is the unified home and must parse");
     }
 
+    /// Extract the bodies of every ```` ```yaml ```` fenced block from a markdown string (the fence
+    /// line itself is dropped). Used to pull the config scaffold out of an embedded SKILL.md.
+    fn fenced_yaml_blocks(md: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = md;
+        while let Some(i) = rest.find("```yaml") {
+            let after = &rest[i + "```yaml".len()..];
+            // the body starts after the rest of the opening-fence line.
+            let Some(nl) = after.find('\n') else { break };
+            let body = &after[nl + 1..];
+            let Some(end) = body.find("```") else { break };
+            out.push(body[..end].to_string());
+            rest = &body[end + 3..];
+        }
+        out
+    }
+
+    /// REGRESSION (the guard that would have caught the shipped bug): the `/agg:new` scaffold that
+    /// the binary EMBEDS must still parse as a CURRENT config. The `/agg:*` skills are
+    /// `include_str!`'d into the binary as string LITERALS (`crate::skills::SKILLS`), so a stale
+    /// scaffold compiles cleanly — the green build does NOT catch a scaffold whose generated config
+    /// is invalid. That gap already shipped one real bug: the scaffold emitted `budget:`/
+    /// `max_sessions:` configs that now HARD-ERROR under `deny_unknown_fields`.
+    ///
+    /// This reads the SAME embedded body the binary installs (NOT a fresh file read), extracts the
+    /// `agg.yaml` scaffold block, fills its human placeholders with concrete VALID values, and
+    /// asserts it parses through the REAL config parser. If the scaffold ever reintroduces a retired
+    /// key (budget / cost / max_sessions / stop_when / halt_when / goals), `deny_unknown_fields`
+    /// rejects it and this test FAILS — which is the whole point. (We use the real parse, as
+    /// preferred over a substring assertion: a substring check for `cost:` would false-positive on
+    /// the scaffold's own `# cost:` comment line, whereas the parser ignores comments and rejects
+    /// only a live retired key.)
+    #[test]
+    fn the_embedded_new_scaffold_parses_as_a_current_config() {
+        // the SAME include_str! body the binary ships — guard what actually installs.
+        let (_, new_skill) = crate::skills::SKILLS
+            .iter()
+            .find(|(name, _)| *name == "agg-new")
+            .expect("the agg-new skill must be embedded in SKILLS");
+
+        // the scaffold is the fenced yaml block carrying the whole config: sequence.limits + done_if.
+        let scaffold = fenced_yaml_blocks(new_skill)
+            .into_iter()
+            .find(|b| b.contains("sequence:") && b.contains("limits:") && b.contains("done_if"))
+            .expect("the /agg:new scaffold (a ```yaml block with sequence.limits + done_if) must be present");
+
+        // fill the human placeholders with concrete VALID values (an agent / a number / a judge name).
+        let filled = scaffold
+            .replace("<name>", "p")
+            .replace("<claude|codex|copilot>", "claude")
+            .replace("<int or null>", "100")
+            .replace("<judge names that must STAY met>", "all_tests_pass")
+            .replace("<expression over judge names>", "all_tests_pass")
+            .replace("<ceiling expression>", "over_iterations");
+
+        // any `<…>` left on a NON-comment line means the scaffold grew a placeholder this test does
+        // not fill — fail loudly here rather than let serde emit something cryptic.
+        for line in filled.lines() {
+            let code = line.split('#').next().unwrap_or("");
+            assert!(
+                !code.contains('<'),
+                "unfilled placeholder on a live scaffold line — add a substitution to this test:\n  {line}"
+            );
+        }
+
+        // THE assertion: the filled scaffold parses through the real deny_unknown_fields parser. A
+        // retired key anywhere in it makes this fail.
+        let cfg = parse(&filled).unwrap_or_else(|e| {
+            panic!("the /agg:new scaffold must parse as a current AggConfig, got:\n{e}\n--- filled scaffold ---\n{filled}")
+        });
+
+        // …and it is the CURRENT shape, not a coincidental parse: the unified ceiling home + the
+        // renamed Definition-of-Done keys are the ones a retired-key reversion would break.
+        assert_eq!(cfg.sequence.limits.tokens, Some(100), "sequence.limits.tokens is the unified token-ceiling home");
+        assert_eq!(cfg.sequence.done_if, "all_tests_pass", "done_if (the rename of stop_when) must carry the scaffold's DoD");
+        assert_eq!(
+            cfg.sequence.abort_if.as_deref(),
+            Some("over_iterations"),
+            "abort_if (the rename of halt_when) must be present in the scaffold"
+        );
+    }
+
     /// §4.1: the RULER block is immutable; naming any `judge*` key (or any non-[`StepBody`] key) in a
     /// step body is a HARD ERROR — a grader that moves makes verdicts incomparable across cycles.
     #[test]
