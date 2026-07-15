@@ -143,20 +143,20 @@ way it turns *your* DoD into config. Point it at a spec you already have (a PRD,
 > `/agg:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes
 
 It reads that plus your code, shows the `agg/agg.yaml` it proposes, and lets you edit before writing.
-There is **no `goals.yaml`** — a judge IS a goal, resolved by name from `agg/judges/`. The config the
-skill writes might look like:
+Each judge is a small file in `agg/judges/` named for the check it makes — a judge that passes IS a
+met goal. The config the skill writes might look like:
 
 ```yaml
 # agg/agg.yaml — the whole config: defaults / judge / steps / sequence
-project: calc
+project: "calc"
 
 defaults:
-  agent: claude                    # claude (default) · codex · copilot — see "Choosing an agent"
+  agent: "claude"                  # claude (default) · codex · copilot — see "Choosing an agent"
   model: "claude-opus-4-8[1m]"     # claude only. On codex: OMIT this line. On copilot: `auto`.
   state: "AGG_STATE.md"            # the standing instructions each fresh session reads
 
 judge:                             # THE RULER — runs LLM judges + the summarizer
-  agent: claude
+  agent: "claude"
   model: "claude-haiku-4-5-20251001"   # a cheap model grades; the worker stays on Opus
   timeout: 300
 
@@ -165,7 +165,7 @@ steps:
 
 sequence:
   steps:
-    - worker                       # run `worker`, forever, until done_if fires
+    - "worker"                     # run `worker`, forever, until done_if fires
   done_if: "outputs_two AND tests_pass"        # your Definition of Done — a boolean over judge names
   abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
 ```
@@ -242,7 +242,7 @@ The supervisor reads only `agg/state/state.json` — the small scoreboard snapsh
 ```yaml
 # agg/agg.yaml
 defaults:
-  agent: claude     # claude (default) · codex · copilot — the worker default
+  agent: "claude"   # claude (default) · codex · copilot — the worker default
 ```
 Supported features:
 
@@ -270,69 +270,17 @@ Supported features:
   `sequence.limits.tokens` (tokens), which works everywhere. Copilot can also cap itself:
   `worker_args: ["--max-ai-credits", "50"]`.
 
-### Setting up on Codex or Copilot
-
-The `/agg:*` skills work on **all three agents**, by two routes.
-
-**Route 1 — the plugin marketplace** (see [Quick start](#quick-start)). Codex and Copilot both have one, and
-both consume the *same* manifest Claude does, so there is one plugin, not three.
-
-**Route 2 — install into the project**, with the binary you already have:
-
-```bash
-agg skills install --agent codex   # claude | codex | copilot
-agg skills install --user          # …for your whole account instead of just this project
-
-# --agent is optional once agg.yaml exists (it reads the `agent:` key), and inside an agent's own
-# shell agg detects which one you are in. Otherwise name it — the install directory differs per
-# agent, so a wrong guess puts the skills where that agent will never look.
-```
-
-That copies the three skills — `agg-new`, `agg-status`, `agg-supervise` — into the directory your
-agent actually reads. (Note the namespace differs by route: the `agg:` in `/agg:new` comes from the
-plugin, so via this installer Claude gives you `/agg-new`.) The directory differs, which is the only reason this is a command and not a `cp`:
+**Where `agg skills install` puts the skills.** Both routes — the plugin marketplace (see
+[Quick start](#quick-start)) and `agg skills install` — work on all three agents. The *only* per-agent
+difference is the install directory, which is why the latter is a command and not a `cp`:
 
 | agent | project install | `--user` install |
 |---|---|---|
 | Claude Code | `.claude/skills/` | `~/.claude/skills/` |
-| OpenAI Codex | `.agents/skills/` | `~/.agents/skills/` |
-| GitHub Copilot | `.agents/skills/` | `~/.agents/skills/` |
+| OpenAI Codex · GitHub Copilot | `.agents/skills/` | `~/.agents/skills/` |
 
-`.agents/` is the emerging agent-neutral convention, and Codex and Copilot both honour it — so one
-directory serves both. Claude reads neither, hence two.
-
-**How you invoke them differs per agent** — and the prefix is not the same:
-
-| agent | invoke it with | |
-|---|---|---|
-| Claude Code | `/agg:new` `/agg:status` `/agg:supervise` | `/agg-new` etc. if installed via `agg skills install` — the `agg:` namespace comes from the plugin |
-| GitHub Copilot | `/agg-new` `/agg-status` `/agg-supervise` | every skill is a slash command |
-| OpenAI Codex | **`$agg-new`** `$agg-status` `$agg-supervise` | Codex uses `$`, not `/` — `/agg-new` is *"Unrecognized command"*. `/skills` opens a picker. |
-
-**Or just ask, on any of them** — every agent also selects a skill by matching your request against
-its `description:`, and that is the only route that works headlessly:
-
-```
-set up AgenticGoGo for this project     → agg-new
-how is the agg loop doing?              → agg-status
-supervise the running agg loop          → agg-supervise
-```
-
-Then:
-
-```bash
-agg doctor     # checks the agent, that it can do what your config asks, and that the skills landed
-agg run
-```
-
-`agg doctor` is the one to trust: agents are **not** interchangeable (no cost guard on Codex or
-Copilot — see [Choosing an agent](#choosing-an-agent)), and `/agg:new` writes a config shaped for the agent you
-chose. If doctor is green, `agg run` will start.
-
-**No skills at all?** `agg init --agent codex` still scaffolds `agg/agg.yaml`, `agg/AGG_STATE.md`
-and a starter judge under `agg/judges/` — shaped for that agent (it omits the keys your agent cannot
-honour, so the result starts).</br> It is the fallback, not the recommended path — `/agg:new` reads your existing
-plans and derives judges from them; `agg init` just writes a template.
+Codex and Copilot both honour the agent-neutral `.agents/` convention, so one directory serves both;
+Claude reads neither.
 
 ## Features
 
@@ -462,7 +410,7 @@ is a repeating list of statements over those steps:
 steps:
   worker: {}                       # pure defaults — the grunt worker
   reconsider:
-    agent: codex                   # a DIFFERENT vendor — the perspective diversity is the point
+    agent: "codex"                 # a DIFFERENT vendor — the perspective diversity is the point
                                    # (no model: — Codex picks its own; naming one is a hard 400)
     prompt: >
       Assume the current approach is wrong. Name 2-3 fundamentally different approaches,
@@ -471,8 +419,8 @@ steps:
 
 sequence:
   steps:
-    - worker x4                    # four grunt sessions…
-    - if stalled then reconsider   # …then, only if progress has flat-lined, step back on Codex
+    - "worker x4"                  # four grunt sessions…
+    - "if stalled then reconsider" # …then, only if progress has flat-lined, step back on Codex
 ```
 
 The statement grammar is tiny: `NAME`, `NAME xN`, and `if <expr> then NAME [else NAME]` (the `<expr>`
@@ -575,7 +523,7 @@ cd src/web && npm install && npm run dev   # the web UI on :5173
 ## CLI reference
 
 Global flags, valid on every subcommand: `--dir <path>` (project root, default `.`),
-`--config <file>` (default `<dir>/agg/agg.yaml`). There is no `--goals` flag — `goals.yaml` is gone.
+`--config <file>` (default `<dir>/agg/agg.yaml`).
 
 | Command | What it does | Flags |
 |---|---|---|

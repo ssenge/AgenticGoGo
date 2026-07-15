@@ -1,17 +1,17 @@
 # agg.yaml — harness + steps + sequence, all in one file. A judge IS a goal, resolved by NAME
-# from agg/judges/<name>.{sh,md} (then ~/.agg/judges/). There is no goals.yaml.
-project: hello-agg
+# from agg/judges/<name>.{sh,md} (then ~/.agg/judges/).
+project: "hello-agg"
 
 # Inherited by EVERY step; a step body may override any of these.
 defaults:
-  agent: claude                    # swap to `codex` or `copilot` — see "Run it on another agent"
-  model: claude-haiku-4-5-20251001 # haiku — costs next to nothing to try
-  state: "AGG_STATE.md"            # the standing instructions each fresh worker reads
+  agent: "claude"                    # swap to `codex` or `copilot` — see "Run it on another agent"
+  model: "claude-haiku-4-5-20251001" # haiku — costs next to nothing to try
+  state: "AGG_STATE.md"              # the standing instructions each fresh worker reads
 
 # THE RULER — runs the LLM judges + the summarizer. Immutable across the run.
 judge:
-  agent: claude
-  model: claude-haiku-4-5-20251001
+  agent: "claude"
+  model: "claude-haiku-4-5-20251001"
   timeout: 300                     # seconds, EVERY judge (script + LLM)
 
 # The step palette. The NAME is your own label; the body is overrides only.
@@ -21,6 +21,6 @@ steps:
 # The repeating sequence + the run-level Definition of Done.
 sequence:
   steps:
-    - worker                       # run `worker`, forever, until done_if fires
+    - "worker"                     # run `worker`, forever, until done_if fires
   done_if: "prints_two"            # your Definition of Done: the `prints_two` judge is met
   abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
