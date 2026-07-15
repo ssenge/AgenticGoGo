@@ -1,26 +1,31 @@
 ---
 name: agg-new
-description: Set up AgenticGoGo for the current project — read existing plans, then generate goals.yaml, agg.yaml, and AGG_RESUME.md so `agg run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
+description: Set up AgenticGoGo for the current project — read existing plans, then generate agg/agg.yaml (defaults/judge/steps/sequence), the judge files under agg/judges/, and agg/AGG_STATE.md so `agg run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
 disable-model-invocation: false
 ---
 
 # /agg:new — set up an AgenticGoGo loop for this project
 
-You are setting up **AgenticGoGo** (`agg`): a loop that runs fresh headless agent workers
-until **goal-based stop conditions** are met. Your job in this skill is to turn
-whatever planning material already exists into three files the loop reads:
+You are setting up **AgenticGoGo** (`agg`): a loop that runs fresh headless agent workers until a
+**Definition of Done** — expressed as judges — is met. Your job in this skill is to turn whatever
+planning material already exists into the files the loop reads, all under the mandatory `agg/` folder:
 
-- `goals.yaml` — the goals, their judges, and the stop condition
-- `agg.yaml` — loop config (agent, model, heartbeat, watchdog, budget, summaries)
-- `AGG_RESUME.md` — the "fat" resume prompt fed to every worker session
+- `agg/agg.yaml` — the whole config: `defaults` / `judge` / `steps` / `sequence`
+- `agg/judges/<name>.sh` (a script judge) or `agg/judges/<name>.md` (an LLM rubric judge) — one per
+  clause of the Definition of Done. **A judge IS a goal.** There is no `goals.yaml`.
+- `agg/AGG_STATE.md` — the standing instructions fed to every worker session
 
-**Core principle: do NOT replicate spec tooling.** Read what's already there and *translate*
-it into goals. Only ask the user for what's genuinely missing.
+**Core principle: do NOT replicate spec tooling.** Read what's already there and *translate* it into
+judges. Only ask the user for what's genuinely missing.
 
-`agg` can drive **Claude Code, OpenAI Codex, or GitHub Copilot** — chosen by the `agent:` key you
-write into `agg.yaml`. They are **not interchangeable**, and `agg` REFUSES to start a run whose
-config asks for something the chosen agent cannot do. **Step 0 is therefore not optional: get the
-agent right, or the config you generate will not start.**
+**The model in one sentence: your judges ARE the gate — your Definition of Done, made executable.**
+Each judge decides one clause; `done_if` composes them into "done"; agg runs the judges, never the
+worker, so the loop cannot fake its own completion.
+
+`agg` can drive **Claude Code, OpenAI Codex, or GitHub Copilot** — chosen by the `agent:` keys you
+write into `agg.yaml`. They are **not interchangeable**, and `agg` REFUSES to start a run whose config
+asks for something the chosen agent cannot do. **Step 0 is therefore not optional: get the agent
+right, or the config you generate will not start.**
 
 ---
 
@@ -53,27 +58,29 @@ claude --version; codex --version; copilot --version
 the one Step 0a printed — but they are independent choices (you can drive Codex from Claude Code),
 so let the user override. **If 0a printed `UNKNOWN`, ASK. Never assume.**
 
-Write the answer as `agent: claude|codex|copilot` in `agg.yaml`. Then obey the matrix below.
+Write the worker default as `defaults.agent: claude|codex|copilot` in `agg.yaml`. Then obey the
+matrix below.
 
 ### The capability matrix — VERIFIED, do not re-derive
 
 | | claude | codex | copilot |
 |---|---|---|---|
 | script judges | ✅ | ✅ | ✅ |
-| LLM judges (`judge: {kind: llm}`) | ✅ | ✅ | ✅ |
+| LLM judges (an `.md` rubric judge) | ✅ | ✅ | ✅ |
 | summaries (`summary.enabled`) | ✅ | ✅ | ✅ |
-| token budget (`budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
-| session resume (`resume_sessions`) | ✅ | ✅ | ✅ |
+| token budget (`sequence.budget.total`, `over_budget`) | ✅ | ✅ | ✅ |
 | thinking effort (`effort:`) | ✅ | ✅ (clamps `max`→`high`) | ⚠️ **not with `model: auto`** |
 | rate-limit backoff | ✅ | ✅ | ❌ |
-| **dollar cost (`cost.total`, `over_cost`)** | ✅ | ❌ | ❌ |
+| **dollar cost (`sequence.cost.total`, `over_cost`)** | ✅ | ❌ | ❌ |
 
 ### Four hard rules. Break one and the config you write CANNOT START.
 
-1. **`cost.total` and `halt_when: over_cost` are CLAUDE-ONLY.** Codex and Copilot cannot price a
-   session in dollars, so `agg` refuses the config outright rather than let a spend guard silently
-   never fire. For codex/copilot use **`budget.total` (output tokens)** instead — it works on all
-   three. (Copilot can additionally cap itself with `--max-ai-credits <n>` via `worker_args`.)
+1. **`sequence.cost.total` and `abort_if: over_cost` are CLAUDE-ONLY.** Codex and Copilot cannot
+   price a session in dollars, so `agg` refuses the config outright rather than let a spend guard
+   silently never fire. **This is checked per step:** even one `agent: codex` step in an otherwise
+   Claude sequence makes a `cost:` guard uncoverable — use **`sequence.budget.total` (output
+   tokens)** instead, which works on all three. (Copilot can additionally cap itself with
+   `--max-ai-credits <n>` via `worker_args`.)
 2. **Codex: OMIT `model:` entirely** unless the user explicitly names one. Guessing (e.g.
    `gpt-5-codex`) is a hard 400 — *"not supported when using Codex with a ChatGPT account"*. Which
    models exist depends on how the user authenticated, so let `agg` pick its default.
@@ -82,8 +89,8 @@ Write the answer as `agent: claude|codex|copilot` in `agg.yaml`. Then obey the m
    instantly having spent 0 tokens. Use `model: auto` with **no** `effort:` (the default), or name a
    concrete model if the user really wants an effort level.
    Claude: `model: "claude-opus-4-8[1m]"` is the default.
-4. **Finish by running `agg doctor`** (Step 7). It re-checks every rule above against the real
-   backend. It is a free correctness check — if it passes, the config starts.
+4. **Finish by running `agg doctor`** (Step 7). It re-checks every rule above against **every agent
+   the sequence names**. It is a free correctness check — if it passes, the config starts.
 
 > ⚠️ **The failure this ordering exists to prevent:** an early version of this skill said "default
 > to the agent you are running in", and Copilot — unable to introspect its own identity — wrote
@@ -106,96 +113,153 @@ If **engram** is available, run `mem_search` for the project to recover prior co
 If you find NOTHING actionable (empty/new repo), go to Step 5 and ask the user to describe
 the goal in a few targeted questions — but prefer inference whenever material exists.
 
-## Step 2 — Derive goals
+## Step 2 — Derive the judges (each is one clause of "done")
 
-From the plans, derive a small set of **concrete, checkable goals** (aim for 3–8). For each:
+From the plans, derive a small set of **concrete, checkable judges** (aim for 3–8). Each judge is a
+single clause of the Definition of Done. For each, decide:
 
-- **id**: short snake_case (e.g. `tests_pass`, `modules_migrated`, `api_documented`)
-- **type**: one of
-  - `binary` — done yes/no (e.g. "all tests pass")
-  - `percentage` — a 0–100 measure vs a target (e.g. "≥90% coverage")
-  - `cardinal` — N of M (e.g. "18 of 28 problems solved")
-- **target**: the threshold to be "met"
-- **description**: one line, human-readable
+- **name**: short snake_case (e.g. `tests_pass`, `modules_migrated`, `api_documented`). **This name
+  IS the filename** and how `done_if` refers to it — `tests_pass` → `agg/judges/tests_pass.sh`.
+- **kind**: `script` (a `.sh` file) when the check is mechanical, or `llm` (a `.md` rubric file) when
+  it's qualitative. **The file extension decides** — there is no `kind:` tag any more.
+- **the check**: for a script, the command that decides met/not-met; for a rubric, the criteria.
+- **numeric or binary**: if it should show partial progress (`18/28`, `82%`), have the script emit
+  `value`/`max`/`target` in its verdict. A judge that emits no `value` is treated as binary.
 
-Mark any **soundness/invariant** goal with `invariant: true` (things that must STAY true —
-"never break the build", "no wrong results"). These can guard the loop via `halt_when`.
+Mark any **soundness/invariant** judge (things that must STAY true — "never break the build", "no
+wrong results") for the `invariants:` list you'll write in Step 4 — not with a per-judge flag.
 
-**Set a `recheck` policy to avoid re-judging finished goals** (saves tokens, esp. with LLM
-judges). Default is `always` (re-judge every cycle — REQUIRED for invariants). For a goal
-whose status can't change once achieved (a written doc, a completed study), use
-`recheck: once_met` — it latches after first met and its judge never runs again. For a goal
-gated on a specific artifact, use `recheck: on_change` with `recheck_inputs: [files]` — it
-re-judges only when those files change. (agg rejects `once_met` on an invariant.)
+**There is no `recheck:` any more.** Every judge in the run-set runs after every step. To skip
+judging on a purely-exploratory step, that STEP sets `skip_judges: true` (Step 4.5) — the lever is
+per-step, not per-judge.
 
-## Step 3 — Pick a judge per goal
+## Step 3 — Write the judge files
 
-Every goal needs a **judge** that emits a verdict JSON:
+Every judge is a **file whose name is the judge name**, emitting a verdict JSON to stdout:
 `{"met": <bool>, "value": <num>, "max": <num>, "target": <num>, "rationale": "<one line>"}`
+Only `met` is required. `agg` reads the **last** JSON object on stdout, so a judge can log freely.
 
-Two kinds:
+Two kinds, chosen by extension:
 
-- **`script`** (preferred when measurable) — a command whose stdout is the verdict JSON.
-  Suggest a real command for THIS project (a test runner, a benchmark, a coverage tool, a
-  grep-count). If the project has such a command, write a tiny wrapper script under
-  `judges/` that runs it and prints the verdict JSON. Example:
-  ```yaml
-  judge:
-    kind: script
-    cmd: "./judges/tests.sh"
-    timeout: 300
+- **script → `agg/judges/<name>.sh`** (preferred when measurable). Its stdout is the verdict JSON.
+  It runs **from the project root**, with cwd = project root and these env vars set: `AGG_SESSION`,
+  `AGG_STEP`, `AGG_JUDGE`, `AGG_PROJECT_DIR`. Suggest a real command for THIS project (a test runner,
+  a benchmark, a coverage tool, a grep-count) and wrap it:
+  ```bash
+  #!/usr/bin/env bash
+  # agg/judges/tests_pass.sh
+  out="$(pytest -q 2>&1)"
+  passed=$(printf '%s' "$out" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo 0)
+  failed=$(printf '%s' "$out" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo 0)
+  total=$(( passed + failed ))
+  met=$([ "$failed" -eq 0 ] && [ "$total" -gt 0 ] && echo true || echo false)
+  printf '{"met":%s,"value":%s,"max":%s,"target":%s,"rationale":"%s/%s pass"}\n' \
+    "$met" "$passed" "$total" "$total" "$passed" "$total"
   ```
-- **`llm`** (for qualitative goals) — a tools-off one-shot model call with a **rubric** that scores
-  artifacts. Works on **all three agents**. Generate a rubric file under `rubrics/<id>.md` with
-  explicit criteria ending in the required line:
-  *"Output ONLY the verdict JSON: {met, value, max, target, rationale}."*
-  ```yaml
-  judge:
-    kind: llm
-    model: haiku          # claude: haiku · copilot: auto · codex: OMIT this line
-    rubric: "rubrics/<id>.md"
-    inputs: ["diff", "log:logs/test.out", "src/main.rs"]
-    timeout: 120
+  `chmod +x` it. A judge that exits non-zero but prints a valid verdict is still accepted.
+- **llm → `agg/judges/<name>.md`** (for qualitative goals) — **the file IS the rubric.** It declares
+  the files it reads in its own YAML **frontmatter**, and its body is the grading criteria. It runs
+  tools-off on the RULER (the `judge:` block), so a repo file can't talk the judge into a pass.
+  ```markdown
+  ---
+  inputs: ["diff", "log:logs/test.out", "src/main.rs"]
+  ---
+  Grade the artifact against these criteria: …
+
+  Output ONLY the verdict JSON on the last line:
+  {"met": <bool>, "value": <0..1>, "max": 1, "target": 1, "rationale": "<one line>"}
   ```
-  The `model:` here follows **the same rule as Step 0**: a cheap model on Claude (`haiku`), `auto`
-  on Copilot, and **omitted entirely on Codex** (naming one is a hard 400).
   Valid `inputs` tokens: `"diff"`, `"diff:<rev>"`, `"status"`, `"log:<path>"` (tail), or a file path.
+  The LLM judge's model comes from the **`judge:` block** (Step 6), not the rubric — so it is set once
+  for the whole run, on the RULER. (Nothing model-specific goes in the `.md`.)
 
-## Step 4 — Choose the stop condition
+**Reuse the standard library.** A set of parameterless judges ships inside the binary and installs to
+`~/.agg/judges/`: `cargo_test`, `build_ok`, `lint_clean`, `git_clean`, `no_regression`, `stalled`,
+`cmd_exit`, `grep_count`. If one fits, just name it in `done_if` — no file needed. To customise it,
+copy it into `agg/judges/<name>.sh` (a project file shadows the library by name). Anything needing an
+argument is a three-line project script.
 
-`stop_when` is a whitelisted expression over goals (NOT arbitrary code). Available terms:
-goal ids (→ their met bool), `all_goals`, `count_met`, `total`, `met_fraction`,
-`weighted_fraction`, `any_regressed(invariants)`, `wall_hours`, and three **ceiling guards**:
-- `over_budget` — output **tokens** exceed `budget.total` (agg.yaml). **Works on all three agents.**
-- `over_cost` — **dollars** exceed `cost.total` (agg.yaml). **CLAUDE ONLY** — only Claude reports a
-  price. Emitting this for codex/copilot makes the config refuse to start (Step 0, rule 1).
-- `over_iterations` — **sessions** reach the `--max-sessions` cap
+## Step 4 — Compose the Definition of Done (`done_if`, `abort_if`, `invariants`)
 
-- Default: `stop_when: "all_goals"`
-- Statistical: `stop_when: "met_fraction >= 0.75"` or `"count_met >= 3"`
-- Boolean: `stop_when: "goal_a OR goal_b"`
+These live under `sequence:` (Step 6). All use the same whitelisted expression grammar over judge
+**names** (NOT arbitrary code):
 
-Add a **`halt_when`** guard if there are invariants or you want a ceiling brake. The ceilings
-OR together — the loop halts the moment ANY one trips:
+- **`done_if`** — the success condition (exit 0). This IS your Definition of Done. A **bare judge
+  name** is its `met` bool; compose with `AND`/`OR`/`NOT` and parentheses. Aggregates: `all_goals`,
+  `count_met`, `total`, `met_fraction`. Default: `all_goals`.
+  - **Numeric thresholds use the dotted accessor** — `coverage.value >= 80`, NOT `coverage >= 80`.
+    A bare name is a bool; comparing a bool to a number is a **hard error at startup** (agg tells you
+    to use the accessor). `.value` and `.max` are the accessors; `.target` is presentational only.
+  - Examples: `"tests_pass"` · `"tests_pass AND coverage.value >= 80"` · `"met_fraction >= 0.75"` ·
+    `"count_met >= 3"`.
+- **`abort_if`** — the giving-up guard (exit 3). NOT part of the DoD — a ceiling, not a definition of
+  done. Terms: `over_budget`, `over_cost` (Claude-only), `over_iterations`, `wall_hours`,
+  `any_regressed(invariants)`, `any_judge_error`. They OR together — the loop aborts the moment any
+  trips.
+  ```yaml
+  # claude:
+  abort_if: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 8"
+  # codex / copilot — SAME, minus over_cost (they cannot report dollars):
+  abort_if: "any_regressed(invariants) OR over_budget OR over_iterations OR wall_hours >= 8"
+  ```
+- **`invariants:`** — a list of judge names that must STAY met (the soundness guards). The gate rolls
+  back any session that regresses one, and `any_regressed(invariants)` in `abort_if` gives up on it.
+
+**Never leave an autonomous loop with no ceiling at all.** If you drop `over_cost` for codex/copilot,
+you MUST keep `over_budget` (with a real `sequence.budget.total`) in its place. **Never put a judge
+that only appears in an `if` branch (like `stalled`) into `done_if`** — the loop would "succeed" by
+getting stuck.
+
+## Step 4.5 — Design the steps and the sequence
+
+This is what's new and powerful. A **step** is an `(agent, model, role)` triple; a **sequence** is a
+repeating list of statements over those steps. Most projects need just one plain `worker` step. Reach
+for more when the run risks going down a rabbit hole.
+
+- **`steps:`** — a palette. Each NAME maps to a body of *overrides* over `defaults:` (legal keys:
+  `agent`, `model`, `effort`, `worker_args`, `state`, `prompt`, `skip_judges` — anything else is a
+  hard error). `prompt:` is ADDITIVE to the composed prompt. `skip_judges: true` means no judges run
+  after that step, so nothing merges — its work **stages**, and the next judged step gates the whole
+  span.
+- **`sequence.steps:`** — a list of statements, each one of:
+  - `NAME` — run that step once
+  - `NAME xN` — run it N times (e.g. `worker x4`)
+  - `if <expr> then NAME [else NAME]` — run a step only when a condition holds; `<expr>` is the
+    Step-4 grammar (e.g. `if stalled then reconsider`)
+
+  The sequence repeats from the top, forever, until `done_if` fires (exit 0) or `abort_if` (exit 3).
+
+**The headline pattern — vendor-diverse reconsider.** When a run stalls, a step-back on a *different
+vendor* breaks the local optimum better than the same vendor's stronger model — a Claude rabbit hole
+is not necessarily a Codex one. And grunt work on a cheap worker + the step-back on a strong one is
+the cost argument. Offer this when the project is open-ended/research-shaped:
 
 ```yaml
-# claude:
-halt_when: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 8"
-# codex / copilot — SAME, minus over_cost (they cannot report dollars):
-halt_when: "any_regressed(invariants) OR over_budget OR over_iterations OR wall_hours >= 8"
+steps:
+  worker: {}                       # pure defaults — the grunt worker
+  reconsider:
+    agent: codex                   # a DIFFERENT vendor — perspective diversity
+    prompt: >
+      Assume the current approach is wrong. Name 2-3 fundamentally different approaches, pick one,
+      and write the rejected ones and WHY into your scratch note — agg will persist them.
+    skip_judges: true              # stages; the next worker step gates it
+sequence:
+  steps:
+    - worker x4
+    - if stalled then reconsider
 ```
 
-**Never leave an autonomous loop with no ceiling at all.** If you drop `over_cost` for
-codex/copilot, you MUST keep `over_budget` (with a real `budget.total`) in its place.
+`stalled` is the library judge (it reads the verdict history). If you use `if stalled then …`, the
+`stalled` judge is automatically in the run-set — you don't list it anywhere else. **Only propose a
+second agent the user actually has installed** (Step 0b) — `agg doctor` checks every agent named.
 
-## Step 4.5 — Detect the user's tools and offer to wire them in (NO hardcoded tool list)
+## Step 4.7 — Detect the user's tools and offer to wire them in (NO hardcoded tool list)
 
-agg the binary is tool-agnostic — it only runs generic lifecycle hooks. But the worker
-runs in THIS user's environment and inherits whatever tools the session has. A worker that
-USES those tools (a code graph instead of grepping, a memory tool to recall state across
-sessions) is cheaper and smarter. So: **enumerate the tools that are actually active in this
-session, then ASK the user which to wire into the loop.** Do NOT assume any specific tool
-exists — discover them.
+agg the binary is tool-agnostic — it only runs generic lifecycle hooks. But the worker runs in THIS
+user's environment and inherits whatever tools the session has. A worker that USES those tools (a code
+graph instead of grepping, a memory tool to recall state across sessions) is cheaper and smarter. So:
+**enumerate the tools that are actually active in this session, then ASK the user which to wire into
+the loop.** Do NOT assume any specific tool exists — discover them.
 
 **Enumerate for the agent the loop will DRIVE (Step 0) — not for whichever agent runs this skill.
 Report only what's actually present:**
@@ -218,21 +282,16 @@ whether to wire it in — and infer HOW from the tool's own purpose:**
   (or `background`) to keep it fresh, and a `prompt_includes` line telling the worker to query
   it instead of grepping. (Refresh matters: the graph must track code changes between sessions.)
 - A **memory tool** (persistent across sessions) → offer a `prompt_includes` line telling the
-  worker to recall state at session start and save a handoff note at session end (cheaper than
-  re-deriving every fresh session).
+  worker to recall state at session start and save a handoff note at session end.
 - A **token/cost proxy hook** already in global settings → just inform the user it's inherited
   automatically; nothing to configure.
-- **Anything else** (a linter, a test-cache warmer, a custom CLI) → ask if they want a hook,
-  and let them name the command. The mechanism is identical regardless of the tool.
+- **Anything else** (a linter, a test-cache warmer, a custom CLI) → ask if they want a hook, and let
+  them name the command. The mechanism is identical regardless of the tool.
 
-**Rules:** never invent a tool that isn't present; only offer what you actually detected.
-Phrase each offer concretely ("Wire `<tool>`? I'd add `on_start: [<cmd>]` and a prompt note
-to use it"). Only write hooks the user confirms. If the user declines all, write no hooks —
-that's fine. The exact hook command depends on the tool's own CLI; read its `--help` or skill
-doc if unsure, and don't guess a flag — ask the user for the command if you can't determine it.
-
-The result goes into `agg.yaml` (`hooks:` + `prompt_includes:`) and, for prompt guidance, a
-small `AGG_TOOLING.md` you reference from `prompt_includes`.
+**Rules:** never invent a tool that isn't present; only offer what you actually detected. Only write
+hooks the user confirms. If the user declines all, write no hooks — that's fine. The result goes into
+`agg.yaml` (`hooks:` + `prompt_includes:`) and, for prompt guidance, a small `AGG_TOOLING.md` you
+reference from `prompt_includes`.
 
 ## Step 5 — Ask ONLY what's missing
 
@@ -240,110 +299,94 @@ Ask (with a structured picker if your agent has one, else plain questions) ONLY 
 you couldn't infer, e.g.:
 - which agent the loop should drive, if Step 0 didn't settle it
 - the test/benchmark command if you couldn't find it
-- the target threshold for a percentage/cardinal goal
+- the numeric threshold for a `judge.value >= N` clause
 - the token budget and max wall-time, if the user wants guards
 - the inner-worker model — but see Step 0 rules 2–3: **never guess one for codex**
 
-Show the user the proposed `goals.yaml` and let them approve or edit before writing.
+Show the user the proposed `agg.yaml` (and the judge files) and let them approve or edit before writing.
 
-## Step 6 — Write the three files
+## Step 6 — Write the files (all under `agg/`)
 
-Write into an **`agg/` config folder** by DEFAULT — it keeps the project root clean and is what
-the README documents. Fall back to the project root only if the user explicitly asks for it. `agg run` auto-detects either: if `<project>/agg/`
-exists, it reads `agg/agg.yaml`, `agg/goals.yaml`, the resume prompt, and `agg/judges/`,
-`agg/rubrics/` from there; otherwise it reads them from the root. Prefer the folder when you're
-generating several judges and/or rubrics (it stops them cluttering the project root); keep the
-root for a tiny 1-judge setup. Two rules if you use the folder:
-- **resume prompt + rubric files resolve against `agg/`** (put them inside it, reference them
-  by name as today, e.g. `rubric: "rubrics/<id>.md"` → `agg/rubrics/<id>.md`).
-- **judge `cmd` + `inputs` resolve against the PROJECT ROOT** (scripts run there). So a foldered
-  judge is `cmd: "./agg/judges/<id>.sh"` — root-relative, with the `agg/` prefix.
-You can also scaffold the folder layout directly with `agg init --folder`.
+Everything agg reads lives under `agg/` (committed); everything it writes lives under `agg/state/`
+(gitignored, auto-created). Write:
 
-### `goals.yaml`
-```yaml
-goals:
-  - id: <id>
-    type: <binary|percentage|cardinal>
-    target: <n>
-    description: "<one line>"
-    judge: { kind: script, cmd: "./judges/<id>.sh", timeout: 300 }
-    # or invariant: true for guards
-stop_when: "<expression>"
-halt_when: "<expression>"   # optional
-```
+### `agg/agg.yaml`
 
-### `agg.yaml` — **the agent-specific file. Get this wrong and the loop won't start.**
-
-Common to every agent:
 ```yaml
 project: <name>
-agent: <claude|codex|copilot>          # from Step 0 — REQUIRED
-resume_prompt: "AGG_RESUME.md"
-heartbeat_secs: 30
-watchdog: { idle_secs: 900, cpu_grace: 180 }
-budget: { total: <tokens or null> }   # token ceiling → over_budget. Works on ALL agents.
-summary: { enabled: true, min_interval_secs: 300 }
-# hooks + prompt_includes: ONLY if Step 4.5 wired tools the user confirmed. Omit otherwise.
-# hooks:
-#   on_start:       ["<build-graph-cmd>"]      # whatever the detected tool needs
-#   on_session_end: ["<refresh-cmd>"]
-#   background:     ["<watch-cmd>"]            # reaped automatically on stop
-# prompt_includes: ["AGG_TOOLING.md"]
+
+defaults:
+  agent: <claude|codex|copilot>          # from Step 0 — REQUIRED (the worker default)
+  # model: "<model>"                     # claude: "claude-opus-4-8[1m]" · copilot: auto · codex: OMIT
+  # effort: <low|medium|high|xhigh|max>  # NOT with copilot's model: auto
+  state: "AGG_STATE.md"
+
+judge:                                   # THE RULER — runs LLM judges + the summarizer; immutable
+  agent: <claude|codex|copilot>          # usually the same as defaults.agent
+  # model: "<cheap model>"               # claude: a haiku · copilot: auto · codex: OMIT
+  timeout: 300                           # seconds, EVERY judge (script + LLM)
+
+steps:
+  worker: {}                             # add more only if Step 4.5 designed them
+
+sequence:
+  steps:
+    - worker
+  budget: { total: <tokens or null> }    # output-token ceiling → over_budget. Works on ALL agents.
+  # cost: { total: <dollars or null> }   # → over_cost. CLAUDE-ONLY, all-Claude sequences only.
+  max_sessions: 0                        # 0 = unlimited (or pass `agg run --max-sessions <n>`)
+  invariants: [<judge names that must STAY met>]
+  done_if: "<expression over judge names>"
+  abort_if: "<ceiling expression>"       # see Step 4
+
+# Optional top-level survivors — omit if unused:
+# heartbeat_secs: 30
+# watchdog: { idle_secs: 900, cpu_grace: 180 }
+# ratelimit_backoff_secs: 1800           # claude + codex; copilot cannot flag a rate-limit
+summary: { enabled: true, min_interval_secs: 300 }   # runs on the RULER (no model: here)
+# hooks + prompt_includes: ONLY if Step 4.7 wired tools the user confirmed
 ```
 
-Then add ONLY the lines your agent supports:
+Agent-specific reminders (Step 0): **codex** — no `model:` in `defaults` OR `judge`, no `cost:`.
+**copilot** — `model: auto`, no `effort:`, no `cost:`, no `ratelimit_backoff_secs`, optional
+`worker_args: ["--max-ai-credits", "50"]`.
 
-```yaml
-# ── agent: claude ────────────────────────────────────────────────
-model: "claude-opus-4-8[1m]"
-cost: { total: <dollars or null> }    # dollar ceiling → over_cost.  CLAUDE ONLY.
-summary: { enabled: true, model: haiku, min_interval_secs: 300 }
-ratelimit_backoff_secs: 1800
+### `agg/judges/<name>.sh` and `agg/judges/<name>.md`
 
-# ── agent: codex ─────────────────────────────────────────────────
-# NO `model:` line at all — naming one is a hard 400 on a ChatGPT account.
-# NO `cost:` line — codex reports no dollars; agg would refuse the config.
-ratelimit_backoff_secs: 1800
+Write one file per judge you derived in Step 2 (skip any you're reusing from the library). `chmod +x`
+the `.sh` scripts. Reference each by its bare name in `done_if` / `abort_if` / `invariants`.
 
-# ── agent: copilot ───────────────────────────────────────────────
-model: auto
-summary: { enabled: true, model: auto, min_interval_secs: 300 }
-# NO `cost:` line — copilot bills in AI Credits, not dollars; agg would refuse the config.
-# NO `ratelimit_backoff_secs` — copilot cannot flag a rate-limit.
-# Optional self-cap, since agg's dollar guard is unavailable:
-# worker_args: ["--max-ai-credits", "50"]
-```
+### `agg/AGG_STATE.md` — the worker's standing instructions
 
-### `AGG_RESUME.md` (the fat resume prompt — this is the worker's standing instructions)
-Write a self-contained prompt that, on EVERY fresh session, tells the worker to:
-1. Read its handoff/state (a `HANDOFF.md` you also create, or the project's existing one)
-2. Do ONE self-contained chunk of work toward the goals
-3. Commit as it goes
-4. Before exiting (context fills — a headless worker does NOT auto-compact): rewrite the handoff
-   with new state + the exact next task, commit
-5. Be autonomous — there is NO human in the loop; never pause to ask
+The forward state file fed to EVERY fresh session. Write a self-contained brief that tells the worker,
+each session, to:
+1. Orient: read this file, then run the project's checks to see what's failing.
+2. Do ONE self-contained chunk of real, correct work toward the judges (no stubs).
+3. Verify the change (re-run the relevant check).
+4. Update THIS file with the new state + the exact next task, commit, and exit — the loop relaunches
+   it fresh; there is no held-open context.
+5. Be autonomous — there is NO human in the loop; never pause to ask.
 
 Inline any workflow content the worker needs — do not assume it can invoke a skill by name in a
-headless session. Paste the relevant steps directly.
-
-Also create a starter `HANDOFF.md` capturing the current state + first task.
+headless session. (Institutional memory, `AGG_MEMORY.md`, is written by agg, not the worker — never
+tell the worker to maintain it.)
 
 ## Step 7 — Validate: `agg doctor`, then `agg plan`
 
-**`agg doctor` first — it is the check that catches a config the chosen agent cannot honour**
-(a cost guard on codex, a model name codex will reject, a stray `effort:`). It verifies the agent
-CLI is installed AND that every key you wrote is one that agent can actually deliver:
+**`agg doctor` first — it is the check that catches a config the chosen agent(s) cannot honour**
+(a cost guard on a codex step, a model name codex will reject, a stray `effort:`). It verifies every
+agent the sequence names is installed AND that every key you wrote is one that agent can deliver:
 ```bash
 agg doctor
 ```
 Fix anything it marks ✗ — a ✗ here means `agg run` would refuse to start.
 
-Then the dry-run, to confirm the judges work and show the starting scoreboard:
+Then the dry-run, to confirm the judges resolve and work, and show the starting scoreboard:
 ```bash
 agg plan
 ```
-If a judge errors, fix its command/rubric before finishing.
+If a judge errors or fails to resolve, fix its file/name before finishing. (`agg plan` lists every
+available judge name on a resolution failure.)
 
 ## Step 8 — Tell the user how to launch
 
@@ -352,7 +395,7 @@ Setup complete — driving <agent>. Starting scoreboard above.
 
 To run the loop:
   agg run                # foreground, watch it live
-  agg run --detach       # background (pidfile + .agg/run.log), survives the terminal
+  agg run --detach       # background (pidfile + agg/state/run.log), survives the terminal
 
 To watch the dashboard (second terminal):
   agg dashboard
@@ -361,7 +404,7 @@ To stop / steer:
   agg stop               # graceful stop at the next session boundary
   agg send inject "…"    # high-priority instruction for the next session
 
-The loop stops when:  <stop_when>
+The loop stops when:  <done_if>
 ```
 
 (If `agg` is not on PATH, tell them to install it — the install script or GitHub Releases, see

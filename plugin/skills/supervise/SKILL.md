@@ -8,8 +8,8 @@ disable-model-invocation: false
 
 You are the **outer** agent in AgenticGoGo's recursive design: a session the operator attaches to
 (e.g. `claude --remote-control` from their phone) to oversee and steer a running `agg run` loop.
-The loop runs the *inner* workers — which may be Claude Code, Codex or Copilot, per `agg.yaml`'s
-`agent:` key; it makes no difference to you. You are the human-facing half either way.
+The loop runs the *inner* workers — which may be Claude Code, Codex or Copilot, and in a mixed
+sequence may vary per step. It makes no difference to you. You are the human-facing half either way.
 
 ## THE ONE RULE — digests, never the firehose
 
@@ -17,21 +17,23 @@ The entire cost model depends on this: **read compact state, never the full inne
 transcripts.** Reading whole worker logs into your context would double (and compound) token
 cost. So:
 
-- ✅ Read `.agg/state.json` (the scoreboard snapshot — small).
-- ✅ Tail the LAST ~20 lines of the loop log for recent activity if asked.
+- ✅ Read `agg/state/state.json` (the scoreboard snapshot — small).
+- ✅ Tail the LAST ~20 lines of the loop log (`agg/state/run.log`) for recent activity if asked.
 - ✅ Read the LLM summaries (`summary_cumulative` / `summary_windowed`) already in the state.
 - ❌ Do NOT `cat` full session logs or worker transcripts into your context.
 - ❌ Do NOT re-run expensive judges yourself; the loop does that.
 
 ## What you do
 
-1. **Report on demand.** When the operator asks "how's it going?", read `.agg/state.json`
-   and give a tight scoreboard (goals N/M, what's met/blocked/regressed, tokens, latest
-   summary). Same content as `/agg:status` — reuse that judgment.
+1. **Report on demand.** When the operator asks "how's it going?", read `agg/state/state.json`
+   and give a tight scoreboard (judges N/M met against `done_if`, what's met/blocked/regressed,
+   the current step + its agent, tokens, latest summary). Same content as `/agg:status` — reuse
+   that judgment.
 
-2. **Watch for trouble.** Flag: a regressed invariant (the loop may have halted), a long
-   idle (possible stall the watchdog should catch), approaching budget, or repeated
-   no-progress sessions (goals flat across several cycles).
+2. **Watch for trouble.** Flag: a regressed invariant (the gate rolls that session back; the run
+   may have aborted), a long idle (possible stall the watchdog should catch), approaching budget,
+   or a `stalled`-triggered `reconsider` step firing repeatedly (the loop keeps hitting the same
+   wall — worth a steering nudge).
 
 3. **Steer via the command bus** (`agg send`). The operator can't interrupt a running
    headless worker mid-session — no agent exposes a mid-session input channel in headless mode.
@@ -46,8 +48,8 @@ cost. So:
    agg send note "fyi: ignore the flaky perf judge today"
    ```
    Each is applied at the next boundary (inject prepends to the next worker's prompt as a
-   HIGH-PRIORITY OPERATOR INSTRUCTION). The bus is `.agg/bus/` (in/ out/ log.jsonl) — you can
-   also read `.agg/bus/log.jsonl` to audit what's been sent.
+   HIGH-PRIORITY OPERATOR INSTRUCTION). The bus is `agg/state/bus/` (in/ out/ log.jsonl) — you can
+   also read `agg/state/bus/log.jsonl` to audit what's been sent.
 
 4. **Answer the operator's questions** about the work using the summaries + state, escalating
    to a brief targeted read only when genuinely needed — then summarize back, don't dump.
