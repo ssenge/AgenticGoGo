@@ -350,6 +350,8 @@ pub fn mechanical_note(
     killed_by_watchdog: bool,
     rate_limited: bool,
     duration_secs: u64,
+    started_at_epoch: u64,
+    ended_at_epoch: u64,
     scoreboard: &str,
     deltas: &[crate::core::engine::GoalDelta],
 ) -> String {
@@ -364,7 +366,11 @@ pub fn mechanical_note(
             None => "worker exit code unknown".to_string(),
         }
     };
-    let mut out = format!("{outcome} after {duration_secs}s.\n");
+    let mut out = format!(
+        "{} → {}  ({duration_secs}s)\n{outcome}.\n",
+        crate::util::human_time(started_at_epoch),
+        crate::util::human_time(ended_at_epoch),
+    );
     let changed = changed_lines(deltas);
     if changed.is_empty() {
         out.push_str("No goal changed this session.\n");
@@ -639,14 +645,18 @@ mod tests {
 
     #[test]
     fn mechanical_note_always_has_content() {
-        let killed = mechanical_note(None, true, false, 42, "Goals: 1/2", &[]);
+        let killed = mechanical_note(None, true, false, 42, 1_000, 1_042, "Goals: 1/2", &[]);
         assert!(killed.contains("watchdog"));
         assert!(killed.contains("Goals: 1/2"));
-        let limited = mechanical_note(None, false, true, 9, "Goals: 0/2", &[]);
+        let limited = mechanical_note(None, false, true, 9, 2_000, 2_009, "Goals: 0/2", &[]);
         assert!(limited.contains("rate limit"));
-        let clean = mechanical_note(Some(0), false, false, 10, "Goals: 2/2", &[delta("g", 1.0, 2.0)]);
+        let clean =
+            mechanical_note(Some(0), false, false, 10, 1_752_000_000, 1_752_000_010, "Goals: 2/2", &[delta("g", 1.0, 2.0)]);
         assert!(clean.contains("exited cleanly"));
         assert!(clean.contains("g: 1→2"));
+        // the human-readable begin→end line is present (a real local date, not a raw epoch)
+        assert!(clean.contains(" → "), "entry should carry a begin→end timestamp line: {clean}");
+        assert!(clean.contains("(10s)"));
     }
 
     #[test]

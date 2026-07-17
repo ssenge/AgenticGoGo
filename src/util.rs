@@ -10,6 +10,19 @@ pub fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
+/// A Unix epoch as a human-readable LOCAL wall-clock string (`YYYY-MM-DD HH:MM:SS`), for logs a
+/// person reads (e.g. the `AGG_MEMORY.md` session header). Falls back to the raw epoch if the
+/// clock is unrepresentable.
+pub fn human_time(epoch: u64) -> String {
+    jiff::Timestamp::from_second(epoch as i64)
+        .map(|ts| {
+            ts.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| format!("epoch {epoch}"))
+}
+
 /// Read + parse a YAML config file, naming the file in BOTH failure modes (can't read it vs.
 /// can't parse it) — the distinction a user needs to fix the problem. Used for every config the
 /// loop refuses to start without: agg.yaml.
