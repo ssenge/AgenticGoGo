@@ -673,11 +673,14 @@ impl LoopState<'_> {
     fn fold_memory_floor(&mut self, outcome: &SessionOutcome) -> bool {
         if self.cfg.memory.enabled && !outcome.rate_limited {
             let scoreboard_now = self.eng.scoreboard();
+            let ended = crate::util::now_epoch();
             let body = crate::core::memory::mechanical_note(
                 outcome.exit_code,
                 outcome.killed_by_watchdog,
                 outcome.rate_limited,
                 outcome.duration_secs,
+                ended.saturating_sub(outcome.duration_secs),
+                ended,
                 &scoreboard_now,
                 &[],
             );
@@ -908,9 +911,11 @@ impl LoopState<'_> {
         // ── institutional memory: post-judge refinement ──
         if self.cfg.memory.enabled && mem_folded {
             let scoreboard = self.eng.scoreboard();
+            let ended = crate::util::now_epoch();
             let mut mech = crate::core::memory::mechanical_note(
                 outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
-                outcome.duration_secs, &scoreboard, &res.deltas,
+                outcome.duration_secs, ended.saturating_sub(outcome.duration_secs), ended,
+                &scoreboard, &res.deltas,
             );
             if rolled_back {
                 mech = format!(
