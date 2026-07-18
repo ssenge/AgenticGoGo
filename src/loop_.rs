@@ -607,17 +607,26 @@ impl LoopState<'_> {
         s.push_str(&format!("2. Rewrite `agg/{}` as crisp next-step advice for your successor.\n", step.state));
         // UNCONDITIONAL: durable knowledge + any multi-session plan live in the wiki (STATE is
         // rewritten wholesale each session, so a plan parked there is lost; the wiki is edited
-        // incrementally and persists). Instruct the OKF discipline so the pages actually form a graph
-        // — a set of unlinked notes is not a wiki. OKF v0.1 = one concept per md file, a `type:`
-        // frontmatter, and STANDARD MARKDOWN links between pages (Obsidian renders both).
+        // incrementally and persists). The guidance is SELF-CONTAINED — it never assumes the worker
+        // knows "OKF" (a June-2026 spec many models predate); it states the rules AND ships a concrete
+        // template to copy, so the wiki forms a real graph (Obsidian renders standard markdown links,
+        // provided filenames resolve — hence the hyphenated, space-free filename rule).
         s.push_str(
             "3. Maintain the durable wiki at `agg/state/wiki/` as an OKF (Open Knowledge Format) \
-             knowledge base: ONE concept per markdown file, each with YAML frontmatter (`type:` is \
-             required; `title`/`tags`/`timestamp` optional), and CROSS-LINK related pages with \
-             standard markdown links `[label](other-page.md)` so it forms a navigable graph — a pile \
-             of unlinked notes is not a wiki. Record dead-ends, design decisions, and any \
-             MULTI-SESSION PLAN here: `STATE.md` is rewritten every session, the wiki persists and \
-             accumulates.\n",
+             knowledge base — atomic, LINKED markdown pages a knowledge-graph tool (e.g. Obsidian) can \
+             render; a pile of unlinked notes is NOT a wiki. Rules: ONE concept per file; a HYPHENATED, \
+             space-free filename so links resolve everywhere (`parser-approach.md`, not `parser \
+             approach.md`); YAML frontmatter with a REQUIRED `type:` (choose your own vocabulary — \
+             concept / decision / dead-end / plan / …) plus optional `title`/`tags`/`timestamp`; and \
+             CROSS-LINK related pages with STANDARD markdown links `[label](other-page.md)` (NOT \
+             `[[wikilinks]]`). Put dead-ends, decisions, and any MULTI-SESSION PLAN here — `STATE.md` \
+             is rewritten every session; the wiki persists and accumulates. Copy this shape for a page \
+             `agg/state/wiki/parser-approach.md`:\n",
+        );
+        s.push_str(
+            "```\n---\ntype: decision\ntitle: Parser approach\ntags: [parser]\n---\nChose \
+             recursive-descent over a table-driven parser. Rejected alternatives are in \
+             [dead-ends](dead-ends.md); grammar notes in [grammar](grammar.md).\n```\n",
         );
         s.push_str(
             "Edit files freely — agg saves and version-controls your work automatically; you do NOT commit.\n",

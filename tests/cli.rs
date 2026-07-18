@@ -525,6 +525,11 @@ exit 0
     assert!(instr.contains("agg/state/STATE.md"), "brief POINTS at STATE.md:\n{instr}");
     assert!(instr.contains("agg/AGG.md"), "brief POINTS at the standing AGG.md:\n{instr}");
     assert!(instr.contains("agg/state/wiki/"), "footer names the wiki (multi-session plans live there):\n{instr}");
+    // the wiki guidance must be SELF-CONTAINED: the OKF rules + a concrete template to copy, so a
+    // worker that has never heard of OKF can still produce a linked, graph-able wiki.
+    assert!(instr.contains("OKF"), "footer names the OKF format:\n{instr}");
+    assert!(instr.contains("type: decision"), "footer ships a concrete OKF page template to copy:\n{instr}");
+    assert!(instr.contains("[dead-ends](dead-ends.md)"), "template shows a standard markdown cross-link:\n{instr}");
     assert!(instr.contains("Before you exit"), "brief carries the standing footer:\n{instr}");
 }
 
