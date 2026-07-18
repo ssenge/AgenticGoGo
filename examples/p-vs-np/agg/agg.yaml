@@ -6,6 +6,9 @@ project: "p-vs-np"
 defaults:
   agent: "claude"                        # the grunt worker runs on Claude/Opus. See the README to port.
   model: "claude-opus-4-8[1m]"           # the heavy lifting runs on Opus
+  effort: "max"                          # highest thinking effort — this is a HARD problem. `max` is Claude's
+                                         # headless ceiling; the `reconsider` step below runs on codex, which
+                                         # clamps `max`→`high` (its own ceiling). See docs/CONFIG.md.
   state: "state/STATE.md"                # worker-curated forward advice; under gitignored agg/state/, survives a rollback
 
 # THE RULER — runs the LLM judge (paper_written) + the summarizer. Immutable across the run:
