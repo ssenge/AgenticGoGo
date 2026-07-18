@@ -1,0 +1,42 @@
+# agg.yaml — harness + steps + sequence. One file: a judge IS a goal, resolved by NAME from
+# agg/judges/<name>.{sh,md} (then ~/.agg/judges/).
+project: "my-project"
+
+# Inherited by EVERY step; a step body may override any of these.
+defaults:
+  agent: "{{AGENT}}"
+{{MODEL_LINE}}{{EFFORT_LINE}}  state: "state/STATE.md"          # forward "what to do next" file the AGENT maintains (under agg/, gitignored)
+
+# THE RULER — runs the LLM judges + the summarizer. Immutable; naming any of these in a step is a
+# HARD ERROR (a grader that moves makes verdicts incomparable across cycles).
+judge:
+  agent: "{{AGENT}}"
+{{JUDGE_MODEL}}  timeout: 300                     # seconds, EVERY judge (script + LLM)
+
+# The step palette. The NAME is your own label; the body is overrides only. A step may also carry
+# `role_prompt:` (generic role framing, e.g. a red-team "reconsider" step) and `prompt:` (its
+# specific ask) — both are composed into the per-session brief above the context. Example:
+#   reconsider: { skip_judges: true, role_prompt: "Step back — assume the current approach is wrong.",
+#                 prompt: "Name 2-3 different approaches, pick one, record the rejected ones + why." }
+steps:
+  worker: {}                       # pure defaults
+
+# The repeating sequence + the run-level ceilings and Definition of Done.
+sequence:
+  steps:
+    - "worker"                     # run `worker`, forever, until done_if fires
+  # Run-level ceilings, unified under one block — each null = unlimited.
+  limits:
+    tokens: null                   # output-token ceiling — worker AND judge spend → over_budget
+{{COST_LINE}}    sessions: null                 # session cap → over_iterations (or pass `agg run --max-sessions <n>`)
+  gate_regressions: true           # roll a session back if a previously-met judge regresses
+  invariants: []                   # judge names that must STAY met
+  done_if: "tests_pass"            # your Definition of Done — judge names, all_goals, count_met, …
+  abort_if: "over_budget{{OVER_COST}} OR over_iterations OR wall_hours >= 4"
+
+heartbeat_secs: 30
+watchdog: { idle_secs: 900, cpu_grace: 180 }
+ratelimit_backoff_secs: 1800
+summary: { enabled: true, min_interval_secs: 300 }
+memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
+session_isolation: {}              # MANDATORY; defaults (branch_prefix: agg, red_file: .agg_red)

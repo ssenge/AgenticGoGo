@@ -87,6 +87,11 @@ impl LifecycleEvent {
 const INSTRUCTIONS_POINTER: &str =
     "Read the file `agg/state/INSTRUCTIONS.md` in full and follow it — it is your complete brief for this session.";
 
+/// The standing "Before you exit" footer of every session's brief (the wiki/OKF guidance lives here).
+/// Kept as a real markdown file (`include_str!`'d, like the scaffolds + skills) rather than an inline
+/// string; `{{STATE}}` is filled with the step's state path when composed.
+const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
+
 /// What INJECT produced.
 enum Injected {
     Prompt(String),
@@ -600,37 +605,13 @@ impl LoopState<'_> {
             }
         }
 
-        // ── standing footer (no git tutorial — agg owns git; §3 remark 3) ── the STATE path is
-        //    derived from `step.state` (NOT hardcoded) so an overridden `state:` still names the file
-        //    agg actually reads/points-at — otherwise the worker would rewrite the wrong file.
-        s.push_str("\n## Before you exit\n1. Do ONE focused chunk of real, correct work — no stubs.\n");
-        s.push_str(&format!("2. Rewrite `agg/{}` as crisp next-step advice for your successor.\n", step.state));
-        // UNCONDITIONAL: durable knowledge + any multi-session plan live in the wiki (STATE is
-        // rewritten wholesale each session, so a plan parked there is lost; the wiki is edited
-        // incrementally and persists). The guidance is SELF-CONTAINED — it never assumes the worker
-        // knows "OKF" (a June-2026 spec many models predate); it states the rules AND ships a concrete
-        // template to copy, so the wiki forms a real graph (Obsidian renders standard markdown links,
-        // provided filenames resolve — hence the hyphenated, space-free filename rule).
-        s.push_str(
-            "3. Maintain the durable wiki at `agg/state/wiki/` as an OKF (Open Knowledge Format) \
-             knowledge base — atomic, LINKED markdown pages a knowledge-graph tool (e.g. Obsidian) can \
-             render; a pile of unlinked notes is NOT a wiki. Rules: ONE concept per file; a HYPHENATED, \
-             space-free filename so links resolve everywhere (`parser-approach.md`, not `parser \
-             approach.md`); YAML frontmatter with a REQUIRED `type:` (choose your own vocabulary — \
-             concept / decision / dead-end / plan / …) plus optional `title`/`tags`/`timestamp`; and \
-             CROSS-LINK related pages with STANDARD markdown links `[label](other-page.md)` (NOT \
-             `[[wikilinks]]`). Put dead-ends, decisions, and any MULTI-SESSION PLAN here — `STATE.md` \
-             is rewritten every session; the wiki persists and accumulates. Copy this shape for a page \
-             `agg/state/wiki/parser-approach.md`:\n",
-        );
-        s.push_str(
-            "```\n---\ntype: decision\ntitle: Parser approach\ntags: [parser]\n---\nChose \
-             recursive-descent over a table-driven parser. Rejected alternatives are in \
-             [dead-ends](dead-ends.md); grammar notes in [grammar](grammar.md).\n```\n",
-        );
-        s.push_str(
-            "Edit files freely — agg saves and version-controls your work automatically; you do NOT commit.\n",
-        );
+        // ── standing footer (from plugin/scaffold/exit_footer.md; no git tutorial — agg owns git,
+        //    §3 remark 3). The STATE path is filled from `step.state` (NOT hardcoded) so an overridden
+        //    `state:` still names the file agg actually reads/points-at. The wiki/OKF guidance is
+        //    SELF-CONTAINED (rules + a concrete template) so the worker needn't know "OKF" — a
+        //    June-2026 spec many models predate. ──
+        s.push('\n');
+        s.push_str(&EXIT_FOOTER.replace("{{STATE}}", &step.state));
 
         // write the composed brief to disk; the worker's actual `-p` is the tiny pointer.
         let path = crate::paths::instructions_md(self.dir);
