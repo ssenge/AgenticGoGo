@@ -6,7 +6,7 @@ project: "hello-agg"
 defaults:
   agent: "claude"                    # swap to `codex` or `copilot` — see "Run it on another agent"
   model: "claude-haiku-4-5-20251001" # haiku — costs next to nothing to try
-  state: "AGG_STATE.md"              # the standing instructions each fresh worker reads
+  state: "state/STATE.md"            # worker-curated forward advice; under gitignored agg/state/ (created at runtime)
 
 # THE RULER — runs the LLM judges + the summarizer. Immutable across the run.
 judge:

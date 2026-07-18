@@ -23,7 +23,7 @@
   <div class="tile card">
     <div class="label">memory</div>
     <div class="value mono">{fmtBytes(state?.memory_bytes ?? 0)}</div>
-    <div class="sub">AGG_MEMORY.md</div>
+    <div class="sub">LOG.md</div>
   </div>
   <div class="tile card">
     <div class="label">phase</div>

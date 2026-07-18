@@ -1,6 +1,6 @@
 ---
 name: agg-new
-description: Set up AgenticGoGo for the current project — read existing plans, then generate agg/agg.yaml (defaults/judge/steps/sequence), the judge files under agg/judges/, and agg/AGG_STATE.md so `agg run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
+description: Set up AgenticGoGo for the current project — read existing plans, then generate agg/agg.yaml (defaults/judge/steps/sequence), the judge files under agg/judges/, agg/AGG.md (stable scope) and agg/state/STATE.md (forward advice) so `agg run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
 disable-model-invocation: false
 ---
 
@@ -13,7 +13,9 @@ planning material already exists into the files the loop reads, all under the ma
 - `agg/agg.yaml` — the whole config: `defaults` / `judge` / `steps` / `sequence`
 - `agg/judges/<name>.sh` (a script judge) or `agg/judges/<name>.md` (an LLM rubric judge) — one per
   clause of the Definition of Done. **A judge IS a goal.**
-- `agg/AGG_STATE.md` — the standing instructions fed to every worker session
+- `agg/AGG.md` — the stable scope/goals/architecture each worker reads for orientation (committed)
+- `agg/state/STATE.md` — the forward "what to do next" advice the worker rewrites each session
+  (gitignored; agg composes it + AGG.md + memory into a per-session `agg/state/INSTRUCTIONS.md` brief)
 
 **Core principle: do NOT replicate spec tooling.** Read what's already there and *translate* it into
 judges. Only ask the user for what's genuinely missing.
@@ -217,10 +219,11 @@ repeating list of statements over those steps. Most projects need just one plain
 for more when the run risks going down a rabbit hole.
 
 - **`steps:`** — a palette. Each NAME maps to a body of *overrides* over `defaults:` (legal keys:
-  `agent`, `model`, `effort`, `worker_args`, `state`, `prompt`, `skip_judges` — anything else is a
-  hard error). `prompt:` is ADDITIVE to the composed prompt. `skip_judges: true` means no judges run
-  after that step, so nothing merges — its work **stages**, and the next judged step gates the whole
-  span.
+  `agent`, `model`, `effort`, `worker_args`, `state`, `role_prompt`, `prompt`, `skip_judges` —
+  anything else is a hard error). `prompt:` is ADDITIVE to the composed prompt; `role_prompt:` is a
+  generic ROLE framing composed *above* `prompt:` (e.g. a red-team "reconsider" step). `skip_judges:
+  true` means no judges run after that step, so nothing merges — its work **stages**, and the next
+  judged step gates the whole span.
 - **`sequence.steps:`** — a list of statements, each one of:
   - `NAME` — run that step once
   - `NAME xN` — run it N times (e.g. `worker x4`)
@@ -319,7 +322,7 @@ defaults:
   agent: "<claude|codex|copilot>"        # from Step 0 — REQUIRED (the worker default)
   # model: "<model>"                     # claude: "claude-opus-4-8[1m]" · copilot: auto · codex: OMIT
   # effort: <low|medium|high|xhigh|max>  # NOT with copilot's model: auto
-  state: "AGG_STATE.md"
+  state: "state/STATE.md"                # forward-advice file (under agg/, gitignored)
 
 judge:                                   # THE RULER — runs LLM judges + the summarizer; immutable
   agent: "<claude|codex|copilot>"        # usually the same as defaults.agent
@@ -328,6 +331,8 @@ judge:                                   # THE RULER — runs LLM judges + the s
 
 steps:
   worker: {}                             # add more only if Step 4.5 designed them
+  # a step may also carry `prompt:` (its specific ask) and `role_prompt:` (generic role framing,
+  # e.g. a "reconsider" red-team step: { skip_judges: true, role_prompt: "...", prompt: "..." })
 
 sequence:
   steps:
@@ -357,20 +362,24 @@ Agent-specific reminders (Step 0): **codex** — no `model:` in `defaults` OR `j
 Write one file per judge you derived in Step 2 (skip any you're reusing from the library). `chmod +x`
 the `.sh` scripts. Reference each by its bare name in `done_if` / `abort_if` / `invariants`.
 
-### `agg/AGG_STATE.md` — the worker's standing instructions
+### `agg/AGG.md` — the stable scope (committed) and `agg/state/STATE.md` — the forward advice
 
-The forward state file fed to EVERY fresh session. Write a self-contained brief that tells the worker,
-each session, to:
-1. Orient: read this file, then run the project's checks to see what's failing.
-2. Do ONE self-contained chunk of real, correct work toward the judges (no stubs).
-3. Verify the change (re-run the relevant check).
-4. Update THIS file with the new state + the exact next task, commit, and exit — the loop relaunches
-   it fresh; there is no held-open context.
-5. Be autonomous — there is NO human in the loop; never pause to ask.
+agg regenerates a per-session `agg/state/INSTRUCTIONS.md` brief (the worker's whole `-p` is a tiny
+pointer at it) by composing AGG.md + STATE + memory. Split the standing content by change-frequency:
 
-Inline any workflow content the worker needs — do not assume it can invoke a skill by name in a
-headless session. (Institutional memory, `AGG_MEMORY.md`, is written by agg, not the worker — never
-tell the worker to maintain it.)
+**`agg/AGG.md`** (committed, rare edits, human-owned) — the STABLE scope: what the project is, the
+goal, the architecture (key modules/entry points + the exact build/test commands), and the rules:
+- Do ONE self-contained chunk of real, correct work toward the judges each session (no stubs).
+- Be autonomous — there is NO human in the loop; never pause to ask.
+- Inline any workflow content the worker needs — do not assume it can invoke a skill by name in a
+  headless session.
+
+**`agg/state/STATE.md`** (gitignored, the worker REWRITES it each session) — the forward "what to do
+next": where things stand + the exact next task. Seed it with a first-session note; the worker keeps
+it current for its successor.
+
+(Institutional memory, `agg/state/LOG.md`, is written by agg, not the worker — never tell the worker
+to maintain it. The worker never commits; agg owns git.)
 
 ## Step 7 — Validate: `agg doctor`, then `agg plan`
 

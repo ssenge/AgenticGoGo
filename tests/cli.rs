@@ -59,10 +59,10 @@ fn cfg(project: &str, done_if: &str, seq_extra: &str, top_extra: &str) -> String
     )
 }
 
-/// Write `agg/agg.yaml` (via [`cfg`]) + the forward state file `agg/AGG_STATE.md`.
+/// Write `agg/agg.yaml` (via [`cfg`]) + the forward state file `agg/state/STATE.md`.
 fn write_cfg(dir: &Path, project: &str, done_if: &str, seq_extra: &str, top_extra: &str) {
     write(dir, "agg/agg.yaml", &cfg(project, done_if, seq_extra, top_extra));
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
 }
 
 /// Turn `dir` into a clean git repo on `main` with one (empty) commit. Session isolation is
@@ -141,10 +141,11 @@ fn init_then_plan_shows_scoreboard() {
 
     let out = agg(dir, &path).arg("init").output().unwrap();
     assert!(out.status.success(), "agg init failed: {}", String::from_utf8_lossy(&out.stderr));
-    // init scaffolds ONE config file + the forward state file + a starter judge. No goals.yaml,
-    // no AGG_RESUME.md (§7.1).
+    // init scaffolds agg.yaml + the committed AGG.md + the gitignored forward-state STATE.md + a
+    // starter judge. No goals.yaml, no AGG_RESUME.md (§7.1).
     assert!(dir.join("agg/agg.yaml").exists(), "init should scaffold agg.yaml");
-    assert!(dir.join("agg/AGG_STATE.md").exists(), "init should scaffold the forward state file");
+    assert!(dir.join("agg/AGG.md").exists(), "init should scaffold the committed AGG.md");
+    assert!(dir.join("agg/state/STATE.md").exists(), "init should scaffold the forward state file");
     assert!(dir.join("agg/judges/tests_pass.sh").exists(), "init should scaffold a starter judge");
 
     let out = agg(dir, &path).arg("plan").output().unwrap();
@@ -218,7 +219,7 @@ fn config_lives_in_the_agg_folder() {
     // judge `worked` lives under agg/judges/ and checks a root-level marker the worker creates.
     write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
     write_cfg(dir, "folded", "worked", "", "");
-    write(dir, "agg/AGG_STATE.md", "create the file did_work\n");
+    write(dir, "agg/state/STATE.md", "create the file did_work\n");
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
     let combined = format!(
@@ -252,7 +253,7 @@ fi
 "#,
     );
     write_cfg(dir, "itest", "worked", "", "");
-    write(dir, "agg/AGG_STATE.md", "create the file did_work\n");
+    write(dir, "agg/state/STATE.md", "create the file did_work\n");
 
     // Cap sessions so a logic bug can't hang the test. One fake session should suffice:
     // baseline judge says not-met → launch worker (creates did_work) → judge met → stop.
@@ -340,7 +341,7 @@ fn judge_runs_one_name_and_prints_raw_verdict() {
     // a judge is a FILE resolved by NAME now (§5.1) — no goals.yaml, no inline cmd.
     write_judge(dir, "ok", "#!/bin/sh\necho '{\"met\":true,\"rationale\":\"fine\"}'\n");
     write(dir, "agg/agg.yaml", "project: jt\nsteps: { worker: {} }\nsequence: { steps: [worker], done_if: ok }\n");
-    write(dir, "agg/AGG_STATE.md", "noop\n");
+    write(dir, "agg/state/STATE.md", "noop\n");
 
     // a known judge: raw verdict JSON on stdout
     let out = agg(dir, &path).args(["judge", "ok"]).output().unwrap();
@@ -400,7 +401,7 @@ fn status_and_history_json_are_machine_readable() {
     let dir = tmp.path();
     write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
     write_cfg(dir, "jsonproj", "worked", "  limits: { cost: 5.0 }\n", "");
-    write(dir, "agg/AGG_STATE.md", "create the file did_work\n");
+    write(dir, "agg/state/STATE.md", "create the file did_work\n");
 
     // run once so both the snapshot (state.json) and the ledger (project.json) exist.
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
@@ -448,7 +449,7 @@ fn status_and_history_json_are_machine_readable() {
 #[test]
 fn institutional_memory_is_written_without_worker_cooperation() {
     // ENFORCEMENT FLOOR: the default fake worker writes NO memory note, yet agg must still produce
-    // AGG_MEMORY.md from mechanical facts — the worker is never trusted to persist.
+    // LOG.md from mechanical facts — the worker is never trusted to persist.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
     // a judge that never meets, so the loop runs the full max_sessions and folds memory each time.
@@ -460,13 +461,71 @@ fn institutional_memory_is_written_without_worker_cooperation() {
     assert_exit(&out, 4, &combined); // DoD is `impossible` → reaches the session cap unmet.
 
     // the durable memory file must exist under agg/state/, with a folded mechanical entry.
-    let mem = dir.join("agg/state/AGG_MEMORY.md");
-    assert!(mem.exists(), "AGG_MEMORY.md must be written even when the worker writes no note");
+    let mem = dir.join("agg/state/LOG.md");
+    assert!(mem.exists(), "LOG.md must be written even when the worker writes no note");
     let text = fs::read_to_string(&mem).unwrap();
     assert!(text.contains("## session 1"), "session 1 folded into memory, got:\n{text}");
     assert!(text.contains("exited cleanly") || text.contains("Goals:"), "mechanical facts recorded:\n{text}");
     // the loop logs the fold.
     assert!(combined.contains("[memory] session #1 folded"), "fold should be logged:\n{combined}");
+}
+
+#[test]
+fn worker_gets_a_pointer_and_agg_writes_the_full_brief_to_instructions_md() {
+    // §2/§3: the worker's `-p` is a tiny FIXED pointer; the whole brief is composed into
+    // agg/state/INSTRUCTIONS.md (regenerated every session), which the worker reads. This kills the
+    // argv size ceiling + the dash-safe fragility, and points at STATE.md rather than inlining it.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // a stub that captures its `-p` value into pval.txt, then commits a marker + emits a clean result.
+    let claude = bin.join("claude");
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+prev=""
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+  if [ "$prev" = "-p" ]; then printf '%s' "$a" > pval.txt; fi
+  prev="$a"
+done
+: > did_work
+git add did_work >/dev/null 2>&1
+git commit -qm "worker: did_work" >/dev/null 2>&1
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    );
+    chmod_x(&claude);
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    write_judge(dir, "did", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    write_cfg(dir, "ptrproj", "did", "", "");
+    // a recognisable STATE body, to prove agg POINTS at it (§3 refinement 1) rather than inlining it.
+    write(dir, "agg/state/STATE.md", "STATE-BODY-MARKER: fix the widget\n");
+    // a committed AGG.md so the brief also points at the standing project instructions.
+    write(dir, "agg/AGG.md", "# Project\nThe widget factory.\n");
+    git_init(dir);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 0, &combined);
+
+    // 1) the worker's `-p` was the tiny pointer — never the full brief, never the STATE body.
+    let pval = fs::read_to_string(dir.join("pval.txt")).expect("fake worker captured its -p");
+    assert!(pval.contains("agg/state/INSTRUCTIONS.md"), "the -p must be the INSTRUCTIONS.md pointer, got: {pval}");
+    assert!(!pval.contains("STATE-BODY-MARKER"), "the STATE body must NOT be inlined into -p: {pval}");
+    assert!(pval.len() < 200, "the -p must stay tiny (no argv ceiling), got {} bytes", pval.len());
+
+    // 2) agg composed the FULL brief into INSTRUCTIONS.md, pointing at STATE.md (not inlining it).
+    let instr = fs::read_to_string(dir.join("agg/state/INSTRUCTIONS.md")).expect("agg wrote INSTRUCTIONS.md");
+    assert!(instr.contains("# Session 1"), "brief carries the session header:\n{instr}");
+    assert!(instr.contains("agg/state/STATE.md"), "brief POINTS at STATE.md:\n{instr}");
+    assert!(instr.contains("agg/AGG.md"), "brief POINTS at the standing AGG.md:\n{instr}");
+    assert!(instr.contains("agg/state/wiki/"), "footer names the wiki (multi-session plans live there):\n{instr}");
+    assert!(instr.contains("Before you exit"), "brief carries the standing footer:\n{instr}");
 }
 
 #[test]
@@ -491,8 +550,8 @@ fn lifetime_session_is_published_to_state_json() {
 
 #[test]
 fn worker_written_memory_note_is_folded() {
-    // Tier 3a: when the worker writes agg/state/memory/session-<N>.md on a clean session, agg folds
-    // that note (preferred over the mechanical fallback) into the durable AGG_MEMORY.md.
+    // Tier 3a: when the worker writes agg/state/sessions/session-<N>.md on a clean session, agg folds
+    // that note (preferred over the mechanical fallback) into the durable LOG.md.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
@@ -506,8 +565,8 @@ fn worker_written_memory_note_is_folded() {
 for a in "$@"; do
   if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
 done
-mkdir -p agg/state/memory
-printf 'GOTCHA: the frobnicator needs a warm cache before the second pass\n' > agg/state/memory/session-1.md
+mkdir -p agg/state/sessions
+printf 'GOTCHA: the frobnicator needs a warm cache before the second pass\n' > agg/state/sessions/session-1.md
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
 exit 0
 "#,
@@ -523,7 +582,7 @@ exit 0
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // DoD is `impossible` → reaches the session cap unmet.
 
-    let text = fs::read_to_string(dir.join("agg/state/AGG_MEMORY.md")).unwrap();
+    let text = fs::read_to_string(dir.join("agg/state/LOG.md")).unwrap();
     assert!(text.contains("GOTCHA: the frobnicator"), "worker note folded into memory, got:\n{text}");
     // the worker note is appended as a fenced, lower-trust hint after the mechanical fact —
     // never standing alone — so the fold source is 'mechanical+worker'.
@@ -532,7 +591,7 @@ exit 0
     // exactly ONE entry for session 1 (the early floor was superseded, not double-folded).
     assert_eq!(text.matches("## session 1 (").count(), 1, "single entry per session, got:\n{text}");
     // the scratch note is cleaned up after folding.
-    assert!(!dir.join("agg/state/memory/session-1.md").exists(), "scratch note deleted after fold");
+    assert!(!dir.join("agg/state/sessions/session-1.md").exists(), "scratch note deleted after fold");
 }
 
 #[test]
@@ -694,7 +753,7 @@ exit 0
          sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  \
          done_if: \"feature\"\nsummary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
@@ -829,7 +888,7 @@ fi
         "",
         "hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
-    write(dir, "agg/AGG_STATE.md", "create the file did_work\n");
+    write(dir, "agg/state/STATE.md", "create the file did_work\n");
     git_init(dir); // mandatory session isolation needs a git base
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
@@ -877,7 +936,7 @@ fn a_baseline_satisfied_run_enters_no_stage() {
         "",
         "hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
-    write(dir, "agg/AGG_STATE.md", "noop\n");
+    write(dir, "agg/state/STATE.md", "noop\n");
     git_init(dir); // mandatory session isolation needs a git base (did_work stays untracked → clean)
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
@@ -935,7 +994,7 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
         "",
         "hooks:\n  on_session_start: [\"sh bin/rec INJECT\"]\n  on_session_end: [\"sh bin/rec GATE\"]\n",
     );
-    write(dir, "agg/AGG_STATE.md", "work\n");
+    write(dir, "agg/state/STATE.md", "work\n");
     git_init(dir); // mandatory session isolation needs a git base
 
     let log = dir.join("run.log");
@@ -1005,7 +1064,7 @@ fn an_unknown_step_in_the_sequence_is_a_startup_error() {
         "project: ghosts\ndefaults: { model: fake }\nsteps:\n  worker: {}\n\
          sequence:\n  steps: [worker, ghost]\n  done_if: \"worked\"\nsummary: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
     assert!(!out.status.success(), "an unknown step must refuse to start");
@@ -1029,7 +1088,7 @@ fn a_sequence_of_only_skip_judges_is_refused_at_startup() {
         "project: allskip\ndefaults: { model: fake }\nsteps:\n  stage: { skip_judges: true }\n\
          sequence:\n  steps: [stage]\n  done_if: \"worked\"\nsummary: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
     assert!(!out.status.success(), "an all-skip_judges sequence must refuse to start");
@@ -1086,7 +1145,7 @@ exit 0
         "project: span\ndefaults: { model: fake }\nsteps:\n  stage: { skip_judges: true }\n  worker: {}\n\
          sequence:\n  steps: [stage, worker]\n  done_if: \"feature\"\nsummary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
@@ -1126,7 +1185,7 @@ fn done_if_all_goals_ignores_an_if_condition_judge() {
          sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  \
          done_if: \"all_goals\"\n  invariants: [feature]\nsummary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "create the file did_work\n");
+    write(dir, "agg/state/STATE.md", "create the file did_work\n");
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -1185,7 +1244,7 @@ exit 0
          sequence:\n  steps: [worker]\n  done_if: \"reviewed\"\n  abort_if: \"over_budget\"\n  limits: { tokens: 1000 }\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
     git_init(dir);
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output().unwrap();
@@ -1222,7 +1281,7 @@ fn ceilings_are_checked_after_a_skip_judges_step_too() {
          sequence:\n  steps: [worker, stage]\n  done_if: \"feature\"\n  abort_if: \"over_iterations\"\n  limits: { sessions: 2 }\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
 
     // No --max-sessions flag on purpose: the ceiling under test is `limits.sessions`, and a non-zero
     // flag would OVERRIDE it (§4.1). limits.sessions=2 ALSO backs the loop's own exit-4 precheck, so
@@ -1335,7 +1394,7 @@ exit 0
              summary: {{ enabled: false }}\nmemory: {{ enabled: false }}\n"
         ),
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
     git_init(dir);
     let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -1447,7 +1506,7 @@ exit 0
          sequence:\n  steps: [worker]\n  done_if: \"reviewed\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "create the file did_work\n");
+    write(dir, "agg/state/STATE.md", "create the file did_work\n");
     git_init(dir);
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
@@ -1470,14 +1529,15 @@ fn a_run_set_only_if_condition_judge_is_evaluated_and_fires_its_branch() {
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // the worker records every -p prompt (so the reconsider marker is observable) and, on its first
-    // run, COMMITS `.signal` — which flips `stalled` to met on the next evaluation.
+    // the worker records the brief it actually reads (agg/state/INSTRUCTIONS.md — the `-p` is now
+    // just a tiny pointer at it) so the reconsider marker is observable, and on its first run COMMITS
+    // `.signal` — which flips `stalled` to met on the next evaluation.
     write(
         &bin,
         "claude",
         r#"#!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s\n===8<===\n' "$a" >> prompts.txt; prev="$a"; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat agg/state/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
 if [ ! -f .signal ]; then : > .signal; git add .signal >/dev/null 2>&1; git commit -qm signal >/dev/null 2>&1; fi
 printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 exit 0
@@ -1497,7 +1557,7 @@ exit 0
          sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  done_if: \"feature\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
     git_init(dir);
 
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
@@ -1534,17 +1594,18 @@ fn the_builtin_stalled_judge_fires_reconsider_on_a_no_progress_run() {
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // The fake worker: (1) records every `-p` prompt to prompts.txt — left UNTRACKED so it survives
-    // session branch resets and accumulates the reconsider marker; (2) commits a UNIQUE no-op line
-    // per session to a TRACKED file so the worker step MERGES (the builtin stalled counts only
-    // `merged` verdict rows) while moving NO judge's met/value. `agg/state/` is auto-gitignored by
-    // agg, so the verdicts.jsonl stalled reads is never committed or clobbered.
+    // The fake worker: (1) records the brief it actually reads (agg/state/INSTRUCTIONS.md — the `-p`
+    // is now a tiny pointer at it) to prompts.txt — left UNTRACKED so it survives session branch
+    // resets and accumulates the reconsider marker; (2) commits a UNIQUE no-op line per session to a
+    // TRACKED file so the worker step MERGES (the builtin stalled counts only `merged` verdict rows)
+    // while moving NO judge's met/value. `agg/state/` is auto-gitignored by agg, so the
+    // verdicts.jsonl stalled reads is never committed or clobbered.
     write(
         &bin,
         "claude",
         r#"#!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s\n===8<===\n' "$a" >> prompts.txt; prev="$a"; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat agg/state/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
 n=$(cat noop.txt 2>/dev/null | wc -l | tr -d ' ')
 printf 'noop %s\n' "$n" >> noop.txt
 git add noop.txt >/dev/null 2>&1
@@ -1569,7 +1630,7 @@ exit 0
          sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  done_if: \"feature\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
     git_init(dir);
 
     // feature never met + no abort_if → the ONLY terminator is the session cap (exit 4). 8 is ample:

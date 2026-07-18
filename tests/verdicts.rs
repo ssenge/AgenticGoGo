@@ -112,7 +112,7 @@ exit 0
 
     write_judge(dir, "feature", "#!/bin/sh\n[ -f feature_done ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write(dir, "agg/agg.yaml", &base_config(project));
-    write(dir, "agg/AGG_STATE.md", "create feature_done\n");
+    write(dir, "agg/state/STATE.md", "create feature_done\n");
     git_init(dir);
 
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
@@ -226,7 +226,7 @@ exit 0
          sequence:\n  steps: [worker]\n  done_if: \"feature\"\n  invariants: [build_ok]\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/AGG_STATE.md", "do work\n");
+    write(dir, "agg/state/STATE.md", "do work\n");
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "base"]);
 

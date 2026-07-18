@@ -21,7 +21,9 @@
 #
 # Config is the CURRENT judge/step model: a judge IS a goal (agg/judges/<name>.{sh,md}), the DoD
 # is `done_if`, ceilings live in `sequence.limits`, and continuity across sessions is carried by
-# COMMITTED git state + AGG_MEMORY.md — there is no `--resume` (every worker session is fresh).
+# COMMITTED git state + LOG.md — there is no `--resume` (every worker session is fresh). The worker's
+# whole `-p` is a tiny pointer at agg/state/INSTRUCTIONS.md (agg regenerates it each session); this
+# test proves a REAL agent reads that brief AND the STATE.md it points at, then does the work.
 #
 # Exits 0 only if every check passed.
 set -uo pipefail
@@ -54,11 +56,16 @@ printf '\033[33mthis spends real subscription usage (not dollars).\033[0m\n'
 ( cd "$ROOT" && cargo build --quiet ) || { bad "cargo build"; exit 1; }
 
 # ── fixture: a passthrough-instrumented `claude` + a named external judge + a git repo ────────
-# mkproj <name> <judge_name> <done_if_expr> <state/AGG_STATE.md body>
-# Writes agg/agg.yaml (judge/step model), agg/AGG_STATE.md, agg/judges/<judge_name>.sh stub,
-# and inits a git repo (session isolation is mandatory). The section fills in the judge body after.
+# mkproj <name> <judge_name> <done_if_expr> <state/STATE.md seed> [<step prompt — the persistent ask>]
+# Writes agg/agg.yaml (judge/step model), agg/state/STATE.md, agg/judges/<judge_name>.sh stub, and
+# inits a git repo (session isolation is mandatory). The section fills in the judge body after.
+#
+# The 4th arg seeds STATE.md (worker-curated forward advice; the worker REWRITES it each session).
+# A persistent MULTI-session ask must therefore go in the 5th arg → the step `prompt:` (inlined into
+# every session's brief, immutable config the worker cannot overwrite). A one-shot ask can just live
+# in the STATE seed (§3: STATE is pointed-at, so this also proves a real agent follows that pointer).
 mkproj() {
-  local d="$WS/$1"; mkdir -p "$d/bin" "$d/agg/judges"
+  local d="$WS/$1"; mkdir -p "$d/bin" "$d/agg/judges" "$d/agg/state"
   cat > "$d/bin/claude" <<EOF
 #!/bin/sh
 # PASSTHROUGH: record what agg invoked us with, note the live phase, then run the REAL claude.
@@ -73,9 +80,15 @@ printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/state/stat
 EOF
   chmod +x "$d/bin/claude" "$d/rec"
   { printf 'project: %s\n' "$1"
-    printf 'defaults: { agent: claude, model: %s, state: AGG_STATE.md }\n' "$MODEL"
+    printf 'defaults: { agent: claude, model: %s, state: state/STATE.md }\n' "$MODEL"
     printf 'judge: { agent: claude, model: %s, timeout: 120 }\n' "$MODEL"
-    printf 'steps: { worker: {} }\n'
+    if [ -n "${5:-}" ]; then
+      # a persistent ask → the step `prompt:` (a YAML block scalar), inlined into every brief.
+      printf 'steps:\n  worker:\n    prompt: |\n'
+      printf '%s\n' "$5" | sed 's/^/      /'
+    else
+      printf 'steps: { worker: {} }\n'
+    fi
     printf 'summary: { enabled: false }\n'
     printf 'hooks:\n  on_session_start: ["sh ./rec INJECT"]\n  on_session_end: ["sh ./rec GATE"]\n'
     printf 'sequence:\n'
@@ -84,7 +97,7 @@ EOF
     printf '  done_if: "%s"\n' "$3"
     printf '  abort_if: "over_cost OR over_iterations"\n'
   } > "$d/agg/agg.yaml"
-  printf '%s' "$4" > "$d/agg/AGG_STATE.md"
+  printf '%s' "$4" > "$d/agg/state/STATE.md"
   ( cd "$d" && git init -q -b main && git config user.email t@t && git config user.name t \
       && git add -A && git commit -q -m seed )
   echo "$d"
@@ -158,8 +171,8 @@ has "…--model <the configured model>" "$A/claude_args.txt" "$MODEL"
 hasnt "…and NO --resume (every session is fresh context — the moat)" "$A/claude_args.txt" "--resume"
 
 sec "6. durable side effects of a real run"
-exists "institutional memory was written" "$A/agg/state/AGG_MEMORY.md"
-has    "…recording the real session"      "$A/agg/state/AGG_MEMORY.md" "## session 1"
+exists "institutional memory was written" "$A/agg/state/LOG.md"
+has    "…recording the real session"      "$A/agg/state/LOG.md" "## session 1"
 is "the ledger is finalized as goals-met" \
    "$(python3 -c "import json;print(json.load(open('$A/agg/state/project.json'))['runs'][-1]['end_reason'])" 2>/dev/null)" "goals-met"
 [ ! -f "$A/agg/state/run.pid" ] && ok "run.pid cleared by the Drop guard" || bad "run.pid left behind"
@@ -172,12 +185,13 @@ is "…the worker's committed file is on main (isolation merged it)" \
 sec "7. TWO real sessions: fresh-context continuity via COMMITTED state + memory (no --resume)"
 # a counter that needs exactly two increments — the loop MUST take two sessions, and session 2
 # (a FRESH context) must pick up session 1's committed count.txt + the folded memory. This is the
-# whole point of the rewrite: continuity carried by git + AGG_MEMORY.md, not a --resume handle.
-B="$(mkproj resume counted 'counted' 'Read the file `count.txt` in the current directory (if it does not exist, treat its value as 0).
+# whole point of the rewrite: continuity carried by git + LOG.md, not a --resume handle.
+B="$(mkproj resume counted 'counted' \
+'First session — count.txt does not exist yet. Follow the step task, then rewrite this note with the new count.' \
+'Read the file `count.txt` in the current directory (if it does not exist, treat its value as 0).
 Increment that number by exactly ONE. Write the new number back to `count.txt` as the only
 contents, followed by a newline. Then run `git add count.txt && git commit -m increment` to commit
-it (uncommitted work is discarded). Increment exactly once, then stop. Do not skip ahead.
-')"
+it (uncommitted work is discarded). Increment exactly once, then stop. Do not skip ahead.')"
 cat > "$B/agg/judges/counted.sh" <<'EOF'
 #!/bin/sh
 sh ./rec VERIFY
@@ -202,7 +216,7 @@ SESS=$(snap "$B" session)
                        || bad "expected ≥2 sessions, got $SESS"
 is "the counter really reached 2" "$(tr -d '[:space:]' < "$B/count.txt" 2>/dev/null)" "2"
 hasnt "…and did so with NO --resume — pure fresh context each session" "$B/claude_args.txt" "--resume"
-COUNT_FOLDS=$(grep -c "^## session" "$B/agg/state/AGG_MEMORY.md" 2>/dev/null || echo 0)
+COUNT_FOLDS=$(grep -c "^## session" "$B/agg/state/LOG.md" 2>/dev/null || echo 0)
 [ "$COUNT_FOLDS" -ge 2 ] && ok "memory folded one entry per real session ($COUNT_FOLDS)" \
                          || bad "expected ≥2 memory entries, got $COUNT_FOLDS"
 has "…and session #1's record was INJECTed into session 2's prompt" "$B/out.log" "[memory] session #1 folded"

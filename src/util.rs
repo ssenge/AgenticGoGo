@@ -11,7 +11,7 @@ pub fn now_epoch() -> u64 {
 }
 
 /// A Unix epoch as a human-readable LOCAL wall-clock string (`YYYY-MM-DD HH:MM:SS`), for logs a
-/// person reads (e.g. the `AGG_MEMORY.md` session header). Falls back to the raw epoch if the
+/// person reads (e.g. the `LOG.md` session header). Falls back to the raw epoch if the
 /// clock is unrepresentable.
 pub fn human_time(epoch: u64) -> String {
     jiff::Timestamp::from_second(epoch as i64)

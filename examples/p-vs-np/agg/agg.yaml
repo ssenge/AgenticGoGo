@@ -6,7 +6,7 @@ project: "p-vs-np"
 defaults:
   agent: "claude"                        # the grunt worker runs on Claude/Opus. See the README to port.
   model: "claude-opus-4-8[1m]"           # the heavy lifting runs on Opus
-  state: "AGG_STATE.md"
+  state: "state/STATE.md"                # worker-curated forward advice; under gitignored agg/state/, survives a rollback
 
 # THE RULER — runs the LLM judge (paper_written) + the summarizer. Immutable across the run:
 # a grader that moves makes verdicts incomparable across cycles.

@@ -7,13 +7,17 @@
 //!
 //! ```text
 //! <project>/
-//!   agg/                  user config — COMMITTED (agg.yaml, AGG_STATE.md, judges/<name>.{sh,md})
+//!   agg/                  user config — COMMITTED (agg.yaml, AGG.md, judges/<name>.{sh,md})
+//!     AGG.md            standing project instructions the WORKER reads (the CLAUDE.md-analog) — COMMITTED
 //!     state/              ALL runtime state — GITIGNORED (one folder, one rule)
-//!       AGG_MEMORY.md       durable institutional memory (#3) — moved here from the project root
+//!       INSTRUCTIONS.md     the worker's whole `-p` target — agg REGENERATES it every session
+//!       STATE.md            worker-curated forward advice (moved out of committed agg/, survives rollback)
+//!       LOG.md              durable institutional memory (#3) — enforced hard-facts audit trail
+//!       wiki/               worker-owned durable knowledge — multi-session PLANS + dead-ends (linked md pages)
 //!       state.json          live dashboard snapshot (loop writes, `agg dashboard` reads)
 //!       project.json        persistent run-history ledger (lifetime sessions/tokens)
 //!       verdicts.jsonl      append-only, safety-critical GATE record — one line per verdict (§5.8)
-//!       memory/             transient per-session worker memory scratch (session-<N>.md)
+//!       sessions/           transient per-session worker memory scratch (session-<N>.md)
 //!       spawns.json         long-task registry (`agg spawn`)
 //!       spawns/<name>.log   per-spawn combined stdout+stderr
 //!       bus/{in,out}/       operator↔loop command bus; bus/log.jsonl audit
@@ -39,6 +43,17 @@ pub fn config_base(dir: &Path) -> PathBuf {
 /// The runtime-state root: `<dir>/agg/state`. Everything agg writes lives under here, gitignored.
 pub fn agg_dir(dir: &Path) -> PathBuf {
     config_base(dir).join("state")
+}
+
+/// The worker's whole `-p` target: `agg/state/INSTRUCTIONS.md`. agg REGENERATES it fresh every
+/// session (compose_prompt writes it); the worker reads it and follows it. Disposable, gitignored.
+pub fn instructions_md(dir: &Path) -> PathBuf {
+    agg_dir(dir).join("INSTRUCTIONS.md")
+}
+
+/// The worker-owned LLM wiki root: `agg/state/wiki/` (durable knowledge incl. multi-session plans, gitignored).
+pub fn wiki_dir(dir: &Path) -> PathBuf {
+    agg_dir(dir).join("wiki")
 }
 
 /// Live dashboard snapshot: `agg/state/state.json`.
@@ -90,6 +105,8 @@ mod tests {
     fn runtime_state_is_under_agg_state() {
         let d = Path::new("/proj");
         assert_eq!(agg_dir(d), Path::new("/proj/agg/state"));
+        assert_eq!(instructions_md(d), Path::new("/proj/agg/state/INSTRUCTIONS.md"));
+        assert_eq!(wiki_dir(d), Path::new("/proj/agg/state/wiki"));
         assert_eq!(state_json(d), Path::new("/proj/agg/state/state.json"));
         assert_eq!(project_json(d), Path::new("/proj/agg/state/project.json"));
         assert_eq!(verdicts_jsonl(d), Path::new("/proj/agg/state/verdicts.jsonl"));

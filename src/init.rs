@@ -1,8 +1,9 @@
 //! `agg init` — scaffold a working AgenticGoGo project.
 //!
-//! One config file now (`agg.yaml` — defaults/judge/steps/sequence) plus the forward state file
-//! (`AGG_STATE.md`) and a starter judge. `goals.yaml` is gone: a judge IS a goal, resolved by name
-//! from `agg/judges/` (§7.1). Everything scaffolds under the mandatory `agg/` folder.
+//! `agg.yaml` (defaults/judge/steps/sequence), a committed `AGG.md` (stable scope), the gitignored
+//! forward-state file `state/STATE.md`, and a starter judge. `goals.yaml` is gone: a judge IS a
+//! goal, resolved by name from `agg/judges/` (§7.1). Config + AGG.md are COMMITTED under `agg/`; all
+//! runtime state (incl. STATE.md) lives under the gitignored `agg/state/`.
 
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -45,9 +46,10 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         .replace("{{COST_LINE}}", &cost_line)
         .replace("{{OVER_COST}}", over_cost);
 
-    let files: [(&str, &str, bool); 3] = [
+    let files: [(&str, &str, bool); 4] = [
         ("agg.yaml", agg_yaml.as_str(), false),
-        ("AGG_STATE.md", STATE_MD, false),
+        ("AGG.md", AGG_MD, false),
+        ("state/STATE.md", STATE_MD, false),
         ("judges/tests_pass.sh", JUDGE_SH, true),
     ];
 
@@ -90,9 +92,11 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         "\n✔ Scaffolded an AgenticGoGo starter in {}.\n\n\
          Next steps:\n  \
          1. Edit agg/agg.yaml `done_if` + agg/judges/ to match YOUR project.\n  \
-         2. Edit agg/AGG_STATE.md — the standing instructions each worker session reads.\n  \
-         3. agg plan            # dry-run: see the starting scoreboard (run from the project root)\n  \
-         4. agg run             # launch the loop until done_if is met\n",
+         2. Edit agg/AGG.md — the standing project instructions each worker reads (committed).\n  \
+         3. Edit agg/state/STATE.md — the forward \"what to do next\" advice (agg regenerates the\n     \
+            per-session brief at agg/state/INSTRUCTIONS.md from these; gitignored).\n  \
+         4. agg plan            # dry-run: see the starting scoreboard (run from the project root)\n  \
+         5. agg run             # launch the loop until done_if is met\n",
         base.display()
     );
     Ok(())
@@ -119,7 +123,7 @@ project: "my-project"
 # Inherited by EVERY step; a step body may override any of these.
 defaults:
   agent: "{{AGENT}}"
-{{MODEL_LINE}}{{EFFORT_LINE}}  state: "AGG_STATE.md"            # the forward state file the AGENT maintains (best-effort)
+{{MODEL_LINE}}{{EFFORT_LINE}}  state: "state/STATE.md"          # forward "what to do next" file the AGENT maintains (under agg/, gitignored)
 
 # THE RULER — runs the LLM judges + the summarizer. Immutable; naming any of these in a step is a
 # HARD ERROR (a grader that moves makes verdicts incomparable across cycles).
@@ -127,7 +131,11 @@ judge:
   agent: "{{AGENT}}"
 {{JUDGE_MODEL}}  timeout: 300                     # seconds, EVERY judge (script + LLM)
 
-# The step palette. The NAME is your own label; the body is overrides only.
+# The step palette. The NAME is your own label; the body is overrides only. A step may also carry
+# `role_prompt:` (generic role framing, e.g. a red-team "reconsider" step) and `prompt:` (its
+# specific ask) — both are composed into the per-session brief above the context. Example:
+#   reconsider: { skip_judges: true, role_prompt: "Step back — assume the current approach is wrong.",
+#                 prompt: "Name 2-3 different approaches, pick one, record the rejected ones + why." }
 steps:
   worker: {}                       # pure defaults
 
@@ -152,23 +160,42 @@ memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
 session_isolation: {}              # MANDATORY; defaults (branch_prefix: agg, red_file: .agg_red)
 "#;
 
-const STATE_MD: &str = r#"<!-- AGG_STATE.md — the standing instructions fed to EVERY fresh worker session, AND the forward
-     state the agent maintains ("what to do next"). agg reads it at the bottom of each prompt; you
-     start it, the agent updates it as it works. A vague file = a loop that spins. -->
+const AGG_MD: &str = r#"<!-- AGG.md — the standing instructions for this project (the CLAUDE.md-analog for the agg loop).
+     COMMITTED; you (the human) own it; rare edits. agg points every worker session here for
+     orientation. The moving "what to do next" lives in agg/state/STATE.md; durable knowledge and
+     multi-session PLANS live in agg/state/wiki/. A vague file here = a loop that spins. -->
+
+# Project
+One line: what this project is and does.
 
 # Goal
-Make all the project's tests pass.
+Make all the project's tests pass. (The real gate is your judges / `done_if`.)
 
-# This session — do ONE self-contained chunk of work
-1. Orient: read this file, then run the project's tests/checks to see what's failing.
-2. Implement or fix ONE thing that moves a goal forward. Real, correct work — no stubs.
-3. Verify your change (re-run the relevant test/check).
-4. Update THIS file with the new state + the exact next task; commit.
+# Architecture — where things live
+Fill this in so a fresh worker orients fast: key modules/entry points, and the exact build/test
+commands to run.
 
 # Rules
 - You are AUTONOMOUS. There is NO human to answer questions — never pause to ask.
-- Commit as you go. Keep changes focused and correct. When context fills, finish the chunk,
-  update this file, commit, then exit — the loop relaunches you fresh.
+- Real, correct work only — no stubs. Keep changes focused.
+- Multi-session work: keep a running PLAN as a page in `agg/state/wiki/` and update it each session.
+  STATE.md is rewritten every session, so a plan parked there is lost; the wiki persists (and
+  survives session rollbacks).
+"#;
+
+const STATE_MD: &str = r#"<!-- STATE.md — your predecessor's forward advice: crisp "what to do next". agg regenerates the
+     per-session brief (agg/state/INSTRUCTIONS.md) from this + AGG.md + memory, and points the
+     worker at it. You (the agent) rewrite THIS file each session before you exit. Keep it SHORT —
+     it is read in full. Gitignored, so it survives a session rollback. -->
+
+# Where things stand
+First session — nothing done yet.
+
+# Next step
+1. Orient: read agg/AGG.md, then run the project's tests/checks to see what's failing.
+2. Implement or fix ONE thing that moves a goal forward. Real, correct work — no stubs.
+3. Verify your change (re-run the relevant test/check).
+4. Rewrite THIS file with the new state + the exact next task before you exit.
 "#;
 
 const JUDGE_SH: &str = r#"#!/usr/bin/env bash
