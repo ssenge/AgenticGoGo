@@ -178,9 +178,11 @@ commands to run.
 # Rules
 - You are AUTONOMOUS. There is NO human to answer questions — never pause to ask.
 - Real, correct work only — no stubs. Keep changes focused.
-- Multi-session work: keep a running PLAN as a page in `agg/state/wiki/` and update it each session.
-  STATE.md is rewritten every session, so a plan parked there is lost; the wiki persists (and
-  survives session rollbacks).
+- Durable knowledge lives in `agg/state/wiki/` as an OKF (Open Knowledge Format) wiki: one concept
+  per markdown file with a `type:` frontmatter, CROSS-LINKED with standard `[label](page.md)` markdown
+  links so it forms a graph. Keep any multi-session PLAN there (STATE.md is rewritten each session, so
+  a plan parked there is lost; the wiki persists and survives rollbacks) and record dead-ends +
+  decisions. View it in Obsidian by opening the `agg/` folder as a vault.
 "#;
 
 const STATE_MD: &str = r#"<!-- STATE.md — your predecessor's forward advice: crisp "what to do next". agg regenerates the

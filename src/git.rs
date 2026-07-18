@@ -215,31 +215,46 @@ pub fn remove_file(dir: &Path, path: &str) {
     let _ = std::fs::remove_file(dir.join(path));
 }
 
-/// Ensure `agg/state/` is gitignored (so agg's runtime state never gets committed onto session
-/// branches or merged into base). Idempotent. MIGRATION: runtime state used to live at
-/// `<project>/.agg/`, so a pre-move project already ignores that now-stale path — we DROP it while
-/// writing the new entry rather than leave two contradictory lines. Only `agg/state/` is ignored:
-/// the committed config + judge library under `agg/` must stay tracked. Best-effort.
+/// Ensure the project's `.gitignore` carries `agg/state/` (agg's runtime state must never get
+/// committed onto session branches or merged into base) AND `.obsidian/` (so a user who opens the
+/// `agg/` folder as an Obsidian vault — to visualize the LLM wiki — never commits Obsidian's config).
+/// Idempotent, order-independent. MIGRATION: runtime state used to live at `<project>/.agg/`, so a
+/// pre-move project ignores that now-stale path — we DROP it rather than leave two contradictory
+/// lines. Only `agg/state/` is ignored under `agg/`: the committed config + judges must stay tracked.
+/// Best-effort.
 pub fn ensure_agg_gitignored(dir: &Path) {
     let gi = dir.join(".gitignore");
     let existing = std::fs::read_to_string(&gi).unwrap_or_default();
-    let is_new = |t: &str| matches!(t, "agg/state" | "agg/state/" | "/agg/state" | "/agg/state/");
+    let has = |opts: &[&str]| existing.lines().any(|l| opts.contains(&l.trim()));
     let is_stale = |t: &str| matches!(t, ".agg" | ".agg/" | "/.agg" | "/.agg/");
-    if existing.lines().any(|l| is_new(l.trim())) {
-        return; // already migrated
+
+    let has_state = has(&["agg/state", "agg/state/", "/agg/state", "/agg/state/"]);
+    // `.obsidian/` (no leading slash) matches an Obsidian vault at ANY depth — root, `agg/`, or
+    // `agg/state/` — so it covers whichever folder the user opens as the vault.
+    let has_obsidian = has(&[".obsidian", ".obsidian/", "/.obsidian", "/.obsidian/"]);
+    let has_stale = existing.lines().any(|l| is_stale(l.trim()));
+    if has_state && has_obsidian && !has_stale {
+        return; // both entries present, nothing stale — done
     }
-    // Re-emit every line except the stale pre-move `.agg/` entry, then append the new one, so a
-    // migrated project ends with exactly one (correct) entry, never two contradictory ones.
+
+    // Re-emit every line except the stale pre-move `.agg/` entry, then append whichever entries are
+    // missing, so the file ends with exactly one (correct) copy of each, never a contradictory pair.
     let mut new: String = existing
         .lines()
         .filter(|l| !is_stale(l.trim()))
         .map(|l| format!("{l}\n"))
         .collect();
-    new.push_str("agg/state/\n");
+    if !has_state {
+        new.push_str("agg/state/\n");
+    }
+    if !has_obsidian {
+        new.push_str(".obsidian/\n");
+    }
     let _ = std::fs::write(&gi, new);
     // also stop tracking runtime state if it was committed under the OLD layout (keeps files on
     // disk). Target `agg/state` ONLY — `git rm --cached agg` would untrack the whole committed
-    // config + judge library, inverting the moat.
+    // config + judge library, inverting the moat. (We do NOT untrack a `.obsidian/` a user chose to
+    // commit — only ignore it going forward.)
     let _ = git(dir, &["rm", "-r", "--cached", "--quiet", "agg/state"]);
 }
 
@@ -678,13 +693,33 @@ mod tests {
         let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();
         let lines: Vec<&str> = gi.lines().map(str::trim).collect();
         assert!(lines.contains(&"agg/state/"), "new runtime path must be ignored: {gi:?}");
+        assert!(lines.contains(&".obsidian/"), "the Obsidian vault config must be ignored too: {gi:?}");
         assert!(!lines.iter().any(|l| *l == ".agg/" || *l == ".agg"), "stale .agg/ line must be dropped: {gi:?}");
         assert!(lines.contains(&"target/"), "unrelated entries must survive: {gi:?}");
 
-        // idempotent: a second call recognises the new spelling and appends nothing.
+        // idempotent: a second call recognises both entries and appends nothing.
         ensure_agg_gitignored(&d);
         let gi2 = std::fs::read_to_string(d.join(".gitignore")).unwrap();
         assert_eq!(gi2.matches("agg/state/").count(), 1, "must not append a duplicate: {gi2:?}");
+        assert_eq!(gi2.matches(".obsidian/").count(), 1, "must not duplicate .obsidian/: {gi2:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A project that ALREADY ignores `agg/state/` (from an earlier agg version) but not `.obsidian/`
+    /// must still get `.obsidian/` added on the next call — the early-return must not skip it.
+    #[test]
+    fn ensure_agg_gitignored_adds_obsidian_to_an_already_migrated_project() {
+        let d = std::env::temp_dir().join(format!("agg-git-{}-obsidian", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git_t(&d, &["init", "-q", "-b", "main"]);
+        std::fs::write(d.join(".gitignore"), "target/\nagg/state/\n").unwrap();
+
+        ensure_agg_gitignored(&d);
+        let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();
+        let lines: Vec<&str> = gi.lines().map(str::trim).collect();
+        assert!(lines.contains(&".obsidian/"), "must add .obsidian/ even when agg/state/ already present: {gi:?}");
+        assert_eq!(gi.matches("agg/state/").count(), 1, "must not duplicate the existing agg/state/: {gi:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -605,12 +605,19 @@ impl LoopState<'_> {
         //    agg actually reads/points-at — otherwise the worker would rewrite the wrong file.
         s.push_str("\n## Before you exit\n1. Do ONE focused chunk of real, correct work — no stubs.\n");
         s.push_str(&format!("2. Rewrite `agg/{}` as crisp next-step advice for your successor.\n", step.state));
-        // UNCONDITIONAL: a multi-session plan MUST live in the wiki (STATE is rewritten wholesale each
-        // session, so a plan parked there is lost; the wiki is edited incrementally and persists).
+        // UNCONDITIONAL: durable knowledge + any multi-session plan live in the wiki (STATE is
+        // rewritten wholesale each session, so a plan parked there is lost; the wiki is edited
+        // incrementally and persists). Instruct the OKF discipline so the pages actually form a graph
+        // — a set of unlinked notes is not a wiki. OKF v0.1 = one concept per md file, a `type:`
+        // frontmatter, and STANDARD MARKDOWN links between pages (Obsidian renders both).
         s.push_str(
-            "3. Put durable knowledge in `agg/state/wiki/`. If your work spans multiple sessions, keep \
-             the PLAN as a wiki page and update it as you go — `STATE.md` is rewritten every session, \
-             the wiki persists.\n",
+            "3. Maintain the durable wiki at `agg/state/wiki/` as an OKF (Open Knowledge Format) \
+             knowledge base: ONE concept per markdown file, each with YAML frontmatter (`type:` is \
+             required; `title`/`tags`/`timestamp` optional), and CROSS-LINK related pages with \
+             standard markdown links `[label](other-page.md)` so it forms a navigable graph — a pile \
+             of unlinked notes is not a wiki. Record dead-ends, design decisions, and any \
+             MULTI-SESSION PLAN here: `STATE.md` is rewritten every session, the wiki persists and \
+             accumulates.\n",
         );
         s.push_str(
             "Edit files freely — agg saves and version-controls your work automatically; you do NOT commit.\n",
