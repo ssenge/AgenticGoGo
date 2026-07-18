@@ -179,10 +179,11 @@ commands to run.
 - You are AUTONOMOUS. There is NO human to answer questions — never pause to ask.
 - Real, correct work only — no stubs. Keep changes focused.
 - Durable knowledge lives in `agg/state/wiki/` as an OKF (Open Knowledge Format) wiki: one concept
-  per markdown file with a `type:` frontmatter, CROSS-LINKED with standard `[label](page.md)` markdown
-  links so it forms a graph. Keep any multi-session PLAN there (STATE.md is rewritten each session, so
-  a plan parked there is lost; the wiki persists and survives rollbacks) and record dead-ends +
-  decisions. View it in Obsidian by opening the `agg/` folder as a vault.
+  per markdown file (HYPHENATED, space-free filenames so links resolve everywhere), a required `type:`
+  frontmatter, CROSS-LINKED with standard `[label](page.md)` markdown links so it forms a graph. agg's
+  per-session brief ships the exact format + a template. Keep any multi-session PLAN there (STATE.md is
+  rewritten each session, so a plan parked there is lost; the wiki persists and survives rollbacks) and
+  record dead-ends + decisions. View it in Obsidian by opening the `agg/` folder as a vault.
 "#;
 
 const STATE_MD: &str = r#"<!-- STATE.md — your predecessor's forward advice: crisp "what to do next". agg regenerates the
