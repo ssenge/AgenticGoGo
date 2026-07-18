@@ -115,99 +115,16 @@ fn make_executable(path: &Path) {
 fn make_executable(_path: &Path) {}
 
 // ---- starter file contents ----
+//
+// The scaffolds live as REAL files under `plugin/scaffold/` and are `include_str!`'d — the same
+// pattern this crate already uses for the `/agg:*` skills (`crate::skills`) and the judge library
+// (`crate::core::judges`). Editing a scaffold means editing an actual .md/.yaml/.sh file (syntax
+// highlighting, no Rust-string escaping) rather than an inline `r#"…"#` blob. They still compile INTO
+// the binary — a change is a behavior change and must go through the gate; the file just reads better.
+// The `{{…}}` placeholders in `agg.yaml` are filled by the `.replace()` calls in `run` (no template
+// engine — a handful of substitutions do not earn a dependency).
 
-const AGG_YAML: &str = r#"# agg.yaml — harness + steps + sequence. One file: a judge IS a goal, resolved by NAME from
-# agg/judges/<name>.{sh,md} (then ~/.agg/judges/).
-project: "my-project"
-
-# Inherited by EVERY step; a step body may override any of these.
-defaults:
-  agent: "{{AGENT}}"
-{{MODEL_LINE}}{{EFFORT_LINE}}  state: "state/STATE.md"          # forward "what to do next" file the AGENT maintains (under agg/, gitignored)
-
-# THE RULER — runs the LLM judges + the summarizer. Immutable; naming any of these in a step is a
-# HARD ERROR (a grader that moves makes verdicts incomparable across cycles).
-judge:
-  agent: "{{AGENT}}"
-{{JUDGE_MODEL}}  timeout: 300                     # seconds, EVERY judge (script + LLM)
-
-# The step palette. The NAME is your own label; the body is overrides only. A step may also carry
-# `role_prompt:` (generic role framing, e.g. a red-team "reconsider" step) and `prompt:` (its
-# specific ask) — both are composed into the per-session brief above the context. Example:
-#   reconsider: { skip_judges: true, role_prompt: "Step back — assume the current approach is wrong.",
-#                 prompt: "Name 2-3 different approaches, pick one, record the rejected ones + why." }
-steps:
-  worker: {}                       # pure defaults
-
-# The repeating sequence + the run-level ceilings and Definition of Done.
-sequence:
-  steps:
-    - "worker"                     # run `worker`, forever, until done_if fires
-  # Run-level ceilings, unified under one block — each null = unlimited.
-  limits:
-    tokens: null                   # output-token ceiling — worker AND judge spend → over_budget
-{{COST_LINE}}    sessions: null                 # session cap → over_iterations (or pass `agg run --max-sessions <n>`)
-  gate_regressions: true           # roll a session back if a previously-met judge regresses
-  invariants: []                   # judge names that must STAY met
-  done_if: "tests_pass"            # your Definition of Done — judge names, all_goals, count_met, …
-  abort_if: "over_budget{{OVER_COST}} OR over_iterations OR wall_hours >= 4"
-
-heartbeat_secs: 30
-watchdog: { idle_secs: 900, cpu_grace: 180 }
-ratelimit_backoff_secs: 1800
-summary: { enabled: true, min_interval_secs: 300 }
-memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
-session_isolation: {}              # MANDATORY; defaults (branch_prefix: agg, red_file: .agg_red)
-"#;
-
-const AGG_MD: &str = r#"<!-- AGG.md — the standing instructions for this project (the CLAUDE.md-analog for the agg loop).
-     COMMITTED; you (the human) own it; rare edits. agg points every worker session here for
-     orientation. The moving "what to do next" lives in agg/state/STATE.md; durable knowledge and
-     multi-session PLANS live in agg/state/wiki/. A vague file here = a loop that spins. -->
-
-# Project
-One line: what this project is and does.
-
-# Goal
-Make all the project's tests pass. (The real gate is your judges / `done_if`.)
-
-# Architecture — where things live
-Fill this in so a fresh worker orients fast: key modules/entry points, and the exact build/test
-commands to run.
-
-# Rules
-- You are AUTONOMOUS. There is NO human to answer questions — never pause to ask.
-- Real, correct work only — no stubs. Keep changes focused.
-- Durable knowledge lives in `agg/state/wiki/` as an OKF (Open Knowledge Format) wiki: one concept
-  per markdown file (HYPHENATED, space-free filenames so links resolve everywhere), a required `type:`
-  frontmatter, CROSS-LINKED with standard `[label](page.md)` markdown links so it forms a graph. agg's
-  per-session brief ships the exact format + a template. Keep any multi-session PLAN there (STATE.md is
-  rewritten each session, so a plan parked there is lost; the wiki persists and survives rollbacks) and
-  record dead-ends + decisions. View it in Obsidian by opening the `agg/` folder as a vault.
-"#;
-
-const STATE_MD: &str = r#"<!-- STATE.md — your predecessor's forward advice: crisp "what to do next". agg regenerates the
-     per-session brief (agg/state/INSTRUCTIONS.md) from this + AGG.md + memory, and points the
-     worker at it. You (the agent) rewrite THIS file each session before you exit. Keep it SHORT —
-     it is read in full. Gitignored, so it survives a session rollback. -->
-
-# Where things stand
-First session — nothing done yet.
-
-# Next step
-1. Orient: read agg/AGG.md, then run the project's tests/checks to see what's failing.
-2. Implement or fix ONE thing that moves a goal forward. Real, correct work — no stubs.
-3. Verify your change (re-run the relevant test/check).
-4. Rewrite THIS file with the new state + the exact next task before you exit.
-"#;
-
-const JUDGE_SH: &str = r#"#!/usr/bin/env bash
-# Starter judge (agg/judges/tests_pass.sh) — resolved by the NAME `tests_pass` in done_if.
-# Prints a verdict JSON to stdout. REPLACE the body with your real check.
-# Env agg sets: AGG_SESSION, AGG_STEP, AGG_JUDGE, AGG_PROJECT_DIR.
-N="$(cat .passing 2>/dev/null || echo 0)"
-TARGET=3
-met=$([ "$N" -ge "$TARGET" ] && echo true || echo false)
-printf '{"met":%s,"value":%s,"max":%s,"target":%s,"rationale":"%s/%s tests pass (starter stub — replace me)"}\n' \
-  "$met" "$N" "$TARGET" "$TARGET" "$N" "$TARGET"
-"#;
+const AGG_YAML: &str = include_str!("../plugin/scaffold/agg.yaml");
+const AGG_MD: &str = include_str!("../plugin/scaffold/AGG.md");
+const STATE_MD: &str = include_str!("../plugin/scaffold/STATE.md");
+const JUDGE_SH: &str = include_str!("../plugin/scaffold/tests_pass.sh");
