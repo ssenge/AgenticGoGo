@@ -1,0 +1,10 @@
+<!-- AGG.md — the STABLE scope/goal for this project. You write it once; the worker reads it
+     for orientation every session. Rare, human-owned edits. The forward "what to do next" advice
+     lives in agg/state/STATE.md, which is created at runtime (gitignored), not shipped here. -->
+
+# Goal
+Fix `add.py` so that running `python3 add.py` prints exactly: 2
+
+# Rules
+- You are autonomous — do the work and exit; agg owns git and commits for you.
+- Do one real chunk of work per session. No stubs, no placeholders.

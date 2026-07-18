@@ -164,6 +164,8 @@ mod tests {
             "sequence.budget", // → sequence.limits
             "sequence.cost",   // → sequence.limits
             "max_sessions:",   // → sequence.limits.sessions (the --max-sessions FLAG survives)
+            "AGG_STATE.md",    // → agg/AGG.md (stable) + agg/state/STATE.md (forward) — STATE_REDESIGN
+            "AGG_MEMORY.md",   // → agg/state/LOG.md (the `AGG_MEMORY_MAX_KB` env var is a NON-match)
             // NB: `goals.yaml` is deliberately NOT here — the skills legitimately say "there is no
             // goals.yaml", which is correct prose, not a stale reference.
         ];

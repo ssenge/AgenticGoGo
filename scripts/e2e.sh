@@ -86,7 +86,7 @@ deansi() { LC_ALL=C sed -e $'s/\x1b\[[0-9;?]*[A-Za-z]//g' -e $'s/\x1b[()][AB0]//
 mkproj() { # mkproj <name>
   local name=$1
   local d="$WS/$name"
-  mkdir -p "$d/bin" "$d/agg/judges"
+  mkdir -p "$d/bin" "$d/agg/judges" "$d/agg/state"
 
   cat > "$d/bin/rec" <<'EOF'
 #!/bin/sh
@@ -98,7 +98,10 @@ EOF
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
 prev=""
 for a in "$@"; do
-  [ "$prev" = "-p" ] && { printf '%s' "$a" > prompt_latest.txt; printf '%s\n===8<===\n' "$a" >> prompts.txt; }
+  # the `-p` is now just a tiny pointer at agg/state/INSTRUCTIONS.md — capture the brief the worker
+  # actually reads (the file agg regenerates each session). prompt_latest.txt = this session's brief;
+  # prompts.txt accumulates every session's brief.
+  [ "$prev" = "-p" ] && { cat agg/state/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null; cat agg/state/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }
   prev="$a"
 done
 sh bin/rec RUN
@@ -139,7 +142,7 @@ hooks:
   on_session_start: ["sh bin/rec INJECT"]
   on_session_end: ["sh bin/rec GATE"]
 EOF
-  echo "create the file did_work" > "$d/agg/AGG_STATE.md"
+  echo "create the file did_work" > "$d/agg/state/STATE.md"
 
   ( cd "$d" && git init -q -b main && git config user.email t@t && git config user.name t \
     && git commit -q --allow-empty -m init )
@@ -229,7 +232,7 @@ agg_do "$S" send note "hello-bus" > /dev/null 2>&1
 agg_do "$S" send inject "OPERATOR_MARKER_XYZ" > /dev/null 2>&1
 waitfor 30 "injected instruction reaches the NEXT worker prompt" grep -q "OPERATOR_MARKER_XYZ" "$S/prompt_latest.txt"
 has "…as a HIGH-PRIORITY header"     "$S/prompt_latest.txt" "HIGH-PRIORITY OPERATOR INSTRUCTION"
-has "…and the AGG_STATE.md survives"  "$S/prompt_latest.txt" "create the file did_work"
+has "…and the brief POINTS the worker at its STATE.md"  "$S/prompt_latest.txt" "agg/state/STATE.md"
 has "agg send note is logged by the loop" "$S/run.log" "[bus] note: hello-bus"
 
 agg_do "$S" send pause > /dev/null 2>&1
@@ -306,7 +309,7 @@ SPID=$(python3 -c "import json;print([x for x in json.load(open('$SP/agg/state/s
 
 # ═══════════════════════════════════════════════════════════════════════════
 sec "9. institutional memory — carried ACROSS separate \`agg run\` invocations"
-# The single-run memory contract (AGG_MEMORY.md is written · exactly ONE entry per completed
+# The single-run memory contract (LOG.md is written · exactly ONE entry per completed
 # session, the early fold superseded · the scratch note is deleted after folding) is covered by
 # tests/cli.rs — institutional_memory_is_written_without_worker_cooperation and
 # worker_written_memory_note_is_folded. What stays HERE is the part cli.rs does not drive:
@@ -392,7 +395,7 @@ has "session 1 (green) is merged onto base"          "$GR/run.log" "session #1 m
 has "session 2 (regressing) is ROLLED BACK"          "$GR/run.log" "session #2 ROLLED BACK"
 is  "…and its work NEVER lands on base (base still holds session 1)" \
     "$( cd "$GR" && git show HEAD:tracked.txt 2>/dev/null )" "sess-1"
-has "…the durable memory says the work is NOT on base" "$GR/agg/state/AGG_MEMORY.md" "NOT on the base branch"
+has "…the durable memory says the work is NOT on base" "$GR/agg/state/LOG.md" "NOT on the base branch"
 has "…and the session branch is kept for inspection"   "$GR/run.log" "kept for inspection"
 
 # the worker's own veto: writing the red file discards the session, merged or not
@@ -454,7 +457,7 @@ agg_do "$RL" run --max-sessions 2 > "$RL/run.log" 2>&1
 has "a rate-limited session backs off"        "$RL/run.log" "rate limit detected"
 has "…and is flagged on the exit line"        "$RL/run.log" "[RATE-LIMITED]"
 hasnt "…and is NEVER judged"                  "$RL/run.log" "running judges…"
-absent "…and leaves NO durable memory entry"  "$RL/agg/state/AGG_MEMORY.md"
+absent "…and leaves NO durable memory entry"  "$RL/agg/state/LOG.md"
 is "…the trace shows no VERIFY/GATE after RUN" \
    "$(tr '\n' ' ' < "$RL/trace.txt")" "VERIFY=verify INJECT=inject RUN=run INJECT=inject RUN=run "
 
@@ -526,7 +529,7 @@ cat > "$PI/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 prev=""; for a in "$@"; do
-  [ "$prev" = "-p" ] && printf '%s' "$a" > prompt_latest.txt
+  [ "$prev" = "-p" ] && cat agg/state/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null
   prev="$a"
 done
 sh bin/rec RUN
@@ -551,7 +554,7 @@ hooks:
 EOF
 agg_do "$PI" run --max-sessions 2 > "$PI/run.log" 2>&1
 has "prompt_includes are prepended to every prompt" "$PI/prompt_latest.txt" "TOOLING_FRAGMENT_ZZZ"
-has "…above the AGG_STATE.md standing instructions"  "$PI/prompt_latest.txt" "create the file did_work"
+has "…and the brief still POINTS at the STATE.md standing instructions"  "$PI/prompt_latest.txt" "agg/state/STATE.md"
 has "on_start hook runs once at launch"             "$PI/run.log" "HOOK_ON_START"
 has "on_stop hook runs on exit (Drop guard)"        "$PI/run.log" "HOOK_ON_STOP"
 has "background hook is spawned"                    "$PI/run.log" "[hook:background]"
@@ -888,11 +891,11 @@ MK="$(mkproj memcap)"; : > "$MK/NO_WORK"
 cat > "$MK/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s' "$a" > prompt_latest.txt; prev="$a"; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && cat agg/state/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null; prev="$a"; done
 sh bin/rec RUN
 n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
-mkdir -p agg/state/memory
-i=0; while [ $i -lt 40 ]; do printf 'padding line %s for session %s\n' "$i" "$n" >> "agg/state/memory/session-$n.md"; i=$((i+1)); done
+mkdir -p agg/state/sessions
+i=0; while [ $i -lt 40 ]; do printf 'padding line %s for session %s\n' "$i" "$n" >> "agg/state/sessions/session-$n.md"; i=$((i+1)); done
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$MK/bin/claude"
@@ -910,19 +913,26 @@ hooks:
   on_session_end: ["sh bin/rec GATE"]
 EOF
 agg_do "$MK" run --max-sessions 4 > "$MK/run.log" 2>&1
-exists "AGG_MEMORY.md exists after 4 sessions" "$MK/agg/state/AGG_MEMORY.md"
-SZ=$(wc -c < "$MK/agg/state/AGG_MEMORY.md" | tr -d ' ')
-printf '  AGG_MEMORY.md = %s bytes (cap = 1 KB)\n' "$SZ"
+exists "LOG.md exists after 4 sessions" "$MK/agg/state/LOG.md"
+SZ=$(wc -c < "$MK/agg/state/LOG.md" | tr -d ' ')
+printf '  LOG.md = %s bytes (cap = 1 KB)\n' "$SZ"
 [ "$SZ" -le 1100 ] && ok "…and max_kb=1 caps the durable file (${SZ}B)" \
                    || bad "max_kb not enforced" "${SZ}B > 1 KB"
-has "…dropping the OLDEST entries, and saying so" "$MK/agg/state/AGG_MEMORY.md" "older entries dropped"
-has "…the newest session survives the rotation"   "$MK/agg/state/AGG_MEMORY.md" "session 4"
+has "…dropping the OLDEST entries, and saying so" "$MK/agg/state/LOG.md" "older entries dropped"
+has "…the newest session survives the rotation"   "$MK/agg/state/LOG.md" "session 4"
 # inject_kb bounds the per-prompt slice independently of the on-disk file
 PB=$(python3 - "$MK/prompt_latest.txt" <<'PY'
 import sys
 t = open(sys.argv[1]).read()
 i = t.find("--- INSTITUTIONAL MEMORY")
-print(0 if i < 0 else len(t[i:]))
+if i < 0:
+    print(0)
+else:
+    # the memory block lives inside INSTRUCTIONS.md now; measure ONLY it (up to the next `## `
+    # section header) so the trailing STATE/AGG.md/footer don't inflate the injected-slice size.
+    rest = t[i:]
+    j = rest.find("\n## ")
+    print(len(rest if j < 0 else rest[:j]))
 PY
 )
 printf '  injected memory block = %s bytes (inject_kb = 1 KB)\n' "$PB"
@@ -1059,23 +1069,23 @@ cat > "$EV/bin/claude" <<'EOF'
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 sh bin/rec RUN
 n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
-mkdir -p agg/state/memory
-i=0; while [ $i -lt 200 ]; do printf 'padding line %s of session %s\n' "$i" "$n" >> "agg/state/memory/session-$n.md"; i=$((i+1)); done
+mkdir -p agg/state/sessions
+i=0; while [ $i -lt 200 ]; do printf 'padding line %s of session %s\n' "$i" "$n" >> "agg/state/sessions/session-$n.md"; i=$((i+1)); done
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$EV/bin/claude"
 # CONTROL first: without the override the file must exceed 1 KB, or the assertion below is
 # vacuous (it would "pass" simply because nothing was ever big enough to cap).
 ( cd "$EV" && PATH="$EV/bin:$PATH" "$AGG" run --max-sessions 4 > uncapped.log 2>&1 )
-RAW=$(wc -c < "$EV/agg/state/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
+RAW=$(wc -c < "$EV/agg/state/LOG.md" 2>/dev/null | tr -d ' ')
 [ "${RAW:-0}" -gt 1100 ] && ok "control: uncapped memory really does exceed 1 KB (${RAW}B)" \
                          || bad "control failed — the memcap assertion would be vacuous" "${RAW}B"
 rm -f "$EV/.sess"; rm -rf "$EV/agg/state"
 ( cd "$EV" && PATH="$EV/bin:$PATH" AGG_MEMORY_MAX_KB=1 "$AGG" run --max-sessions 4 > run.log 2>&1 )
-SZ=$(wc -c < "$EV/agg/state/AGG_MEMORY.md" 2>/dev/null | tr -d ' ')
+SZ=$(wc -c < "$EV/agg/state/LOG.md" 2>/dev/null | tr -d ' ')
 [ "${SZ:-99999}" -le 1100 ] && ok "AGG_MEMORY_MAX_KB=1 overrides the config default (${RAW}B → ${SZ}B)" \
                             || bad "the env override was ignored" "${SZ}B"
-has "…and the rotation notice proves the cap actually fired" "$EV/agg/state/AGG_MEMORY.md" "older entries dropped"
+has "…and the rotation notice proves the cap actually fired" "$EV/agg/state/LOG.md" "older entries dropped"
 
 # ── global flags: --dir, --config (--goals is GONE, §7.1) ─────────────────────────────────
 GF="$(mkproj globalflags)"
@@ -1147,7 +1157,7 @@ chmod +x "$BR/agg/judges/flip.sh"
 cat > "$BR/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-prev=""; for a in "$@"; do [ "$prev" = "-p" ] && printf '%s\n===8<===\n' "$a" >> prompts.txt; prev="$a"; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat agg/state/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
 sh bin/rec RUN
 if [ ! -f .flip ]; then : > .flip; git add .flip >/dev/null 2>&1; git commit -qm flip >/dev/null 2>&1; fi
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
@@ -1561,7 +1571,7 @@ has "copilot installs to the SAME neutral dir as codex" "$SK/i-copilot.log" ".ag
 absent "the un-namespaced dir name is never used" "$SK/.agents/skills/new"
 # the description is what Codex/Copilot ROUTE on — an empty copy would list a skill saying nothing
 has "the installed skill keeps its frontmatter"  "$SK/.agents/skills/agg-new/SKILL.md" "description:"
-has "…and the capability-aware agg.yaml template" "$SK/.agents/skills/agg-new/SKILL.md" "agent: <claude|codex|copilot>"
+has "…and the capability-aware agg.yaml template" "$SK/.agents/skills/agg-new/SKILL.md" "<claude|codex|copilot>"
 
 # --- the ergonomics: no flags needed, and a bad agent writes nothing ------------------------
 D2="$WS/skills-default"; mkdir -p "$D2/agg"
@@ -1601,9 +1611,9 @@ has "…and says so, non-fatally, when they are not" "$DN/doc.log" "are not inst
 capcheck() { # capcheck <desc> <expect: ok|refused|inert> <agg.yaml body>
   local desc=$1 expect=$2 body=$3
   local d="$WS/cap-$(echo "$desc" | tr -cd '[:alnum:]' | cut -c1-16)"
-  mkdir -p "$d/agg/judges"; printf '%s' "$body" > "$d/agg/agg.yaml"
+  mkdir -p "$d/agg/judges" "$d/agg/state"; printf '%s' "$body" > "$d/agg/agg.yaml"
   printf '#!/bin/sh\necho "{\\"met\\":true}"\n' > "$d/agg/judges/g.sh"; chmod +x "$d/agg/judges/g.sh"
-  printf 'do work\n' > "$d/agg/AGG_STATE.md"
+  printf 'do work\n' > "$d/agg/state/STATE.md"
   ( cd "$d" && "$AGG" doctor > "$d/doc.log" 2>&1 )
   if grep -q "cannot do" "$d/doc.log"; then
     [ "$expect" = "refused" ] && ok "$desc" || bad "$desc" "agg REFUSED a config the skill tells /agg:new to write"

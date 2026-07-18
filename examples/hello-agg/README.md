@@ -17,10 +17,17 @@ hello-agg/
   add.py                    # the (broken) target the worker fixes  — at the project root
   agg/
     agg.yaml                # defaults / judge / steps / sequence — the whole config
-    AGG_STATE.md            # the worker's standing instructions
+    AGG.md                # the stable goal + rules the worker reads for orientation
     judges/
       prints_two.sh         # the judge — resolved by the NAME `prints_two` in `done_if`
+    state/                  # runtime, gitignored — agg writes it each session:
+                            #   INSTRUCTIONS.md (the worker's -p target), STATE.md
+                            #   (forward advice), LOG.md (durable memory)
 ```
+
+Each session the worker's `-p` is a tiny fixed pointer — "read `agg/state/INSTRUCTIONS.md` and
+follow it." agg regenerates that `INSTRUCTIONS.md` fresh every session, composing it from `AGG.md`,
+the worker's own `state/STATE.md`, and the `state/LOG.md` memory tail.
 
 ## Run it
 ```bash
@@ -76,7 +83,7 @@ The loop, the judge and the gate behave identically on all three.
 ## Files
 - `add.py` — the (broken) target the worker fixes
 - `agg/agg.yaml` — the config: one `worker` step, `done_if: prints_two`
-- `agg/AGG_STATE.md` — the worker's standing instructions (read into every session)
+- `agg/AGG.md` — the stable goal + rules the worker reads for orientation (agg folds it into `state/INSTRUCTIONS.md` every session)
 - `agg/judges/prints_two.sh` — the judge; prints `{"met":…}` — a plain script, so it works on any agent
 
 ---
@@ -119,7 +126,7 @@ project: "calc"
 defaults:
   agent: "claude"                  # ⚠️ CLAUDE-SHAPED — see "Run it on another agent" above
   model: "claude-opus-4-8[1m]"
-  state: "AGG_STATE.md"
+  state: "state/STATE.md"
 judge:
   agent: "claude"
   model: "claude-haiku-4-5-20251001" # the cheap RULER model for any LLM judges
@@ -139,22 +146,22 @@ top-level `budget:` (or the retired `budget:`/`cost:`/`max_sessions:` keys) is a
 (so a spend ceiling can never silently become decorative). `limits.cost` is Claude-only; on
 Codex/Copilot omit it and rely on `limits.tokens`.
 
-**4. `agg/AGG_STATE.md`** — the standing instructions `INJECT`ed into *every* fresh session:
+**4. `agg/AGG.md`** — the stable goal + rules agg folds into every fresh session's `INSTRUCTIONS.md`:
 
 ```
 # Goal
 Make all tests in test_calc.py pass.
 calc.py has add(a,b), factorial(n), is_prime(n) stubbed with NotImplementedError.
 
-# This session
-1. Run `python3 -m pytest -q` to see what's failing.
-2. Implement the failing function(s) in calc.py — real, correct implementations.
-3. Re-run pytest to confirm. Update this file with the next task, commit, and exit.
+# Rules
+- You are autonomous — do one real chunk of work per session and exit; agg owns git.
+- Implement real, correct functions — no stubs, no placeholders.
 ```
 
-The agent maintains this file forward across sessions (best-effort — agg warns if a session leaves
-it untouched). Institutional memory (`AGG_MEMORY.md`, "what we tried and rejected") is written by
-agg, never the worker, and lives under `agg/state/`.
+`AGG.md` is stable and human-owned. The worker's *forward* advice ("what to do next") lives in
+`agg/state/STATE.md`, which the worker rewrites each session (gitignored, so it survives a rollback).
+Institutional memory (`LOG.md`, "what we tried and rejected") is written by agg, never the worker,
+and also lives under `agg/state/`.
 
 **5. Run it:**
 
@@ -164,7 +171,7 @@ agg run         # the outer loop: RUN real agents until VERIFY passes, then GATE
 agg dashboard   # (optional, second terminal) live colored TUI
 ```
 
-What happens: a fresh agent reads the injected prompt, runs pytest, implements the functions,
+What happens: a fresh agent reads its `agg/state/INSTRUCTIONS.md`, runs pytest, implements the functions,
 re-runs pytest → green, exits. `VERIFY` flips the judge `0/3 → 3/3`; `GATE` sees `done_if` met →
 the loop exits after one session. A one-line summary records what it did.
 

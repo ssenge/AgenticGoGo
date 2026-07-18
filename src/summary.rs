@@ -60,7 +60,7 @@ pub fn summarize(
     };
 
     // The worker's thoughts are UNTRUSTED text (the worker is adversarial by design). The summary
-    // is only advisory, but it lands in the committable AGG_MEMORY.md, so a thought crafted to
+    // is only advisory, but it lands in the durable LOG.md, so a thought crafted to
     // steer the summarizer could poison the human-facing record. Tell the summarizer to treat the
     // thoughts as data, not instructions.
     let prompt = format!(

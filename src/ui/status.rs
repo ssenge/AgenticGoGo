@@ -70,7 +70,7 @@ fn render_state(s: &DashboardState) -> String {
     }
     // memory line — shown only once the durable file has content, so a fresh run stays clean.
     if s.memory_bytes > 0 {
-        out.push_str(&format!("memory {} (AGG_MEMORY.md)\n", crate::util::human_bytes(s.memory_bytes)));
+        out.push_str(&format!("memory {} (LOG.md)\n", crate::util::human_bytes(s.memory_bytes)));
     }
     // per-agent token + cost breakdown (§7.4) — otherwise a mixed run's totals are uninterpretable.
     if !s.per_agent.is_empty() {

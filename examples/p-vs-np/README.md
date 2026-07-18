@@ -20,14 +20,28 @@ The name a judge is referenced by in `done_if` / `invariants` **is its filename*
 p-vs-np/
   proof/Basic.lean              # the Lean work the worker grows — at the project root (judges read it)
   agg/
-    agg.yaml                    # defaults / judge / steps / sequence
-    AGG_STATE.md                # the worker's standing instructions
-    judges/
+    agg.yaml                    # defaults / judge / steps / sequence           — COMMITTED
+    AGG.md                    # stable scope / goal / rules the worker reads   — COMMITTED
+    judges/                     # the moat — a judge IS a goal, resolved by name — COMMITTED
       proof_verified.sh         #   → the `proof_verified` name (was verify_proof.sh)
       lemmas_verified.sh        #   → the `lemmas_verified` name (was count_lemmas.sh)
       no_sorry.sh               #   → the `no_sorry` invariant
       paper_written.md          #   an .md judge = an LLM rubric; inputs in its own frontmatter
+    state/                      # ALL runtime state — GITIGNORED (survives a session rollback)
+      INSTRUCTIONS.md           #   agg regenerates this each session = the worker's entire -p input
+      STATE.md                  #   worker-curated forward "what to do next" advice
+      LOG.md                    #   durable institutional memory (agg-owned; worker never writes it)
+      sessions/                 #   transient per-session worker scratch notes
+      wiki/                     #   worker-owned durable knowledge: multi-session plans + dead-ends
 ```
+
+Everything under `agg/state/` is runtime, gitignored, and regenerated as the loop runs — you ship
+only `AGG.md` and the judges. Each session the worker's `-p` is a tiny fixed pointer — *"read
+`agg/state/INSTRUCTIONS.md` and follow it"* — and agg COMPOSES that file fresh from the stable
+`AGG.md`, the forward `STATE.md` the last worker left, and a recent-tail excerpt of memory
+(`LOG.md`). On a long run like this one, `agg/state/wiki/` gives the worker a durable
+place to compile what it learns (rejected proof routes, key lemma shapes) that outlives every
+session rollback.
 
 The `.md` judge is the LLM-as-judge: **the file IS the rubric**, and it declares what it reads in a
 YAML frontmatter (`inputs: ["PAPER.md"]`) — one self-contained file, no registry, no `kind:` tag.
@@ -95,7 +109,8 @@ Opus). Only when `stalled` fires — the run has made no verdict progress across
 steps — does the sequence step back on **Codex**, told to assume the current route is a dead end and
 name a different one. Its `skip_judges: true` means nothing merges from that step: the work stages,
 and the next worker step gates the whole span. The rejected routes reach institutional memory
-(`AGG_MEMORY.md`, agg-owned) through the worker's scratch note, so no future session repeats them.
+(`agg/state/LOG.md`, agg-owned) through the worker's scratch note in `agg/state/sessions/`, so no
+future session repeats them.
 
 ```yaml
 steps:
@@ -124,7 +139,7 @@ The config names two agents already (`claude` worker, `codex` reconsider). To ch
 
 ## Files
 - `agg/agg.yaml` — defaults/judge/steps/sequence: two agents, a stall-triggered reconsider, budget
-- `agg/AGG_STATE.md` — the worker's standing instructions
+- `agg/AGG.md` — the stable scope / goal / rules the worker reads for orientation (committed)
 - `agg/judges/proof_verified.sh` — Lean compiles + no smuggled assumptions → the real check
 - `agg/judges/lemmas_verified.sh` — counts Lean-verified, sorry-free lemmas (partial progress)
 - `agg/judges/no_sorry.sh` — the soundness invariant (aborts on sorry/admit/axiom)

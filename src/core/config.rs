@@ -71,10 +71,16 @@ pub struct Defaults {
     /// the sandbox constraint — inheritable, so an operator sets it once (§4.1).
     #[serde(default)]
     pub worker_args: Vec<String>,
-    /// the forward state file (`AGG_STATE.md`), resolved against the project dir; the AGENT writes
-    /// it best-effort (§5.6). Renamed from the old `resume_prompt`.
+    /// the forward state file (`state/STATE.md`), resolved against `agg/`; the AGENT writes it
+    /// best-effort (§5.6). Under the gitignored `agg/state/`, so a worker's forward advice survives
+    /// a session rollback (the code attempt is thrown away, the advice about it is not).
     #[serde(default = "default_state")]
     pub state: String,
+    /// the generic framing for this step's ROLE (§4) — prepended as its own section above the
+    /// step's own `prompt:`. Config-driven, so a role like `reconsider`/`reviewer`/`tester` needs
+    /// no Rust (this replaced the hardcoded `enum Role` red-team arm). `None` = no role section.
+    #[serde(default)]
+    pub role_prompt: Option<String>,
 }
 
 impl Default for Defaults {
@@ -85,6 +91,7 @@ impl Default for Defaults {
             effort: None,
             worker_args: vec![],
             state: default_state(),
+            role_prompt: None,
         }
     }
 }
@@ -125,6 +132,10 @@ pub struct StepBody {
     pub worker_args: Option<Vec<String>>,
     #[serde(default)]
     pub state: Option<String>,
+    /// generic ROLE framing for this step (§4) — a config-driven section above `prompt:`. Overrides
+    /// `defaults.role_prompt`; `None` inherits it.
+    #[serde(default)]
+    pub role_prompt: Option<String>,
     /// ADDITIVE to the composed prompt (§5.6), never replacing.
     #[serde(default)]
     pub prompt: Option<String>,
@@ -274,7 +285,7 @@ fn default_agent() -> String {
     "claude".into()
 }
 fn default_state() -> String {
-    "AGG_STATE.md".into()
+    "state/STATE.md".into()
 }
 fn default_branch_prefix() -> String {
     "agg".into()
@@ -324,6 +335,7 @@ pub struct ResolvedStep {
     pub effort: Option<String>,
     pub worker_args: Vec<String>,
     pub state: String,
+    pub role_prompt: Option<String>,
     pub prompt: Option<String>,
     pub skip_judges: bool,
 }
@@ -374,6 +386,7 @@ impl AggConfig {
             effort: body.effort.clone().or_else(|| self.defaults.effort.clone()),
             worker_args: body.worker_args.clone().unwrap_or_else(|| self.defaults.worker_args.clone()),
             state: body.state.clone().unwrap_or_else(|| self.defaults.state.clone()),
+            role_prompt: body.role_prompt.clone().or_else(|| self.defaults.role_prompt.clone()),
             prompt: body.prompt.clone(),
             skip_judges: body.skip_judges,
         })

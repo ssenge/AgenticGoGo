@@ -32,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scaffold a starter agg.yaml + AGG_STATE.md + a judge in this dir.
+    /// Scaffold a starter agg.yaml + AGG.md + state/STATE.md + a judge in this dir.
     Init {
         /// which agent the scaffold should target (default: the agent whose shell you are in,
         /// else claude). The template differs: codex omits `model:`, and only claude may set `cost:`.
