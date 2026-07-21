@@ -108,6 +108,6 @@ agg/state/                   GITIGNORED all runtime state:
 - **Gate before any commit:** `cargo build` (0 warnings) · `cargo test` · `cargo clippy --all-targets -- -D warnings` · `bash scripts/e2e.sh` (~12 min).
 - **Run `cargo test` / e2e OUTSIDE the sandbox** (they SIGKILL processes + bind sockets; a sandboxed e2e gives false failures). If `rtk` rewrites cargo output, use `rtk proxy cargo …`.
 - **THE MOAT — never break it:** gitignore ONLY `agg/state/`, NEVER all of `agg/`. The judges must stay committed so a rollback can restore a grader a worker tampered with.
-- **The worker MUST commit its own code** — session isolation discards uncommitted edits. agg owns merge/push; the worker never merges or pushes.
+- **agg owns ALL git; the worker NEVER runs git** — the worker just edits files. agg auto-commits its work on the session branch (a `GitAutoCommit` handler on `on_verify`), then merges/keeps or rolls back. The worker never adds/commits/merges/pushes. (GIT_REDESIGN.)
 - **Verify agent behavior on the WIRE** (`scripts/e2e_real.sh`), never from docs — agent CLIs differ (Codex's `-p` is `--profile`; only Claude reports dollar cost; etc.).
 - **Design specs live in `internal/`** (gitignored): `SEQUENCES.md`, `STATE_REDESIGN.md`.
