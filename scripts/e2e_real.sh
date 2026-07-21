@@ -98,6 +98,21 @@ EOF
     printf '  abort_if: "over_cost OR over_iterations"\n'
   } > "$d/agg/agg.yaml"
   printf '%s' "$4" > "$d/agg/state/STATE.md"
+  # GIT_REDESIGN: agg now `git add -A`s the worker's WORK, so anything untracked in the tree gets
+  # swept onto the session branch. Gitignore the scaffolding + instrumentation + the `*.log` capture
+  # files agg's own stdout is redirected into (out.log/status.log) — committing an actively-written
+  # log breaks the next `checkout base`. Only the real agent's WORK (answer.txt, count.txt) stays
+  # trackable → agg commits + merges it, exactly as in production.
+  cat > "$d/.gitignore" <<'EOF'
+agg/state/
+bin/
+rec
+agg/agg.yaml
+agg/judges/
+claude_args.txt
+trace.txt
+*.log
+EOF
   ( cd "$d" && git init -q -b main && git config user.email t@t && git config user.name t \
       && git add -A && git commit -q -m seed )
   echo "$d"
