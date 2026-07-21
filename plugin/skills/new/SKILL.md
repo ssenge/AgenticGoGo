@@ -379,8 +379,8 @@ next": where things stand + the exact next task. Seed it with a first-session no
 it current for its successor.
 
 (Institutional memory, `agg/state/LOG.md`, is written by agg, not the worker — never tell the worker
-to maintain it. The worker COMMITS its own code each session — agg runs the session on a throwaway
-branch and keeps it only if committed AND the judges pass — but never merges or pushes; agg does that.)
+to maintain it. The worker just edits files and NEVER runs git — agg commits the work automatically,
+runs the session on a throwaway branch, and keeps it only if the judges pass; agg owns all git.)
 
 ## Step 7 — Validate: `agg doctor`, then `agg plan`
 
