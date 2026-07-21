@@ -92,12 +92,6 @@ const INSTRUCTIONS_POINTER: &str =
 /// string; `{{STATE}}` is filled with the step's state path when composed.
 const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
 
-/// What INJECT produced.
-enum Injected {
-    Prompt(String),
-    Stop(RunOutcome),
-}
-
 /// What VERIFY produced: the judged (or skipped) step, plus everything GATE needs.
 struct Verified {
     res: CycleResult,
@@ -117,15 +111,69 @@ enum GateDecision {
 
 // ── the lifecycle registry (HOOK_REDESIGN §3.1/§5) ────────────────────────────────────────────
 // Handlers are `.add()`ed to hook points in code and dispatched in order by the loop — the seed of
-// "every task is a hook". Today only the user shell hooks are handlers; agg's own inline tasks
-// (judges, gate, memory, …) move onto hooks in later increments (HOOK_REDESIGN §7 step 1).
+// "every task is a hook". agg's own tasks (pick/compose/judges/gate/memory) are handlers too; only
+// the true scheduler control flow (over_max_sessions, worker_is_broken, the phase emits) stays core.
 //
 // The context a handler receives is the whole `LoopState` (§8: the context IS the run/session
 // state). Handlers run STRICTLY SEQUENTIALLY, each with an exclusive `&mut LoopState`, so passing
 // the whole state is legal with no borrow gymnastics. The `Lifecycle` is owned by `run()` and passed
 // ALONGSIDE the state (never stored in it) — that disjointness is what keeps the borrow sound.
+
+/// A handler's control-flow result (§3.1). MINIMAL: reason/ledger_tag are NOT here — every Stop
+/// path already `emit`s `Finished{reason,ledger_tag}` itself before yielding the outcome, so a
+/// handler emits then returns `Flow::Stop(outcome)` and the core never re-emits.
+enum Flow {
+    Continue,
+    /// stop the rest of THIS session's hooks, loop to the next session (the rate-limit path).
+    #[allow(dead_code)] // constructed at INC-3 (RateLimitBackoff); remove this allow then.
+    SkipSession,
+    Stop(RunOutcome),
+}
+
+/// What a whole hook-point dispatch produced (`None` = drained cleanly, fall through to next hook).
+enum End {
+    NextSession,
+    Stop(RunOutcome),
+}
+
+/// The per-session channel between stage-handlers. ONE field on `LoopState`, reset each session at
+/// the loop top so no field (esp. `prompt`) leaks across sessions. NOT the on-disk memory scratch
+/// (`memory::clear_scratch`) — a different thing. Grows a field per increment as stages convert.
+#[derive(Default)]
+struct Scratch {
+    /// `WriteInstructions` (on_session_start) → the RUN launch. Replaces `Injected::Prompt`.
+    prompt: Option<String>,
+    /// `PickStep` sets it from `cur_step.skip_judges`; `run_hook`'s predicate uses it to bypass a
+    /// handler that opts out of skip steps (`runs_on_skip()==false`). Truth stays in `self.cur_step`.
+    skip_judges: bool,
+}
+
 trait Handler {
-    fn run(&self, ctx: &mut LoopState);
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow>;
+    /// Whether this handler runs on a `skip_judges` step. Default yes; the judged-merge handlers
+    /// override to `false` so a skip step bypasses them (mirrors the old `if !skip`).
+    fn runs_on_skip(&self) -> bool {
+        true
+    }
+    /// Stable name for the registration-order characterization tests (order is outcome-invisible).
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn name(&self) -> &'static str;
+}
+
+/// Dispatch one hook point's handlers in order, honoring `Flow`. A handler's hard `Err` bubbles out
+/// (it is NOT a `RunOutcome` — e.g. `verdicts::append`, or the worker-broken guard). §3.1.
+fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End>> {
+    for h in hooks {
+        if st.scratch.skip_judges && !h.runs_on_skip() {
+            continue;
+        }
+        match h.run(st)? {
+            Flow::Continue => {}
+            Flow::SkipSession => return Ok(Some(End::NextSession)),
+            Flow::Stop(o) => return Ok(Some(End::Stop(o))),
+        }
+    }
+    Ok(None)
 }
 
 /// A user shell-hook list wrapped as a handler — best-effort, non-fatal (exactly `hooks::run`).
@@ -134,13 +182,175 @@ struct ShellHook {
     cmds: Vec<String>,
 }
 impl Handler for ShellHook {
-    fn run(&self, ctx: &mut LoopState) {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         crate::hooks::run(self.label, &self.cmds, ctx.dir);
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        self.label
     }
 }
 
-/// The lifecycle registry: one ordered handler list per hook point. Grows a field per hook as the
-/// inline tasks convert (§4). `Lifecycle::default_pipeline` is agg's built-in registration (§5).
+// ── on_session_start handlers = the old INJECT stage, decomposed (HOOK_REDESIGN §4) ──────────────
+
+/// Drain the operator bus at the session boundary (inject / pause / set-budget / stop / note).
+struct BusDrain;
+impl Handler for BusDrain {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let cmds = match &ctx.bus {
+            Some(bus) => bus.drain(),
+            None => Vec::new(),
+        };
+        for cmd in cmds {
+            match cmd {
+                Command::InjectInstruction { text } => {
+                    eprintln!("  [bus] inject-instruction → prepended to next session");
+                    ctx.pending_instruction = Some(match ctx.pending_instruction.take() {
+                        Some(prev) => format!("{prev}\n\n{text}"),
+                        None => text,
+                    });
+                }
+                Command::SetBudget { total } => {
+                    eprintln!("  [bus] set-budget → {:?}", total);
+                    ctx.budget_total = total;
+                }
+                Command::Pause => {
+                    eprintln!("  [bus] pause → waiting for resume/stop…");
+                    let stopped = match &ctx.bus {
+                        Some(bus) => wait_for_resume(bus),
+                        None => None,
+                    };
+                    if let Some(reason) = stopped {
+                        return Ok(Flow::Stop(ctx.stopped_via_bus(reason)));
+                    }
+                }
+                Command::Resume => {}
+                Command::Stop { reason } => return Ok(Flow::Stop(ctx.stopped_via_bus(reason))),
+                Command::Note { text } => eprintln!("  [bus] note: {text}"),
+            }
+        }
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "BusDrain"
+    }
+}
+
+/// Advance the sequence cursor → resolve the next step; then (ONLY on a resolved step) bump the
+/// session counter, update the ledger, print the banner, and set `cur_step` + `scratch.skip_judges`.
+struct PickStep;
+impl Handler for PickStep {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let step_name = {
+            let rs = ctx.run_state();
+            let eng = &ctx.eng;
+            let picked = ctx.cursor.next_step(&mut |cond| {
+                let sc = StopContext {
+                    judges: &eng.judges,
+                    judge_errors: &[],
+                    tokens_spent: rs.tokens_spent,
+                    budget_total: rs.budget_total,
+                    cost_spent: rs.cost_spent,
+                    cost_limit: rs.cost_limit,
+                    sessions_done: rs.sessions_done,
+                    max_sessions: rs.max_sessions,
+                    wall_hours: rs.wall_hours,
+                };
+                stop::evaluate(cond, &sc)
+            });
+            match picked {
+                Ok(n) => n,
+                Err(e) => return Ok(Flow::Stop(ctx.abort_now(&format!("sequence error: {e}")))),
+            }
+        };
+        let step = match ctx.cfg.resolve_step(&step_name) {
+            Ok(s) => s,
+            Err(e) => return Ok(Flow::Stop(ctx.abort_now(&format!("{e}")))),
+        };
+
+        ctx.session += 1;
+        ctx.dash.session = ctx.session;
+        ctx.dash.lifetime_session = ctx.lifetime_base + ctx.session;
+        let (gm, gt) = ctx.eng.tally();
+        ctx.ledger.update(ctx.session, ctx.tokens_spent, gm, gt);
+        let up = ctx.loop_start.elapsed().as_secs();
+        eprintln!(
+            "\n──── session #{} (#{} lifetime)  step `{}` [{}]  (up {}h{:02}m)  goals {gm}/{gt} ────",
+            ctx.session,
+            ctx.dash.lifetime_session,
+            step.name,
+            step.agent,
+            up / 3600,
+            (up % 3600) / 60,
+        );
+        // skip_judges into the channel BEFORE cur_step is moved (later hooks read the channel).
+        ctx.scratch.skip_judges = step.skip_judges;
+        ctx.cur_step = Some(step);
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "PickStep"
+    }
+}
+
+/// Cut this session's git branch off the span tip (or base).
+struct SessionBranchCut;
+impl Handler for SessionBranchCut {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let iso = &ctx.cfg.session_isolation;
+        let base_ref = ctx.base_ref().to_string();
+        let br = crate::git::session_branch(&iso.branch_prefix, &ctx.cfg.project, ctx.session);
+        crate::git::remove_file(ctx.dir, &iso.red_file); // clear a stale veto
+        ctx.session_branch = if crate::git::create_branch(ctx.dir, &br, &base_ref) {
+            eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", ctx.session);
+            Some(br)
+        } else {
+            eprintln!("  [iso] could not create session branch — running on {base_ref}");
+            None
+        };
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "SessionBranchCut"
+    }
+}
+
+/// Capture the state file (for the staleness warning) + compose the brief into `INSTRUCTIONS.md`;
+/// the tiny pointer (or the inline brief on a write failure) goes to `scratch.prompt`.
+struct WriteInstructions;
+impl Handler for WriteInstructions {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        if let Some(change) = crate::os::spawns::scan(ctx.dir) {
+            eprintln!("  [spawn] {change}");
+        }
+        let step = ctx.cur_step.clone().expect("PickStep set cur_step");
+        let state_path = ctx.config_base.join(&step.state);
+        ctx.state_before = std::fs::read_to_string(&state_path).ok();
+        let prompt = ctx.compose_prompt(&step);
+        ctx.scratch.prompt = Some(prompt);
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "WriteInstructions"
+    }
+}
+
+/// Reset the on-disk per-session memory scratch for the fresh session.
+struct ClearMemScratch;
+impl Handler for ClearMemScratch {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        if ctx.cfg.memory.enabled {
+            crate::core::memory::clear_scratch(ctx.dir, ctx.session);
+        }
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "ClearMemScratch"
+    }
+}
+
+/// The lifecycle registry: one ordered handler list per hook point. `default_pipeline` is agg's
+/// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
 #[derive(Default)]
 struct Lifecycle {
     on_session_start: Vec<Box<dyn Handler>>,
@@ -148,11 +358,21 @@ struct Lifecycle {
 }
 impl Lifecycle {
     fn default_pipeline(cfg: &AggConfig) -> Self {
+        Self::with_hooks(&cfg.hooks)
+    }
+    /// Split out from `default_pipeline` so the registration ORDER is testable without a full
+    /// `AggConfig` (`Hooks: Default`).
+    fn with_hooks(hooks: &crate::core::config::Hooks) -> Self {
         let mut l = Lifecycle::default();
+        l.on_session_start.push(Box::new(BusDrain));
+        l.on_session_start.push(Box::new(PickStep));
+        l.on_session_start.push(Box::new(SessionBranchCut));
         l.on_session_start
-            .push(Box::new(ShellHook { label: "on_session_start", cmds: cfg.hooks.on_session_start.clone() }));
+            .push(Box::new(ShellHook { label: "on_session_start", cmds: hooks.on_session_start.clone() }));
+        l.on_session_start.push(Box::new(WriteInstructions));
+        l.on_session_start.push(Box::new(ClearMemScratch));
         l.on_session_end
-            .push(Box::new(ShellHook { label: "on_session_end", cmds: cfg.hooks.on_session_end.clone() }));
+            .push(Box::new(ShellHook { label: "on_session_end", cmds: hooks.on_session_end.clone() }));
         l
     }
 }
@@ -343,6 +563,8 @@ struct LoopState<'a> {
     span_branches: Vec<String>,
     /// content of the step's state file at session start, to warn if the agent never touched it.
     state_before: Option<String>,
+    /// per-session channel between stage-handlers; reset each session at the loop top (§8).
+    scratch: Scratch,
 }
 
 impl LoopState<'_> {
@@ -442,124 +664,6 @@ impl LoopState<'_> {
     /// isolation base.
     fn base_ref(&self) -> &str {
         self.span_tip.as_deref().unwrap_or(&self.iso_base)
-    }
-
-    /// **INJECT** — next step → state + steering → the worker's prompt. Cuts the session branch off
-    /// the span tip (or base) and composes the prompt in the §5.6 order.
-    fn inject(&mut self, lifecycle: &Lifecycle) -> Injected {
-        self.emit(LifecycleEvent::Inject);
-
-        // ── drain the bus at the session boundary ──
-        let cmds = match &self.bus {
-            Some(bus) => bus.drain(),
-            None => Vec::new(),
-        };
-        for cmd in cmds {
-            match cmd {
-                Command::InjectInstruction { text } => {
-                    eprintln!("  [bus] inject-instruction → prepended to next session");
-                    self.pending_instruction = Some(match self.pending_instruction.take() {
-                        Some(prev) => format!("{prev}\n\n{text}"),
-                        None => text,
-                    });
-                }
-                Command::SetBudget { total } => {
-                    eprintln!("  [bus] set-budget → {:?}", total);
-                    self.budget_total = total;
-                }
-                Command::Pause => {
-                    eprintln!("  [bus] pause → waiting for resume/stop…");
-                    let stopped = match &self.bus {
-                        Some(bus) => wait_for_resume(bus),
-                        None => None,
-                    };
-                    if let Some(reason) = stopped {
-                        return Injected::Stop(self.stopped_via_bus(reason));
-                    }
-                }
-                Command::Resume => {}
-                Command::Stop { reason } => return Injected::Stop(self.stopped_via_bus(reason)),
-                Command::Note { text } => eprintln!("  [bus] note: {text}"),
-            }
-        }
-
-        // ── pick the next step from the sequence (branch conditions read current judge state) ──
-        let step_name = {
-            let rs = self.run_state();
-            let eng = &self.eng;
-            let picked = self.cursor.next_step(&mut |cond| {
-                let ctx = StopContext {
-                    judges: &eng.judges,
-                    judge_errors: &[],
-                    tokens_spent: rs.tokens_spent,
-                    budget_total: rs.budget_total,
-                    cost_spent: rs.cost_spent,
-                    cost_limit: rs.cost_limit,
-                    sessions_done: rs.sessions_done,
-                    max_sessions: rs.max_sessions,
-                    wall_hours: rs.wall_hours,
-                };
-                stop::evaluate(cond, &ctx)
-            });
-            match picked {
-                Ok(n) => n,
-                Err(e) => return Injected::Stop(self.abort_now(&format!("sequence error: {e}"))),
-            }
-        };
-        let step = match self.cfg.resolve_step(&step_name) {
-            Ok(s) => s,
-            Err(e) => return Injected::Stop(self.abort_now(&format!("{e}"))),
-        };
-
-        self.session += 1;
-        self.dash.session = self.session;
-        self.dash.lifetime_session = self.lifetime_base + self.session;
-        let (gm, gt) = self.eng.tally();
-        self.ledger.update(self.session, self.tokens_spent, gm, gt);
-        let up = self.loop_start.elapsed().as_secs();
-        eprintln!(
-            "\n──── session #{} (#{} lifetime)  step `{}` [{}]  (up {}h{:02}m)  goals {gm}/{gt} ────",
-            self.session,
-            self.dash.lifetime_session,
-            step.name,
-            step.agent,
-            up / 3600,
-            (up % 3600) / 60,
-        );
-
-        // ── isolation: cut this session's branch off the span tip (or base) ──
-        let iso = &self.cfg.session_isolation;
-        let base_ref = self.base_ref().to_string();
-        let br = crate::git::session_branch(&iso.branch_prefix, &self.cfg.project, self.session);
-        crate::git::remove_file(self.dir, &iso.red_file); // clear a stale veto
-        self.session_branch = if crate::git::create_branch(self.dir, &br, &base_ref) {
-            eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", self.session);
-            Some(br)
-        } else {
-            eprintln!("  [iso] could not create session branch — running on {base_ref}");
-            None
-        };
-
-        // on_session_start hook — dispatched through the registry (disjoint from `&mut self`).
-        for h in &lifecycle.on_session_start {
-            h.run(self);
-        }
-        if let Some(change) = crate::os::spawns::scan(self.dir) {
-            eprintln!("  [spawn] {change}");
-        }
-
-        // capture the state file so we can warn if the agent never updated it (§5.6).
-        let state_path = self.config_base.join(&step.state);
-        self.state_before = std::fs::read_to_string(&state_path).ok();
-
-        let prompt = self.compose_prompt(&step);
-        self.cur_step = Some(step);
-
-        self.emit(LifecycleEvent::Run);
-        if self.cfg.memory.enabled {
-            crate::core::memory::clear_scratch(self.dir, self.session);
-        }
-        Injected::Prompt(prompt)
     }
 
     /// Compose the worker's whole brief into `agg/state/INSTRUCTIONS.md`, then return the tiny
@@ -977,9 +1081,10 @@ impl LoopState<'_> {
         }
 
         // on_session_end hook — dispatched through the registry (HOOK_REDESIGN §7 step-1 seam).
-        // `lifecycle` and `self` are disjoint borrows, so the whole state passes as `&mut`.
+        // `lifecycle` and `self` are disjoint borrows, so the whole state passes as `&mut`. These
+        // are best-effort (always `Continue`); `?` only forwards a would-be hard error.
         for h in &lifecycle.on_session_end {
-            h.run(self);
+            h.run(self)?;
         }
 
         // ── summary (best-effort) ──
@@ -1224,6 +1329,7 @@ pub fn run(
         span_tip: None,
         span_branches: Vec::new(),
         state_before: None,
+        scratch: Scratch::default(),
     };
     st.publish();
     st.dash.lifetime_session = lifetime_base;
@@ -1281,10 +1387,16 @@ pub fn run(
         if let Some(outcome) = st.over_max_sessions() {
             return Ok(outcome);
         }
-        let prompt = match st.inject(&lifecycle) {
-            Injected::Prompt(p) => p,
-            Injected::Stop(outcome) => return Ok(outcome),
-        };
+        // reset the per-session channel so no field (esp. `prompt`) leaks across sessions.
+        st.scratch = Scratch::default();
+        st.emit(LifecycleEvent::Inject);
+        match run_hook(&lifecycle.on_session_start, &mut st)? {
+            Some(End::Stop(outcome)) => return Ok(outcome),
+            Some(End::NextSession) => continue,
+            None => {}
+        }
+        st.emit(LifecycleEvent::Run);
+        let prompt = st.scratch.prompt.take().expect("WriteInstructions set scratch.prompt");
         let Some(outcome) = st.run(&prompt) else {
             return Ok(st.finish_interrupted());
         };
@@ -1352,5 +1464,26 @@ mod tests {
         let pages = wiki_pages(&d);
         assert_eq!(pages, vec!["`wiki/dead-ends.md`".to_string(), "`wiki/parser.md`".to_string()]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// R3 (HOOK_STAGE_PLAN): `on_session_start` MUST dispatch in exactly this order — the user shell
+    /// hook BEFORE `WriteInstructions` (so a hook sees the PREVIOUS session's brief), and
+    /// `BusDrain`→`PickStep` before the branch cut / compose. This order is outcome-invisible (the
+    /// e2e asserts outcomes, not order), so pin it here where a reorder would otherwise pass the gate.
+    #[test]
+    fn on_session_start_registration_order_is_the_spec() {
+        let l = Lifecycle::with_hooks(&crate::core::config::Hooks::default());
+        let names: Vec<&str> = l.on_session_start.iter().map(|h| h.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "BusDrain",
+                "PickStep",
+                "SessionBranchCut",
+                "on_session_start",
+                "WriteInstructions",
+                "ClearMemScratch",
+            ]
+        );
     }
 }
