@@ -109,13 +109,12 @@ pub fn checkout(dir: &Path, branch: &str) -> bool {
     ok
 }
 
-/// Discard the CURRENT branch's uncommitted modifications to TRACKED files, so they don't leak
-/// onto base at the next `checkout base` and get judged as a real result. Called on the session
-/// branch after the worker exits: the worker was told to commit its work, so anything still
-/// uncommitted is not a durable result (the exact out-of-context-stop case). Only tracked
-/// modifications are reset (`git checkout -- .`) — untracked files (build artifacts a judge may
-/// read) are left, and `agg/state/` runtime state is never touched. Returns true if there was
-/// something to discard (for logging).
+/// Discard the CURRENT branch's uncommitted modifications to TRACKED files. LEGACY: GIT_REDESIGN
+/// replaced this on the normal staging path with `auto_commit_tracked` — agg now COMMITS the worker's
+/// edits rather than discarding them (the worker never runs git). Retained for the (unused)
+/// `resolve_session` path + its unit test. Only tracked modifications are reset (`git checkout -- .`)
+/// — untracked files are left, and `agg/state/` runtime state is never touched. Returns true if there
+/// was something to discard (for logging).
 pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
     let dirty = !git(
         dir,
