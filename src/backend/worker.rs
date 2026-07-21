@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Clone)]
 pub struct SessionOutcome {
     pub exit_code: Option<i32>,
     pub duration_secs: u64,
