@@ -18,4 +18,4 @@ tags: [parser]
 ---
 Chose recursive-descent over a table-driven parser. Rejected alternatives are in [dead-ends](dead-ends.md); grammar notes in [grammar](grammar.md).
 ```
-4. COMMIT your code changes before you exit (`git add -A && git commit -m "…"`). agg runs each session on its own throwaway branch and keeps the work ONLY if it is committed AND the judges pass — uncommitted edits are DISCARDED. You never merge or push; agg does that. (Files under `agg/state/` — your STATE.md and the wiki — are saved automatically, so leave those uncommitted.)
+4. Just edit files — you NEVER run git (no `add`/`commit`/`merge`/`push`). agg version-controls and commits your work automatically, runs each session on its own throwaway branch, and keeps the work only if the judges pass. Everything is handled for you, including `agg/state/` (your STATE.md and the wiki).
