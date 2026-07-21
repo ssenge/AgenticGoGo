@@ -109,13 +109,12 @@ pub fn checkout(dir: &Path, branch: &str) -> bool {
     ok
 }
 
-/// Discard the CURRENT branch's uncommitted modifications to TRACKED files, so they don't leak
-/// onto base at the next `checkout base` and get judged as a real result. Called on the session
-/// branch after the worker exits: the worker was told to commit its work, so anything still
-/// uncommitted is not a durable result (the exact out-of-context-stop case). Only tracked
-/// modifications are reset (`git checkout -- .`) — untracked files (build artifacts a judge may
-/// read) are left, and `agg/state/` runtime state is never touched. Returns true if there was
-/// something to discard (for logging).
+/// Discard the CURRENT branch's uncommitted modifications to TRACKED files. LEGACY: GIT_REDESIGN
+/// replaced this on the normal staging path with `auto_commit_tracked` — agg now COMMITS the worker's
+/// edits rather than discarding them (the worker never runs git). Retained for the (unused)
+/// `resolve_session` path + its unit test. Only tracked modifications are reset (`git checkout -- .`)
+/// — untracked files are left, and `agg/state/` runtime state is never touched. Returns true if there
+/// was something to discard (for logging).
 pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
     let dirty = !git(
         dir,
@@ -131,6 +130,29 @@ pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
         let _ = git(dir, &["checkout", "--", ".", ":(exclude)agg/state/**"]);
     }
     dirty
+}
+
+/// Commit the CURRENT (session) branch's uncommitted TRACKED edits — GIT_REDESIGN: agg owns git,
+/// the worker just edits files and never runs git. Stages everything EXCEPT `agg/state/**` (runtime
+/// state, gitignored + excluded via the moat pathspec) and commits IFF something is staged (no
+/// `--allow-empty`: a no-op session makes no commit, exactly like a worker that changed nothing, and
+/// a worker that DID commit leaves nothing staged so no extra commit is made). This REPLACES
+/// `discard_uncommitted_tracked` on the normal path: the worker's work is now KEPT (committed) rather
+/// than thrown away, which kills the "worker forgot to commit → work lost" failure (GIT_REDESIGN §2).
+/// `--no-verify` so a project's pre-commit hook can't block agg's mechanical commit. Returns true if
+/// it made a commit (for logging).
+pub fn auto_commit_tracked(dir: &Path, message: &str) -> bool {
+    // stage tracked modifications, deletions, AND new files — but never agg's runtime state.
+    let _ = git(dir, &["add", "-A", "--", ".", ":(exclude)agg/state/**"]);
+    // commit only if the index actually differs from HEAD (worker already committed / did nothing).
+    if git(dir, &["diff", "--cached", "--name-only"]).1.is_empty() {
+        return false;
+    }
+    let (ok, _, err) = git(dir, &["commit", "--no-verify", "--no-edit", "-m", message]);
+    if !ok {
+        eprintln!("  [git] agg auto-commit failed on the session branch: {err}");
+    }
+    ok
 }
 
 /// Merge `branch` into the currently-checked-out branch (no-ff so each session is one merge
@@ -372,12 +394,9 @@ pub enum StagedSession {
 /// merge path. The companion `finalize_session` commits or rolls back.
 pub fn stage_session(dir: &Path, base: &str, branch: &str, red_file: &str) -> StagedSession {
     let vetoed = file_exists(dir, red_file);
-    // Discard the session's uncommitted tracked edits BEFORE leaving the branch — otherwise git
-    // carries them onto base at checkout and the judges would score them as a real (merged) result
-    // even though the branch has no commits (→ NoChanges). Uncommitted == not a durable result.
-    if discard_uncommitted_tracked(dir) {
-        eprintln!("  [iso] session left uncommitted edits — discarding (commit your work to keep it)");
-    }
+    // The worker's tracked edits were already committed on the session branch by the GitAutoCommit
+    // handler (GIT_REDESIGN: agg owns git) — so there is nothing uncommitted to discard here. A truly
+    // empty session (worker edited nothing) made no commit → `branch_has_no_new_commits` → NoChanges.
     if !checkout(dir, base) {
         eprintln!("  [iso] WARNING could not checkout base '{base}'; leaving session branch {branch} in place");
         return StagedSession::CheckoutFailed;
@@ -599,12 +618,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Blocker 2: a worker that EDITS a tracked file but never commits must not have those edits
-    /// leak onto base at `checkout base` and be judged as a real result. stage_session must
-    /// discard them → NoChanges, base pristine.
+    /// GIT_REDESIGN (was "Blocker 2"): a worker that EDITS a tracked file but never commits used to
+    /// have its edits DISCARDED (and lost). Now agg owns git — `auto_commit_tracked` (run by the
+    /// GitAutoCommit handler on the session branch BEFORE staging) COMMITS the edit, so stage_session
+    /// sees a real commit and STAGES the merge: the work is KEPT. A truly empty session still commits
+    /// nothing → NoChanges, base pristine.
     #[test]
-    fn uncommitted_tracked_edits_do_not_leak_onto_base() {
-        let d = std::env::temp_dir().join(format!("agg-git-{}-leak", std::process::id()));
+    fn auto_commit_keeps_the_worker_edit_and_stages_it() {
+        let d = std::env::temp_dir().join(format!("agg-git-{}-autocommit", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         git_t(&d, &["init", "-q", "-b", "main"]);
@@ -619,13 +640,24 @@ mod tests {
         git_t(&d, &["checkout", "-q", "-b", "agg/p/session-1"]);
         std::fs::write(d.join("f.txt"), "base\nWORKER-UNCOMMITTED-EDIT\n").unwrap();
 
+        // agg owns git: commit the worker's edit on the session branch (what GitAutoCommit does).
+        assert!(auto_commit_tracked(&d, "agg: session 1 (worker) on fake"), "agg commits the worker's uncommitted edit");
         let staged = stage_session(&d, "main", "agg/p/session-1", ".agg_red");
-        assert_eq!(staged, StagedSession::NoChanges, "no commits → NoChanges");
-        // base's working tree must NOT carry the worker's uncommitted edit.
+        assert_eq!(staged, StagedSession::Staged, "the committed edit is a durable, stageable result");
+        // keep it: the merge commits and the worker's edit lands on base — work KEPT, not lost.
+        let _ = finalize_session(&d, "agg/p/session-1", 1, true);
+        assert!(
+            std::fs::read_to_string(d.join("f.txt")).unwrap().contains("WORKER-UNCOMMITTED-EDIT"),
+            "the auto-committed worker edit must be KEPT on base (GIT_REDESIGN: agg owns git)"
+        );
+
+        // a truly EMPTY session (worker changed nothing) still commits nothing → NoChanges, base pristine.
+        git_t(&d, &["checkout", "-q", "-b", "agg/p/session-2", "main"]);
+        assert!(!auto_commit_tracked(&d, "agg: session 2 (worker) on fake"), "nothing changed → no commit");
         assert_eq!(
-            std::fs::read_to_string(d.join("f.txt")).unwrap(),
-            "base\n",
-            "base must be pristine — the uncommitted edit must not leak/merge"
+            stage_session(&d, "main", "agg/p/session-2", ".agg_red"),
+            StagedSession::NoChanges,
+            "empty session → NoChanges"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
