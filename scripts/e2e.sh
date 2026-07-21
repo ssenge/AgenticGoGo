@@ -108,8 +108,7 @@ sh bin/rec RUN
 [ -f WORKER_SLEEP ] && sleep "$(cat WORKER_SLEEP)"
 if [ ! -f NO_WORK ]; then
   : > did_work
-  git add did_work >/dev/null 2>&1
-  git commit -qm "worker: did_work" >/dev/null 2>&1
+  # GIT_REDESIGN: the worker no longer runs git — it just edits files. agg's GitAutoCommit commits did_work.
 fi
 tok=1;   [ -f WORKER_TOKENS ] && tok=$(cat WORKER_TOKENS)
 cost=0;  [ -f WORKER_COST ]   && cost=$(cat WORKER_COST)
@@ -144,8 +143,34 @@ hooks:
 EOF
   echo "create the file did_work" > "$d/agg/state/STATE.md"
 
+  # GIT_REDESIGN: agg now auto-commits the worker's WORK (`git add -A`), so anything left UNTRACKED in
+  # the project tree would be swept onto the session branch and pollute base on merge. A real project
+  # tracks its config + gitignores build artifacts; these fixtures instead REWRITE bin/, agg.yaml, and
+  # judges per-test (which would dirty a tracked tree and make `agg run` refuse), so we gitignore all
+  # the per-test SCAFFOLDING + agg runtime + worker instrumentation + toggle/marker files, AND the
+  # `*.log` capture files agg's own stdout is redirected into (run.log/dirrun.log/uncapped.log/…): those
+  # live in the project root, so `git add -A` would COMMIT the actively-written log → the next
+  # `checkout base` fails ("local changes to run.log would be overwritten") and isolation breaks. Only the
+  # worker's judged WORK files (tracked.txt, did_work, .n, BREAK, .flip) stay trackable → agg commits +
+  # merges/rolls-them-back exactly as in production. (agg reads config/judges from DISK, not from git.)
+  cat > "$d/.gitignore" <<'EOF'
+agg/state/
+bin/
+agg/agg.yaml
+agg/judges/
+trace.txt
+prompt_latest.txt
+prompts.txt
+NO_WORK
+WORKER_SLEEP
+WORKER_TOKENS
+WORKER_COST
+JUDGE_FAIL
+.sess
+*.log
+EOF
   ( cd "$d" && git init -q -b main && git config user.email t@t && git config user.name t \
-    && git commit -q --allow-empty -m init )
+    && git add .gitignore && git commit -q -m "project scaffold (gitignore)" )
   echo "$d"
 }
 
