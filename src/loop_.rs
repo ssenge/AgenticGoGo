@@ -115,6 +115,45 @@ enum GateDecision {
     Stop(RunOutcome),
 }
 
+// ── the lifecycle registry (HOOK_REDESIGN §3.1/§5) ────────────────────────────────────────────
+// Handlers are `.add()`ed to hook points in code and dispatched in order by the loop — the seed of
+// "every task is a hook". Today only the user shell hooks are handlers; agg's own inline tasks
+// (judges, gate, memory, …) move onto hooks in later increments (HOOK_REDESIGN §7 step 1).
+//
+// The context a handler receives is the whole `LoopState` (§8: the context IS the run/session
+// state). Handlers run STRICTLY SEQUENTIALLY, each with an exclusive `&mut LoopState`, so passing
+// the whole state is legal with no borrow gymnastics. The `Lifecycle` is owned by `run()` and passed
+// ALONGSIDE the state (never stored in it) — that disjointness is what keeps the borrow sound.
+trait Handler {
+    fn run(&self, ctx: &mut LoopState);
+}
+
+/// A user shell-hook list wrapped as a handler — best-effort, non-fatal (exactly `hooks::run`).
+struct ShellHook {
+    label: &'static str,
+    cmds: Vec<String>,
+}
+impl Handler for ShellHook {
+    fn run(&self, ctx: &mut LoopState) {
+        crate::hooks::run(self.label, &self.cmds, ctx.dir);
+    }
+}
+
+/// The lifecycle registry: one ordered handler list per hook point. Grows a field per hook as the
+/// inline tasks convert (§4). `Lifecycle::default_pipeline` is agg's built-in registration (§5).
+#[derive(Default)]
+struct Lifecycle {
+    on_session_end: Vec<Box<dyn Handler>>,
+}
+impl Lifecycle {
+    fn default_pipeline(cfg: &AggConfig) -> Self {
+        let mut l = Lifecycle::default();
+        l.on_session_end
+            .push(Box::new(ShellHook { label: "on_session_end", cmds: cfg.hooks.on_session_end.clone() }));
+        l
+    }
+}
+
 /// The engine + parsed sequence, assembled from config. Built once, before the loop (and by
 /// `agg plan`).
 pub struct Assembly {
@@ -837,7 +876,7 @@ impl LoopState<'_> {
     }
 
     /// **GATE** — keep / roll back the judged merge, or record the staged span · check done/abort.
-    fn gate(&mut self, v: Verified, outcome: &SessionOutcome) -> Result<GateDecision> {
+    fn gate(&mut self, v: Verified, outcome: &SessionOutcome, lifecycle: &Lifecycle) -> Result<GateDecision> {
         let Verified { mut res, staged, pre_cycle_goals, mem_folded, skip } = v;
 
         // a ceiling tripped during rate-limit backoff already emitted Finished.
@@ -931,7 +970,11 @@ impl LoopState<'_> {
             }
         }
 
-        crate::hooks::run("on_session_end", &self.cfg.hooks.on_session_end, self.dir);
+        // on_session_end hook — dispatched through the registry (HOOK_REDESIGN §7 step-1 seam).
+        // `lifecycle` and `self` are disjoint borrows, so the whole state passes as `&mut`.
+        for h in &lifecycle.on_session_end {
+            h.run(self);
+        }
 
         // ── summary (best-effort) ──
         let mut summarized_this_cycle = false;
@@ -1224,6 +1267,9 @@ pub fn run(
     }
     st.bus = Bus::open(dir).ok();
 
+    // agg's built-in hook registration (HOOK_REDESIGN §5). Owned here, passed alongside `st`.
+    let lifecycle = Lifecycle::default_pipeline(&cfg);
+
     // ── the deterministic outer loop, one step at a time ──
     loop {
         if let Some(outcome) = st.over_max_sessions() {
@@ -1242,7 +1288,7 @@ pub fn run(
         let Some(verified) = st.verify(&outcome) else {
             continue; // rate-limited: incomplete session, not judged — go round again
         };
-        match st.gate(verified, &outcome)? {
+        match st.gate(verified, &outcome, &lifecycle)? {
             GateDecision::Loop => continue,
             GateDecision::Stop(outcome) => return Ok(outcome),
         }
