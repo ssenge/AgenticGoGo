@@ -92,18 +92,6 @@ const INSTRUCTIONS_POINTER: &str =
 /// string; `{{STATE}}` is filled with the step's state path when composed.
 const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
 
-/// What VERIFY produced: the judged (or skipped) step, plus everything GATE needs.
-struct Verified {
-    res: CycleResult,
-    /// the staged git merge for a JUDGED step (`None` for a skip step or a non-staged disposition).
-    staged: Option<(String, crate::git::StagedSession)>,
-    /// pre-step (base) judge truth, so a rollback can restore it (W5).
-    pre_cycle_goals: Vec<GoalRuntime>,
-    mem_folded: bool,
-    /// this step ran no judges (§5.7) — its work STAGES on the span.
-    skip: bool,
-}
-
 enum GateDecision {
     Loop,
     Stop(RunOutcome),
@@ -125,7 +113,6 @@ enum GateDecision {
 enum Flow {
     Continue,
     /// stop the rest of THIS session's hooks, loop to the next session (the rate-limit path).
-    #[allow(dead_code)] // constructed at INC-3 (RateLimitBackoff); remove this allow then.
     SkipSession,
     Stop(RunOutcome),
 }
@@ -148,6 +135,14 @@ struct Scratch {
     skip_judges: bool,
     /// `LaunchWorker` (on_run) → VERIFY/GATE. Replaces `run()`'s `Option<SessionOutcome>` return.
     outcome: Option<SessionOutcome>,
+    /// `FloorFold` (on_verify) → the post-judge refine fold in GATE. Was `Verified.mem_folded`.
+    mem_folded: bool,
+    /// `SnapshotGoals` (on_verify) → a rollback in GATE restores it. Was `Verified.pre_cycle_goals`.
+    pre_cycle_goals: Vec<GoalRuntime>,
+    /// `StageSpan` (skip) XOR `RunJudges` (judged) → GATE; REWRITTEN by GATE on a rollback. Was `Verified.res`.
+    res: Option<CycleResult>,
+    /// `StageMerge` (judged) → GATE's keep/rollback. `None` on a skip step. Was `Verified.staged`.
+    staged: Option<(String, crate::git::StagedSession)>,
 }
 
 trait Handler {
@@ -429,12 +424,163 @@ impl Handler for LaunchWorker {
     }
 }
 
+// ── on_verify handlers = the old VERIFY stage, decomposed (HOOK_REDESIGN §4) ───────────────────────
+
+/// The early ENFORCED memory floor — FIRST on on_verify, BEFORE any judging, so the session's facts
+/// survive a later panic (R1). Sets `scratch.mem_folded` for the post-judge refine fold in GATE.
+struct FloorFold;
+impl Handler for FloorFold {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let outcome = ctx.scratch.outcome.clone().expect("LaunchWorker set scratch.outcome");
+        ctx.scratch.mem_folded = ctx.fold_memory_floor(&outcome);
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "FloorFold"
+    }
+}
+
+/// The rate-limit exit: a rate-limited session is INCOMPLETE. Plain rate-limit → `SkipSession` (skip
+/// gate + session_end, loop on). A ceiling tripped DURING backoff → `Stop(Halt)` (abort_now emits
+/// Finished first). Ceilings are checked even here so an all-night spin still trips the guard (§5.5).
+struct RateLimitBackoff;
+impl Handler for RateLimitBackoff {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let rate_limited = ctx.scratch.outcome.as_ref().map(|o| o.rate_limited).unwrap_or(false);
+        if !rate_limited {
+            return Ok(Flow::Continue);
+        }
+        let secs = ctx.cfg.ratelimit_backoff_secs;
+        eprintln!("  rate limit detected — backing off {secs}s");
+        if ctx.cfg.memory.enabled {
+            crate::core::memory::clear_scratch(ctx.dir, ctx.session);
+        }
+        // §5.5 item 6: check the ceilings even here — an all-night rate-limit spin must still trip
+        // `wall_hours`/`over_budget`.
+        let rs = ctx.run_state();
+        let ceil = ctx.eng.conditions_only(&rs);
+        if ceil.halt {
+            eprintln!("  ⚠ ceiling tripped during backoff — aborting");
+            let outcome = ctx.abort_now(&format!("abort_if: {}", ceil.halt_reason.unwrap_or_default()));
+            return Ok(Flow::Stop(outcome));
+        }
+        ctx.emit(LifecycleEvent::Backoff);
+        std::thread::sleep(Duration::from_secs(secs));
+        Ok(Flow::SkipSession)
+    }
+    fn name(&self) -> &'static str {
+        "RateLimitBackoff"
+    }
+}
+
+/// Snapshot the pre-step (base) judge truth so a GATE rollback can restore it (W5). Runs only past
+/// the rate-limit exit — exactly like the old `pre_cycle_goals` snapshot after the rate-limit return.
+struct SnapshotGoals;
+impl Handler for SnapshotGoals {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        ctx.scratch.pre_cycle_goals = ctx.eng.snapshot_goal_state();
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "SnapshotGoals"
+    }
+}
+
+/// The `skip_judges` path (§5.7): no judges — keep the branch, extend the span tip, run ceilings only.
+/// Runs on a skip step (an internal guard makes it a no-op on a judged step, where StageMerge/RunJudges
+/// take over). Sets `scratch.res` (ceilings-only) and leaves `scratch.staged = None`.
+struct StageSpan;
+impl Handler for StageSpan {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        if !ctx.scratch.skip_judges {
+            return Ok(Flow::Continue);
+        }
+        ctx.emit(LifecycleEvent::Staging);
+        let iso = &ctx.cfg.session_isolation;
+        let vetoed = ctx.dir.join(&iso.red_file).exists();
+        let red_file = iso.red_file.clone();
+        let sb = ctx.session_branch.clone();
+        if vetoed {
+            eprintln!("  [span] session #{} VETOED (red_file) → work discarded, not staged", ctx.session);
+            crate::git::remove_file(ctx.dir, &red_file);
+            // leave the branch orphaned; the span tip is unchanged.
+        } else if let Some(br) = sb {
+            eprintln!("  [span] session #{} staged on {br} (skip_judges) — nothing merged yet", ctx.session);
+            ctx.span_tip = Some(br.clone());
+            ctx.span_branches.push(br);
+        }
+        // ceilings only (no judges ran) — done_if reads stale state and cannot fire, ceilings can.
+        let step = ctx.cur_step.clone().expect("PickStep set cur_step");
+        let rs = ctx.run_state();
+        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), true);
+        ctx.scratch.res = Some(res);
+        ctx.scratch.staged = None;
+        ctx.publish();
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "StageSpan"
+    }
+}
+
+/// A JUDGED step only (bypassed on a skip step): stage the merge so the judges test the MERGED tree.
+/// Sets `scratch.staged`.
+struct StageMerge;
+impl Handler for StageMerge {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let red_file = ctx.cfg.session_isolation.red_file.clone();
+        let staged = ctx.session_branch.clone().map(|br| {
+            let s = crate::git::stage_session(ctx.dir, &ctx.iso_base, &br, &red_file);
+            (br, s)
+        });
+        ctx.scratch.staged = staged;
+        Ok(Flow::Continue)
+    }
+    fn runs_on_skip(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str {
+        "StageMerge"
+    }
+}
+
+/// A JUDGED step only (bypassed on a skip step): run the run-set judges against the staged tree, count
+/// their spend against the ceilings + the ruler's per-agent tally. Sets `scratch.res`.
+struct RunJudges;
+impl Handler for RunJudges {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let step = ctx.cur_step.clone().expect("PickStep set cur_step");
+        eprintln!("  running judges…");
+        ctx.emit(LifecycleEvent::Verify);
+        let rs = ctx.run_state();
+        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), false);
+        // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
+        ctx.tokens_spent += res.judge_tokens;
+        if let Some(c) = res.judge_cost {
+            ctx.cost_spent += c;
+        }
+        let ruler_agent = ctx.cfg.judge.agent.clone();
+        ctx.charge(&ruler_agent, res.judge_tokens, res.judge_cost);
+        eprint!("{}", indent(&ctx.eng.scoreboard()));
+        ctx.scratch.res = Some(res);
+        ctx.publish();
+        Ok(Flow::Continue)
+    }
+    fn runs_on_skip(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str {
+        "RunJudges"
+    }
+}
+
 /// The lifecycle registry: one ordered handler list per hook point. `default_pipeline` is agg's
 /// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
 #[derive(Default)]
 struct Lifecycle {
     on_session_start: Vec<Box<dyn Handler>>,
     on_run: Vec<Box<dyn Handler>>,
+    on_verify: Vec<Box<dyn Handler>>,
     on_session_end: Vec<Box<dyn Handler>>,
 }
 impl Lifecycle {
@@ -453,6 +599,12 @@ impl Lifecycle {
         l.on_session_start.push(Box::new(WriteInstructions));
         l.on_session_start.push(Box::new(ClearMemScratch));
         l.on_run.push(Box::new(LaunchWorker));
+        l.on_verify.push(Box::new(FloorFold));
+        l.on_verify.push(Box::new(RateLimitBackoff));
+        l.on_verify.push(Box::new(SnapshotGoals));
+        l.on_verify.push(Box::new(StageSpan));
+        l.on_verify.push(Box::new(StageMerge));
+        l.on_verify.push(Box::new(RunJudges));
         l.on_session_end
             .push(Box::new(ShellHook { label: "on_session_end", cmds: hooks.on_session_end.clone() }));
         l
@@ -921,92 +1073,21 @@ impl LoopState<'_> {
         }
     }
 
-    /// **VERIFY** — run the run-set judges (unless `skip_judges`) against the staged tree, or stage
-    /// the span for a skip step. `None` = the session was rate-limited (incomplete): NOT judged, NOT
-    /// merged; the caller loops. Ceilings ARE checked on the rate-limit path (§5.5 item 6 fix).
-    fn verify(&mut self, outcome: &SessionOutcome) -> Option<Verified> {
-        let mem_folded = self.fold_memory_floor(outcome);
-
-        if outcome.rate_limited {
-            let secs = self.cfg.ratelimit_backoff_secs;
-            eprintln!("  rate limit detected — backing off {secs}s");
-            if self.cfg.memory.enabled {
-                crate::core::memory::clear_scratch(self.dir, self.session);
-            }
-            // §5.5 item 6: check the ceilings even here — an all-night rate-limit spin must still
-            // trip `wall_hours`/`over_budget`, which the old `return` before `evaluate` never did.
-            let rs = self.run_state();
-            let ceil = self.eng.conditions_only(&rs);
-            if ceil.halt {
-                eprintln!("  ⚠ ceiling tripped during backoff — aborting");
-                let _ = self.abort_now(&format!("abort_if: {}", ceil.halt_reason.unwrap_or_default()));
-                // signal the caller to stop by returning a Verified marked halt.
-                return Some(Verified {
-                    res: CycleResult { halt: true, ..Default::default() },
-                    staged: None,
-                    pre_cycle_goals: self.eng.snapshot_goal_state(),
-                    mem_folded,
-                    skip: true,
-                });
-            }
-            self.emit(LifecycleEvent::Backoff);
-            std::thread::sleep(Duration::from_secs(secs));
-            return None;
-        }
-
-        let step = self.cur_step.clone().expect("cur_step set");
-        let pre_cycle_goals = self.eng.snapshot_goal_state();
-
-        if step.skip_judges {
-            // ── STAGE the span (§5.7): no judges, keep the branch, extend the span tip. ──
-            self.emit(LifecycleEvent::Staging);
-            let iso = &self.cfg.session_isolation;
-            let vetoed = self.dir.join(&iso.red_file).exists();
-            if vetoed {
-                eprintln!("  [span] session #{} VETOED (red_file) → work discarded, not staged", self.session);
-                crate::git::remove_file(self.dir, &iso.red_file);
-                // leave the branch orphaned; the span tip is unchanged.
-            } else if let Some(br) = &self.session_branch {
-                eprintln!("  [span] session #{} staged on {br} (skip_judges) — nothing merged yet", self.session);
-                self.span_tip = Some(br.clone());
-                self.span_branches.push(br.clone());
-            }
-            // ceilings only (no judges ran) — done_if reads stale state and cannot fire, ceilings can.
-            let rs = self.run_state();
-            let res = self.eng.run_step(self.dir, &rs, self.ruler, &self.judge_model, self.judge_timeout, &step.name, Some(self.session), true);
-            self.publish();
-            return Some(Verified { res, staged: None, pre_cycle_goals, mem_folded, skip: true });
-        }
-
-        // ── JUDGED step: stage the merge so the judges test the MERGED tree, then judge. ──
-        let iso = &self.cfg.session_isolation;
-        let staged = match &self.session_branch {
-            Some(br) => Some((br.clone(), crate::git::stage_session(self.dir, &self.iso_base, br, &iso.red_file))),
-            None => None,
-        };
-
-        eprintln!("  running judges…");
-        self.emit(LifecycleEvent::Verify);
-        let rs = self.run_state();
-        let res = self.eng.run_step(self.dir, &rs, self.ruler, &self.judge_model, self.judge_timeout, &step.name, Some(self.session), false);
-        // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
-        self.tokens_spent += res.judge_tokens;
-        if let Some(c) = res.judge_cost {
-            self.cost_spent += c;
-        }
-        let ruler_agent = self.cfg.judge.agent.clone();
-        self.charge(&ruler_agent, res.judge_tokens, res.judge_cost);
-        eprint!("{}", indent(&self.eng.scoreboard()));
-        self.publish();
-
-        Some(Verified { res, staged, pre_cycle_goals, mem_folded, skip: false })
-    }
-
     /// **GATE** — keep / roll back the judged merge, or record the staged span · check done/abort.
-    fn gate(&mut self, v: Verified, outcome: &SessionOutcome, lifecycle: &Lifecycle) -> Result<GateDecision> {
-        let Verified { mut res, staged, pre_cycle_goals, mem_folded, skip } = v;
+    /// Reads what the on_verify handlers left in `scratch` (§8): `res` (judged or ceilings-only),
+    /// `staged` (the merge), `pre_cycle_goals` (rollback restore), `mem_folded`, `skip_judges`, and
+    /// the `outcome`. On a rollback it REWRITES `res`.
+    fn gate(&mut self, lifecycle: &Lifecycle) -> Result<GateDecision> {
+        let mut res = self.scratch.res.take().expect("an on_verify handler set scratch.res");
+        let staged = self.scratch.staged.take();
+        let pre_cycle_goals = std::mem::take(&mut self.scratch.pre_cycle_goals);
+        let mem_folded = self.scratch.mem_folded;
+        let skip = self.scratch.skip_judges;
+        let outcome = self.scratch.outcome.clone().expect("LaunchWorker set scratch.outcome");
 
-        // a ceiling tripped during rate-limit backoff already emitted Finished.
+        // a skip-step ceiling halt with nothing staged and no verdicts — stop without the session-end
+        // work (its Finished, if any, is already emitted). The rate-limit ceiling path no longer
+        // reaches here (RateLimitBackoff now Stops directly), so this guards the skip-step case.
         if skip && res.halt && staged.is_none() && res.fresh_verdicts.is_empty() && res.deltas.is_empty() {
             return Ok(GateDecision::Stop(RunOutcome::Halt));
         }
@@ -1421,11 +1502,12 @@ pub fn run(
         if let Some(e) = st.worker_is_broken() {
             return Err(e);
         }
-        let outcome = st.scratch.outcome.take().expect("LaunchWorker set scratch.outcome");
-        let Some(verified) = st.verify(&outcome) else {
-            continue; // rate-limited: incomplete session, not judged — go round again
-        };
-        match st.gate(verified, &outcome, &lifecycle)? {
+        match run_hook(&lifecycle.on_verify, &mut st)? {
+            Some(End::NextSession) => continue, // rate-limited: incomplete session — go round again
+            Some(End::Stop(outcome)) => return Ok(outcome), // ceiling tripped during backoff → Halt
+            None => {}
+        }
+        match st.gate(&lifecycle)? {
             GateDecision::Loop => continue,
             GateDecision::Stop(outcome) => return Ok(outcome),
         }
