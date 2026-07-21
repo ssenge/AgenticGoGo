@@ -473,8 +473,8 @@ same files, so you can attach any number of views to a running loop without coup
   steering, and pointers to `AGG.md` and `STATE.md`. Disposable; the worker never edits it.
 - **`agg/state/LOG.md`** — durable cross-session memory (`what we tried and rejected`), written by
   **agg** (never the worker); its recent tail is injected into every session.
-- **git commits** — the actual *work* state. Each session commits on its own branch and is gated; the
-  next **fresh** session resumes from the filesystem + `LOG.md`, not from a held-open context.
+- **git commits** — the actual *work* state. **agg** commits each session's work on its own branch (the
+  worker never runs git) and gates it; the next **fresh** session resumes from the filesystem + `LOG.md`.
   Git *is* the memory between sessions.
 
 Because the log on stdout is the source of truth and `state.json` is just a view of it, a run is

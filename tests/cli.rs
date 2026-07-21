@@ -1664,3 +1664,178 @@ exit 0
         "the loop must dispatch the reconsider step, not merely evaluate the condition:\n{combined}"
     );
 }
+
+/// R5a (HOOK_STAGE_PLAN): a rate-limited worker session is INCOMPLETE — the loop backs off and goes
+/// round again WITHOUT judging, staging/gating, or folding the post-judge memory refinement. This is
+/// outcome-invisible (the run still reaches the cap and exits 4), so pin it here where a botched
+/// verify/gate conversion would otherwise stay green while dropping the skip.
+#[test]
+fn a_rate_limited_session_skips_the_judged_gate_and_the_refine_fold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // fake claude: report a rate-limit in the result line (matched by `looks_rate_limited`) and do
+    // NO work — a rate-limited turn never reached the model.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+# detection is exit-code AND terminal-event gated ("a clean exit 0 is never a rate-limit"), so the
+# stub reports the rate-limit in its result AND exits non-zero.
+printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"result":"rate_limit_error: slow down","usage":{"output_tokens":0},"total_cost_usd":0}'
+exit 1
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    // a judge that never meets (absent the rate-limit the loop would judge every session); backoff 0
+    // so the test never sleeps; memory on so a would-be refine fold would show up in the log.
+    write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    write_cfg(dir, "rl", "impossible", "", "ratelimit_backoff_secs: 0\nmemory: { enabled: true, max_kb: 64, inject_kb: 8 }\n");
+    git_init(dir);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined); // one rate-limited session, then the cap → MaxSessions.
+
+    assert!(combined.contains("rate limit detected"), "the rate-limit path must be taken:\n{combined}");
+    // the judged path (verify) is skipped: only the BASELINE runs judges ("running judges once before
+    // the first session…"); the rate-limited session must NOT add a second judge run.
+    assert_eq!(
+        combined.matches("running judges").count(),
+        1,
+        "a rate-limited session must NOT judge (only the baseline should):\n{combined}"
+    );
+    // the post-judge memory REFINE fold (in the gate) is skipped for the incomplete session.
+    assert!(
+        !combined.contains("[memory] session #1 folded"),
+        "a rate-limited session must NOT fold the post-judge refinement:\n{combined}"
+    );
+}
+
+/// R2 (HOOK_STAGE_PLAN): the session that MEETS `done_if` is NOT special-cased out of session-end
+/// work — it still fires the on_session_end hook and folds the post-judge memory refinement BEFORE
+/// the run stops. (The run-stop check is the LAST on_session_end handler, not part of the gate; a
+/// gate-placed stop would skip the winning session's fold + hook.) Outcome-invisible → pinned here.
+#[test]
+fn a_winning_session_still_folds_memory_and_fires_on_session_end() {
+    let (tmp, path) = project_with_fake_claude(); // the worker creates + commits `did_work`
+    let dir = tmp.path();
+    write_judge(dir, "won", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "win", "won", "", "memory: { enabled: true, max_kb: 64, inject_kb: 8 }\nhooks:\n  on_session_end: [\"touch session_end_ran\"]\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 0, &combined); // done_if fires on session 1 → GoalsMet.
+
+    // the WINNING session still fired its on_session_end hook…
+    assert!(dir.join("session_end_ran").exists(), "on_session_end must fire on the winning session:\n{combined}");
+    // …and still folded session 1 into LOG.md (the fold precedes the run-stop decision).
+    let mem = fs::read_to_string(dir.join("agg/state/LOG.md")).unwrap_or_default();
+    assert!(mem.contains("## session 1"), "the winning session must still fold into LOG.md:\n{mem}\n{combined}");
+    assert!(combined.contains("[memory] session #1 folded"), "the winning session's fold must be logged:\n{combined}");
+}
+
+#[test]
+fn agg_auto_commits_a_worker_that_forgets_to_commit() {
+    // GIT_REDESIGN §2: the worker EDITS a tracked file but never runs `git commit`. agg must
+    // auto-commit the edit on the session branch (not discard it), so it merges to base and the goal
+    // is met. Before GIT_REDESIGN, discard_uncommitted_tracked threw the edit away → never converged.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // fake worker: create answer.txt and DO NOT commit (no git at all).
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+printf 'made-it\n' > answer.txt
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    write_judge(dir, "answered", "#!/bin/sh\n[ -f answer.txt ] && grep -q made-it answer.txt && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"answered\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "autocommit", "answered", "", "memory: { enabled: false }\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 0, &combined); // agg committed the edit → merged → answered met → done.
+    // the worker never ran git, yet its edit is on main (agg auto-committed it).
+    let on_main = std::process::Command::new("git").args(["show", "main:answer.txt"]).current_dir(dir).output().unwrap();
+    let content = String::from_utf8_lossy(&on_main.stdout);
+    assert!(content.contains("made-it"), "agg must auto-commit the worker's uncommitted edit onto main, got: {content:?}\n{combined}");
+    assert!(combined.contains("agg committed the worker's edits"), "the auto-commit must be logged:\n{combined}");
+}
+
+#[test]
+fn a_worker_tampered_judge_is_rolled_back_and_base_judge_restored() {
+    // GIT_REDESIGN §6 (the single most important moat test): a session whose worker TAMPERS a
+    // committed judge AND regresses a DoD-set invariant must ROLL BACK — and because judges are
+    // committed and rollback restores base via `:(exclude)agg/state/**`, base's judge is the
+    // ORIGINAL, not the worker's tampered copy. agg (not the worker) makes the commit now, so this
+    // proves the moat still holds under GIT_REDESIGN's auto-commit.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // worker: regress build_ok (drop .regressed) AND tamper its judge script (append a marker), and
+    // DO NOT commit — agg auto-commits. The tamper is a harmless trailing comment, so build_ok still
+    // runs and still reports the regression (a self-hiding tamper is a deeper concern, out of scope).
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+touch .regressed
+printf '\n# TAMPERED-BY-WORKER\n' >> agg/judges/build_ok.sh
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    // build_ok (invariant): met at baseline, REGRESSES once .regressed exists.
+    write_judge(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"regressed\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}'\n");
+    // feature: never met (so the loop runs a session rather than stopping at baseline).
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "tamper", "feature", "  invariants: [build_ok]\n", "memory: { enabled: false }\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined); // feature never met → cap; the regressing session rolled back.
+    assert!(combined.contains("ROLLED BACK"), "the judge-tampering, regressing session must roll back:\n{combined}");
+    // THE MOAT: base's committed judge is restored to the ORIGINAL — the worker's tamper is gone.
+    let judge_on_main = std::process::Command::new("git").args(["show", "main:agg/judges/build_ok.sh"]).current_dir(dir).output().unwrap();
+    let judge = String::from_utf8_lossy(&judge_on_main.stdout);
+    assert!(!judge.contains("TAMPERED"), "rollback must restore the committed judge — no worker tamper on base, got:\n{judge}");
+    assert!(judge.contains(".regressed"), "base keeps the ORIGINAL judge logic");
+    // base is pristine: the worker's .regressed marker is NOT tracked on base.
+    let ls = std::process::Command::new("git").args(["ls-files", ".regressed"]).current_dir(dir).output().unwrap();
+    assert!(String::from_utf8_lossy(&ls.stdout).trim().is_empty(), "the regressing session's marker must not be on base");
+}
