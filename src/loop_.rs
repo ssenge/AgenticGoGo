@@ -143,11 +143,14 @@ impl Handler for ShellHook {
 /// inline tasks convert (§4). `Lifecycle::default_pipeline` is agg's built-in registration (§5).
 #[derive(Default)]
 struct Lifecycle {
+    on_session_start: Vec<Box<dyn Handler>>,
     on_session_end: Vec<Box<dyn Handler>>,
 }
 impl Lifecycle {
     fn default_pipeline(cfg: &AggConfig) -> Self {
         let mut l = Lifecycle::default();
+        l.on_session_start
+            .push(Box::new(ShellHook { label: "on_session_start", cmds: cfg.hooks.on_session_start.clone() }));
         l.on_session_end
             .push(Box::new(ShellHook { label: "on_session_end", cmds: cfg.hooks.on_session_end.clone() }));
         l
@@ -443,7 +446,7 @@ impl LoopState<'_> {
 
     /// **INJECT** — next step → state + steering → the worker's prompt. Cuts the session branch off
     /// the span tip (or base) and composes the prompt in the §5.6 order.
-    fn inject(&mut self) -> Injected {
+    fn inject(&mut self, lifecycle: &Lifecycle) -> Injected {
         self.emit(LifecycleEvent::Inject);
 
         // ── drain the bus at the session boundary ──
@@ -537,7 +540,10 @@ impl LoopState<'_> {
             None
         };
 
-        crate::hooks::run("on_session_start", &self.cfg.hooks.on_session_start, self.dir);
+        // on_session_start hook — dispatched through the registry (disjoint from `&mut self`).
+        for h in &lifecycle.on_session_start {
+            h.run(self);
+        }
         if let Some(change) = crate::os::spawns::scan(self.dir) {
             eprintln!("  [spawn] {change}");
         }
@@ -1275,7 +1281,7 @@ pub fn run(
         if let Some(outcome) = st.over_max_sessions() {
             return Ok(outcome);
         }
-        let prompt = match st.inject() {
+        let prompt = match st.inject(&lifecycle) {
             Injected::Prompt(p) => p,
             Injected::Stop(outcome) => return Ok(outcome),
         };
