@@ -92,11 +92,6 @@ const INSTRUCTIONS_POINTER: &str =
 /// string; `{{STATE}}` is filled with the step's state path when composed.
 const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
 
-enum GateDecision {
-    Loop,
-    Stop(RunOutcome),
-}
-
 // ── the lifecycle registry (HOOK_REDESIGN §3.1/§5) ────────────────────────────────────────────
 // Handlers are `.add()`ed to hook points in code and dispatched in order by the loop — the seed of
 // "every task is a hook". agg's own tasks (pick/compose/judges/gate/memory) are handlers too; only
@@ -143,6 +138,10 @@ struct Scratch {
     res: Option<CycleResult>,
     /// `StageMerge` (judged) → GATE's keep/rollback. `None` on a skip step. Was `Verified.staged`.
     staged: Option<(String, crate::git::StagedSession)>,
+    /// `GateKeepRollback` (on_gate) → `RefineFold`'s "session ROLLED BACK" prefix. Staged-!keep only.
+    rolled_back: bool,
+    /// `Summarize` (on_session_end) → `RefineFold`'s mechanical+summary source choice.
+    summarized_this_cycle: bool,
 }
 
 trait Handler {
@@ -574,6 +573,260 @@ impl Handler for RunJudges {
     }
 }
 
+// ── on_gate handlers = the old GATE keep/rollback (HOOK_REDESIGN §4) ───────────────────────────────
+
+/// FIRST on on_gate: a skip-step ceiling halt (nothing staged, no verdicts) stops the run WITHOUT the
+/// session-end work — and crucially WITHOUT `emit(Gate)`, so the poison path never publishes a Gate
+/// phase (R10). Emits nothing; reads scratch by ref (leaves `res`/`staged` for GateKeepRollback).
+struct CeilingPoisonGuard;
+impl Handler for CeilingPoisonGuard {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let res = ctx.scratch.res.as_ref().expect("an on_verify handler set scratch.res");
+        if ctx.scratch.skip_judges
+            && res.halt
+            && ctx.scratch.staged.is_none()
+            && res.fresh_verdicts.is_empty()
+            && res.deltas.is_empty()
+        {
+            return Ok(Flow::Stop(RunOutcome::Halt));
+        }
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "CeilingPoisonGuard"
+    }
+}
+
+/// Keep / roll back the judged merge. `emit(Gate)` is its FIRST line (fires for skip + judged; the
+/// poison path never reaches here, so it stays Gate-free — R10). Runs on skip steps too (an internal
+/// `if skip_judges` guard makes the keep/rollback a no-op there — a skip step emits Gate but merges
+/// nothing). On a rollback it REWRITES `scratch.res` and sets `scratch.rolled_back`. The
+/// `verdicts::append` `?` is a HARD disk Err that bubbles out of `run()` (R7) — NOT a clean Halt.
+struct GateKeepRollback;
+impl Handler for GateKeepRollback {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        ctx.emit(LifecycleEvent::Gate);
+        if ctx.scratch.skip_judges {
+            return Ok(Flow::Continue); // a skip step: the span was staged in VERIFY; nothing to gate.
+        }
+        let mut res = ctx.scratch.res.take().expect("an on_verify handler set scratch.res");
+        let staged = ctx.scratch.staged.take();
+        let pre_cycle_goals = std::mem::take(&mut ctx.scratch.pre_cycle_goals);
+        let step_name = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+        let mut rolled_back = false;
+
+        match &staged {
+            Some((br, crate::git::StagedSession::Staged)) => {
+                // the regression gate: a DoD-set judge MET before (durable, §5.7) that now fails.
+                // Scope to the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs
+                // `in_scope` → `g.in_dod`). A run-set-only control judge like `stalled` is DESIGNED to
+                // flip met→unmet — that flip is the very signal that fired `reconsider` — so counting
+                // its flip as a regression would roll back the work that escaped the stall (and, because
+                // rolled-back rows never land, livelock the loop). §5.7 protects the DoD-set; a judge
+                // named only in an `if` condition is not in it.
+                let landed = crate::core::verdicts::landed_met(ctx.dir);
+                let regressed = res.fresh_verdicts.iter().any(|(id, v)| {
+                    ctx.eng.judges.iter().any(|g| g.in_dod && &g.name == id)
+                        && v.error.is_none()
+                        && !v.met
+                        && landed.get(id).copied().unwrap_or(false)
+                });
+                let keep = if ctx.gate_regressions { !regressed } else { true };
+                crate::git::finalize_session(ctx.dir, br, ctx.session, keep);
+                let tag = if keep {
+                    crate::core::verdicts::Outcome::Merged
+                } else {
+                    crate::core::verdicts::Outcome::RolledBack
+                };
+                crate::core::verdicts::append(ctx.dir, Some(ctx.session), &step_name, &res.fresh_verdicts, tag)?;
+                if keep {
+                    // the whole span merged with this branch (it descends from the span). Clear it.
+                    // ponytail: intermediate span branches are left as refs (no public delete);
+                    // harmless, and cleanup is a later polish. REPORTED.
+                    ctx.span_tip = None;
+                    ctx.span_branches.clear();
+                } else {
+                    rolled_back = true;
+                    ctx.eng.restore_goal_state(&pre_cycle_goals);
+                    ctx.span_tip = None; // span discarded; next cuts off base
+                    ctx.span_branches.clear();
+                    eprint!("{}", indent(&ctx.eng.scoreboard()));
+                    let rs = ctx.run_state();
+                    let recomputed = ctx.eng.conditions_only(&rs);
+                    res = CycleResult {
+                        stop: recomputed.stop,
+                        halt: recomputed.halt,
+                        halt_reason: recomputed.halt_reason,
+                        deltas: Vec::new(),
+                        fresh_verdicts: Vec::new(),
+                        judge_tokens: 0,
+                        judge_cost: None,
+                    };
+                }
+                ctx.publish();
+            }
+            _ => {
+                // Vetoed / NoChanges / Conflict / CheckoutFailed / no branch: nothing merged. The
+                // judged verdicts describe base, not a landed merge — record them rolled_back and
+                // restore base truth so the next step isn't gated against a phantom.
+                ctx.eng.restore_goal_state(&pre_cycle_goals);
+                ctx.span_tip = None;
+                ctx.span_branches.clear();
+                crate::core::verdicts::append(
+                    ctx.dir,
+                    Some(ctx.session),
+                    &step_name,
+                    &res.fresh_verdicts,
+                    crate::core::verdicts::Outcome::RolledBack,
+                )?;
+                let rs = ctx.run_state();
+                let recomputed = ctx.eng.conditions_only(&rs);
+                res = CycleResult {
+                    stop: recomputed.stop,
+                    halt: recomputed.halt,
+                    halt_reason: recomputed.halt_reason,
+                    deltas: Vec::new(),
+                    fresh_verdicts: Vec::new(),
+                    judge_tokens: 0,
+                    judge_cost: None,
+                };
+                ctx.publish();
+            }
+        }
+
+        ctx.scratch.res = Some(res);
+        ctx.scratch.rolled_back = rolled_back;
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "GateKeepRollback"
+    }
+}
+
+// ── on_session_end handlers = the old GATE tail (HOOK_REDESIGN §4) ─────────────────────────────────
+
+/// The LLM summarizer (best-effort). Feeds `RefineFold` via `scratch.summarized_this_cycle`.
+struct Summarize;
+impl Handler for Summarize {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        if !(ctx.cfg.summary.enabled
+            && ctx.last_summary.elapsed().as_secs() >= ctx.cfg.summary.min_interval_secs)
+        {
+            return Ok(Flow::Continue);
+        }
+        let model = ctx.ruler.default_summary_model().to_string();
+        let thoughts = ctx.scratch.outcome.as_ref().map(|o| o.thoughts.clone()).unwrap_or_default();
+        let deltas = ctx.scratch.res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
+        if let Some((s, spend)) =
+            summary::summarize(ctx.ruler, &model, &ctx.cumulative, &thoughts, &deltas, 120)
+        {
+            eprintln!("  [SUMMARY cumulative] {}", s.cumulative);
+            eprintln!("  [SUMMARY windowed]   {}", s.windowed);
+            ctx.cumulative = s.cumulative.clone();
+            ctx.dash.summary_cumulative = s.cumulative;
+            ctx.dash.summary_windowed = s.windowed;
+            ctx.last_summary = Instant::now();
+            ctx.scratch.summarized_this_cycle = true;
+            // §5.6: summarizer spend counts too — the summarizer runs on the ruler.
+            ctx.tokens_spent += spend.tokens;
+            if let Some(c) = spend.cost_usd {
+                ctx.cost_spent += c;
+            }
+            let ruler_agent = ctx.cfg.judge.agent.clone();
+            ctx.charge(&ruler_agent, spend.tokens, spend.cost_usd);
+            ctx.publish();
+        }
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "Summarize"
+    }
+}
+
+/// Institutional memory: the post-judge refinement fold. Gated on the floor fold (`scratch.mem_folded`)
+/// and reads `scratch.rolled_back` + the summary — exactly the old post-judge fold.
+struct RefineFold;
+impl Handler for RefineFold {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        if !(ctx.cfg.memory.enabled && ctx.scratch.mem_folded) {
+            return Ok(Flow::Continue);
+        }
+        let outcome = ctx.scratch.outcome.clone().expect("LaunchWorker set scratch.outcome");
+        let deltas = ctx.scratch.res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
+        let rolled_back = ctx.scratch.rolled_back;
+        let summarized_this_cycle = ctx.scratch.summarized_this_cycle;
+        let scoreboard = ctx.eng.scoreboard();
+        let ended = crate::util::now_epoch();
+        let mut mech = crate::core::memory::mechanical_note(
+            outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
+            outcome.duration_secs, ended.saturating_sub(outcome.duration_secs), ended,
+            &scoreboard, &deltas,
+        );
+        if rolled_back {
+            mech = format!(
+                "session ROLLED BACK — a goal regressed on the staged merge; the work below is \
+                 NOT on the base branch (kept on the session branch for inspection).\n{mech}"
+            );
+        }
+        let worker_note = crate::core::memory::read_worker_note(ctx.dir, ctx.session);
+        let (source, body) = match worker_note {
+            Some(note) => (
+                "mechanical+worker",
+                format!("{mech}\n\n[worker note — UNTRUSTED hint, not authoritative]\n```text\n{note}\n```"),
+            ),
+            None if summarized_this_cycle && !ctx.dash.summary_windowed.trim().is_empty() => (
+                "mechanical+summary",
+                format!("{mech}\n\nsummary: {}", ctx.dash.summary_windowed.trim()),
+            ),
+            None => ("mechanical", mech),
+        };
+        ctx.dash.memory_bytes = crate::core::memory::fold_entry(
+            ctx.dir, ctx.session, source, &body, ctx.cfg.memory.max_kb, true,
+        );
+        crate::core::memory::clear_scratch(ctx.dir, ctx.session);
+        ctx.last_session = crate::core::memory::last_session_block(&deltas, &scoreboard);
+        eprintln!("  [memory] session #{} folded ({source}); LOG.md {} B", ctx.session, ctx.dash.memory_bytes);
+        ctx.publish();
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "RefineFold"
+    }
+}
+
+/// The run-stop decision — the LAST on_session_end handler (R2): the winning/aborting session has
+/// ALREADY run the session-end shell hook + summary + refine fold above. Emits `Finished` itself,
+/// then `Flow::Stop`. `Continue` means the loop goes round again (the old `GateDecision::Loop`).
+struct CheckRunStop;
+impl Handler for CheckRunStop {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let res = ctx.scratch.res.take().expect("an on_verify handler set scratch.res");
+        if res.halt {
+            let reason = res.halt_reason.unwrap_or_default();
+            eprintln!("\n⚠ ABORT — abort_if true: {reason}\n  stopping the loop (a ceiling / guard, not success).");
+            ctx.report_stranded_span();
+            ctx.emit(LifecycleEvent::Finished {
+                reason: format!("ABORT: {reason}"),
+                ledger_tag: format!("abort:{reason}"),
+            });
+            return Ok(Flow::Stop(RunOutcome::Halt));
+        }
+        if res.stop {
+            let (mt, tt) = ctx.eng.tally();
+            eprintln!("\n✔ done_if satisfied — {mt}/{tt} goals met. Done after {} session(s).", ctx.session);
+            ctx.emit(LifecycleEvent::Finished {
+                reason: format!("{mt}/{tt} goals met after {} session(s)", ctx.session),
+                ledger_tag: "goals-met".into(),
+            });
+            return Ok(Flow::Stop(RunOutcome::GoalsMet));
+        }
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "CheckRunStop"
+    }
+}
+
 /// The lifecycle registry: one ordered handler list per hook point. `default_pipeline` is agg's
 /// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
 #[derive(Default)]
@@ -581,6 +834,7 @@ struct Lifecycle {
     on_session_start: Vec<Box<dyn Handler>>,
     on_run: Vec<Box<dyn Handler>>,
     on_verify: Vec<Box<dyn Handler>>,
+    on_gate: Vec<Box<dyn Handler>>,
     on_session_end: Vec<Box<dyn Handler>>,
 }
 impl Lifecycle {
@@ -605,8 +859,13 @@ impl Lifecycle {
         l.on_verify.push(Box::new(StageSpan));
         l.on_verify.push(Box::new(StageMerge));
         l.on_verify.push(Box::new(RunJudges));
+        l.on_gate.push(Box::new(CeilingPoisonGuard));
+        l.on_gate.push(Box::new(GateKeepRollback));
         l.on_session_end
             .push(Box::new(ShellHook { label: "on_session_end", cmds: hooks.on_session_end.clone() }));
+        l.on_session_end.push(Box::new(Summarize));
+        l.on_session_end.push(Box::new(RefineFold));
+        l.on_session_end.push(Box::new(CheckRunStop));
         l
     }
 }
@@ -1073,208 +1332,6 @@ impl LoopState<'_> {
         }
     }
 
-    /// **GATE** — keep / roll back the judged merge, or record the staged span · check done/abort.
-    /// Reads what the on_verify handlers left in `scratch` (§8): `res` (judged or ceilings-only),
-    /// `staged` (the merge), `pre_cycle_goals` (rollback restore), `mem_folded`, `skip_judges`, and
-    /// the `outcome`. On a rollback it REWRITES `res`.
-    fn gate(&mut self, lifecycle: &Lifecycle) -> Result<GateDecision> {
-        let mut res = self.scratch.res.take().expect("an on_verify handler set scratch.res");
-        let staged = self.scratch.staged.take();
-        let pre_cycle_goals = std::mem::take(&mut self.scratch.pre_cycle_goals);
-        let mem_folded = self.scratch.mem_folded;
-        let skip = self.scratch.skip_judges;
-        let outcome = self.scratch.outcome.clone().expect("LaunchWorker set scratch.outcome");
-
-        // a skip-step ceiling halt with nothing staged and no verdicts — stop without the session-end
-        // work (its Finished, if any, is already emitted). The rate-limit ceiling path no longer
-        // reaches here (RateLimitBackoff now Stops directly), so this guards the skip-step case.
-        if skip && res.halt && staged.is_none() && res.fresh_verdicts.is_empty() && res.deltas.is_empty() {
-            return Ok(GateDecision::Stop(RunOutcome::Halt));
-        }
-
-        self.emit(LifecycleEvent::Gate);
-
-        let step_name = self.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
-        let mut rolled_back = false;
-
-        if !skip {
-            match &staged {
-                Some((br, crate::git::StagedSession::Staged)) => {
-                    // the regression gate: a DoD-set judge MET before (durable, §5.7) that now fails.
-                    // Scope to the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs
-                    // `in_scope` → `g.in_dod`). A run-set-only control judge like `stalled` is DESIGNED
-                    // to flip met→unmet — that flip is the very signal that fired `reconsider` — so
-                    // counting its flip as a regression would roll back the work that escaped the stall
-                    // (and, because rolled-back rows never land, livelock the loop). §5.7 protects the
-                    // DoD-set; a judge named only in an `if` condition is not in it.
-                    let landed = crate::core::verdicts::landed_met(self.dir);
-                    let regressed = res.fresh_verdicts.iter().any(|(id, v)| {
-                        self.eng.judges.iter().any(|g| g.in_dod && &g.name == id)
-                            && v.error.is_none()
-                            && !v.met
-                            && landed.get(id).copied().unwrap_or(false)
-                    });
-                    let keep = if self.gate_regressions { !regressed } else { true };
-                    crate::git::finalize_session(self.dir, br, self.session, keep);
-                    let tag = if keep {
-                        crate::core::verdicts::Outcome::Merged
-                    } else {
-                        crate::core::verdicts::Outcome::RolledBack
-                    };
-                    crate::core::verdicts::append(self.dir, Some(self.session), &step_name, &res.fresh_verdicts, tag)?;
-                    if keep {
-                        // the whole span merged with this branch (it descends from the span). Clear it.
-                        // ponytail: intermediate span branches are left as refs (no public delete);
-                        // harmless, and cleanup is a later polish. REPORTED.
-                        self.span_tip = None;
-                        self.span_branches.clear();
-                    } else {
-                        rolled_back = true;
-                        self.eng.restore_goal_state(&pre_cycle_goals);
-                        self.span_tip = None; // span discarded; next cuts off base
-                        self.span_branches.clear();
-                        eprint!("{}", indent(&self.eng.scoreboard()));
-                        let rs = self.run_state();
-                        let recomputed = self.eng.conditions_only(&rs);
-                        res = CycleResult {
-                            stop: recomputed.stop,
-                            halt: recomputed.halt,
-                            halt_reason: recomputed.halt_reason,
-                            deltas: Vec::new(),
-                            fresh_verdicts: Vec::new(),
-                            judge_tokens: 0,
-                            judge_cost: None,
-                        };
-                    }
-                    self.publish();
-                }
-                _ => {
-                    // Vetoed / NoChanges / Conflict / CheckoutFailed / no branch: nothing merged. The
-                    // judged verdicts describe base, not a landed merge — record them rolled_back and
-                    // restore base truth so the next step isn't gated against a phantom.
-                    self.eng.restore_goal_state(&pre_cycle_goals);
-                    self.span_tip = None;
-                    self.span_branches.clear();
-                    crate::core::verdicts::append(
-                        self.dir,
-                        Some(self.session),
-                        &step_name,
-                        &res.fresh_verdicts,
-                        crate::core::verdicts::Outcome::RolledBack,
-                    )?;
-                    let rs = self.run_state();
-                    let recomputed = self.eng.conditions_only(&rs);
-                    res = CycleResult {
-                        stop: recomputed.stop,
-                        halt: recomputed.halt,
-                        halt_reason: recomputed.halt_reason,
-                        deltas: Vec::new(),
-                        fresh_verdicts: Vec::new(),
-                        judge_tokens: 0,
-                        judge_cost: None,
-                    };
-                    self.publish();
-                }
-            }
-        }
-
-        // on_session_end hook — dispatched through the registry (HOOK_REDESIGN §7 step-1 seam).
-        // `lifecycle` and `self` are disjoint borrows, so the whole state passes as `&mut`. These
-        // are best-effort (always `Continue`); `?` only forwards a would-be hard error.
-        for h in &lifecycle.on_session_end {
-            h.run(self)?;
-        }
-
-        // ── summary (best-effort) ──
-        let mut summarized_this_cycle = false;
-        if self.cfg.summary.enabled
-            && self.last_summary.elapsed().as_secs() >= self.cfg.summary.min_interval_secs
-        {
-            let model = self.ruler.default_summary_model().to_string();
-            if let Some((s, spend)) = summary::summarize(
-                self.ruler,
-                &model,
-                &self.cumulative,
-                &outcome.thoughts,
-                &res.deltas,
-                120,
-            ) {
-                eprintln!("  [SUMMARY cumulative] {}", s.cumulative);
-                eprintln!("  [SUMMARY windowed]   {}", s.windowed);
-                self.cumulative = s.cumulative.clone();
-                self.dash.summary_cumulative = s.cumulative;
-                self.dash.summary_windowed = s.windowed;
-                self.last_summary = Instant::now();
-                summarized_this_cycle = true;
-                // §5.6: summarizer spend counts too — the summarizer runs on the ruler.
-                self.tokens_spent += spend.tokens;
-                if let Some(c) = spend.cost_usd {
-                    self.cost_spent += c;
-                }
-                let ruler_agent = self.cfg.judge.agent.clone();
-                self.charge(&ruler_agent, spend.tokens, spend.cost_usd);
-                self.publish();
-            }
-        }
-
-        // ── institutional memory: post-judge refinement ──
-        if self.cfg.memory.enabled && mem_folded {
-            let scoreboard = self.eng.scoreboard();
-            let ended = crate::util::now_epoch();
-            let mut mech = crate::core::memory::mechanical_note(
-                outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
-                outcome.duration_secs, ended.saturating_sub(outcome.duration_secs), ended,
-                &scoreboard, &res.deltas,
-            );
-            if rolled_back {
-                mech = format!(
-                    "session ROLLED BACK — a goal regressed on the staged merge; the work below is \
-                     NOT on the base branch (kept on the session branch for inspection).\n{mech}"
-                );
-            }
-            let worker_note = crate::core::memory::read_worker_note(self.dir, self.session);
-            let (source, body) = match worker_note {
-                Some(note) => (
-                    "mechanical+worker",
-                    format!("{mech}\n\n[worker note — UNTRUSTED hint, not authoritative]\n```text\n{note}\n```"),
-                ),
-                None if summarized_this_cycle && !self.dash.summary_windowed.trim().is_empty() => (
-                    "mechanical+summary",
-                    format!("{mech}\n\nsummary: {}", self.dash.summary_windowed.trim()),
-                ),
-                None => ("mechanical", mech),
-            };
-            self.dash.memory_bytes = crate::core::memory::fold_entry(
-                self.dir, self.session, source, &body, self.cfg.memory.max_kb, true,
-            );
-            crate::core::memory::clear_scratch(self.dir, self.session);
-            self.last_session = crate::core::memory::last_session_block(&res.deltas, &scoreboard);
-            eprintln!("  [memory] session #{} folded ({source}); LOG.md {} B", self.session, self.dash.memory_bytes);
-            self.publish();
-        }
-
-        if res.halt {
-            let reason = res.halt_reason.unwrap_or_default();
-            eprintln!("\n⚠ ABORT — abort_if true: {reason}\n  stopping the loop (a ceiling / guard, not success).");
-            self.report_stranded_span();
-            self.emit(LifecycleEvent::Finished {
-                reason: format!("ABORT: {reason}"),
-                ledger_tag: format!("abort:{reason}"),
-            });
-            return Ok(GateDecision::Stop(RunOutcome::Halt));
-        }
-        if res.stop {
-            let (mt, tt) = self.eng.tally();
-            eprintln!("\n✔ done_if satisfied — {mt}/{tt} goals met. Done after {} session(s).", self.session);
-            self.emit(LifecycleEvent::Finished {
-                reason: format!("{mt}/{tt} goals met after {} session(s)", self.session),
-                ledger_tag: "goals-met".into(),
-            });
-            return Ok(GateDecision::Stop(RunOutcome::GoalsMet));
-        }
-        Ok(GateDecision::Loop)
-    }
-
     /// On abort with a span still staged, leave the branches and print them (§5.7).
     fn report_stranded_span(&self) {
         if !self.span_branches.is_empty() {
@@ -1507,9 +1564,13 @@ pub fn run(
             Some(End::Stop(outcome)) => return Ok(outcome), // ceiling tripped during backoff → Halt
             None => {}
         }
-        match st.gate(&lifecycle)? {
-            GateDecision::Loop => continue,
-            GateDecision::Stop(outcome) => return Ok(outcome),
+        // GATE keep/rollback → poison-pill Halt short-circuits here (CeilingPoisonGuard).
+        if let Some(End::Stop(outcome)) = run_hook(&lifecycle.on_gate, &mut st)? {
+            return Ok(outcome);
+        }
+        // session-end work (shell hook, summary, memory fold) then the run-stop check (CheckRunStop).
+        if let Some(End::Stop(outcome)) = run_hook(&lifecycle.on_session_end, &mut st)? {
+            return Ok(outcome);
         }
     }
 }
