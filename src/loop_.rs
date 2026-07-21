@@ -146,6 +146,8 @@ struct Scratch {
     /// `PickStep` sets it from `cur_step.skip_judges`; `run_hook`'s predicate uses it to bypass a
     /// handler that opts out of skip steps (`runs_on_skip()==false`). Truth stays in `self.cur_step`.
     skip_judges: bool,
+    /// `LaunchWorker` (on_run) → VERIFY/GATE. Replaces `run()`'s `Option<SessionOutcome>` return.
+    outcome: Option<SessionOutcome>,
 }
 
 trait Handler {
@@ -349,11 +351,90 @@ impl Handler for ClearMemScratch {
     }
 }
 
+// ── on_run handler = the old RUN stage (HOOK_REDESIGN §4) ─────────────────────────────────────────
+
+/// Launch the fresh worker for this step's (agent, model, effort). ONE handler: the unknown-agent
+/// and SIGINT early returns forbid splitting. Reads `scratch.prompt`, writes `scratch.outcome`.
+/// `Flow::Stop(finish_interrupted())` on SIGINT — the only control-flow exit of the RUN stage.
+struct LaunchWorker;
+impl Handler for LaunchWorker {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let prompt = ctx.scratch.prompt.take().expect("WriteInstructions set scratch.prompt");
+        let step = ctx.cur_step.clone().expect("PickStep set cur_step");
+        let agent = match step.backend() {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("  step `{}` names an unknown agent: {e}", step.name);
+                ctx.dud_streak += 1;
+                ctx.scratch.outcome = Some(SessionOutcome {
+                    exit_code: None,
+                    duration_secs: 0,
+                    rate_limited: false,
+                    killed_by_watchdog: false,
+                    output_tokens: 0,
+                    cost_usd: 0.0,
+                    thoughts: vec![],
+                    session_id: None,
+                });
+                return Ok(Flow::Continue);
+            }
+        };
+        let model = step.model(agent).to_string();
+        let effort = step.effort(agent).to_string();
+        let outcome = worker::run_session(
+            ctx.cfg,
+            agent,
+            &model,
+            &effort,
+            &step.worker_args,
+            &prompt,
+            ctx.dir,
+            ctx.session,
+            &ctx.live,
+        );
+        ctx.tokens_spent += outcome.output_tokens;
+        ctx.cost_spent += outcome.cost_usd;
+        ctx.charge(&step.agent, outcome.output_tokens, Some(outcome.cost_usd));
+
+        if crate::os::signals::interrupted() {
+            return Ok(Flow::Stop(ctx.finish_interrupted()));
+        }
+        eprintln!(
+            "  session #{} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
+            ctx.session,
+            outcome.exit_code,
+            outcome.duration_secs,
+            if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
+            if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
+            outcome.output_tokens,
+            ctx.tokens_spent,
+            outcome.cost_usd,
+            ctx.cost_spent,
+        );
+        // warn (loudly) if the agent never touched its forward state file (§5.6 / OQ3).
+        if let (Some(step), false) = (&ctx.cur_step, outcome.rate_limited) {
+            let now = std::fs::read_to_string(ctx.config_base.join(&step.state)).ok();
+            if now == ctx.state_before {
+                eprintln!("  ⚠ the worker did not update `{}` this session — the next session inherits stale forward-state.", step.state);
+            }
+        }
+
+        let dud = !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.output_tokens == 0;
+        ctx.dud_streak = if dud { ctx.dud_streak + 1 } else { 0 };
+        ctx.scratch.outcome = Some(outcome);
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "LaunchWorker"
+    }
+}
+
 /// The lifecycle registry: one ordered handler list per hook point. `default_pipeline` is agg's
 /// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
 #[derive(Default)]
 struct Lifecycle {
     on_session_start: Vec<Box<dyn Handler>>,
+    on_run: Vec<Box<dyn Handler>>,
     on_session_end: Vec<Box<dyn Handler>>,
 }
 impl Lifecycle {
@@ -371,6 +452,7 @@ impl Lifecycle {
             .push(Box::new(ShellHook { label: "on_session_start", cmds: hooks.on_session_start.clone() }));
         l.on_session_start.push(Box::new(WriteInstructions));
         l.on_session_start.push(Box::new(ClearMemScratch));
+        l.on_run.push(Box::new(LaunchWorker));
         l.on_session_end
             .push(Box::new(ShellHook { label: "on_session_end", cmds: hooks.on_session_end.clone() }));
         l
@@ -776,71 +858,6 @@ impl LoopState<'_> {
                 if s.starts_with('-') { format!("\n{s}") } else { s }
             }
         }
-    }
-
-    /// **RUN** — the fresh worker for THIS step's (agent, model, effort). `None` = interrupted.
-    fn run(&mut self, prompt: &str) -> Option<SessionOutcome> {
-        let step = self.cur_step.clone().expect("inject set cur_step");
-        let agent = match step.backend() {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("  step `{}` names an unknown agent: {e}", step.name);
-                self.dud_streak += 1;
-                return Some(SessionOutcome {
-                    exit_code: None,
-                    duration_secs: 0,
-                    rate_limited: false,
-                    killed_by_watchdog: false,
-                    output_tokens: 0,
-                    cost_usd: 0.0,
-                    thoughts: vec![],
-                    session_id: None,
-                });
-            }
-        };
-        let model = step.model(agent).to_string();
-        let effort = step.effort(agent).to_string();
-        let outcome = worker::run_session(
-            self.cfg,
-            agent,
-            &model,
-            &effort,
-            &step.worker_args,
-            prompt,
-            self.dir,
-            self.session,
-            &self.live,
-        );
-        self.tokens_spent += outcome.output_tokens;
-        self.cost_spent += outcome.cost_usd;
-        self.charge(&step.agent, outcome.output_tokens, Some(outcome.cost_usd));
-
-        if crate::os::signals::interrupted() {
-            return None;
-        }
-        eprintln!(
-            "  session #{} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
-            self.session,
-            outcome.exit_code,
-            outcome.duration_secs,
-            if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
-            if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
-            outcome.output_tokens,
-            self.tokens_spent,
-            outcome.cost_usd,
-            self.cost_spent,
-        );
-        // warn (loudly) if the agent never touched its forward state file (§5.6 / OQ3).
-        if let (Some(step), false) = (&self.cur_step, outcome.rate_limited) {
-            let now = std::fs::read_to_string(self.config_base.join(&step.state)).ok();
-            if now == self.state_before {
-                eprintln!("  ⚠ the worker did not update `{}` this session — the next session inherits stale forward-state.", step.state);
-            }
-        }
-
-        let dud = !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.output_tokens == 0;
-        self.dud_streak = if dud { self.dud_streak + 1 } else { 0 };
-        Some(outcome)
     }
 
     fn worker_is_broken(&self) -> Option<anyhow::Error> {
@@ -1396,13 +1413,15 @@ pub fn run(
             None => {}
         }
         st.emit(LifecycleEvent::Run);
-        let prompt = st.scratch.prompt.take().expect("WriteInstructions set scratch.prompt");
-        let Some(outcome) = st.run(&prompt) else {
-            return Ok(st.finish_interrupted());
-        };
+        match run_hook(&lifecycle.on_run, &mut st)? {
+            Some(End::Stop(outcome)) => return Ok(outcome), // SIGINT → finish_interrupted → Stopped
+            Some(End::NextSession) => continue,
+            None => {}
+        }
         if let Some(e) = st.worker_is_broken() {
             return Err(e);
         }
+        let outcome = st.scratch.outcome.take().expect("LaunchWorker set scratch.outcome");
         let Some(verified) = st.verify(&outcome) else {
             continue; // rate-limited: incomplete session, not judged — go round again
         };
@@ -1485,5 +1504,8 @@ mod tests {
                 "ClearMemScratch",
             ]
         );
+        // on_run is a SINGLE handler (the unknown-agent + SIGINT early returns forbid splitting).
+        let run_names: Vec<&str> = l.on_run.iter().map(|h| h.name()).collect();
+        assert_eq!(run_names, ["LaunchWorker"]);
     }
 }
