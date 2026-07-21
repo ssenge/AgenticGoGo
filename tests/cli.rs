@@ -1740,3 +1740,102 @@ fn a_winning_session_still_folds_memory_and_fires_on_session_end() {
     assert!(mem.contains("## session 1"), "the winning session must still fold into LOG.md:\n{mem}\n{combined}");
     assert!(combined.contains("[memory] session #1 folded"), "the winning session's fold must be logged:\n{combined}");
 }
+
+#[test]
+fn agg_auto_commits_a_worker_that_forgets_to_commit() {
+    // GIT_REDESIGN §2: the worker EDITS a tracked file but never runs `git commit`. agg must
+    // auto-commit the edit on the session branch (not discard it), so it merges to base and the goal
+    // is met. Before GIT_REDESIGN, discard_uncommitted_tracked threw the edit away → never converged.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // fake worker: create answer.txt and DO NOT commit (no git at all).
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+printf 'made-it\n' > answer.txt
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    write_judge(dir, "answered", "#!/bin/sh\n[ -f answer.txt ] && grep -q made-it answer.txt && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"answered\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "autocommit", "answered", "", "memory: { enabled: false }\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 0, &combined); // agg committed the edit → merged → answered met → done.
+    // the worker never ran git, yet its edit is on main (agg auto-committed it).
+    let on_main = std::process::Command::new("git").args(["show", "main:answer.txt"]).current_dir(dir).output().unwrap();
+    let content = String::from_utf8_lossy(&on_main.stdout);
+    assert!(content.contains("made-it"), "agg must auto-commit the worker's uncommitted edit onto main, got: {content:?}\n{combined}");
+    assert!(combined.contains("agg committed the worker's edits"), "the auto-commit must be logged:\n{combined}");
+}
+
+#[test]
+fn a_worker_tampered_judge_is_rolled_back_and_base_judge_restored() {
+    // GIT_REDESIGN §6 (the single most important moat test): a session whose worker TAMPERS a
+    // committed judge AND regresses a DoD-set invariant must ROLL BACK — and because judges are
+    // committed and rollback restores base via `:(exclude)agg/state/**`, base's judge is the
+    // ORIGINAL, not the worker's tampered copy. agg (not the worker) makes the commit now, so this
+    // proves the moat still holds under GIT_REDESIGN's auto-commit.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // worker: regress build_ok (drop .regressed) AND tamper its judge script (append a marker), and
+    // DO NOT commit — agg auto-commits. The tamper is a harmless trailing comment, so build_ok still
+    // runs and still reports the regression (a self-hiding tamper is a deeper concern, out of scope).
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+touch .regressed
+printf '\n# TAMPERED-BY-WORKER\n' >> agg/judges/build_ok.sh
+exit 0
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    // build_ok (invariant): met at baseline, REGRESSES once .regressed exists.
+    write_judge(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"regressed\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}'\n");
+    // feature: never met (so the loop runs a session rather than stopping at baseline).
+    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "tamper", "feature", "  invariants: [build_ok]\n", "memory: { enabled: false }\n");
+    g(&["add", "-A"]);
+    g(&["commit", "-qm", "base"]);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined); // feature never met → cap; the regressing session rolled back.
+    assert!(combined.contains("ROLLED BACK"), "the judge-tampering, regressing session must roll back:\n{combined}");
+    // THE MOAT: base's committed judge is restored to the ORIGINAL — the worker's tamper is gone.
+    let judge_on_main = std::process::Command::new("git").args(["show", "main:agg/judges/build_ok.sh"]).current_dir(dir).output().unwrap();
+    let judge = String::from_utf8_lossy(&judge_on_main.stdout);
+    assert!(!judge.contains("TAMPERED"), "rollback must restore the committed judge — no worker tamper on base, got:\n{judge}");
+    assert!(judge.contains(".regressed"), "base keeps the ORIGINAL judge logic");
+    // base is pristine: the worker's .regressed marker is NOT tracked on base.
+    let ls = std::process::Command::new("git").args(["ls-files", ".regressed"]).current_dir(dir).output().unwrap();
+    assert!(String::from_utf8_lossy(&ls.stdout).trim().is_empty(), "the regressing session's marker must not be on base");
+}

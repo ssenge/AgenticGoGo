@@ -474,6 +474,28 @@ impl Handler for RateLimitBackoff {
 
 /// Snapshot the pre-step (base) judge truth so a GATE rollback can restore it (W5). Runs only past
 /// the rate-limit exit — exactly like the old `pre_cycle_goals` snapshot after the rate-limit return.
+/// Auto-commit the worker's tracked edits on the session branch (GIT_REDESIGN: agg owns git, the
+/// worker never runs git). Runs after the worker (on_run) and the rate-limit check, BEFORE staging
+/// (StageSpan/StageMerge) — the session branch is still checked out here, so the commit lands on it
+/// and the subsequent merge picks it up. Best-effort → Continue; skipped cleanly when isolation
+/// produced no session branch. Runs on skip AND judged steps (both stage the branch's work).
+struct GitAutoCommit;
+impl Handler for GitAutoCommit {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        if let Some(br) = ctx.session_branch.clone() {
+            let step = ctx.cur_step.clone().expect("PickStep set cur_step");
+            let msg = format!("agg: session {} ({}) on {}", ctx.session, step.name, step.agent);
+            if crate::git::auto_commit_tracked(ctx.dir, &msg) {
+                eprintln!("  [git] agg committed the worker's edits on {br}");
+            }
+        }
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "GitAutoCommit"
+    }
+}
+
 struct SnapshotGoals;
 impl Handler for SnapshotGoals {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
@@ -855,6 +877,7 @@ impl Lifecycle {
         l.on_run.push(Box::new(LaunchWorker));
         l.on_verify.push(Box::new(FloorFold));
         l.on_verify.push(Box::new(RateLimitBackoff));
+        l.on_verify.push(Box::new(GitAutoCommit));
         l.on_verify.push(Box::new(SnapshotGoals));
         l.on_verify.push(Box::new(StageSpan));
         l.on_verify.push(Box::new(StageMerge));
