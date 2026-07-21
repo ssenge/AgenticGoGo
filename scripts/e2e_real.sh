@@ -4,8 +4,8 @@
 # scripts/e2e.sh stubs the worker so it is fast, free and deterministic. This one does not.
 # It spends real tokens, and it is the only test that exercises the worker integration for
 # real: the live stream-json shapes, the real `total_cost_usd` and `usage.output_tokens`, the
-# real activity events, and a real agent actually satisfying an external judge — then COMMITTING
-# its work so mandatory session isolation keeps it.
+# real activity events, and a real agent actually satisfying an external judge — with agg
+# auto-committing its work so mandatory session isolation keeps it.
 #
 # The `claude` on PATH is a PASSTHROUGH WRAPPER, not a stub: it records argv, records the
 # phase agg had published when the worker started, and then `exec`s the real binary. Nothing
@@ -105,8 +105,8 @@ EOF
 run_agg() { local d=$1; shift; ( cd "$d" && PATH="$d/bin:$PATH" "$AGG" "$@" ); }
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
-sec "1. a real agent, driven by agg, satisfying a real external judge (and committing its work)"
-A="$(mkproj oneshot answered 'answered' 'Create a file named `answer.txt` in the current directory whose entire contents are the number 42 followed by a newline. Nothing else. Then run `git add answer.txt && git commit -m answer` to commit it (uncommitted work is discarded by the harness). Then stop.
+sec "1. a real agent, driven by agg, satisfying a real external judge (agg auto-commits its work)"
+A="$(mkproj oneshot answered 'answered' 'Create a file named `answer.txt` in the current directory whose entire contents are the number 42 followed by a newline. Nothing else. Then stop. Do NOT run git — agg version-controls and commits your work for you.
 ')"
 cat > "$A/agg/judges/answered.sh" <<'EOF'
 #!/bin/sh
@@ -128,7 +128,7 @@ is "the loop reaches its Definition of Done (exit 0)" "$RC" "0"
 has "…and says so (done_if satisfied)"            "$A/out.log" "done_if satisfied"
 exists "the REAL agent created the file"           "$A/answer.txt"
 is "…with exactly the content the judge demands"   "$(cat "$A/answer.txt" 2>/dev/null)" "42"
-has "…and the session merged (worker committed → isolation kept it)" "$A/out.log" "merged → kept"
+has "…and the session merged (agg auto-committed the worker's edit → kept)" "$A/out.log" "merged → kept"
 
 sec "2. the four outer-loop stages, observed on a real run"
 TRACE=$(tr '\n' ' ' < "$A/trace.txt" 2>/dev/null)
@@ -178,7 +178,7 @@ is "the ledger is finalized as goals-met" \
 [ ! -f "$A/agg/state/run.pid" ] && ok "run.pid cleared by the Drop guard" || bad "run.pid left behind"
 run_agg "$A" status > "$A/status.log" 2>&1
 has "agg status renders the finished real run" "$A/status.log" "done"
-is "…the worker's committed file is on main (isolation merged it)" \
+is "…the agg-committed file is on main (agg committed the worker's edit, isolation merged it)" \
    "$(cd "$A" && git show main:answer.txt 2>/dev/null | tr -d '[:space:]')" "42"
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -190,8 +190,8 @@ B="$(mkproj resume counted 'counted' \
 'First session — count.txt does not exist yet. Follow the step task, then rewrite this note with the new count.' \
 'Read the file `count.txt` in the current directory (if it does not exist, treat its value as 0).
 Increment that number by exactly ONE. Write the new number back to `count.txt` as the only
-contents, followed by a newline. Then run `git add count.txt && git commit -m increment` to commit
-it (uncommitted work is discarded). Increment exactly once, then stop. Do not skip ahead.')"
+contents, followed by a newline. Increment exactly once, then stop. Do not skip ahead. Do NOT run
+git — agg version-controls and commits your work for you.')"
 cat > "$B/agg/judges/counted.sh" <<'EOF'
 #!/bin/sh
 sh ./rec VERIFY
@@ -234,8 +234,8 @@ W="$(mkproj wiki wikidone 'wikidone' \
 'First session — calc.py does not exist yet.' \
 'Build calc.py with two functions, add(a, b) and subtract(a, b), each returning the result.
 Implement EXACTLY ONE not-yet-present function this session — real code plus a one-line print
-self-test at the bottom — run it, then `git add -A && git commit`. Only ONE function per session,
-then stop.')"
+self-test at the bottom — run it. Only ONE function per session, then stop. Do NOT run git — agg
+commits your work for you.')"
 cat > "$W/agg/judges/wikidone.sh" <<'EOF'
 #!/bin/sh
 sh ./rec VERIFY
