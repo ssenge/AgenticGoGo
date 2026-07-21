@@ -1664,3 +1664,79 @@ exit 0
         "the loop must dispatch the reconsider step, not merely evaluate the condition:\n{combined}"
     );
 }
+
+/// R5a (HOOK_STAGE_PLAN): a rate-limited worker session is INCOMPLETE — the loop backs off and goes
+/// round again WITHOUT judging, staging/gating, or folding the post-judge memory refinement. This is
+/// outcome-invisible (the run still reaches the cap and exits 4), so pin it here where a botched
+/// verify/gate conversion would otherwise stay green while dropping the skip.
+#[test]
+fn a_rate_limited_session_skips_the_judged_gate_and_the_refine_fold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    // fake claude: report a rate-limit in the result line (matched by `looks_rate_limited`) and do
+    // NO work — a rate-limited turn never reached the model.
+    write(
+        &bin,
+        "claude",
+        r#"#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
+done
+# detection is exit-code AND terminal-event gated ("a clean exit 0 is never a rate-limit"), so the
+# stub reports the rate-limit in its result AND exits non-zero.
+printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"result":"rate_limit_error: slow down","usage":{"output_tokens":0},"total_cost_usd":0}'
+exit 1
+"#,
+    );
+    chmod_x(&bin.join("claude"));
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+
+    // a judge that never meets (absent the rate-limit the loop would judge every session); backoff 0
+    // so the test never sleeps; memory on so a would-be refine fold would show up in the log.
+    write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    write_cfg(dir, "rl", "impossible", "", "ratelimit_backoff_secs: 0\nmemory: { enabled: true, max_kb: 64, inject_kb: 8 }\n");
+    git_init(dir);
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 4, &combined); // one rate-limited session, then the cap → MaxSessions.
+
+    assert!(combined.contains("rate limit detected"), "the rate-limit path must be taken:\n{combined}");
+    // the judged path (verify) is skipped: only the BASELINE runs judges ("running judges once before
+    // the first session…"); the rate-limited session must NOT add a second judge run.
+    assert_eq!(
+        combined.matches("running judges").count(),
+        1,
+        "a rate-limited session must NOT judge (only the baseline should):\n{combined}"
+    );
+    // the post-judge memory REFINE fold (in the gate) is skipped for the incomplete session.
+    assert!(
+        !combined.contains("[memory] session #1 folded"),
+        "a rate-limited session must NOT fold the post-judge refinement:\n{combined}"
+    );
+}
+
+/// R2 (HOOK_STAGE_PLAN): the session that MEETS `done_if` is NOT special-cased out of session-end
+/// work — it still fires the on_session_end hook and folds the post-judge memory refinement BEFORE
+/// the run stops. (The run-stop check is the LAST on_session_end handler, not part of the gate; a
+/// gate-placed stop would skip the winning session's fold + hook.) Outcome-invisible → pinned here.
+#[test]
+fn a_winning_session_still_folds_memory_and_fires_on_session_end() {
+    let (tmp, path) = project_with_fake_claude(); // the worker creates + commits `did_work`
+    let dir = tmp.path();
+    write_judge(dir, "won", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "win", "won", "", "memory: { enabled: true, max_kb: 64, inject_kb: 8 }\nhooks:\n  on_session_end: [\"touch session_end_ran\"]\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 0, &combined); // done_if fires on session 1 → GoalsMet.
+
+    // the WINNING session still fired its on_session_end hook…
+    assert!(dir.join("session_end_ran").exists(), "on_session_end must fire on the winning session:\n{combined}");
+    // …and still folded session 1 into LOG.md (the fold precedes the run-stop decision).
+    let mem = fs::read_to_string(dir.join("agg/state/LOG.md")).unwrap_or_default();
+    assert!(mem.contains("## session 1"), "the winning session must still fold into LOG.md:\n{mem}\n{combined}");
+    assert!(combined.contains("[memory] session #1 folded"), "the winning session's fold must be logged:\n{combined}");
+}
