@@ -931,8 +931,96 @@ impl Handler for BackgroundSpawn {
 
 /// The lifecycle registry: one ordered handler list per hook point. `default_pipeline` is agg's
 /// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
+/// Bootstrap context for the `pre_start` hook — the ONE phase that runs before `LoopState` exists.
+/// Handlers read `dir`/`cfg`, may `bail!` (a hard error out of `run()`, exactly as the old inline
+/// checks did), and `ResolveIsoBase` writes `iso_base` for the constructor to read. This is a second,
+/// minimal handler protocol for state-BUILDING (vs `Handler`, which operates on the built state).
+struct Bootstrap<'a> {
+    dir: &'a Path,
+    cfg: &'a AggConfig,
+    iso_base: Option<String>,
+}
+
+/// A `pre_start` handler: agg's run-start git preconditions (recover a stranded merge, require a
+/// clean git repo, ensure `agg/state` gitignored, resolve the isolation base branch). Runs before the
+/// loop state exists, so it takes `Bootstrap`, not `LoopState`.
+trait PreStart {
+    fn run(&self, boot: &mut Bootstrap) -> Result<()>;
+}
+
+fn run_pre_start(hs: &[Box<dyn PreStart>], boot: &mut Bootstrap) -> Result<()> {
+    for h in hs {
+        h.run(boot)?; // a `bail!` propagates out of `run()`, exactly like the old inline check
+    }
+    Ok(())
+}
+
+/// Recover a stranded merge left by a prior crash (guarded on the dir being a git repo).
+struct RecoverStrandedMerge;
+impl PreStart for RecoverStrandedMerge {
+    fn run(&self, boot: &mut Bootstrap) -> Result<()> {
+        if crate::git::is_repo(boot.dir) {
+            crate::git::recover_stranded_merge(boot.dir, &boot.cfg.session_isolation.branch_prefix);
+        }
+        Ok(())
+    }
+}
+
+/// Session isolation is MANDATORY: refuse to run outside a git repo with a clean tracked tree.
+struct RequireGitRepoAndClean;
+impl PreStart for RequireGitRepoAndClean {
+    fn run(&self, boot: &mut Bootstrap) -> Result<()> {
+        if !crate::git::is_repo(boot.dir) {
+            anyhow::bail!(
+                "session isolation is mandatory, but this is not a git repository.\n  \
+                 fix:  git init && git add -A && git commit -m 'agg baseline'"
+            );
+        }
+        if !crate::git::is_clean(boot.dir) {
+            anyhow::bail!(
+                "session isolation is mandatory, but the work tree has uncommitted tracked changes.\n  \
+                 fix:  commit or stash your changes first  (git status shows them)"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Ensure `agg/state` is gitignored (runtime state stays untracked and survives rollback).
+struct EnsureGitignored;
+impl PreStart for EnsureGitignored {
+    fn run(&self, boot: &mut Bootstrap) -> Result<()> {
+        crate::git::ensure_agg_gitignored(boot.dir);
+        Ok(())
+    }
+}
+
+/// Resolve the isolation base branch (configured `base_branch`, else the current branch; refuse a
+/// detached HEAD) and hand it to the constructor via `boot.iso_base`.
+struct ResolveIsoBase;
+impl PreStart for ResolveIsoBase {
+    fn run(&self, boot: &mut Bootstrap) -> Result<()> {
+        let iso = &boot.cfg.session_isolation;
+        let iso_base: String = if iso.base_branch.is_empty() {
+            match crate::git::current_branch(boot.dir) {
+                Some(b) => b,
+                None => anyhow::bail!(
+                    "session isolation is mandatory, but HEAD is detached.\n  \
+                     fix:  git switch -c <branch>"
+                ),
+            }
+        } else {
+            iso.base_branch.clone()
+        };
+        eprintln!("  [iso] per-session branch isolation ON — base branch '{iso_base}'");
+        boot.iso_base = Some(iso_base);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct Lifecycle {
+    pre_start: Vec<Box<dyn PreStart>>,
     on_start: Vec<Box<dyn Handler>>,
     on_run_start: Vec<Box<dyn Handler>>,
     background: Vec<Box<dyn Handler>>,
@@ -954,6 +1042,11 @@ impl Lifecycle {
         let shell = |label: &'static str, cmds: &[String]| -> Box<dyn Handler> {
             Box::new(ShellHook { label, cmds: cmds.to_vec(), dir: dir.to_path_buf() })
         };
+        // pre_start: the run-start git preconditions (before the loop state exists).
+        l.pre_start.push(Box::new(RecoverStrandedMerge));
+        l.pre_start.push(Box::new(RequireGitRepoAndClean));
+        l.pre_start.push(Box::new(EnsureGitignored));
+        l.pre_start.push(Box::new(ResolveIsoBase));
         l.on_start.push(shell("on_start", &hooks.on_start));
         l.on_run_start.push(Box::new(Baseline));
         l.background.push(Box::new(BackgroundSpawn { cmds: hooks.background.clone() }));
@@ -1485,43 +1578,19 @@ pub fn run(
     let judge_model = cfg.judge_model(ruler);
     let judge_timeout = cfg.judge.timeout;
 
-    // ── session isolation (MANDATORY) ──
-    let iso = &cfg.session_isolation;
-    if crate::git::is_repo(dir) {
-        crate::git::recover_stranded_merge(dir, &iso.branch_prefix);
-    }
-    if !crate::git::is_repo(dir) {
-        anyhow::bail!(
-            "session isolation is mandatory, but this is not a git repository.\n  \
-             fix:  git init && git add -A && git commit -m 'agg baseline'"
-        );
-    }
-    if !crate::git::is_clean(dir) {
-        anyhow::bail!(
-            "session isolation is mandatory, but the work tree has uncommitted tracked changes.\n  \
-             fix:  commit or stash your changes first  (git status shows them)"
-        );
-    }
-    crate::git::ensure_agg_gitignored(dir);
-    let iso_base: String = if iso.base_branch.is_empty() {
-        match crate::git::current_branch(dir) {
-            Some(b) => b,
-            None => anyhow::bail!(
-                "session isolation is mandatory, but HEAD is detached.\n  \
-                 fix:  git switch -c <branch>"
-            ),
-        }
-    } else {
-        iso.base_branch.clone()
-    };
-    eprintln!("  [iso] per-session branch isolation ON — base branch '{iso_base}'");
+    // agg's built-in hook registration (HOOK_REDESIGN §5) — EVERY lifecycle point, no exceptions,
+    // including the `pre_start` git preconditions below and on_start (now) / on_stop (Drop guard).
+    let mut lifecycle = Lifecycle::default_pipeline(&cfg, dir);
+
+    // ── session isolation (MANDATORY): the git preconditions run as `pre_start` hooks — recover a
+    //    stranded merge, require a clean git repo, ensure `agg/state` gitignored, resolve the base
+    //    branch. Any bail is a hard error out of run(), exactly as the old inline block. ──
+    let mut boot = Bootstrap { dir, cfg: &cfg, iso_base: None };
+    run_pre_start(&lifecycle.pre_start, &mut boot)?;
+    let iso_base = boot.iso_base.expect("ResolveIsoBase set iso_base");
 
     #[cfg(not(unix))]
     eprintln!("  ⚠ Windows: unix-first build — the CPU-flat watchdog and process-group spawn protection are NOT active here.");
-
-    // agg's built-in hook registration (HOOK_REDESIGN §5) — EVERY lifecycle point, no exceptions.
-    // Built here so the run-level hooks (on_start now, on_stop via the Drop guard) dispatch from it.
-    let mut lifecycle = Lifecycle::default_pipeline(&cfg, dir);
     for h in &lifecycle.on_start {
         h.fire(); // fires BEFORE prompt_includes are gathered — order preserved.
     }
