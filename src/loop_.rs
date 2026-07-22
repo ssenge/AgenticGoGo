@@ -849,10 +849,82 @@ impl Handler for CheckRunStop {
     }
 }
 
+/// Baseline pass (§5.5.1): judge the untouched repo ONCE before session 1 and write `baseline`
+/// verdicts, on `on_run_start`. Its two launch-time early exits — `abort_if` already true → Halt,
+/// `done_if` already satisfied → GoalsMet — come back as `Flow::Stop`; it finalizes dash + ledger
+/// itself (exactly as the old inline pass did) before returning, so the core just propagates the
+/// outcome. Verbatim port of the former inline baseline block.
+struct Baseline;
+impl Handler for Baseline {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        eprintln!("  baseline: running judges once before the first session…");
+        ctx.dash.phase = Phase::Verify;
+        ctx.publish();
+        let dir = ctx.dir;
+        let ruler = ctx.ruler;
+        let judge_model = ctx.judge_model.clone();
+        let judge_timeout = ctx.judge_timeout;
+        let rs = ctx.run_state();
+        let pre = ctx.eng.run_step(dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false);
+        ctx.tokens_spent += pre.judge_tokens;
+        if let Some(c) = pre.judge_cost {
+            ctx.cost_spent += c;
+        }
+        let ruler_agent = ctx.cfg.judge.agent.clone();
+        ctx.charge(&ruler_agent, pre.judge_tokens, pre.judge_cost);
+        eprint!("{}", indent(&ctx.eng.scoreboard()));
+        ctx.publish();
+        crate::core::verdicts::append(dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
+        if pre.halt {
+            eprintln!("⚠ ABORT at baseline — abort_if already true: {}", pre.halt_reason.clone().unwrap_or_default());
+            ctx.dash.phase = Phase::Done;
+            ctx.dash.finished = true;
+            ctx.dash.finish_reason = format!("ABORT at baseline: {}", pre.halt_reason.clone().unwrap_or_default());
+            let (gm, gt) = ctx.eng.tally();
+            ctx.ledger.update(0, 0, gm, gt);
+            ctx.ledger.finish(now_epoch(), &format!("abort-at-baseline:{}", pre.halt_reason.unwrap_or_default()));
+            ctx.publish();
+            return Ok(Flow::Stop(RunOutcome::Halt));
+        }
+        if pre.stop {
+            eprintln!("✔ done_if already satisfied at launch — nothing to do.");
+            ctx.dash.phase = Phase::Done;
+            ctx.dash.finished = true;
+            ctx.dash.finish_reason = "already satisfied at launch".into();
+            let (gm, gt) = ctx.eng.tally();
+            ctx.ledger.update(0, 0, gm, gt);
+            ctx.ledger.finish(now_epoch(), "already-satisfied");
+            ctx.publish();
+            return Ok(Flow::Stop(RunOutcome::GoalsMet));
+        }
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "Baseline"
+    }
+}
+
+/// Spawn the user's long-lived `background` watchers into the loop's process group (so the straggler
+/// reaper cleans them up), on the `background` hook fired once at run start. Best-effort → Continue.
+struct BackgroundSpawn {
+    cmds: Vec<String>,
+}
+impl Handler for BackgroundSpawn {
+    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        crate::hooks::spawn_background(&self.cmds, ctx.dir);
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "BackgroundSpawn"
+    }
+}
+
 /// The lifecycle registry: one ordered handler list per hook point. `default_pipeline` is agg's
 /// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
 #[derive(Default)]
 struct Lifecycle {
+    on_run_start: Vec<Box<dyn Handler>>,
+    background: Vec<Box<dyn Handler>>,
     on_session_start: Vec<Box<dyn Handler>>,
     on_run: Vec<Box<dyn Handler>>,
     on_verify: Vec<Box<dyn Handler>>,
@@ -867,6 +939,8 @@ impl Lifecycle {
     /// `AggConfig` (`Hooks: Default`).
     fn with_hooks(hooks: &crate::core::config::Hooks) -> Self {
         let mut l = Lifecycle::default();
+        l.on_run_start.push(Box::new(Baseline));
+        l.background.push(Box::new(BackgroundSpawn { cmds: hooks.background.clone() }));
         l.on_session_start.push(Box::new(BusDrain));
         l.on_session_start.push(Box::new(PickStep));
         l.on_session_start.push(Box::new(SessionBranchCut));
@@ -1429,7 +1503,6 @@ pub fn run(
     eprintln!("  ⚠ Windows: unix-first build — the CPU-flat watchdog and process-group spawn protection are NOT active here.");
 
     crate::hooks::run("on_start", &cfg.hooks.on_start, dir);
-    crate::hooks::spawn_background(&cfg.hooks.background, dir);
     let _stop_hooks = StopHooks { cmds: cfg.hooks.on_stop.clone(), dir };
     let prompt_prefix = crate::hooks::gather_prompt_includes(&cfg.prompt_includes, dir);
 
@@ -1512,42 +1585,15 @@ pub fn run(
     st.publish();
     st.dash.lifetime_session = lifetime_base;
 
-    // ── baseline pass (§5.5.1): judge the untouched repo once; write `baseline` verdicts. ──
-    eprintln!("  baseline: running judges once before the first session…");
-    st.dash.phase = Phase::Verify;
-    st.publish();
-    let rs = st.run_state();
-    let pre = st.eng.run_step(dir, &rs, ruler, &st.judge_model, st.judge_timeout, "baseline", None, false);
-    st.tokens_spent += pre.judge_tokens;
-    if let Some(c) = pre.judge_cost {
-        st.cost_spent += c;
-    }
-    let ruler_agent = st.cfg.judge.agent.clone();
-    st.charge(&ruler_agent, pre.judge_tokens, pre.judge_cost);
-    eprint!("{}", indent(&st.eng.scoreboard()));
-    st.publish();
-    crate::core::verdicts::append(dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
-    if pre.halt {
-        eprintln!("⚠ ABORT at baseline — abort_if already true: {}", pre.halt_reason.clone().unwrap_or_default());
-        st.dash.phase = Phase::Done;
-        st.dash.finished = true;
-        st.dash.finish_reason = format!("ABORT at baseline: {}", pre.halt_reason.clone().unwrap_or_default());
-        let (gm, gt) = st.eng.tally();
-        st.ledger.update(0, 0, gm, gt);
-        st.ledger.finish(now_epoch(), &format!("abort-at-baseline:{}", pre.halt_reason.unwrap_or_default()));
-        st.publish();
-        return Ok(RunOutcome::Halt);
-    }
-    if pre.stop {
-        eprintln!("✔ done_if already satisfied at launch — nothing to do.");
-        st.dash.phase = Phase::Done;
-        st.dash.finished = true;
-        st.dash.finish_reason = "already satisfied at launch".into();
-        let (gm, gt) = st.eng.tally();
-        st.ledger.update(0, 0, gm, gt);
-        st.ledger.finish(now_epoch(), "already-satisfied");
-        st.publish();
-        return Ok(RunOutcome::GoalsMet);
+    // agg's built-in hook registration (HOOK_REDESIGN §5). Owned here, passed alongside `st`.
+    let lifecycle = Lifecycle::default_pipeline(&cfg);
+
+    // ── run-start hooks: spawn the user's background watchers, then the baseline pass (§5.5.1) —
+    //    both are registry handlers now (the `background` / `on_run_start` hooks). Baseline's two
+    //    launch-time early exits come back as End::Stop and finish the run. ──
+    run_hook(&lifecycle.background, &mut st)?;
+    if let Some(End::Stop(outcome)) = run_hook(&lifecycle.on_run_start, &mut st)? {
+        return Ok(outcome);
     }
 
     st.last_summary = Instant::now() - Duration::from_secs(cfg.summary.min_interval_secs);
@@ -1556,9 +1602,6 @@ pub fn run(
         crate::core::memory::sweep_scratch(dir);
     }
     st.bus = Bus::open(dir).ok();
-
-    // agg's built-in hook registration (HOOK_REDESIGN §5). Owned here, passed alongside `st`.
-    let lifecycle = Lifecycle::default_pipeline(&cfg);
 
     // ── the deterministic outer loop, one step at a time ──
     loop {
