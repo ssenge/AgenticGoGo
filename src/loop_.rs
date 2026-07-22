@@ -118,11 +118,88 @@ enum End {
     Stop(RunOutcome),
 }
 
-/// The per-session channel between stage-handlers. ONE field on `LoopState`, reset each session at
-/// the loop top so no field (esp. `prompt`) leaks across sessions. NOT the on-disk memory scratch
-/// (`memory::clear_scratch`) — a different thing. Grows a field per increment as stages convert.
+/// A type-keyed bag: one value per Rust type (anymap-style). The loop is single-threaded, so no
+/// Send/Sync needed. This is the generic extension store (LOOPSTATE_REDESIGN §3): agg's own features
+/// use it via `AGGState`/`AGGScratch`, and a third-party plugin stashes ITS OWN type the same way —
+/// `ctx.ext.get::<FooState>()` — without ever editing the core struct.
 #[derive(Default)]
-struct Scratch {
+struct Extensions {
+    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
+}
+impl Extensions {
+    /// Get-or-insert-default this type's slot, typed. How a feature/plugin reads+writes its own state.
+    fn get<T: Default + 'static>(&mut self) -> &mut T {
+        self.map
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| Box::new(T::default()))
+            .downcast_mut::<T>()
+            .expect("TypeId keys its own type")
+    }
+    fn clear(&mut self) {
+        self.map.clear();
+    }
+}
+
+/// ALL of agg's own per-run feature state, organised by feature (LOOPSTATE_REDESIGN §3.1) — the
+/// built-in "plugin", stored in the per-run `ext`. Persists across sessions (git span, summarizer
+/// window, memory tail, worker health); NEVER cleared mid-run.
+#[derive(Default)]
+struct AGGState {
+    git: GitIso,
+    summary: Summary,
+    memory: Memory,
+    worker: WorkerHealth,
+    operator: Operator,
+    inject: Inject,
+}
+/// per-session git isolation + spans (was `iso_base`/`session_branch`/`span_tip`/`span_branches`).
+#[derive(Default)]
+struct GitIso {
+    /// the resolved isolation base branch (set once at run start).
+    iso_base: String,
+    /// this session's branch (cut by INJECT, resolved by GATE).
+    session_branch: Option<String>,
+    /// the branch the NEXT session cuts off — the TIP of the staged span, or `None` = base (§5.7).
+    span_tip: Option<String>,
+    /// staged span branches accumulated by `skip_judges` steps (for reporting on abort).
+    span_branches: Vec<String>,
+}
+/// the LLM summarizer's rolling window (was `cumulative`/`last_summary`).
+#[derive(Default)]
+struct Summary {
+    cumulative: String,
+    /// `None` until `Setup` primes it (on_run_start, before the loop) — reads treat `None` as due.
+    last_summary: Option<Instant>,
+}
+/// institutional-memory tail (was `last_session`).
+#[derive(Default)]
+struct Memory {
+    last_session: String,
+}
+/// worker-broken detection (was `dud_streak`).
+#[derive(Default)]
+struct WorkerHealth {
+    dud_streak: u32,
+}
+/// operator steering carried to the next session (was `pending_instruction`).
+#[derive(Default)]
+struct Operator {
+    pending_instruction: Option<String>,
+}
+/// compose-time inputs (was `prompt_prefix`/`state_before`).
+#[derive(Default)]
+struct Inject {
+    /// `prompt_includes` fragments, composed once at launch.
+    prompt_prefix: String,
+    /// content of the step's state file at session start, to warn if the agent never touched it.
+    state_before: Option<String>,
+}
+
+/// The per-session channel between stage-handlers, stored in the per-session `scratch` store and
+/// `clear()`ed each session at the loop top so no field (esp. `prompt`) leaks across sessions. NOT
+/// the on-disk memory scratch (`memory::clear_scratch`) — a different thing.
+#[derive(Default)]
+struct AGGScratch {
     /// `WriteInstructions` (on_session_start) → the RUN launch. Replaces `Injected::Prompt`.
     prompt: Option<String>,
     /// `PickStep` sets it from `cur_step.skip_judges`; `run_hook`'s predicate uses it to bypass a
@@ -164,7 +241,7 @@ trait Handler {
 /// (it is NOT a `RunOutcome` — e.g. `verdicts::append`, or the worker-broken guard). §3.1.
 fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End>> {
     for h in hooks {
-        if st.scratch.skip_judges && !h.runs_on_skip() {
+        if st.scratch.get::<AGGScratch>().skip_judges && !h.runs_on_skip() {
             continue;
         }
         match h.run(st)? {
@@ -206,8 +283,10 @@ impl Handler for Feature {
 struct Setup;
 impl Handler for Setup {
     fn run(&self, st: &mut LoopState) -> Result<Flow> {
-        st.prompt_prefix = crate::hooks::gather_prompt_includes(&st.cfg.prompt_includes, st.dir);
-        st.last_summary = Instant::now() - Duration::from_secs(st.cfg.summary.min_interval_secs);
+        st.ext.get::<AGGState>().inject.prompt_prefix =
+            crate::hooks::gather_prompt_includes(&st.cfg.prompt_includes, st.dir);
+        st.ext.get::<AGGState>().summary.last_summary =
+            Some(Instant::now() - Duration::from_secs(st.cfg.summary.min_interval_secs));
         if st.cfg.memory.enabled {
             crate::core::memory::ensure_scratch_dir(st.dir);
             crate::core::memory::sweep_scratch(st.dir);
@@ -255,7 +334,8 @@ impl Handler for BusDrain {
             match cmd {
                 Command::InjectInstruction { text } => {
                     eprintln!("  [bus] inject-instruction → prepended to next session");
-                    ctx.pending_instruction = Some(match ctx.pending_instruction.take() {
+                    let op = &mut ctx.ext.get::<AGGState>().operator;
+                    op.pending_instruction = Some(match op.pending_instruction.take() {
                         Some(prev) => format!("{prev}\n\n{text}"),
                         None => text,
                     });
@@ -334,7 +414,7 @@ impl Handler for PickStep {
             (up % 3600) / 60,
         );
         // skip_judges into the channel BEFORE cur_step is moved (later hooks read the channel).
-        ctx.scratch.skip_judges = step.skip_judges;
+        ctx.scratch.get::<AGGScratch>().skip_judges = step.skip_judges;
         ctx.cur_step = Some(step);
         Ok(Flow::Continue)
     }
@@ -347,11 +427,11 @@ impl Handler for PickStep {
 struct SessionBranchCut;
 impl Handler for SessionBranchCut {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        let base_ref = ctx.base_ref(); // owned; ends the &mut-self borrow before we touch cfg below
         let iso = &ctx.cfg.session_isolation;
-        let base_ref = ctx.base_ref().to_string();
         let br = crate::git::session_branch(&iso.branch_prefix, &ctx.cfg.project, ctx.session);
         crate::git::remove_file(ctx.dir, &iso.red_file); // clear a stale veto
-        ctx.session_branch = if crate::git::create_branch(ctx.dir, &br, &base_ref) {
+        ctx.ext.get::<AGGState>().git.session_branch = if crate::git::create_branch(ctx.dir, &br, &base_ref) {
             eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", ctx.session);
             Some(br)
         } else {
@@ -375,9 +455,9 @@ impl Handler for WriteInstructions {
         }
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         let state_path = ctx.config_base.join(&step.state);
-        ctx.state_before = std::fs::read_to_string(&state_path).ok();
+        ctx.ext.get::<AGGState>().inject.state_before = std::fs::read_to_string(&state_path).ok();
         let prompt = ctx.compose_prompt(&step);
-        ctx.scratch.prompt = Some(prompt);
+        ctx.scratch.get::<AGGScratch>().prompt = Some(prompt);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -407,14 +487,14 @@ impl Handler for ClearMemScratch {
 struct LaunchWorker;
 impl Handler for LaunchWorker {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let prompt = ctx.scratch.prompt.take().expect("WriteInstructions set scratch.prompt");
+        let prompt = ctx.scratch.get::<AGGScratch>().prompt.take().expect("WriteInstructions set scratch.prompt");
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         let agent = match step.backend() {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("  step `{}` names an unknown agent: {e}", step.name);
-                ctx.dud_streak += 1;
-                ctx.scratch.outcome = Some(SessionOutcome {
+                ctx.ext.get::<AGGState>().worker.dud_streak += 1;
+                ctx.scratch.get::<AGGScratch>().outcome = Some(SessionOutcome {
                     exit_code: None,
                     duration_secs: 0,
                     rate_limited: false,
@@ -462,14 +542,15 @@ impl Handler for LaunchWorker {
         // warn (loudly) if the agent never touched its forward state file (§5.6 / OQ3).
         if let (Some(step), false) = (&ctx.cur_step, outcome.rate_limited) {
             let now = std::fs::read_to_string(ctx.config_base.join(&step.state)).ok();
-            if now == ctx.state_before {
+            if now == ctx.ext.get::<AGGState>().inject.state_before {
                 eprintln!("  ⚠ the worker did not update `{}` this session — the next session inherits stale forward-state.", step.state);
             }
         }
 
         let dud = !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.output_tokens == 0;
-        ctx.dud_streak = if dud { ctx.dud_streak + 1 } else { 0 };
-        ctx.scratch.outcome = Some(outcome);
+        let w = &mut ctx.ext.get::<AGGState>().worker;
+        w.dud_streak = if dud { w.dud_streak + 1 } else { 0 };
+        ctx.scratch.get::<AGGScratch>().outcome = Some(outcome);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -484,8 +565,8 @@ impl Handler for LaunchWorker {
 struct FloorFold;
 impl Handler for FloorFold {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let outcome = ctx.scratch.outcome.clone().expect("LaunchWorker set scratch.outcome");
-        ctx.scratch.mem_folded = ctx.fold_memory_floor(&outcome);
+        let outcome = ctx.scratch.get::<AGGScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
+        ctx.scratch.get::<AGGScratch>().mem_folded = ctx.fold_memory_floor(&outcome);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -499,7 +580,7 @@ impl Handler for FloorFold {
 struct RateLimitBackoff;
 impl Handler for RateLimitBackoff {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let rate_limited = ctx.scratch.outcome.as_ref().map(|o| o.rate_limited).unwrap_or(false);
+        let rate_limited = ctx.scratch.get::<AGGScratch>().outcome.as_ref().map(|o| o.rate_limited).unwrap_or(false);
         if !rate_limited {
             return Ok(Flow::Continue);
         }
@@ -536,7 +617,7 @@ impl Handler for RateLimitBackoff {
 struct GitAutoCommit;
 impl Handler for GitAutoCommit {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if let Some(br) = ctx.session_branch.clone() {
+        if let Some(br) = ctx.ext.get::<AGGState>().git.session_branch.clone() {
             let step = ctx.cur_step.clone().expect("PickStep set cur_step");
             let msg = format!("agg: session {} ({}) on {}", ctx.session, step.name, step.agent);
             if crate::git::auto_commit_tracked(ctx.dir, &msg) {
@@ -553,7 +634,7 @@ impl Handler for GitAutoCommit {
 struct SnapshotGoals;
 impl Handler for SnapshotGoals {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        ctx.scratch.pre_cycle_goals = ctx.eng.snapshot_goal_state();
+        ctx.scratch.get::<AGGScratch>().pre_cycle_goals = ctx.eng.snapshot_goal_state();
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -567,29 +648,30 @@ impl Handler for SnapshotGoals {
 struct StageSpan;
 impl Handler for StageSpan {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if !ctx.scratch.skip_judges {
+        if !ctx.scratch.get::<AGGScratch>().skip_judges {
             return Ok(Flow::Continue);
         }
         ctx.emit(LifecycleEvent::Staging);
         let iso = &ctx.cfg.session_isolation;
         let vetoed = ctx.dir.join(&iso.red_file).exists();
         let red_file = iso.red_file.clone();
-        let sb = ctx.session_branch.clone();
+        let sb = ctx.ext.get::<AGGState>().git.session_branch.clone();
         if vetoed {
             eprintln!("  [span] session #{} VETOED (red_file) → work discarded, not staged", ctx.session);
             crate::git::remove_file(ctx.dir, &red_file);
             // leave the branch orphaned; the span tip is unchanged.
         } else if let Some(br) = sb {
             eprintln!("  [span] session #{} staged on {br} (skip_judges) — nothing merged yet", ctx.session);
-            ctx.span_tip = Some(br.clone());
-            ctx.span_branches.push(br);
+            let git = &mut ctx.ext.get::<AGGState>().git;
+            git.span_tip = Some(br.clone());
+            git.span_branches.push(br);
         }
         // ceilings only (no judges ran) — done_if reads stale state and cannot fire, ceilings can.
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         let rs = ctx.run_state();
         let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), true);
-        ctx.scratch.res = Some(res);
-        ctx.scratch.staged = None;
+        ctx.scratch.get::<AGGScratch>().res = Some(res);
+        ctx.scratch.get::<AGGScratch>().staged = None;
         ctx.publish();
         Ok(Flow::Continue)
     }
@@ -604,11 +686,12 @@ struct StageMerge;
 impl Handler for StageMerge {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         let red_file = ctx.cfg.session_isolation.red_file.clone();
-        let staged = ctx.session_branch.clone().map(|br| {
-            let s = crate::git::stage_session(ctx.dir, &ctx.iso_base, &br, &red_file);
+        let iso_base = ctx.ext.get::<AGGState>().git.iso_base.clone();
+        let staged = ctx.ext.get::<AGGState>().git.session_branch.clone().map(|br| {
+            let s = crate::git::stage_session(ctx.dir, &iso_base, &br, &red_file);
             (br, s)
         });
-        ctx.scratch.staged = staged;
+        ctx.scratch.get::<AGGScratch>().staged = staged;
         Ok(Flow::Continue)
     }
     fn runs_on_skip(&self) -> bool {
@@ -637,7 +720,7 @@ impl Handler for RunJudges {
         let ruler_agent = ctx.cfg.judge.agent.clone();
         ctx.charge(&ruler_agent, res.judge_tokens, res.judge_cost);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
-        ctx.scratch.res = Some(res);
+        ctx.scratch.get::<AGGScratch>().res = Some(res);
         ctx.publish();
         Ok(Flow::Continue)
     }
@@ -657,10 +740,11 @@ impl Handler for RunJudges {
 struct CeilingPoisonGuard;
 impl Handler for CeilingPoisonGuard {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let res = ctx.scratch.res.as_ref().expect("an on_verify handler set scratch.res");
-        if ctx.scratch.skip_judges
+        let sc = ctx.scratch.get::<AGGScratch>();
+        let res = sc.res.as_ref().expect("an on_verify handler set scratch.res");
+        if sc.skip_judges
             && res.halt
-            && ctx.scratch.staged.is_none()
+            && sc.staged.is_none()
             && res.fresh_verdicts.is_empty()
             && res.deltas.is_empty()
         {
@@ -682,12 +766,12 @@ struct GateKeepRollback;
 impl Handler for GateKeepRollback {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         ctx.emit(LifecycleEvent::Gate);
-        if ctx.scratch.skip_judges {
+        if ctx.scratch.get::<AGGScratch>().skip_judges {
             return Ok(Flow::Continue); // a skip step: the span was staged in VERIFY; nothing to gate.
         }
-        let mut res = ctx.scratch.res.take().expect("an on_verify handler set scratch.res");
-        let staged = ctx.scratch.staged.take();
-        let pre_cycle_goals = std::mem::take(&mut ctx.scratch.pre_cycle_goals);
+        let mut res = ctx.scratch.get::<AGGScratch>().res.take().expect("an on_verify handler set scratch.res");
+        let staged = ctx.scratch.get::<AGGScratch>().staged.take();
+        let pre_cycle_goals = std::mem::take(&mut ctx.scratch.get::<AGGScratch>().pre_cycle_goals);
         let step_name = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
         let mut rolled_back = false;
 
@@ -719,13 +803,13 @@ impl Handler for GateKeepRollback {
                     // the whole span merged with this branch (it descends from the span). Clear it.
                     // ponytail: intermediate span branches are left as refs (no public delete);
                     // harmless, and cleanup is a later polish. REPORTED.
-                    ctx.span_tip = None;
-                    ctx.span_branches.clear();
+                    ctx.ext.get::<AGGState>().git.span_tip = None;
+                    ctx.ext.get::<AGGState>().git.span_branches.clear();
                 } else {
                     rolled_back = true;
                     ctx.eng.restore_goal_state(&pre_cycle_goals);
-                    ctx.span_tip = None; // span discarded; next cuts off base
-                    ctx.span_branches.clear();
+                    ctx.ext.get::<AGGState>().git.span_tip = None; // span discarded; next cuts off base
+                    ctx.ext.get::<AGGState>().git.span_branches.clear();
                     eprint!("{}", indent(&ctx.eng.scoreboard()));
                     let rs = ctx.run_state();
                     let recomputed = ctx.eng.conditions_only(&rs);
@@ -746,8 +830,8 @@ impl Handler for GateKeepRollback {
                 // judged verdicts describe base, not a landed merge — record them rolled_back and
                 // restore base truth so the next step isn't gated against a phantom.
                 ctx.eng.restore_goal_state(&pre_cycle_goals);
-                ctx.span_tip = None;
-                ctx.span_branches.clear();
+                ctx.ext.get::<AGGState>().git.span_tip = None;
+                ctx.ext.get::<AGGState>().git.span_branches.clear();
                 crate::core::verdicts::append(
                     ctx.dir,
                     Some(ctx.session),
@@ -770,8 +854,8 @@ impl Handler for GateKeepRollback {
             }
         }
 
-        ctx.scratch.res = Some(res);
-        ctx.scratch.rolled_back = rolled_back;
+        ctx.scratch.get::<AGGScratch>().res = Some(res);
+        ctx.scratch.get::<AGGScratch>().rolled_back = rolled_back;
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -785,24 +869,31 @@ impl Handler for GateKeepRollback {
 struct Summarize;
 impl Handler for Summarize {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if !(ctx.cfg.summary.enabled
-            && ctx.last_summary.elapsed().as_secs() >= ctx.cfg.summary.min_interval_secs)
-        {
+        let min_interval = ctx.cfg.summary.min_interval_secs;
+        let due = ctx
+            .ext
+            .get::<AGGState>()
+            .summary
+            .last_summary
+            .map(|t| t.elapsed().as_secs() >= min_interval)
+            .unwrap_or(true); // None only before Setup primes it — treat as due (matches old init)
+        if !(ctx.cfg.summary.enabled && due) {
             return Ok(Flow::Continue);
         }
         let model = ctx.ruler.default_summary_model().to_string();
-        let thoughts = ctx.scratch.outcome.as_ref().map(|o| o.thoughts.clone()).unwrap_or_default();
-        let deltas = ctx.scratch.res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
+        let thoughts = ctx.scratch.get::<AGGScratch>().outcome.as_ref().map(|o| o.thoughts.clone()).unwrap_or_default();
+        let deltas = ctx.scratch.get::<AGGScratch>().res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
+        let cumulative = ctx.ext.get::<AGGState>().summary.cumulative.clone();
         if let Some((s, spend)) =
-            summary::summarize(ctx.ruler, &model, &ctx.cumulative, &thoughts, &deltas, 120)
+            summary::summarize(ctx.ruler, &model, &cumulative, &thoughts, &deltas, 120)
         {
             eprintln!("  [SUMMARY cumulative] {}", s.cumulative);
             eprintln!("  [SUMMARY windowed]   {}", s.windowed);
-            ctx.cumulative = s.cumulative.clone();
+            ctx.ext.get::<AGGState>().summary.cumulative = s.cumulative.clone();
             ctx.dash.summary_cumulative = s.cumulative;
             ctx.dash.summary_windowed = s.windowed;
-            ctx.last_summary = Instant::now();
-            ctx.scratch.summarized_this_cycle = true;
+            ctx.ext.get::<AGGState>().summary.last_summary = Some(Instant::now());
+            ctx.scratch.get::<AGGScratch>().summarized_this_cycle = true;
             // §5.6: summarizer spend counts too — the summarizer runs on the ruler.
             ctx.tokens_spent += spend.tokens;
             if let Some(c) = spend.cost_usd {
@@ -824,13 +915,13 @@ impl Handler for Summarize {
 struct RefineFold;
 impl Handler for RefineFold {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if !(ctx.cfg.memory.enabled && ctx.scratch.mem_folded) {
+        if !(ctx.cfg.memory.enabled && ctx.scratch.get::<AGGScratch>().mem_folded) {
             return Ok(Flow::Continue);
         }
-        let outcome = ctx.scratch.outcome.clone().expect("LaunchWorker set scratch.outcome");
-        let deltas = ctx.scratch.res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
-        let rolled_back = ctx.scratch.rolled_back;
-        let summarized_this_cycle = ctx.scratch.summarized_this_cycle;
+        let outcome = ctx.scratch.get::<AGGScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
+        let deltas = ctx.scratch.get::<AGGScratch>().res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
+        let rolled_back = ctx.scratch.get::<AGGScratch>().rolled_back;
+        let summarized_this_cycle = ctx.scratch.get::<AGGScratch>().summarized_this_cycle;
         let scoreboard = ctx.eng.scoreboard();
         let ended = crate::util::now_epoch();
         let mut mech = crate::core::memory::mechanical_note(
@@ -860,7 +951,8 @@ impl Handler for RefineFold {
             ctx.dir, ctx.session, source, &body, ctx.cfg.memory.max_kb, true,
         );
         crate::core::memory::clear_scratch(ctx.dir, ctx.session);
-        ctx.last_session = crate::core::memory::last_session_block(&deltas, &scoreboard);
+        ctx.ext.get::<AGGState>().memory.last_session =
+            crate::core::memory::last_session_block(&deltas, &scoreboard);
         eprintln!("  [memory] session #{} folded ({source}); LOG.md {} B", ctx.session, ctx.dash.memory_bytes);
         ctx.publish();
         Ok(Flow::Continue)
@@ -876,7 +968,7 @@ impl Handler for RefineFold {
 struct CheckRunStop;
 impl Handler for CheckRunStop {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let res = ctx.scratch.res.take().expect("an on_verify handler set scratch.res");
+        let res = ctx.scratch.get::<AGGScratch>().res.take().expect("an on_verify handler set scratch.res");
         if res.halt {
             let reason = res.halt_reason.unwrap_or_default();
             eprintln!("\n⚠ ABORT — abort_if true: {reason}\n  stopping the loop (a ceiling / guard, not success).");
@@ -1262,8 +1354,6 @@ struct LoopState<'a> {
     judge_timeout: u64,
     dir: &'a Path,
     config_base: &'a Path,
-    /// `prompt_includes` fragments, composed once at launch.
-    prompt_prefix: String,
 
     eng: Engine,
     /// the sequence cursor — yields the next step name each cycle.
@@ -1292,24 +1382,12 @@ struct LoopState<'a> {
     /// summarizer). Sums to `tokens_spent`/`cost_spent`; makes a mixed run's totals interpretable.
     per_agent: std::collections::BTreeMap<String, crate::state::AgentUsage>,
 
-    pending_instruction: Option<String>,
-    last_session: String,
-    cumulative: String,
-    last_summary: Instant,
-    dud_streak: u32,
-
-    // ── per-session git isolation + spans ──
-    iso_base: String,
-    /// this session's branch (cut by INJECT, resolved by GATE).
-    session_branch: Option<String>,
-    /// the branch the NEXT session cuts off — the TIP of the staged span, or `None` = base (§5.7).
-    span_tip: Option<String>,
-    /// staged span branches accumulated by `skip_judges` steps (for reporting on abort).
-    span_branches: Vec<String>,
-    /// content of the step's state file at session start, to warn if the agent never touched it.
-    state_before: Option<String>,
-    /// per-session channel between stage-handlers; reset each session at the loop top (§8).
-    scratch: Scratch,
+    /// per-RUN generic extension store — agg's own feature state lives here as `AGGState`; a plugin
+    /// stashes its own type. Persists across sessions (never cleared mid-run). LOOPSTATE_REDESIGN §3.
+    ext: Extensions,
+    /// per-SESSION generic extension store — agg's stage channel lives here as `AGGScratch`;
+    /// `clear()`ed each session at the loop top so no field leaks across sessions (§3/§8).
+    scratch: Extensions,
 }
 
 impl LoopState<'_> {
@@ -1407,8 +1485,9 @@ impl LoopState<'_> {
 
     /// The branch a JUDGED step's regression check reads / the branch cut. Base is the resolved
     /// isolation base.
-    fn base_ref(&self) -> &str {
-        self.span_tip.as_deref().unwrap_or(&self.iso_base)
+    fn base_ref(&mut self) -> String {
+        let git = &self.ext.get::<AGGState>().git;
+        git.span_tip.clone().unwrap_or_else(|| git.iso_base.clone())
     }
 
     /// Compose the worker's whole brief into `agg/state/INSTRUCTIONS.md`, then return the tiny
@@ -1435,7 +1514,7 @@ impl LoopState<'_> {
         // ── operator steering — highest priority, act on it FIRST. The banner keeps the phrase
         //    "HIGH-PRIORITY OPERATOR INSTRUCTION" so the memory sanitizer (`looks_like_marker`) still
         //    de-fangs a worker note that tries to forge it. ──
-        if let Some(instr) = self.pending_instruction.take() {
+        if let Some(instr) = self.ext.get::<AGGState>().operator.pending_instruction.take() {
             s.push_str(&format!(
                 "\n## ⚠ HIGH-PRIORITY OPERATOR INSTRUCTION — do this FIRST (it overrides the default plan)\n{instr}\n"
             ));
@@ -1455,13 +1534,15 @@ impl LoopState<'_> {
                 s.push_str(&format!("\n## This session — do ONE focused chunk\n{}\n", p.trim()));
             }
         }
-        if !self.prompt_prefix.is_empty() {
-            s.push_str(&format!("\n{}\n", self.prompt_prefix.trim()));
+        let prompt_prefix = self.ext.get::<AGGState>().inject.prompt_prefix.clone();
+        if !prompt_prefix.is_empty() {
+            s.push_str(&format!("\n{}\n", prompt_prefix.trim()));
         }
 
         // ── context: memory recent-tail excerpt + a conditional pointer to the full LOG ──
         if self.cfg.memory.enabled {
-            let mem = crate::core::memory::read_block(self.dir, &self.last_session, self.cfg.memory.inject_kb);
+            let last_session = self.ext.get::<AGGState>().memory.last_session.clone();
+            let mem = crate::core::memory::read_block(self.dir, &last_session, self.cfg.memory.inject_kb);
             if !mem.trim().is_empty() {
                 s.push_str(&format!("\n## What's been tried\n{}\n", mem.trim()));
                 s.push_str(
@@ -1523,9 +1604,9 @@ impl LoopState<'_> {
         }
     }
 
-    fn worker_is_broken(&self) -> Option<anyhow::Error> {
+    fn worker_is_broken(&mut self) -> Option<anyhow::Error> {
         const LIMIT: u32 = 3;
-        (self.dud_streak >= LIMIT).then(|| {
+        (self.ext.get::<AGGState>().worker.dud_streak >= LIMIT).then(|| {
             let agent = self.cur_step.as_ref().map(|s| s.agent.as_str()).unwrap_or("worker");
             anyhow::anyhow!(
                 "the `{agent}` worker failed to start {LIMIT} times in a row — non-zero exit, ZERO \
@@ -1585,12 +1666,13 @@ impl LoopState<'_> {
     }
 
     /// On abort with a span still staged, leave the branches and print them (§5.7).
-    fn report_stranded_span(&self) {
-        if !self.span_branches.is_empty() {
+    fn report_stranded_span(&mut self) {
+        let span_branches = &self.ext.get::<AGGState>().git.span_branches;
+        if !span_branches.is_empty() {
             eprintln!(
                 "  [span] {} staged branch(es) left un-merged for inspection: {}",
-                self.span_branches.len(),
-                self.span_branches.join(", ")
+                span_branches.len(),
+                span_branches.join(", ")
             );
         }
     }
@@ -1687,7 +1769,6 @@ pub fn run(
         judge_timeout,
         dir,
         config_base,
-        prompt_prefix: String::new(), // gathered by the `Setup` feature (on_run_start), before the loop
         eng,
         cursor: Cursor::new(statements),
         cur_step: None,
@@ -1706,18 +1787,10 @@ pub fn run(
         tokens_spent: 0,
         cost_spent: 0.0,
         per_agent: std::collections::BTreeMap::new(),
-        pending_instruction: None,
-        last_session: String::new(),
-        dud_streak: 0,
-        cumulative: String::new(),
-        last_summary: loop_start,
-        iso_base,
-        session_branch: None,
-        span_tip: None,
-        span_branches: Vec::new(),
-        state_before: None,
-        scratch: Scratch::default(),
+        ext: Extensions::default(),
+        scratch: Extensions::default(),
     };
+    st.ext.get::<AGGState>().git.iso_base = iso_base; // resolved base branch (was a named field)
     st.publish();
     st.dash.lifetime_session = lifetime_base;
 
@@ -1738,7 +1811,7 @@ pub fn run(
             return Ok(outcome);
         }
         // reset the per-session channel so no field (esp. `prompt`) leaks across sessions.
-        st.scratch = Scratch::default();
+        st.scratch.clear();
         st.emit(LifecycleEvent::Inject);
         match run_hook(&lifecycle.on_session_start, &mut st)? {
             Some(End::Stop(outcome)) => return Ok(outcome),
@@ -1842,5 +1915,22 @@ mod tests {
         assert_eq!(names(&l.on_session_end), ["Finalize"]);
         assert_eq!(names(&l.on_stop), ["on_stop"]);
         assert_eq!(l.pre_start.len(), 1); // GitSetup (the PreStart protocol carries no name())
+    }
+
+    /// The one non-trivial bit of the extension store is the type-keyed downcast — verify each type
+    /// gets its OWN slot, values persist across `get`s, and `clear()` drops everything (per-session).
+    #[test]
+    fn extensions_is_one_slot_per_type() {
+        #[derive(Default, PartialEq, Debug)]
+        struct A(u32);
+        #[derive(Default, PartialEq, Debug)]
+        struct B(String);
+        let mut ext = Extensions::default();
+        ext.get::<A>().0 = 7;
+        ext.get::<B>().0 = "x".into();
+        assert_eq!(ext.get::<A>(), &A(7)); // persists + downcasts to its own type, not B's
+        assert_eq!(ext.get::<B>(), &B("x".into()));
+        ext.clear();
+        assert_eq!(ext.get::<A>(), &A(0)); // clear() → default re-inserted (the per-session reset)
     }
 }
