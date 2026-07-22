@@ -176,6 +176,50 @@ fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End
     Ok(None)
 }
 
+/// A HIGH-LEVEL feature hook: one named registry entry composing several ordered sub-steps (each its
+/// own small `Handler`). The registry reads as the loop's lifecycle (Inject / Run / Verify / Gate /
+/// Finalize …) while each step stays a focused unit. It dispatches its steps with the SAME `run_hook`
+/// semantics (Flow, `runs_on_skip`), so grouping changes NOTHING about behavior — it is the flat
+/// handler list, nested one level. This is what keeps the registry readable without micro-task soup.
+struct Feature {
+    name: &'static str,
+    steps: Vec<Box<dyn Handler>>,
+}
+impl Handler for Feature {
+    fn run(&self, st: &mut LoopState) -> Result<Flow> {
+        Ok(match run_hook(&self.steps, st)? {
+            Some(End::NextSession) => Flow::SkipSession,
+            Some(End::Stop(o)) => Flow::Stop(o),
+            None => Flow::Continue,
+        })
+    }
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// Finalize the run bootstrap before the loop: gather the `prompt_includes` into `prompt_prefix`,
+/// reset the summary clock, prepare the on-disk memory scratch, and open the operator bus. On
+/// `on_run_start`, after the baseline pass — which runs AFTER `on_start` (so on_start→prompt_includes
+/// order holds) and BEFORE the loop (so the first `compose` sees the prefix). Behavior-unchanged:
+/// nothing between the `LoopState` build and here reads `prompt_prefix` (baseline judges only).
+struct Setup;
+impl Handler for Setup {
+    fn run(&self, st: &mut LoopState) -> Result<Flow> {
+        st.prompt_prefix = crate::hooks::gather_prompt_includes(&st.cfg.prompt_includes, st.dir);
+        st.last_summary = Instant::now() - Duration::from_secs(st.cfg.summary.min_interval_secs);
+        if st.cfg.memory.enabled {
+            crate::core::memory::ensure_scratch_dir(st.dir);
+            crate::core::memory::sweep_scratch(st.dir);
+        }
+        st.bus = Bus::open(st.dir).ok();
+        Ok(Flow::Continue)
+    }
+    fn name(&self) -> &'static str {
+        "Setup"
+    }
+}
+
 /// A user shell-hook list wrapped as a handler — best-effort, non-fatal (exactly `hooks::run`).
 /// Self-contained: carries its own `dir`, so it can fire from anywhere (a per-session hook via
 /// `run`, or a run-level hook via `fire` — on_start/on_stop) without needing `LoopState`.
@@ -955,54 +999,38 @@ fn run_pre_start(hs: &[Box<dyn PreStart>], boot: &mut Bootstrap) -> Result<()> {
     Ok(())
 }
 
-/// Recover a stranded merge left by a prior crash (guarded on the dir being a git repo).
-struct RecoverStrandedMerge;
-impl PreStart for RecoverStrandedMerge {
+/// The `pre_start` feature: agg's run-start git preconditions, in order — recover a stranded merge
+/// from a prior crash, require a clean git repo (session isolation is MANDATORY), ensure `agg/state`
+/// is gitignored (runtime state survives rollback), and resolve the isolation base branch (→
+/// `boot.iso_base` for the constructor). Runs before the loop state exists; any `bail!` is a hard
+/// error out of `run()`, exactly as the old inline block. Verbatim, just grouped under one feature.
+struct GitSetup;
+impl PreStart for GitSetup {
     fn run(&self, boot: &mut Bootstrap) -> Result<()> {
-        if crate::git::is_repo(boot.dir) {
-            crate::git::recover_stranded_merge(boot.dir, &boot.cfg.session_isolation.branch_prefix);
+        let dir = boot.dir;
+        let iso = &boot.cfg.session_isolation;
+        // recover a stranded merge left by a prior crash (guarded on being a git repo)
+        if crate::git::is_repo(dir) {
+            crate::git::recover_stranded_merge(dir, &iso.branch_prefix);
         }
-        Ok(())
-    }
-}
-
-/// Session isolation is MANDATORY: refuse to run outside a git repo with a clean tracked tree.
-struct RequireGitRepoAndClean;
-impl PreStart for RequireGitRepoAndClean {
-    fn run(&self, boot: &mut Bootstrap) -> Result<()> {
-        if !crate::git::is_repo(boot.dir) {
+        // require a git repo with a clean tracked tree
+        if !crate::git::is_repo(dir) {
             anyhow::bail!(
                 "session isolation is mandatory, but this is not a git repository.\n  \
                  fix:  git init && git add -A && git commit -m 'agg baseline'"
             );
         }
-        if !crate::git::is_clean(boot.dir) {
+        if !crate::git::is_clean(dir) {
             anyhow::bail!(
                 "session isolation is mandatory, but the work tree has uncommitted tracked changes.\n  \
                  fix:  commit or stash your changes first  (git status shows them)"
             );
         }
-        Ok(())
-    }
-}
-
-/// Ensure `agg/state` is gitignored (runtime state stays untracked and survives rollback).
-struct EnsureGitignored;
-impl PreStart for EnsureGitignored {
-    fn run(&self, boot: &mut Bootstrap) -> Result<()> {
-        crate::git::ensure_agg_gitignored(boot.dir);
-        Ok(())
-    }
-}
-
-/// Resolve the isolation base branch (configured `base_branch`, else the current branch; refuse a
-/// detached HEAD) and hand it to the constructor via `boot.iso_base`.
-struct ResolveIsoBase;
-impl PreStart for ResolveIsoBase {
-    fn run(&self, boot: &mut Bootstrap) -> Result<()> {
-        let iso = &boot.cfg.session_isolation;
+        // keep runtime state untracked (survives rollback)
+        crate::git::ensure_agg_gitignored(dir);
+        // resolve the isolation base branch (configured, else current; refuse a detached HEAD)
         let iso_base: String = if iso.base_branch.is_empty() {
-            match crate::git::current_branch(boot.dir) {
+            match crate::git::current_branch(dir) {
                 Some(b) => b,
                 None => anyhow::bail!(
                     "session isolation is mandatory, but HEAD is detached.\n  \
@@ -1042,34 +1070,51 @@ impl Lifecycle {
         let shell = |label: &'static str, cmds: &[String]| -> Box<dyn Handler> {
             Box::new(ShellHook { label, cmds: cmds.to_vec(), dir: dir.to_path_buf() })
         };
-        // pre_start: the run-start git preconditions (before the loop state exists).
-        l.pre_start.push(Box::new(RecoverStrandedMerge));
-        l.pre_start.push(Box::new(RequireGitRepoAndClean));
-        l.pre_start.push(Box::new(EnsureGitignored));
-        l.pre_start.push(Box::new(ResolveIsoBase));
+        let feature = |name: &'static str, steps: Vec<Box<dyn Handler>>| -> Box<dyn Handler> {
+            Box::new(Feature { name, steps })
+        };
+        // ── THE REGISTRY, read top-to-bottom = the loop's lifecycle. Each hook point holds a
+        //    HIGH-LEVEL FEATURE; a feature's `vec![…]` is its internal structure (small, focused
+        //    steps), dispatched with the same Flow/skip semantics — grouping changes no behavior. ──
+        l.pre_start.push(Box::new(GitSetup)); // git preconditions (before the loop state exists)
         l.on_start.push(shell("on_start", &hooks.on_start));
-        l.on_run_start.push(Box::new(Baseline));
         l.background.push(Box::new(BackgroundSpawn { cmds: hooks.background.clone() }));
-        l.on_session_start.push(Box::new(BusDrain));
-        l.on_session_start.push(Box::new(PickStep));
-        l.on_session_start.push(Box::new(SessionBranchCut));
-        l.on_session_start.push(shell("on_session_start", &hooks.on_session_start));
-        l.on_session_start.push(Box::new(WriteInstructions));
-        l.on_session_start.push(Box::new(ClearMemScratch));
-        l.on_run.push(Box::new(LaunchWorker));
-        l.on_verify.push(Box::new(FloorFold));
-        l.on_verify.push(Box::new(RateLimitBackoff));
-        l.on_verify.push(Box::new(GitAutoCommit));
-        l.on_verify.push(Box::new(SnapshotGoals));
-        l.on_verify.push(Box::new(StageSpan));
-        l.on_verify.push(Box::new(StageMerge));
-        l.on_verify.push(Box::new(RunJudges));
-        l.on_gate.push(Box::new(CeilingPoisonGuard));
-        l.on_gate.push(Box::new(GateKeepRollback));
-        l.on_session_end.push(shell("on_session_end", &hooks.on_session_end));
-        l.on_session_end.push(Box::new(Summarize));
-        l.on_session_end.push(Box::new(RefineFold));
-        l.on_session_end.push(Box::new(CheckRunStop));
+        l.on_run_start.push(Box::new(Baseline)); // baseline judge pass, then bootstrap finalize:
+        l.on_run_start.push(Box::new(Setup));
+        l.on_session_start.push(feature(
+            "Inject",
+            vec![
+                Box::new(BusDrain),
+                Box::new(PickStep),
+                Box::new(SessionBranchCut),
+                shell("on_session_start", &hooks.on_session_start),
+                Box::new(WriteInstructions),
+                Box::new(ClearMemScratch),
+            ],
+        ));
+        l.on_run.push(feature("Run", vec![Box::new(LaunchWorker)]));
+        l.on_verify.push(feature(
+            "Verify",
+            vec![
+                Box::new(FloorFold),
+                Box::new(RateLimitBackoff),
+                Box::new(GitAutoCommit),
+                Box::new(SnapshotGoals),
+                Box::new(StageSpan),
+                Box::new(StageMerge),
+                Box::new(RunJudges),
+            ],
+        ));
+        l.on_gate.push(feature("Gate", vec![Box::new(CeilingPoisonGuard), Box::new(GateKeepRollback)]));
+        l.on_session_end.push(feature(
+            "Finalize",
+            vec![
+                shell("on_session_end", &hooks.on_session_end),
+                Box::new(Summarize),
+                Box::new(RefineFold),
+                Box::new(CheckRunStop),
+            ],
+        ));
         l.on_stop.push(shell("on_stop", &hooks.on_stop));
         l
     }
@@ -1592,11 +1637,10 @@ pub fn run(
     #[cfg(not(unix))]
     eprintln!("  ⚠ Windows: unix-first build — the CPU-flat watchdog and process-group spawn protection are NOT active here.");
     for h in &lifecycle.on_start {
-        h.fire(); // fires BEFORE prompt_includes are gathered — order preserved.
+        h.fire(); // fires at run-start, BEFORE the `Setup` feature gathers prompt_includes — order preserved.
     }
     // on_stop moves into the Drop guard so it fires on any exit incl. panic (its dispatcher).
     let _stop_hooks = StopHooks { handlers: std::mem::take(&mut lifecycle.on_stop) };
-    let prompt_prefix = crate::hooks::gather_prompt_includes(&cfg.prompt_includes, dir);
 
     let loop_start = Instant::now();
     let (m, t) = eng.tally();
@@ -1643,7 +1687,7 @@ pub fn run(
         judge_timeout,
         dir,
         config_base,
-        prompt_prefix,
+        prompt_prefix: String::new(), // gathered by the `Setup` feature (on_run_start), before the loop
         eng,
         cursor: Cursor::new(statements),
         cur_step: None,
@@ -1685,12 +1729,8 @@ pub fn run(
         return Ok(outcome);
     }
 
-    st.last_summary = Instant::now() - Duration::from_secs(cfg.summary.min_interval_secs);
-    if cfg.memory.enabled {
-        crate::core::memory::ensure_scratch_dir(dir);
-        crate::core::memory::sweep_scratch(dir);
-    }
-    st.bus = Bus::open(dir).ok();
+    // (summary clock, memory scratch, and the operator bus were opened by the `Setup` feature on
+    //  `on_run_start`, right after the baseline pass — the old inline block, now a registry hook.)
 
     // ── the deterministic outer loop, one step at a time ──
     loop {
@@ -1783,34 +1823,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// R3 (HOOK_STAGE_PLAN): `on_session_start` MUST dispatch in exactly this order — the user shell
-    /// hook BEFORE `WriteInstructions` (so a hook sees the PREVIOUS session's brief), and
-    /// `BusDrain`→`PickStep` before the branch cut / compose. This order is outcome-invisible (the
-    /// e2e asserts outcomes, not order), so pin it here where a reorder would otherwise pass the gate.
+    /// The registry reads as HIGH-LEVEL FEATURES — one (or a couple) per lifecycle phase — so a human
+    /// understands the loop's structure at a glance (Inject / Run / Verify / Gate / Finalize …). And
+    /// EVERY lifecycle point is a registry hook: an empty list here means a lifecycle task escaped the
+    /// registry. Each feature's internal step order is source-visible in `with_hooks` and dispatched
+    /// verbatim by `run_hook` (grouping changed no behavior).
     #[test]
-    fn on_session_start_registration_order_is_the_spec() {
+    fn the_registry_reads_as_high_level_features() {
         let l = Lifecycle::with_hooks(&crate::core::config::Hooks::default(), std::path::Path::new("."));
-        let names: Vec<&str> = l.on_session_start.iter().map(|h| h.name()).collect();
-        assert_eq!(
-            names,
-            [
-                "BusDrain",
-                "PickStep",
-                "SessionBranchCut",
-                "on_session_start",
-                "WriteInstructions",
-                "ClearMemScratch",
-            ]
-        );
-        // on_run is a SINGLE handler (the unknown-agent + SIGINT early returns forbid splitting).
-        let run_names: Vec<&str> = l.on_run.iter().map(|h| h.name()).collect();
-        assert_eq!(run_names, ["LaunchWorker"]);
-        // EVERY lifecycle point is a registry hook — no exceptions. on_start + on_stop (run-level,
-        // context-free) live here too, dispatched via `fire()` (on_start at run-start, on_stop from
-        // the Drop guard). If either is empty, a lifecycle task escaped the registry.
-        assert_eq!(l.on_start.iter().map(|h| h.name()).collect::<Vec<_>>(), ["on_start"]);
-        assert_eq!(l.on_run_start.iter().map(|h| h.name()).collect::<Vec<_>>(), ["Baseline"]);
-        assert_eq!(l.background.iter().map(|h| h.name()).collect::<Vec<_>>(), ["BackgroundSpawn"]);
-        assert_eq!(l.on_stop.iter().map(|h| h.name()).collect::<Vec<_>>(), ["on_stop"]);
+        let names = |hs: &[Box<dyn Handler>]| hs.iter().map(|h| h.name()).collect::<Vec<_>>();
+        assert_eq!(names(&l.on_start), ["on_start"]);
+        assert_eq!(names(&l.on_run_start), ["Baseline", "Setup"]);
+        assert_eq!(names(&l.background), ["BackgroundSpawn"]);
+        assert_eq!(names(&l.on_session_start), ["Inject"]);
+        assert_eq!(names(&l.on_run), ["Run"]);
+        assert_eq!(names(&l.on_verify), ["Verify"]);
+        assert_eq!(names(&l.on_gate), ["Gate"]);
+        assert_eq!(names(&l.on_session_end), ["Finalize"]);
+        assert_eq!(names(&l.on_stop), ["on_stop"]);
+        assert_eq!(l.pre_start.len(), 1); // GitSetup (the PreStart protocol carries no name())
     }
 }
