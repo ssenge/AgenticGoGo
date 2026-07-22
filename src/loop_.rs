@@ -151,6 +151,10 @@ trait Handler {
     fn runs_on_skip(&self) -> bool {
         true
     }
+    /// Fire a CONTEXT-FREE (run-level) hook — `on_start` before the loop state exists, `on_stop` at
+    /// teardown. Default no-op; `ShellHook` overrides. This is what lets `on_start`/`on_stop` live in
+    /// the SAME registry as every other hook without needing `&mut LoopState`.
+    fn fire(&self) {}
     /// Stable name for the registration-order characterization tests (order is outcome-invisible).
     #[cfg_attr(not(test), allow(dead_code))]
     fn name(&self) -> &'static str;
@@ -173,14 +177,20 @@ fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End
 }
 
 /// A user shell-hook list wrapped as a handler — best-effort, non-fatal (exactly `hooks::run`).
+/// Self-contained: carries its own `dir`, so it can fire from anywhere (a per-session hook via
+/// `run`, or a run-level hook via `fire` — on_start/on_stop) without needing `LoopState`.
 struct ShellHook {
     label: &'static str,
     cmds: Vec<String>,
+    dir: std::path::PathBuf,
 }
 impl Handler for ShellHook {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        crate::hooks::run(self.label, &self.cmds, ctx.dir);
+    fn run(&self, _ctx: &mut LoopState) -> Result<Flow> {
+        self.fire();
         Ok(Flow::Continue)
+    }
+    fn fire(&self) {
+        crate::hooks::run(self.label, &self.cmds, &self.dir);
     }
     fn name(&self) -> &'static str {
         self.label
@@ -923,6 +933,7 @@ impl Handler for BackgroundSpawn {
 /// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
 #[derive(Default)]
 struct Lifecycle {
+    on_start: Vec<Box<dyn Handler>>,
     on_run_start: Vec<Box<dyn Handler>>,
     background: Vec<Box<dyn Handler>>,
     on_session_start: Vec<Box<dyn Handler>>,
@@ -930,22 +941,26 @@ struct Lifecycle {
     on_verify: Vec<Box<dyn Handler>>,
     on_gate: Vec<Box<dyn Handler>>,
     on_session_end: Vec<Box<dyn Handler>>,
+    on_stop: Vec<Box<dyn Handler>>,
 }
 impl Lifecycle {
-    fn default_pipeline(cfg: &AggConfig) -> Self {
-        Self::with_hooks(&cfg.hooks)
+    fn default_pipeline(cfg: &AggConfig, dir: &Path) -> Self {
+        Self::with_hooks(&cfg.hooks, dir)
     }
     /// Split out from `default_pipeline` so the registration ORDER is testable without a full
     /// `AggConfig` (`Hooks: Default`).
-    fn with_hooks(hooks: &crate::core::config::Hooks) -> Self {
+    fn with_hooks(hooks: &crate::core::config::Hooks, dir: &Path) -> Self {
         let mut l = Lifecycle::default();
+        let shell = |label: &'static str, cmds: &[String]| -> Box<dyn Handler> {
+            Box::new(ShellHook { label, cmds: cmds.to_vec(), dir: dir.to_path_buf() })
+        };
+        l.on_start.push(shell("on_start", &hooks.on_start));
         l.on_run_start.push(Box::new(Baseline));
         l.background.push(Box::new(BackgroundSpawn { cmds: hooks.background.clone() }));
         l.on_session_start.push(Box::new(BusDrain));
         l.on_session_start.push(Box::new(PickStep));
         l.on_session_start.push(Box::new(SessionBranchCut));
-        l.on_session_start
-            .push(Box::new(ShellHook { label: "on_session_start", cmds: hooks.on_session_start.clone() }));
+        l.on_session_start.push(shell("on_session_start", &hooks.on_session_start));
         l.on_session_start.push(Box::new(WriteInstructions));
         l.on_session_start.push(Box::new(ClearMemScratch));
         l.on_run.push(Box::new(LaunchWorker));
@@ -958,11 +973,11 @@ impl Lifecycle {
         l.on_verify.push(Box::new(RunJudges));
         l.on_gate.push(Box::new(CeilingPoisonGuard));
         l.on_gate.push(Box::new(GateKeepRollback));
-        l.on_session_end
-            .push(Box::new(ShellHook { label: "on_session_end", cmds: hooks.on_session_end.clone() }));
+        l.on_session_end.push(shell("on_session_end", &hooks.on_session_end));
         l.on_session_end.push(Box::new(Summarize));
         l.on_session_end.push(Box::new(RefineFold));
         l.on_session_end.push(Box::new(CheckRunStop));
+        l.on_stop.push(shell("on_stop", &hooks.on_stop));
         l
     }
 }
@@ -1075,14 +1090,16 @@ fn wait_for_resume(bus: &Bus) -> Option<String> {
     }
 }
 
-struct StopHooks<'a> {
-    cmds: Vec<String>,
-    dir: &'a Path,
+/// Owns the registered `on_stop` handlers and fires them on Drop — so the teardown hook runs on
+/// EVERY exit (normal return, early return, or panic-unwind), which a loop-body dispatch can't
+/// guarantee. `on_stop` is a registry hook like the rest; the Drop guard is just its dispatcher.
+struct StopHooks {
+    handlers: Vec<Box<dyn Handler>>,
 }
-impl Drop for StopHooks<'_> {
+impl Drop for StopHooks {
     fn drop(&mut self) {
-        if !self.cmds.is_empty() {
-            crate::hooks::run("on_stop", &self.cmds, self.dir);
+        for h in &self.handlers {
+            h.fire();
         }
     }
 }
@@ -1502,8 +1519,14 @@ pub fn run(
     #[cfg(not(unix))]
     eprintln!("  ⚠ Windows: unix-first build — the CPU-flat watchdog and process-group spawn protection are NOT active here.");
 
-    crate::hooks::run("on_start", &cfg.hooks.on_start, dir);
-    let _stop_hooks = StopHooks { cmds: cfg.hooks.on_stop.clone(), dir };
+    // agg's built-in hook registration (HOOK_REDESIGN §5) — EVERY lifecycle point, no exceptions.
+    // Built here so the run-level hooks (on_start now, on_stop via the Drop guard) dispatch from it.
+    let mut lifecycle = Lifecycle::default_pipeline(&cfg, dir);
+    for h in &lifecycle.on_start {
+        h.fire(); // fires BEFORE prompt_includes are gathered — order preserved.
+    }
+    // on_stop moves into the Drop guard so it fires on any exit incl. panic (its dispatcher).
+    let _stop_hooks = StopHooks { handlers: std::mem::take(&mut lifecycle.on_stop) };
     let prompt_prefix = crate::hooks::gather_prompt_includes(&cfg.prompt_includes, dir);
 
     let loop_start = Instant::now();
@@ -1584,9 +1607,6 @@ pub fn run(
     };
     st.publish();
     st.dash.lifetime_session = lifetime_base;
-
-    // agg's built-in hook registration (HOOK_REDESIGN §5). Owned here, passed alongside `st`.
-    let lifecycle = Lifecycle::default_pipeline(&cfg);
 
     // ── run-start hooks: spawn the user's background watchers, then the baseline pass (§5.5.1) —
     //    both are registry handlers now (the `background` / `on_run_start` hooks). Baseline's two
@@ -1700,7 +1720,7 @@ mod tests {
     /// e2e asserts outcomes, not order), so pin it here where a reorder would otherwise pass the gate.
     #[test]
     fn on_session_start_registration_order_is_the_spec() {
-        let l = Lifecycle::with_hooks(&crate::core::config::Hooks::default());
+        let l = Lifecycle::with_hooks(&crate::core::config::Hooks::default(), std::path::Path::new("."));
         let names: Vec<&str> = l.on_session_start.iter().map(|h| h.name()).collect();
         assert_eq!(
             names,
@@ -1716,5 +1736,12 @@ mod tests {
         // on_run is a SINGLE handler (the unknown-agent + SIGINT early returns forbid splitting).
         let run_names: Vec<&str> = l.on_run.iter().map(|h| h.name()).collect();
         assert_eq!(run_names, ["LaunchWorker"]);
+        // EVERY lifecycle point is a registry hook — no exceptions. on_start + on_stop (run-level,
+        // context-free) live here too, dispatched via `fire()` (on_start at run-start, on_stop from
+        // the Drop guard). If either is empty, a lifecycle task escaped the registry.
+        assert_eq!(l.on_start.iter().map(|h| h.name()).collect::<Vec<_>>(), ["on_start"]);
+        assert_eq!(l.on_run_start.iter().map(|h| h.name()).collect::<Vec<_>>(), ["Baseline"]);
+        assert_eq!(l.background.iter().map(|h| h.name()).collect::<Vec<_>>(), ["BackgroundSpawn"]);
+        assert_eq!(l.on_stop.iter().map(|h| h.name()).collect::<Vec<_>>(), ["on_stop"]);
     }
 }
