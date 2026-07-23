@@ -30,6 +30,7 @@ pub mod core;
 pub mod os;
 pub mod ui;
 
+pub mod assembly;
 pub mod bus;
 pub mod capability;
 pub mod context;
@@ -42,6 +43,7 @@ pub mod loop_;
 pub mod paths;
 pub mod plugin;
 pub mod project;
+pub mod registry;
 pub mod skills;
 pub mod state;
 pub mod summary;

@@ -17,9 +17,7 @@
 
 use crate::bus::{Bus, Command};
 use crate::core::config::AggConfig;
-use crate::core::engine::Engine;
-use crate::core::sequence::{self, Cursor, Statement};
-use crate::core::stop;
+use crate::core::sequence::Cursor;
 use crate::state::{DashboardState, LiveState, Phase};
 use anyhow::Result;
 use std::path::Path;
@@ -64,45 +62,12 @@ pub const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
 pub use crate::features::state::{AGGScratch, AGGState};
 pub use crate::context::LoopState;
 pub use crate::plugin::{Bootstrap, End, Extensions, Flow, Handler, LifecycleEvent, PreStart, RunOutcome};
+pub use crate::registry::{run_hook, Lifecycle};
+pub use crate::assembly::{assemble, Assembly};
+use crate::registry::run_pre_start;
 
 
-/// Dispatch one hook point's handlers in order, honoring `Flow`. A handler's hard `Err` bubbles out
-/// (it is NOT a `RunOutcome` — e.g. `verdicts::append`, or the worker-broken guard). §3.1.
-pub fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End>> {
-    for h in hooks {
-        if st.scratch.get::<AGGScratch>().skip_judges && !h.runs_on_skip() {
-            continue;
-        }
-        match h.run(st)? {
-            Flow::Continue => {}
-            Flow::SkipSession => return Ok(Some(End::NextSession)),
-            Flow::Stop(o) => return Ok(Some(End::Stop(o))),
-        }
-    }
-    Ok(None)
-}
 
-/// A HIGH-LEVEL feature hook: one named registry entry composing several ordered sub-steps (each its
-/// own small `Handler`). The registry reads as the loop's lifecycle (Inject / Run / Verify / Gate /
-/// Finalize …) while each step stays a focused unit. It dispatches its steps with the SAME `run_hook`
-/// semantics (Flow, `runs_on_skip`), so grouping changes NOTHING about behavior — it is the flat
-/// handler list, nested one level. This is what keeps the registry readable without micro-task soup.
-struct Feature {
-    name: &'static str,
-    steps: Vec<Box<dyn Handler>>,
-}
-impl Handler for Feature {
-    fn run(&self, st: &mut LoopState) -> Result<Flow> {
-        Ok(match run_hook(&self.steps, st)? {
-            Some(End::NextSession) => Flow::SkipSession,
-            Some(End::Stop(o)) => Flow::Stop(o),
-            None => Flow::Continue,
-        })
-    }
-    fn name(&self) -> &'static str {
-        self.name
-    }
-}
 
 
 // ShellHook moved to `crate::features::shell::ShellHook`.
@@ -140,180 +105,11 @@ impl Handler for Feature {
 
 
 
-fn run_pre_start(hs: &[Box<dyn PreStart>], boot: &mut Bootstrap) -> Result<()> {
-    for h in hs {
-        h.run(boot)?; // a `bail!` propagates out of `run()`, exactly like the old inline check
-    }
-    Ok(())
-}
 
 
-/// The hook registry: one ordered plugin list per lifecycle point. `default_pipeline` is agg's OWN
-/// registration (its features are plugins, no different from a third party's). Fields are `pub` so a
-/// host can `lifecycle.on_verify.push(Box::new(MyPlugin))` before the loop — config-in-code, no yaml
-/// (HOOK_REDESIGN §5). This is the OQ5 registration seam.
-#[derive(Default)]
-pub struct Lifecycle {
-    pub pre_start: Vec<Box<dyn PreStart>>,
-    pub on_start: Vec<Box<dyn Handler>>,
-    pub on_run_start: Vec<Box<dyn Handler>>,
-    pub background: Vec<Box<dyn Handler>>,
-    pub on_session_start: Vec<Box<dyn Handler>>,
-    pub on_run: Vec<Box<dyn Handler>>,
-    pub on_verify: Vec<Box<dyn Handler>>,
-    pub on_gate: Vec<Box<dyn Handler>>,
-    pub on_session_end: Vec<Box<dyn Handler>>,
-    pub on_stop: Vec<Box<dyn Handler>>,
-}
-impl Lifecycle {
-    pub fn default_pipeline(cfg: &AggConfig, dir: &Path) -> Self {
-        Self::with_hooks(&cfg.hooks, dir)
-    }
-    /// Split out from `default_pipeline` so the registration ORDER is testable without a full
-    /// `AggConfig` (`Hooks: Default`).
-    fn with_hooks(hooks: &crate::core::config::Hooks, dir: &Path) -> Self {
-        let mut l = Lifecycle::default();
-        let shell = |label: &'static str, cmds: &[String]| -> Box<dyn Handler> {
-            Box::new(crate::features::shell::ShellHook { label, cmds: cmds.to_vec(), dir: dir.to_path_buf() })
-        };
-        let feature = |name: &'static str, steps: Vec<Box<dyn Handler>>| -> Box<dyn Handler> {
-            Box::new(Feature { name, steps })
-        };
-        // ── THE REGISTRY, read top-to-bottom = the loop's lifecycle. Each hook point holds a
-        //    HIGH-LEVEL FEATURE; a feature's `vec![…]` is its internal structure (small, focused
-        //    steps), dispatched with the same Flow/skip semantics — grouping changes no behavior. ──
-        l.pre_start.push(Box::new(crate::features::gitsetup::GitSetup)); // git preconditions (before the loop state exists)
-        l.on_start.push(shell("on_start", &hooks.on_start));
-        l.background.push(Box::new(crate::features::setup::BackgroundSpawn { cmds: hooks.background.clone() }));
-        l.on_run_start.push(Box::new(crate::features::setup::Baseline)); // baseline judge pass, then bootstrap finalize:
-        l.on_run_start.push(Box::new(crate::features::setup::Setup));
-        l.on_session_start.push(feature(
-            "Inject",
-            vec![
-                Box::new(crate::features::inject::BusDrain),
-                Box::new(crate::features::inject::PickStep),
-                Box::new(crate::features::inject::SessionBranchCut),
-                shell("on_session_start", &hooks.on_session_start),
-                Box::new(crate::features::inject::WriteInstructions),
-                Box::new(crate::features::inject::ClearMemScratch),
-            ],
-        ));
-        l.on_run.push(feature("Run", vec![Box::new(crate::features::run::LaunchWorker)]));
-        l.on_verify.push(feature(
-            "Verify",
-            vec![
-                Box::new(crate::features::verify::FloorFold),
-                Box::new(crate::features::verify::RateLimitBackoff),
-                Box::new(crate::features::verify::GitAutoCommit),
-                Box::new(crate::features::verify::SnapshotGoals),
-                Box::new(crate::features::verify::StageSpan),
-                Box::new(crate::features::verify::StageMerge),
-                Box::new(crate::features::verify::RunJudges),
-            ],
-        ));
-        l.on_gate.push(feature("Gate", vec![Box::new(crate::features::gate::CeilingPoisonGuard), Box::new(crate::features::gate::GateKeepRollback)]));
-        l.on_session_end.push(feature(
-            "Finalize",
-            vec![
-                shell("on_session_end", &hooks.on_session_end),
-                Box::new(crate::features::summary::Summarize),
-                Box::new(crate::features::finalize::RefineFold),
-                Box::new(crate::features::finalize::CheckRunStop),
-            ],
-        ));
-        l.on_stop.push(shell("on_stop", &hooks.on_stop));
-        l
-    }
-}
 
-/// The engine + parsed sequence, assembled from config. Built once, before the loop (and by
-/// `agg plan`).
-pub struct Assembly {
-    pub engine: Engine,
-    pub statements: Vec<Statement>,
-}
 
-/// Build the run-set engine + parse the sequence from `cfg` (§5.3/§5.4). Refuses at startup:
-/// an unknown step name, an all-`skip_judges` sequence (nothing could ever merge), or a judge name
-/// that resolves to no file.
-pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
-    use crate::core::judges;
-    use crate::core::model::{Judge, Lifecycle};
 
-    // the standard library must exist before we resolve names against it (§6.1).
-    if let Err(e) = judges::ensure_library() {
-        eprintln!("  ⚠ could not refresh ~/.agg/judges: {e}");
-    }
-
-    let statements = sequence::parse(&cfg.sequence.steps)?;
-
-    // every referenced step name must be a key in `steps:` (§5.4).
-    for st in &statements {
-        for name in st.step_names() {
-            if !cfg.steps.contains_key(name) {
-                let defined: Vec<&str> = cfg.steps.keys().map(String::as_str).collect();
-                anyhow::bail!(
-                    "sequence references unknown step `{name}` — defined steps: {}",
-                    defined.join(", ")
-                );
-            }
-        }
-    }
-    // an all-`skip_judges` sequence never merges, so `done_if` can never fire (§5.7) — refuse.
-    let has_judged = statements
-        .iter()
-        .flat_map(|s| s.step_names())
-        .any(|n| cfg.steps.get(n).map(|b| !b.skip_judges).unwrap_or(false));
-    if !has_judged {
-        anyhow::bail!(
-            "every step in the sequence is skip_judges — nothing can ever merge and done_if can \
-             never fire (§5.7). At least one judged step is required."
-        );
-    }
-
-    // DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ every if-condition (§5.3).
-    let mut dod: Vec<String> = stop::judge_names(&cfg.sequence.done_if)?;
-    for inv in &cfg.sequence.invariants {
-        push_unique(&mut dod, inv);
-    }
-    let mut run_set = dod.clone();
-    if let Some(a) = &cfg.sequence.abort_if {
-        for n in stop::judge_names(a)? {
-            push_unique(&mut run_set, &n);
-        }
-    }
-    for st in &statements {
-        if let Some(c) = st.condition() {
-            for n in stop::judge_names(c)? {
-                push_unique(&mut run_set, &n);
-            }
-        }
-    }
-
-    // resolve every run-set name to a judge FILE (§5.1) — a name with no file is a startup error.
-    let mut judges_vec: Vec<Judge> = Vec::with_capacity(run_set.len());
-    for name in &run_set {
-        let kind = judges::resolve(name, config_base)?;
-        judges_vec.push(Judge {
-            name: name.clone(),
-            kind,
-            invariant: cfg.sequence.invariants.iter().any(|i| i == name),
-            in_dod: dod.iter().any(|d| d == name),
-            state: Lifecycle::Pending,
-            last_verdict: None,
-            ever_met: false,
-        });
-    }
-
-    let engine = Engine::new(judges_vec, cfg.sequence.done_if.clone(), cfg.sequence.abort_if.clone())?;
-    Ok(Assembly { engine, statements })
-}
-
-fn push_unique(v: &mut Vec<String>, s: &str) {
-    if !v.iter().any(|x| x == s) {
-        v.push(s.to_string());
-    }
-}
 
 pub fn wait_for_resume(bus: &Bus) -> Option<String> {
     loop {
@@ -601,86 +397,4 @@ mod tests {
         assert_eq!(ext.get::<A>(), &A(0)); // clear() → default re-inserted (the per-session reset)
     }
 
-    /// The §4 payoff, proven end-to-end through the REAL `run_hook` dispatcher (not the store in
-    /// isolation): a handler that is NOT one of agg's built-ins stashes its OWN type in `ext`, and a
-    /// LATER handler on the same hook reads it back — so a third-party plugin gets its own state
-    /// without ever touching `LoopState`. Guards against a future refactor that breaks the threading.
-    #[test]
-    fn a_plugin_handler_threads_its_own_type_across_the_dispatcher() {
-        #[derive(Default)]
-        struct PluginState {
-            token: u32,
-        }
-        #[derive(Default)]
-        struct Observed {
-            token: u32,
-        }
-        struct PluginWrite;
-        impl Handler for PluginWrite {
-            fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-                ctx.ext.get::<PluginState>().token = 1234; // its OWN type — no core edit, no core field
-                Ok(Flow::Continue)
-            }
-            fn name(&self) -> &'static str {
-                "PluginWrite"
-            }
-        }
-        struct PluginRead;
-        impl Handler for PluginRead {
-            fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-                let seen = ctx.ext.get::<PluginState>().token; // sees the earlier handler's write
-                ctx.ext.get::<Observed>().token = seen;
-                Ok(Flow::Continue)
-            }
-            fn name(&self) -> &'static str {
-                "PluginRead"
-            }
-        }
-
-        let cfg: AggConfig =
-            serde_yaml::from_str("project: probe\nsequence:\n  steps: []\n").expect("minimal config parses");
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("agg/state")).unwrap();
-        let dir = tmp.path();
-        let loop_start = Instant::now();
-        let dash = DashboardState::default();
-        let mut st = LoopState {
-            cfg: &cfg,
-            ruler: crate::backend::for_name("claude").unwrap(),
-            judge_model: "m".into(),
-            judge_timeout: 1,
-            dir,
-            config_base: dir,
-            eng: Engine::new(vec![], "iterations > 999999".into(), None).unwrap(),
-            cursor: Cursor::new(vec![]),
-            cur_step: None,
-            live: LiveState::new(dir, loop_start, dash.clone()),
-            dash,
-            ledger: crate::project::RunLedger::begin(dir, "probe", 0, 0),
-            bus: None,
-            budget_total: None,
-            cost_limit: None,
-            max_iter: None,
-            max_sessions: 0,
-            gate_regressions: false,
-            loop_start,
-            lifetime_base: 0,
-            session: 0,
-            tokens_spent: 0,
-            cost_spent: 0.0,
-            per_agent: Default::default(),
-            ext: Extensions::default(),
-            scratch: Extensions::default(),
-        };
-
-        // a hook holding two plugin-style handlers, dispatched by the SAME code the loop uses.
-        let hooks: Vec<Box<dyn Handler>> = vec![Box::new(PluginWrite), Box::new(PluginRead)];
-        let end = run_hook(&hooks, &mut st).expect("dispatch ok");
-        assert!(end.is_none(), "both handlers returned Continue → the hook drained, no early End");
-        assert_eq!(
-            st.ext.get::<Observed>().token,
-            1234,
-            "PluginRead saw PluginWrite's ext-stashed value across the real dispatcher — §4 holds"
-        );
-    }
 }
