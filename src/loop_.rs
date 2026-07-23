@@ -1933,4 +1933,87 @@ mod tests {
         ext.clear();
         assert_eq!(ext.get::<A>(), &A(0)); // clear() → default re-inserted (the per-session reset)
     }
+
+    /// The §4 payoff, proven end-to-end through the REAL `run_hook` dispatcher (not the store in
+    /// isolation): a handler that is NOT one of agg's built-ins stashes its OWN type in `ext`, and a
+    /// LATER handler on the same hook reads it back — so a third-party plugin gets its own state
+    /// without ever touching `LoopState`. Guards against a future refactor that breaks the threading.
+    #[test]
+    fn a_plugin_handler_threads_its_own_type_across_the_dispatcher() {
+        #[derive(Default)]
+        struct PluginState {
+            token: u32,
+        }
+        #[derive(Default)]
+        struct Observed {
+            token: u32,
+        }
+        struct PluginWrite;
+        impl Handler for PluginWrite {
+            fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+                ctx.ext.get::<PluginState>().token = 1234; // its OWN type — no core edit, no core field
+                Ok(Flow::Continue)
+            }
+            fn name(&self) -> &'static str {
+                "PluginWrite"
+            }
+        }
+        struct PluginRead;
+        impl Handler for PluginRead {
+            fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+                let seen = ctx.ext.get::<PluginState>().token; // sees the earlier handler's write
+                ctx.ext.get::<Observed>().token = seen;
+                Ok(Flow::Continue)
+            }
+            fn name(&self) -> &'static str {
+                "PluginRead"
+            }
+        }
+
+        let cfg: AggConfig =
+            serde_yaml::from_str("project: probe\nsequence:\n  steps: []\n").expect("minimal config parses");
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("agg/state")).unwrap();
+        let dir = tmp.path();
+        let loop_start = Instant::now();
+        let dash = DashboardState::default();
+        let mut st = LoopState {
+            cfg: &cfg,
+            ruler: crate::backend::for_name("claude").unwrap(),
+            judge_model: "m".into(),
+            judge_timeout: 1,
+            dir,
+            config_base: dir,
+            eng: Engine::new(vec![], "iterations > 999999".into(), None).unwrap(),
+            cursor: Cursor::new(vec![]),
+            cur_step: None,
+            live: LiveState::new(dir, loop_start, dash.clone()),
+            dash,
+            ledger: crate::project::RunLedger::begin(dir, "probe", 0, 0),
+            bus: None,
+            budget_total: None,
+            cost_limit: None,
+            max_iter: None,
+            max_sessions: 0,
+            gate_regressions: false,
+            loop_start,
+            lifetime_base: 0,
+            session: 0,
+            tokens_spent: 0,
+            cost_spent: 0.0,
+            per_agent: Default::default(),
+            ext: Extensions::default(),
+            scratch: Extensions::default(),
+        };
+
+        // a hook holding two plugin-style handlers, dispatched by the SAME code the loop uses.
+        let hooks: Vec<Box<dyn Handler>> = vec![Box::new(PluginWrite), Box::new(PluginRead)];
+        let end = run_hook(&hooks, &mut st).expect("dispatch ok");
+        assert!(end.is_none(), "both handlers returned Continue → the hook drained, no early End");
+        assert_eq!(
+            st.ext.get::<Observed>().token,
+            1234,
+            "PluginRead saw PluginWrite's ext-stashed value across the real dispatcher — §4 holds"
+        );
+    }
 }
