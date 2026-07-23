@@ -41,6 +41,8 @@ impl AggConfig {
             role_prompt: body.role_prompt.clone().or_else(|| self.defaults.role_prompt.clone()),
             prompt: body.prompt.clone(),
             skip_judges: body.skip_judges,
+            // Copy type → no clone. step overrides defaults; both absent ⇒ Isolation::None.
+            isolation: body.isolation.or(self.defaults.isolation).unwrap_or_default(),
         })
     }
 
