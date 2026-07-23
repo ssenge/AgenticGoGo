@@ -21,7 +21,7 @@ use crate::bus::{Bus, Command};
 use crate::core::config::{AggConfig, ResolvedStep};
 use crate::core::engine::{CycleResult, Engine, GoalRuntime, RunState};
 use crate::core::sequence::{self, Cursor, Statement};
-use crate::core::stop::{self, StopContext};
+use crate::core::stop;
 use crate::state::{DashboardState, LiveState, Phase};
 use anyhow::Result;
 use std::path::Path;
@@ -274,657 +274,39 @@ impl Handler for Feature {
     }
 }
 
-/// Finalize the run bootstrap before the loop: gather the `prompt_includes` into `prompt_prefix`,
-/// reset the summary clock, prepare the on-disk memory scratch, and open the operator bus. On
-/// `on_run_start`, after the baseline pass — which runs AFTER `on_start` (so on_start→prompt_includes
-/// order holds) and BEFORE the loop (so the first `compose` sees the prefix). Behavior-unchanged:
-/// nothing between the `LoopState` build and here reads `prompt_prefix` (baseline judges only).
-struct Setup;
-impl Handler for Setup {
-    fn run(&self, st: &mut LoopState) -> Result<Flow> {
-        st.ext.get::<AGGState>().inject.prompt_prefix =
-            crate::hooks::gather_prompt_includes(&st.cfg.prompt_includes, st.dir);
-        st.ext.get::<AGGState>().summary.last_summary =
-            Some(Instant::now() - Duration::from_secs(st.cfg.summary.min_interval_secs));
-        if st.cfg.memory.enabled {
-            crate::core::memory::ensure_scratch_dir(st.dir);
-            crate::core::memory::sweep_scratch(st.dir);
-        }
-        st.bus = Bus::open(st.dir).ok();
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "Setup"
-    }
-}
 
 // ShellHook moved to `crate::features::shell::ShellHook`.
 
 // ── on_session_start handlers = the old INJECT stage, decomposed (HOOK_REDESIGN §4) ──────────────
 
-/// Drain the operator bus at the session boundary (inject / pause / set-budget / stop / note).
-struct BusDrain;
-impl Handler for BusDrain {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let cmds = match &ctx.bus {
-            Some(bus) => bus.drain(),
-            None => Vec::new(),
-        };
-        for cmd in cmds {
-            match cmd {
-                Command::InjectInstruction { text } => {
-                    eprintln!("  [bus] inject-instruction → prepended to next session");
-                    let op = &mut ctx.ext.get::<AGGState>().operator;
-                    op.pending_instruction = Some(match op.pending_instruction.take() {
-                        Some(prev) => format!("{prev}\n\n{text}"),
-                        None => text,
-                    });
-                }
-                Command::SetBudget { total } => {
-                    eprintln!("  [bus] set-budget → {:?}", total);
-                    ctx.budget_total = total;
-                }
-                Command::Pause => {
-                    eprintln!("  [bus] pause → waiting for resume/stop…");
-                    let stopped = match &ctx.bus {
-                        Some(bus) => wait_for_resume(bus),
-                        None => None,
-                    };
-                    if let Some(reason) = stopped {
-                        return Ok(Flow::Stop(ctx.stopped_via_bus(reason)));
-                    }
-                }
-                Command::Resume => {}
-                Command::Stop { reason } => return Ok(Flow::Stop(ctx.stopped_via_bus(reason))),
-                Command::Note { text } => eprintln!("  [bus] note: {text}"),
-            }
-        }
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "BusDrain"
-    }
-}
 
-/// Advance the sequence cursor → resolve the next step; then (ONLY on a resolved step) bump the
-/// session counter, update the ledger, print the banner, and set `cur_step` + `scratch.skip_judges`.
-struct PickStep;
-impl Handler for PickStep {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let step_name = {
-            let rs = ctx.run_state();
-            let eng = &ctx.eng;
-            let picked = ctx.cursor.next_step(&mut |cond| {
-                let sc = StopContext {
-                    judges: &eng.judges,
-                    judge_errors: &[],
-                    tokens_spent: rs.tokens_spent,
-                    budget_total: rs.budget_total,
-                    cost_spent: rs.cost_spent,
-                    cost_limit: rs.cost_limit,
-                    sessions_done: rs.sessions_done,
-                    max_sessions: rs.max_sessions,
-                    wall_hours: rs.wall_hours,
-                };
-                stop::evaluate(cond, &sc)
-            });
-            match picked {
-                Ok(n) => n,
-                Err(e) => return Ok(Flow::Stop(ctx.abort_now(&format!("sequence error: {e}")))),
-            }
-        };
-        let step = match ctx.cfg.resolve_step(&step_name) {
-            Ok(s) => s,
-            Err(e) => return Ok(Flow::Stop(ctx.abort_now(&format!("{e}")))),
-        };
 
-        ctx.session += 1;
-        ctx.dash.session = ctx.session;
-        ctx.dash.lifetime_session = ctx.lifetime_base + ctx.session;
-        let (gm, gt) = ctx.eng.tally();
-        ctx.ledger.update(ctx.session, ctx.tokens_spent, gm, gt);
-        let up = ctx.loop_start.elapsed().as_secs();
-        eprintln!(
-            "\n──── session #{} (#{} lifetime)  step `{}` [{}]  (up {}h{:02}m)  goals {gm}/{gt} ────",
-            ctx.session,
-            ctx.dash.lifetime_session,
-            step.name,
-            step.agent,
-            up / 3600,
-            (up % 3600) / 60,
-        );
-        // skip_judges into the channel BEFORE cur_step is moved (later hooks read the channel).
-        ctx.scratch.get::<AGGScratch>().skip_judges = step.skip_judges;
-        ctx.cur_step = Some(step);
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "PickStep"
-    }
-}
 
-/// Cut this session's git branch off the span tip (or base).
-struct SessionBranchCut;
-impl Handler for SessionBranchCut {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let base_ref = ctx.base_ref(); // owned; ends the &mut-self borrow before we touch cfg below
-        let iso = &ctx.cfg.session_isolation;
-        let br = crate::git::session_branch(&iso.branch_prefix, &ctx.cfg.project, ctx.session);
-        crate::git::remove_file(ctx.dir, &iso.red_file); // clear a stale veto
-        ctx.ext.get::<AGGState>().git.session_branch = if crate::git::create_branch(ctx.dir, &br, &base_ref) {
-            eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", ctx.session);
-            Some(br)
-        } else {
-            eprintln!("  [iso] could not create session branch — running on {base_ref}");
-            None
-        };
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "SessionBranchCut"
-    }
-}
 
-/// Capture the state file (for the staleness warning) + compose the brief into `INSTRUCTIONS.md`;
-/// the tiny pointer (or the inline brief on a write failure) goes to `scratch.prompt`.
-struct WriteInstructions;
-impl Handler for WriteInstructions {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if let Some(change) = crate::os::spawns::scan(ctx.dir) {
-            eprintln!("  [spawn] {change}");
-        }
-        let step = ctx.cur_step.clone().expect("PickStep set cur_step");
-        let state_path = ctx.config_base.join(&step.state);
-        ctx.ext.get::<AGGState>().inject.state_before = std::fs::read_to_string(&state_path).ok();
-        let prompt = ctx.compose_prompt(&step);
-        ctx.scratch.get::<AGGScratch>().prompt = Some(prompt);
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "WriteInstructions"
-    }
-}
-
-/// Reset the on-disk per-session memory scratch for the fresh session.
-struct ClearMemScratch;
-impl Handler for ClearMemScratch {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if ctx.cfg.memory.enabled {
-            crate::core::memory::clear_scratch(ctx.dir, ctx.session);
-        }
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "ClearMemScratch"
-    }
-}
 
 // LaunchWorker moved to `crate::features::run::LaunchWorker`.
 
 // ── on_verify handlers = the old VERIFY stage, decomposed (HOOK_REDESIGN §4) ───────────────────────
 
-/// The early ENFORCED memory floor — FIRST on on_verify, BEFORE any judging, so the session's facts
-/// survive a later panic (R1). Sets `scratch.mem_folded` for the post-judge refine fold in GATE.
-struct FloorFold;
-impl Handler for FloorFold {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let outcome = ctx.scratch.get::<AGGScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
-        ctx.scratch.get::<AGGScratch>().mem_folded = ctx.fold_memory_floor(&outcome);
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "FloorFold"
-    }
-}
 
-/// The rate-limit exit: a rate-limited session is INCOMPLETE. Plain rate-limit → `SkipSession` (skip
-/// gate + session_end, loop on). A ceiling tripped DURING backoff → `Stop(Halt)` (abort_now emits
-/// Finished first). Ceilings are checked even here so an all-night spin still trips the guard (§5.5).
-struct RateLimitBackoff;
-impl Handler for RateLimitBackoff {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let rate_limited = ctx.scratch.get::<AGGScratch>().outcome.as_ref().map(|o| o.rate_limited).unwrap_or(false);
-        if !rate_limited {
-            return Ok(Flow::Continue);
-        }
-        let secs = ctx.cfg.ratelimit_backoff_secs;
-        eprintln!("  rate limit detected — backing off {secs}s");
-        if ctx.cfg.memory.enabled {
-            crate::core::memory::clear_scratch(ctx.dir, ctx.session);
-        }
-        // §5.5 item 6: check the ceilings even here — an all-night rate-limit spin must still trip
-        // `wall_hours`/`over_budget`.
-        let rs = ctx.run_state();
-        let ceil = ctx.eng.conditions_only(&rs);
-        if ceil.halt {
-            eprintln!("  ⚠ ceiling tripped during backoff — aborting");
-            let outcome = ctx.abort_now(&format!("abort_if: {}", ceil.halt_reason.unwrap_or_default()));
-            return Ok(Flow::Stop(outcome));
-        }
-        ctx.emit(LifecycleEvent::Backoff);
-        std::thread::sleep(Duration::from_secs(secs));
-        Ok(Flow::SkipSession)
-    }
-    fn name(&self) -> &'static str {
-        "RateLimitBackoff"
-    }
-}
 
-/// Snapshot the pre-step (base) judge truth so a GATE rollback can restore it (W5). Runs only past
-/// the rate-limit exit — exactly like the old `pre_cycle_goals` snapshot after the rate-limit return.
-/// Auto-commit the worker's tracked edits on the session branch (GIT_REDESIGN: agg owns git, the
-/// worker never runs git). Runs after the worker (on_run) and the rate-limit check, BEFORE staging
-/// (StageSpan/StageMerge) — the session branch is still checked out here, so the commit lands on it
-/// and the subsequent merge picks it up. Best-effort → Continue; skipped cleanly when isolation
-/// produced no session branch. Runs on skip AND judged steps (both stage the branch's work).
-struct GitAutoCommit;
-impl Handler for GitAutoCommit {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if let Some(br) = ctx.ext.get::<AGGState>().git.session_branch.clone() {
-            let step = ctx.cur_step.clone().expect("PickStep set cur_step");
-            let msg = format!("agg: session {} ({}) on {}", ctx.session, step.name, step.agent);
-            if crate::git::auto_commit_tracked(ctx.dir, &msg) {
-                eprintln!("  [git] agg committed the worker's edits on {br}");
-            }
-        }
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "GitAutoCommit"
-    }
-}
 
-struct SnapshotGoals;
-impl Handler for SnapshotGoals {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        ctx.scratch.get::<AGGScratch>().pre_cycle_goals = ctx.eng.snapshot_goal_state();
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "SnapshotGoals"
-    }
-}
 
-/// The `skip_judges` path (§5.7): no judges — keep the branch, extend the span tip, run ceilings only.
-/// Runs on a skip step (an internal guard makes it a no-op on a judged step, where StageMerge/RunJudges
-/// take over). Sets `scratch.res` (ceilings-only) and leaves `scratch.staged = None`.
-struct StageSpan;
-impl Handler for StageSpan {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if !ctx.scratch.get::<AGGScratch>().skip_judges {
-            return Ok(Flow::Continue);
-        }
-        ctx.emit(LifecycleEvent::Staging);
-        let iso = &ctx.cfg.session_isolation;
-        let vetoed = ctx.dir.join(&iso.red_file).exists();
-        let red_file = iso.red_file.clone();
-        let sb = ctx.ext.get::<AGGState>().git.session_branch.clone();
-        if vetoed {
-            eprintln!("  [span] session #{} VETOED (red_file) → work discarded, not staged", ctx.session);
-            crate::git::remove_file(ctx.dir, &red_file);
-            // leave the branch orphaned; the span tip is unchanged.
-        } else if let Some(br) = sb {
-            eprintln!("  [span] session #{} staged on {br} (skip_judges) — nothing merged yet", ctx.session);
-            let git = &mut ctx.ext.get::<AGGState>().git;
-            git.span_tip = Some(br.clone());
-            git.span_branches.push(br);
-        }
-        // ceilings only (no judges ran) — done_if reads stale state and cannot fire, ceilings can.
-        let step = ctx.cur_step.clone().expect("PickStep set cur_step");
-        let rs = ctx.run_state();
-        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), true);
-        ctx.scratch.get::<AGGScratch>().res = Some(res);
-        ctx.scratch.get::<AGGScratch>().staged = None;
-        ctx.publish();
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "StageSpan"
-    }
-}
 
-/// A JUDGED step only (bypassed on a skip step): stage the merge so the judges test the MERGED tree.
-/// Sets `scratch.staged`.
-struct StageMerge;
-impl Handler for StageMerge {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let red_file = ctx.cfg.session_isolation.red_file.clone();
-        let iso_base = ctx.ext.get::<AGGState>().git.iso_base.clone();
-        let staged = ctx.ext.get::<AGGState>().git.session_branch.clone().map(|br| {
-            let s = crate::git::stage_session(ctx.dir, &iso_base, &br, &red_file);
-            (br, s)
-        });
-        ctx.scratch.get::<AGGScratch>().staged = staged;
-        Ok(Flow::Continue)
-    }
-    fn runs_on_skip(&self) -> bool {
-        false
-    }
-    fn name(&self) -> &'static str {
-        "StageMerge"
-    }
-}
 
-/// A JUDGED step only (bypassed on a skip step): run the run-set judges against the staged tree, count
-/// their spend against the ceilings + the ruler's per-agent tally. Sets `scratch.res`.
-struct RunJudges;
-impl Handler for RunJudges {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let step = ctx.cur_step.clone().expect("PickStep set cur_step");
-        eprintln!("  running judges…");
-        ctx.emit(LifecycleEvent::Verify);
-        let rs = ctx.run_state();
-        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), false);
-        // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
-        ctx.tokens_spent += res.judge_tokens;
-        if let Some(c) = res.judge_cost {
-            ctx.cost_spent += c;
-        }
-        let ruler_agent = ctx.cfg.judge.agent.clone();
-        ctx.charge(&ruler_agent, res.judge_tokens, res.judge_cost);
-        eprint!("{}", indent(&ctx.eng.scoreboard()));
-        ctx.scratch.get::<AGGScratch>().res = Some(res);
-        ctx.publish();
-        Ok(Flow::Continue)
-    }
-    fn runs_on_skip(&self) -> bool {
-        false
-    }
-    fn name(&self) -> &'static str {
-        "RunJudges"
-    }
-}
 
 // ── on_gate handlers = the old GATE keep/rollback (HOOK_REDESIGN §4) ───────────────────────────────
 
-/// FIRST on on_gate: a skip-step ceiling halt (nothing staged, no verdicts) stops the run WITHOUT the
-/// session-end work — and crucially WITHOUT `emit(Gate)`, so the poison path never publishes a Gate
-/// phase (R10). Emits nothing; reads scratch by ref (leaves `res`/`staged` for GateKeepRollback).
-struct CeilingPoisonGuard;
-impl Handler for CeilingPoisonGuard {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let sc = ctx.scratch.get::<AGGScratch>();
-        let res = sc.res.as_ref().expect("an on_verify handler set scratch.res");
-        if sc.skip_judges
-            && res.halt
-            && sc.staged.is_none()
-            && res.fresh_verdicts.is_empty()
-            && res.deltas.is_empty()
-        {
-            return Ok(Flow::Stop(RunOutcome::Halt));
-        }
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "CeilingPoisonGuard"
-    }
-}
 
-/// Keep / roll back the judged merge. `emit(Gate)` is its FIRST line (fires for skip + judged; the
-/// poison path never reaches here, so it stays Gate-free — R10). Runs on skip steps too (an internal
-/// `if skip_judges` guard makes the keep/rollback a no-op there — a skip step emits Gate but merges
-/// nothing). On a rollback it REWRITES `scratch.res` and sets `scratch.rolled_back`. The
-/// `verdicts::append` `?` is a HARD disk Err that bubbles out of `run()` (R7) — NOT a clean Halt.
-struct GateKeepRollback;
-impl Handler for GateKeepRollback {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        ctx.emit(LifecycleEvent::Gate);
-        if ctx.scratch.get::<AGGScratch>().skip_judges {
-            return Ok(Flow::Continue); // a skip step: the span was staged in VERIFY; nothing to gate.
-        }
-        let mut res = ctx.scratch.get::<AGGScratch>().res.take().expect("an on_verify handler set scratch.res");
-        let staged = ctx.scratch.get::<AGGScratch>().staged.take();
-        let pre_cycle_goals = std::mem::take(&mut ctx.scratch.get::<AGGScratch>().pre_cycle_goals);
-        let step_name = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
-        let mut rolled_back = false;
-
-        match &staged {
-            Some((br, crate::git::StagedSession::Staged)) => {
-                // the regression gate: a DoD-set judge MET before (durable, §5.7) that now fails.
-                // Scope to the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs
-                // `in_scope` → `g.in_dod`). A run-set-only control judge like `stalled` is DESIGNED to
-                // flip met→unmet — that flip is the very signal that fired `reconsider` — so counting
-                // its flip as a regression would roll back the work that escaped the stall (and, because
-                // rolled-back rows never land, livelock the loop). §5.7 protects the DoD-set; a judge
-                // named only in an `if` condition is not in it.
-                let landed = crate::core::verdicts::landed_met(ctx.dir);
-                let regressed = res.fresh_verdicts.iter().any(|(id, v)| {
-                    ctx.eng.judges.iter().any(|g| g.in_dod && &g.name == id)
-                        && v.error.is_none()
-                        && !v.met
-                        && landed.get(id).copied().unwrap_or(false)
-                });
-                let keep = if ctx.gate_regressions { !regressed } else { true };
-                crate::git::finalize_session(ctx.dir, br, ctx.session, keep);
-                let tag = if keep {
-                    crate::core::verdicts::Outcome::Merged
-                } else {
-                    crate::core::verdicts::Outcome::RolledBack
-                };
-                crate::core::verdicts::append(ctx.dir, Some(ctx.session), &step_name, &res.fresh_verdicts, tag)?;
-                if keep {
-                    // the whole span merged with this branch (it descends from the span). Clear it.
-                    // ponytail: intermediate span branches are left as refs (no public delete);
-                    // harmless, and cleanup is a later polish. REPORTED.
-                    ctx.ext.get::<AGGState>().git.span_tip = None;
-                    ctx.ext.get::<AGGState>().git.span_branches.clear();
-                } else {
-                    rolled_back = true;
-                    ctx.eng.restore_goal_state(&pre_cycle_goals);
-                    ctx.ext.get::<AGGState>().git.span_tip = None; // span discarded; next cuts off base
-                    ctx.ext.get::<AGGState>().git.span_branches.clear();
-                    eprint!("{}", indent(&ctx.eng.scoreboard()));
-                    let rs = ctx.run_state();
-                    let recomputed = ctx.eng.conditions_only(&rs);
-                    res = CycleResult {
-                        stop: recomputed.stop,
-                        halt: recomputed.halt,
-                        halt_reason: recomputed.halt_reason,
-                        deltas: Vec::new(),
-                        fresh_verdicts: Vec::new(),
-                        judge_tokens: 0,
-                        judge_cost: None,
-                    };
-                }
-                ctx.publish();
-            }
-            _ => {
-                // Vetoed / NoChanges / Conflict / CheckoutFailed / no branch: nothing merged. The
-                // judged verdicts describe base, not a landed merge — record them rolled_back and
-                // restore base truth so the next step isn't gated against a phantom.
-                ctx.eng.restore_goal_state(&pre_cycle_goals);
-                ctx.ext.get::<AGGState>().git.span_tip = None;
-                ctx.ext.get::<AGGState>().git.span_branches.clear();
-                crate::core::verdicts::append(
-                    ctx.dir,
-                    Some(ctx.session),
-                    &step_name,
-                    &res.fresh_verdicts,
-                    crate::core::verdicts::Outcome::RolledBack,
-                )?;
-                let rs = ctx.run_state();
-                let recomputed = ctx.eng.conditions_only(&rs);
-                res = CycleResult {
-                    stop: recomputed.stop,
-                    halt: recomputed.halt,
-                    halt_reason: recomputed.halt_reason,
-                    deltas: Vec::new(),
-                    fresh_verdicts: Vec::new(),
-                    judge_tokens: 0,
-                    judge_cost: None,
-                };
-                ctx.publish();
-            }
-        }
-
-        ctx.scratch.get::<AGGScratch>().res = Some(res);
-        ctx.scratch.get::<AGGScratch>().rolled_back = rolled_back;
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "GateKeepRollback"
-    }
-}
 
 // ── on_session_end handlers = the old GATE tail (HOOK_REDESIGN §4) ─────────────────────────────────
 
 // The LLM summarizer moved to `crate::features::summary::Summarize` — agg's first feature relocated
 // out of the core as a plugin, reaching the core only through the public API.
 
-/// Institutional memory: the post-judge refinement fold. Gated on the floor fold (`scratch.mem_folded`)
-/// and reads `scratch.rolled_back` + the summary — exactly the old post-judge fold.
-struct RefineFold;
-impl Handler for RefineFold {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if !(ctx.cfg.memory.enabled && ctx.scratch.get::<AGGScratch>().mem_folded) {
-            return Ok(Flow::Continue);
-        }
-        let outcome = ctx.scratch.get::<AGGScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
-        let deltas = ctx.scratch.get::<AGGScratch>().res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
-        let rolled_back = ctx.scratch.get::<AGGScratch>().rolled_back;
-        let summarized_this_cycle = ctx.scratch.get::<AGGScratch>().summarized_this_cycle;
-        let scoreboard = ctx.eng.scoreboard();
-        let ended = crate::util::now_epoch();
-        let mut mech = crate::core::memory::mechanical_note(
-            outcome.exit_code, outcome.killed_by_watchdog, outcome.rate_limited,
-            outcome.duration_secs, ended.saturating_sub(outcome.duration_secs), ended,
-            &scoreboard, &deltas,
-        );
-        if rolled_back {
-            mech = format!(
-                "session ROLLED BACK — a goal regressed on the staged merge; the work below is \
-                 NOT on the base branch (kept on the session branch for inspection).\n{mech}"
-            );
-        }
-        let worker_note = crate::core::memory::read_worker_note(ctx.dir, ctx.session);
-        let (source, body) = match worker_note {
-            Some(note) => (
-                "mechanical+worker",
-                format!("{mech}\n\n[worker note — UNTRUSTED hint, not authoritative]\n```text\n{note}\n```"),
-            ),
-            None if summarized_this_cycle && !ctx.dash.summary_windowed.trim().is_empty() => (
-                "mechanical+summary",
-                format!("{mech}\n\nsummary: {}", ctx.dash.summary_windowed.trim()),
-            ),
-            None => ("mechanical", mech),
-        };
-        ctx.dash.memory_bytes = crate::core::memory::fold_entry(
-            ctx.dir, ctx.session, source, &body, ctx.cfg.memory.max_kb, true,
-        );
-        crate::core::memory::clear_scratch(ctx.dir, ctx.session);
-        ctx.ext.get::<AGGState>().memory.last_session =
-            crate::core::memory::last_session_block(&deltas, &scoreboard);
-        eprintln!("  [memory] session #{} folded ({source}); LOG.md {} B", ctx.session, ctx.dash.memory_bytes);
-        ctx.publish();
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "RefineFold"
-    }
-}
 
-/// The run-stop decision — the LAST on_session_end handler (R2): the winning/aborting session has
-/// ALREADY run the session-end shell hook + summary + refine fold above. Emits `Finished` itself,
-/// then `Flow::Stop`. `Continue` means the loop goes round again (the old `GateDecision::Loop`).
-struct CheckRunStop;
-impl Handler for CheckRunStop {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let res = ctx.scratch.get::<AGGScratch>().res.take().expect("an on_verify handler set scratch.res");
-        if res.halt {
-            let reason = res.halt_reason.unwrap_or_default();
-            eprintln!("\n⚠ ABORT — abort_if true: {reason}\n  stopping the loop (a ceiling / guard, not success).");
-            ctx.report_stranded_span();
-            ctx.emit(LifecycleEvent::Finished {
-                reason: format!("ABORT: {reason}"),
-                ledger_tag: format!("abort:{reason}"),
-            });
-            return Ok(Flow::Stop(RunOutcome::Halt));
-        }
-        if res.stop {
-            let (mt, tt) = ctx.eng.tally();
-            eprintln!("\n✔ done_if satisfied — {mt}/{tt} goals met. Done after {} session(s).", ctx.session);
-            ctx.emit(LifecycleEvent::Finished {
-                reason: format!("{mt}/{tt} goals met after {} session(s)", ctx.session),
-                ledger_tag: "goals-met".into(),
-            });
-            return Ok(Flow::Stop(RunOutcome::GoalsMet));
-        }
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "CheckRunStop"
-    }
-}
 
-/// Baseline pass (§5.5.1): judge the untouched repo ONCE before session 1 and write `baseline`
-/// verdicts, on `on_run_start`. Its two launch-time early exits — `abort_if` already true → Halt,
-/// `done_if` already satisfied → GoalsMet — come back as `Flow::Stop`; it finalizes dash + ledger
-/// itself (exactly as the old inline pass did) before returning, so the core just propagates the
-/// outcome. Verbatim port of the former inline baseline block.
-struct Baseline;
-impl Handler for Baseline {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        eprintln!("  baseline: running judges once before the first session…");
-        ctx.dash.phase = Phase::Verify;
-        ctx.publish();
-        let dir = ctx.dir;
-        let ruler = ctx.ruler;
-        let judge_model = ctx.judge_model.clone();
-        let judge_timeout = ctx.judge_timeout;
-        let rs = ctx.run_state();
-        let pre = ctx.eng.run_step(dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false);
-        ctx.tokens_spent += pre.judge_tokens;
-        if let Some(c) = pre.judge_cost {
-            ctx.cost_spent += c;
-        }
-        let ruler_agent = ctx.cfg.judge.agent.clone();
-        ctx.charge(&ruler_agent, pre.judge_tokens, pre.judge_cost);
-        eprint!("{}", indent(&ctx.eng.scoreboard()));
-        ctx.publish();
-        crate::core::verdicts::append(dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
-        if pre.halt {
-            eprintln!("⚠ ABORT at baseline — abort_if already true: {}", pre.halt_reason.clone().unwrap_or_default());
-            ctx.dash.phase = Phase::Done;
-            ctx.dash.finished = true;
-            ctx.dash.finish_reason = format!("ABORT at baseline: {}", pre.halt_reason.clone().unwrap_or_default());
-            let (gm, gt) = ctx.eng.tally();
-            ctx.ledger.update(0, 0, gm, gt);
-            ctx.ledger.finish(now_epoch(), &format!("abort-at-baseline:{}", pre.halt_reason.unwrap_or_default()));
-            ctx.publish();
-            return Ok(Flow::Stop(RunOutcome::Halt));
-        }
-        if pre.stop {
-            eprintln!("✔ done_if already satisfied at launch — nothing to do.");
-            ctx.dash.phase = Phase::Done;
-            ctx.dash.finished = true;
-            ctx.dash.finish_reason = "already satisfied at launch".into();
-            let (gm, gt) = ctx.eng.tally();
-            ctx.ledger.update(0, 0, gm, gt);
-            ctx.ledger.finish(now_epoch(), "already-satisfied");
-            ctx.publish();
-            return Ok(Flow::Stop(RunOutcome::GoalsMet));
-        }
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "Baseline"
-    }
-}
 
-/// Spawn the user's long-lived `background` watchers into the loop's process group (so the straggler
-/// reaper cleans them up), on the `background` hook fired once at run start. Best-effort → Continue.
-struct BackgroundSpawn {
-    cmds: Vec<String>,
-}
-impl Handler for BackgroundSpawn {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        crate::hooks::spawn_background(&self.cmds, ctx.dir);
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "BackgroundSpawn"
-    }
-}
 
 /// The lifecycle registry: one ordered handler list per hook point. `default_pipeline` is agg's
 /// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
@@ -952,52 +334,6 @@ fn run_pre_start(hs: &[Box<dyn PreStart>], boot: &mut Bootstrap) -> Result<()> {
     Ok(())
 }
 
-/// The `pre_start` feature: agg's run-start git preconditions, in order — recover a stranded merge
-/// from a prior crash, require a clean git repo (session isolation is MANDATORY), ensure `agg/state`
-/// is gitignored (runtime state survives rollback), and resolve the isolation base branch (→
-/// `boot.iso_base` for the constructor). Runs before the loop state exists; any `bail!` is a hard
-/// error out of `run()`, exactly as the old inline block. Verbatim, just grouped under one feature.
-struct GitSetup;
-impl PreStart for GitSetup {
-    fn run(&self, boot: &mut Bootstrap) -> Result<()> {
-        let dir = boot.dir;
-        let iso = &boot.cfg.session_isolation;
-        // recover a stranded merge left by a prior crash (guarded on being a git repo)
-        if crate::git::is_repo(dir) {
-            crate::git::recover_stranded_merge(dir, &iso.branch_prefix);
-        }
-        // require a git repo with a clean tracked tree
-        if !crate::git::is_repo(dir) {
-            anyhow::bail!(
-                "session isolation is mandatory, but this is not a git repository.\n  \
-                 fix:  git init && git add -A && git commit -m 'agg baseline'"
-            );
-        }
-        if !crate::git::is_clean(dir) {
-            anyhow::bail!(
-                "session isolation is mandatory, but the work tree has uncommitted tracked changes.\n  \
-                 fix:  commit or stash your changes first  (git status shows them)"
-            );
-        }
-        // keep runtime state untracked (survives rollback)
-        crate::git::ensure_agg_gitignored(dir);
-        // resolve the isolation base branch (configured, else current; refuse a detached HEAD)
-        let iso_base: String = if iso.base_branch.is_empty() {
-            match crate::git::current_branch(dir) {
-                Some(b) => b,
-                None => anyhow::bail!(
-                    "session isolation is mandatory, but HEAD is detached.\n  \
-                     fix:  git switch -c <branch>"
-                ),
-            }
-        } else {
-            iso.base_branch.clone()
-        };
-        eprintln!("  [iso] per-session branch isolation ON — base branch '{iso_base}'");
-        boot.iso_base = Some(iso_base);
-        Ok(())
-    }
-}
 
 /// The hook registry: one ordered plugin list per lifecycle point. `default_pipeline` is agg's OWN
 /// registration (its features are plugins, no different from a third party's). Fields are `pub` so a
@@ -1033,43 +369,43 @@ impl Lifecycle {
         // ── THE REGISTRY, read top-to-bottom = the loop's lifecycle. Each hook point holds a
         //    HIGH-LEVEL FEATURE; a feature's `vec![…]` is its internal structure (small, focused
         //    steps), dispatched with the same Flow/skip semantics — grouping changes no behavior. ──
-        l.pre_start.push(Box::new(GitSetup)); // git preconditions (before the loop state exists)
+        l.pre_start.push(Box::new(crate::features::gitsetup::GitSetup)); // git preconditions (before the loop state exists)
         l.on_start.push(shell("on_start", &hooks.on_start));
-        l.background.push(Box::new(BackgroundSpawn { cmds: hooks.background.clone() }));
-        l.on_run_start.push(Box::new(Baseline)); // baseline judge pass, then bootstrap finalize:
-        l.on_run_start.push(Box::new(Setup));
+        l.background.push(Box::new(crate::features::setup::BackgroundSpawn { cmds: hooks.background.clone() }));
+        l.on_run_start.push(Box::new(crate::features::setup::Baseline)); // baseline judge pass, then bootstrap finalize:
+        l.on_run_start.push(Box::new(crate::features::setup::Setup));
         l.on_session_start.push(feature(
             "Inject",
             vec![
-                Box::new(BusDrain),
-                Box::new(PickStep),
-                Box::new(SessionBranchCut),
+                Box::new(crate::features::inject::BusDrain),
+                Box::new(crate::features::inject::PickStep),
+                Box::new(crate::features::inject::SessionBranchCut),
                 shell("on_session_start", &hooks.on_session_start),
-                Box::new(WriteInstructions),
-                Box::new(ClearMemScratch),
+                Box::new(crate::features::inject::WriteInstructions),
+                Box::new(crate::features::inject::ClearMemScratch),
             ],
         ));
         l.on_run.push(feature("Run", vec![Box::new(crate::features::run::LaunchWorker)]));
         l.on_verify.push(feature(
             "Verify",
             vec![
-                Box::new(FloorFold),
-                Box::new(RateLimitBackoff),
-                Box::new(GitAutoCommit),
-                Box::new(SnapshotGoals),
-                Box::new(StageSpan),
-                Box::new(StageMerge),
-                Box::new(RunJudges),
+                Box::new(crate::features::verify::FloorFold),
+                Box::new(crate::features::verify::RateLimitBackoff),
+                Box::new(crate::features::verify::GitAutoCommit),
+                Box::new(crate::features::verify::SnapshotGoals),
+                Box::new(crate::features::verify::StageSpan),
+                Box::new(crate::features::verify::StageMerge),
+                Box::new(crate::features::verify::RunJudges),
             ],
         ));
-        l.on_gate.push(feature("Gate", vec![Box::new(CeilingPoisonGuard), Box::new(GateKeepRollback)]));
+        l.on_gate.push(feature("Gate", vec![Box::new(crate::features::gate::CeilingPoisonGuard), Box::new(crate::features::gate::GateKeepRollback)]));
         l.on_session_end.push(feature(
             "Finalize",
             vec![
                 shell("on_session_end", &hooks.on_session_end),
                 Box::new(crate::features::summary::Summarize),
-                Box::new(RefineFold),
-                Box::new(CheckRunStop),
+                Box::new(crate::features::finalize::RefineFold),
+                Box::new(crate::features::finalize::CheckRunStop),
             ],
         ));
         l.on_stop.push(shell("on_stop", &hooks.on_stop));
@@ -1166,7 +502,7 @@ fn push_unique(v: &mut Vec<String>, s: &str) {
     }
 }
 
-fn wait_for_resume(bus: &Bus) -> Option<String> {
+pub fn wait_for_resume(bus: &Bus) -> Option<String> {
     loop {
         std::thread::sleep(Duration::from_secs(2));
         for cmd in bus.drain() {
@@ -1318,7 +654,7 @@ impl LoopState<'_> {
         });
     }
 
-    fn run_state(&self) -> RunState {
+    pub fn run_state(&self) -> RunState {
         RunState {
             tokens_spent: self.tokens_spent,
             budget_total: self.budget_total,
@@ -1344,7 +680,7 @@ impl LoopState<'_> {
         Some(RunOutcome::MaxSessions)
     }
 
-    fn stopped_via_bus(&mut self, reason: String) -> RunOutcome {
+    pub fn stopped_via_bus(&mut self, reason: String) -> RunOutcome {
         eprintln!("  [bus] stop → {reason}");
         self.emit(LifecycleEvent::Finished {
             reason: format!("stopped via bus: {reason}"),
@@ -1355,7 +691,7 @@ impl LoopState<'_> {
 
     /// The branch a JUDGED step's regression check reads / the branch cut. Base is the resolved
     /// isolation base.
-    fn base_ref(&mut self) -> String {
+    pub fn base_ref(&mut self) -> String {
         let git = &self.ext.get::<AGGState>().git;
         git.span_tip.clone().unwrap_or_else(|| git.iso_base.clone())
     }
@@ -1370,7 +706,7 @@ impl LoopState<'_> {
     ///
     /// If the file write fails (rare best-effort disk error), fall back to returning the composed
     /// content directly so the session still runs, arg-safe against a leading dash.
-    fn compose_prompt(&mut self, step: &ResolvedStep) -> String {
+    pub fn compose_prompt(&mut self, step: &ResolvedStep) -> String {
         let mut s = String::new();
         s.push_str(
             "<!-- agg/state/INSTRUCTIONS.md — WRITTEN BY agg, REGENERATED every session. Do not edit; it is overwritten. -->\n\n",
@@ -1497,7 +833,7 @@ impl LoopState<'_> {
         RunOutcome::Stopped
     }
 
-    fn abort_now(&mut self, reason: &str) -> RunOutcome {
+    pub fn abort_now(&mut self, reason: &str) -> RunOutcome {
         eprintln!("\n⚠ {reason}");
         self.emit(LifecycleEvent::Finished {
             reason: reason.to_string(),
@@ -1507,7 +843,7 @@ impl LoopState<'_> {
     }
 
     /// The early ENFORCED memory floor (so the session's facts survive a later panic).
-    fn fold_memory_floor(&mut self, outcome: &SessionOutcome) -> bool {
+    pub fn fold_memory_floor(&mut self, outcome: &SessionOutcome) -> bool {
         if self.cfg.memory.enabled && !outcome.rate_limited {
             let scoreboard_now = self.eng.scoreboard();
             let ended = crate::util::now_epoch();
@@ -1536,7 +872,7 @@ impl LoopState<'_> {
     }
 
     /// On abort with a span still staged, leave the branches and print them (§5.7).
-    fn report_stranded_span(&mut self) {
+    pub fn report_stranded_span(&mut self) {
         let span_branches = &self.ext.get::<AGGState>().git.span_branches;
         if !span_branches.is_empty() {
             eprintln!(
@@ -1730,7 +1066,7 @@ pub fn run_with(
     }
 }
 
-fn indent(s: &str) -> String {
+pub fn indent(s: &str) -> String {
     s.lines().map(|l| format!("    {l}\n")).collect()
 }
 
