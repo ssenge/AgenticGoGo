@@ -34,6 +34,7 @@ signal-hook = "0.4.4"
 [dev-dependencies]
 assert_cmd = "2"          # drive the built `agg` binary in integration tests
 tempfile = "3"            # throwaway project dirs for integration tests
+anyhow = "1"              # the Handler trait's public return type — a plugin crate needs it too
 
 [profile.release]
 opt-level = 3
