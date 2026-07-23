@@ -15,11 +15,9 @@
 //! The sequence repeats from the top forever until `done_if` fires (exit 0) or `abort_if` fires
 //! (exit 3). Per-step agent/model/effort are resolved at session-build time (the singleton is gone).
 
-use crate::backend::worker::SessionOutcome;
-use crate::backend::AgentBackend;
 use crate::bus::{Bus, Command};
-use crate::core::config::{AggConfig, ResolvedStep};
-use crate::core::engine::{CycleResult, Engine, GoalRuntime, RunState};
+use crate::core::config::AggConfig;
+use crate::core::engine::Engine;
 use crate::core::sequence::{self, Cursor, Statement};
 use crate::core::stop;
 use crate::state::{DashboardState, LiveState, Phase};
@@ -27,55 +25,9 @@ use anyhow::Result;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// How the loop ended — mapped to a process exit code in `main`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunOutcome {
-    /// `done_if` (the Definition of Done) fired, or was already satisfied at launch.
-    GoalsMet,
-    /// `abort_if` fired (invariant regressed, budget/cost/iteration/wall ceiling) — NOT success.
-    Halt,
-    /// The `--max-sessions` cap was reached with the DoD not met.
-    MaxSessions,
-    /// The operator stopped the run.
-    Stopped,
-}
 
-impl RunOutcome {
-    pub fn exit_code(self) -> u8 {
-        match self {
-            RunOutcome::GoalsMet => 0,
-            RunOutcome::Stopped => 0,
-            RunOutcome::Halt => 3,
-            RunOutcome::MaxSessions => 4,
-        }
-    }
-}
 
-/// Something the loop DID, at the moment it did it — the single source of truth for `dash.phase`.
-pub enum LifecycleEvent {
-    Inject,
-    Run,
-    Verify,
-    Gate,
-    Backoff,
-    /// a `skip_judges` step whose work is being STAGED onto the span (§7.4).
-    Staging,
-    Finished { reason: String, ledger_tag: String },
-}
 
-impl LifecycleEvent {
-    pub fn phase(&self) -> Phase {
-        match self {
-            LifecycleEvent::Inject => Phase::Inject,
-            LifecycleEvent::Run => Phase::Run,
-            LifecycleEvent::Verify => Phase::Verify,
-            LifecycleEvent::Gate => Phase::Gate,
-            LifecycleEvent::Backoff => Phase::Backoff,
-            LifecycleEvent::Staging => Phase::Staging,
-            LifecycleEvent::Finished { .. } => Phase::Done,
-        }
-    }
-}
 
 /// The worker's ENTIRE pushed input. The full brief is composed into `agg/state/INSTRUCTIONS.md`
 /// every session and the worker is pointed at it — this kills the argv size ceiling AND the
@@ -101,140 +53,18 @@ pub const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
 // the whole state is legal with no borrow gymnastics. The `Lifecycle` is owned by `run()` and passed
 // ALONGSIDE the state (never stored in it) — that disjointness is what keeps the borrow sound.
 
-/// A handler's control-flow result (§3.1). MINIMAL: reason/ledger_tag are NOT here — every Stop
-/// path already `emit`s `Finished{reason,ledger_tag}` itself before yielding the outcome, so a
-/// handler emits then returns `Flow::Stop(outcome)` and the core never re-emits.
-pub enum Flow {
-    Continue,
-    /// stop the rest of THIS session's hooks, loop to the next session (the rate-limit path).
-    SkipSession,
-    Stop(RunOutcome),
-}
 
-/// What a whole hook-point dispatch produced (`None` = drained cleanly, fall through to next hook).
-pub enum End {
-    NextSession,
-    Stop(RunOutcome),
-}
 
-/// A type-keyed bag: one value per Rust type (anymap-style). The loop is single-threaded, so no
-/// Send/Sync needed. This is the generic extension store (LOOPSTATE_REDESIGN §3): agg's own features
-/// use it via `AGGState`/`AGGScratch`, and a third-party plugin stashes ITS OWN type the same way —
-/// `ctx.ext.get::<FooState>()` — without ever editing the core struct.
-#[derive(Default)]
-pub struct Extensions {
-    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
-}
-impl Extensions {
-    /// Get-or-insert-default this type's slot, typed. How a feature/plugin reads+writes its own state.
-    pub fn get<T: Default + 'static>(&mut self) -> &mut T {
-        self.map
-            .entry(std::any::TypeId::of::<T>())
-            .or_insert_with(|| Box::new(T::default()))
-            .downcast_mut::<T>()
-            .expect("TypeId keys its own type")
-    }
-    pub fn clear(&mut self) {
-        self.map.clear();
-    }
-}
 
 /// ALL of agg's own per-run feature state, organised by feature (LOOPSTATE_REDESIGN §3.1) — the
 /// built-in "plugin", stored in the per-run `ext`. Persists across sessions (git span, summarizer
 /// window, memory tail, worker health); NEVER cleared mid-run.
-#[derive(Default)]
-pub struct AGGState {
-    pub git: GitIso,
-    pub summary: Summary,
-    pub memory: Memory,
-    pub worker: WorkerHealth,
-    pub operator: Operator,
-    pub inject: Inject,
-}
-/// per-session git isolation + spans (was `iso_base`/`session_branch`/`span_tip`/`span_branches`).
-#[derive(Default)]
-pub struct GitIso {
-    /// the resolved isolation base branch (set once at run start).
-    pub iso_base: String,
-    /// this session's branch (cut by INJECT, resolved by GATE).
-    pub session_branch: Option<String>,
-    /// the branch the NEXT session cuts off — the TIP of the staged span, or `None` = base (§5.7).
-    pub span_tip: Option<String>,
-    /// staged span branches accumulated by `skip_judges` steps (for reporting on abort).
-    pub span_branches: Vec<String>,
-}
-/// the LLM summarizer's rolling window (was `cumulative`/`last_summary`).
-#[derive(Default)]
-pub struct Summary {
-    pub cumulative: String,
-    /// `None` until `Setup` primes it (on_run_start, before the loop) — reads treat `None` as due.
-    pub last_summary: Option<Instant>,
-}
-/// institutional-memory tail (was `last_session`).
-#[derive(Default)]
-pub struct Memory {
-    pub last_session: String,
-}
-/// worker-broken detection (was `dud_streak`).
-#[derive(Default)]
-pub struct WorkerHealth {
-    pub dud_streak: u32,
-}
-/// operator steering carried to the next session (was `pending_instruction`).
-#[derive(Default)]
-pub struct Operator {
-    pub pending_instruction: Option<String>,
-}
-/// compose-time inputs (was `prompt_prefix`/`state_before`).
-#[derive(Default)]
-pub struct Inject {
-    /// `prompt_includes` fragments, composed once at launch.
-    pub prompt_prefix: String,
-    /// content of the step's state file at session start, to warn if the agent never touched it.
-    pub state_before: Option<String>,
-}
+// agg's plugin state (AGGState/AGGScratch) lives in `features::state`; re-exported so the
+// context + registry can name it. A third-party plugin defines its OWN state type the same way.
+pub use crate::features::state::{AGGScratch, AGGState};
+pub use crate::context::LoopState;
+pub use crate::plugin::{Bootstrap, End, Extensions, Flow, Handler, LifecycleEvent, PreStart, RunOutcome};
 
-/// The per-session channel between stage-handlers, stored in the per-session `scratch` store and
-/// `clear()`ed each session at the loop top so no field (esp. `prompt`) leaks across sessions. NOT
-/// the on-disk memory scratch (`memory::clear_scratch`) — a different thing.
-#[derive(Default)]
-pub struct AGGScratch {
-    /// `WriteInstructions` (on_session_start) → the RUN launch. Replaces `Injected::Prompt`.
-    pub prompt: Option<String>,
-    /// `PickStep` sets it from `cur_step.skip_judges`; `run_hook`'s predicate uses it to bypass a
-    /// handler that opts out of skip steps (`runs_on_skip()==false`). Truth stays in `self.cur_step`.
-    pub skip_judges: bool,
-    /// `LaunchWorker` (on_run) → VERIFY/GATE. Replaces `run()`'s `Option<SessionOutcome>` return.
-    pub outcome: Option<SessionOutcome>,
-    /// `FloorFold` (on_verify) → the post-judge refine fold in GATE. Was `Verified.mem_folded`.
-    pub mem_folded: bool,
-    /// `SnapshotGoals` (on_verify) → a rollback in GATE restores it. Was `Verified.pre_cycle_goals`.
-    pub pre_cycle_goals: Vec<GoalRuntime>,
-    /// `StageSpan` (skip) XOR `RunJudges` (judged) → GATE; REWRITTEN by GATE on a rollback. Was `Verified.res`.
-    pub res: Option<CycleResult>,
-    /// `StageMerge` (judged) → GATE's keep/rollback. `None` on a skip step. Was `Verified.staged`.
-    pub staged: Option<(String, crate::git::StagedSession)>,
-    /// `GateKeepRollback` (on_gate) → `RefineFold`'s "session ROLLED BACK" prefix. Staged-!keep only.
-    pub rolled_back: bool,
-    /// `Summarize` (on_session_end) → `RefineFold`'s mechanical+summary source choice.
-    pub summarized_this_cycle: bool,
-}
-
-pub trait Handler {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow>;
-    /// Whether this handler runs on a `skip_judges` step. Default yes; the judged-merge handlers
-    /// override to `false` so a skip step bypasses them (mirrors the old `if !skip`).
-    fn runs_on_skip(&self) -> bool {
-        true
-    }
-    /// Fire a CONTEXT-FREE (run-level) hook — `on_start` before the loop state exists, `on_stop` at
-    /// teardown. Default no-op; `ShellHook` overrides. This is what lets `on_start`/`on_stop` live in
-    /// the SAME registry as every other hook without needing `&mut LoopState`.
-    fn fire(&self) {}
-    /// Stable name for the registration-order characterization tests (order is outcome-invisible).
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn name(&self) -> &'static str;
-}
 
 /// Dispatch one hook point's handlers in order, honoring `Flow`. A handler's hard `Err` bubbles out
 /// (it is NOT a `RunOutcome` — e.g. `verdicts::append`, or the worker-broken guard). §3.1.
@@ -308,24 +138,7 @@ impl Handler for Feature {
 
 
 
-/// The lifecycle registry: one ordered handler list per hook point. `default_pipeline` is agg's
-/// built-in registration (§5); the ordering here IS the spec (order is outcome-invisible).
-/// Bootstrap context for the `pre_start` hook — the ONE phase that runs before `LoopState` exists.
-/// Handlers read `dir`/`cfg`, may `bail!` (a hard error out of `run()`, exactly as the old inline
-/// checks did), and `ResolveIsoBase` writes `iso_base` for the constructor to read. This is a second,
-/// minimal handler protocol for state-BUILDING (vs `Handler`, which operates on the built state).
-pub struct Bootstrap<'a> {
-    pub dir: &'a Path,
-    pub cfg: &'a AggConfig,
-    pub iso_base: Option<String>,
-}
 
-/// A `pre_start` handler: agg's run-start git preconditions (recover a stranded merge, require a
-/// clean git repo, ensure `agg/state` gitignored, resolve the isolation base branch). Runs before the
-/// loop state exists, so it takes `Bootstrap`, not `LoopState`.
-pub trait PreStart {
-    fn run(&self, boot: &mut Bootstrap) -> Result<()>;
-}
 
 fn run_pre_start(hs: &[Box<dyn PreStart>], boot: &mut Bootstrap) -> Result<()> {
     for h in hs {
@@ -544,187 +357,7 @@ impl Drop for RunPidGuard<'_> {
     }
 }
 
-/// Everything one step of the loop reads and writes.
-/// The context every plugin (`Handler`) receives — the whole run/session state, shared `&mut`
-/// (HOOK_REDESIGN §8: the context IS the state, threaded sequentially, no facade). Fields are `pub`
-/// per the crate's no-facade convention (lib.rs) so a plugin in ANY module/crate reaches what it
-/// needs — most importantly its own typed state via `ext`/`scratch`. The core knows only the hook
-/// registry + this shared bus; every feature (agg's own included) is a plugin against it.
-pub struct LoopState<'a> {
-    pub cfg: &'a AggConfig,
-    /// the RULER — LLM judges + summarizer. Immutable across the run (§4).
-    pub ruler: &'static dyn AgentBackend,
-    /// the ruler model (`judge.model`, resolved).
-    pub judge_model: String,
-    /// EVERY judge's timeout (`judge.timeout`).
-    pub judge_timeout: u64,
-    pub dir: &'a Path,
-    pub config_base: &'a Path,
 
-    pub eng: Engine,
-    /// the sequence cursor — yields the next step name each cycle.
-    pub cursor: Cursor,
-    /// the step being run THIS cycle (set by INJECT).
-    pub cur_step: Option<ResolvedStep>,
-
-    pub dash: DashboardState,
-    pub live: LiveState,
-    pub ledger: crate::project::RunLedger,
-    pub bus: Option<Bus>,
-
-    pub budget_total: Option<u64>,
-    pub cost_limit: Option<f64>,
-    pub max_iter: Option<u32>,
-    pub max_sessions: u32,
-    pub gate_regressions: bool,
-
-    pub loop_start: Instant,
-    pub lifetime_base: u32,
-
-    pub session: u32,
-    pub tokens_spent: u64,
-    pub cost_spent: f64,
-    /// per-agent token + cost tally (§7.4), attributed at each spend site (worker / ruler judges /
-    /// summarizer). Sums to `tokens_spent`/`cost_spent`; makes a mixed run's totals interpretable.
-    pub per_agent: std::collections::BTreeMap<String, crate::state::AgentUsage>,
-
-    /// per-RUN generic extension store — agg's own feature state lives here as `AGGState`; a plugin
-    /// stashes its own type. Persists across sessions (never cleared mid-run). LOOPSTATE_REDESIGN §3.
-    pub ext: Extensions,
-    /// per-SESSION generic extension store — agg's stage channel lives here as `AGGScratch`;
-    /// `clear()`ed each session at the loop top so no field leaks across sessions (§3/§8).
-    pub scratch: Extensions,
-}
-
-impl LoopState<'_> {
-    pub fn emit(&mut self, event: LifecycleEvent) {
-        self.dash.phase = event.phase();
-        if let LifecycleEvent::Finished { reason, ledger_tag } = &event {
-            self.dash.finished = true;
-            self.dash.finish_reason = reason.clone();
-            let (gm, gt) = self.eng.tally();
-            self.ledger.update(self.session, self.tokens_spent, gm, gt);
-            self.ledger.finish(now_epoch(), ledger_tag);
-        }
-        self.publish();
-    }
-
-    /// Attribute one spend to an agent's running tally (§7.4). A `None` cost is an agent that cannot
-    /// report a price — it never fabricates a `0`, so that agent's cost stays `None` (rendered "—")
-    /// until a real price arrives, then it accumulates only the reported part.
-    pub fn charge(&mut self, agent: &str, tokens: u64, cost: Option<f64>) {
-        let e = self.per_agent.entry(agent.to_string()).or_default();
-        e.tokens += tokens;
-        if let Some(c) = cost {
-            e.cost = Some(e.cost.unwrap_or(0.0) + c);
-        }
-    }
-
-    pub fn publish(&mut self) {
-        self.dash.up_secs = self.loop_start.elapsed().as_secs();
-        self.dash.tokens_spent = self.tokens_spent;
-        self.dash.cost_spent = self.cost_spent;
-        self.dash.per_agent = self.per_agent.clone();
-        // Surface the current step + its agent/model so a mixed run is interpretable from state.json
-        // (§7.4). Pure display copy — never touches control flow or accounting.
-        if let Some(cs) = &self.cur_step {
-            self.dash.step = cs.name.clone();
-            self.dash.step_agent = cs.agent.clone();
-            // the RESOLVED model (step override, else the agent's default) — what actually ran.
-            self.dash.step_model = cs.backend().map(|b| cs.model(b).to_string()).unwrap_or_default();
-        }
-        let (m, t) = self.eng.tally();
-        self.dash.goals_met = m;
-        self.dash.goals_total = t;
-        self.dash.goals = DashboardState::goals_from_engine(&self.eng, &self.dash.goals);
-        self.dash.judges = DashboardState::judges_from_engine(&self.eng, &self.dash.judges);
-        let snapshot = self.dash.clone();
-        self.live.update(|s| {
-            let now = std::mem::take(&mut s.now);
-            let think = std::mem::take(&mut s.think);
-            let recent = std::mem::take(&mut s.recent);
-            let idle_secs = s.idle_secs;
-            let seq = s.seq;
-            *s = snapshot;
-            s.now = now;
-            s.think = think;
-            s.recent = recent;
-            s.idle_secs = idle_secs;
-            s.seq = seq;
-        });
-    }
-
-    pub fn run_state(&self) -> RunState {
-        RunState {
-            tokens_spent: self.tokens_spent,
-            budget_total: self.budget_total,
-            cost_spent: self.cost_spent,
-            cost_limit: self.cost_limit,
-            sessions_done: self.session,
-            max_sessions: self.max_iter,
-            wall_hours: self.loop_start.elapsed().as_secs_f64() / 3600.0,
-        }
-    }
-
-    fn over_max_sessions(&mut self) -> Option<RunOutcome> {
-        if self.max_sessions == 0 || self.session < self.max_sessions {
-            return None;
-        }
-        let max_sessions = self.max_sessions;
-        eprintln!("→ reached max_sessions={max_sessions}; stopping (DoD not met).");
-        let (gm, gt) = self.eng.tally();
-        self.emit(LifecycleEvent::Finished {
-            reason: format!("reached max_sessions={max_sessions} ({gm}/{gt} goals met)"),
-            ledger_tag: "max-sessions".into(),
-        });
-        Some(RunOutcome::MaxSessions)
-    }
-
-    pub fn stopped_via_bus(&mut self, reason: String) -> RunOutcome {
-        eprintln!("  [bus] stop → {reason}");
-        self.emit(LifecycleEvent::Finished {
-            reason: format!("stopped via bus: {reason}"),
-            ledger_tag: "stopped".into(),
-        });
-        RunOutcome::Stopped
-    }
-
-
-
-    fn worker_is_broken(&mut self) -> Option<anyhow::Error> {
-        const LIMIT: u32 = 3;
-        (self.ext.get::<AGGState>().worker.dud_streak >= LIMIT).then(|| {
-            let agent = self.cur_step.as_ref().map(|s| s.agent.as_str()).unwrap_or("worker");
-            anyhow::anyhow!(
-                "the `{agent}` worker failed to start {LIMIT} times in a row — non-zero exit, ZERO \
-                 tokens, every time.\n\
-                 That means the agent CLI rejected the invocation itself; it never reached the model. \
-                 Retrying cannot help: each session builds the same command.\n\
-                 Run `agg doctor`, and try the worker by hand to see the CLI's own error."
-            )
-        })
-    }
-
-    pub fn finish_interrupted(&mut self) -> RunOutcome {
-        eprintln!("\n⚠ interrupted (SIGINT/SIGTERM) — stopping after the current session; worker killed, base untouched.");
-        self.emit(LifecycleEvent::Finished {
-            reason: "interrupted (SIGINT/SIGTERM)".into(),
-            ledger_tag: "interrupted".into(),
-        });
-        RunOutcome::Stopped
-    }
-
-    pub fn abort_now(&mut self, reason: &str) -> RunOutcome {
-        eprintln!("\n⚠ {reason}");
-        self.emit(LifecycleEvent::Finished {
-            reason: reason.to_string(),
-            ledger_tag: format!("abort:{reason}"),
-        });
-        RunOutcome::Halt
-    }
-
-
-}
 
 /// Drive the loop with agg's default plugin pipeline. The common entry point.
 pub fn run(

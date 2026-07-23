@@ -32,6 +32,7 @@ pub mod ui;
 
 pub mod bus;
 pub mod capability;
+pub mod context;
 pub mod doctor;
 pub mod features;
 pub mod git;
@@ -39,6 +40,7 @@ pub mod hooks;
 pub mod init;
 pub mod loop_;
 pub mod paths;
+pub mod plugin;
 pub mod project;
 pub mod skills;
 pub mod state;
