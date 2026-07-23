@@ -23,7 +23,6 @@ use crate::core::engine::{CycleResult, Engine, GoalRuntime, RunState};
 use crate::core::sequence::{self, Cursor, Statement};
 use crate::core::stop::{self, StopContext};
 use crate::state::{DashboardState, LiveState, Phase};
-use crate::summary;
 use anyhow::Result;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -144,81 +143,81 @@ impl Extensions {
 /// built-in "plugin", stored in the per-run `ext`. Persists across sessions (git span, summarizer
 /// window, memory tail, worker health); NEVER cleared mid-run.
 #[derive(Default)]
-struct AGGState {
-    git: GitIso,
-    summary: Summary,
-    memory: Memory,
-    worker: WorkerHealth,
-    operator: Operator,
-    inject: Inject,
+pub struct AGGState {
+    pub git: GitIso,
+    pub summary: Summary,
+    pub memory: Memory,
+    pub worker: WorkerHealth,
+    pub operator: Operator,
+    pub inject: Inject,
 }
 /// per-session git isolation + spans (was `iso_base`/`session_branch`/`span_tip`/`span_branches`).
 #[derive(Default)]
-struct GitIso {
+pub struct GitIso {
     /// the resolved isolation base branch (set once at run start).
-    iso_base: String,
+    pub iso_base: String,
     /// this session's branch (cut by INJECT, resolved by GATE).
-    session_branch: Option<String>,
+    pub session_branch: Option<String>,
     /// the branch the NEXT session cuts off — the TIP of the staged span, or `None` = base (§5.7).
-    span_tip: Option<String>,
+    pub span_tip: Option<String>,
     /// staged span branches accumulated by `skip_judges` steps (for reporting on abort).
-    span_branches: Vec<String>,
+    pub span_branches: Vec<String>,
 }
 /// the LLM summarizer's rolling window (was `cumulative`/`last_summary`).
 #[derive(Default)]
-struct Summary {
-    cumulative: String,
+pub struct Summary {
+    pub cumulative: String,
     /// `None` until `Setup` primes it (on_run_start, before the loop) — reads treat `None` as due.
-    last_summary: Option<Instant>,
+    pub last_summary: Option<Instant>,
 }
 /// institutional-memory tail (was `last_session`).
 #[derive(Default)]
-struct Memory {
-    last_session: String,
+pub struct Memory {
+    pub last_session: String,
 }
 /// worker-broken detection (was `dud_streak`).
 #[derive(Default)]
-struct WorkerHealth {
-    dud_streak: u32,
+pub struct WorkerHealth {
+    pub dud_streak: u32,
 }
 /// operator steering carried to the next session (was `pending_instruction`).
 #[derive(Default)]
-struct Operator {
-    pending_instruction: Option<String>,
+pub struct Operator {
+    pub pending_instruction: Option<String>,
 }
 /// compose-time inputs (was `prompt_prefix`/`state_before`).
 #[derive(Default)]
-struct Inject {
+pub struct Inject {
     /// `prompt_includes` fragments, composed once at launch.
-    prompt_prefix: String,
+    pub prompt_prefix: String,
     /// content of the step's state file at session start, to warn if the agent never touched it.
-    state_before: Option<String>,
+    pub state_before: Option<String>,
 }
 
 /// The per-session channel between stage-handlers, stored in the per-session `scratch` store and
 /// `clear()`ed each session at the loop top so no field (esp. `prompt`) leaks across sessions. NOT
 /// the on-disk memory scratch (`memory::clear_scratch`) — a different thing.
 #[derive(Default)]
-struct AGGScratch {
+pub struct AGGScratch {
     /// `WriteInstructions` (on_session_start) → the RUN launch. Replaces `Injected::Prompt`.
-    prompt: Option<String>,
+    pub prompt: Option<String>,
     /// `PickStep` sets it from `cur_step.skip_judges`; `run_hook`'s predicate uses it to bypass a
     /// handler that opts out of skip steps (`runs_on_skip()==false`). Truth stays in `self.cur_step`.
-    skip_judges: bool,
+    pub skip_judges: bool,
     /// `LaunchWorker` (on_run) → VERIFY/GATE. Replaces `run()`'s `Option<SessionOutcome>` return.
-    outcome: Option<SessionOutcome>,
+    pub outcome: Option<SessionOutcome>,
     /// `FloorFold` (on_verify) → the post-judge refine fold in GATE. Was `Verified.mem_folded`.
-    mem_folded: bool,
+    pub mem_folded: bool,
     /// `SnapshotGoals` (on_verify) → a rollback in GATE restores it. Was `Verified.pre_cycle_goals`.
-    pre_cycle_goals: Vec<GoalRuntime>,
+    pub pre_cycle_goals: Vec<GoalRuntime>,
     /// `StageSpan` (skip) XOR `RunJudges` (judged) → GATE; REWRITTEN by GATE on a rollback. Was `Verified.res`.
-    res: Option<CycleResult>,
+    pub res: Option<CycleResult>,
     /// `StageMerge` (judged) → GATE's keep/rollback. `None` on a skip step. Was `Verified.staged`.
-    staged: Option<(String, crate::git::StagedSession)>,
+    pub staged: Option<(String, crate::git::StagedSession)>,
     /// `GateKeepRollback` (on_gate) → `RefineFold`'s "session ROLLED BACK" prefix. Staged-!keep only.
-    rolled_back: bool,
+    pub rolled_back: bool,
     /// `Summarize` (on_session_end) → `RefineFold`'s mechanical+summary source choice.
-    summarized_this_cycle: bool,
+    pub summarized_this_cycle: bool,
 }
 
 pub trait Handler {
@@ -865,50 +864,8 @@ impl Handler for GateKeepRollback {
 
 // ── on_session_end handlers = the old GATE tail (HOOK_REDESIGN §4) ─────────────────────────────────
 
-/// The LLM summarizer (best-effort). Feeds `RefineFold` via `scratch.summarized_this_cycle`.
-struct Summarize;
-impl Handler for Summarize {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let min_interval = ctx.cfg.summary.min_interval_secs;
-        let due = ctx
-            .ext
-            .get::<AGGState>()
-            .summary
-            .last_summary
-            .map(|t| t.elapsed().as_secs() >= min_interval)
-            .unwrap_or(true); // None only before Setup primes it — treat as due (matches old init)
-        if !(ctx.cfg.summary.enabled && due) {
-            return Ok(Flow::Continue);
-        }
-        let model = ctx.ruler.default_summary_model().to_string();
-        let thoughts = ctx.scratch.get::<AGGScratch>().outcome.as_ref().map(|o| o.thoughts.clone()).unwrap_or_default();
-        let deltas = ctx.scratch.get::<AGGScratch>().res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
-        let cumulative = ctx.ext.get::<AGGState>().summary.cumulative.clone();
-        if let Some((s, spend)) =
-            summary::summarize(ctx.ruler, &model, &cumulative, &thoughts, &deltas, 120)
-        {
-            eprintln!("  [SUMMARY cumulative] {}", s.cumulative);
-            eprintln!("  [SUMMARY windowed]   {}", s.windowed);
-            ctx.ext.get::<AGGState>().summary.cumulative = s.cumulative.clone();
-            ctx.dash.summary_cumulative = s.cumulative;
-            ctx.dash.summary_windowed = s.windowed;
-            ctx.ext.get::<AGGState>().summary.last_summary = Some(Instant::now());
-            ctx.scratch.get::<AGGScratch>().summarized_this_cycle = true;
-            // §5.6: summarizer spend counts too — the summarizer runs on the ruler.
-            ctx.tokens_spent += spend.tokens;
-            if let Some(c) = spend.cost_usd {
-                ctx.cost_spent += c;
-            }
-            let ruler_agent = ctx.cfg.judge.agent.clone();
-            ctx.charge(&ruler_agent, spend.tokens, spend.cost_usd);
-            ctx.publish();
-        }
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "Summarize"
-    }
-}
+// The LLM summarizer moved to `crate::features::summary::Summarize` — agg's first feature relocated
+// out of the core as a plugin, reaching the core only through the public API.
 
 /// Institutional memory: the post-judge refinement fold. Gated on the floor fold (`scratch.mem_folded`)
 /// and reads `scratch.rolled_back` + the summary — exactly the old post-judge fold.
@@ -1206,7 +1163,7 @@ impl Lifecycle {
             "Finalize",
             vec![
                 shell("on_session_end", &hooks.on_session_end),
-                Box::new(Summarize),
+                Box::new(crate::features::summary::Summarize),
                 Box::new(RefineFold),
                 Box::new(CheckRunStop),
             ],

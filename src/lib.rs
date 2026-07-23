@@ -33,6 +33,7 @@ pub mod ui;
 pub mod bus;
 pub mod capability;
 pub mod doctor;
+pub mod features;
 pub mod git;
 pub mod hooks;
 pub mod init;
