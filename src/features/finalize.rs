@@ -66,7 +66,7 @@ impl Handler for CheckRunStop {
         if res.halt {
             let reason = res.halt_reason.unwrap_or_default();
             eprintln!("\n⚠ ABORT — abort_if true: {reason}\n  stopping the loop (a ceiling / guard, not success).");
-            ctx.report_stranded_span();
+            report_stranded_span(ctx);
             ctx.emit(LifecycleEvent::Finished {
                 reason: format!("ABORT: {reason}"),
                 ledger_tag: format!("abort:{reason}"),
@@ -86,5 +86,17 @@ impl Handler for CheckRunStop {
     }
     fn name(&self) -> &'static str {
         "CheckRunStop"
+    }
+}
+
+/// On abort with a span still staged, leave the branches and print them for inspection (§5.7).
+pub fn report_stranded_span(ctx: &mut LoopState) {
+    let span_branches = &ctx.ext.get::<AGGState>().git.span_branches;
+    if !span_branches.is_empty() {
+        eprintln!(
+            "  [span] {} staged branch(es) left un-merged for inspection: {}",
+            span_branches.len(),
+            span_branches.join(", ")
+        );
     }
 }

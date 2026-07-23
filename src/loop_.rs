@@ -83,13 +83,13 @@ impl LifecycleEvent {
 /// the worker saw inspectable on disk. The path is RELATIVE so it resolves from the worker's cwd
 /// (the project dir) on every backend (Claude/Copilot `-p`, Codex positional) with no per-backend
 /// special-casing — it is just a short, dash-free prompt value.
-const INSTRUCTIONS_POINTER: &str =
+pub const INSTRUCTIONS_POINTER: &str =
     "Read the file `agg/state/INSTRUCTIONS.md` in full and follow it — it is your complete brief for this session.";
 
 /// The standing "Before you exit" footer of every session's brief (the wiki/OKF guidance lives here).
 /// Kept as a real markdown file (`include_str!`'d, like the scaffolds + skills) rather than an inline
 /// string; `{{STATE}}` is filled with the step's state path when composed.
-const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
+pub const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
 
 // ── the lifecycle registry (HOOK_REDESIGN §3.1/§5) ────────────────────────────────────────────
 // Handlers are `.add()`ed to hook points in code and dispatched in order by the loop — the seed of
@@ -689,126 +689,7 @@ impl LoopState<'_> {
         RunOutcome::Stopped
     }
 
-    /// The branch a JUDGED step's regression check reads / the branch cut. Base is the resolved
-    /// isolation base.
-    pub fn base_ref(&mut self) -> String {
-        let git = &self.ext.get::<AGGState>().git;
-        git.span_tip.clone().unwrap_or_else(|| git.iso_base.clone())
-    }
 
-    /// Compose the worker's whole brief into `agg/state/INSTRUCTIONS.md`, then return the tiny
-    /// fixed pointer that becomes the actual `-p` value (§2/§3). The order is highest-priority
-    /// first — operator steering, then the task (role framing + the step's `prompt:`), then the
-    /// context pointers/excerpts (memory tail → STATE pointer → AGG.md pointer → wiki), then the
-    /// standing footer. Long files are POINTED at (STATE, AGG.md, LOG's older history) or excerpted
-    /// (LOG's recent tail via `read_block`) so agg keeps the context budget bounded even though the
-    /// worker can open the full files itself.
-    ///
-    /// If the file write fails (rare best-effort disk error), fall back to returning the composed
-    /// content directly so the session still runs, arg-safe against a leading dash.
-    pub fn compose_prompt(&mut self, step: &ResolvedStep) -> String {
-        let mut s = String::new();
-        s.push_str(
-            "<!-- agg/state/INSTRUCTIONS.md — WRITTEN BY agg, REGENERATED every session. Do not edit; it is overwritten. -->\n\n",
-        );
-        let agent = &step.agent;
-        s.push_str(&format!(
-            "# Session {} · step `{}` · agent `{agent}`\n",
-            self.session, step.name
-        ));
-
-        // ── operator steering — highest priority, act on it FIRST. The banner keeps the phrase
-        //    "HIGH-PRIORITY OPERATOR INSTRUCTION" so the memory sanitizer (`looks_like_marker`) still
-        //    de-fangs a worker note that tries to forge it. ──
-        if let Some(instr) = self.ext.get::<AGGState>().operator.pending_instruction.take() {
-            s.push_str(&format!(
-                "\n## ⚠ HIGH-PRIORITY OPERATOR INSTRUCTION — do this FIRST (it overrides the default plan)\n{instr}\n"
-            ));
-        }
-        if let Some(status) = crate::os::spawns::summary_for_prompt(self.dir) {
-            s.push_str(&format!("\n{status}\n"));
-        }
-
-        // ── the task: the step's ROLE framing (config-driven, §4) + its specific `prompt:` ──
-        if let Some(rp) = &step.role_prompt {
-            if !rp.trim().is_empty() {
-                s.push_str(&format!("\n## Your role this session\n{}\n", rp.trim()));
-            }
-        }
-        if let Some(p) = &step.prompt {
-            if !p.trim().is_empty() {
-                s.push_str(&format!("\n## This session — do ONE focused chunk\n{}\n", p.trim()));
-            }
-        }
-        let prompt_prefix = self.ext.get::<AGGState>().inject.prompt_prefix.clone();
-        if !prompt_prefix.is_empty() {
-            s.push_str(&format!("\n{}\n", prompt_prefix.trim()));
-        }
-
-        // ── context: memory recent-tail excerpt + a conditional pointer to the full LOG ──
-        if self.cfg.memory.enabled {
-            let last_session = self.ext.get::<AGGState>().memory.last_session.clone();
-            let mem = crate::core::memory::read_block(self.dir, &last_session, self.cfg.memory.inject_kb);
-            if !mem.trim().is_empty() {
-                s.push_str(&format!("\n## What's been tried\n{}\n", mem.trim()));
-                s.push_str(
-                    "Full history in `agg/state/LOG.md` — read it ONLY if you need older detail; it is long, don't load it all.\n",
-                );
-            }
-        }
-
-        // ── STATE → a POINTER, not an excerpt (it is crisp by design; read the whole small file) ──
-        if let Ok(st) = std::fs::read_to_string(self.config_base.join(&step.state)) {
-            if !st.trim().is_empty() {
-                s.push_str(&format!(
-                    "\n## Where things stand\nRead `agg/{}` — your predecessor's forward advice (kept short; read it in full).\n",
-                    step.state
-                ));
-            }
-        }
-
-        // ── AGG.md → a POINTER (the standing project instructions; scope/goals/architecture/rules,
-        //    the CLAUDE.md-analog for the agg loop) ──
-        if crate::paths::config_base(self.dir).join("AGG.md").exists() {
-            s.push_str("\n## Project instructions\nRead `agg/AGG.md` — the standing scope, architecture, and rules for this project.\n");
-        }
-
-        // ── the LLM wiki — list its pages if any exist (the footer names it regardless, since a
-        //    multi-session PLAN belongs there) ──
-        let wiki = crate::paths::wiki_dir(self.dir);
-        if wiki.exists() {
-            let pages = wiki_pages(&wiki);
-            if !pages.is_empty() {
-                s.push_str(&format!(
-                    "\n## Knowledge base\nConsult and maintain the durable wiki at `agg/state/wiki/` (start with {}).\n",
-                    pages.join(", ")
-                ));
-            }
-        }
-
-        // ── standing footer (from plugin/scaffold/exit_footer.md; no git tutorial — agg owns git,
-        //    §3 remark 3). The STATE path is filled from `step.state` (NOT hardcoded) so an overridden
-        //    `state:` still names the file agg actually reads/points-at. The wiki/OKF guidance is
-        //    SELF-CONTAINED (rules + a concrete template) so the worker needn't know "OKF" — a
-        //    June-2026 spec many models predate. ──
-        s.push('\n');
-        s.push_str(&EXIT_FOOTER.replace("{{STATE}}", &step.state));
-
-        // write the composed brief to disk; the worker's actual `-p` is the tiny pointer.
-        let path = crate::paths::instructions_md(self.dir);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::write(&path, &s) {
-            Ok(()) => INSTRUCTIONS_POINTER.to_string(),
-            Err(e) => {
-                // degraded mode: could not write the brief — pass it inline so the session still
-                // runs. Guard a leading dash so no backend's arg-parser eats it as a flag.
-                eprintln!("  ⚠ could not write {} ({e}); passing the brief inline this session", path.display());
-                if s.starts_with('-') { format!("\n{s}") } else { s }
-            }
-        }
-    }
 
     fn worker_is_broken(&mut self) -> Option<anyhow::Error> {
         const LIMIT: u32 = 3;
@@ -842,46 +723,7 @@ impl LoopState<'_> {
         RunOutcome::Halt
     }
 
-    /// The early ENFORCED memory floor (so the session's facts survive a later panic).
-    pub fn fold_memory_floor(&mut self, outcome: &SessionOutcome) -> bool {
-        if self.cfg.memory.enabled && !outcome.rate_limited {
-            let scoreboard_now = self.eng.scoreboard();
-            let ended = crate::util::now_epoch();
-            let body = crate::core::memory::mechanical_note(
-                outcome.exit_code,
-                outcome.killed_by_watchdog,
-                outcome.rate_limited,
-                outcome.duration_secs,
-                ended.saturating_sub(outcome.duration_secs),
-                ended,
-                &scoreboard_now,
-                &[],
-            );
-            self.dash.memory_bytes = crate::core::memory::append_entry(
-                self.dir,
-                self.session,
-                "session-start",
-                &body,
-                self.cfg.memory.max_kb,
-            );
-            self.publish();
-            true
-        } else {
-            false
-        }
-    }
 
-    /// On abort with a span still staged, leave the branches and print them (§5.7).
-    pub fn report_stranded_span(&mut self) {
-        let span_branches = &self.ext.get::<AGGState>().git.span_branches;
-        if !span_branches.is_empty() {
-            eprintln!(
-                "  [span] {} staged branch(es) left un-merged for inspection: {}",
-                span_branches.len(),
-                span_branches.join(", ")
-            );
-        }
-    }
 }
 
 /// Drive the loop with agg's default plugin pipeline. The common entry point.
@@ -1070,22 +912,6 @@ pub fn indent(s: &str) -> String {
     s.lines().map(|l| format!("    {l}\n")).collect()
 }
 
-/// The wiki's page names (up to a handful), sorted, for the INSTRUCTIONS "start with …" hint. A
-/// pure listing — an empty/absent dir yields no names and the hint is dropped. ponytail: caps at 5
-/// so a large wiki can't bloat the pointer; the worker sees the rest by opening the dir.
-fn wiki_pages(wiki: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(wiki) else { return Vec::new() };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().into_owned();
-            n.ends_with(".md").then(|| format!("`wiki/{n}`"))
-        })
-        .collect();
-    names.sort();
-    names.truncate(5);
-    names
-}
 
 use crate::util::now_epoch;
 
@@ -1103,21 +929,6 @@ mod tests {
         assert!(INSTRUCTIONS_POINTER.contains("agg/state/INSTRUCTIONS.md"), "pointer names the brief file");
     }
 
-    /// `wiki_pages` lists only `.md` files, sorted, capped, and formatted as `` `wiki/<name>` ``;
-    /// an absent dir yields nothing (so the KB hint is dropped).
-    #[test]
-    fn wiki_pages_lists_markdown_only() {
-        let d = std::env::temp_dir().join(format!("agg-wiki-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        assert!(wiki_pages(&d).is_empty(), "absent dir → no pages");
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("parser.md"), "x").unwrap();
-        std::fs::write(d.join("dead-ends.md"), "x").unwrap();
-        std::fs::write(d.join("notes.txt"), "x").unwrap(); // not markdown → excluded
-        let pages = wiki_pages(&d);
-        assert_eq!(pages, vec!["`wiki/dead-ends.md`".to_string(), "`wiki/parser.md`".to_string()]);
-        let _ = std::fs::remove_dir_all(&d);
-    }
 
     /// The registry reads as HIGH-LEVEL FEATURES — one (or a couple) per lifecycle phase — so a human
     /// understands the loop's structure at a glance (Inject / Run / Verify / Gate / Finalize …). And
