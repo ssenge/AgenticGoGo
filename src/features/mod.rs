@@ -12,5 +12,6 @@ pub mod inject;
 pub mod run;
 pub mod setup;
 pub mod shell;
+pub mod state;
 pub mod summary;
 pub mod verify;
