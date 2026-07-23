@@ -152,6 +152,12 @@ impl AgentBackend for Claude {
         })
     }
 
+    /// Claude writes session logs/cache under `~/.claude` — add it to the sandbox's writable set so
+    /// a confined worker can still record its session. Only returned when it actually exists.
+    fn writable_state_paths(&self) -> Vec<std::path::PathBuf> {
+        super::state_dir_if_exists(".claude")
+    }
+
     fn is_installed(&self) -> bool {
         Command::new(self.bin())
             .arg("--version")
@@ -212,6 +218,7 @@ mod tests {
             resume_id: Some("abc"),
             extra_args: &["--add-dir".to_string(), "/x".to_string()],
             cwd: Path::new("/tmp"),
+            isolation: crate::isolation::Isolation::None,
         };
         let cmd = Claude.session_command(&spec);
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -226,6 +233,38 @@ mod tests {
         assert!(args.contains(&"--effort".to_string()));
     }
 
+    /// Claude has only a permission layer, not a kernel jail, so its confinement comes from the OS
+    /// wrapper (applied in worker.rs) — NOT from any flag change. Its argv must be BYTE-identical
+    /// under `none` and `sandbox`: it keeps `--dangerously-skip-permissions` (autonomy) either way,
+    /// and never grows a `--sandbox` flag. If this regresses, Claude would either lose autonomy or
+    /// pretend to self-confine while actually going unwrapped.
+    #[test]
+    fn isolation_does_not_change_claude_flags_and_it_does_not_self_sandbox() {
+        let base = SessionSpec {
+            prompt: "p",
+            model: "m",
+            effort: "",
+            resume_id: None,
+            extra_args: &[],
+            cwd: Path::new("/tmp"),
+            isolation: crate::isolation::Isolation::None,
+        };
+        let argv = |iso| {
+            Claude
+                .session_command(&SessionSpec { isolation: iso, ..base })
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let none = argv(crate::isolation::Isolation::None);
+        let sandbox = argv(crate::isolation::Isolation::Sandbox);
+        assert_eq!(none, sandbox, "Claude's flags are identical across isolation tiers — the OS wrapper confines it, not a flag");
+        assert!(none.contains(&"--dangerously-skip-permissions".to_string()), "autonomy is kept under BOTH tiers");
+        assert!(!none.contains(&"--sandbox".to_string()), "Claude never grows a --sandbox flag");
+        // it therefore MUST be OS-wrapped: it does not self-sandbox.
+        assert!(!Claude.self_sandboxes(), "Claude has no kernel jail — worker.rs must wrap it");
+    }
+
     /// An empty `effort` must omit the flag entirely — passing `--effort ""` is an error.
     #[test]
     fn empty_effort_omits_the_flag() {
@@ -236,6 +275,7 @@ mod tests {
             resume_id: None,
             extra_args: &[],
             cwd: Path::new("/tmp"),
+            isolation: crate::isolation::Isolation::None,
         };
         let cmd = Claude.session_command(&spec);
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();

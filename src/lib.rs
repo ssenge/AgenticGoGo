@@ -39,6 +39,7 @@ pub mod features;
 pub mod git;
 pub mod hooks;
 pub mod init;
+pub mod isolation;
 pub mod loop_;
 pub mod paths;
 pub mod plugin;

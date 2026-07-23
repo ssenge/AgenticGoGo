@@ -184,6 +184,30 @@ fn a_step_overrides_what_it_names_and_inherits_the_rest() {
     assert!(err.contains("unknown step `nope`") && err.contains("plan") && err.contains("build"), "got: {err}");
 }
 
+/// §10.2/§10.7: per-step blast-radius `isolation:` resolves like every other step key — a step
+/// overrides what it names, inherits `defaults.isolation` otherwise, and falls back to `None` when
+/// neither names it. (This is a DIFFERENT axis from git session isolation — see ISOLATION.md §10.8.)
+#[test]
+fn resolve_step_merges_isolation_step_over_defaults_default_none() {
+    use crate::isolation::Isolation;
+
+    // no isolation named anywhere ⇒ the tier defaults to None (today's direct-subprocess behaviour).
+    let bare = parse(MINIMAL).unwrap();
+    assert_eq!(bare.resolve_step("worker").unwrap().isolation, Isolation::None, "unset ⇒ None");
+
+    // defaults names sandbox; a step overrides back to none; a bare step inherits the default.
+    let cfg = parse(
+        "project: p\n\
+         defaults: { isolation: sandbox }\n\
+         steps:\n  plan: { isolation: none }\n  build: {}\n\
+         sequence: { steps: [plan, build] }\n",
+    )
+    .expect("isolation parses on both defaults and a step body");
+
+    assert_eq!(cfg.resolve_step("plan").unwrap().isolation, Isolation::None, "step override wins over defaults");
+    assert_eq!(cfg.resolve_step("build").unwrap().isolation, Isolation::Sandbox, "an un-named step inherits defaults.isolation");
+}
+
 /// `agent_names` returns EVERY distinct agent the sequence names (defaults + ruler + per-step),
 /// sorted and de-duped — so `doctor`/capability can cover them all (§7.3).
 #[test]

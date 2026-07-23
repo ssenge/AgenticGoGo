@@ -39,6 +39,22 @@ pub struct SessionOutcome {
     pub session_id: Option<String>,
 }
 
+impl SessionOutcome {
+    /// A no-op outcome for a session that never ran (spawn/sandbox failure, unknown agent).
+    pub fn failed() -> Self {
+        SessionOutcome {
+            exit_code: None,
+            duration_secs: 0,
+            rate_limited: false,
+            killed_by_watchdog: false,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            thoughts: vec![],
+            session_id: None,
+        }
+    }
+}
+
 /// Run one worker session to completion and return its outcome.
 ///
 /// `agent`/`model`/`effort`/`worker_args` are this STEP's resolved values (over `defaults`), handed
@@ -56,6 +72,7 @@ pub fn run_session(
     dir: &std::path::Path,
     session: u32,
     live: &LiveState,
+    isolation: crate::isolation::Isolation,
 ) -> SessionOutcome {
     let start = Instant::now();
 
@@ -69,7 +86,25 @@ pub fn run_session(
         resume_id: None,
         extra_args: worker_args,
         cwd: dir,
+        isolation,
     });
+    // Blast-radius isolation: wrap the built Command in the OS sandbox when `sandbox` is requested
+    // AND the agent does not confine itself. Codex self-sandboxes (it reads `spec.isolation` and
+    // adds its own kernel-sandbox flags above), so it is NEVER wrapped; Claude/Copilot have only
+    // permission layers, so they get the real kernel jail here. The wrapper rebuilds argv as
+    // `<wrapper flags…> <agent> <agent args…>` and re-applies the uniform stdio, so the
+    // `process_group(0)` below correctly targets the wrapper. An unavailable mechanism is a LOUD
+    // failure, never a silent direct spawn (capability::check also refuses it at startup).
+    if isolation == crate::isolation::Isolation::Sandbox && !agent.self_sandboxes() {
+        let writable = agent.writable_state_paths();
+        match crate::isolation::wrap(command, dir, &writable) {
+            Ok(c) => command = c,
+            Err(e) => {
+                eprintln!("  FAILED to sandbox the {} worker: {e}", agent.bin());
+                return SessionOutcome::failed();
+            }
+        }
+    }
     // Own process group (pgid == pid) so the watchdog can SIGKILL the WHOLE tree —
     // the worker AND every tool subprocess it spawned. A bare kill(pid) leaves
     // orphan grandchildren (a runaway build/sleep) running, which is exactly the
@@ -83,16 +118,7 @@ pub fn run_session(
         Ok(c) => c,
         Err(e) => {
             eprintln!("  FAILED to spawn the {} worker: {e}", agent.bin());
-            return SessionOutcome {
-                exit_code: None,
-                duration_secs: 0,
-                rate_limited: false,
-                killed_by_watchdog: false,
-                output_tokens: 0,
-                cost_usd: 0.0,
-                thoughts: vec![],
-                session_id: None,
-            };
+            return SessionOutcome::failed();
         }
     };
 

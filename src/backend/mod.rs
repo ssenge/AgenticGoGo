@@ -253,11 +253,44 @@ pub trait AgentBackend: Send + Sync {
         None
     }
 
+    /// Does this agent have its OWN kernel-enforced sandbox, so agg must NOT wrap it in the OS
+    /// sandbox?
+    ///
+    /// Only Codex does (`--sandbox workspace-write`, Seatbelt/Landlock under the hood). Claude and
+    /// Copilot have permission layers, not kernel jails, so they return `false` and get the OS
+    /// wrapper ([`crate::isolation::wrap`]) applied in [`worker::run_session`]. When `true`, the
+    /// backend's own [`Self::session_command`] must confine itself by reading `spec.isolation`.
+    fn self_sandboxes(&self) -> bool {
+        false
+    }
+
+    /// Directories OUTSIDE cwd that the agent must be able to WRITE while sandboxed — its session
+    /// logs / cache (e.g. `~/.claude`, `~/.copilot`). Only dirs that actually EXIST are returned, so
+    /// the wrapper never binds a nonexistent path. Reads are already covered by "read everything";
+    /// this is the write carve-out only. Empty for a backend that writes nothing outside cwd (Codex,
+    /// which self-sandboxes anyway).
+    fn writable_state_paths(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+
     /// Is the agent CLI on PATH and runnable?
     fn is_installed(&self) -> bool;
 
     /// Hard preflight: bail with an install hint if the CLI is missing.
     fn preflight(&self) -> Result<()>;
+}
+
+/// A `~/<name>` agent-state dir, but ONLY if it exists — the writable carve-out for the OS sandbox
+/// ([`AgentBackend::writable_state_paths`]). Returns empty when there is no HOME or the dir is
+/// absent, so the wrapper never binds a path that isn't there.
+fn state_dir_if_exists(name: &str) -> Vec<std::path::PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+    let dir = std::path::Path::new(&home).join(name);
+    if dir.is_dir() {
+        vec![dir]
+    } else {
+        Vec::new()
+    }
 }
 
 // ---------------- selection ----------------

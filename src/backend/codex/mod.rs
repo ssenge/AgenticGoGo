@@ -93,6 +93,13 @@ impl AgentBackend for Codex {
         DEFAULT_SUMMARY_MODEL
     }
 
+    /// Codex has a REAL kernel sandbox (`--sandbox workspace-write`), so agg confines it with flags
+    /// (see [`Self::session_command`]) and must NOT wrap it in the OS sandbox. This is what makes
+    /// [`crate::backend::worker::run_session`] skip the wrapper for Codex.
+    fn self_sandboxes(&self) -> bool {
+        true
+    }
+
     /// `high` — the most reasoning Codex offers. (agg's blanket `max` is Claude's vocabulary; see
     /// [`effort_arg`] for how the levels map.)
     fn default_effort(&self) -> &'static str {
@@ -110,11 +117,30 @@ impl AgentBackend for Codex {
         if let Some(id) = spec.resume_id {
             command.arg("resume").arg(id); // SUBCOMMAND, not a flag
         }
-        command
-            .arg("--json")
-            // headless: never prompt for approval, and don't refuse to run outside a git repo.
-            .arg("--dangerously-bypass-approvals-and-sandbox")
-            .arg("--skip-git-repo-check");
+        command.arg("--json");
+        // Blast-radius isolation is agent-NATIVE for Codex: it has a real kernel sandbox, so we
+        // pick its flags rather than wrapping the process (see `self_sandboxes`).
+        //   none    → `--dangerously-bypass-approvals-and-sandbox` (auto's behaviour today).
+        //   sandbox → `--sandbox workspace-write` (writes confined to cwd + tmp, kernel-enforced)
+        //             PLUS `-c sandbox_workspace_write.network_access=true` — workspace-write DENIES
+        //             network by default, and the owner wants full internet. The config key was
+        //             verified on the wire against the installed codex binary's config struct
+        //             (`sandbox_workspace_write.network_access`, alongside `writable_roots` /
+        //             `exclude_tmpdir_env_var` / `exclude_slash_tmp`).
+        match spec.isolation {
+            crate::isolation::Isolation::None => {
+                command.arg("--dangerously-bypass-approvals-and-sandbox");
+            }
+            crate::isolation::Isolation::Sandbox => {
+                command
+                    .arg("--sandbox")
+                    .arg("workspace-write")
+                    .arg("-c")
+                    .arg("sandbox_workspace_write.network_access=true");
+            }
+        }
+        // don't refuse to run outside a git repo (headless), under either isolation tier.
+        command.arg("--skip-git-repo-check");
         // Only pass --model if the operator actually named one. Empty = let Codex decide, which is
         // the only safe default: the models available depend on how the user authenticated, and a
         // wrong one is a hard 400 at runtime. See DEFAULT_MODEL.
