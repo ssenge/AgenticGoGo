@@ -15,7 +15,7 @@
 //! The sequence repeats from the top forever until `done_if` fires (exit 0) or `abort_if` fires
 //! (exit 3). Per-step agent/model/effort are resolved at session-build time (the singleton is gone).
 
-use crate::backend::worker::{self, SessionOutcome};
+use crate::backend::worker::SessionOutcome;
 use crate::backend::AgentBackend;
 use crate::bus::{Bus, Command};
 use crate::core::config::{AggConfig, ResolvedStep};
@@ -298,26 +298,7 @@ impl Handler for Setup {
     }
 }
 
-/// A user shell-hook list wrapped as a handler — best-effort, non-fatal (exactly `hooks::run`).
-/// Self-contained: carries its own `dir`, so it can fire from anywhere (a per-session hook via
-/// `run`, or a run-level hook via `fire` — on_start/on_stop) without needing `LoopState`.
-struct ShellHook {
-    label: &'static str,
-    cmds: Vec<String>,
-    dir: std::path::PathBuf,
-}
-impl Handler for ShellHook {
-    fn run(&self, _ctx: &mut LoopState) -> Result<Flow> {
-        self.fire();
-        Ok(Flow::Continue)
-    }
-    fn fire(&self) {
-        crate::hooks::run(self.label, &self.cmds, &self.dir);
-    }
-    fn name(&self) -> &'static str {
-        self.label
-    }
-}
+// ShellHook moved to `crate::features::shell::ShellHook`.
 
 // ── on_session_start handlers = the old INJECT stage, decomposed (HOOK_REDESIGN §4) ──────────────
 
@@ -478,84 +459,7 @@ impl Handler for ClearMemScratch {
     }
 }
 
-// ── on_run handler = the old RUN stage (HOOK_REDESIGN §4) ─────────────────────────────────────────
-
-/// Launch the fresh worker for this step's (agent, model, effort). ONE handler: the unknown-agent
-/// and SIGINT early returns forbid splitting. Reads `scratch.prompt`, writes `scratch.outcome`.
-/// `Flow::Stop(finish_interrupted())` on SIGINT — the only control-flow exit of the RUN stage.
-struct LaunchWorker;
-impl Handler for LaunchWorker {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let prompt = ctx.scratch.get::<AGGScratch>().prompt.take().expect("WriteInstructions set scratch.prompt");
-        let step = ctx.cur_step.clone().expect("PickStep set cur_step");
-        let agent = match step.backend() {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("  step `{}` names an unknown agent: {e}", step.name);
-                ctx.ext.get::<AGGState>().worker.dud_streak += 1;
-                ctx.scratch.get::<AGGScratch>().outcome = Some(SessionOutcome {
-                    exit_code: None,
-                    duration_secs: 0,
-                    rate_limited: false,
-                    killed_by_watchdog: false,
-                    output_tokens: 0,
-                    cost_usd: 0.0,
-                    thoughts: vec![],
-                    session_id: None,
-                });
-                return Ok(Flow::Continue);
-            }
-        };
-        let model = step.model(agent).to_string();
-        let effort = step.effort(agent).to_string();
-        let outcome = worker::run_session(
-            ctx.cfg,
-            agent,
-            &model,
-            &effort,
-            &step.worker_args,
-            &prompt,
-            ctx.dir,
-            ctx.session,
-            &ctx.live,
-        );
-        ctx.tokens_spent += outcome.output_tokens;
-        ctx.cost_spent += outcome.cost_usd;
-        ctx.charge(&step.agent, outcome.output_tokens, Some(outcome.cost_usd));
-
-        if crate::os::signals::interrupted() {
-            return Ok(Flow::Stop(ctx.finish_interrupted()));
-        }
-        eprintln!(
-            "  session #{} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
-            ctx.session,
-            outcome.exit_code,
-            outcome.duration_secs,
-            if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
-            if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
-            outcome.output_tokens,
-            ctx.tokens_spent,
-            outcome.cost_usd,
-            ctx.cost_spent,
-        );
-        // warn (loudly) if the agent never touched its forward state file (§5.6 / OQ3).
-        if let (Some(step), false) = (&ctx.cur_step, outcome.rate_limited) {
-            let now = std::fs::read_to_string(ctx.config_base.join(&step.state)).ok();
-            if now == ctx.ext.get::<AGGState>().inject.state_before {
-                eprintln!("  ⚠ the worker did not update `{}` this session — the next session inherits stale forward-state.", step.state);
-            }
-        }
-
-        let dud = !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.output_tokens == 0;
-        let w = &mut ctx.ext.get::<AGGState>().worker;
-        w.dud_streak = if dud { w.dud_streak + 1 } else { 0 };
-        ctx.scratch.get::<AGGScratch>().outcome = Some(outcome);
-        Ok(Flow::Continue)
-    }
-    fn name(&self) -> &'static str {
-        "LaunchWorker"
-    }
-}
+// LaunchWorker moved to `crate::features::run::LaunchWorker`.
 
 // ── on_verify handlers = the old VERIFY stage, decomposed (HOOK_REDESIGN §4) ───────────────────────
 
@@ -1121,7 +1025,7 @@ impl Lifecycle {
     fn with_hooks(hooks: &crate::core::config::Hooks, dir: &Path) -> Self {
         let mut l = Lifecycle::default();
         let shell = |label: &'static str, cmds: &[String]| -> Box<dyn Handler> {
-            Box::new(ShellHook { label, cmds: cmds.to_vec(), dir: dir.to_path_buf() })
+            Box::new(crate::features::shell::ShellHook { label, cmds: cmds.to_vec(), dir: dir.to_path_buf() })
         };
         let feature = |name: &'static str, steps: Vec<Box<dyn Handler>>| -> Box<dyn Handler> {
             Box::new(Feature { name, steps })
@@ -1145,7 +1049,7 @@ impl Lifecycle {
                 Box::new(ClearMemScratch),
             ],
         ));
-        l.on_run.push(feature("Run", vec![Box::new(LaunchWorker)]));
+        l.on_run.push(feature("Run", vec![Box::new(crate::features::run::LaunchWorker)]));
         l.on_verify.push(feature(
             "Verify",
             vec![
@@ -1584,7 +1488,7 @@ impl LoopState<'_> {
         })
     }
 
-    fn finish_interrupted(&mut self) -> RunOutcome {
+    pub fn finish_interrupted(&mut self) -> RunOutcome {
         eprintln!("\n⚠ interrupted (SIGINT/SIGTERM) — stopping after the current session; worker killed, base untouched.");
         self.emit(LifecycleEvent::Finished {
             reason: "interrupted (SIGINT/SIGTERM)".into(),

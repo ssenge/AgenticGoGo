@@ -4,4 +4,6 @@
 //! (see `tests/plugin_api.rs`). The core file knows nothing about what any of them do — proving
 //! "agg is just the built-in plugin" (LOOPSTATE_REDESIGN §3.1 / HOOK_REDESIGN §1) in the layout itself.
 
+pub mod run;
+pub mod shell;
 pub mod summary;
