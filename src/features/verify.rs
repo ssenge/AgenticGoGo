@@ -1,8 +1,10 @@
 //! The verify feature group: the decomposed VERIFY-stage handlers (on_verify).
 
-use anyhow::Result;
-use crate::loop_::{AGGState, AGGScratch, Flow, Handler, LoopState, LifecycleEvent, indent};
 use std::time::Duration;
+
+use anyhow::Result;
+use crate::backend::worker::SessionOutcome;
+use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LifecycleEvent, LoopState, indent};
 
 /// The early ENFORCED memory floor — FIRST on on_verify, BEFORE any judging, so the session's facts
 /// survive a later panic (R1). Sets `scratch.mem_folded` for the post-judge refine fold in GATE.
@@ -10,7 +12,7 @@ pub struct FloorFold;
 impl Handler for FloorFold {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         let outcome = ctx.scratch.get::<AGGScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
-        ctx.scratch.get::<AGGScratch>().mem_folded = ctx.fold_memory_floor(&outcome);
+        ctx.scratch.get::<AGGScratch>().mem_folded = fold_memory_floor(ctx, &outcome);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -173,5 +175,35 @@ impl Handler for RunJudges {
     }
     fn name(&self) -> &'static str {
         "RunJudges"
+    }
+}
+
+/// The early ENFORCED memory floor (so the session's facts survive a later panic). Writes a
+/// mechanical session-start note to LOG.md before any judging runs.
+pub fn fold_memory_floor(ctx: &mut LoopState, outcome: &SessionOutcome) -> bool {
+    if ctx.cfg.memory.enabled && !outcome.rate_limited {
+        let scoreboard_now = ctx.eng.scoreboard();
+        let ended = crate::util::now_epoch();
+        let body = crate::core::memory::mechanical_note(
+            outcome.exit_code,
+            outcome.killed_by_watchdog,
+            outcome.rate_limited,
+            outcome.duration_secs,
+            ended.saturating_sub(outcome.duration_secs),
+            ended,
+            &scoreboard_now,
+            &[],
+        );
+        ctx.dash.memory_bytes = crate::core::memory::append_entry(
+            ctx.dir,
+            ctx.session,
+            "session-start",
+            &body,
+            ctx.cfg.memory.max_kb,
+        );
+        ctx.publish();
+        true
+    } else {
+        false
     }
 }
