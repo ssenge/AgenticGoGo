@@ -53,7 +53,7 @@ impl RunOutcome {
 }
 
 /// Something the loop DID, at the moment it did it — the single source of truth for `dash.phase`.
-enum LifecycleEvent {
+pub enum LifecycleEvent {
     Inject,
     Run,
     Verify,
@@ -65,7 +65,7 @@ enum LifecycleEvent {
 }
 
 impl LifecycleEvent {
-    fn phase(&self) -> Phase {
+    pub fn phase(&self) -> Phase {
         match self {
             LifecycleEvent::Inject => Phase::Inject,
             LifecycleEvent::Run => Phase::Run,
@@ -105,7 +105,7 @@ const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
 /// A handler's control-flow result (§3.1). MINIMAL: reason/ledger_tag are NOT here — every Stop
 /// path already `emit`s `Finished{reason,ledger_tag}` itself before yielding the outcome, so a
 /// handler emits then returns `Flow::Stop(outcome)` and the core never re-emits.
-enum Flow {
+pub enum Flow {
     Continue,
     /// stop the rest of THIS session's hooks, loop to the next session (the rate-limit path).
     SkipSession,
@@ -113,7 +113,7 @@ enum Flow {
 }
 
 /// What a whole hook-point dispatch produced (`None` = drained cleanly, fall through to next hook).
-enum End {
+pub enum End {
     NextSession,
     Stop(RunOutcome),
 }
@@ -123,19 +123,19 @@ enum End {
 /// use it via `AGGState`/`AGGScratch`, and a third-party plugin stashes ITS OWN type the same way —
 /// `ctx.ext.get::<FooState>()` — without ever editing the core struct.
 #[derive(Default)]
-struct Extensions {
+pub struct Extensions {
     map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
 }
 impl Extensions {
     /// Get-or-insert-default this type's slot, typed. How a feature/plugin reads+writes its own state.
-    fn get<T: Default + 'static>(&mut self) -> &mut T {
+    pub fn get<T: Default + 'static>(&mut self) -> &mut T {
         self.map
             .entry(std::any::TypeId::of::<T>())
             .or_insert_with(|| Box::new(T::default()))
             .downcast_mut::<T>()
             .expect("TypeId keys its own type")
     }
-    fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.map.clear();
     }
 }
@@ -221,7 +221,7 @@ struct AGGScratch {
     summarized_this_cycle: bool,
 }
 
-trait Handler {
+pub trait Handler {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow>;
     /// Whether this handler runs on a `skip_judges` step. Default yes; the judged-merge handlers
     /// override to `false` so a skip step bypasses them (mirrors the old `if !skip`).
@@ -239,7 +239,7 @@ trait Handler {
 
 /// Dispatch one hook point's handlers in order, honoring `Flow`. A handler's hard `Err` bubbles out
 /// (it is NOT a `RunOutcome` — e.g. `verdicts::append`, or the worker-broken guard). §3.1.
-fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End>> {
+pub fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End>> {
     for h in hooks {
         if st.scratch.get::<AGGScratch>().skip_judges && !h.runs_on_skip() {
             continue;
@@ -1071,16 +1071,16 @@ impl Handler for BackgroundSpawn {
 /// Handlers read `dir`/`cfg`, may `bail!` (a hard error out of `run()`, exactly as the old inline
 /// checks did), and `ResolveIsoBase` writes `iso_base` for the constructor to read. This is a second,
 /// minimal handler protocol for state-BUILDING (vs `Handler`, which operates on the built state).
-struct Bootstrap<'a> {
-    dir: &'a Path,
-    cfg: &'a AggConfig,
-    iso_base: Option<String>,
+pub struct Bootstrap<'a> {
+    pub dir: &'a Path,
+    pub cfg: &'a AggConfig,
+    pub iso_base: Option<String>,
 }
 
 /// A `pre_start` handler: agg's run-start git preconditions (recover a stranded merge, require a
 /// clean git repo, ensure `agg/state` gitignored, resolve the isolation base branch). Runs before the
 /// loop state exists, so it takes `Bootstrap`, not `LoopState`.
-trait PreStart {
+pub trait PreStart {
     fn run(&self, boot: &mut Bootstrap) -> Result<()>;
 }
 
@@ -1138,21 +1138,25 @@ impl PreStart for GitSetup {
     }
 }
 
+/// The hook registry: one ordered plugin list per lifecycle point. `default_pipeline` is agg's OWN
+/// registration (its features are plugins, no different from a third party's). Fields are `pub` so a
+/// host can `lifecycle.on_verify.push(Box::new(MyPlugin))` before the loop — config-in-code, no yaml
+/// (HOOK_REDESIGN §5). This is the OQ5 registration seam.
 #[derive(Default)]
-struct Lifecycle {
-    pre_start: Vec<Box<dyn PreStart>>,
-    on_start: Vec<Box<dyn Handler>>,
-    on_run_start: Vec<Box<dyn Handler>>,
-    background: Vec<Box<dyn Handler>>,
-    on_session_start: Vec<Box<dyn Handler>>,
-    on_run: Vec<Box<dyn Handler>>,
-    on_verify: Vec<Box<dyn Handler>>,
-    on_gate: Vec<Box<dyn Handler>>,
-    on_session_end: Vec<Box<dyn Handler>>,
-    on_stop: Vec<Box<dyn Handler>>,
+pub struct Lifecycle {
+    pub pre_start: Vec<Box<dyn PreStart>>,
+    pub on_start: Vec<Box<dyn Handler>>,
+    pub on_run_start: Vec<Box<dyn Handler>>,
+    pub background: Vec<Box<dyn Handler>>,
+    pub on_session_start: Vec<Box<dyn Handler>>,
+    pub on_run: Vec<Box<dyn Handler>>,
+    pub on_verify: Vec<Box<dyn Handler>>,
+    pub on_gate: Vec<Box<dyn Handler>>,
+    pub on_session_end: Vec<Box<dyn Handler>>,
+    pub on_stop: Vec<Box<dyn Handler>>,
 }
 impl Lifecycle {
-    fn default_pipeline(cfg: &AggConfig, dir: &Path) -> Self {
+    pub fn default_pipeline(cfg: &AggConfig, dir: &Path) -> Self {
         Self::with_hooks(&cfg.hooks, dir)
     }
     /// Split out from `default_pipeline` so the registration ORDER is testable without a full
@@ -1344,54 +1348,59 @@ impl Drop for RunPidGuard<'_> {
 }
 
 /// Everything one step of the loop reads and writes.
-struct LoopState<'a> {
-    cfg: &'a AggConfig,
+/// The context every plugin (`Handler`) receives — the whole run/session state, shared `&mut`
+/// (HOOK_REDESIGN §8: the context IS the state, threaded sequentially, no facade). Fields are `pub`
+/// per the crate's no-facade convention (lib.rs) so a plugin in ANY module/crate reaches what it
+/// needs — most importantly its own typed state via `ext`/`scratch`. The core knows only the hook
+/// registry + this shared bus; every feature (agg's own included) is a plugin against it.
+pub struct LoopState<'a> {
+    pub cfg: &'a AggConfig,
     /// the RULER — LLM judges + summarizer. Immutable across the run (§4).
-    ruler: &'static dyn AgentBackend,
+    pub ruler: &'static dyn AgentBackend,
     /// the ruler model (`judge.model`, resolved).
-    judge_model: String,
+    pub judge_model: String,
     /// EVERY judge's timeout (`judge.timeout`).
-    judge_timeout: u64,
-    dir: &'a Path,
-    config_base: &'a Path,
+    pub judge_timeout: u64,
+    pub dir: &'a Path,
+    pub config_base: &'a Path,
 
-    eng: Engine,
+    pub eng: Engine,
     /// the sequence cursor — yields the next step name each cycle.
-    cursor: Cursor,
+    pub cursor: Cursor,
     /// the step being run THIS cycle (set by INJECT).
-    cur_step: Option<ResolvedStep>,
+    pub cur_step: Option<ResolvedStep>,
 
-    dash: DashboardState,
-    live: LiveState,
-    ledger: crate::project::RunLedger,
-    bus: Option<Bus>,
+    pub dash: DashboardState,
+    pub live: LiveState,
+    pub ledger: crate::project::RunLedger,
+    pub bus: Option<Bus>,
 
-    budget_total: Option<u64>,
-    cost_limit: Option<f64>,
-    max_iter: Option<u32>,
-    max_sessions: u32,
-    gate_regressions: bool,
+    pub budget_total: Option<u64>,
+    pub cost_limit: Option<f64>,
+    pub max_iter: Option<u32>,
+    pub max_sessions: u32,
+    pub gate_regressions: bool,
 
-    loop_start: Instant,
-    lifetime_base: u32,
+    pub loop_start: Instant,
+    pub lifetime_base: u32,
 
-    session: u32,
-    tokens_spent: u64,
-    cost_spent: f64,
+    pub session: u32,
+    pub tokens_spent: u64,
+    pub cost_spent: f64,
     /// per-agent token + cost tally (§7.4), attributed at each spend site (worker / ruler judges /
     /// summarizer). Sums to `tokens_spent`/`cost_spent`; makes a mixed run's totals interpretable.
-    per_agent: std::collections::BTreeMap<String, crate::state::AgentUsage>,
+    pub per_agent: std::collections::BTreeMap<String, crate::state::AgentUsage>,
 
     /// per-RUN generic extension store — agg's own feature state lives here as `AGGState`; a plugin
     /// stashes its own type. Persists across sessions (never cleared mid-run). LOOPSTATE_REDESIGN §3.
-    ext: Extensions,
+    pub ext: Extensions,
     /// per-SESSION generic extension store — agg's stage channel lives here as `AGGScratch`;
     /// `clear()`ed each session at the loop top so no field leaks across sessions (§3/§8).
-    scratch: Extensions,
+    pub scratch: Extensions,
 }
 
 impl LoopState<'_> {
-    fn emit(&mut self, event: LifecycleEvent) {
+    pub fn emit(&mut self, event: LifecycleEvent) {
         self.dash.phase = event.phase();
         if let LifecycleEvent::Finished { reason, ledger_tag } = &event {
             self.dash.finished = true;
@@ -1406,7 +1415,7 @@ impl LoopState<'_> {
     /// Attribute one spend to an agent's running tally (§7.4). A `None` cost is an agent that cannot
     /// report a price — it never fabricates a `0`, so that agent's cost stays `None` (rendered "—")
     /// until a real price arrives, then it accumulates only the reported part.
-    fn charge(&mut self, agent: &str, tokens: u64, cost: Option<f64>) {
+    pub fn charge(&mut self, agent: &str, tokens: u64, cost: Option<f64>) {
         let e = self.per_agent.entry(agent.to_string()).or_default();
         e.tokens += tokens;
         if let Some(c) = cost {
@@ -1414,7 +1423,7 @@ impl LoopState<'_> {
         }
     }
 
-    fn publish(&mut self) {
+    pub fn publish(&mut self) {
         self.dash.up_secs = self.loop_start.elapsed().as_secs();
         self.dash.tokens_spent = self.tokens_spent;
         self.dash.cost_spent = self.cost_spent;
@@ -1678,12 +1687,28 @@ impl LoopState<'_> {
     }
 }
 
+/// Drive the loop with agg's default plugin pipeline. The common entry point.
 pub fn run(
     cfg: AggConfig,
     assembly: Assembly,
     dir: &Path,
     config_base: &Path,
     max_sessions_flag: u32,
+) -> Result<RunOutcome> {
+    run_with(cfg, assembly, dir, config_base, max_sessions_flag, |_| {})
+}
+
+/// Drive the loop with a chance to register EXTRA plugins on top of agg's own (HOOK_REDESIGN §5:
+/// config-in-code registration, no yaml). `register` runs after `Lifecycle::default_pipeline` and
+/// before the loop, so a host adds its `Handler`s to any hook exactly as agg registers its own —
+/// agg's features and a third-party plugin ride the identical path.
+pub fn run_with(
+    cfg: AggConfig,
+    assembly: Assembly,
+    dir: &Path,
+    config_base: &Path,
+    max_sessions_flag: u32,
+    register: impl FnOnce(&mut Lifecycle),
 ) -> Result<RunOutcome> {
     let Assembly { engine: eng, statements } = assembly;
 
@@ -1708,6 +1733,7 @@ pub fn run(
     // agg's built-in hook registration (HOOK_REDESIGN §5) — EVERY lifecycle point, no exceptions,
     // including the `pre_start` git preconditions below and on_start (now) / on_stop (Drop guard).
     let mut lifecycle = Lifecycle::default_pipeline(&cfg, dir);
+    register(&mut lifecycle); // host/third-party plugins, added on top of agg's own (§5)
 
     // ── session isolation (MANDATORY): the git preconditions run as `pre_start` hooks — recover a
     //    stranded merge, require a clean git repo, ensure `agg/state` gitignored, resolve the base
