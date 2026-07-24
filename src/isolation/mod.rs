@@ -6,12 +6,15 @@
 //! They compose. See `internal/ISOLATION.md`.
 //!
 //! # Scope
-//! `none` (direct subprocess, today's behaviour) and `sandbox` (kernel-enforced FS confinement)
-//! only. `container` / `vm` / `remote` are designed in the doc but not built.
+//! `none` (direct subprocess, today's behaviour), `sandbox` (kernel-enforced FS confinement) and
+//! `container` (the command re-hosted inside a container — [`container`]). `vm` / `remote` are
+//! designed in the doc but not built.
 //!
 //! # The policy
 //! `sandbox` gives the worker: **write = cwd (+subfolders) + `$TMPDIR` + the agent's own state
 //! dir; read = everything; network = open.** No egress policy — the owner wants full internet.
+//! `container` targets the same policy from the other side: the only host paths that exist inside
+//! the container are the ones bind-mounted, so read is confined too.
 //!
 //! # Agent-awareness lives at the seam, not here
 //! Codex has its OWN kernel sandbox (`--sandbox workspace-write`), so it is confined by flags in
@@ -35,6 +38,11 @@ mod imp;
 #[path = "macos.rs"]
 mod imp;
 
+// The container tier is NOT cfg-split: one `docker run` argv works on every host that has an
+// engine (macOS reaches a Linux VM, which is the engine's problem, not ours).
+pub mod container;
+pub use container::{container_available, containerize, DEFAULT_IMAGE};
+
 // Any OS that is neither Linux nor macOS has no wrapper. Both entry points fail LOUD — the whole
 // point of this feature is that an unavailable mechanism is refused, never silently ignored.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -52,7 +60,8 @@ mod imp {
 }
 
 /// The per-step blast-radius isolation tier. `none` = direct subprocess (today); `sandbox` =
-/// kernel-enforced FS confinement. Deserialized from the lowercase tier name in agg.yaml.
+/// kernel-enforced FS confinement; `container` = the command runs inside a container.
+/// Deserialized from the lowercase tier name in agg.yaml.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Isolation {
@@ -61,6 +70,9 @@ pub enum Isolation {
     None,
     /// Kernel-enforced FS confinement: write = cwd + tmp + agent state; read = all; net = open.
     Sandbox,
+    /// Re-hosted inside a container ([`container`]): write = the bind-mounted cwd (+ the agent's
+    /// state dirs); read = only what is mounted; net = open. The strongest tier agg ships.
+    Container,
 }
 
 /// Is the OS sandbox mechanism available on this host (the wrapper binary is present)?
@@ -130,6 +142,7 @@ mod tests {
     fn deserializes_the_tier_names_and_rejects_garbage() {
         assert_eq!(serde_yaml::from_str::<Isolation>("none").unwrap(), Isolation::None);
         assert_eq!(serde_yaml::from_str::<Isolation>("sandbox").unwrap(), Isolation::Sandbox);
+        assert_eq!(serde_yaml::from_str::<Isolation>("container").unwrap(), Isolation::Container);
         assert!(serde_yaml::from_str::<Isolation>("nonsense").is_err());
         // capitalisation is not accepted — the tier name is lowercase.
         assert!(serde_yaml::from_str::<Isolation>("None").is_err());

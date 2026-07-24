@@ -43,6 +43,11 @@ impl AggConfig {
             skip_judges: body.skip_judges,
             // Copy type → no clone. step overrides defaults; both absent ⇒ Isolation::None.
             isolation: body.isolation.or(self.defaults.isolation).unwrap_or_default(),
+            image: body
+                .image
+                .clone()
+                .or_else(|| self.defaults.image.clone())
+                .unwrap_or_else(|| crate::isolation::DEFAULT_IMAGE.to_string()),
         })
     }
 
@@ -51,6 +56,12 @@ impl AggConfig {
     /// (`on_stop`), which fires once, after all workers, with no single step's context (ISOLATION.md
     /// §13). Over-approximates deliberately: confining a best-effort teardown hook that maybe didn't
     /// need it is harmless; leaving it unconfined when a sandboxed worker ran is the escape.
+    ///
+    /// `container` is deliberately NOT folded in here: judges and hooks are host tooling (agg's own
+    /// DoD judges run `cargo`), so re-hosting them in the worker's base image would break them, and
+    /// jailing them in the OS sandbox instead is a different policy than the step asked for. The
+    /// residual — a container worker can still rewrite a judge/hook script in its bind-mounted cwd —
+    /// is documented in `internal/ISOLATION.md` §15, not silently papered over.
     pub fn run_isolation(&self) -> crate::isolation::Isolation {
         use crate::isolation::Isolation;
         let any_step = self.steps.values().any(|b| b.isolation == Some(Isolation::Sandbox));

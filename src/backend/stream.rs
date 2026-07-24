@@ -223,16 +223,91 @@ pub fn parse_result(line: &str) -> Option<crate::backend::SessionReport> {
     if v.get("type")?.as_str()? != "result" {
         return None;
     }
+    let rate_limited = line_is_rate_limited_result(line);
+    // If rate-limited, try to read WHEN it resets from the same terminal text (Claude subscription
+    // limits carry "resets 12:50pm") so the backoff can wait exactly that long instead of blind.
+    let rate_limit_reset = if rate_limited {
+        let mut hay = String::new();
+        for k in ["result", "error", "subtype"] {
+            if let Some(s) = v.get(k).and_then(|x| x.as_str()) {
+                hay.push_str(s);
+                hay.push(' ');
+            }
+        }
+        parse_reset_epoch(&hay)
+    } else {
+        None
+    };
     Some(crate::backend::SessionReport {
         // Claude prices the session itself — correctly per-model (including the `[1m]` variant),
         // cache-aware, no pricing table needed on our side. We just read it.
         cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
-        rate_limited: line_is_rate_limited_result(line),
+        rate_limited,
+        rate_limit_reset,
     })
     // The session id comes via `AgentBackend::parse_session_id` (per-line), not from here —
     // Codex puts its resume handle on the FIRST event, not the terminal one.
     // NOTE: output tokens are NOT read here — they are accumulated per-line via
     // `AgentBackend::parse_usage`, because not every agent reports them on the terminal event.
+}
+
+/// Parse `resets <H>:<MM><am|pm>` (as in "You've hit your session limit · resets 12:50pm
+/// (Europe/Berlin)") into the ABSOLUTE epoch of the NEXT occurrence of that local wall-clock time.
+/// `None` when absent, unparseable, or absurd (≤0 or >25h out) — the caller then falls back to the
+/// fixed backoff.
+///
+/// TZ: the CLI reports the reset in the user's LOCAL time and this runs on the user's machine, so we
+/// treat the time as local (via [`crate::ui::localtime::local_hms`]). A fully tz-aware parse would
+/// need a timezone database; this covers the real case and is bounded so a bad parse can't oversleep.
+fn parse_reset_epoch(text: &str) -> Option<u64> {
+    let low = text.to_lowercase();
+    let after = low.split("resets").nth(1)?.trim_start();
+    let after = after.strip_prefix("at ").map(str::trim_start).unwrap_or(after);
+    let b = after.as_bytes();
+
+    // hour digits, then ':'
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let hour: u64 = after.get(..i)?.parse().ok()?;
+    if i >= b.len() || b[i] != b':' {
+        return None;
+    }
+    i += 1;
+    // exactly-parseable minute digits
+    let mstart = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let minute: u64 = after.get(mstart..i)?.parse().ok()?;
+
+    // optional space then am/pm → 24h. No meridiem ⇒ assume it was already 24h.
+    let rest = after[i..].trim_start();
+    let hour24 = if let Some(_p) = rest.strip_prefix("pm") {
+        if hour == 12 { 12 } else { hour + 12 }
+    } else if rest.strip_prefix("am").is_some() {
+        if hour == 12 { 0 } else { hour }
+    } else {
+        hour
+    };
+    if hour24 > 23 || minute > 59 {
+        return None;
+    }
+
+    let target_mod = (hour24 * 60 + minute) as i64;
+    let now = crate::util::now_epoch();
+    let (ch, cm, cs) = crate::ui::localtime::local_hms(now);
+    let cur_mod = (ch * 60 + cm) as i64;
+    let mut delta_min = target_mod - cur_mod;
+    if delta_min <= 0 {
+        delta_min += 1440; // reset time already passed today ⇒ it's tomorrow
+    }
+    let wait = delta_min * 60 - cs as i64;
+    if wait <= 0 || wait > 25 * 3600 {
+        return None;
+    }
+    Some(now + wait as u64)
 }
 
 /// Extract the `session_id` from a terminal `result` event (for `--resume`), if any.
@@ -374,5 +449,39 @@ mod tests {
         // a real terminal result error DOES
         let real = r#"{"type":"result","subtype":"error","error":"API rate_limit_error (status 429)","result":""}"#;
         assert!(line_is_rate_limited_result(real));
+    }
+
+    /// The regression this fix exists for: the Claude SUBSCRIPTION limit message — a different
+    /// wording from the API "usage limit reached" — must be detected as a rate-limit AND its reset
+    /// time parsed, so the loop waits for the reset instead of dud-aborting. Verified against the
+    /// exact string a real subscription run emitted.
+    #[test]
+    fn subscription_session_limit_is_detected_with_its_reset() {
+        let line = r#"{"type":"result","subtype":"success","result":"You've hit your session limit · resets 12:50pm (Europe/Berlin)"}"#;
+        assert!(line_is_rate_limited_result(line), "the subscription 'session limit' message must be detected");
+        let report = parse_result(line).expect("terminal result parses");
+        assert!(report.rate_limited);
+        assert!(report.rate_limit_reset.is_some(), "the reset time must be parsed for the smart wait");
+        // and a benign terminal result stays clean (no false positive, no reset)
+        let ok = r#"{"type":"result","subtype":"success","result":"all done"}"#;
+        let r2 = parse_result(ok).unwrap();
+        assert!(!r2.rate_limited && r2.rate_limit_reset.is_none());
+    }
+
+    #[test]
+    fn parse_reset_epoch_reads_the_clock_time_and_bounds_it() {
+        let now = crate::util::now_epoch();
+        // a valid "resets H:MMpm" yields an absolute epoch in the future, within a day.
+        let e = parse_reset_epoch("hit your session limit · resets 11:59pm (Europe/Berlin)");
+        // 11:59pm may be in the past-of-today (→ tomorrow) or future; either way it's ahead of now
+        // and no more than ~25h out.
+        if let Some(ep) = e {
+            assert!(ep > now && ep <= now + 25 * 3600, "reset epoch is bounded: {ep} vs now {now}");
+        }
+        // no "resets" ⇒ None (fixed backoff)
+        assert!(parse_reset_epoch("You've hit your usage limit reached").is_none());
+        // garbage after "resets" ⇒ None, never a panic
+        assert!(parse_reset_epoch("resets soon-ish").is_none());
+        assert!(parse_reset_epoch("resets 25:99pm").is_none());
     }
 }

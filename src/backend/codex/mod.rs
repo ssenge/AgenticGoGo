@@ -130,8 +130,13 @@ impl AgentBackend for Codex {
         // `error: unexpected argument '--sandbox' found`). Since the resume branch above reshapes
         // argv into that subcommand, the flag form would make every resumed sandboxed session die
         // on argv parsing. The config form parses and enforces identically on both shapes.
+        //   container → the CONTAINER is the jail (worker.rs re-hosts the whole command inside it),
+        //             so Codex's own kernel sandbox is redundant here and would only add a second,
+        //             stricter policy nobody asked for — worse, a nested seccomp/landlock jail is
+        //             not reliably available inside a container. Same argv as `none`; the
+        //             confinement is one level out.
         match spec.isolation {
-            crate::isolation::Isolation::None => {
+            crate::isolation::Isolation::None | crate::isolation::Isolation::Container => {
                 command.arg("--dangerously-bypass-approvals-and-sandbox");
             }
             crate::isolation::Isolation::Sandbox => {
@@ -261,6 +266,7 @@ impl AgentBackend for Codex {
         Some(SessionReport {
             cost_usd: None, // Codex reports no cost, anywhere — see capabilities()
             rate_limited: rate_limited(&v, ty),
+            rate_limit_reset: None, // Codex 429 JSON carries no reset time — fixed backoff
         })
     }
 

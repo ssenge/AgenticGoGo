@@ -36,6 +36,7 @@ impl Handler for LaunchWorker {
             ctx.session,
             &ctx.live,
             isolation,
+            &step.image,
         );
         ctx.tokens_spent += outcome.output_tokens;
         ctx.cost_spent += outcome.cost_usd;

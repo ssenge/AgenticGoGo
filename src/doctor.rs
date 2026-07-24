@@ -77,6 +77,22 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
             );
         }
 
+        // 3d) …and the rung above: `isolation: container` needs an engine whose daemon ANSWERS.
+        //     Same gating rule — only checked when the config actually asks for the tier.
+        let wants_engine = c
+            .steps
+            .keys()
+            .filter_map(|n| c.resolve_step(n).ok())
+            .any(|s| s.isolation == crate::isolation::Isolation::Container);
+        if wants_engine {
+            check(
+                crate::isolation::container_available(),
+                "container engine running for `isolation: container` (docker / podman)",
+                "start the engine (`colima start`, Docker Desktop, `podman machine start`) or install one",
+                &mut fail,
+            );
+        }
+
         // 4) the forward state file exists (named by `defaults.state`, resolved against agg/).
         let sp = config_base.join(&c.defaults.state);
         check(

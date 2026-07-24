@@ -208,6 +208,29 @@ fn resolve_step_merges_isolation_step_over_defaults_default_none() {
     assert_eq!(cfg.resolve_step("build").unwrap().isolation, Isolation::Sandbox, "an un-named step inherits defaults.isolation");
 }
 
+/// The `container` rung and its `image:` companion resolve by the same rules: the tier parses on
+/// both levels, and the image is inheritable with a built-in default when nobody names one.
+#[test]
+fn resolve_step_merges_the_container_tier_and_its_image() {
+    use crate::isolation::Isolation;
+
+    // nobody names an image ⇒ the built-in base image, so `container` needs no extra config to work.
+    let bare = parse(MINIMAL).unwrap();
+    assert_eq!(bare.resolve_step("worker").unwrap().image, crate::isolation::DEFAULT_IMAGE);
+
+    let cfg = parse(
+        "project: p\n\
+         defaults: { isolation: container, image: \"debian:12\" }\n\
+         steps:\n  plan: { isolation: sandbox }\n  build: { image: \"alpine:3.20\" }\n\
+         sequence: { steps: [plan, build] }\n",
+    )
+    .expect("`container` + `image` parse on both defaults and a step body");
+
+    assert_eq!(cfg.resolve_step("build").unwrap().isolation, Isolation::Container, "container inherits");
+    assert_eq!(cfg.resolve_step("build").unwrap().image, "alpine:3.20", "step image wins over defaults");
+    assert_eq!(cfg.resolve_step("plan").unwrap().image, "debian:12", "an un-named step inherits defaults.image");
+}
+
 /// `agent_names` returns EVERY distinct agent the sequence names (defaults + ruler + per-step),
 /// sorted and de-duped — so `doctor`/capability can cover them all (§7.3).
 #[test]

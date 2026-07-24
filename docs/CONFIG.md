@@ -19,7 +19,8 @@ defaults:
   effort: "high"                   # low|medium|high|xhigh|max — None ⇒ backend default; "" ⇒ none
   worker_args: []                  # extra flags passed VERBATIM to the worker (the sandbox constraint)
   state: "state/STATE.md"          # the forward-advice file under agg/ (gitignored)
-  isolation: none                  # none (default) | sandbox — OS jail around the worker+judges+hooks
+  isolation: none                  # none (default) | sandbox | container — the blast-radius jail
+  image: "alpine:3.20"             # the base image an `isolation: container` step runs in
 
 # THE RULER — runs LLM judges + the summarizer. Run-level and IMMUTABLE: naming any of these keys
 # in a step body is a hard error (a grader that moves makes verdicts incomparable across cycles).
@@ -72,7 +73,8 @@ prompt_includes: []                # files prepended to every worker prompt
 | `worker_args` | `[]` | extra flags passed **verbatim** to the worker CLI — the sandbox constraint. Inheritable so you set it once. |
 | `state` | `state/STATE.md` | the forward-advice file (see [State](#state-and-memory)) — under `agg/state/` (gitignored), resolved against `agg/`. |
 | `role_prompt` | none | generic **role** framing composed *above* a step's `prompt:`. Inheritable; a step body may override it. |
-| `isolation` | `none` | `none` \| `sandbox` — blast-radius jail (below). Inheritable; a step may override. |
+| `isolation` | `none` | `none` \| `sandbox` \| `container` — blast-radius jail (below). Inheritable; a step may override. |
+| `image` | `alpine:3.20` | the base image an `isolation: container` step runs in. Inert on every other tier. |
 
 ## `judge` — THE RULER
 
@@ -103,7 +105,8 @@ Each NAME maps to a body of overrides. **The complete legal key list** (anything
 | `role_prompt` | `defaults.role_prompt` | generic **role** framing composed **above** the step's `prompt:` (e.g. `reconsider`'s "step back — assume the current approach is wrong"). Replaced the old hardcoded `Role` enum. |
 | `prompt` | none | **ADDITIVE** to the composed prompt, never replacing it. |
 | `skip_judges` | `false` | `true` ⇒ no judges run after this step, so nothing merges — the work **stages** (below). |
-| `isolation` | `defaults.isolation` | `none` \| `sandbox` — the blast-radius jail for this step (below). |
+| `isolation` | `defaults.isolation` | `none` \| `sandbox` \| `container` — the blast-radius jail for this step (below). |
+| `image` | `defaults.image` | the base image for this step under `isolation: container`. |
 
 **`skip_judges` steps stage.** Nothing was judged, so nothing merges; the work stays on the session
 branch and the **next judged step gates the whole span** — pass ⇒ the span merges, a regression ⇒ the
@@ -116,18 +119,32 @@ Every worker runs the agent in auto mode (`--dangerously-skip-permissions` and e
 default it can do anything YOU can — `rm -rf ~`, read `~/.ssh`, touch other repos. `isolation` bounds
 that, **per step**:
 
-| tier | what the worker (and its judges + hooks) may do |
+| tier | what the worker may do |
 |---|---|
 | `none` *(default)* | no confinement — full host access, today's behaviour. |
-| `sandbox` | **write** = the project dir (+subfolders) + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open. Kernel-enforced. |
+| `sandbox` | **write** = the project dir (+subfolders) + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open. Kernel-enforced. Also confines this step's judges + hooks. |
+| `container` | the worker runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir + the agent's state dir + the container's own tmp; **read** = only what is mounted; **network** = fully open. |
 
 `sandbox` uses the OS jail — **`sandbox-exec` (Seatbelt) on macOS**, `bwrap` (bubblewrap) on Linux —
 except Codex, which has its own kernel sandbox agg drives with flags. It confines the **worker, its
 script + LLM judges, and its foreground hooks** in one jail, so nothing a confined worker can rewrite
 in the project dir becomes an escape. It does **not** restrict network (full internet by design).
 
-If `sandbox` is requested but the OS mechanism is unavailable, agg **refuses at startup** — never a
-silent downgrade to `none`. `agg doctor` reports whether the sandbox tooling is present.
+`container` confines from the other side: instead of jailing a host process it re-hosts the command
+in a container, so the host filesystem is not there to read at all. The step's `image:` names the
+base image (default `alpine:3.20`). It applies to **every** agent, self-sandboxing or not — the
+container boundary *is* the confinement.
+
+> **`container` is the confinement mechanism, not yet an agent runtime.** The base image has no
+> agent CLI and no credentials in it, so this tier is ready for commands you can run in a plain
+> image; running `claude`/`codex` themselves inside it needs an image with the CLI plus a mounted
+> credential store, and is a documented follow-up (`internal/ISOLATION.md` §15). That section also
+> records the residual: unlike `sandbox`, this tier confines the **worker only** — judges and hooks
+> are host tooling (they run `cargo`, `git`, your linters), so they still run on the host.
+
+If `sandbox` is requested but the OS mechanism is unavailable — or `container` is requested and no
+container engine answers — agg **refuses at startup**, never a silent downgrade to `none`. `agg
+doctor` reports whether the tooling the config asks for is present.
 
 > **Platform status:** macOS (`sandbox-exec`) is verified end-to-end. The Linux `bwrap` path is
 > implemented but not yet shaken out on a real Linux host — treat Linux `sandbox` as experimental.
