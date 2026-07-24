@@ -181,9 +181,40 @@ pub trait AgentBackend: Send + Sync {
     /// A single NON-AGENTIC prompt→text call, tools/MCP off, project config ignored. Used by the
     /// LLM judge and the summarizer.
     ///
+    /// `isolation` confines it exactly like a worker session (ISOLATION.md §12): a judge grading a
+    /// sandboxed step must not itself be an escape hatch. The LLM judge already denies tool writes
+    /// at the agent-permission layer, but that is defense-in-depth, "NOT a host jail" — so under
+    /// `Sandbox` a non-self-sandboxing backend gets the real OS wrapper here too. Requires a `cwd`
+    /// to anchor the jail; a `None` cwd (the summarizer) is never confined. Codex self-sandboxes its
+    /// one-shot with `--sandbox read-only`, so it is never wrapped.
+    ///
     /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
-    fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String>;
+    fn one_shot(
+        &self,
+        prompt: &str,
+        model: &str,
+        timeout_secs: u64,
+        cwd: Option<&Path>,
+        isolation: crate::isolation::Isolation,
+    ) -> Result<OneShot, String>;
+
+    /// Wrap a one-shot's built [`Command`] in the OS sandbox when the step is confined and this
+    /// backend does not confine itself — the shared tail of every non-self-sandboxing `one_shot`.
+    /// A `None` cwd cannot be jailed (no anchor), so it is returned unwrapped.
+    fn confine_one_shot(
+        &self,
+        command: Command,
+        cwd: Option<&Path>,
+        isolation: crate::isolation::Isolation,
+    ) -> Result<Command, String> {
+        match cwd {
+            Some(dir) if isolation == crate::isolation::Isolation::Sandbox && !self.self_sandboxes() => {
+                crate::isolation::wrap(command, dir, &self.writable_state_paths()).map_err(|e| e.to_string())
+            }
+            _ => Ok(command),
+        }
+    }
 
     /// Tally a one-shot's usage from its RAW stdout by re-using this backend's own per-line parsers
     /// ([`Self::parse_usage`] / [`Self::parse_result`]) — so `OneShot` carries token/cost spend
@@ -280,17 +311,17 @@ pub trait AgentBackend: Send + Sync {
     fn preflight(&self) -> Result<()>;
 }
 
-/// A `~/<name>` agent-state dir, but ONLY if it exists — the writable carve-out for the OS sandbox
-/// ([`AgentBackend::writable_state_paths`]). Returns empty when there is no HOME or the dir is
-/// absent, so the wrapper never binds a path that isn't there.
-fn state_dir_if_exists(name: &str) -> Vec<std::path::PathBuf> {
+/// The `~/<name>` agent-state paths that exist — the writable carve-out for the OS sandbox
+/// ([`AgentBackend::writable_state_paths`]). Returns only what is actually there, so the wrapper
+/// never binds a path that isn't (and empty when there is no HOME).
+///
+/// FILES count, not just dirs: Claude's primary config is `~/.claude.json`, a plain file SIBLING to
+/// `~/.claude`, so a dirs-only rule silently loses every write to it (measured — `Operation not
+/// permitted`, and the CLI does not complain).
+fn state_paths_that_exist(names: &[&str]) -> Vec<std::path::PathBuf> {
     let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
-    let dir = std::path::Path::new(&home).join(name);
-    if dir.is_dir() {
-        vec![dir]
-    } else {
-        Vec::new()
-    }
+    let home = std::path::Path::new(&home);
+    names.iter().map(|n| home.join(n)).filter(|p| p.exists()).collect()
 }
 
 // ---------------- selection ----------------

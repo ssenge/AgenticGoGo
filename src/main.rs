@@ -225,7 +225,8 @@ fn run_cli() -> Result<ExitCode> {
             let jm = cfg.judge_model(ruler);
             let mut eng = asm.engine;
             eprintln!("agg: evaluating {} judge(s) once (dry run)…", eng.judges.len());
-            let res = eng.run_step(&p.dir, &engine::RunState::default(), ruler, &jm, cfg.judge.timeout, "plan", None, false);
+            // dry run — no worker, clean tree → no confinement needed.
+            let res = eng.run_step(&p.dir, &engine::RunState::default(), ruler, &jm, cfg.judge.timeout, "plan", None, false, agg::isolation::Isolation::None);
             print!("{}", eng.scoreboard());
             if res.halt {
                 println!("\n⚠ abort_if is already true: {}", res.halt_reason.unwrap_or_default());
@@ -266,7 +267,8 @@ fn run_cli() -> Result<ExitCode> {
                 Ok(c) => (c.judge_model(ruler), c.judge.timeout),
                 Err(_) => (ruler.default_summary_model().to_string(), 300),
             };
-            let (verdict, _spend) = judge::run(&kind, name, &p.dir, ruler, &jm, timeout, None, "judge");
+            // Manual `agg judge` — no worker ran this session, so no confinement is needed.
+            let (verdict, _spend) = judge::run(&kind, name, &p.dir, ruler, &jm, timeout, None, "judge", agg::isolation::Isolation::None);
             // raw verdict JSON (the judge contract), then a one-line human summary.
             println!("{}", serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".into()));
             let mark = if verdict.met { "✔ met" } else { "✖ not met" };

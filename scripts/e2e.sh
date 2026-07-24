@@ -1306,11 +1306,16 @@ EOF
   # --- isolation: sandbox → agg wraps the worker in the OS sandbox ---------------------------
   SB="$(mkproj sandbox)"
   make_wrapper "$SB"
+  # A post-session HOOK that execs a repo-relative script — the §13 escape shape (a confined worker
+  # rewrites hook_payload.sh in its writable cwd). It must be wrapped just like the worker + judge.
+  printf 'echo hook ran\n' > "$SB/hook_payload.sh"
   cat > "$SB/agg/agg.yaml" <<'EOF'
 project: sandbox
 defaults: { model: fake }
 steps:
   worker: { isolation: sandbox }
+hooks:
+  on_session_end: ["sh hook_payload.sh"]
 sequence:
   steps: [worker]
   done_if: "worked"
@@ -1323,6 +1328,11 @@ EOF
   has  "…and the inner claude was the wrapped command"      "$SB/sandbox_wrap.log" "claude"
   has  "…the inner claude STILL ran under the wrapper"      "$SB/trace.txt" "RUN=run"
   has  "…and its work landed (the judge saw did_work)"      "$SB/run.log" "1/1 goals met"
+  # §12/§13: everything a confined worker can rewrite in its writable cwd is wrapped too, or it is a
+  # wide-open escape. The post-session script JUDGE and the on_session_end HOOK both appear in the
+  # wrap log alongside the worker.
+  has  "…and the post-session JUDGE was wrapped too (§12 escape closed)" "$SB/sandbox_wrap.log" "worked.sh"
+  has  "…and the on_session_end HOOK was wrapped too (§13 escape closed)" "$SB/sandbox_wrap.log" "hook_payload.sh"
 
   # --- isolation: none → agg spawns the worker DIRECTLY, no wrapper -------------------------
   NB="$(mkproj nosandbox)"

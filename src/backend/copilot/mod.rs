@@ -312,12 +312,22 @@ impl AgentBackend for Copilot {
     ///   from the repo. The worker writes those, so loading them would let it reconfigure its own
     ///   judge. Copilot's equivalent of Claude's `--setting-sources user`.
     /// - **`--disable-builtin-mcps`** — no MCP servers, like Claude's `--strict-mcp-config`.
-    fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String> {
+    fn one_shot(
+        &self,
+        prompt: &str,
+        model: &str,
+        timeout_secs: u64,
+        cwd: Option<&Path>,
+        isolation: crate::isolation::Isolation,
+    ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command.args(ONE_SHOT_FLAGS).arg("--model").arg(model).arg("-p").arg(prompt).stdin(Stdio::null());
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
+        // Confine the judge under `Sandbox` (ISOLATION.md §12): withholding `--allow-all-tools`
+        // denies writes at the permission layer, but the OS wrapper is the kernel jail on top.
+        let command = self.confine_one_shot(command, cwd, isolation)?;
         let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
         // ponytail: Copilot's one-shot stream reports neither tokens nor cost (§5.6) — tally yields
         // (0, None), a LOUD hole the ceilings must treat as "unknown", not "free". The visible
@@ -336,7 +346,7 @@ impl AgentBackend for Copilot {
     /// Copilot writes session state under `~/.copilot` — add it to the sandbox's writable set so a
     /// confined worker can still record its session. Only returned when it actually exists.
     fn writable_state_paths(&self) -> Vec<std::path::PathBuf> {
-        super::state_dir_if_exists(".copilot")
+        super::state_paths_that_exist(&[".copilot"])
     }
 
     fn is_installed(&self) -> bool {

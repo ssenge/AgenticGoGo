@@ -89,7 +89,7 @@ fn resume_is_a_subcommand_not_a_flag() {
 
 /// Blast-radius isolation is agent-NATIVE for Codex: it self-sandboxes, so `spec.isolation` picks
 /// its flags rather than the OS wrapper. `None` keeps today's bypass; `Sandbox` swaps to
-/// `--sandbox workspace-write` and re-enables network (workspace-write denies it by default).
+/// workspace-write and re-enables network (workspace-write denies it by default).
 #[test]
 fn isolation_selects_codex_native_sandbox_flags() {
     let base = SessionSpec {
@@ -120,8 +120,10 @@ fn isolation_selects_codex_native_sandbox_flags() {
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let s = sb.iter().position(|a| a == "--sandbox").expect("sandbox tier passes --sandbox");
-    assert_eq!(sb[s + 1], "workspace-write", "workspace-write is exactly agg's target policy");
+    assert!(
+        sb.contains(&"sandbox_mode=workspace-write".to_string()),
+        "workspace-write is exactly agg's target policy"
+    );
     assert!(
         !sb.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
         "the bypass must be GONE once confined"
@@ -133,6 +135,24 @@ fn isolation_selects_codex_native_sandbox_flags() {
     );
     // --skip-git-repo-check survives under BOTH tiers (headless runs outside a repo).
     assert!(sb.contains(&"--skip-git-repo-check".to_string()) && none.contains(&"--skip-git-repo-check".to_string()));
+
+    // The confinement must be selected by the CONFIG form, never the `--sandbox` FLAG: `codex exec`
+    // takes that flag but `codex exec resume` does NOT ("error: unexpected argument '--sandbox'",
+    // verified on the wire), so a resumed sandboxed session would die on argv parsing.
+    let resumed: Vec<String> = Codex
+        .session_command(&SessionSpec {
+            isolation: crate::isolation::Isolation::Sandbox,
+            resume_id: Some("abc123"),
+            ..base
+        })
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert!(resumed.contains(&"resume".to_string()), "resume reshapes argv into the subcommand");
+    for argv in [&sb, &resumed] {
+        assert!(!argv.contains(&"--sandbox".to_string()), "the flag form breaks `codex exec resume`: {argv:?}");
+    }
+    assert!(resumed.contains(&"sandbox_mode=workspace-write".to_string()), "a RESUMED session is confined too");
 }
 
 /// Codex is the ONE backend agg must not wrap in the OS sandbox — it has its own kernel jail.

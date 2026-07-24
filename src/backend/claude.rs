@@ -125,7 +125,14 @@ impl AgentBackend for Claude {
     /// repo's `.claude/settings.json` or hooks). Together these stop a worker from steering its
     /// own judge via repo config, while preserving auth. (CLAUDE.md auto-discovery in cwd is the
     /// documented residual — see judge.rs's trust-boundary note.)
-    fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String> {
+    fn one_shot(
+        &self,
+        prompt: &str,
+        model: &str,
+        timeout_secs: u64,
+        cwd: Option<&Path>,
+        isolation: crate::isolation::Isolation,
+    ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command
             .arg("-p")
@@ -141,6 +148,9 @@ impl AgentBackend for Claude {
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
+        // Confine the judge under `Sandbox` (ISOLATION.md §12). Claude's permission layer already
+        // denies tool writes here, but that is not a kernel jail — the OS wrapper is.
+        let command = self.confine_one_shot(command, cwd, isolation)?;
         let out: Captured = proc::run_with_timeout(command, timeout_secs)?;
         let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
         Ok(OneShot {
@@ -152,10 +162,19 @@ impl AgentBackend for Claude {
         })
     }
 
-    /// Claude writes session logs/cache under `~/.claude` — add it to the sandbox's writable set so
-    /// a confined worker can still record its session. Only returned when it actually exists.
+    /// What a confined Claude worker must still be able to write outside the repo, measured on a
+    /// real host rather than assumed: `~/.claude` (session transcripts, shell snapshots the Bash
+    /// tool writes on EVERY tool call, plugin markers) and `~/.claude.json` — the primary config
+    /// file, which is a sibling FILE of that dir, not inside it, so it needs its own entry.
+    ///
+    /// Deliberately NOT granted: `~/Library/Keychains/login.keychain-db`. Claude READS its OAuth
+    /// credentials from there fine (that path is mach, not the filesystem); only persisting a
+    /// REFRESHED token is denied. Handing an auto-mode worker write access to the user's login
+    /// keychain to save a re-login would defeat the point of the jail.
     fn writable_state_paths(&self) -> Vec<std::path::PathBuf> {
-        super::state_dir_if_exists(".claude")
+        // `.claude.json.backup` needs no entry of its own: the OS wrapper grants a writable FILE
+        // its atomic-write temp siblings by prefix, and `.backup` is one of them.
+        super::state_paths_that_exist(&[".claude", ".claude.json"])
     }
 
     fn is_installed(&self) -> bool {

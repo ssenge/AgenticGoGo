@@ -46,6 +46,21 @@ impl AggConfig {
         })
     }
 
+    /// The RUN-LEVEL blast-radius tier — `Sandbox` if the run could confine ANY worker (defaults or
+    /// some step names `sandbox`), else `None`. Used to confine the run-level teardown hook
+    /// (`on_stop`), which fires once, after all workers, with no single step's context (ISOLATION.md
+    /// §13). Over-approximates deliberately: confining a best-effort teardown hook that maybe didn't
+    /// need it is harmless; leaving it unconfined when a sandboxed worker ran is the escape.
+    pub fn run_isolation(&self) -> crate::isolation::Isolation {
+        use crate::isolation::Isolation;
+        let any_step = self.steps.values().any(|b| b.isolation == Some(Isolation::Sandbox));
+        if self.defaults.isolation == Some(Isolation::Sandbox) || any_step {
+            Isolation::Sandbox
+        } else {
+            Isolation::None
+        }
+    }
+
     /// Every distinct agent named anywhere (defaults + judge + each step) — so `agg doctor` and the
     /// capability check can cover EVERY agent the sequence names (§7.3), not just one.
     pub fn agent_names(&self) -> Vec<String> {
