@@ -119,6 +119,20 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
                  or run the step on an agent with its own sandbox (codex)."
             ));
         }
+        // Same rule one rung up: `container` needs a container engine that ANSWERS (the client
+        // binary alone is not enough — a dead daemon means every session dies at spawn). Refuse at
+        // startup rather than let the run discover it, session by session.
+        if step.isolation == crate::isolation::Isolation::Container
+            && !crate::isolation::container_available()
+        {
+            problems.push(format!(
+                "step `{step_name}` (agent `{agent}`): `isolation: container` is set, but no \
+                 container engine is runnable on this host — `docker`/`podman` is missing or its \
+                 daemon is not answering, so the worker could not start at all.\n      \
+                 fix: start the engine (e.g. `colima start`, `docker desktop`), install one, or use \
+                 `isolation: sandbox` / `isolation: none`."
+            ));
+        }
     }
 
     // Loud but non-fatal (§7.3): an inert-but-still-bounded guard. Surface it whether or not we

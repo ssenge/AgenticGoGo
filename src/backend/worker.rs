@@ -25,6 +25,9 @@ pub struct SessionOutcome {
     pub exit_code: Option<i32>,
     pub duration_secs: u64,
     pub rate_limited: bool,
+    /// when the limit resets (absolute epoch secs), if the terminal event said so — so the backoff
+    /// waits exactly that long instead of a blind fixed interval. `None` ⇒ fixed backoff.
+    pub rate_limit_reset: Option<u64>,
     /// the watchdog SIGKILLed this session (stream-idle + cpu-flat) — surfaced on the
     /// session-exit log line so a hung worker is visible, not silently swallowed.
     pub killed_by_watchdog: bool,
@@ -46,6 +49,7 @@ impl SessionOutcome {
             exit_code: None,
             duration_secs: 0,
             rate_limited: false,
+            rate_limit_reset: None,
             killed_by_watchdog: false,
             output_tokens: 0,
             cost_usd: 0.0,
@@ -60,7 +64,7 @@ impl SessionOutcome {
 /// `agent`/`model`/`effort`/`worker_args` are this STEP's resolved values (over `defaults`), handed
 /// in by the loop — no process-wide agent, no config read here. `agent` is `&'static` because the
 /// stream-reader thread below needs it inside a `move` closure; every backend is a unit struct, so
-/// this costs nothing.
+/// this costs nothing. `image` is the step's base image, read ONLY under `isolation: container`.
 #[allow(clippy::too_many_arguments)]
 pub fn run_session(
     cfg: &AggConfig,
@@ -73,13 +77,14 @@ pub fn run_session(
     session: u32,
     live: &LiveState,
     isolation: crate::isolation::Isolation,
+    image: &str,
 ) -> SessionOutcome {
     let start = Instant::now();
 
     // WHAT to run is the backend's business (binary, flags, prompt placement); HOW to supervise
     // it is ours (process group, stream reader, heartbeat, watchdog, reaping). Resume is dropped
     // (§4.1: a session id is per-agent, so it cannot cross a mixed sequence) — always fresh context.
-    let mut command = agent.session_command(&backend::SessionSpec {
+    let command = agent.session_command(&backend::SessionSpec {
         prompt,
         model,
         effort,
@@ -88,23 +93,34 @@ pub fn run_session(
         cwd: dir,
         isolation,
     });
-    // Blast-radius isolation: wrap the built Command in the OS sandbox when `sandbox` is requested
-    // AND the agent does not confine itself. Codex self-sandboxes (it reads `spec.isolation` and
-    // adds its own kernel-sandbox flags above), so it is NEVER wrapped; Claude/Copilot have only
-    // permission layers, so they get the real kernel jail here. The wrapper rebuilds argv as
-    // `<wrapper flags…> <agent> <agent args…>` and re-applies the uniform stdio, so the
-    // `process_group(0)` below correctly targets the wrapper. An unavailable mechanism is a LOUD
-    // failure, never a silent direct spawn (capability::check also refuses it at startup).
-    if isolation == crate::isolation::Isolation::Sandbox && !agent.self_sandboxes() {
-        let writable = agent.writable_state_paths();
-        match crate::isolation::wrap(command, dir, &writable) {
-            Ok(c) => command = c,
-            Err(e) => {
-                eprintln!("  FAILED to sandbox the {} worker: {e}", agent.bin());
-                return SessionOutcome::failed();
-            }
+    // Blast-radius isolation. Both confining tiers reshape the built Command and re-apply the
+    // uniform stdio, so the `process_group(0)` below correctly targets the wrapper / engine client.
+    // An unavailable mechanism is a LOUD failure here, never a silent direct spawn (and
+    // capability::check already refuses it at startup).
+    //
+    //   sandbox   → the OS jail, but only when the agent does not confine ITSELF. Codex reads
+    //               `spec.isolation` and adds its own kernel-sandbox flags above, so it is NEVER
+    //               wrapped; Claude/Copilot have only permission layers, so they get the real jail.
+    //   container → the command is re-hosted inside `image` with `dir` bind-mounted. This applies
+    //               to EVERY agent, self-sandboxing or not: the container boundary is the
+    //               confinement, and a nested kernel sandbox inside it would only get in the way
+    //               (which is why codex drops its own flags under this tier — see codex/mod.rs).
+    let confined = match isolation {
+        crate::isolation::Isolation::Sandbox if !agent.self_sandboxes() => {
+            crate::isolation::wrap(command, dir, &agent.writable_state_paths())
         }
-    }
+        crate::isolation::Isolation::Container => {
+            crate::isolation::containerize(command, dir, &agent.writable_state_paths(), image)
+        }
+        _ => Ok(command),
+    };
+    let mut command = match confined {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("  FAILED to isolate the {} worker ({isolation:?}): {e}", agent.bin());
+            return SessionOutcome::failed();
+        }
+    };
     // Own process group (pgid == pid) so the watchdog can SIGKILL the WHOLE tree —
     // the worker AND every tool subprocess it spawned. A bare kill(pid) leaves
     // orphan grandchildren (a runaway build/sleep) running, which is exactly the
@@ -198,6 +214,11 @@ pub fn run_session(
         // GATE: a clean exit 0 is never a rate-limit, even if a transient event looked like one.
         rate_limited: sh.rate_limited.load(Ordering::Relaxed)
             && status.and_then(|s| s.code()).unwrap_or(0) != 0,
+        // 0 = unreported → None; the handler falls back to the fixed backoff.
+        rate_limit_reset: match sh.rate_limit_reset.load(Ordering::Relaxed) {
+            0 => None,
+            r => Some(r),
+        },
         killed_by_watchdog: sh.killed.load(Ordering::Relaxed),
         output_tokens: sh.output_tokens.load(Ordering::Relaxed),
         cost_usd: cost,
@@ -220,6 +241,9 @@ struct Shared {
     /// the worker's most recent `💬` thought, for the heartbeat line.
     last_thought: std::sync::Mutex<String>,
     rate_limited: AtomicBool,
+    /// reset epoch (secs) from the terminal event, 0 = unreported. AtomicU64 so the reader thread
+    /// can publish it lock-free alongside `rate_limited`.
+    rate_limit_reset: AtomicU64,
     output_tokens: AtomicU64,
     /// a result event carries the FINAL cumulative cost for the session, so this is SET, not
     /// accumulated. f64 has no atomic, hence a tiny Mutex.
@@ -243,6 +267,7 @@ impl Shared {
             last_activity: AtomicU64::new(now_epoch()),
             last_thought: std::sync::Mutex::new(String::from("session start")),
             rate_limited: AtomicBool::new(false),
+            rate_limit_reset: AtomicU64::new(0),
             output_tokens: AtomicU64::new(0),
             cost_usd: std::sync::Mutex::new(0.0),
             done: AtomicBool::new(false),
@@ -315,6 +340,10 @@ fn spawn_reader(
             if let Some(report) = agent.parse_result(&line) {
                 if report.rate_limited {
                     sh.rate_limited.store(true, Ordering::Relaxed);
+                }
+                // when the limit resets, if the terminal event told us — for the smart backoff.
+                if let Some(r) = report.rate_limit_reset {
+                    sh.rate_limit_reset.store(r, Ordering::Relaxed);
                 }
                 // cost is CUMULATIVE on the terminal event, so SET it, don't add.
                 if let Some(c) = report.cost_usd {

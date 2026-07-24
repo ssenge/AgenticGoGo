@@ -63,6 +63,11 @@ pub struct SessionReport {
     pub cost_usd: Option<f64>,
     /// the terminal event reported a rate/usage limit.
     pub rate_limited: bool,
+    /// when the limit resets, as an ABSOLUTE epoch (secs), if the message said so (Claude
+    /// subscription limits carry `resets <time>`). `None` = unknown → the backoff falls back to the
+    /// fixed `ratelimit_backoff_secs`. Absolute (not a duration) so it survives the gap between the
+    /// reader parsing it and the backoff handler acting on it.
+    pub rate_limit_reset: Option<u64>,
 }
 
 /// A completed one-shot call: the model's TEXT (envelope already stripped), plus the exit status

@@ -339,6 +339,14 @@ pub fn looks_rate_limited(text: &str) -> bool {
         "rate_limit_error",
         "usage limit reached",
         "overloaded_error",
+        // Claude Code SUBSCRIPTION limits (Pro/Max) — a DIFFERENT wording from the API "usage
+        // limit reached" above, and the one a subscription actually hits. Verified on the wire:
+        //   "You've hit your session limit · resets 12:50pm (Europe/Berlin)"
+        // Before this, that message matched NOTHING here, so a subscription rate-limit went
+        // undetected: no backoff, the zero-token retries tripped the dud-worker abort, and the run
+        // died ~1 min after hitting the wall instead of waiting for the reset. See `reset_epoch`.
+        "session limit",
+        "weekly limit",
         // ---- OpenAI / Codex ----
         // Codex does NOT hand us prose: its terminal event's `message` is the RAW UPSTREAM JSON,
         // verified on the wire by forcing a 400:

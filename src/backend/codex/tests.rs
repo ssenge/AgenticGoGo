@@ -136,6 +136,15 @@ fn isolation_selects_codex_native_sandbox_flags() {
     // --skip-git-repo-check survives under BOTH tiers (headless runs outside a repo).
     assert!(sb.contains(&"--skip-git-repo-check".to_string()) && none.contains(&"--skip-git-repo-check".to_string()));
 
+    // Container ⇒ the CONTAINER is the jail (worker.rs re-hosts the whole command), so Codex drops
+    // its own kernel sandbox: a nested one is redundant and not reliably available in there.
+    let ct: Vec<String> = Codex
+        .session_command(&SessionSpec { isolation: crate::isolation::Isolation::Container, ..base })
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(ct, none, "under `container` codex runs exactly as under `none` — confinement is one level out");
+
     // The confinement must be selected by the CONFIG form, never the `--sandbox` FLAG: `codex exec`
     // takes that flag but `codex exec resume` does NOT ("error: unexpected argument '--sandbox'",
     // verified on the wire), so a resumed sandboxed session would die on argv parsing.
