@@ -43,6 +43,12 @@ pub(super) struct DashboardUi {
     /// when true, the Activity pane sticks to the newest event (the default);
     /// scrolling up in Activity turns it off, `f` or scrolling to the bottom restores it.
     pub(super) activity_follow: bool,
+    /// `Some(buffer)` while the user is typing an inject message (`i` enters this mode); `None`
+    /// otherwise. In this mode keystrokes edit the buffer instead of driving the normal controls.
+    pub(super) input: Option<String>,
+    /// A transient confirmation/error line shown in the Summary panel after an inject is sent
+    /// (`✓ …` / `✗ …`); cleared on the next keypress.
+    pub(super) flash: Option<String>,
 }
 
 impl Default for DashboardUi {
@@ -52,6 +58,8 @@ impl Default for DashboardUi {
             judges_scroll: 0,
             activity_scroll: 0,
             activity_follow: true,
+            input: None,
+            flash: None,
         }
     }
 }
@@ -95,8 +103,19 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, dir: &Path) -> Result<()> {
         // poll input ~4x/sec; repaint regardless to pick up state changes.
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(k) = event::read()? {
-                if handle_key(&mut ui, k.code) == KeyAction::Quit {
-                    break;
+                match handle_key(&mut ui, k.code) {
+                    KeyAction::Quit => break,
+                    // The only key that does I/O: send the typed instruction to the loop's bus,
+                    // exactly as `agg send inject` does — the loop drains it at the next session.
+                    KeyAction::Inject(text) => {
+                        ui.flash = Some(
+                            match crate::bus::queue_command(dir, &crate::bus::Command::InjectInstruction { text }) {
+                                Ok(_) => "✓ injected — queued for the next session".to_string(),
+                                Err(e) => format!("✗ inject failed: {e}"),
+                            },
+                        );
+                    }
+                    KeyAction::Continue => {}
                 }
             }
         }
@@ -105,18 +124,49 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Whether a handled key asked the dashboard to quit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a handled key asks the event loop to do. `Inject` carries the typed text out of the pure
+/// key handler so the loop (not the handler) does the bus write — keeping `handle_key` I/O-free and
+/// unit-testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum KeyAction {
     Continue,
     Quit,
+    Inject(String),
 }
 
 /// Apply one keypress to the UI state. Pure over `(ui, code)` — no terminal I/O — so the whole
 /// interaction model (focus switching, scrolling, follow-mode, quit) is unit-testable without a
 /// real TTY. The event loop just reads keys and calls this.
 fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
+    // ---- inject INPUT MODE: keystrokes edit the buffer, not the normal controls (so typing "q"
+    //      does not quit). `i` in normal mode enters this; Enter sends, Esc cancels. ----
+    if ui.input.is_some() {
+        match code {
+            KeyCode::Esc => ui.input = None, // cancel
+            KeyCode::Enter => {
+                let text = ui.input.take().unwrap_or_default().trim().to_string();
+                if !text.is_empty() {
+                    return KeyAction::Inject(text);
+                } // empty ⇒ just close, no-op
+            }
+            KeyCode::Backspace => {
+                if let Some(b) = ui.input.as_mut() {
+                    b.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(b) = ui.input.as_mut() {
+                    b.push(c);
+                }
+            }
+            _ => {}
+        }
+        return KeyAction::Continue;
+    }
+    // any key in normal mode dismisses a lingering inject confirmation.
+    ui.flash = None;
     match code {
+        KeyCode::Char('i') => ui.input = Some(String::new()), // enter inject mode
         KeyCode::Char('q') | KeyCode::Esc => return KeyAction::Quit,
         KeyCode::Tab => {
             ui.focus = match ui.focus {

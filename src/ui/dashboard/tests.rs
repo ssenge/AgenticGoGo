@@ -322,3 +322,41 @@ fn scroll_targets_only_the_focused_pane() {
     assert_eq!(ui.activity_scroll, 1);
     assert_eq!(ui.judges_scroll, 0, "judges pane untouched while Activity is focused");
 }
+
+// ── inject input mode: `i` opens a buffer; keys edit it (not the controls); Enter emits the text ──
+#[test]
+fn inject_input_mode_captures_text_and_emits_on_enter() {
+    let mut ui = DashboardUi::default();
+    // `i` enters input mode
+    assert_eq!(handle_key(&mut ui, KeyCode::Char('i')), KeyAction::Continue);
+    assert!(ui.input.is_some(), "`i` opens the inject buffer");
+    // typing builds the buffer — and control keys ('q', 'f') are TEXT here, not commands
+    for c in "focus q".chars() {
+        assert_eq!(handle_key(&mut ui, KeyCode::Char(c)), KeyAction::Continue);
+    }
+    assert_eq!(ui.input.as_deref(), Some("focus q"), "typing 'q' does not quit while injecting");
+    // Backspace edits
+    handle_key(&mut ui, KeyCode::Backspace);
+    assert_eq!(ui.input.as_deref(), Some("focus "));
+    // Enter emits the trimmed text and leaves input mode
+    assert_eq!(handle_key(&mut ui, KeyCode::Enter), KeyAction::Inject("focus".into()));
+    assert!(ui.input.is_none(), "Enter closes the buffer");
+}
+
+#[test]
+fn inject_esc_cancels_and_empty_enter_is_a_noop() {
+    let mut ui = DashboardUi::default();
+    handle_key(&mut ui, KeyCode::Char('i'));
+    handle_key(&mut ui, KeyCode::Char('x'));
+    // Esc cancels without emitting
+    assert_eq!(handle_key(&mut ui, KeyCode::Esc), KeyAction::Continue);
+    assert!(ui.input.is_none(), "Esc cancels inject mode");
+    // Esc in normal mode still QUITS (not swallowed by inject handling)
+    assert_eq!(handle_key(&mut ui, KeyCode::Esc), KeyAction::Quit);
+    // whitespace-only Enter closes without an Inject action
+    let mut ui = DashboardUi::default();
+    handle_key(&mut ui, KeyCode::Char('i'));
+    handle_key(&mut ui, KeyCode::Char(' '));
+    assert_eq!(handle_key(&mut ui, KeyCode::Enter), KeyAction::Continue, "empty inject is a no-op");
+    assert!(ui.input.is_none());
+}
