@@ -1518,6 +1518,7 @@ EOF
   has "…paints the worker's activity stream" "$T/base.txt" "thinking step"
   has "…paints the finished banner" "$T/base.txt" "FINISHED"
   has "…paints the keybinding help" "$T/base.txt" "q=quit"
+  has "…and advertises inject (i=inject)" "$T/base.txt" "i=inject"
   # focus starts on Activity, follow-mode starts on
   has "…Activity starts focused (▸)"        "$T/base.txt" "▸ Activity"
   has "…and auto-follow starts on (⏵live)"  "$T/base.txt" "⏵live"
@@ -1559,7 +1560,7 @@ EOF
 
   # a LIVE loop must render one of the four stage names, not the old vocabulary
   TL="$(mkproj tuilive)"; : > "$TL/NO_WORK"; echo 5 > "$TL/WORKER_SLEEP"
-  agg_bg TLP "$TL" run.log run --max-sessions 3
+  agg_bg TLP "$TL" run.log run --max-sessions 6   # room for a TUI-injected instruction to reach a later session
   waitfor 30 "live loop for the TUI" grep -q "RUN=run" "$TL/trace.txt"
   ( cd "$TL" && python3 "$DRIVE" --seq "2.0:q" --timeout 25 -- "$AGG" dashboard > tui.raw 2>&1 )
   deansi "$TL/tui.raw" "$TL/tui.txt"
@@ -1567,6 +1568,15 @@ EOF
     && ok "…a live loop renders a four-stage phase (inject/run/verify/gate)" \
     || bad "TUI phase is not one of inject/run/verify/gate" "$(grep -o 'phase [a-z]*' "$TL/tui.txt" | head -1)"
   hasnt "…and never the old 'judging' vocabulary" "$TL/tui.txt" "judging"
+
+  # THE NEW FEATURE: inject a steering message straight from the TUI (press `i`, type it, Enter) —
+  # it must hit the loop's bus and land on the NEXT worker prompt, exactly like `agg send inject`.
+  # The definitive proof is that the injected text reaches the loop — the on-screen `✓ injected`
+  # flash is deliberately NOT asserted here: ratatui re-emits only CHANGED cells, so a transient
+  # confirmation is unreliable to grep from a pty capture (the same reason the RESIZE pseudo-key
+  # exists). The feature is covered end-to-end by the prompt check below + unit tests in mod.rs.
+  ( cd "$TL" && python3 "$DRIVE" --seq "2.0:i,0.6:TUI_INJECT_MARKER,0.5:Enter,1.0:q" --timeout 25 -- "$AGG" dashboard > tui_inject.raw 2>&1 )
+  waitfor 40 "TUI inject (i→type→Enter) reaches the NEXT worker prompt" grep -q "TUI_INJECT_MARKER" "$TL/prompt_latest.txt"
   kill -INT $TLP 2>/dev/null; wait $TLP 2>/dev/null
 fi
 
