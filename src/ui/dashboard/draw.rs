@@ -46,7 +46,7 @@ pub(super) fn draw(f: &mut Frame, dir: &Path, state: Option<&DashboardState>, ui
     draw_per_agent(f, band[1], s);
     draw_judges(f, chunks[3], s, ui);
     draw_activity(f, chunks[4], s, ui);
-    draw_summary(f, chunks[5], s);
+    draw_summary(f, chunks[5], s, ui);
 }
 
 pub(super) fn title_block(title: &str) -> Block<'_> {
@@ -430,27 +430,50 @@ pub(super) fn activity_line(ev: &ActivityEvent, width: usize) -> Line<'static> {
 
 /// Summary: ONE block. The cumulative "story" (wrapped) + a recent line, or the
 /// terminal FINISHED banner when the run is done.
-pub(super) fn draw_summary(f: &mut Frame, area: Rect, s: &DashboardState) {
-    let body = if s.finished {
-        vec![Line::from(Span::styled(
+pub(super) fn draw_summary(f: &mut Frame, area: Rect, s: &DashboardState, ui: &DashboardUi) {
+    // INJECT INPUT MODE takes over the panel: an editable prompt line + a hint.
+    if let Some(buf) = &ui.input {
+        let p = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("inject› ", Style::default().fg(Color::Yellow).bold()),
+                Span::raw(buf.as_str()),
+                Span::styled("▏", Style::default().fg(Color::Yellow)), // caret
+            ]),
+            Line::from(Span::styled(
+                "prepended to the NEXT worker session (same as `agg send inject`)",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .block(title_block(" Inject   (Enter=send · Esc=cancel) "));
+        f.render_widget(p, area);
+        return;
+    }
+
+    let mut body: Vec<Line> = Vec::new();
+    // A just-sent confirmation (or error) rides above the story until the next keypress.
+    if let Some(msg) = &ui.flash {
+        let color = if msg.starts_with('✓') { Color::Green } else { Color::Red };
+        body.push(Line::from(Span::styled(msg.clone(), Style::default().fg(color).bold())));
+    }
+    if s.finished {
+        body.push(Line::from(Span::styled(
             format!("✔ FINISHED: {}", s.finish_reason),
             Style::default().fg(Color::Green).bold(),
-        ))]
+        )));
     } else {
-        // The panel is a fixed 3 content lines. Cap the cumulative story at 2 wrapped lines so the
-        // windowed `recent:` line ALWAYS survives (it used to be shoved out entirely when the story
-        // was long); the story ellipsizes on clip instead of vanishing mid-sentence (§7.4 finding).
+        // The panel is a fixed 3 content lines. Cap the cumulative story so the windowed `recent:`
+        // line survives (it used to be shoved out entirely when the story was long); the story
+        // ellipsizes on clip instead of vanishing mid-sentence (§7.4). A flash line borrows one row.
         let inner_w = area.width.saturating_sub(2) as usize;
         let story = if s.summary_cumulative.is_empty() { "(no summary yet)" } else { &s.summary_cumulative };
-        let mut v = wrapped_block("story:  ", Color::Green, story, 2, inner_w);
-        if !s.summary_windowed.is_empty() {
-            v.extend(wrapped_block("recent: ", Color::Blue, &s.summary_windowed, 1, inner_w));
+        let story_lines = if ui.flash.is_some() { 1 } else { 2 };
+        body.extend(wrapped_block("story:  ", Color::Green, story, story_lines, inner_w));
+        if !s.summary_windowed.is_empty() && ui.flash.is_none() {
+            body.extend(wrapped_block("recent: ", Color::Blue, &s.summary_windowed, 1, inner_w));
         }
-        v
-    };
+    }
     // No `.wrap()`: `wrapped_block` has already wrapped every line to the inner width and clamped the
-    // line count, and Wrap{trim} would eat the continuation indent. Pre-wrapping is what lets us
-    // reserve a line for `recent:` instead of letting the story consume the whole panel.
-    let p = Paragraph::new(body).block(title_block(" Summary   (Tab=focus · ↑↓=scroll · f=follow · q=quit) "));
+    // line count, and Wrap{trim} would eat the continuation indent.
+    let p = Paragraph::new(body).block(title_block(" Summary   (i=inject · Tab=focus · ↑↓=scroll · f=follow · q=quit) "));
     f.render_widget(p, area);
 }
