@@ -18,21 +18,13 @@ impl Handler for LaunchWorker {
             Err(e) => {
                 eprintln!("  step `{}` names an unknown agent: {e}", step.name);
                 ctx.ext.get::<AGGState>().worker.dud_streak += 1;
-                ctx.scratch.get::<AGGScratch>().outcome = Some(SessionOutcome {
-                    exit_code: None,
-                    duration_secs: 0,
-                    rate_limited: false,
-                    killed_by_watchdog: false,
-                    output_tokens: 0,
-                    cost_usd: 0.0,
-                    thoughts: vec![],
-                    session_id: None,
-                });
+                ctx.scratch.get::<AGGScratch>().outcome = Some(SessionOutcome::failed());
                 return Ok(Flow::Continue);
             }
         };
         let model = step.model(agent).to_string();
         let effort = step.effort(agent).to_string();
+        let isolation = step.isolation;
         let outcome = worker::run_session(
             ctx.cfg,
             agent,
@@ -43,6 +35,7 @@ impl Handler for LaunchWorker {
             ctx.dir,
             ctx.session,
             &ctx.live,
+            isolation,
         );
         ctx.tokens_spent += outcome.output_tokens;
         ctx.cost_spent += outcome.cost_usd;

@@ -112,4 +112,7 @@ pub struct SessionSpec<'a> {
     pub extra_args: &'a [String],
     /// the project directory the worker runs in.
     pub cwd: &'a Path,
+    /// blast-radius isolation for this session. A backend that self-sandboxes (Codex) reads this to
+    /// pick its native flags; others ignore it and get wrapped by the OS sandbox in [`super::worker`].
+    pub isolation: crate::isolation::Isolation,
 }

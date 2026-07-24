@@ -115,7 +115,7 @@ impl Handler for StageSpan {
         // ceilings only (no judges ran) — done_if reads stale state and cannot fire, ceilings can.
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         let rs = ctx.run_state();
-        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), true);
+        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), true, step.isolation);
         ctx.scratch.get::<AGGScratch>().res = Some(res);
         ctx.scratch.get::<AGGScratch>().staged = None;
         ctx.publish();
@@ -157,7 +157,9 @@ impl Handler for RunJudges {
         eprintln!("  running judges…");
         ctx.emit(LifecycleEvent::Verify);
         let rs = ctx.run_state();
-        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), false);
+        // §12: judges for a sandboxed step run in the SAME jail — a confined worker could otherwise
+        // rewrite agg/judges/*.sh (in its writable cwd) and escape through agg's unconfined run.
+        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), false, step.isolation);
         // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
         ctx.tokens_spent += res.judge_tokens;
         if let Some(c) = res.judge_cost {
