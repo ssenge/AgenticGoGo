@@ -48,7 +48,9 @@ impl Handler for Baseline {
         let judge_model = ctx.judge_model.clone();
         let judge_timeout = ctx.judge_timeout;
         let rs = ctx.run_state();
-        let pre = ctx.eng.run_step(dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false);
+        // Baseline runs BEFORE any worker, on the clean committed tree (gitsetup requires it) — the
+        // judge scripts cannot have been tampered with yet, so there is no escape to confine against.
+        let pre = ctx.eng.run_step(dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false, crate::isolation::Isolation::None);
         ctx.tokens_spent += pre.judge_tokens;
         if let Some(c) = pre.judge_cost {
             ctx.cost_spent += c;

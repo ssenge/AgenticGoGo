@@ -71,14 +71,19 @@ pub struct Lifecycle {
 }
 impl Lifecycle {
     pub fn default_pipeline(cfg: &AggConfig, dir: &Path) -> Self {
-        Self::with_hooks(&cfg.hooks, dir)
+        Self::with_hooks(&cfg.hooks, dir, cfg.run_isolation())
     }
     /// Split out from `default_pipeline` so the registration ORDER is testable without a full
-    /// `AggConfig` (`Hooks: Default`).
-    pub(crate) fn with_hooks(hooks: &crate::core::config::Hooks, dir: &Path) -> Self {
+    /// `AggConfig` (`Hooks: Default`). `run_isolation` is the tier for RUN-LEVEL hooks that fire
+    /// without a step context — only `on_stop` uses it (post-worker teardown); the per-session
+    /// hooks resolve their tier from the live step, and `on_start` is pre-worker so it stays `None`.
+    pub(crate) fn with_hooks(hooks: &crate::core::config::Hooks, dir: &Path, run_isolation: crate::isolation::Isolation) -> Self {
+        use crate::isolation::Isolation;
         let mut l = Lifecycle::default();
-        let shell = |label: &'static str, cmds: &[String]| -> Box<dyn Handler> {
-            Box::new(crate::features::shell::ShellHook { label, cmds: cmds.to_vec(), dir: dir.to_path_buf() })
+        // `iso` is the BAKED run-level tier for hooks fired via `fire()` (no ctx). Per-session hooks
+        // ignore it — their `run(ctx)` reads the current step's tier — so they bake `None`.
+        let shell = |label: &'static str, cmds: &[String], iso: Isolation| -> Box<dyn Handler> {
+            Box::new(crate::features::shell::ShellHook { label, cmds: cmds.to_vec(), dir: dir.to_path_buf(), isolation: iso })
         };
         let feature = |name: &'static str, steps: Vec<Box<dyn Handler>>| -> Box<dyn Handler> {
             Box::new(Feature { name, steps })
@@ -87,7 +92,8 @@ impl Lifecycle {
         //    HIGH-LEVEL FEATURE; a feature's `vec![…]` is its internal structure (small, focused
         //    steps), dispatched with the same Flow/skip semantics — grouping changes no behavior. ──
         l.pre_start.push(Box::new(crate::features::gitsetup::GitSetup)); // git preconditions (before the loop state exists)
-        l.on_start.push(shell("on_start", &hooks.on_start));
+        // on_start fires pre-worker on the clean committed tree → nothing tampered yet → unconfined.
+        l.on_start.push(shell("on_start", &hooks.on_start, Isolation::None));
         l.background.push(Box::new(crate::features::setup::BackgroundSpawn { cmds: hooks.background.clone() }));
         l.on_run_start.push(Box::new(crate::features::setup::Baseline)); // baseline judge pass, then bootstrap finalize:
         l.on_run_start.push(Box::new(crate::features::setup::Setup));
@@ -97,7 +103,8 @@ impl Lifecycle {
                 Box::new(crate::features::inject::BusDrain),
                 Box::new(crate::features::inject::PickStep),
                 Box::new(crate::features::inject::SessionBranchCut),
-                shell("on_session_start", &hooks.on_session_start),
+                // per-session: run(ctx) confines with the LIVE step's tier — baked None is just a fallback.
+                shell("on_session_start", &hooks.on_session_start, Isolation::None),
                 Box::new(crate::features::inject::WriteInstructions),
                 Box::new(crate::features::inject::ClearMemScratch),
             ],
@@ -119,13 +126,16 @@ impl Lifecycle {
         l.on_session_end.push(feature(
             "Finalize",
             vec![
-                shell("on_session_end", &hooks.on_session_end),
+                // per-session, POST-worker: run(ctx) confines with the step the worker just ran under.
+                shell("on_session_end", &hooks.on_session_end, Isolation::None),
                 Box::new(crate::features::summary::Summarize),
                 Box::new(crate::features::finalize::RefineFold),
                 Box::new(crate::features::finalize::CheckRunStop),
             ],
         ));
-        l.on_stop.push(shell("on_stop", &hooks.on_stop));
+        // on_stop fires via the Drop guard AFTER all workers, with no step context — confine it with
+        // the run-level tier so a worker-rewritten teardown script can't escape at the very end.
+        l.on_stop.push(shell("on_stop", &hooks.on_stop, run_isolation));
         l
     }
 }

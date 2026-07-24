@@ -19,6 +19,7 @@ defaults:
   effort: "high"                   # low|medium|high|xhigh|max — None ⇒ backend default; "" ⇒ none
   worker_args: []                  # extra flags passed VERBATIM to the worker (the sandbox constraint)
   state: "state/STATE.md"          # the forward-advice file under agg/ (gitignored)
+  isolation: none                  # none (default) | sandbox — OS jail around the worker+judges+hooks
 
 # THE RULER — runs LLM judges + the summarizer. Run-level and IMMUTABLE: naming any of these keys
 # in a step body is a hard error (a grader that moves makes verdicts incomparable across cycles).
@@ -71,6 +72,7 @@ prompt_includes: []                # files prepended to every worker prompt
 | `worker_args` | `[]` | extra flags passed **verbatim** to the worker CLI — the sandbox constraint. Inheritable so you set it once. |
 | `state` | `state/STATE.md` | the forward-advice file (see [State](#state-and-memory)) — under `agg/state/` (gitignored), resolved against `agg/`. |
 | `role_prompt` | none | generic **role** framing composed *above* a step's `prompt:`. Inheritable; a step body may override it. |
+| `isolation` | `none` | `none` \| `sandbox` — blast-radius jail (below). Inheritable; a step may override. |
 
 ## `judge` — THE RULER
 
@@ -101,11 +103,38 @@ Each NAME maps to a body of overrides. **The complete legal key list** (anything
 | `role_prompt` | `defaults.role_prompt` | generic **role** framing composed **above** the step's `prompt:` (e.g. `reconsider`'s "step back — assume the current approach is wrong"). Replaced the old hardcoded `Role` enum. |
 | `prompt` | none | **ADDITIVE** to the composed prompt, never replacing it. |
 | `skip_judges` | `false` | `true` ⇒ no judges run after this step, so nothing merges — the work **stages** (below). |
+| `isolation` | `defaults.isolation` | `none` \| `sandbox` — the blast-radius jail for this step (below). |
 
 **`skip_judges` steps stage.** Nothing was judged, so nothing merges; the work stays on the session
 branch and the **next judged step gates the whole span** — pass ⇒ the span merges, a regression ⇒ the
 whole span rolls back. A sequence of *only* `skip_judges` steps is refused at startup (nothing could
 ever merge).
+
+### `isolation` — blast-radius jail (a DIFFERENT axis from session isolation)
+
+Every worker runs the agent in auto mode (`--dangerously-skip-permissions` and equivalents), so by
+default it can do anything YOU can — `rm -rf ~`, read `~/.ssh`, touch other repos. `isolation` bounds
+that, **per step**:
+
+| tier | what the worker (and its judges + hooks) may do |
+|---|---|
+| `none` *(default)* | no confinement — full host access, today's behaviour. |
+| `sandbox` | **write** = the project dir (+subfolders) + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open. Kernel-enforced. |
+
+`sandbox` uses the OS jail — **`sandbox-exec` (Seatbelt) on macOS**, `bwrap` (bubblewrap) on Linux —
+except Codex, which has its own kernel sandbox agg drives with flags. It confines the **worker, its
+script + LLM judges, and its foreground hooks** in one jail, so nothing a confined worker can rewrite
+in the project dir becomes an escape. It does **not** restrict network (full internet by design).
+
+If `sandbox` is requested but the OS mechanism is unavailable, agg **refuses at startup** — never a
+silent downgrade to `none`. `agg doctor` reports whether the sandbox tooling is present.
+
+> **Platform status:** macOS (`sandbox-exec`) is verified end-to-end. The Linux `bwrap` path is
+> implemented but not yet shaken out on a real Linux host — treat Linux `sandbox` as experimental.
+
+This is **orthogonal** to `session_isolation` (below): that protects the repo *history* from bad work
+(per-session branches + a rollback gate); `isolation` protects the *host* from an errant worker. They
+compose.
 
 ## `sequence` — the loop
 

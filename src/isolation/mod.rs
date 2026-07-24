@@ -71,22 +71,49 @@ pub fn available() -> bool {
     imp::available()
 }
 
-/// Wrap a built worker [`Command`] in the OS sandbox, confining writes to `cwd` + `$TMPDIR` +
-/// `writable` (the agent's own state dirs) while leaving reads and network open.
+/// Wrap a built [`Command`] in the OS sandbox, confining writes to `cwd` + `$TMPDIR` + `writable`
+/// (the agent's own state dirs) while leaving reads and network open.
+///
+/// Used for the worker AND for a script judge — a confined worker can rewrite `agg/judges/*.sh`
+/// (they live inside its writable cwd), so the judge must run in the same jail or it is a wide-open
+/// escape (ISOLATION.md §12). A script judge passes `writable: &[]`: it may write cwd/tmp but must
+/// not be able to write anywhere the worker couldn't.
 ///
 /// Rebuilds a fresh `Command::new(<wrapper>)` whose argv is `[wrapper flags…, <orig program>,
-/// <orig args…>]`, sets the working directory to `cwd`, and RE-APPLIES the uniform worker stdio
-/// (stdin `/dev/null`, stdout/stderr piped) — the caller's `process_group(0)` then lands on the
-/// wrapper, which is correct. No backend sets env on its command, so env is not carried (verified).
+/// <orig args…>]`, sets the working directory to `cwd`, carries the inner command's ENV, and
+/// RE-APPLIES the uniform stdio (stdin `/dev/null`, stdout/stderr piped) — the caller's
+/// `process_group(0)` then lands on the wrapper, which is correct.
 ///
 /// Returns a LOUD `Err` on an unsupported OS rather than silently downgrading to a direct spawn.
 pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf]) -> Result<Command> {
-    // get_program / get_args / get_current_dir are queryable; that is what lets us reshape a
-    // backend's Command without the backend knowing about sandboxing.
+    // get_program / get_args / get_envs are queryable; that is what lets us reshape a caller's
+    // Command without the caller knowing about sandboxing.
     let prog = cmd.get_program().to_owned();
     let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_owned()).collect();
+    // Carry env EXPLICITLY. The worker backends set none, but a script judge sets `AGG_*` — and a
+    // rebuilt Command starts from the parent env with no per-command overrides, so those would be
+    // silently dropped (the judge would run without its contract). `get_envs()` yields the
+    // overrides layered on the inherited env: `Some` = set, `None` = a `.env_remove()`.
+    let envs: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> =
+        cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
 
-    let mut wrapped = imp::build(cwd, writable, &prog, &args)?;
+    // Resolve before handing paths to a wrapper. `cwd` arrives as the literal `"."` whenever the
+    // user did not pass `--dir`, and may reach us through a symlink — on macOS that alone silently
+    // denies every write the policy meant to ALLOW (ISOLATION.md §11 BUG 1), because Seatbelt
+    // matches canonical paths only. Doing it here rather than per-platform means the Linux `bwrap`
+    // binds get the same guarantee. The SPAWNED cwd below deliberately stays as the caller supplied
+    // it, so paths in logs and in the agent's own output stay the ones the user recognises.
+    let cwd_resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let writable: Vec<PathBuf> =
+        writable.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
+
+    let mut wrapped = imp::build(&cwd_resolved, &writable, &prog, &args)?;
+    for (k, v) in envs {
+        match v {
+            Some(v) => wrapped.env(k, v),
+            None => wrapped.env_remove(k),
+        };
+    }
     wrapped
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -138,6 +165,73 @@ mod tests {
         let sep = args.iter().position(|a| a == "--").expect("wrapper uses a -- separator");
         let inner: Vec<&String> = args[sep + 1..].iter().collect();
         assert_eq!(inner, vec!["claude", "-p", "do the thing"], "inner program + args survive in order after --");
+    }
+
+    /// The wrapper MUST carry the inner command's env, or a wrapped script judge loses its `AGG_*`
+    /// contract (the exact regression this guards). A rebuilt Command otherwise keeps only the
+    /// inherited parent env with none of the per-command overrides.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn wrap_carries_the_inner_command_env() {
+        let mut inner = Command::new("/bin/sh");
+        inner.arg("-c").arg("true").env("AGG_JUDGE", "answered").env("AGG_SESSION", "3");
+        let cwd = std::env::temp_dir();
+        let wrapped = wrap(inner, &cwd, &[]).expect("supported OS builds a wrapper");
+        let got: std::collections::HashMap<String, String> = wrapped
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .collect();
+        assert_eq!(got.get("AGG_JUDGE").map(String::as_str), Some("answered"), "judge env must survive the wrap");
+        assert_eq!(got.get("AGG_SESSION").map(String::as_str), Some("3"));
+    }
+
+    /// REAL kernel confinement, on a real host — the only test that proves the feature rather than
+    /// the wiring. Everything else here (and the e2e's fake wrapper) asserts argv and profile TEXT;
+    /// this one actually runs `sandbox-exec`/`bwrap` and checks what the kernel permits:
+    /// a write INSIDE the jail succeeds, `/dev/null` succeeds, and a write OUTSIDE is DENIED.
+    ///
+    /// `#[ignore]`d on purpose — it needs the real OS mechanism, which CI containers and *nested*
+    /// sandboxes refuse (Claude Code's own Seatbelt jail makes a nested `sandbox_apply` fail with
+    /// "Operation not permitted"). Run it by hand on a real host:
+    ///
+    /// ```text
+    /// cargo test -- --ignored real_sandbox_confines_writes --nocapture
+    /// ```
+    #[test]
+    #[ignore = "spawns the real OS sandbox; run by hand on a real host (see the doc comment)"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn real_sandbox_confines_writes() {
+        assert!(available(), "no OS sandbox mechanism on this host — cannot prove confinement");
+        let jail = std::env::temp_dir().join(format!("agg-iso-real-{}", std::process::id()));
+        std::fs::create_dir_all(&jail).expect("create the jail dir");
+        // "Outside" must be outside the jail AND outside $TMPDIR (which the policy grants). The
+        // crate dir is neither — and if confinement is broken we notice a stray file and clean it.
+        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/agg-isolation-escape-probe.txt");
+        let _ = std::fs::remove_file(&outside);
+
+        let script = format!(
+            "echo in > '{j}/inside.txt' && echo INSIDE_OK; \
+             echo dev > /dev/null && echo DEVNULL_OK; \
+             echo out > '{o}' && echo ESCAPE_OK || echo ESCAPE_DENIED",
+            j = jail.display(),
+            o = outside.display()
+        );
+        let mut inner = Command::new("/bin/sh");
+        inner.arg("-c").arg(&script);
+        let out = wrap(inner, &jail, &[])
+            .expect("build the wrapper")
+            .output()
+            .expect("run the real OS sandbox");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let escaped = outside.exists();
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&jail);
+
+        assert!(stdout.contains("INSIDE_OK"), "a write INSIDE the jail must succeed\n{stdout}\n{stderr}");
+        assert!(stdout.contains("DEVNULL_OK"), "/dev/null must be writable\n{stdout}\n{stderr}");
+        assert!(stdout.contains("ESCAPE_DENIED"), "a write OUTSIDE the jail must be denied\n{stdout}\n{stderr}");
+        assert!(!escaped, "the worker ESCAPED — it wrote {}", outside.display());
     }
 
     #[test]

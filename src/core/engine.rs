@@ -132,6 +132,7 @@ impl Engine {
         step: &str,
         session: Option<u32>,
         skip_judges: bool,
+        isolation: crate::isolation::Isolation,
     ) -> CycleResult {
         let before: Vec<(f64, Lifecycle)> = self
             .judges
@@ -144,7 +145,7 @@ impl Engine {
         let mut judge_tokens = 0u64;
         let mut judge_cost: Option<f64> = None;
         if !skip_judges {
-            let verdicts = self.run_judges(cwd, ruler, judge_model, timeout, session, step);
+            let verdicts = self.run_judges(cwd, ruler, judge_model, timeout, session, step, isolation);
             for (judge, (v, spend)) in self.judges.iter_mut().zip(verdicts) {
                 judge_tokens += spend.tokens;
                 if let Some(c) = spend.cost_usd {
@@ -187,6 +188,7 @@ impl Engine {
     /// parallelism + result caching) lands INSIDE this function and nowhere else. `&self` (not
     /// `&mut`) because judging is a pure read of judge state — the mutation stays in the caller,
     /// sequential and in order. Today it is a plain sequential map; the seam is the deliverable.
+    #[allow(clippy::too_many_arguments)]
     fn run_judges(
         &self,
         cwd: &Path,
@@ -195,10 +197,11 @@ impl Engine {
         timeout: u64,
         session: Option<u32>,
         step: &str,
+        isolation: crate::isolation::Isolation,
     ) -> Vec<(Verdict, crate::backend::Spend)> {
         self.judges
             .iter()
-            .map(|g| judge::run(&g.kind, &g.name, cwd, ruler, judge_model, timeout, session, step))
+            .map(|g| judge::run(&g.kind, &g.name, cwd, ruler, judge_model, timeout, session, step, isolation))
             .collect()
     }
 
