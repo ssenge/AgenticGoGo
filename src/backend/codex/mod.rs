@@ -93,6 +93,13 @@ impl AgentBackend for Codex {
         DEFAULT_SUMMARY_MODEL
     }
 
+    /// Codex has a REAL kernel sandbox (`--sandbox workspace-write`), so agg confines it with flags
+    /// (see [`Self::session_command`]) and must NOT wrap it in the OS sandbox. This is what makes
+    /// [`crate::backend::worker::run_session`] skip the wrapper for Codex.
+    fn self_sandboxes(&self) -> bool {
+        true
+    }
+
     /// `high` — the most reasoning Codex offers. (agg's blanket `max` is Claude's vocabulary; see
     /// [`effort_arg`] for how the levels map.)
     fn default_effort(&self) -> &'static str {
@@ -110,11 +117,33 @@ impl AgentBackend for Codex {
         if let Some(id) = spec.resume_id {
             command.arg("resume").arg(id); // SUBCOMMAND, not a flag
         }
-        command
-            .arg("--json")
-            // headless: never prompt for approval, and don't refuse to run outside a git repo.
-            .arg("--dangerously-bypass-approvals-and-sandbox")
-            .arg("--skip-git-repo-check");
+        command.arg("--json");
+        // Blast-radius isolation is agent-NATIVE for Codex: it has a real kernel sandbox, so we
+        // pick its flags rather than wrapping the process (see `self_sandboxes`).
+        //   none    → `--dangerously-bypass-approvals-and-sandbox` (auto's behaviour today).
+        //   sandbox → workspace-write (writes confined to cwd + tmp, kernel-enforced) PLUS
+        //             `-c sandbox_workspace_write.network_access=true` — workspace-write DENIES
+        //             network by default, and the owner wants full internet.
+        //
+        // The CONFIG form `-c sandbox_mode=…`, not the `--sandbox` FLAG, and that is load-bearing:
+        // `codex exec` accepts `--sandbox`, but `codex exec resume` does NOT (verified on the wire:
+        // `error: unexpected argument '--sandbox' found`). Since the resume branch above reshapes
+        // argv into that subcommand, the flag form would make every resumed sandboxed session die
+        // on argv parsing. The config form parses and enforces identically on both shapes.
+        match spec.isolation {
+            crate::isolation::Isolation::None => {
+                command.arg("--dangerously-bypass-approvals-and-sandbox");
+            }
+            crate::isolation::Isolation::Sandbox => {
+                command
+                    .arg("-c")
+                    .arg("sandbox_mode=workspace-write")
+                    .arg("-c")
+                    .arg("sandbox_workspace_write.network_access=true");
+            }
+        }
+        // don't refuse to run outside a git repo (headless), under either isolation tier.
+        command.arg("--skip-git-repo-check");
         // Only pass --model if the operator actually named one. Empty = let Codex decide, which is
         // the only safe default: the models available depend on how the user authenticated, and a
         // wrong one is a hard 400 at runtime. See DEFAULT_MODEL.
@@ -246,7 +275,14 @@ impl AgentBackend for Codex {
     ///   This is Codex's equivalent of Claude's `--setting-sources user`.
     ///
     /// `--ephemeral` keeps a judge call from polluting the resumable-session history.
-    fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String> {
+    fn one_shot(
+        &self,
+        prompt: &str,
+        model: &str,
+        timeout_secs: u64,
+        cwd: Option<&Path>,
+        isolation: crate::isolation::Isolation,
+    ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command
             .arg("exec")
@@ -264,6 +300,9 @@ impl AgentBackend for Codex {
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
+        // No-op for Codex (self_sandboxes → returns unchanged): `--sandbox read-only` already
+        // kernel-confines the judge more tightly than the OS wrapper would. Kept for uniformity.
+        let command = self.confine_one_shot(command, cwd, isolation)?;
         let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
         let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
         Ok(OneShot {

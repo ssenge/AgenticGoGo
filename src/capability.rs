@@ -102,6 +102,23 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
         if let Some(c) = b.config_conflict(&model, &effort) {
             problems.push(format!("step `{step_name}` (agent `{agent}`): model + effort — {c}"));
         }
+        // Blast-radius isolation: `sandbox` on an agent that does NOT self-sandbox needs an OS
+        // wrapper (bwrap / sandbox-exec). If none is available on this host, refuse at startup
+        // rather than silently downgrade to `none` — a worker that thinks it is confined but is not
+        // is exactly the blast radius this feature exists to bound. Codex self-sandboxes, so it is
+        // exempt; a wrapper-backed agent on a supported OS with the tool installed passes.
+        if step.isolation == crate::isolation::Isolation::Sandbox
+            && !b.self_sandboxes()
+            && !crate::isolation::available()
+        {
+            problems.push(format!(
+                "step `{step_name}` (agent `{agent}`): `isolation: sandbox` is set, but this agent \
+                 has no native sandbox and no OS wrapper (bubblewrap on Linux, sandbox-exec on \
+                 macOS) is available on this host — the worker would NOT actually be confined.\n      \
+                 fix: install the wrapper (`apt install bubblewrap` on Linux), use `isolation: none`, \
+                 or run the step on an agent with its own sandbox (codex)."
+            ));
+        }
     }
 
     // Loud but non-fatal (§7.3): an inert-but-still-bounded guard. Surface it whether or not we

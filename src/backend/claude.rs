@@ -125,7 +125,14 @@ impl AgentBackend for Claude {
     /// repo's `.claude/settings.json` or hooks). Together these stop a worker from steering its
     /// own judge via repo config, while preserving auth. (CLAUDE.md auto-discovery in cwd is the
     /// documented residual — see judge.rs's trust-boundary note.)
-    fn one_shot(&self, prompt: &str, model: &str, timeout_secs: u64, cwd: Option<&Path>) -> Result<OneShot, String> {
+    fn one_shot(
+        &self,
+        prompt: &str,
+        model: &str,
+        timeout_secs: u64,
+        cwd: Option<&Path>,
+        isolation: crate::isolation::Isolation,
+    ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command
             .arg("-p")
@@ -141,6 +148,9 @@ impl AgentBackend for Claude {
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
+        // Confine the judge under `Sandbox` (ISOLATION.md §12). Claude's permission layer already
+        // denies tool writes here, but that is not a kernel jail — the OS wrapper is.
+        let command = self.confine_one_shot(command, cwd, isolation)?;
         let out: Captured = proc::run_with_timeout(command, timeout_secs)?;
         let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
         Ok(OneShot {
@@ -150,6 +160,21 @@ impl AgentBackend for Claude {
             output_tokens,
             cost_usd,
         })
+    }
+
+    /// What a confined Claude worker must still be able to write outside the repo, measured on a
+    /// real host rather than assumed: `~/.claude` (session transcripts, shell snapshots the Bash
+    /// tool writes on EVERY tool call, plugin markers) and `~/.claude.json` — the primary config
+    /// file, which is a sibling FILE of that dir, not inside it, so it needs its own entry.
+    ///
+    /// Deliberately NOT granted: `~/Library/Keychains/login.keychain-db`. Claude READS its OAuth
+    /// credentials from there fine (that path is mach, not the filesystem); only persisting a
+    /// REFRESHED token is denied. Handing an auto-mode worker write access to the user's login
+    /// keychain to save a re-login would defeat the point of the jail.
+    fn writable_state_paths(&self) -> Vec<std::path::PathBuf> {
+        // `.claude.json.backup` needs no entry of its own: the OS wrapper grants a writable FILE
+        // its atomic-write temp siblings by prefix, and `.backup` is one of them.
+        super::state_paths_that_exist(&[".claude", ".claude.json"])
     }
 
     fn is_installed(&self) -> bool {
@@ -212,6 +237,7 @@ mod tests {
             resume_id: Some("abc"),
             extra_args: &["--add-dir".to_string(), "/x".to_string()],
             cwd: Path::new("/tmp"),
+            isolation: crate::isolation::Isolation::None,
         };
         let cmd = Claude.session_command(&spec);
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -226,6 +252,38 @@ mod tests {
         assert!(args.contains(&"--effort".to_string()));
     }
 
+    /// Claude has only a permission layer, not a kernel jail, so its confinement comes from the OS
+    /// wrapper (applied in worker.rs) — NOT from any flag change. Its argv must be BYTE-identical
+    /// under `none` and `sandbox`: it keeps `--dangerously-skip-permissions` (autonomy) either way,
+    /// and never grows a `--sandbox` flag. If this regresses, Claude would either lose autonomy or
+    /// pretend to self-confine while actually going unwrapped.
+    #[test]
+    fn isolation_does_not_change_claude_flags_and_it_does_not_self_sandbox() {
+        let base = SessionSpec {
+            prompt: "p",
+            model: "m",
+            effort: "",
+            resume_id: None,
+            extra_args: &[],
+            cwd: Path::new("/tmp"),
+            isolation: crate::isolation::Isolation::None,
+        };
+        let argv = |iso| {
+            Claude
+                .session_command(&SessionSpec { isolation: iso, ..base })
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let none = argv(crate::isolation::Isolation::None);
+        let sandbox = argv(crate::isolation::Isolation::Sandbox);
+        assert_eq!(none, sandbox, "Claude's flags are identical across isolation tiers — the OS wrapper confines it, not a flag");
+        assert!(none.contains(&"--dangerously-skip-permissions".to_string()), "autonomy is kept under BOTH tiers");
+        assert!(!none.contains(&"--sandbox".to_string()), "Claude never grows a --sandbox flag");
+        // it therefore MUST be OS-wrapped: it does not self-sandbox.
+        assert!(!Claude.self_sandboxes(), "Claude has no kernel jail — worker.rs must wrap it");
+    }
+
     /// An empty `effort` must omit the flag entirely — passing `--effort ""` is an error.
     #[test]
     fn empty_effort_omits_the_flag() {
@@ -236,6 +294,7 @@ mod tests {
             resume_id: None,
             extra_args: &[],
             cwd: Path::new("/tmp"),
+            isolation: crate::isolation::Isolation::None,
         };
         let cmd = Claude.session_command(&spec);
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();

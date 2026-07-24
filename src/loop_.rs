@@ -366,7 +366,7 @@ mod tests {
     /// verbatim by `run_hook` (grouping changed no behavior).
     #[test]
     fn the_registry_reads_as_high_level_features() {
-        let l = Lifecycle::with_hooks(&crate::core::config::Hooks::default(), std::path::Path::new("."));
+        let l = Lifecycle::with_hooks(&crate::core::config::Hooks::default(), std::path::Path::new("."), crate::isolation::Isolation::None);
         let names = |hs: &[Box<dyn Handler>]| hs.iter().map(|h| h.name()).collect::<Vec<_>>();
         assert_eq!(names(&l.on_start), ["on_start"]);
         assert_eq!(names(&l.on_run_start), ["Baseline", "Setup"]);

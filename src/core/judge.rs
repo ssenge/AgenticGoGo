@@ -30,6 +30,11 @@ use std::process::{Command, Stdio};
 /// `cwd` = project root (scripts run there, `inputs` resolve there). `ruler` = the backend an LLM
 /// judge calls (a script judge ignores it). `model`/`timeout` are the RUN-LEVEL `judge:` block's —
 /// no longer per-judge. `session`/`step`/`name` populate the judge's env contract.
+///
+/// `isolation` is the CURRENT step's tier. Under `Sandbox` the judge runs in the same jail as the
+/// worker did — otherwise a confined worker escapes trivially by rewriting `agg/judges/*.sh` (they
+/// live in its writable cwd) for agg to run unconfined (ISOLATION.md §12). Baseline/manual judging
+/// (no worker ran) passes `None`.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     kind: &JudgeKind,
@@ -40,12 +45,13 @@ pub fn run(
     timeout_secs: u64,
     session: Option<u32>,
     step: &str,
+    isolation: crate::isolation::Isolation,
 ) -> (Verdict, Spend) {
     match kind {
         JudgeKind::Script { path } => {
-            (run_script(path, cwd, name, session, step, timeout_secs), Spend::default())
+            (run_script(path, cwd, name, session, step, timeout_secs, isolation), Spend::default())
         }
-        JudgeKind::Llm { path, inputs } => run_llm(path, inputs, model, timeout_secs, cwd, ruler),
+        JudgeKind::Llm { path, inputs } => run_llm(path, inputs, model, timeout_secs, cwd, ruler, isolation),
     }
 }
 
@@ -53,6 +59,13 @@ pub fn run(
 
 /// Execute the judge FILE. cwd = project root; stdin = `/dev/null` (script judges inherited agg's
 /// stdin before — §5.2 nulls it); env carries the four NEW `AGG_*` keys.
+///
+/// Under `isolation: Sandbox` the script runs in the OS jail (write = cwd + tmp, nothing outside).
+/// A script judge is arbitrary shell — the exact thing a confined worker rewrites to escape — so it
+/// is ALWAYS wrapped when the step is sandboxed (unlike an LLM judge, a shell script has no
+/// `self_sandboxes`). `writable: &[]`: it needs no state dir of its own; the wrapper still grants
+/// cwd + tmp so a judge can scribble scratch files where it always could.
+#[allow(clippy::too_many_arguments)]
 fn run_script(
     path: &Path,
     cwd: &Path,
@@ -60,6 +73,7 @@ fn run_script(
     session: Option<u32>,
     step: &str,
     timeout_secs: u64,
+    isolation: crate::isolation::Isolation,
 ) -> Verdict {
     // Exec the file directly so its shebang (usually bash) is honoured; make it absolute first so
     // the program is resolved from OUR cwd, not the child's `current_dir`.
@@ -75,6 +89,14 @@ fn run_script(
         .env("AGG_STEP", step)
         .env("AGG_JUDGE", name)
         .env("AGG_PROJECT_DIR", cwd);
+    if isolation == crate::isolation::Isolation::Sandbox {
+        match crate::isolation::wrap(command, cwd, &[]) {
+            Ok(c) => command = c,
+            // Loud, not silent: a judge that can't be confined must FAIL, never run unconfined and
+            // reopen the escape. Mirrors worker.rs's spawn-failure path.
+            Err(e) => return Verdict::failed(format!("could not sandbox judge {name}: {e}")),
+        }
+    }
     match proc::run_with_timeout(command, timeout_secs) {
         Ok(out) => parse_judge_output(&out),
         Err(e) => Verdict::failed(e),
@@ -83,6 +105,7 @@ fn run_script(
 
 // ---------------- llm judge ----------------
 
+#[allow(clippy::too_many_arguments)]
 fn run_llm(
     rubric_path: &Path,
     inputs: &[String],
@@ -90,6 +113,7 @@ fn run_llm(
     timeout_secs: u64,
     cwd: &Path,
     ruler: &dyn AgentBackend,
+    isolation: crate::isolation::Isolation,
 ) -> (Verdict, Spend) {
     // 1) read the rubric (the judge's prompt body) — `rubric_path` is already the resolved file.
     let rubric_text = match std::fs::read_to_string(rubric_path) {
@@ -123,8 +147,9 @@ fn run_llm(
     );
 
     // 4) one-shot the ruler. The isolation flags that keep the worker from steering its own judge
-    //    live in `backend::one_shot`; `cwd` is passed so the judge sees the project it is judging.
-    let out = match ruler.one_shot(&prompt, model, timeout_secs, Some(cwd)) {
+    //    live in `backend::one_shot`; `cwd` is passed so the judge sees the project it is judging,
+    //    and `isolation` OS-jails the call under Sandbox (defense-in-depth over its permission layer).
+    let out = match ruler.one_shot(&prompt, model, timeout_secs, Some(cwd), isolation) {
         Ok(o) => o,
         Err(e) => return (Verdict::failed(format!("llm judge: {e}")), Spend::default()),
     };
@@ -256,4 +281,54 @@ fn parse_verdict(text: &str) -> Result<Verdict, String> {
         return serde_json::from_str::<Verdict>(block).map_err(|e| e.to_string());
     }
     Err("no JSON object found".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::isolation::Isolation;
+
+    /// The wiring for ISOLATION.md §12: a SANDBOXED script judge — the exact escape a confined
+    /// worker would plant by rewriting `agg/judges/*.sh` — cannot write outside the project, yet
+    /// still runs and returns its verdict (proving `wrap()` carried the judge through, env and all).
+    ///
+    /// `#[ignore]`d like its isolation twin (`isolation::tests::real_sandbox_confines_writes`):
+    /// nested Seatbelt is refused inside CI's own sandbox. Run on a real host:
+    /// `cargo test -- --ignored sandboxed_script_judge`.
+    #[test]
+    #[ignore = "spawns the real OS sandbox; run by hand on a real host"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn sandboxed_script_judge_cannot_write_outside_cwd() {
+        assert!(crate::isolation::available(), "no OS sandbox on this host — cannot prove confinement");
+        let proj = std::env::temp_dir().join(format!("agg-judge-jail-{}", std::process::id()));
+        std::fs::create_dir_all(&proj).unwrap();
+        // Outside the jail's writable set (cwd + $TMPDIR + /tmp + /dev): the repo's target dir.
+        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/agg-judge-escape-probe.txt");
+        let _ = std::fs::remove_file(&outside);
+
+        let judge = proj.join("answered.sh");
+        std::fs::write(
+            &judge,
+            format!(
+                "#!/bin/sh\n\
+                 echo pwned > '{}' 2>/dev/null || true\n\
+                 echo '{{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}}'\n",
+                outside.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&judge, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let verdict = run_script(&judge, &proj, "answered", Some(1), "worker", 30, Isolation::Sandbox);
+        let escaped = outside.exists();
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&proj);
+
+        assert!(!escaped, "the confined judge ESCAPED — it wrote {}", outside.display());
+        assert!(verdict.met, "the judge still ran through the wrapper and returned its verdict: {verdict:?}");
+    }
 }

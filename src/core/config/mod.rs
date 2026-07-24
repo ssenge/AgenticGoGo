@@ -87,6 +87,11 @@ pub struct Defaults {
     /// no Rust (this replaced the hardcoded `enum Role` red-team arm). `None` = no role section.
     #[serde(default)]
     pub role_prompt: Option<String>,
+    /// blast-radius isolation (`none` | `sandbox`) — the OS sandbox wrapped around the worker
+    /// (DIFFERENT from `session_isolation`, which protects the git history). Inheritable; a step
+    /// may override. `None` here = fall through to the [`crate::isolation::Isolation`] default (none).
+    #[serde(default)]
+    pub isolation: Option<crate::isolation::Isolation>,
 }
 
 impl Default for Defaults {
@@ -98,6 +103,7 @@ impl Default for Defaults {
             worker_args: vec![],
             state: default_state(),
             role_prompt: None,
+            isolation: None,
         }
     }
 }
@@ -148,6 +154,10 @@ pub struct StepBody {
     /// no DoD judges run after this step ⇒ nothing merges; the work STAGES (§5.7).
     #[serde(default)]
     pub skip_judges: bool,
+    /// blast-radius isolation for this step (`none` | `sandbox`); overrides `defaults.isolation`.
+    /// `None` inherits it. See [`crate::isolation::Isolation`].
+    #[serde(default)]
+    pub isolation: Option<crate::isolation::Isolation>,
 }
 
 /// The sequence: a repeating statement list + the run-level ceilings and Definition of Done. The
@@ -344,6 +354,8 @@ pub struct ResolvedStep {
     pub role_prompt: Option<String>,
     pub prompt: Option<String>,
     pub skip_judges: bool,
+    /// resolved blast-radius isolation (step over defaults, default none) — [`crate::isolation`].
+    pub isolation: crate::isolation::Isolation,
 }
 
 impl ResolvedStep {

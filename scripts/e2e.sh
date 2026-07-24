@@ -1265,6 +1265,96 @@ is  "a stray top-level \`budget:\` (retired — ceilings live under sequence.lim
 has "…naming the unknown field"                                                          "$DK/run.log" "unknown field \`budget\`"
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9l. blast-radius isolation (isolation: sandbox wraps the worker; none does not)"
+# A DIFFERENT axis from git session isolation (§9b): this one bounds what the WORKER process can do
+# to the HOST (fs/creds), by wrapping the spawn in the OS sandbox — bwrap on Linux, sandbox-exec on
+# macOS (internal/ISOLATION.md). Claude has no kernel jail, so `isolation: sandbox` makes agg wrap
+# `claude` in that OS tool; `none` spawns it directly.
+#
+# We cannot prove KERNEL confinement in CI (that needs a real host + real userns/Seatbelt deny), so
+# this asserts the WIRING: agg selects the wrapper, hands it the worker as the inner command, and the
+# inner `claude` still runs and produces its result. We stand a FAKE wrapper (named for this OS) first
+# on PATH: it records that it fired (the marker) and then `exec`s the inner command after the `--`
+# separator, so the real stub still runs. The `available()` probe agg does at startup
+# (`bwrap --version` / `sandbox-exec -p <profile> true`, no `--`) is answered with a bare exit 0 — it
+# must NOT leave a marker, so a marker ⟺ the worker itself was wrapped.
+case "$(uname -s)" in
+  Linux)  WRAPPER=bwrap ;;
+  Darwin) WRAPPER=sandbox-exec ;;
+  *)      WRAPPER="" ;;
+esac
+if [ -z "$WRAPPER" ]; then
+  skip "isolation: sandbox wraps the worker" "no OS wrapper on $(uname -s)"
+  skip "isolation: none does not wrap the worker" "no OS wrapper on $(uname -s)"
+else
+  # the fake wrapper: answers the availability probe, records the wrap, execs the inner command.
+  # marker is a *.log (already gitignored by mkproj) so agg's `git add -A` never sweeps it onto base.
+  make_wrapper() { cat > "$1/bin/$WRAPPER" <<'EOF'
+#!/bin/sh
+# fake OS-sandbox wrapper (bwrap / sandbox-exec) — record the wrap, then exec the inner command.
+case "$1" in --version) echo "fake-wrapper 0.0.0"; exit 0 ;; esac   # bwrap --version probe
+found=0
+while [ $# -gt 0 ]; do [ "$1" = "--" ] && { found=1; shift; break; }; shift; done
+if [ "$found" = 1 ]; then
+  printf 'WRAPPED %s\n' "$*" >> sandbox_wrap.log     # marker: the worker itself was OS-wrapped
+  exec "$@"
+fi
+exit 0                                                # no `--`: the availability probe — just succeed
+EOF
+    chmod +x "$1/bin/$WRAPPER"; }
+
+  # --- isolation: sandbox → agg wraps the worker in the OS sandbox ---------------------------
+  SB="$(mkproj sandbox)"
+  make_wrapper "$SB"
+  # A post-session HOOK that execs a repo-relative script — the §13 escape shape (a confined worker
+  # rewrites hook_payload.sh in its writable cwd). It must be wrapped just like the worker + judge.
+  printf 'echo hook ran\n' > "$SB/hook_payload.sh"
+  cat > "$SB/agg/agg.yaml" <<'EOF'
+project: sandbox
+defaults: { model: fake }
+steps:
+  worker: { isolation: sandbox }
+hooks:
+  on_session_end: ["sh hook_payload.sh"]
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+memory: { enabled: false }
+EOF
+  agg_do "$SB" run --max-sessions 1 > "$SB/run.log" 2>&1
+  is   "isolation: sandbox drives the run to done (exit 0)" "$?" "0"
+  exists "…the OS wrapper fired (marker present)"           "$SB/sandbox_wrap.log"
+  has  "…and the inner claude was the wrapped command"      "$SB/sandbox_wrap.log" "claude"
+  has  "…the inner claude STILL ran under the wrapper"      "$SB/trace.txt" "RUN=run"
+  has  "…and its work landed (the judge saw did_work)"      "$SB/run.log" "1/1 goals met"
+  # §12/§13: everything a confined worker can rewrite in its writable cwd is wrapped too, or it is a
+  # wide-open escape. The post-session script JUDGE and the on_session_end HOOK both appear in the
+  # wrap log alongside the worker.
+  has  "…and the post-session JUDGE was wrapped too (§12 escape closed)" "$SB/sandbox_wrap.log" "worked.sh"
+  has  "…and the on_session_end HOOK was wrapped too (§13 escape closed)" "$SB/sandbox_wrap.log" "hook_payload.sh"
+
+  # --- isolation: none → agg spawns the worker DIRECTLY, no wrapper -------------------------
+  NB="$(mkproj nosandbox)"
+  make_wrapper "$NB"          # wrapper IS on PATH — the point is agg does NOT reach for it under none
+  cat > "$NB/agg/agg.yaml" <<'EOF'
+project: nosandbox
+defaults: { model: fake }
+steps:
+  worker: { isolation: none }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+memory: { enabled: false }
+EOF
+  agg_do "$NB" run --max-sessions 1 > "$NB/run.log" 2>&1
+  is     "isolation: none drives the run to done (exit 0)" "$?" "0"
+  absent "…and the OS wrapper NEVER fired (no marker)"     "$NB/sandbox_wrap.log"
+  has    "…the worker ran directly (unwrapped)"            "$NB/trace.txt" "RUN=run"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "9j. the docs describe the tool that actually exists"
 # A hand-written CLI table rots the moment a subcommand is added. Assert every clap subcommand
 # appears in the README, and that every relative link in the README resolves to a real file.

@@ -83,7 +83,9 @@ pub fn summarize(
     // unwrap included). `cwd: None` — the summarizer only reads text it was handed, so unlike
     // the judge it has no business looking at the project.
     // Best-effort: any failure (spawn/timeout) → None, never breaks the loop.
-    let out = ruler.one_shot(&prompt, model, timeout_secs, None).ok()?;
+    // cwd is None (the summarizer runs in agg's own dir, not the project) → never confined; it is
+    // a tool-less LLM call over worker thoughts, not a worker-rewritable script.
+    let out = ruler.one_shot(&prompt, model, timeout_secs, None, crate::isolation::Isolation::None).ok()?;
 
     let spend = Spend::from_one_shot(&out);
     let raw = parse_summaries(&out.body)?;
