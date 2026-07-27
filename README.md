@@ -301,6 +301,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. Refused at startup if the mechanism is missing, never a silent downgrade ([details](docs/CONFIG.md)). *macOS verified; Linux experimental.*
 - **Rate-limit backoff** *(Claude + Codex)* — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
+- **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `agg` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just judges — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](docs/CONFIG.md)).
 - **No orphaned compute** — process-group reaping sweeps stragglers when a session or the loop ends.
 - **Token ceilings on every agent, dollar ceilings on Claude** — `over_budget` / `over_iterations` / `wall_hours` everywhere; `over_cost` only where the agent reports dollars. Asking for a guard your agent can't report is refused at startup, never silently ignored.
 - **Long-task tracking** — `agg spawn` keeps a sim/build alive across sessions so the reaper spares it.
@@ -392,11 +393,25 @@ accessors (`coverage.value >= 80`) and aggregates (`met_fraction >= 0.75`, `coun
 a regressed invariant, a judge error) that aborts the run as a failure. Done is one thing; giving up
 is another:
 
+`notify_if` takes the same grammar again, and is the one clause that **doesn't end the run**: when it's
+true, `agg` runs `notify.cmd` and the loop keeps going. Done is one thing, giving up is another —
+*asking for help* is a third, and it must not stop the loop to do it:
+
 ```yaml
 sequence:
   done_if: "outputs_two AND tests_pass"                  # both must hold — exit 0
   abort_if: "any_regressed(invariants) OR over_budget"   # optional guard — exit 3 — see docs/CONFIG.md
+  notify_if: "stalled"                                   # optional PING — the loop KEEPS RUNNING
+  notify:
+    cooldown_sessions: 5                                 # at most one ping per 5 sessions (default 3)
+    cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"]      # {{reason}} = the firing judge's rationale
 ```
+
+`{{reason}}` (plus `{{project}}`, `{{session}}`, `{{step}}`) is substituted **shell-quoted by `agg`** —
+so never wrap a placeholder in quotes of your own. Which clause a detector sits in *is* your human
+policy: none = pure autonomy, `notify_if` = tell me but keep going, `abort_if` = stop. Put
+**worker-authored** signals in `notify_if` only, or the agent gains a way to end its own run — the
+tradeoff, and the copy-ready `stuck` / `blocked` detectors, are in [`docs/CONFIG.md`](docs/CONFIG.md).
 
 The rule that makes it a moat: **`agg` runs the judges, never the agent.** So make the judges check
 the resulting artifacts — tests, a compiler, a proof checker — not the agent's claim about it — the agent will often enough hallucinate that a job is done.
@@ -560,7 +575,8 @@ under `agg/judges/`) for your project, and `agg run` reads `agg/agg.yaml` by def
 tune it: the `agent:` (see [Choosing an agent](#choosing-an-agent)), the `steps` / `sequence` model,
 token and dollar ceilings, the rolling summary, cross-session memory, mandatory per-session git
 isolation with a rollback gate, lifecycle hooks, watchdog thresholds, judges-by-name resolution, and
-the `done_if` / `abort_if` grammar are all documented in **[`docs/CONFIG.md`](docs/CONFIG.md)**.
+the `done_if` / `abort_if` / `notify_if` grammar are all documented in
+**[`docs/CONFIG.md`](docs/CONFIG.md)**.
 
 ## Examples
 

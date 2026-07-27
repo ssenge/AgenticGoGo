@@ -32,6 +32,10 @@ pub struct CycleResult {
     /// the abort guard fired (giving up — exit 3).
     pub halt: bool,
     pub halt_reason: Option<String>,
+    /// the NON-TERMINAL signal (STUCK_NOTIFY §8.2): `Some(reason)` = `notify_if` is true THIS step.
+    /// It never sets `stop`/`halt` — a stuck loop keeps running; a human is a side-channel, not a
+    /// gate. `reason` is the one-line `{{reason}}` string (see [`Engine::notify_reason`]).
+    pub notify: Option<String>,
     /// per-judge changes this step (feeds the LLM summarizer).
     pub deltas: Vec<GoalDelta>,
     /// the verdicts a judge actually PRODUCED this step (name + verdict), in judge order. The GATE
@@ -92,6 +96,8 @@ pub struct Engine {
     pub done_if: String,
     /// the giving-up guard.
     pub abort_if: Option<String>,
+    /// the non-terminal notify guard (STUCK_NOTIFY §3). Same grammar, no effect on stop/halt.
+    pub notify_if: Option<String>,
 }
 
 /// A snapshot of one judge's per-step runtime state (see [`Engine::snapshot_goal_state`]).
@@ -105,12 +111,47 @@ pub struct GoalRuntime {
 impl Engine {
     /// Build from a resolved run-set + the DoD expressions. Validates the expressions up front so a
     /// typo fails at load, not 3 sessions into a run.
-    pub fn new(judges: Vec<Judge>, done_if: String, abort_if: Option<String>) -> Result<Self> {
+    pub fn new(
+        judges: Vec<Judge>,
+        done_if: String,
+        abort_if: Option<String>,
+        notify_if: Option<String>,
+    ) -> Result<Self> {
         stop::validate(&done_if, &judges)?;
         if let Some(a) = &abort_if {
             stop::validate(a, &judges)?;
         }
-        Ok(Engine { judges, done_if, abort_if })
+        if let Some(n) = &notify_if {
+            stop::validate(n, &judges)?;
+        }
+        Ok(Engine { judges, done_if, abort_if, notify_if })
+    }
+
+    /// The one-line `{{reason}}` for a `notify_if` that just fired (STUCK_NOTIFY §5 / §12.3): the
+    /// rationale of the judge NAMED IN THE EXPRESSION with the highest `value`, so a compound
+    /// `stuck.value >= 85 OR blocked` reports whichever detector is actually shouting. Falls back to
+    /// the expression text when no named judge has a usable rationale (e.g. the baseline pass, where
+    /// only run-scalars like `over_iterations` can be true).
+    pub fn notify_reason(&self, expr: &str) -> String {
+        let named = stop::judge_names(expr).unwrap_or_default();
+        let best = self
+            .judges
+            .iter()
+            .filter(|g| named.iter().any(|n| n == &g.name))
+            .filter_map(|g| g.last_verdict.as_ref().map(|v| (v.value.unwrap_or(0.0), v.rationale.trim())))
+            .filter(|(_, r)| !r.is_empty())
+            // `reduce` keeping only a STRICTLY greater value, not `max_by`: `Iterator::max_by`
+            // returns the LAST of equal maxima, and §12.3 pins ties to the FIRST in run-set order
+            // (which is the order the expression names them in). Both are deterministic; matching
+            // the spec is free here and a documented tie-break is one less surprise to debug.
+            .reduce(|best, cur| if cur.0 > best.0 { cur } else { best });
+        let text = match best {
+            Some((_, rationale)) => rationale,
+            None => expr,
+        };
+        // one LINE: a rationale with an embedded newline would break a line-oriented sink (ntfy,
+        // syslog, a `>> file` tail) and is unreadable in a push notification either way.
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// Run every run-set judge (unless `skip_judges`), fold verdicts in, and evaluate done/abort
@@ -258,7 +299,23 @@ impl Engine {
             }
             None => (false, None),
         };
-        CycleResult { stop, halt, halt_reason, deltas, fresh_verdicts: Vec::new(), judge_tokens: 0, judge_cost: None }
+        // Evaluated on the SAME judge snapshot as done/abort so a cycle cannot report an
+        // inconsistent trio. NON-TERMINAL by construction: `notify` is a separate field, and no
+        // branch below folds it into `stop`/`halt`.
+        let notify = match &self.notify_if {
+            Some(expr) if eval_or_log(expr, &ctx, "notify_if") => Some(self.notify_reason(expr)),
+            _ => None,
+        };
+        CycleResult {
+            stop,
+            halt,
+            halt_reason,
+            notify,
+            deltas,
+            fresh_verdicts: Vec::new(),
+            judge_tokens: 0,
+            judge_cost: None,
+        }
     }
 
     /// Counts for the scoreboard header: (met, total) over the DoD-set — a run-set-only judge like
@@ -284,5 +341,256 @@ impl Engine {
             out.push('\n');
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::model::{Judge, JudgeKind, Lifecycle, Verdict};
+
+    /// A judge that has never been graded — the state `Engine::new` validates against, and the
+    /// state every detector is in on the baseline pass.
+    fn unjudged(name: &str, in_dod: bool) -> Judge {
+        Judge {
+            name: name.into(),
+            kind: JudgeKind::Script { path: "true".into() },
+            invariant: false,
+            in_dod,
+            state: Lifecycle::Pending,
+            last_verdict: None,
+            ever_met: false,
+        }
+    }
+
+    /// A graded DoD-set goal. Passing `met: false` is what keeps the non-terminality assertions
+    /// honest: a vacuously-satisfied `done_if` would set `stop` for reasons that have nothing to do
+    /// with notify, and the test would pass while proving nothing.
+    fn goal(name: &str, met: bool) -> Judge {
+        let mut j = unjudged(name, true);
+        j.apply(Verdict {
+            met,
+            value: Some(if met { 1.0 } else { 0.0 }),
+            max: Some(1.0),
+            target: 1.0,
+            rationale: String::new(),
+            evidence: vec![],
+            error: None,
+        });
+        j
+    }
+
+    /// A stuck-detector: run-set only (`in_dod: false` — machinery, never a goal, §12.1), carrying
+    /// the `value` the expression compares and the `rationale` that becomes `{{reason}}`.
+    fn detector(name: &str, value: f64, rationale: &str) -> Judge {
+        let mut j = unjudged(name, false);
+        j.apply(Verdict {
+            met: value > 0.0,
+            value: Some(value),
+            max: Some(100.0),
+            target: 100.0,
+            rationale: rationale.into(),
+            evidence: vec![],
+            error: None,
+        });
+        j
+    }
+
+    /// The engine under test: an unmet DoD plus a guard that cannot trip on a default `RunState`,
+    /// so `stop`/`halt` are false unless the thing under test moves them.
+    fn engine(judges: Vec<Judge>, notify_if: Option<&str>) -> Engine {
+        Engine::new(judges, "all_goals".into(), Some("over_iterations".into()), notify_if.map(String::from))
+            .expect("the test engine's expressions must validate")
+    }
+
+    /// One cycle's verdict without running a single judge (no subprocess, no ruler) — the same
+    /// entry point the rollback gate uses to re-derive a cycle from kept judge state.
+    fn cycle(eng: &Engine) -> CycleResult {
+        eng.conditions_only(&RunState::default())
+    }
+
+    /// THE feature, in one assertion (§2.1/§8.2): a fired `notify_if` is PURE SIGNAL. If this
+    /// regresses, agg has silently become the thing it exists to avoid — a loop that halts to ask a
+    /// human. The reason travels on its own field; `stop`/`halt` do not move.
+    #[test]
+    fn a_fired_notify_if_is_non_terminal_the_loop_keeps_running() {
+        let eng = engine(
+            vec![goal("feature", false), detector("stuck", 92.0, "no judge moved in 5 sessions")],
+            Some("stuck.value >= 85"),
+        );
+        let res = cycle(&eng);
+        assert_eq!(res.notify.as_deref(), Some("no judge moved in 5 sessions"), "the detector's rationale is the reason");
+        assert!(!res.stop, "notify is not success — it must never satisfy the Definition of Done");
+        assert!(!res.halt, "notify is not abort — the loop KEEPS RUNNING while a human is pinged");
+        assert!(res.halt_reason.is_none(), "nothing halted, so there is no halt reason to report");
+
+        // the same detector below its threshold pings nobody.
+        let quiet = engine(
+            vec![goal("feature", false), detector("stuck", 40.0, "still moving")],
+            Some("stuck.value >= 85"),
+        );
+        assert!(cycle(&quiet).notify.is_none(), "notify_if false ⇒ no signal at all");
+    }
+
+    /// §5/§12.3: under a compound guard, `{{reason}}` is the rationale of whichever NAMED detector
+    /// is shouting loudest — highest `value`. Not the first one listed, and not the loudest judge
+    /// in the run-set, or a `stuck.value >= 85 OR blocked` ladder would report the wrong stage.
+    #[test]
+    fn the_reason_comes_from_the_highest_value_judge_named_in_the_expression() {
+        let expr = "stuck.value >= 85 OR blocked";
+
+        // `stuck` (92) outranks `blocked` (1) even though `blocked` comes first in the run-set…
+        let eng = engine(
+            vec![
+                goal("feature", false),
+                detector("blocked", 1.0, "waiting on a prod credential"),
+                detector("stuck", 92.0, "values flat for 5 sessions"),
+                // …and a LOUDER judge the expression does not name must not supply the reason.
+                detector("coverage", 100.0, "coverage is fine"),
+            ],
+            Some(expr),
+        );
+        assert_eq!(cycle(&eng).notify.as_deref(), Some("values flat for 5 sessions"));
+
+        // the ranking is by VALUE, not position: flip the numbers, keep the order, get the other one.
+        let flipped = engine(
+            vec![
+                goal("feature", false),
+                detector("blocked", 99.0, "waiting on a prod credential"),
+                detector("stuck", 90.0, "values flat for 5 sessions"),
+            ],
+            Some(expr),
+        );
+        assert_eq!(cycle(&flipped).notify.as_deref(), Some("waiting on a prod credential"));
+    }
+
+    /// §12.3 step 4 — the reason is never empty, so a detector with nothing to say falls back to
+    /// the expression text: "why did I get paged" must always be answerable. Two shapes reach it —
+    /// a judge that ran and said nothing, and a judge that has not run yet (the baseline pass).
+    #[test]
+    fn a_judge_with_no_usable_rationale_falls_back_to_the_expression_text() {
+        let silent = engine(
+            vec![goal("feature", false), detector("stuck", 92.0, "   ")],
+            Some("stuck.value >= 85"),
+        );
+        assert_eq!(cycle(&silent).notify.as_deref(), Some("stuck.value >= 85"), "whitespace is not a rationale");
+
+        // never graded: `NOT stuck` still fires (an unjudged judge is not met) and there is no
+        // verdict to read a rationale from.
+        let fresh = engine(vec![goal("feature", false), unjudged("stuck", false)], Some("NOT stuck"));
+        assert_eq!(cycle(&fresh).notify.as_deref(), Some("NOT stuck"));
+    }
+
+    /// §12.3: the reason lands in LINE-ORIENTED sinks (ntfy, a `>> log` tail, a push notification)
+    /// and a rationale is free-form LLM prose that routinely wraps. Every interior break is
+    /// collapsed before it can truncate the message or corrupt the sink.
+    #[test]
+    fn the_reason_is_always_a_single_line() {
+        let rationale = "goal values flat since session 3.\nThe diff churns over the same\r\n  two files.\n";
+        let eng = engine(vec![goal("feature", false), detector("stuck", 90.0, rationale)], Some("stuck.value >= 85"));
+        let reason = cycle(&eng).notify.expect("notify_if fired");
+        assert!(!reason.contains('\n'), "no newline may survive: {reason:?}");
+        assert!(!reason.contains('\r'), "not a CR either — CRLF prose is the common case: {reason:?}");
+        assert_eq!(reason, "goal values flat since session 3. The diff churns over the same two files.");
+    }
+
+    /// §8.1/§12.1: a `notify_if` naming a judge outside the run-set is a STARTUP error, not a
+    /// surprise three sessions into an overnight run — the exact treatment `abort_if` already gets.
+    /// (In production `assemble` puts `notify_if`'s judges INTO the run-set; this is the guard for
+    /// when a name still fails to resolve.)
+    #[test]
+    fn engine_new_refuses_a_notify_if_naming_a_judge_outside_the_run_set() {
+        let run_set = || vec![goal("feature", false)];
+
+        // `.map(|_| ())` only so the failure path is printable — `Engine` is not `Debug`.
+        let err = format!(
+            "{:#}",
+            Engine::new(run_set(), "all_goals".into(), None, Some("stuck.value >= 85".into()))
+                .map(|_| ())
+                .expect_err("an unresolvable notify_if must not build an Engine")
+        );
+        assert!(err.contains("unknown judge `stuck`"), "the error must name the judge that is missing: {err}");
+        assert!(err.contains("stuck.value >= 85"), "…and quote the offending expression back: {err}");
+
+        // identical treatment for the terminal twin — this is a mirror, not a new policy.
+        assert!(Engine::new(run_set(), "all_goals".into(), Some("stuck".into()), None).is_err());
+
+        // …and the very same expression builds clean once the detector IS in the run-set.
+        let mut with_detector = run_set();
+        with_detector.push(unjudged("stuck", false));
+        assert!(Engine::new(with_detector, "all_goals".into(), None, Some("stuck.value >= 85".into())).is_ok());
+    }
+
+    /// §12.7 row 4 / §12.8: with no `notify_if`, `CycleResult.notify` is `None` on EVERY cycle —
+    /// including the one that succeeds and the one that halts. The field means exactly one thing,
+    /// "notify_if fired this step"; success is not a cry for help ("ping me when the run ends" is
+    /// spelled `hooks.on_stop`), and the terminal halt ping (§8.5) is keyed off `halt` by the
+    /// delivery handler, not smuggled into this field.
+    #[test]
+    fn without_notify_if_no_cycle_ever_notifies() {
+        let running = engine(vec![goal("feature", false), detector("stuck", 99.0, "hopelessly stuck")], None);
+        let res = cycle(&running);
+        assert!(res.notify.is_none(), "a detector pinned at 99 is silent when no notify_if reads it");
+        assert!(!res.stop && !res.halt);
+
+        let succeeded = engine(vec![goal("feature", true)], None);
+        let res = cycle(&succeeded);
+        assert!(res.stop, "the DoD is met");
+        assert!(res.notify.is_none(), "reaching the DoD is not a notification");
+
+        let over = RunState { sessions_done: 3, max_sessions: Some(3), ..RunState::default() };
+        let res = engine(vec![goal("feature", false)], None).conditions_only(&over);
+        assert!(res.halt, "the abort guard tripped");
+        assert!(res.notify.is_none(), "an abort_if halt does not set `notify` — that is the handler's job");
+    }
+
+    /// §12.3's tie-break, which `Iterator::max_by` gets backwards (it returns the LAST of equal
+    /// maxima). Two detectors, same `value`, both with a rationale: the FIRST in run-set order wins.
+    /// Run-set order is the order the expression names them, so this is the tie-break a reader of
+    /// `blocked OR escalated` would predict.
+    #[test]
+    fn a_tie_on_value_goes_to_the_first_judge_in_run_set_order() {
+        let eng = engine(
+            vec![
+                goal("feature", false),
+                detector("blocked", 1.0, "first — a human must unblock this"),
+                detector("escalated", 1.0, "second — should lose the tie"),
+            ],
+            Some("blocked OR escalated"),
+        );
+        assert_eq!(cycle(&eng).notify.as_deref(), Some("first — a human must unblock this"));
+
+        // …and it really is ORDER, not the name: flip the run-set and the other one wins.
+        let flipped = engine(
+            vec![
+                goal("feature", false),
+                detector("escalated", 1.0, "second — should lose the tie"),
+                detector("blocked", 1.0, "first — a human must unblock this"),
+            ],
+            Some("blocked OR escalated"),
+        );
+        assert_eq!(cycle(&flipped).notify.as_deref(), Some("second — should lose the tie"));
+    }
+
+    /// §12.10b — the halt ping enriches the bare `abort_if` expression with the winning judge's
+    /// rationale, so "stop + notify" delivers the blocker rather than a config line. A ceiling-only
+    /// expression names no judge and must come back UNCHANGED (that is §8.5's contract, and the e2e
+    /// asserts the exact `over_iterations` line).
+    #[test]
+    fn the_halt_reason_carries_the_blocker_but_a_ceiling_stays_bare() {
+        let eng = engine(
+            vec![goal("feature", false), detector("blocked", 1.0, "BLOCKED: need the prod deploy key")],
+            None,
+        );
+        assert_eq!(
+            eng.notify_reason("blocked OR over_iterations"),
+            "BLOCKED: need the prod deploy key",
+            "a named judge with a rationale supplies the detail the handler appends"
+        );
+        assert_eq!(
+            eng.notify_reason("over_budget OR wall_hours >= 8"),
+            "over_budget OR wall_hours >= 8",
+            "a ceiling-only expression names no judge — echo it back so the handler leaves it bare"
+        );
     }
 }

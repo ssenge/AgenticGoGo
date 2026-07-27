@@ -122,7 +122,16 @@ impl Lifecycle {
                 Box::new(crate::features::verify::RunJudges),
             ],
         ));
-        l.on_gate.push(feature("Gate", vec![Box::new(crate::features::gate::CeilingPoisonGuard), Box::new(crate::features::gate::GateKeepRollback)]));
+        l.on_gate.push(feature(
+            "Gate",
+            vec![
+                Box::new(crate::features::gate::CeilingPoisonGuard),
+                Box::new(crate::features::gate::GateKeepRollback),
+                // LAST: a rollback rewrites `res` above, so notifying earlier would flag work the
+                // gate just discarded. Non-terminal — it never changes the run's outcome.
+                Box::new(crate::features::notify::NotifyOnStuck),
+            ],
+        ));
         l.on_session_end.push(feature(
             "Finalize",
             vec![

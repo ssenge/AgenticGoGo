@@ -193,6 +193,29 @@ pub struct Sequence {
     /// the giving-up guard (exit 3). RENAME of `halt_when`.
     #[serde(default)]
     pub abort_if: Option<String>,
+    /// the NON-TERMINAL twin of `abort_if` (STUCK_NOTIFY §3): same grammar, but firing it runs
+    /// `notify.cmd` and the loop KEEPS RUNNING. Absent ⇒ never notify on a live cycle.
+    #[serde(default)]
+    pub notify_if: Option<String>,
+    /// how a notification is delivered. Valid WITHOUT `notify_if` — that is the "stop + notify"
+    /// policy (ping only when `abort_if` halts, §8.5). Required WITH it (else nothing would fire).
+    #[serde(default)]
+    pub notify: Option<NotifyCfg>,
+}
+
+/// Delivery for `notify_if` / an `abort_if` halt (STUCK_NOTIFY §5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotifyCfg {
+    /// shell commands, run exactly like a hook — best-effort, non-fatal, in the step's jail. Each
+    /// string may contain `{{reason}}` / `{{project}}` / `{{session}}` / `{{step}}`, which agg
+    /// substitutes SHELL-QUOTED (§12.4) — do not add quotes of your own around a placeholder.
+    #[serde(default)]
+    pub cmd: Vec<String>,
+    /// debounce: minimum sessions between two `notify_if` fires. `0` = every qualifying cycle. The
+    /// terminal `abort_if` ping ignores this (it happens once, at the end).
+    #[serde(default = "default_cooldown")]
+    pub cooldown_sessions: u32,
 }
 
 /// Per-session git isolation — MANDATORY, no master switch. The keep/rollback decision moved to
@@ -331,6 +354,9 @@ fn default_wd_cpu() -> u64 {
 }
 fn default_done_if() -> String {
     "all_goals".into()
+}
+fn default_cooldown() -> u32 {
+    3
 }
 fn default_true() -> bool {
     true
