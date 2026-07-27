@@ -298,7 +298,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
 
 **Guardrails for unattended runs**
-- **Blast-radius isolation** *(`isolation: sandbox`, per step)* — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) confining the worker's *and its judges' and hooks'* **writes** to the project dir + tmp, reads and network open. Bounds what an auto-mode worker can do to the host (`rm -rf ~`, read `~/.ssh`) without touching the repo history — orthogonal to session isolation. Refused at startup if the OS mechanism is missing, never a silent downgrade ([details](docs/CONFIG.md)). *macOS verified; Linux experimental.*
+- **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. Refused at startup if the mechanism is missing, never a silent downgrade ([details](docs/CONFIG.md)). *macOS verified; Linux experimental.*
 - **Rate-limit backoff** *(Claude + Codex)* — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
 - **No orphaned compute** — process-group reaping sweeps stragglers when a session or the loop ends.
