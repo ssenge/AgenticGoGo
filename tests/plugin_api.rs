@@ -56,7 +56,7 @@ fn probe_state<'a>(cfg: &'a agg::core::config::AggConfig, dir: &'a Path) -> Loop
         judge_timeout: 1,
         dir,
         config_base: dir,
-        eng: agg::core::engine::Engine::new(vec![], "iterations > 999999".into(), None).unwrap(),
+        eng: agg::core::engine::Engine::new(vec![], "iterations > 999999".into(), None, None).unwrap(),
         cursor: agg::core::sequence::Cursor::new(vec![]),
         cur_step: None,
         live: agg::state::LiveState::new(dir, loop_start, dash.clone()),

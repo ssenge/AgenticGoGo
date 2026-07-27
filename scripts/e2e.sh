@@ -782,6 +782,169 @@ has   "…and names the expression"                    "$WH/run.log" "wall_hours
 hasnt "…it did not simply run out of sessions"       "$WH/run.log" "reached max_sessions"
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9m. notify_if — flag a human WITHOUT killing the loop (STUCK_NOTIFY)"
+
+# `notify_if` is the NON-TERMINAL twin of the `abort_if` guards above: identical grammar, but a true
+# expression runs `sequence.notify.cmd` and the loop KEEPS RUNNING. Delivery is a shell command, so
+# the only honest observation channel is the files that command leaves behind — asserting on run.log
+# would pass for a notification that agg merely COMPOSED and never executed.
+#
+# Every marker this section writes lives under agg/state/, which mkproj already gitignores (the
+# fixture discipline at ~line 150): a marker dropped in the project ROOT gets swept onto the session
+# branch by agg's auto-commit and can vanish again on a checkout, so the assertion would be measuring
+# git rather than the notification.
+
+# The detector. A script judge that is always shouting (value 90, over the 85 threshold, EVERY
+# session) whose rationale is whatever the caller put in agg/state/RATIONALE.txt. The indirection is
+# the point: STUCK_NOTIFY §6's `blocked` detector echoes a line the WORKER wrote, which is what makes
+# {{reason}} untrusted input and §12.4's shell-quoting load-bearing.
+mkstuck() { # mkstuck <dir> <rationale>
+  printf '%s\n' "$2" > "$1/agg/state/RATIONALE.txt"
+  cat > "$1/agg/judges/stuck.sh" <<'EOF'
+#!/bin/sh
+# JSON-escape the free text (backslash first, then quote) — what any real script judge must do when
+# it reports a string it does not control.
+r=$(sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' agg/state/RATIONALE.txt)
+printf '{"met":true,"value":90,"max":100,"target":100,"rationale":"%s"}\n' "$r"
+EOF
+  chmod +x "$1/agg/judges/stuck.sh"
+}
+
+# The delivery. `"$1"` is the WHOLE reason if agg shell-quoted the placeholder, and only its first
+# WORD if it did not — so this one-liner is the on-the-wire proof of §12.4. It APPENDS rather than
+# touches, because a marker file's mere existence cannot tell one fire from four (the cooldown case).
+mknotifier() { # mknotifier <dir>
+  cat > "$1/bin/notify" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> agg/state/notified.txt
+EOF
+  chmod +x "$1/bin/notify"
+}
+
+# ── 1. the headline: it pings, and the loop DOES NOT DIE ─────────────────────────────────────────
+NTF="$(mkproj notify)"; : > "$NTF/NO_WORK"     # `worked` never fires → only the session cap can end it
+mkstuck "$NTF" "no judge moved in 3 sessions"
+cat > "$NTF/agg/agg.yaml" <<'EOF'
+project: notify
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  notify_if: "stuck.value >= 85"
+  notify:
+    cooldown_sessions: 0
+    cmd: ["touch agg/state/NOTIFIED"]
+summary: { enabled: false }
+EOF
+agg_do "$NTF" run --max-sessions 2 > "$NTF/run.log" 2>&1; NRC=$?
+exists "notify_if runs its delivery command"          "$NTF/agg/state/NOTIFIED"
+# …and the half that IS the feature. exit 4 = the --max-sessions cap, i.e. NOT the exit-3 abort guard
+# and NOT a done_if stop; and with cooldown 0 the ping fired on BOTH sessions, which it could not have
+# done if the first one had ended the run.
+is    "…and the loop KEEPS RUNNING — it exits via the session cap (exit 4)" "$NRC" "4"
+is    "…because it really ran every session after flagging"  "$(grep -cF '[notify:stuck]' "$NTF/run.log")" "2"
+# the tally is 0/1, not 0/2: `stuck` joined the RUN-set only (§12.1) — a detector is machinery, never a goal.
+is    "…finishing on the cap, with the detector kept out of the DoD" "$(finish_reason "$NTF")" "reached max_sessions=2 (0/1 goals met)"
+hasnt "…and a notification never aborts the run"      "$NTF/run.log" "ABORT"
+hasnt "…nor ends it as a success"                     "$NTF/run.log" "done_if satisfied"
+
+# ── 2. cooldown_sessions debounces, and {{reason}} carries the rationale on the wire ─────────────
+NCD="$(mkproj notifycd)"; : > "$NCD/NO_WORK"
+NCD_REASON='verdicts flat for 3 sessions; diff churning'
+mkstuck "$NCD" "$NCD_REASON"; mknotifier "$NCD"
+cat > "$NCD/agg/agg.yaml" <<'EOF'
+project: notifycd
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  notify_if: "stuck.value >= 85"
+  notify:
+    cooldown_sessions: 3
+    cmd: ["sh bin/notify {{reason}}"]
+summary: { enabled: false }
+EOF
+agg_do "$NCD" run --max-sessions 3 > "$NCD/run.log" 2>&1; NRC=$?
+# 3 qualifying sessions, one line written per fire: a marker file's mere existence could not tell
+# "debounced to 1" from "fired 3 times", and the exit code rules out "died after the first fire".
+is "…and the loop still ran to the session cap"       "$NRC" "4"
+is "cooldown_sessions:3 debounces 3 qualifying sessions down to ONE delivery" \
+   "$(wc -l < "$NCD/agg/state/notified.txt" 2>/dev/null | tr -d ' ')" "1"
+is "…and {{reason}} is the detector's RATIONALE, byte-identical in ONE argv element" \
+   "$(cat "$NCD/agg/state/notified.txt" 2>/dev/null)" "$NCD_REASON"
+
+# ── 3. §12.4: a HOSTILE, worker-authored reason is data, never code ──────────────────────────────
+NHX="$(mkproj notifyhostile)"; : > "$NHX/NO_WORK"; mknotifier "$NHX"
+# Three payloads, each aimed at a DIFFERENT way to get this wrong, so no marker can stay absent for
+# a vacuous reason: PWNED needs no quoting at all to fire, PWNED2 fires only if agg wraps the value
+# in '…' but forgets to escape the interior quote (the close-reopen trick IS the mechanism), PWNED3
+# is the backtick form the naive path also executes. Plus `;`, `&&` and a double quote for company.
+NHX_REASON='STUCK $(touch PWNED) it'\''; touch PWNED2; echo '\''`touch PWNED3` && "it" churns'
+mkstuck "$NHX" "$NHX_REASON"
+cat > "$NHX/agg/agg.yaml" <<'EOF'
+project: notifyhostile
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  notify_if: "stuck.value >= 85"
+  notify:
+    cooldown_sessions: 0
+    cmd: ["sh bin/notify {{reason}}"]
+summary: { enabled: false }
+EOF
+agg_do "$NHX" run --max-sessions 1 > "$NHX/run.log" 2>&1
+absent "a worker-authored reason cannot inject a command substitution"  "$NHX/PWNED"
+absent "…nor CLOSE agg's quote to start a command of its own"          "$NHX/PWNED2"
+absent "…nor smuggle one in backticks"                                 "$NHX/PWNED3"
+is     "…while the literal text is delivered verbatim (§12.4 quoting, through the real binary)" \
+       "$(cat "$NHX/agg/state/notified.txt" 2>/dev/null)" "$NHX_REASON"
+
+# ── 4. §8.5 stop + notify: `notify` with NO `notify_if` (row 3 of the §12.7 validity matrix) ─────
+NAB="$(mkproj notifystop)"; : > "$NAB/NO_WORK"; mknotifier "$NAB"
+cat > "$NAB/agg/agg.yaml" <<'EOF'
+project: notifystop
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  abort_if: "over_iterations"
+  notify:
+    cmd: ["sh bin/notify {{reason}}"]
+summary: { enabled: false }
+EOF
+agg_do "$NAB" run --max-sessions 2 > "$NAB/run.log" 2>&1
+is  "a notify block WITHOUT notify_if loads, and the abort still HALTS (exit 3)" "$?" "3"
+has "…the run really ended on the guard"     "$NAB/run.log" "ABORT"
+# once, cooldown ignored (it is terminal), with the halt expression as {{reason}} — that single line
+# is also the proof it did not additionally fire on session 1, where nothing was wrong.
+is  "…and the halt pings exactly once, carrying the abort expression as {{reason}}" \
+    "$(cat "$NAB/agg/state/notified.txt" 2>/dev/null)" "over_iterations"
+
+# ── 5. §12.8: SUCCESS is not a cry for help ──────────────────────────────────────────────────────
+NOK="$(mkproj notifyok)"; mknotifier "$NOK"    # default worker writes did_work → `worked` is met
+cat > "$NOK/agg/agg.yaml" <<'EOF'
+project: notifyok
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  notify:
+    cmd: ["sh bin/notify {{reason}}"]
+summary: { enabled: false }
+EOF
+agg_do "$NOK" run --max-sessions 3 > "$NOK/run.log" 2>&1
+is     "a satisfied done_if ends the run normally (exit 0)" "$?" "0"
+has    "…as a success"                                      "$NOK/run.log" "done_if satisfied"
+absent "…and success does NOT notify (§12.8 — hooks.on_stop is the ping-me-whatever-happens knob)" \
+       "$NOK/agg/state/notified.txt"
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "9g. the git paths the rollback gate does NOT take (auto-accept · conflict · recovery)"
 
 # ── gate_regressions:false → auto-accept: a regressing session is KEPT, never rolled back ───────

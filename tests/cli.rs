@@ -333,6 +333,40 @@ fn doctor_flags_a_broken_setup() {
     assert!(!out.status.success(), "doctor on an empty dir should report failures");
 }
 
+/// The dry-run commands inherit the `notify_if` validation for free, because `doctor` and `plan`
+/// both go through `assemble()` (STUCK_NOTIFY §12.1). Proving it on `doctor` is enough — a second
+/// test on `plan` would assert the same call, not a second code path.
+///
+/// The setup is otherwise perfect (fake agent on PATH, state file present, judge resolves), so
+/// EXACTLY ONE check may fail: a typo'd detector name must be caught before an overnight run, not
+/// mid-loop, and it must be attributed to the sequence check rather than to some incidental gap.
+#[test]
+fn doctor_inherits_the_notify_if_validation() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}'\n");
+    write_cfg(
+        dir,
+        "docnotify",
+        "worked",
+        "  notify_if: \"ghost_detector\"\n  notify: { cmd: [\"true\"] }\n",
+        "",
+    );
+
+    let out = agg(dir, &path).arg("doctor").output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "a notify_if naming an unresolvable judge must fail doctor:\n{combined}");
+    assert!(
+        combined.contains("✗ sequence + judges resolve"),
+        "the failure must be attributed to the sequence/judge check, got:\n{combined}"
+    );
+    assert!(combined.contains("ghost_detector"), "doctor must NAME the unresolvable detector:\n{combined}");
+    assert!(
+        combined.contains("1 check(s) failed"),
+        "only the notify_if check may fail — anything else means the fixture, not the feature, is broken:\n{combined}"
+    );
+}
+
 #[test]
 fn judge_runs_one_name_and_prints_raw_verdict() {
     let tmp = tempfile::tempdir().unwrap();

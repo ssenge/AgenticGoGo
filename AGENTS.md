@@ -51,12 +51,24 @@ sequence:
   invariants: []                 # judge names that must STAY met
   done_if: "tests_pass"          # SUCCESS (exit 0)
   abort_if: "over_budget OR over_iterations OR wall_hours >= 4"   # GIVE UP (exit 3)
+  notify_if: "stalled"           # OPTIONAL, NON-TERMINAL: fire notify.cmd, KEEP RUNNING
+  notify: { cooldown_sessions: 3, cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"] }
 ```
 
-### `done_if` / `abort_if` grammar
+### `done_if` / `abort_if` / `notify_if` grammar
 Bare judge names combined with `AND` / `OR` / parens, plus these terms: `all_goals`, `count_met >= N`,
 `over_budget` (tokens), `over_cost` (**claude-only**), `over_iterations`, `wall_hours >= N`, `stalled`,
 `any_regressed(invariants)`, `count_regressed >= N`.
+
+`notify_if` is the NON-TERMINAL twin of `abort_if` — same grammar, but true ⇒ run `notify.cmd` (like a
+hook: best-effort, non-fatal, in the current step's isolation tier) and the loop CONTINUES. Its judges
+join the run-set, never the DoD-set. `{{reason}}` (the firing judge's rationale) / `{{project}}` /
+`{{session}}` / `{{step}}` are substituted **shell-quoted by agg** — never quote a placeholder yourself.
+`cooldown_sessions` (default 3) debounces; an `abort_if` halt pings once ignoring it; `done_if` success
+never pings (that is `hooks.on_stop`). `notify_if` with an empty `notify.cmd` is a hard startup error;
+`notify:` alone is valid and means "ping only when `abort_if` halts". **THE MOAT: put WORKER-AUTHORED
+signals (a `blocked` judge over a worker-written file) in `notify_if`, never `abort_if` — otherwise the
+agent can end its own run.**
 
 ## Writing a judge (a judge IS a goal)
 A judge lives at `agg/judges/<name>.{sh,md}` and is referenced by its **bare NAME** in

@@ -88,6 +88,9 @@ impl Handler for GateKeepRollback {
                         stop: recomputed.stop,
                         halt: recomputed.halt,
                         halt_reason: recomputed.halt_reason,
+                        // recomputed against RESTORED base truth — NotifyOnStuck runs after this
+                        // handler, so it flags what was kept, never what was rolled back.
+                        notify: recomputed.notify,
                         deltas: Vec::new(),
                         fresh_verdicts: Vec::new(),
                         judge_tokens: 0,
@@ -116,6 +119,7 @@ impl Handler for GateKeepRollback {
                     stop: recomputed.stop,
                     halt: recomputed.halt,
                     halt_reason: recomputed.halt_reason,
+                    notify: recomputed.notify,
                     deltas: Vec::new(),
                     fresh_verdicts: Vec::new(),
                     judge_tokens: 0,
