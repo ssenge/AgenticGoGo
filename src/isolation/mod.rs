@@ -51,7 +51,7 @@ mod imp {
     pub fn available() -> bool {
         false
     }
-    pub fn build(_cwd: &Path, _writable: &[PathBuf], _prog: &std::ffi::OsStr, _args: &[std::ffi::OsString]) -> Result<Command> {
+    pub fn build(_cwd: &Path, _writable: &[PathBuf], _denied: &[PathBuf], _prog: &std::ffi::OsStr, _args: &[std::ffi::OsString]) -> Result<Command> {
         anyhow::bail!(
             "`isolation: sandbox` is not supported on this operating system — only Linux (bubblewrap) \
              and macOS (sandbox-exec) have an OS wrapper. Use `isolation: none`, or run on a supported OS."
@@ -97,6 +97,8 @@ pub fn available() -> bool {
 /// `process_group(0)` then lands on the wrapper, which is correct.
 ///
 /// Returns a LOUD `Err` on an unsupported OS rather than silently downgrading to a direct spawn.
+///
+/// Writes to [`denied`] (agg's own private state) are carved back OUT of the writable cwd.
 pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf]) -> Result<Command> {
     // get_program / get_args / get_envs are queryable; that is what lets us reshape a caller's
     // Command without the caller knowing about sandboxing.
@@ -119,7 +121,7 @@ pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf]) -> Result<Command> {
     let writable: Vec<PathBuf> =
         writable.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
 
-    let mut wrapped = imp::build(&cwd_resolved, &writable, &prog, &args)?;
+    let mut wrapped = imp::build(&cwd_resolved, &writable, &denied(&cwd_resolved), &prog, &args)?;
     for (k, v) in envs {
         match v {
             Some(v) => wrapped.env(k, v),
@@ -132,6 +134,26 @@ pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf]) -> Result<Command> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     Ok(wrapped)
+}
+
+/// The write CARVE-OUT: paths that stay readable but are denied for WRITING, even though they sit
+/// inside the otherwise-writable `cwd`. Today that is exactly `agg/private/` — see [`crate::paths`]
+/// for what lives there and why.
+///
+/// DERIVED FROM `cwd` rather than passed in, deliberately. `wrap` confines three different spawn
+/// surfaces (worker, script judge, `agg.yaml` hook) and every one of them is reachable by a worker
+/// that edits files in its own cwd. A parameter is a thing a future call site can forget; deriving
+/// it here means adding a fourth surface cannot silently reopen the hole.
+///
+/// Returned even when the directory does not exist yet (a fresh project, or a unit test whose cwd
+/// is a bare temp dir): both backends match on the path STRING, so denying a not-yet-created
+/// directory is correct and becomes effective the moment agg creates it.
+fn denied(cwd: &Path) -> Vec<PathBuf> {
+    let p = crate::paths::private_dir(cwd);
+    // canonicalize when it resolves — macOS Seatbelt matches canonical paths ONLY, so an
+    // unresolved `/tmp/...` deny would silently match nothing on a host where `/tmp` is a symlink
+    // (ISOLATION.md §11 BUG 1, the same trap that once broke the ALLOW side).
+    vec![std::fs::canonicalize(&p).unwrap_or(p)]
 }
 
 #[cfg(test)]
@@ -245,6 +267,54 @@ mod tests {
         assert!(stdout.contains("DEVNULL_OK"), "/dev/null must be writable\n{stdout}\n{stderr}");
         assert!(stdout.contains("ESCAPE_DENIED"), "a write OUTSIDE the jail must be denied\n{stdout}\n{stderr}");
         assert!(!escaped, "the worker ESCAPED — it wrote {}", outside.display());
+    }
+
+    /// THE CARVE-OUT, proven by the kernel rather than by reading the profile text. This is the
+    /// test the `verdicts.jsonl` forgery has to fail against: a confined worker may still write its
+    /// own state (`agg/state/`) and the project source, but NOT `agg/private/` — and it may still
+    /// READ the private files, because a judge reads the ledger and the worker reads its brief.
+    ///
+    /// `#[ignore]`d like its siblings: it spawns the real OS sandbox, which a nested sandbox (CI,
+    /// Claude Code's own jail) refuses. Run on a real host:
+    /// `cargo test -- --ignored private_dir_is_carved_out --nocapture`
+    #[test]
+    #[ignore = "spawns the real OS sandbox; run by hand on a real host"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn private_dir_is_carved_out_of_the_writable_cwd() {
+        assert!(available(), "no OS sandbox on this host — cannot prove confinement");
+        let proj = std::env::temp_dir().join(format!("agg-carve-{}", std::process::id()));
+        let private = crate::paths::private_dir(&proj);
+        let state = crate::paths::agg_dir(&proj);
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        // a pre-existing ledger the worker will try to forge a row into, and read back
+        let ledger = crate::paths::verdicts_jsonl(&proj);
+        std::fs::write(&ledger, "{\"judge\":\"real\"}\n").unwrap();
+
+        let script = format!(
+            "echo work > '{p}/source.txt' && echo SRC_OK; \
+             echo advice > '{s}/STATE.md' && echo STATE_OK; \
+             cat '{l}' >/dev/null && echo READ_OK; \
+             echo forged >> '{l}' && echo FORGE_OK || echo FORGE_DENIED; \
+             echo x > '{pr}/new.txt' && echo NEWFILE_OK || echo NEWFILE_DENIED",
+            p = proj.display(), s = state.display(), l = ledger.display(), pr = private.display()
+        );
+        let mut inner = Command::new("/bin/sh");
+        inner.arg("-c").arg(&script);
+        let out = wrap(inner, &proj, &[]).expect("build the wrapper").output().expect("run the sandbox");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let ledger_after = std::fs::read_to_string(&ledger).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&proj);
+
+        // the worker's own world still works — a carve-out that breaks the loop is not a fix
+        assert!(stdout.contains("SRC_OK"), "the worker must still write the project:\n{stdout}\n{stderr}");
+        assert!(stdout.contains("STATE_OK"), "…and its own agg/state/:\n{stdout}\n{stderr}");
+        assert!(stdout.contains("READ_OK"), "…and READ the ledger (a judge does):\n{stdout}\n{stderr}");
+        // …and the hole is shut
+        assert!(stdout.contains("FORGE_DENIED"), "the ledger forgery must be DENIED:\n{stdout}\n{stderr}");
+        assert!(stdout.contains("NEWFILE_DENIED"), "no new files in private/ either:\n{stdout}\n{stderr}");
+        assert!(!ledger_after.contains("forged"), "the ledger was MODIFIED — the carve-out leaked");
     }
 
     #[test]

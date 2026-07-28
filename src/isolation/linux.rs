@@ -28,8 +28,9 @@ pub fn available() -> bool {
         .unwrap_or(false)
 }
 
-/// Build the `bwrap` wrapper command around `prog args…`, writable = cwd + tmpfs /tmp + `writable`.
-pub fn build(cwd: &Path, writable: &[PathBuf], prog: &OsStr, args: &[OsString]) -> Result<Command> {
+/// Build the `bwrap` wrapper command around `prog args…`, writable = cwd + tmpfs /tmp + `writable`,
+/// minus `denied` (agg's own private state, which lives inside cwd).
+pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], prog: &OsStr, args: &[OsString]) -> Result<Command> {
     let mut cmd = Command::new("bwrap");
     cmd.arg("--die-with-parent")
         // whole host read-only …
@@ -39,6 +40,18 @@ pub fn build(cwd: &Path, writable: &[PathBuf], prog: &OsStr, args: &[OsString]) 
     // …plus the agent's own state dirs (session logs etc.) — already filtered to existing dirs.
     for w in writable {
         cmd.arg("--bind").arg(w).arg(w);
+    }
+    // The CARVE-OUT: re-bind agg's private state READ-ONLY on top of the writable cwd. bwrap applies
+    // binds in argv ORDER, so this must come AFTER `--bind <cwd>` — reversing them lets the later
+    // writable bind win and silently reopens the hole.
+    //
+    // `--ro-bind`, not `--tmpfs`: reads must keep working (a judge reads `verdicts.jsonl`, the
+    // worker reads its brief). A path that does not exist is skipped — bwrap FAILS the whole spawn
+    // on a missing source, which would turn "no private dir yet" into "the worker cannot start".
+    for d in denied {
+        if d.exists() {
+            cmd.arg("--ro-bind").arg(d).arg(d);
+        }
     }
     cmd.arg("--tmpfs").arg("/tmp")
         .arg("--proc").arg("/proc")

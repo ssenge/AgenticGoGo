@@ -276,6 +276,7 @@ fn ensure_agg_gitignored_migrates_the_stale_dot_agg_line() {
     let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();
     let lines: Vec<&str> = gi.lines().map(str::trim).collect();
     assert!(lines.contains(&"agg/state/"), "new runtime path must be ignored: {gi:?}");
+    assert!(lines.contains(&"agg/private/"), "the agg-owned runtime root must be ignored too: {gi:?}");
     assert!(lines.contains(&".obsidian/"), "the Obsidian vault config must be ignored too: {gi:?}");
     assert!(!lines.iter().any(|l| *l == ".agg/" || *l == ".agg"), "stale .agg/ line must be dropped: {gi:?}");
     assert!(lines.contains(&"target/"), "unrelated entries must survive: {gi:?}");
@@ -288,10 +289,15 @@ fn ensure_agg_gitignored_migrates_the_stale_dot_agg_line() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// A project that ALREADY ignores `agg/state/` (from an earlier agg version) but not `.obsidian/`
-/// must still get `.obsidian/` added on the next call — the early-return must not skip it.
+/// A project that ALREADY ignores `agg/state/` (from an earlier agg version) must still gain the
+/// entries it is missing on the next call — the early-return must not skip them.
+///
+/// `agg/private/` is the load-bearing one: it is the NEWER entry, so every existing project reaches
+/// this branch, and the whole population of upgrading users would silently start committing agg's
+/// private state (the verdict ledger, the bus, run.log) if the writer stopped at `has_state`. The
+/// `.obsidian/` case is the same early-return bug, found earlier.
 #[test]
-fn ensure_agg_gitignored_adds_obsidian_to_an_already_migrated_project() {
+fn ensure_agg_gitignored_adds_the_missing_entries_to_an_already_migrated_project() {
     let d = std::env::temp_dir().join(format!("agg-git-{}-obsidian", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
@@ -301,7 +307,13 @@ fn ensure_agg_gitignored_adds_obsidian_to_an_already_migrated_project() {
     ensure_agg_gitignored(&d);
     let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();
     let lines: Vec<&str> = gi.lines().map(str::trim).collect();
+    assert!(lines.contains(&"agg/private/"), "an upgrading project must pick up agg/private/: {gi:?}");
     assert!(lines.contains(&".obsidian/"), "must add .obsidian/ even when agg/state/ already present: {gi:?}");
     assert_eq!(gi.matches("agg/state/").count(), 1, "must not duplicate the existing agg/state/: {gi:?}");
+
+    // idempotent: the second call sees all three and appends nothing.
+    ensure_agg_gitignored(&d);
+    let gi2 = std::fs::read_to_string(d.join(".gitignore")).unwrap();
+    assert_eq!(gi2.matches("agg/private/").count(), 1, "must not append a duplicate agg/private/: {gi2:?}");
     let _ = std::fs::remove_dir_all(&d);
 }

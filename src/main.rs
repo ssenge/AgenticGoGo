@@ -48,7 +48,7 @@ enum Cmd {
     /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
     Plan,
     /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
-    /// re-run judges; reads agg/state/state.json, same as the /agg:status skill).
+    /// re-run judges; reads agg/private/state.json, same as the /agg:status skill).
     Status {
         /// emit the raw snapshot as JSON (the full DashboardState) for scripting/piping.
         #[arg(long)]
@@ -59,7 +59,7 @@ enum Cmd {
         /// stop after this many sessions regardless (0 = unlimited)
         #[arg(long, default_value_t = 0)]
         max_sessions: u32,
-        /// run in the background: detach, write agg/state/run.pid, log to agg/state/run.log.
+        /// run in the background: detach, write agg/private/run.pid, log to agg/private/run.log.
         #[arg(long, short = 'd')]
         detach: bool,
     },
@@ -174,7 +174,7 @@ enum SendCmd {
 }
 
 struct Paths {
-    /// project root (cwd for judges + worker; runtime state lives in `<dir>/agg/state/`).
+    /// project root (cwd for judges + worker; runtime state lives in `<dir>/agg/{state,private}/`).
     dir: PathBuf,
     /// where user inputs live: `<dir>/agg/`. The state file, project judges, and LLM-judge rubric
     /// files resolve against this base.
@@ -225,7 +225,13 @@ fn run_cli() -> Result<ExitCode> {
             let jm = cfg.judge_model(ruler);
             let mut eng = asm.engine;
             eprintln!("agg: evaluating {} judge(s) once (dry run)…", eng.judges.len());
-            // dry run — no worker, clean tree → no confinement needed.
+            // ponytail: UNCONFINED, unlike the baseline pass (features/setup.rs) which now uses the
+            // run-level tier. Two things make that safe here and not there: `plan` never writes
+            // `verdicts.jsonl`, so a tampered judge has no ledger to forge; and it is
+            // OPERATOR-invoked, so running it is the same act of trust as running any script in a
+            // repo you are working on. The residual is that a judge tampered with by an earlier
+            // sandboxed run is arbitrary code on the operator's host. Upgrade path if that matters:
+            // pass `cfg.run_isolation()` here and in `agg judge` below, exactly as Baseline does.
             let res = eng.run_step(&p.dir, &engine::RunState::default(), ruler, &jm, cfg.judge.timeout, "plan", None, false, agg::isolation::Isolation::None);
             print!("{}", eng.scoreboard());
             // Non-terminal, so it is reported ALONGSIDE the verdict, not instead of it: knowing a
@@ -411,7 +417,7 @@ fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
         eprintln!(
             "queued → {} — but NO loop is running in this dir right now.\n  \
              it will apply when one starts (a queued `stop` fires immediately at the next `agg run`;\n  \
-             delete agg/state/bus/in/*.json to cancel).",
+             delete agg/private/bus/in/*.json to cancel).",
             path.display()
         );
     }

@@ -2,7 +2,7 @@
 //!
 //! Two-stream discipline: the line-oriented log on stdout stays the source of truth
 //! (greppable, tailable). The TUI is a *view* rendered from this compact state file, never
-//! the only output. The loop writes `agg/state/state.json` atomically after each meaningful change;
+//! the only output. The loop writes `agg/private/state.json` atomically after each meaningful change;
 //! `agg dashboard` polls it and repaints in place.
 //!
 //! Single-writer-under-lock: both the loop (boundary updates) and the worker's reader thread
@@ -149,7 +149,7 @@ pub struct DashboardState {
     /// session number WITHIN the current `agg run` invocation (resets to 0 each run).
     pub session: u32,
     /// cumulative session count across ALL `agg run` invocations for this project
-    /// (persisted in `agg/state/sessions.count`). Survives restarts so the dashboard can
+    /// (persisted in the run ledger `agg/private/project.json`). Survives restarts so the dashboard can
     /// show "how many sessions has this project ever run", not just this invocation.
     pub lifetime_session: u32,
     /// the outer loop's current stage.

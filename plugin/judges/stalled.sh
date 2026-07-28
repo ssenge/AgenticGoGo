@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Standard library judge: STALL detector (§5.9). Its input is agg/state/verdicts.jsonl.
+# Standard library judge: STALL detector (§5.9). Its input is agg/private/verdicts.jsonl — the
+# AGG-OWNED half of the runtime state, unwritable by a confined worker. That is the whole point:
+# this judge decides "is the loop making progress", projects wire it to abort_if, so a worker able
+# to append forged `merged` rows could end its own run.
 #
 #   met:true when, across the last K=3 MERGED steps: no binary judge changed `met`, AND no
 #   numeric judge changed `value`. Judges with no row in the window are ignored; `stalled`
@@ -10,7 +13,7 @@
 # undone and must not read as progress-or-stall.
 set -u
 DIR="${AGG_PROJECT_DIR:-.}"
-LOG="$DIR/agg/state/verdicts.jsonl"
+LOG="$DIR/agg/private/verdicts.jsonl"
 
 python3 - "$LOG" <<'PY'
 import json, sys

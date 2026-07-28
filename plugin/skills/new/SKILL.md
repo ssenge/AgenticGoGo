@@ -15,7 +15,7 @@ planning material already exists into the files the loop reads, all under the ma
   clause of the Definition of Done. **A judge IS a goal.**
 - `agg/AGG.md` — the stable scope/goals/architecture each worker reads for orientation (committed)
 - `agg/state/STATE.md` — the forward "what to do next" advice the worker rewrites each session
-  (gitignored; agg composes it + AGG.md + memory into a per-session `agg/state/INSTRUCTIONS.md` brief)
+  (gitignored; agg composes it + AGG.md + memory into a per-session `agg/private/INSTRUCTIONS.md` brief)
 
 **Core principle: do NOT replicate spec tooling.** Read what's already there and *translate* it into
 judges. Only ask the user for what's genuinely missing.
@@ -230,9 +230,11 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
     cooldown, and the loop keeps going. Keep TERMINATION on the signals the worker genuinely cannot
     reach — the process-internal ones: `over_budget`, `over_cost`, `over_iterations`, `wall_hours`,
     `any_regressed(invariants)`. A `stalled`/`stuck` detector over agg's own
-    `agg/state/verdicts.jsonl` is a **higher bar but not unfakeable**: agg owns that file and a
-    worker touching it is tampering, yet `agg/state/` is inside the worker's writable cwd on every
-    isolation tier and the ledger has no integrity check.
+    `agg/private/verdicts.jsonl` is a **higher bar, and how much higher depends on the isolation
+    tier**: agg owns that file and a worker touching it is tampering, and under `isolation:
+    sandbox`/`container` the ledger sits in `agg/private/`, carved out of the worker's writable set,
+    so the kernel refuses the write. Under the default `isolation: none` it is a protocol boundary
+    only — the worker can reach it and the ledger has no integrity check.
   - **Do not reuse one detector across clauses.** `notify_if: "stalled"` next to a
     `"if stalled then reconsider"` step pages the human at the gate of the session that just ran,
     one full cycle before the recovery step is dispatched. Either omit the `if` branch, or give
@@ -346,8 +348,9 @@ Show the user the proposed `agg.yaml` (and the judge files) and let them approve
 
 ## Step 6 — Write the files (all under `agg/`)
 
-Everything agg reads lives under `agg/` (committed); everything it writes lives under `agg/state/`
-(gitignored, auto-created). Write:
+Everything agg reads as config lives under `agg/` (committed). Runtime state is auto-created in two
+gitignored dirs beside it: `agg/state/` (the WORKER writes it) and `agg/private/` (agg owns it — the
+verdict ledger, the bus, the scoreboard). You author nothing in either. Write:
 
 ### `agg/agg.yaml`
 
@@ -404,7 +407,7 @@ the `.sh` scripts. Reference each by its bare name in `done_if` / `abort_if` / `
 
 ### `agg/AGG.md` — the stable scope (committed) and `agg/state/STATE.md` — the forward advice
 
-agg regenerates a per-session `agg/state/INSTRUCTIONS.md` brief (the worker's whole `-p` is a tiny
+agg regenerates a per-session `agg/private/INSTRUCTIONS.md` brief (the worker's whole `-p` is a tiny
 pointer at it) by composing AGG.md + STATE + memory. Split the standing content by change-frequency:
 
 **`agg/AGG.md`** (committed, rare edits, human-owned) — the STABLE scope: what the project is, the
@@ -418,7 +421,7 @@ goal, the architecture (key modules/entry points + the exact build/test commands
 next": where things stand + the exact next task. Seed it with a first-session note; the worker keeps
 it current for its successor.
 
-(Institutional memory, `agg/state/LOG.md`, is written by agg, not the worker — never tell the worker
+(Institutional memory, `agg/private/LOG.md`, is written by agg, not the worker — never tell the worker
 to maintain it. The worker just edits files and NEVER runs git — agg commits the work automatically,
 runs the session on a throwaway branch, and keeps it only if the judges pass; agg owns all git.)
 
@@ -446,7 +449,7 @@ Setup complete — driving <agent>. Starting scoreboard above.
 
 To run the loop:
   agg run                # foreground, watch it live
-  agg run --detach       # background (pidfile + agg/state/run.log), survives the terminal
+  agg run --detach       # background (pidfile + agg/private/run.log), survives the terminal
 
 To watch the dashboard (second terminal):
   agg dashboard

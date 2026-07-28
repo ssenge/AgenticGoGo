@@ -5,9 +5,11 @@
 //! **session-granular**: the loop drains `bus/in/` at each session boundary and
 //! applies the commands before launching the next worker.
 //!
-//! Layout under the project's `agg/state/`:
+//! Layout under the project's AGG-OWNED `agg/private/` (the bus is the OPERATOR's channel — a
+//! worker able to write here would raise its own budget or unpause itself, so it is carved out of
+//! the sandbox writable set):
 //! ```text
-//! agg/state/bus/
+//! agg/private/bus/
 //!   in/        # operator / outer-Claude → loop  (one JSON file per command)
 //!   out/       # loop → operator                 (status/questions)
 //!   log.jsonl  # append-only audit of everything drained

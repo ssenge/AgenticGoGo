@@ -64,9 +64,11 @@ fn combined(out: &std::process::Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 
-/// Parse every line of `agg/state/verdicts.jsonl` into a JSON value.
+/// Parse every line of the gate ledger into a JSON value. Located through `agg::paths` — the
+/// ledger is AGG-OWNED (`agg/private/`, carved out of a confined worker's writable set), and going
+/// through the helper means a future layout move never needs a hunt through the tests again.
 fn read_rows(dir: &Path) -> Vec<serde_json::Value> {
-    let text = fs::read_to_string(dir.join("agg/state/verdicts.jsonl")).unwrap_or_default();
+    let text = fs::read_to_string(agg::paths::verdicts_jsonl(dir)).unwrap_or_default();
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).expect("each verdicts.jsonl line must be valid JSON"))

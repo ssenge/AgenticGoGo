@@ -16,6 +16,8 @@ commands to run.
 # Rules
 - You are AUTONOMOUS. There is NO human to answer questions — never pause to ask.
 - Real, correct work only — no stubs. Keep changes focused.
+- `agg/state/` is YOURS (STATE.md, wiki/). `agg/private/` is agg's — read it if you like, never
+  write it; under `isolation: sandbox` the attempt just fails.
 - Durable knowledge lives in `agg/state/wiki/` as an OKF (Open Knowledge Format) wiki: one concept
   per markdown file (HYPHENATED, space-free filenames so links resolve everywhere), a required `type:`
   frontmatter, CROSS-LINKED with standard `[label](page.md)` markdown links so it forms a graph. agg's

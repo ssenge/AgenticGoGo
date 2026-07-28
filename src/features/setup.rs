@@ -48,9 +48,17 @@ impl Handler for Baseline {
         let judge_model = ctx.judge_model.clone();
         let judge_timeout = ctx.judge_timeout;
         let rs = ctx.run_state();
-        // Baseline runs BEFORE any worker, on the clean committed tree (gitsetup requires it) — the
-        // judge scripts cannot have been tampered with yet, so there is no escape to confine against.
-        let pre = ctx.eng.run_step(dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false, crate::isolation::Isolation::None);
+        // Confined with the RUN-level tier, exactly as the `on_stop` hook is (registry.rs) — the
+        // same "no step context yet" problem, so the same answer.
+        //
+        // The old rationale here was "baseline runs on the clean committed tree, so the judges
+        // cannot have been tampered with yet". That is false ACROSS RUNS, and was demonstrated: the
+        // carve-out covers `agg/private/`, but `agg/judges/` is committed BY DESIGN (the moat), so a
+        // confined worker in run 1 rewrites a judge, agg commits it, and run 2's baseline executes
+        // it — unconfined, before any jail exists — forging `merged` rows straight into the ledger.
+        // `stalled` then reports met and an `abort_if: "stalled"` project has its worker end its own
+        // run. Clean-and-committed is not the same as untampered.
+        let pre = ctx.eng.run_step(dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false, ctx.cfg.run_isolation());
         ctx.tokens_spent += pre.judge_tokens;
         if let Some(c) = pre.judge_cost {
             ctx.cost_spent += c;
@@ -106,5 +114,39 @@ impl Handler for BackgroundSpawn {
     }
     fn name(&self) -> &'static str {
         "BackgroundSpawn"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The baseline pass must confine its judges with the RUN-level tier, not `Isolation::None`.
+    ///
+    /// This pins a real, reproduced bypass: `agg/judges/` is committed by design (the moat), so a
+    /// sandboxed worker in run 1 can rewrite a judge, agg commits it, and run 2's baseline — which
+    /// used to hardcode `Isolation::None` on the premise that a clean committed tree is untampered —
+    /// executed it before any jail existed, forging `merged` rows into `agg/private/verdicts.jsonl`.
+    /// `stalled` then reported met and an `abort_if: "stalled"` project ended its own run.
+    ///
+    /// Asserted on the CONFIG→tier mapping rather than by spawning a sandbox (that lives in the
+    /// `#[ignore]`d kernel test): the defect was reading `None` from a hardcode, so what needs
+    /// pinning is that the tier is DERIVED and non-`None` whenever any step asks for confinement.
+    #[test]
+    fn a_sandboxed_config_gives_the_baseline_pass_a_confining_tier() {
+        use crate::core::config::AggConfig;
+        use crate::isolation::Isolation;
+        let load = |iso: &str| -> AggConfig {
+            serde_yaml::from_str(&format!(
+                "project: p\nsteps:\n  worker:\n    isolation: {iso}\nsequence:\n  steps: [worker]\n  done_if: \"ok\"\n"
+            ))
+            .expect("fixture config parses")
+        };
+        assert_eq!(
+            load("sandbox").run_isolation(),
+            Isolation::Sandbox,
+            "a project with a sandboxed step must NOT baseline-judge unconfined — that is the bypass"
+        );
+        // …and a project that asked for nothing still pays nothing: no behaviour change for the
+        // default tier, which is what makes this fix safe to ship.
+        assert_eq!(load("none").run_isolation(), Isolation::None);
     }
 }

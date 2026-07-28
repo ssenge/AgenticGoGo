@@ -77,6 +77,20 @@ pub fn containerize(cmd: Command, cwd: &Path, writable: &[PathBuf], image: &str)
     for w in writable {
         mount(&mut out, &canonical(w))?;
     }
+    // The CARVE-OUT: agg's private state is inside the mounted cwd, so re-mount it READ-ONLY on top.
+    // The engine applies the more specific mount, and `:ro` is enforced by the kernel inside the
+    // container exactly as the Seatbelt deny / bwrap `--ro-bind` are on the other tiers.
+    //
+    // Only when it EXISTS: `docker run` creates a missing bind source as an empty root-owned
+    // directory, which would leave a stray dir in a fresh project.
+    let private = canonical(&crate::paths::private_dir(&cwd_resolved));
+    if private.exists() {
+        let mut spec = OsString::from(&private);
+        spec.push(":");
+        spec.push(&private);
+        spec.push(":ro");
+        out.arg("-v").arg(spec);
+    }
     for (k, v) in envs {
         if let Some(v) = v {
             let mut kv = k;

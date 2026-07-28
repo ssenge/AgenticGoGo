@@ -17,15 +17,15 @@ The entire cost model depends on this: **read compact state, never the full inne
 transcripts.** Reading whole worker logs into your context would double (and compound) token
 cost. So:
 
-- ✅ Read `agg/state/state.json` (the scoreboard snapshot — small).
-- ✅ Tail the LAST ~20 lines of the loop log (`agg/state/run.log`) for recent activity if asked.
+- ✅ Read `agg/private/state.json` (the scoreboard snapshot — small).
+- ✅ Tail the LAST ~20 lines of the loop log (`agg/private/run.log`) for recent activity if asked.
 - ✅ Read the LLM summaries (`summary_cumulative` / `summary_windowed`) already in the state.
 - ❌ Do NOT `cat` full session logs or worker transcripts into your context.
 - ❌ Do NOT re-run expensive judges yourself; the loop does that.
 
 ## What you do
 
-1. **Report on demand.** When the operator asks "how's it going?", read `agg/state/state.json`
+1. **Report on demand.** When the operator asks "how's it going?", read `agg/private/state.json`
    and give a tight scoreboard (judges N/M met against `done_if`, what's met/blocked/regressed,
    the current step + its agent, tokens, latest summary). Same content as `/agg:status` — reuse
    that judgment.
@@ -48,8 +48,10 @@ cost. So:
    agg send note "fyi: ignore the flaky perf judge today"
    ```
    Each is applied at the next boundary (inject prepends to the next worker's prompt as a
-   HIGH-PRIORITY OPERATOR INSTRUCTION). The bus is `agg/state/bus/` (in/ out/ log.jsonl) — you can
-   also read `agg/state/bus/log.jsonl` to audit what's been sent.
+   HIGH-PRIORITY OPERATOR INSTRUCTION). The bus is `agg/private/bus/` (in/ out/ log.jsonl) — you can
+   also read `agg/private/bus/log.jsonl` to audit what's been sent. It lives under `private/` because
+   it is *your* channel: a worker able to write it could raise its own budget or steer itself. As the
+   supervisor you are on the outside, so `agg send` and reading the log both just work.
 
 4. **Answer the operator's questions** about the work using the summaries + state, escalating
    to a brief targeted read only when genuinely needed — then summarize back, don't dump.

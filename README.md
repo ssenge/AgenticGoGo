@@ -55,11 +55,12 @@ assessment far too much slack, and is easily gamed.
 The overall architecture is captured in the following diagram:
 
 <p align="center">
-  <img src="assets/arch.png" alt="AgenticGoGo architecture: the agg outer loop drives one fresh agent worker (claude -p / codex exec / copilot -p) and writes plain state files under agg/state/, which the TUI, the web UI, and an agent supervisor session (reachable from your phone) all read" width="760">
+  <img src="assets/arch.png" alt="AgenticGoGo architecture: the agg outer loop drives one fresh agent worker (claude -p / codex exec / copilot -p) and writes plain state files under agg/state/ and agg/private/, which the TUI, the web UI, and an agent supervisor session (reachable from your phone) all read" width="760">
 </p>
 
-The whole system is **the loop plus plain files**: `agg` drives one fresh worker and writes state to
-`agg/state/`; the TUI, the web UI, and an `/agg:supervise` agent session (reachable from your phone, via Claude
+The whole system is **the loop plus plain files**: `agg` drives one fresh worker, which writes its own
+state to `agg/state/` while `agg` writes the run's ledger and scoreboard to `agg/private/`; the TUI, the
+web UI, and an `/agg:supervise` agent session (reachable from your phone, via Claude
 Code's mobile app) all just *read* those files (and the supervisor can *steer* via the bus). More on that in
 [State and memory](#state-and-memory) and [Interfaces](#interfaces).
 
@@ -170,7 +171,7 @@ sequence:
   abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
 ```
 
-Each fresh session's entire `-p` is now a tiny fixed pointer — *"read `agg/state/INSTRUCTIONS.md`
+Each fresh session's entire `-p` is now a tiny fixed pointer — *"read `agg/private/INSTRUCTIONS.md`
 and follow it"* — and `agg` **composes that file anew at every `INJECT`** from the step's role + its
 `prompt:`, a recent tail of memory, any queued steering, and pointers to two files: `agg/AGG.md`
 (the stable scope/goals — "fix `calc.py` so `python3 calc.py` prints 2 and the tests pass") and
@@ -213,7 +214,7 @@ numeric threshold? Use the accessor: `done_if: "tests_pass AND coverage.value >=
 
 ```bash
 agg plan                # dry run: one VERIFY pass, prints the scoreboard. No agent launched.
-agg run --detach        # drive the loop until done_if is met; logs to agg/state/run.log
+agg run --detach        # drive the loop until done_if is met; logs to agg/private/run.log
 agg dashboard           # live TUI  (or: agg serve + the web UI — see Interfaces)
 ```
 
@@ -236,7 +237,7 @@ course-correct from your phone:
 > inject: the auth refactor is the blocker — do that first
 ```
 
-The supervisor reads only `agg/state/state.json` — the small scoreboard snapshot — and `agg status`. It
+The supervisor reads only `agg/private/state.json` — the small scoreboard snapshot — and `agg status`. It
 **never** tails the workers' output, so supervising a long run costs you almost nothing.
 
 ## Choosing an agent
@@ -298,7 +299,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
 
 **Guardrails for unattended runs**
-- **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. Refused at startup if the mechanism is missing, never a silent downgrade ([details](docs/CONFIG.md)). *macOS verified; Linux experimental.*
+- **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. On both tiers `agg/private/` is carved back **out** of the writable set, so a confined worker cannot forge the verdict ledger that decides when its own run ends. Refused at startup if the mechanism is missing, never a silent downgrade ([details](docs/CONFIG.md)). *macOS verified; Linux experimental.*
 - **Rate-limit backoff** *(Claude + Codex)* — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
 - **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `agg` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just judges — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](docs/CONFIG.md)).
@@ -466,34 +467,61 @@ for the complete grammar.
 
 ## State and memory
 
-`agg` keeps **no state in a database or a long-running daemon**. Everything agg **reads** lives under
-`<project>/agg/` (committed: config + judges); everything it **writes** lives under
-`<project>/agg/state/` (gitignored, auto-created) — one folder, one rule — plus git itself. The loop
-is the single *writer*; every *reader* (the TUI, the web UI, `/agg:supervise`, `agg status`) reads the
-same files, so you can attach any number of views to a running loop without coupling any of them to it.
+`agg` keeps **no state in a database or a long-running daemon**. Config lives under `<project>/agg/`
+(committed: `agg.yaml`, `AGG.md`, judges); runtime state lives in **two** gitignored, auto-created
+directories beside it — plus git itself. The loop is the single *writer* of the private half; every
+*reader* (the TUI, the web UI, `/agg:supervise`, `agg status`) reads the same files, so you can attach
+any number of views to a running loop without coupling any of them to it.
 
-- **`agg/state/state.json`** — the live scoreboard snapshot (judges, the current step + its agent,
+The two directories are split by **who may write them** — *if the worker writing it could change when
+the loop ends, what it may spend, or what agg believes happened, it is private:*
+
+```text
+<project>/agg/
+  agg.yaml · AGG.md · judges/     COMMITTED — your config, your graders
+  state/                          GITIGNORED — the WORKER writes it (agg reads it as untrusted input)
+    STATE.md  wiki/  sessions/  spawns.json  spawns/  BLOCKED.md
+  private/                        GITIGNORED — AGG writes it; a CONFINED worker cannot
+    INSTRUCTIONS.md  LOG.md  state.json  project.json  verdicts.jsonl  bus/  run.pid  run.log
+```
+
+- **`agg/private/state.json`** — the live scoreboard snapshot (judges, the current step + its agent,
   tokens, phase, activity tail), written atomically after each change. The TUI, `agg serve`, and the
   supervisor read this.
-- **`agg/state/verdicts.jsonl`** — the append-only, safety-critical GATE record: one line per verdict,
+- **`agg/private/verdicts.jsonl`** — the append-only, safety-critical GATE record: one line per verdict,
   stamped with its merge outcome. The gate's "was previously met" and `stalled` both read it.
-- **`agg/state/run.pid`** · **`agg/state/run.log`** — the loop's liveness (double-run guard, `agg stop`
+- **`agg/private/run.pid`** · **`agg/private/run.log`** — the loop's liveness (double-run guard, `agg stop`
   target) and its log when detached.
-- **`agg/state/bus/`** — the steering queue: `agg send …` writes a command here; the loop drains it at
-  the next `INJECT`.
-- **`agg/state/project.json`** — the run-history ledger (`agg history`): lifetime sessions/tokens across runs.
+- **`agg/private/bus/`** — the steering queue: `agg send …` writes a command here; the loop drains it at
+  the next `INJECT`. Private because it is the *operator's* channel — `agg send budget` would otherwise
+  let a worker raise its own token ceiling.
+- **`agg/private/project.json`** — the run-history ledger (`agg history`): lifetime sessions/tokens across runs.
 - **`agg/AGG.md`** (committed) — the stable scope/goals/architecture the worker reads for
   orientation; human-owned, rarely edited. **`agg/state/STATE.md`** — the forward "what to do next"
   advice the **worker** rewrites each session; gitignored, so it survives a session rollback (the code
   attempt is thrown away, the advice about it is not).
-- **`agg/state/INSTRUCTIONS.md`** — regenerated by **agg** every session and pointed at by the worker's
+- **`agg/private/INSTRUCTIONS.md`** — regenerated by **agg** every session and pointed at by the worker's
   entire `-p`; agg composes it from the step's role + `prompt:`, a recent tail of memory, any queued
-  steering, and pointers to `AGG.md` and `STATE.md`. Disposable; the worker never edits it.
-- **`agg/state/LOG.md`** — durable cross-session memory (`what we tried and rejected`), written by
-  **agg** (never the worker); its recent tail is injected into every session.
+  steering, and pointers to `AGG.md` and `STATE.md`. Disposable; the worker reads it and never edits it —
+  it is the worker's *orders*, so rewriting it would launder instructions past you.
+- **`agg/private/LOG.md`** — durable cross-session memory (`what we tried and rejected`), written by
+  **agg** (never the worker); its recent tail is injected into every session. The worker's own
+  contribution arrives as a scratch note in `agg/state/sessions/` that agg sanitizes on the way in.
 - **git commits** — the actual *work* state. **agg** commits each session's work on its own branch (the
   worker never runs git) and gates it; the next **fresh** session resumes from the filesystem + `LOG.md`.
   Git *is* the memory between sessions.
+
+**`agg/private/` is carved out of the sandbox's writable set.** Under `isolation: sandbox` or
+`container`, the worker may write the project dir and its own `agg/state/` but writes to `agg/private/`
+are refused by the kernel — otherwise a confined worker could append forged `merged` rows to
+`verdicts.jsonl`, make `stalled` report met, and end its own run under `abort_if: "stalled"`. **Reads
+are untouched**: the worker still reads its brief and judges still read the ledger. Under the default
+`isolation: none` the worker has your whole filesystem and no directory layout changes that — see
+[isolation](docs/CONFIG.md#isolation--blast-radius-jail-a-different-axis-from-session-isolation).
+
+> **Upgrading an existing project?** The private files used to live in `agg/state/`. Nothing there is
+> tracked, so the migration is a `mv` — see
+> [Migrating an existing project](docs/CONFIG.md#migrating-an-existing-project).
 
 Because the log on stdout is the source of truth and `state.json` is just a view of it, a run is
 **crash-safe and observable**: `tail`/`grep`/`cat` the files, kill and restart, inspect mid-run —

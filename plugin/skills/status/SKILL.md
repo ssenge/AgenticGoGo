@@ -10,11 +10,14 @@ Give the user a concise, accurate status of the running (or last) `agg run` loop
 
 ## Step 1 — Read the live state
 
-The loop writes a compact snapshot to `agg/state/state.json` in the project. Read it:
+The loop writes a compact snapshot to `agg/private/state.json` in the project. Read it:
 
 ```bash
-cat agg/state/state.json 2>/dev/null
+cat agg/private/state.json 2>/dev/null
 ```
+
+(`agg/private/` is agg's own runtime state — the half of the layout a confined worker cannot write.
+The worker's own files live next door in `agg/state/`. Reading either is always fine.)
 
 If it's missing, the loop hasn't been started — tell the user to run `/agg:new` (to set up)
 or `agg run` (if already configured), and stop here.
@@ -23,7 +26,7 @@ You can also run the dry-run scoreboard directly (re-evaluates every judge right
 ```bash
 agg plan
 ```
-Use `agg plan` when the user wants a FRESH evaluation; use `agg/state/state.json` when they
+Use `agg plan` when the user wants a FRESH evaluation; use `agg/private/state.json` when they
 want the state of the currently-running loop without re-judging.
 
 ## Step 2 — Report
@@ -52,7 +55,7 @@ view, suggest `agg dashboard` in a second terminal.
 
 - A regressed invariant → the loop likely aborted; investigate that judge's rationale.
 - Stalled (high idle, no token growth) → the watchdog should auto-recover; if not, the
-  worker may be wedged — suggest checking `agg/state/run.log` / restarting `agg run`.
+  worker may be wedged — suggest checking `agg/private/run.log` / restarting `agg run`.
 - Close to done (e.g. `met_fraction` high) → let it run.
 - Out of budget (`over_budget`) → raise `sequence.limits.tokens` in `agg/agg.yaml` and restart,
   or accept the partial result.

@@ -14,7 +14,7 @@ use std::time::Instant;
 /// Shared, lock-guarded dashboard state with a throttled publisher. ONE of these is
 /// created by the loop and cloned into the worker; both sides mutate the same snapshot
 /// and publish through it. `publish` bumps `seq`, refreshes `up_secs`/`idle_secs`, and
-/// writes `agg/state/state.json` atomically.
+/// writes `agg/private/state.json` atomically.
 #[derive(Clone)]
 pub struct LiveState {
     inner: Arc<Mutex<DashboardState>>,

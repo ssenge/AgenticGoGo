@@ -128,13 +128,19 @@ that, **per step**:
 | tier | what the worker may do |
 |---|---|
 | `none` *(default)* | no confinement — full host access, today's behaviour. |
-| `sandbox` | **write** = the project dir (+subfolders) + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open. Kernel-enforced. Also confines this step's judges + hooks. |
-| `container` | the worker runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir + the agent's state dir + the container's own tmp; **read** = only what is mounted; **network** = fully open. |
+| `sandbox` | **write** = the project dir (+subfolders) **minus `agg/private/`** + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open. Kernel-enforced. Also confines this step's judges + hooks. |
+| `container` | the worker runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir **minus `agg/private/`** + the agent's state dir + the container's own tmp; **read** = only what is mounted; **network** = fully open. |
 
 `sandbox` uses the OS jail — **`sandbox-exec` (Seatbelt) on macOS**, `bwrap` (bubblewrap) on Linux —
 except Codex, which has its own kernel sandbox agg drives with flags. It confines the **worker, its
 script + LLM judges, and its foreground hooks** in one jail, so nothing a confined worker can rewrite
 in the project dir becomes an escape. It does **not** restrict network (full internet by design).
+
+**The one hole punched in "the project dir is writable" is `agg/private/`** — agg's own runtime state
+(the verdict ledger, the command bus, the pidfile, the worker's brief). It stays fully **readable**; only
+writes are denied, on both confining tiers. Without that carve-out a confined worker could append forged
+rows to `agg/private/verdicts.jsonl` and make `stalled` report met — ending its own run under
+`abort_if: "stalled"`. See [State and memory](#state-and-memory) for what lives on each side and why.
 
 `container` confines from the other side: instead of jailing a host process it re-hosts the command
 in a container, so the host filesystem is not there to read at all. The step's `image:` names the
@@ -448,12 +454,14 @@ it is never "the agent ended the run."
 | tier | example terms | what stops the worker |
 |---|---|---|
 | **process-internal** | `over_budget`, `over_cost`, `over_iterations`, `wall_hours`, `any_regressed(invariants)` | agg computes them from its own in-memory run state. Nothing on disk. **Genuinely unfakeable** — these are what termination should stand on. |
-| **agg-owned file** | `stalled`, `stuck` — both read `agg/state/verdicts.jsonl` | a **protocol** boundary, not a permission one. agg writes that ledger and a worker has no sanctioned reason to touch it, so a worker that appends to it is unambiguously tampering — but `agg/state/` sits inside the worker's writable cwd on **every** isolation tier, `sandbox` included, and the ledger carries no integrity check. Forging three flat `merged` rows makes `stalled` report met. |
-| **worker-authored** | `blocked` over `agg/state/BLOCKED.md` | nothing. The worker writes the file. |
+| **agg-owned file** | `stalled`, `stuck` — both read `agg/private/verdicts.jsonl` | **depends on the isolation tier.** Under `sandbox`/`container` this is a real **permission** boundary: the ledger lives in `agg/private/`, which is carved out of the worker's writable set, so a write is refused by the kernel. Under the default `isolation: none` it is only a **protocol** boundary — agg writes that ledger and a worker has no sanctioned reason to touch it, so appending is unambiguously tampering, but nothing stops it and the ledger carries no integrity check. Forging three flat `merged` rows makes `stalled` report met. |
+| **worker-authored** | `blocked` over `agg/state/BLOCKED.md` | nothing, on any tier. `agg/state/` is the worker's own directory — the worker is *supposed* to write this file. |
 
-`stalled`/`stuck` are a **meaningfully higher bar** than `blocked` — the worker must break the protocol
-rather than use it, and that is visible after the fact — but "the worker cannot fake it" is true only
-of row 1. Detect on any row; **terminate on row 1**.
+`stalled`/`stuck` are a **meaningfully higher bar** than `blocked` on every tier — the worker must break
+the protocol rather than use it, and that is visible after the fact — and under `sandbox`/`container` the
+bar becomes a wall the kernel holds. Row 1 is unfakeable regardless of tier, because agg never puts those
+values on disk at all. Detect on any row; **terminate on row 1 unqualified, or on row 2 if you are running
+confined and accept that the moat is only as strong as the tier you configured.**
 
 **agg does not enforce any of this.** There is no startup guard refusing a worker-writable judge in
 `abort_if`, and no integrity check on the ledger: "stop when the worker says it is blocked" is a
@@ -538,7 +546,7 @@ argument is a three-line script in your own `agg/judges/` — library judges tak
 ### `stalled` — the shipped stall detector
 
 `stalled` is the detector behind `if stalled then …` and the zero-authoring `notify_if: "stalled"`. It
-reads `agg/state/verdicts.jsonl` and is **met** when, across the last **K = 3 MERGED steps**, no binary
+reads `agg/private/verdicts.jsonl` and is **met** when, across the last **K = 3 MERGED steps**, no binary
 judge changed its `met` and no numeric judge changed its `value`. The details that decide whether it
 fires when you expect:
 
@@ -563,8 +571,8 @@ first one ships:
 
 | detector | ships? | signal | can the worker fake it? | put it in |
 |---|---|---|---|---|
-| `stalled` | ✅ embedded in the binary | judge values flat over the last 3 merged steps | **not without tampering** — agg owns `verdicts.jsonl`, but it is worker-writable on every tier | `if … then`, `notify_if` |
-| `stuck` | ✗ **you author it** | a 0–100 confidence over agg's own ledger | **not without tampering** — same file, same caveat | `notify_if` (or `abort_if`, if you accept [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s middle row) |
+| `stalled` | ✅ embedded in the binary | judge values flat over the last 3 merged steps | **not without tampering**, and not at all under `sandbox`/`container` — `verdicts.jsonl` lives in the carved-out `agg/private/` | `if … then`, `notify_if` |
+| `stuck` | ✗ **you author it** | a 0–100 confidence over agg's own ledger | **not without tampering** — same file, same tier-dependence | `notify_if` (or `abort_if`, if you accept [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s middle row) |
 | `blocked` | ✗ **you author it** | the worker declaring a human-only blocker | **yes** — the worker writes the file | `notify_if` — see [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if) |
 
 **A config naming `stuck` or `blocked` is a hard error at startup until the file exists.** Only
@@ -599,13 +607,13 @@ halts the *next* launch at the baseline judge pass (it pings, but it never gets 
 
 #### `stuck` — a confidence score over agg's own ledger
 
-`agg/state/verdicts.jsonl` is the append-only record of every verdict — session, step, the verdict
+`agg/private/verdicts.jsonl` is the append-only record of every verdict — session, step, the verdict
 fields, the gate decision. A rubric judge reads it through the existing `log:<path>` input, so there is
 no new plumbing:
 
 ```markdown
 ---
-inputs: ["log:agg/state/verdicts.jsonl", "log:agg/state/LOG.md", "diff"]
+inputs: ["log:agg/private/verdicts.jsonl", "log:agg/private/LOG.md", "diff"]
 ---
 You are a STUCK detector. From the verdict history (each session's judge values over time), the
 memory log, and the latest diff, score 0–100 how confident you are that this loop is GENUINELY
@@ -617,8 +625,9 @@ Output `value` = that confidence; `met` = (value >= 85).
 A **script** version is equally valid and cheaper — e.g. `python3` over `verdicts.jsonl` computing "max
 goal value unchanged for N sessions" → a confidence. Either way it reads **agg-owned** data instead of
 a worker-authored file, which is the higher bar of [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s
-middle row — not an unfakeable one. Putting `stuck` in `abort_if` is a reasonable way to let the loop
-give up on its own; it still trusts the worker not to write into agg's ledger.
+middle row. Putting `stuck` in `abort_if` is a reasonable way to let the loop give up on its own — under
+`isolation: sandbox`/`container` the kernel is what stops the worker from writing that ledger; under the
+default `none` you are trusting it not to.
 
 ## Choosing an agent
 
@@ -695,24 +704,92 @@ read-only`; Copilot by withholding `--allow-all-tools`.
 
 ## State and memory
 
-Everything agg **reads** is under `agg/` (committed); everything it **writes** is under `agg/state/`
-(gitignored, auto-created). One folder, one rule.
+Everything agg **reads** as config is under `agg/` (committed). Runtime state is split across **two**
+gitignored, auto-created directories — and the split is by **who may write them**:
+
+| directory | written by | contents |
+|---|---|---|
+| **`agg/state/`** | the **worker** (agg reads it as untrusted input) | `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/`, `BLOCKED.md` |
+| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `bus/`, `run.pid`, `run.log` |
+
+**The one rule that decides which is which:** *if the worker writing it could change when the loop ends,
+what it may spend, or what agg believes happened, it is private.* Everything the worker is **supposed** to
+author lives in `agg/state/`.
 
 - **`agg/AGG.md`** (committed) — the **stable** scope/goals/architecture the worker reads for
   orientation. Human-owned, rarely edited; this is where `AGG_STATE.md`'s stable header content now lives.
 - **`agg/state/STATE.md`** — the forward state file (`what to do next`). **Worker-curated**: the worker
   rewrites this advice each session. Gitignored, so it **survives a session rollback** — the code
   attempt is thrown away, the advice about it is not.
-- **`agg/state/INSTRUCTIONS.md`** — regenerated by **agg** every session; it is the worker's **entire
-  `-p` input**. The worker's `-p` is a tiny fixed pointer ("read `agg/state/INSTRUCTIONS.md` in full and
+- **`agg/state/wiki/`** · **`agg/state/sessions/`** — the worker's durable knowledge base and its
+  transient per-session scratch notes. Worker-owned by design.
+- **`agg/state/spawns.json`** · **`agg/state/spawns/`** — the long-task registry and per-spawn logs.
+  Worker-writable because `agg spawn` is a command the **worker** invokes; its blast radius is bounded
+  (what to reap, what to tell the next session — nothing that gates the run).
+- **`agg/private/INSTRUCTIONS.md`** — regenerated by **agg** every session; it is the worker's **entire
+  `-p` input**. The worker's `-p` is a tiny fixed pointer ("read `agg/private/INSTRUCTIONS.md` in full and
   follow it"); agg composes the file from operator steering, the step's role framing + its `prompt:`, a
   recent-tail excerpt of memory, pointers to `STATE.md` and `AGG.md`, the wiki, and a standing footer.
-- **`agg/state/LOG.md`** — durable institutional memory (`what we tried and rejected`). Written
-  by **agg**, never the worker — never tell the worker to maintain it.
-- **`agg/state/state.json`** — the live scoreboard snapshot (the TUI, `agg serve`, `/agg:status` read it).
-- **`agg/state/verdicts.jsonl`** — the append-only, safety-critical GATE record.
-- **`agg/state/run.pid` · `run.log`** — the loop's liveness and its detached log.
-- **`agg/state/bus/`** — the steering queue (`agg send …` writes here; the loop drains it at `INJECT`).
+  Private *even though the worker reads it every session*: it is the worker's **orders**, and a worker
+  able to rewrite its own brief mid-run could launder instructions past you.
+- **`agg/private/LOG.md`** — durable institutional memory (`what we tried and rejected`). Written
+  by **agg**, never the worker — never tell the worker to maintain it. The worker's contribution arrives
+  as a scratch note in `agg/state/sessions/` that agg sanitizes on the way in; a direct edit would bypass
+  exactly that sanitizing.
+- **`agg/private/state.json`** — the live scoreboard snapshot (the TUI, `agg serve`, `/agg:status` read it).
+- **`agg/private/verdicts.jsonl`** — the append-only, safety-critical GATE record.
+- **`agg/private/project.json`** — the run-history ledger (`agg history`): lifetime sessions/tokens.
+- **`agg/private/run.pid` · `run.log`** — the loop's liveness and its detached log.
+- **`agg/private/bus/`** — the steering queue (`agg send …` writes here; the loop drains it at `INJECT`).
+  Private because the bus is the **operator's** channel: a worker writing here would raise its own token
+  ceiling with `agg send budget`, unpause itself, or inject its own next-session instructions.
+
+### What the split actually buys you — and on which tier
+
+`agg/state/` sits inside the worker's cwd, so under `isolation: sandbox` the worker could write **every**
+file in it. Three of those files decide when the loop ends or what it costs — `verdicts.jsonl` (the ledger
+`stalled`/`stuck` read), `bus/` (steering + budget), `run.pid` (the double-run guard and `agg stop` target).
+Moving them under one subpath lets agg carve that subpath **out of the sandbox's writable set**: a
+`deny file-write*` rule after the allow on macOS (Seatbelt), a read-only rebind on Linux (bubblewrap), a
+`:ro` remount in the container tier. It is derived from the worker's cwd inside the wrapper, so it covers
+every confined spawn — worker, script judge, and `agg.yaml` hook alike.
+
+> **This binds only under `isolation: sandbox` and `isolation: container`.** Under the default
+> `isolation: none` the worker has your whole filesystem and **no directory layout changes that** — it can
+> write `agg/private/` as easily as anything else. The layout is what *makes the confinement expressible*;
+> the isolation tier is what enforces it. See
+> [`isolation`](#isolation--blast-radius-jail-a-different-axis-from-session-isolation).
+
+**Reads are untouched.** The carve-out denies writes only. The worker still reads its brief from
+`agg/private/INSTRUCTIONS.md`, a `stuck` judge still reads `log:agg/private/verdicts.jsonl`, and the TUI
+still reads `state.json`.
+
+### Migrating an existing project
+
+The `agg/state/` → `agg/private/` move is **breaking** — agg does not migrate for you, and a run started
+against the old layout starts with an empty ledger and no run history.
+
+```bash
+cd <project>
+mkdir -p agg/private
+# nothing under agg/state/ is tracked, so a plain mv is the whole migration
+mv agg/state/{verdicts.jsonl,state.json,project.json,run.pid,run.log,LOG.md} agg/private/ 2>/dev/null
+mv agg/state/bus agg/private/ 2>/dev/null
+rm -f agg/state/INSTRUCTIONS.md          # regenerated every session; no need to keep it
+```
+
+Leave `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/` and `BLOCKED.md` where they are — those are
+the worker's. `INSTRUCTIONS.md` is regenerated every session, so dropping it instead of moving it is fine.
+
+Then update anything of **yours** that names a moved path: a `stuck`/`stalled` judge's
+`inputs: ["log:agg/state/verdicts.jsonl", …]`, a `notify.cmd` or hook that greps the ledger, CI that tails
+`run.log`. A judge pointed at the old path reads an empty file and scores `error`, not a loud failure —
+grep your `agg/` for `state/` once after the move.
+
+Both directories are gitignored. `agg run` appends `agg/private/` to your `.gitignore` on startup if it is
+missing, alongside the `agg/state/` entry it has always written — an existing project picks the new entry up
+on the next run. `agg/` itself stays committed: the judges must be in git so a rollback can restore a grader
+a worker tampered with.
 
 `memory:` keys: `enabled` (default true), `max_kb` (cap on the stored file), `inject_kb` (how much is
 injected per prompt). `0` for either disables that cap.

@@ -82,7 +82,10 @@ fn probe_state<'a>(cfg: &'a agg::core::config::AggConfig, dir: &'a Path) -> Loop
 #[test]
 fn a_third_party_plugin_owns_state_and_is_dispatched_by_the_real_core() {
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join("agg/state")).unwrap();
+    // both runtime roots: the worker-writable one and the agg-owned `private/` (where the ledger
+    // `RunLedger::begin` writes lives) — a plugin host stands up the same layout agg does.
+    std::fs::create_dir_all(agg::paths::agg_dir(tmp.path())).unwrap();
+    std::fs::create_dir_all(agg::paths::private_dir(tmp.path())).unwrap();
     let cfg_path = tmp.path().join("agg.yaml");
     std::fs::write(&cfg_path, "project: probe\nsequence:\n  steps: []\n").unwrap();
     let cfg = agg::core::config::AggConfig::load(&cfg_path).unwrap();

@@ -27,21 +27,31 @@ p-vs-np/
       lemmas_verified.sh        #   → the `lemmas_verified` name (was count_lemmas.sh)
       no_sorry.sh               #   → the `no_sorry` invariant
       paper_written.md          #   an .md judge = an LLM rubric; inputs in its own frontmatter
-    state/                      # ALL runtime state — GITIGNORED (survives a session rollback)
-      INSTRUCTIONS.md           #   agg regenerates this each session = the worker's entire -p input
+    state/                      # runtime the WORKER writes — GITIGNORED (survives a session rollback)
       STATE.md                  #   worker-curated forward "what to do next" advice
-      LOG.md                    #   durable institutional memory (agg-owned; worker never writes it)
       sessions/                 #   transient per-session worker scratch notes
       wiki/                     #   worker-owned durable knowledge: multi-session plans + dead-ends
+    private/                    # runtime AGG owns — GITIGNORED, and a CONFINED worker cannot write it
+      INSTRUCTIONS.md           #   agg regenerates this each session = the worker's entire -p input
+      LOG.md                    #   durable institutional memory (agg-owned; worker never writes it)
+      verdicts.jsonl            #   the GATE record — what `stalled` reads to decide the run is stuck
+      state.json  bus/  run.{pid,log}
 ```
 
-Everything under `agg/state/` is runtime, gitignored, and regenerated as the loop runs — you ship
-only `AGG.md` and the judges. Each session the worker's `-p` is a tiny fixed pointer — *"read
-`agg/state/INSTRUCTIONS.md` and follow it"* — and agg COMPOSES that file fresh from the stable
-`AGG.md`, the forward `STATE.md` the last worker left, and a recent-tail excerpt of memory
-(`LOG.md`). On a long run like this one, `agg/state/wiki/` gives the worker a durable
-place to compile what it learns (rejected proof routes, key lemma shapes) that outlives every
-session rollback.
+Both runtime dirs are gitignored and regenerated as the loop runs — you ship only `AGG.md` and the
+judges. They are split by **who may write them**: if the worker writing a file could change when the
+loop ends, what it may spend, or what agg believes happened, it is `private/`. On a run this long
+that matters — `stalled` gates the `reconsider` step off `verdicts.jsonl`, and under `isolation:
+sandbox` the ledger is carved out of the worker's writable set so it cannot forge its way past the
+detector. Under the default `isolation: none` nothing enforces that; see
+[State and memory](../../docs/CONFIG.md#state-and-memory).
+
+Each session the worker's `-p` is a tiny fixed pointer — *"read `agg/private/INSTRUCTIONS.md` and
+follow it"* — and agg COMPOSES that file fresh from the stable `AGG.md`, the forward `STATE.md` the
+last worker left, and a recent-tail excerpt of memory (`LOG.md`). Reads cross the split freely; only
+writes are denied. On a long run like this one, `agg/state/wiki/` gives the worker a durable place to
+compile what it learns (rejected proof routes, key lemma shapes) that outlives every session rollback
+— and it stays worker-writable, because that knowledge base is the worker's to author.
 
 The `.md` judge is the LLM-as-judge: **the file IS the rubric**, and it declares what it reads in a
 YAML frontmatter (`inputs: ["PAPER.md"]`) — one self-contained file, no registry, no `kind:` tag.
@@ -109,8 +119,9 @@ Opus). Only when `stalled` fires — the run has made no verdict progress across
 steps — does the sequence step back on **Codex**, told to assume the current route is a dead end and
 name a different one. Its `skip_judges: true` means nothing merges from that step: the work stages,
 and the next worker step gates the whole span. The rejected routes reach institutional memory
-(`agg/state/LOG.md`, agg-owned) through the worker's scratch note in `agg/state/sessions/`, so no
-future session repeats them.
+(`agg/private/LOG.md`, agg-owned) through the worker's scratch note in `agg/state/sessions/`, so no
+future session repeats them. That indirection is the point of the split: the note is the worker's to
+write, the trail agg reasons from is not.
 
 ```yaml
 steps:
