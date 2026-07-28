@@ -2,8 +2,11 @@
 //!
 //! `agg.yaml` (defaults/judge/steps/sequence), a committed `AGG.md` (stable scope), the gitignored
 //! forward-state file `state/STATE.md`, and a starter judge. `goals.yaml` is gone: a judge IS a
-//! goal, resolved by name from `agg/judges/` (§7.1). Config + AGG.md are COMMITTED under `agg/`; all
-//! runtime state (incl. STATE.md) lives under the gitignored `agg/state/`.
+//! goal, resolved by name from `agg/judges/` (§7.1). Config + AGG.md are COMMITTED under `agg/`;
+//! runtime state is gitignored and split by who writes it — the worker's own files (STATE.md,
+//! `wiki/`) in `agg/state/`, agg's bookkeeping (INSTRUCTIONS.md, the verdict ledger, the bus) in
+//! `agg/private/`. `init` only ever scaffolds the former; `agg/private/` is created by the loop.
+//! See [`crate::paths`] for the full table.
 
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -94,7 +97,7 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
          1. Edit agg/agg.yaml `done_if` + agg/judges/ to match YOUR project.\n  \
          2. Edit agg/AGG.md — the standing project instructions each worker reads (committed).\n  \
          3. Edit agg/state/STATE.md — the forward \"what to do next\" advice (agg regenerates the\n     \
-            per-session brief at agg/state/INSTRUCTIONS.md from these; gitignored).\n  \
+            per-session brief at agg/private/INSTRUCTIONS.md from these; both gitignored).\n  \
          4. agg plan            # dry-run: see the starting scoreboard (run from the project root)\n  \
          5. agg run             # launch the loop until done_if is met\n",
         base.display()

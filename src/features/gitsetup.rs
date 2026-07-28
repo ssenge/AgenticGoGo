@@ -5,8 +5,8 @@ use anyhow::Result;
 use crate::loop_::{Bootstrap, PreStart};
 
 /// The `pre_start` feature: agg's run-start git preconditions, in order — recover a stranded merge
-/// from a prior crash, require a clean git repo (session isolation is MANDATORY), ensure `agg/state`
-/// is gitignored (runtime state survives rollback), and resolve the isolation base branch (→
+/// from a prior crash, require a clean git repo (session isolation is MANDATORY), ensure BOTH
+/// runtime roots (`agg/state` + `agg/private`) are gitignored (runtime state survives rollback), and resolve the isolation base branch (→
 /// `boot.iso_base` for the constructor). Runs before the loop state exists; any `bail!` is a hard
 /// error out of `run()`, exactly as the old inline block. Verbatim, just grouped under one feature.
 pub struct GitSetup;

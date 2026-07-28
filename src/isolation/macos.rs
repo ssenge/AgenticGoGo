@@ -55,10 +55,10 @@ pub fn available() -> bool {
 }
 
 /// Build the `sandbox-exec -p '<profile>' -- prog args…` wrapper.
-pub fn build(cwd: &Path, writable: &[PathBuf], prog: &OsStr, args: &[OsString]) -> Result<Command> {
+pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], prog: &OsStr, args: &[OsString]) -> Result<Command> {
     // `$TMPDIR` is always writable (falling back to `/tmp` if unset).
     let tmp = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    let profile = profile(cwd, &tmp, writable)?;
+    let profile = profile(cwd, &tmp, writable, denied)?;
     let mut cmd = Command::new("sandbox-exec");
     cmd.arg("-p").arg(profile).arg("--").arg(prog);
     for a in args {
@@ -106,7 +106,7 @@ fn canonical(p: &Path) -> PathBuf {
 /// and `/usr/bin/diff` hardcodes `/tmp/diff.XXXXXXXX` and ignores `$TMPDIR`. It costs no real blast
 /// radius — `/tmp` is world-writable to begin with — and it is exactly what Codex's own
 /// `workspace-write` policy grants.
-fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf]) -> Result<String> {
+fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf], denied: &[PathBuf]) -> Result<String> {
     let mut subpaths = vec![canonical(cwd), canonical(tmp), canonical(Path::new("/tmp"))];
     subpaths.extend(writable.iter().map(|p| canonical(p)));
 
@@ -141,6 +141,20 @@ fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf]) -> Result<String> {
     );
     let writes = writes.join(" ");
 
+    // The CARVE-OUT: agg's own private state sits INSIDE the writable cwd, so the allow above
+    // grants it and only an explicit deny takes it back. Seatbelt resolves the LAST matching rule,
+    // so this must be emitted AFTER `(allow file-write* …)` — swapping the two silently grants
+    // everything again, which is why the real-kernel test below asserts the effect, not the text.
+    //
+    // Write-only: `file-read*` is untouched above, so the worker still reads its own brief and a
+    // judge still reads `verdicts.jsonl`. Confining reads would break the loop for no gain — the
+    // worker is handed this content in its prompt anyway.
+    let denies: String = denied
+        .iter()
+        .filter(|p| !p.as_os_str().is_empty() && p.as_os_str() != "/")
+        .map(|p| format!("(deny file-write* (subpath \"{}\"))", escape(&canonical(p).to_string_lossy())))
+        .collect();
+
     Ok(format!(
         "(version 1)(deny default)\
          (allow process*)\
@@ -148,6 +162,7 @@ fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf]) -> Result<String> {
          (allow file-read*)\
          (allow file-write* {writes})\
          {DEV_WRITES}\
+         {denies}\
          (allow network*)(allow mach*)(allow sysctl-read)(allow system-sched)"
     ))
 }
@@ -180,7 +195,7 @@ mod tests {
         // tmp is passed explicitly — no global env mutation, so this can't race parallel tests.
         // These paths do not exist, which also pins the `canonical` fallback: an unresolvable path
         // is emitted VERBATIM, never dropped (dropping would silently narrow the writable set).
-        let p = profile(Path::new("/repo/proj"), Path::new("/var/folders/xy"), &[PathBuf::from("/home/u/.claude")]).unwrap();
+        let p = profile(Path::new("/repo/proj"), Path::new("/var/folders/xy"), &[PathBuf::from("/home/u/.claude")], &[]).unwrap();
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow file-read*)"), "reads everything");
         assert!(p.contains("(subpath \"/repo/proj\")"), "cwd is writable");
@@ -201,7 +216,7 @@ mod tests {
     /// future edit reaches for, so both are pinned shut here.
     #[test]
     fn profile_grants_the_measured_dev_writes_and_nothing_wider() {
-        let p = profile(Path::new("/repo/proj"), Path::new("/private/tmp/x"), &[]).unwrap();
+        let p = profile(Path::new("/repo/proj"), Path::new("/private/tmp/x"), &[], &[]).unwrap();
         assert!(p.contains("(allow file-write-data (literal \"/dev/null\") (subpath \"/dev/fd\"))"), "{p}");
         assert!(!p.contains("(subpath \"/dev\")"), "all of /dev grants /dev/ttys* → terminal injection: {p}");
         assert!(!p.contains("/dev/stdout"), "dead clause — /dev/stdout is a symlink to /dev/fd/N: {p}");
@@ -212,7 +227,7 @@ mod tests {
     /// reported `isolation: sandbox` — the one failure mode this feature must never have. Refuse.
     #[test]
     fn profile_refuses_a_writable_path_that_resolves_to_root() {
-        let err = profile(Path::new("/"), Path::new("/private/tmp/x"), &[]).unwrap_err().to_string();
+        let err = profile(Path::new("/"), Path::new("/private/tmp/x"), &[], &[]).unwrap_err().to_string();
         assert!(err.contains("resolves to `/`"), "must refuse loudly: {err}");
     }
 
@@ -223,7 +238,7 @@ mod tests {
     #[test]
     fn profile_canonicalizes_symlinked_subpaths() {
         // `/tmp` really is a symlink to `/private/tmp` on every macOS host.
-        let p = profile(Path::new("/tmp"), Path::new("/tmp"), &[]).unwrap();
+        let p = profile(Path::new("/tmp"), Path::new("/tmp"), &[], &[]).unwrap();
         assert!(p.contains("(subpath \"/private/tmp\")"), "symlinked cwd/tmp resolved: {p}");
         assert!(!p.contains("(subpath \"/tmp\")"), "the unresolved path must not be what we emit: {p}");
     }
@@ -239,7 +254,7 @@ mod tests {
         let file = dir.join(".agent.json");
         std::fs::write(&file, "{}").unwrap();
 
-        let p = profile(&dir, Path::new("/private/tmp/x"), &[file.clone(), dir.clone()]).unwrap();
+        let p = profile(&dir, Path::new("/private/tmp/x"), &[file.clone(), dir.clone()], &[]).unwrap();
         let canon = std::fs::canonicalize(&file).unwrap();
         let esc = regex_escape(&canon.to_string_lossy());
         assert!(p.contains(&format!("(regex #\"^{esc}\")")), "the FILE gets a prefix regex: {p}");

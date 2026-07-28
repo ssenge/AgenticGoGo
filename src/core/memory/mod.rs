@@ -2,7 +2,7 @@
 //!
 //! Four layers, all driven by plain loop code (the worker is NEVER trusted to persist):
 //!   READ  (every prompt, pure code — bounded so it never blows the token budget):
-//!     1. the NEWEST `inject_kb` of the durable file `agg/state/LOG.md`. Capped on the
+//!     1. the NEWEST `inject_kb` of the durable file `agg/private/LOG.md`. Capped on the
 //!        READ side independently of the on-disk cap, so a large durable file does not balloon
 //!        every prompt's input tokens.
 //!     2. an always-on "LAST SESSION" block carried in a loop-local String (the prior cycle's
@@ -20,8 +20,10 @@
 //!
 //! All I/O is best-effort: a disk error degrades memory, it never breaks the loop. The durable
 //! file is written atomically (`.tmp` + rename), mirroring `state.rs`, so an interrupted write
-//! can never leave a torn file. The durable file and per-session worker scratch both live under
-//! the gitignored `agg/state/` (`LOG.md` and `sessions/session-<N>.md` respectively).
+//! can never leave a torn file. Both are gitignored, but they sit on OPPOSITE sides of the
+//! write split: the durable `agg/private/LOG.md` is AGG-OWNED (the enforced audit trail), while the
+//! worker's `agg/state/sessions/session-<N>.md` scratch note is worker-authored and sanitized on
+//! the way in — which is exactly why the trail itself must be out of the worker's reach.
 //!
 //! SINGLE-WRITER ASSUMPTION: `LOG.md` is mutated by exactly one loop. Parallel workers
 //! (Tier C #1) are not yet supported; when they land, that work adds the append locking. Until

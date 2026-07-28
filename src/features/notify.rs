@@ -246,7 +246,10 @@ mod tests {
     /// That file is the delivery sink for every test below.
     fn project(cooldown: u32, cmd: &str) -> (tempfile::TempDir, AggConfig) {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("agg/state")).unwrap();
+        // both runtime roots — the step's STATE.md is worker-writable, the run ledger the probe
+        // `LoopState` opens is AGG-OWNED under `private/`.
+        std::fs::create_dir_all(crate::paths::agg_dir(tmp.path())).unwrap();
+        std::fs::create_dir_all(crate::paths::private_dir(tmp.path())).unwrap();
         let yaml = format!(
             "project: probe\nsequence:\n  steps: []\n  notify:\n    cooldown_sessions: {cooldown}\n    cmd:\n      - '{cmd}'\n"
         );

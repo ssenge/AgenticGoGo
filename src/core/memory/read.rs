@@ -9,12 +9,17 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// The durable, rolled-up memory file: `agg/state/LOG.md` (was `AGG_MEMORY.md`). It lives in the
-/// gitignored `agg/state/` — §8 overrules the old "committed to git" rule so a machine-managed file
-/// never churns the user's git history. agg still injects a slice of it into every prompt, so the
-/// worker reads it without touching the file.
+/// The durable, rolled-up memory file: `agg/private/LOG.md` (was `AGG_MEMORY.md`). Gitignored, so a
+/// machine-managed file never churns the user's git history.
+///
+/// AGG-OWNED (`private/`, not `state/`): this is the enforced hard-facts audit trail — agg folds
+/// every session's mechanical record into it, and the worker's own contribution arrives as an
+/// explicitly UNTRUSTED scratch note that gets sanitized on the way in ([`scratch_dir`]). A worker
+/// able to edit the trail directly could rewrite the history agg reasons from, bypassing exactly
+/// the sanitizing that makes the note safe. agg injects a slice into every prompt, so the worker
+/// reads it without ever touching the file.
 pub fn memory_file(dir: &Path) -> PathBuf {
-    crate::paths::agg_dir(dir).join("LOG.md")
+    crate::paths::private_dir(dir).join("LOG.md")
 }
 
 /// Directory for transient per-session worker scratch notes: `agg/state/sessions/`.

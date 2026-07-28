@@ -1,5 +1,5 @@
 //! `agg dashboard` — the live TUI. A separate viewer process that polls
-//! `agg/state/state.json` (written by `agg run` + its worker) and repaints in place
+//! `agg/private/state.json` (written by `agg run` + its worker) and repaints in place
 //! with color.
 //!
 //! It is a *view*: it never drives the loop, never reads the firehose. If the

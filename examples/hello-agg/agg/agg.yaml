@@ -26,7 +26,7 @@ sequence:
   abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
   # ASK FOR HELP WITHOUT STOPPING. `notify_if` is the non-terminal twin of `abort_if`: when it is
   # true agg runs `notify.cmd` and the loop KEEPS RUNNING. `stalled` is a judge that ships inside
-  # the binary (it reads agg/state/verdicts.jsonl), so this runs as-is — nothing to author.
+  # the binary (it reads agg/private/verdicts.jsonl), so this runs as-is — nothing to author.
   # `stalled` is safe HERE because the sequence above has no `if stalled then …` branch: name one
   # detector in both and you get paged a cycle BEFORE the recovery step runs (docs/CONFIG.md, "the
   # escalation ladder"). A real setup would `curl` a push service — and would bound it
@@ -36,4 +36,7 @@ sequence:
     cooldown_sessions: 3           # at most one ping per 3 sessions — don't nag (default 3; 0 = every cycle)
     # {{reason}} is the firing judge's rationale; agg shell-quotes every {{…}}, so DON'T quote it
     # yourself. {{project}} / {{session}} / {{step}} are available too.
+    # NOTIFY.log goes in agg/state/, NOT agg/private/: under `isolation: sandbox` notify.cmd is
+    # confined with the step, and `private/` is carved out of that writable set — a ping that
+    # writes there would be denied. Anything a hook of yours writes belongs on the state/ side.
     cmd: ["echo session {{session}}: {{reason}} >> agg/state/NOTIFY.log"]

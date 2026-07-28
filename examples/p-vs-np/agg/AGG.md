@@ -1,6 +1,6 @@
 <!-- AGG.md — the STABLE scope, goal, and rules every fresh worker session reads for orientation.
      Human-owned, rare edits. The FORWARD "what to do next" lives in agg/state/STATE.md (worker-curated,
-     rewritten each session); agg composes both, plus recent memory, into agg/state/INSTRUCTIONS.md. -->
+     rewritten each session); agg composes both, plus recent memory, into agg/private/INSTRUCTIONS.md. -->
 
 # Goal
 Work toward a FORMAL proof of P ≠ NP, written in Lean 4 under `proof/`.

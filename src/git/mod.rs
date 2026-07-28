@@ -45,16 +45,18 @@ pub fn current_branch(dir: &Path) -> Option<String> {
 }
 
 /// Is the work tree clean enough to branch (no tracked modifications OUTSIDE agg's own runtime
-/// state)? Untracked files are allowed (they carry across a checkout). agg's `agg/state/` runtime
+/// state)? Untracked files are allowed (they carry across a checkout). agg's `agg/{state,private}/` runtime
 /// state (state.json/project.json/run.pid) churns every cycle and MUST NOT count as dirty —
 /// it's runtime, not project content (and gitignored). We exclude it via a pathspec. The
-/// pathspec is `agg/state/**` (NOT `agg`): the committed config + judge library under `agg/`
-/// must still be checked, only `agg/state/` is runtime churn.
+/// pathspec excludes `agg/state/**` and `agg/private/**` (NOT `agg`): the committed config + judge
+/// library under `agg/` must still be checked, only the two runtime-state halves are churn.
 pub fn is_clean(dir: &Path) -> bool {
-    // pathspec `:(exclude)agg/state/**` drops agg's state churn; `--untracked-files=no` ignores untracked.
+    // pathspec `:(exclude)agg/{state,private}/**` drops agg's runtime churn (BOTH halves of the
+    // who-may-write split — `private/` is agg-owned but just as much churn); `--untracked-files=no`
+    // ignores untracked.
     git(
         dir,
-        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)agg/state/**"],
+        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)agg/state/**", ":(exclude)agg/private/**"],
     )
     .1
     .is_empty()
@@ -116,27 +118,27 @@ pub fn checkout(dir: &Path, branch: &str) -> bool {
 /// replaced this on the normal staging path with `auto_commit_tracked` — agg now COMMITS the worker's
 /// edits rather than discarding them (the worker never runs git). Retained for the (unused)
 /// `resolve_session` path + its unit test. Only tracked modifications are reset (`git checkout -- .`)
-/// — untracked files are left, and `agg/state/` runtime state is never touched. Returns true if there
+/// — untracked files are left, and `agg/{state,private}/` runtime state is never touched. Returns true if there
 /// was something to discard (for logging).
 pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
     let dirty = !git(
         dir,
-        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)agg/state/**"],
+        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)agg/state/**", ":(exclude)agg/private/**"],
     )
     .1
     .is_empty();
     if dirty {
         // restore tracked files to HEAD of the (session) branch; pathspec form leaves untracked
         // files and can't over-reach into base — we are still ON the session branch here. The
-        // exclude is `agg/state/**` ONLY: the committed `agg/` config + judges MUST be restored
+        // the excludes are the two runtime-state halves ONLY: the committed `agg/` config + judges MUST be restored
         // (a rolled-back session must not keep the worker's edits to the judges that graded it).
-        let _ = git(dir, &["checkout", "--", ".", ":(exclude)agg/state/**"]);
+        let _ = git(dir, &["checkout", "--", ".", ":(exclude)agg/state/**", ":(exclude)agg/private/**"]);
     }
     dirty
 }
 
 /// Commit the CURRENT (session) branch's uncommitted TRACKED edits — GIT_REDESIGN: agg owns git,
-/// the worker just edits files and never runs git. Stages everything EXCEPT `agg/state/**` (runtime
+/// the worker just edits files and never runs git. Stages everything EXCEPT the runtime-state halves (
 /// state, gitignored + excluded via the moat pathspec) and commits IFF something is staged (no
 /// `--allow-empty`: a no-op session makes no commit, exactly like a worker that changed nothing, and
 /// a worker that DID commit leaves nothing staged so no extra commit is made). This REPLACES
@@ -146,7 +148,7 @@ pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
 /// it made a commit (for logging).
 pub fn auto_commit_tracked(dir: &Path, message: &str) -> bool {
     // stage tracked modifications, deletions, AND new files — but never agg's runtime state.
-    let _ = git(dir, &["add", "-A", "--", ".", ":(exclude)agg/state/**"]);
+    let _ = git(dir, &["add", "-A", "--", ".", ":(exclude)agg/state/**", ":(exclude)agg/private/**"]);
     // commit only if the index actually differs from HEAD (worker already committed / did nothing).
     if git(dir, &["diff", "--cached", "--name-only"]).1.is_empty() {
         return false;
@@ -240,12 +242,13 @@ pub fn remove_file(dir: &Path, path: &str) {
     let _ = std::fs::remove_file(dir.join(path));
 }
 
-/// Ensure the project's `.gitignore` carries `agg/state/` (agg's runtime state must never get
+/// Ensure the project's `.gitignore` carries BOTH runtime-state halves (`agg/state/` and
+/// `agg/private/`) (agg's runtime state must never get
 /// committed onto session branches or merged into base) AND `.obsidian/` (so a user who opens the
 /// `agg/` folder as an Obsidian vault — to visualize the LLM wiki — never commits Obsidian's config).
 /// Idempotent, order-independent. MIGRATION: runtime state used to live at `<project>/.agg/`, so a
 /// pre-move project ignores that now-stale path — we DROP it rather than leave two contradictory
-/// lines. Only `agg/state/` is ignored under `agg/`: the committed config + judges must stay tracked.
+/// lines. Only the two runtime-state dirs are ignored under `agg/`: the committed config + judges must stay tracked.
 /// Best-effort.
 pub fn ensure_agg_gitignored(dir: &Path) {
     let gi = dir.join(".gitignore");
@@ -254,11 +257,15 @@ pub fn ensure_agg_gitignored(dir: &Path) {
     let is_stale = |t: &str| matches!(t, ".agg" | ".agg/" | "/.agg" | "/.agg/");
 
     let has_state = has(&["agg/state", "agg/state/", "/agg/state", "/agg/state/"]);
+    // `agg/private/` is agg-owned runtime state — gitignored for the same reason `agg/state/` is
+    // (machine-managed churn must never touch the user's history). Tracked separately so an
+    // existing project that already ignores `agg/state/` still picks the new entry up.
+    let has_private = has(&["agg/private", "agg/private/", "/agg/private", "/agg/private/"]);
     // `.obsidian/` (no leading slash) matches an Obsidian vault at ANY depth — root, `agg/`, or
     // `agg/state/` — so it covers whichever folder the user opens as the vault.
     let has_obsidian = has(&[".obsidian", ".obsidian/", "/.obsidian", "/.obsidian/"]);
     let has_stale = existing.lines().any(|l| is_stale(l.trim()));
-    if has_state && has_obsidian && !has_stale {
+    if has_state && has_private && has_obsidian && !has_stale {
         return; // both entries present, nothing stale — done
     }
 
@@ -271,6 +278,9 @@ pub fn ensure_agg_gitignored(dir: &Path) {
         .collect();
     if !has_state {
         new.push_str("agg/state/\n");
+    }
+    if !has_private {
+        new.push_str("agg/private/\n");
     }
     if !has_obsidian {
         new.push_str(".obsidian/\n");

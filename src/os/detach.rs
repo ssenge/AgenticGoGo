@@ -1,15 +1,15 @@
 //! `agg run --detach` — run the loop in the background.
 //!
 //! Long loops want to outlive the terminal. Rather than make the user remember
-//! `nohup agg run > agg/state/run.log 2>&1 &`, `--detach` does it for them: it re-execs
+//! `nohup agg run > agg/private/run.log 2>&1 &`, `--detach` does it for them: it re-execs
 //! `agg run` (with the SAME args, minus the detach flag) as a child in its own
-//! session, redirects the child's stdout+stderr to `agg/state/run.log`, writes the child
-//! PID to `agg/state/run.pid`, prints how to follow/stop, and returns.
+//! session, redirects the child's stdout+stderr to `agg/private/run.log`, writes the child
+//! PID to `agg/private/run.pid`, prints how to follow/stop, and returns.
 //!
 //! The child is an ordinary foreground `agg run` from its own point of view — all the
 //! loop/worker/watchdog machinery is unchanged; only its stdio and session differ.
 
-use crate::paths::{agg_dir, run_log, run_pid};
+use crate::paths::{private_dir, run_log, run_pid};
 use anyhow::{Context, Result};
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -20,7 +20,8 @@ use std::process::{Command, Stdio};
 /// `--detach` path wrote run.pid, so a foreground / `nohup agg run` left it pointing at a
 /// stale (often dead) pid, and `agg stop` would target the wrong process.
 pub fn write_run_pid(dir: &Path) {
-    let _ = std::fs::create_dir_all(agg_dir(dir));
+    // run.pid is AGG-OWNED: it lives in `private/`, which `agg/state/` does not create for us.
+    let _ = std::fs::create_dir_all(private_dir(dir));
     let _ = std::fs::write(run_pid(dir), std::process::id().to_string());
 }
 
@@ -33,7 +34,7 @@ pub fn clear_run_pid(dir: &Path) {
 /// Spawn the loop detached and return immediately. Refuses if a previous detached run
 /// is still alive (a stale pidfile from a dead process is cleaned up and ignored).
 pub fn spawn_detached(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(agg_dir(dir)).with_context(|| "creating agg/state dir")?;
+    std::fs::create_dir_all(private_dir(dir)).with_context(|| "creating agg/private dir")?;
 
     // Guard against a double-detach: if run.pid points at a live process, bail.
     if let Some(pid) = live_pid(dir) {
@@ -95,7 +96,7 @@ pub fn spawn_detached(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Read `agg/state/run.pid` and return the PID iff that process is still alive. A stale
+/// Read `agg/private/run.pid` and return the PID iff that process is still alive. A stale
 /// pidfile (process gone) is removed and `None` returned. Public so the loop can use it as a
 /// double-run guard on BOTH the foreground and the detached path.
 pub fn live_pid(dir: &Path) -> Option<u32> {
@@ -123,7 +124,7 @@ mod tests {
             N.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(agg_dir(&d)).unwrap();
+        std::fs::create_dir_all(private_dir(&d)).unwrap(); // run.pid is AGG-OWNED
         d
     }
 

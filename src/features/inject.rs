@@ -165,7 +165,7 @@ impl Handler for ClearMemScratch {
     }
 }
 
-/// Compose the worker's whole brief into `agg/state/INSTRUCTIONS.md`, then return the tiny fixed
+/// Compose the worker's whole brief into `agg/private/INSTRUCTIONS.md`, then return the tiny fixed
 /// pointer that becomes the actual `-p` value (§2/§3). Highest-priority first — operator steering,
 /// then the task (role + `prompt:`), then context pointers/excerpts (memory tail → STATE → AGG.md →
 /// wiki), then the standing footer. Long files are POINTED at or excerpted so agg keeps the context
@@ -173,7 +173,7 @@ impl Handler for ClearMemScratch {
 pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     let mut s = String::new();
     s.push_str(
-        "<!-- agg/state/INSTRUCTIONS.md — WRITTEN BY agg, REGENERATED every session. Do not edit; it is overwritten. -->\n\n",
+        "<!-- agg/private/INSTRUCTIONS.md — WRITTEN BY agg, REGENERATED every session. Do not edit; it is overwritten. -->\n\n",
     );
     let agent = &step.agent;
     s.push_str(&format!("# Session {} · step `{}` · agent `{agent}`\n", ctx.session, step.name));
@@ -213,7 +213,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
         if !mem.trim().is_empty() {
             s.push_str(&format!("\n## What's been tried\n{}\n", mem.trim()));
             s.push_str(
-                "Full history in `agg/state/LOG.md` — read it ONLY if you need older detail; it is long, don't load it all.\n",
+                "Full history in `agg/private/LOG.md` — read it ONLY if you need older detail; it is long, don't load it all.\n",
             );
         }
     }

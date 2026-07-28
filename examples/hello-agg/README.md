@@ -8,9 +8,9 @@ Definition of Done, made executable.**
 
 ## Layout
 
-Everything agg reads lives under `agg/` (committed); everything it writes lives under `agg/state/`
-(gitignored). One config file, `agg/agg.yaml` — a judge is resolved by NAME from
-`agg/judges/`.
+Everything agg reads as config lives under `agg/` (committed). Runtime state lands in two gitignored
+dirs beside it, split by **who may write them**. One config file, `agg/agg.yaml` — a judge is
+resolved by NAME from `agg/judges/`.
 
 ```
 hello-agg/
@@ -20,15 +20,21 @@ hello-agg/
     AGG.md                # the stable goal + rules the worker reads for orientation
     judges/
       prints_two.sh         # the judge — resolved by the NAME `prints_two` in `done_if`
-    state/                  # runtime, gitignored — agg writes it each session:
-                            #   INSTRUCTIONS.md (the worker's -p target), STATE.md
-                            #   (forward advice), LOG.md (durable memory),
+    state/                  # runtime, gitignored — THE WORKER writes this half:
+                            #   STATE.md (forward advice), wiki/, sessions/,
                             #   NOTIFY.log (written by this config's notify.cmd)
+    private/                # runtime, gitignored — AGG owns this half; a CONFINED
+                            #   worker cannot write it (isolation: sandbox/container):
+                            #   INSTRUCTIONS.md (the worker's -p target), LOG.md
+                            #   (durable memory), verdicts.jsonl, state.json, bus/
 ```
 
-Each session the worker's `-p` is a tiny fixed pointer — "read `agg/state/INSTRUCTIONS.md` and
+Each session the worker's `-p` is a tiny fixed pointer — "read `agg/private/INSTRUCTIONS.md` and
 follow it." agg regenerates that `INSTRUCTIONS.md` fresh every session, composing it from `AGG.md`,
-the worker's own `state/STATE.md`, and the `state/LOG.md` memory tail.
+the worker's own `state/STATE.md`, and the `private/LOG.md` memory tail. The brief is private
+because it is the worker's *orders* — it reads the file, it never rewrites it. Reads across the
+split always work; only writes are denied. See
+[State and memory](../../docs/CONFIG.md#state-and-memory).
 
 ## Run it
 ```bash
@@ -78,7 +84,7 @@ sequence:
 ```
 
 Detectors are just judges, so there's no new machinery to learn: `stalled` is a library judge that
-reads `agg/state/verdicts.jsonl` and reports `met` when no judge has moved across the last 3 merged
+reads `agg/private/verdicts.jsonl` and reports `met` when no judge has moved across the last 3 merged
 steps. Swap in a `curl` to a push service and you get the ping on your phone instead of in a file —
 bound it (`curl --max-time 10`), because delivery is foreground and agg imposes no timeout.
 
@@ -92,7 +98,9 @@ can never break out of the command. Don't add quotes of your own around a placeh
 literal quote characters. `{{project}}`, `{{session}}` and `{{step}}` work the same way.
 
 This toy usually finishes in one session, so you won't see a ping — it's here to show the shape. Try
-it by watching `agg/state/NOTIFY.log` on a run that actually grinds. Full reference (the three human
+it by watching `agg/state/NOTIFY.log` on a run that actually grinds. Note the *`state/`* half of the
+split: `notify.cmd` runs confined with the step under `isolation: sandbox`, and `agg/private/` is
+carved out of that writable set, so anything your own hooks write belongs on the `state/` side. Full reference (the three human
 policies, authoring a `stuck` detector, the sandbox caveat) → [`docs/CONFIG.md`](../../docs/CONFIG.md).
 
 ## Run it on another agent
@@ -125,7 +133,7 @@ The loop, the judge and the gate behave identically on all three.
 ## Files
 - `add.py` — the (broken) target the worker fixes
 - `agg/agg.yaml` — the config: one `worker` step, `done_if: prints_two`, and a `notify_if` that pings without stopping
-- `agg/AGG.md` — the stable goal + rules the worker reads for orientation (agg folds it into `state/INSTRUCTIONS.md` every session)
+- `agg/AGG.md` — the stable goal + rules the worker reads for orientation (agg folds it into `private/INSTRUCTIONS.md` every session)
 - `agg/judges/prints_two.sh` — the judge; prints `{"met":…}` — a plain script, so it works on any agent
 
 ---
@@ -202,8 +210,8 @@ calc.py has add(a,b), factorial(n), is_prime(n) stubbed with NotImplementedError
 
 `AGG.md` is stable and human-owned. The worker's *forward* advice ("what to do next") lives in
 `agg/state/STATE.md`, which the worker rewrites each session (gitignored, so it survives a rollback).
-Institutional memory (`LOG.md`, "what we tried and rejected") is written by agg, never the worker,
-and also lives under `agg/state/`.
+Institutional memory (`agg/private/LOG.md`, "what we tried and rejected") is written by agg, never
+the worker — which is exactly why it lives on the `private/` side of the split.
 
 **5. Run it:**
 
@@ -213,7 +221,7 @@ agg run         # the outer loop: RUN real agents until VERIFY passes, then GATE
 agg dashboard   # (optional, second terminal) live colored TUI
 ```
 
-What happens: a fresh agent reads its `agg/state/INSTRUCTIONS.md`, runs pytest, implements the functions,
+What happens: a fresh agent reads its `agg/private/INSTRUCTIONS.md`, runs pytest, implements the functions,
 re-runs pytest → green, exits. `VERIFY` flips the judge `0/3 → 3/3`; `GATE` sees `done_if` met →
 the loop exits after one session. A one-line summary records what it did.
 

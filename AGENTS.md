@@ -110,23 +110,30 @@ n="$(pytest -q 2>/dev/null | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || ech
 agg/AGG.md                   COMMITTED  standing project instructions the worker reads (the CLAUDE.md-analog)
 agg/agg.yaml                 COMMITTED  the loop config
 agg/judges/<name>.{sh,md}    COMMITTED  the Definition of Done  ← THE MOAT: judges MUST stay committed
-agg/state/                   GITIGNORED all runtime state:
-  INSTRUCTIONS.md              the worker's whole `-p` (agg REGENERATES it every session)
+agg/state/                   GITIGNORED runtime state THE WORKER WRITES (agg reads it as untrusted input)
   STATE.md                     worker-curated forward advice (rewritten wholesale each session)
-  LOG.md                       durable institutional memory (agg-owned; worker never writes it)
   wiki/                        worker-owned OKF knowledge base — durable; MULTI-SESSION PLANS live here
-  sessions/  verdicts.jsonl  state.json  project.json  run.{pid,log}
+  sessions/  spawns.json  spawns/  BLOCKED.md
+agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of the sandbox's writable set
+  INSTRUCTIONS.md              the worker's whole `-p` (agg REGENERATES it every session; the worker's ORDERS)
+  LOG.md                       durable institutional memory (worker's input arrives sanitized via sessions/)
+  verdicts.jsonl  state.json  project.json  bus/  run.{pid,log}
 ```
+**The split rule:** if the worker writing it could change *when the loop ends, what it may spend, or what
+agg believes happened*, it is private. `verdicts.jsonl` is why: forged `merged` rows make `stalled` report
+met, so a project with `abort_if: "stalled"` has its worker end its own run. `src/paths.rs` is the
+authority — the classification IS a test there. Binds only under `isolation: sandbox`/`container`; under
+the default `none` the worker has the whole filesystem and no layout changes that.
 
 ## The three "agent" surfaces — do NOT conflate
-- **The worker** (agg's inner agent) reads `agg/AGG.md` + the agg-composed `agg/state/INSTRUCTIONS.md`.
+- **The worker** (agg's inner agent) reads `agg/AGG.md` + the agg-composed `agg/private/INSTRUCTIONS.md`.
 - **An agent OPERATING agg** uses the CLI above + the `/agg:*` skills (`agg:new` / `agg:status` / `agg:supervise`).
 - **This file** is the condensed reference for an agent working in/with this repo.
 
 ## Working ON this repo (contributing to agg itself)
 - **Gate before any commit:** `cargo build` (0 warnings) · `cargo test` · `cargo clippy --all-targets -- -D warnings` · `bash scripts/e2e.sh` (~12 min).
 - **Run `cargo test` / e2e OUTSIDE the sandbox** (they SIGKILL processes + bind sockets; a sandboxed e2e gives false failures). If `rtk` rewrites cargo output, use `rtk proxy cargo …`.
-- **THE MOAT — never break it:** gitignore ONLY `agg/state/`, NEVER all of `agg/`. The judges must stay committed so a rollback can restore a grader a worker tampered with.
+- **THE MOAT — never break it:** gitignore ONLY `agg/state/` + `agg/private/`, NEVER all of `agg/`. The judges must stay committed so a rollback can restore a grader a worker tampered with.
 - **agg owns ALL git; the worker NEVER runs git** — the worker just edits files. agg auto-commits its work on the session branch (a `GitAutoCommit` handler on `on_verify`), then merges/keeps or rolls back. The worker never adds/commits/merges/pushes. (GIT_REDESIGN.)
 - **Verify agent behavior on the WIRE** (`scripts/e2e_real.sh`), never from docs — agent CLIs differ (Codex's `-p` is `--profile`; only Claude reports dollar cost; etc.).
 - **Design specs live in `internal/`** (gitignored): `SEQUENCES.md`, `STATE_REDESIGN.md`.

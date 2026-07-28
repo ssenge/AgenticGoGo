@@ -1,4 +1,4 @@
-//! `agg/state/verdicts.jsonl` — the durable, append-only record of every verdict the loop
+//! `agg/private/verdicts.jsonl` — the durable, append-only record of every verdict the loop
 //! RESOLVES (§5.8). Safety-critical GATE state, not an audit log: the gate's "was met" (§5.7)
 //! reads it, so a failed write is a **hard error**, not a swallowed line.
 //!
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn a_failed_write_is_a_hard_error_not_a_swallow() {
-        // Put a FILE where the state dir must go so `agg/state/` cannot be created → the open
+        // Put a FILE where `agg/` must go so `agg/private/` cannot be created → the open
         // fails. Unlike bus.rs, append must PROPAGATE that, not swallow it: this is gate state.
         let d = tmpdir("hard");
         std::fs::write(d.join("agg"), "not a dir").unwrap();

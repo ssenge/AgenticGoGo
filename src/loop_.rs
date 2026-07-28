@@ -27,14 +27,14 @@ use std::time::{Duration, Instant};
 
 
 
-/// The worker's ENTIRE pushed input. The full brief is composed into `agg/state/INSTRUCTIONS.md`
+/// The worker's ENTIRE pushed input. The full brief is composed into `agg/private/INSTRUCTIONS.md`
 /// every session and the worker is pointed at it — this kills the argv size ceiling AND the
 /// argv-parse fragility (a huge `-p` value that could start with `-`), and makes the exact context
 /// the worker saw inspectable on disk. The path is RELATIVE so it resolves from the worker's cwd
 /// (the project dir) on every backend (Claude/Copilot `-p`, Codex positional) with no per-backend
 /// special-casing — it is just a short, dash-free prompt value.
 pub const INSTRUCTIONS_POINTER: &str =
-    "Read the file `agg/state/INSTRUCTIONS.md` in full and follow it — it is your complete brief for this session.";
+    "Read the file `agg/private/INSTRUCTIONS.md` in full and follow it — it is your complete brief for this session.";
 
 /// The standing "Before you exit" footer of every session's brief (the wiki/OKF guidance lives here).
 /// Kept as a real markdown file (`include_str!`'d, like the scaffolds + skills) rather than an inline
@@ -186,7 +186,7 @@ pub fn run_with(
             anyhow::bail!(
                 "a loop is already running in this project (pid {pid}).\n  \
                  watch it:   agg dashboard\n  stop it:    agg stop\n  \
-                 (if you're sure it's dead, remove agg/state/run.pid and retry.)"
+                 (if you're sure it's dead, remove agg/private/run.pid and retry.)"
             );
         }
     }
@@ -204,7 +204,7 @@ pub fn run_with(
     register(&mut lifecycle); // host/third-party plugins, added on top of agg's own (§5)
 
     // ── session isolation (MANDATORY): the git preconditions run as `pre_start` hooks — recover a
-    //    stranded merge, require a clean git repo, ensure `agg/state` gitignored, resolve the base
+    //    stranded merge, require a clean git repo, ensure `agg/{state,private}` gitignored, resolve the base
     //    branch. Any bail is a hard error out of run(), exactly as the old inline block. ──
     let mut boot = Bootstrap { dir, cfg: &cfg, iso_base: None };
     run_pre_start(&lifecycle.pre_start, &mut boot)?;
@@ -355,7 +355,14 @@ mod tests {
     fn the_instructions_pointer_is_tiny_and_arg_safe() {
         assert!(!INSTRUCTIONS_POINTER.starts_with('-'), "pointer must never look like a flag");
         assert!(INSTRUCTIONS_POINTER.len() < 200, "pointer must stay tiny (no argv ceiling)");
-        assert!(INSTRUCTIONS_POINTER.contains("agg/state/INSTRUCTIONS.md"), "pointer names the brief file");
+        // derived from `paths`, not restated: the pointer is a LITERAL (a const can't call a fn), so
+        // this is the only thing standing between a layout move and a worker sent to a missing brief.
+        let rel = crate::paths::instructions_md(std::path::Path::new(""));
+        assert!(
+            INSTRUCTIONS_POINTER.contains(&*rel.to_string_lossy()),
+            "pointer must name the file agg actually writes ({})",
+            rel.display()
+        );
     }
 
 

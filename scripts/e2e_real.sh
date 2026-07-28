@@ -22,8 +22,13 @@
 # Config is the CURRENT judge/step model: a judge IS a goal (agg/judges/<name>.{sh,md}), the DoD
 # is `done_if`, ceilings live in `sequence.limits`, and continuity across sessions is carried by
 # COMMITTED git state + LOG.md — there is no `--resume` (every worker session is fresh). The worker's
-# whole `-p` is a tiny pointer at agg/state/INSTRUCTIONS.md (agg regenerates it each session); this
+# whole `-p` is a tiny pointer at agg/private/INSTRUCTIONS.md (agg regenerates it each session); this
 # test proves a REAL agent reads that brief AND the STATE.md it points at, then does the work.
+#
+# Runtime state is split by who may write it: agg/state/ is the WORKER's (STATE.md, wiki/, sessions/)
+# and agg/private/ is AGG's (state.json, project.json, verdicts.jsonl, LOG.md, INSTRUCTIONS.md,
+# run.pid). Reads are open either way, which is why the passthrough stub below still reads the
+# snapshot out of private/.
 #
 # Exits 0 only if every check passed.
 set -uo pipefail
@@ -42,7 +47,7 @@ is()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected [$3], got [$2]"; }
 has()  { grep -qF -- "$3" "$2" 2>/dev/null && ok "$1" || bad "$1" "'$3' not found in $2"; }
 hasnt(){ grep -qF -- "$3" "$2" 2>/dev/null && bad "$1" "'$3' unexpectedly present" || ok "$1"; }
 exists(){ [ -e "$2" ] && ok "$1" || bad "$1" "missing: $2"; }
-snap() { python3 -c "import json;print(json.load(open('$1/agg/state/state.json'))['$2'])" 2>/dev/null; }
+snap() { python3 -c "import json;print(json.load(open('$1/agg/private/state.json'))['$2'])" 2>/dev/null; }
 
 trap '[ -n "${KEEP:-}" ] || rm -rf "$WS"' EXIT
 mkdir -p "$WS"
@@ -76,7 +81,7 @@ exec "$REAL_CLAUDE" "\$@"
 EOF
   cat > "$d/rec" <<'EOF'
 #!/bin/sh
-printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/state/state.json)" >> trace.txt
+printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/private/state.json)" >> trace.txt
 EOF
   chmod +x "$d/bin/claude" "$d/rec"
   { printf 'project: %s\n' "$1"
@@ -105,6 +110,7 @@ EOF
   # trackable → agg commits + merges it, exactly as in production.
   cat > "$d/.gitignore" <<'EOF'
 agg/state/
+agg/private/
 bin/
 rec
 agg/agg.yaml
@@ -170,7 +176,7 @@ has "…and the session-exit line reports both" "$A/out.log" "out-tok"
 sec "4. real stream-json parsing"
 python3 - "$A" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1] + "/agg/state/state.json"))
+d = json.load(open(sys.argv[1] + "/agg/private/state.json"))
 r = d.get("recent", [])
 kinds = sorted({e["kind"] for e in r})
 print(f"  activity events: {len(r)}  kinds={kinds}")
@@ -186,11 +192,11 @@ has "…--model <the configured model>" "$A/claude_args.txt" "$MODEL"
 hasnt "…and NO --resume (every session is fresh context — the moat)" "$A/claude_args.txt" "--resume"
 
 sec "6. durable side effects of a real run"
-exists "institutional memory was written" "$A/agg/state/LOG.md"
-has    "…recording the real session"      "$A/agg/state/LOG.md" "## session 1"
+exists "institutional memory was written" "$A/agg/private/LOG.md"
+has    "…recording the real session"      "$A/agg/private/LOG.md" "## session 1"
 is "the ledger is finalized as goals-met" \
-   "$(python3 -c "import json;print(json.load(open('$A/agg/state/project.json'))['runs'][-1]['end_reason'])" 2>/dev/null)" "goals-met"
-[ ! -f "$A/agg/state/run.pid" ] && ok "run.pid cleared by the Drop guard" || bad "run.pid left behind"
+   "$(python3 -c "import json;print(json.load(open('$A/agg/private/project.json'))['runs'][-1]['end_reason'])" 2>/dev/null)" "goals-met"
+[ ! -f "$A/agg/private/run.pid" ] && ok "run.pid cleared by the Drop guard" || bad "run.pid left behind"
 run_agg "$A" status > "$A/status.log" 2>&1
 has "agg status renders the finished real run" "$A/status.log" "done"
 is "…the agg-committed file is on main (agg committed the worker's edit, isolation merged it)" \
@@ -231,7 +237,7 @@ SESS=$(snap "$B" session)
                        || bad "expected ≥2 sessions, got $SESS"
 is "the counter really reached 2" "$(tr -d '[:space:]' < "$B/count.txt" 2>/dev/null)" "2"
 hasnt "…and did so with NO --resume — pure fresh context each session" "$B/claude_args.txt" "--resume"
-COUNT_FOLDS=$(grep -c "^## session" "$B/agg/state/LOG.md" 2>/dev/null || echo 0)
+COUNT_FOLDS=$(grep -c "^## session" "$B/agg/private/LOG.md" 2>/dev/null || echo 0)
 [ "$COUNT_FOLDS" -ge 2 ] && ok "memory folded one entry per real session ($COUNT_FOLDS)" \
                          || bad "expected ≥2 memory entries, got $COUNT_FOLDS"
 has "…and session #1's record was INJECTed into session 2's prompt" "$B/out.log" "[memory] session #1 folded"

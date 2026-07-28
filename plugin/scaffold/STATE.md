@@ -1,5 +1,5 @@
 <!-- STATE.md — your predecessor's forward advice: crisp "what to do next". agg regenerates the
-     per-session brief (agg/state/INSTRUCTIONS.md) from this + AGG.md + memory, and points the
+     per-session brief (agg/private/INSTRUCTIONS.md) from this + AGG.md + memory, and points the
      worker at it. You (the agent) rewrite THIS file each session before you exit. Keep it SHORT —
      it is read in full. Gitignored, so it survives a session rollback. -->
 

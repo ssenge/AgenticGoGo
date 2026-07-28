@@ -13,7 +13,13 @@
 #     and stages + gates every session — so the fixtures git-init and the workers COMMIT their work
 #     (uncommitted work resolves as NoChanges and the gate restores base, so a met verdict on it
 #     never counts).
-#   - all runtime state lives under agg/state/ (gitignored).
+#   - runtime state is SPLIT BY WHO MAY WRITE IT, both halves gitignored:
+#       agg/state/    the WORKER's (STATE.md, wiki/, sessions/, spawns.json, BLOCKED.md) — agg reads
+#                     it as untrusted input, so this suite's fixtures write here freely.
+#       agg/private/  AGG's own (verdicts.jsonl, state.json, project.json, bus/, run.pid, run.log,
+#                     INSTRUCTIONS.md, LOG.md) — carved OUT of the worker's writable set under
+#                     `isolation: sandbox`. READS are unaffected, which is why the fake `claude`
+#                     below still cats its own brief out of it. §9l-b proves the split end to end.
 #
 #   ./scripts/e2e.sh              # everything
 #   ./scripts/e2e.sh --no-web     # skip the SvelteKit app (no node needed)
@@ -65,7 +71,7 @@ waitfor() { # waitfor <secs> <desc> <cmd...>
 }
 
 free_port()     { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
-snap()          { python3 -c "import json;print(json.load(open('$1/agg/state/state.json'))['$2'])" 2>/dev/null; }
+snap()          { python3 -c "import json;print(json.load(open('$1/agg/private/state.json'))['$2'])" 2>/dev/null; }
 phase_of()      { snap "$1" phase; }
 finish_reason() { snap "$1" finish_reason; }
 
@@ -90,7 +96,7 @@ mkproj() { # mkproj <name>
 
   cat > "$d/bin/rec" <<'EOF'
 #!/bin/sh
-printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/state/state.json)" >> trace.txt
+printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/private/state.json)" >> trace.txt
 EOF
 
   cat > "$d/bin/claude" <<'EOF'
@@ -98,10 +104,11 @@ EOF
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
 prev=""
 for a in "$@"; do
-  # the `-p` is now just a tiny pointer at agg/state/INSTRUCTIONS.md — capture the brief the worker
-  # actually reads (the file agg regenerates each session). prompt_latest.txt = this session's brief;
-  # prompts.txt accumulates every session's brief.
-  [ "$prev" = "-p" ] && { cat agg/state/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null; cat agg/state/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }
+  # the `-p` is now just a tiny pointer at agg/private/INSTRUCTIONS.md — capture the brief the worker
+  # actually reads (the file agg regenerates each session). PRIVATE but READABLE: the brief is the
+  # worker's ORDERS, so the carve-out denies writes and leaves reads open — exactly this `cat`.
+  # prompt_latest.txt = this session's brief; prompts.txt accumulates every session's brief.
+  [ "$prev" = "-p" ] && { cat agg/private/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null; cat agg/private/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }
   prev="$a"
 done
 sh bin/rec RUN
@@ -153,8 +160,13 @@ EOF
   # `checkout base` fails ("local changes to run.log would be overwritten") and isolation breaks. Only the
   # worker's judged WORK files (tracked.txt, did_work, .n, BREAK, .flip) stay trackable → agg commits +
   # merges/rolls-them-back exactly as in production. (agg reads config/judges from DISK, not from git.)
+  # BOTH halves of the runtime-state split are ignored. agg appends `agg/private/` itself
+  # (ensure_agg_gitignored), but only on its first run — this fixture is committed BEFORE agg ever
+  # sees it, so without the entry here the very first `git add -A` would sweep agg's own ledger,
+  # pidfile and live state.json onto the session branch. §9l-b asserts neither half is ever committed.
   cat > "$d/.gitignore" <<'EOF'
 agg/state/
+agg/private/
 bin/
 agg/agg.yaml
 agg/judges/
@@ -274,9 +286,9 @@ is  "…exit 0 (an operator stop is a clean end)" "$RC" "0"
 # "stopped via bus: …" is never printed to the log.
 has "…the loop logs the bus stop"      "$S/run.log" "[bus] stop → e2e-stop-reason"
 is  "…and records the finish reason"   "$(finish_reason "$S")" "stopped via bus: e2e-stop-reason"
-absent "…run.pid cleared by the Drop guard" "$S/agg/state/run.pid"
+absent "…run.pid cleared by the Drop guard" "$S/agg/private/run.pid"
 is  "…ledger finalized as stopped" \
-    "$(python3 -c "import json;print(json.load(open('$S/agg/state/project.json'))['runs'][-1]['end_reason'])")" "stopped"
+    "$(python3 -c "import json;print(json.load(open('$S/agg/private/project.json'))['runs'][-1]['end_reason'])")" "stopped"
 
 # --- budget steering halts a live loop (budget + abort_if live under `sequence:` now, §4.1)
 B="$(mkproj budget)"; : > "$B/NO_WORK"; echo 2 > "$B/WORKER_SLEEP"; echo 500 > "$B/WORKER_TOKENS"
@@ -303,14 +315,14 @@ sec "7. detached run + agg stop"
 DT="$(mkproj detach)"; : > "$DT/NO_WORK"; echo 2 > "$DT/WORKER_SLEEP"
 agg_do "$DT" run --detach --max-sessions 6 > "$DT/detach.log" 2>&1
 is  "agg run --detach returns immediately (exit 0)" "$?" "0"
-waitfor 30 "…writes agg/state/run.pid" test -f "$DT/agg/state/run.pid"
-exists "…and logs to agg/state/run.log" "$DT/agg/state/run.log"
+waitfor 30 "…writes agg/private/run.pid" test -f "$DT/agg/private/run.pid"
+exists "…and logs to agg/private/run.log" "$DT/agg/private/run.log"
 waitfor 30 "…the detached loop really runs" grep -q "RUN=run" "$DT/trace.txt"
 agg_do "$DT" run --max-sessions 1 > "$DT/second.log" 2>&1
 [ $? -ne 0 ] && ok "double-run guard refuses a second loop" || bad "a second concurrent loop was allowed"
 has "…and says which pid holds it" "$DT/second.log" "already running"
 agg_do "$DT" stop "detached-stop" > /dev/null 2>&1
-waitfor 40 "agg stop ends the detached loop" bash -c "! test -f '$DT/agg/state/run.pid'"
+waitfor 40 "agg stop ends the detached loop" bash -c "! test -f '$DT/agg/private/run.pid'"
 ok "…run.pid cleared after the detached loop exits"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -420,7 +432,7 @@ has "session 1 (green) is merged onto base"          "$GR/run.log" "session #1 m
 has "session 2 (regressing) is ROLLED BACK"          "$GR/run.log" "session #2 ROLLED BACK"
 is  "…and its work NEVER lands on base (base still holds session 1)" \
     "$( cd "$GR" && git show HEAD:tracked.txt 2>/dev/null )" "sess-1"
-has "…the durable memory says the work is NOT on base" "$GR/agg/state/LOG.md" "NOT on the base branch"
+has "…the durable memory says the work is NOT on base" "$GR/agg/private/LOG.md" "NOT on the base branch"
 has "…and the session branch is kept for inspection"   "$GR/run.log" "kept for inspection"
 
 # the worker's own veto: writing the red file discards the session, merged or not
@@ -482,7 +494,7 @@ agg_do "$RL" run --max-sessions 2 > "$RL/run.log" 2>&1
 has "a rate-limited session backs off"        "$RL/run.log" "rate limit detected"
 has "…and is flagged on the exit line"        "$RL/run.log" "[RATE-LIMITED]"
 hasnt "…and is NEVER judged"                  "$RL/run.log" "running judges…"
-absent "…and leaves NO durable memory entry"  "$RL/agg/state/LOG.md"
+absent "…and leaves NO durable memory entry"  "$RL/agg/private/LOG.md"
 is "…the trace shows no VERIFY/GATE after RUN" \
    "$(tr '\n' ' ' < "$RL/trace.txt")" "VERIFY=verify INJECT=inject RUN=run INJECT=inject RUN=run "
 
@@ -554,7 +566,7 @@ cat > "$PI/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 prev=""; for a in "$@"; do
-  [ "$prev" = "-p" ] && cat agg/state/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null
+  [ "$prev" = "-p" ] && cat agg/private/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null
   prev="$a"
 done
 sh bin/rec RUN
@@ -789,10 +801,12 @@ sec "9m. notify_if — flag a human WITHOUT killing the loop (STUCK_NOTIFY)"
 # the only honest observation channel is the files that command leaves behind — asserting on run.log
 # would pass for a notification that agg merely COMPOSED and never executed.
 #
-# Every marker this section writes lives under agg/state/, which mkproj already gitignores (the
-# fixture discipline at ~line 150): a marker dropped in the project ROOT gets swept onto the session
-# branch by agg's auto-commit and can vanish again on a checkout, so the assertion would be measuring
-# git rather than the notification.
+# Every marker this section writes lives under agg/state/ — the WORKER-writable half, which mkproj
+# already gitignores (the fixture discipline at ~line 150): a marker dropped in the project ROOT gets
+# swept onto the session branch by agg's auto-commit and can vanish again on a checkout, so the
+# assertion would be measuring git rather than the notification. These are test scaffolding written
+# by fake judges and a fake notifier, i.e. by the WORKER side — they belong in state/, not private/,
+# and moving them would make the fixtures unwritable the moment a step sets `isolation: sandbox`.
 
 # The detector. A script judge that is always shouting (value 90, over the 85 threshold, EVERY
 # session) whose rationale is whatever the caller put in agg/state/RATIONALE.txt. The indirection is
@@ -1260,7 +1274,7 @@ MK="$(mkproj memcap)"; : > "$MK/NO_WORK"
 cat > "$MK/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-prev=""; for a in "$@"; do [ "$prev" = "-p" ] && cat agg/state/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null; prev="$a"; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && cat agg/private/INSTRUCTIONS.md > prompt_latest.txt 2>/dev/null; prev="$a"; done
 sh bin/rec RUN
 n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
 mkdir -p agg/state/sessions
@@ -1282,13 +1296,13 @@ hooks:
   on_session_end: ["sh bin/rec GATE"]
 EOF
 agg_do "$MK" run --max-sessions 4 > "$MK/run.log" 2>&1
-exists "LOG.md exists after 4 sessions" "$MK/agg/state/LOG.md"
-SZ=$(wc -c < "$MK/agg/state/LOG.md" | tr -d ' ')
+exists "LOG.md exists after 4 sessions" "$MK/agg/private/LOG.md"
+SZ=$(wc -c < "$MK/agg/private/LOG.md" | tr -d ' ')
 printf '  LOG.md = %s bytes (cap = 1 KB)\n' "$SZ"
 [ "$SZ" -le 1100 ] && ok "…and max_kb=1 caps the durable file (${SZ}B)" \
                    || bad "max_kb not enforced" "${SZ}B > 1 KB"
-has "…dropping the OLDEST entries, and saying so" "$MK/agg/state/LOG.md" "older entries dropped"
-has "…the newest session survives the rotation"   "$MK/agg/state/LOG.md" "session 4"
+has "…dropping the OLDEST entries, and saying so" "$MK/agg/private/LOG.md" "older entries dropped"
+has "…the newest session survives the rotation"   "$MK/agg/private/LOG.md" "session 4"
 # inject_kb bounds the per-prompt slice independently of the on-disk file
 PB=$(python3 - "$MK/prompt_latest.txt" <<'PY'
 import sys
@@ -1446,15 +1460,17 @@ chmod +x "$EV/bin/claude"
 # CONTROL first: without the override the file must exceed 1 KB, or the assertion below is
 # vacuous (it would "pass" simply because nothing was ever big enough to cap).
 ( cd "$EV" && PATH="$EV/bin:$PATH" "$AGG" run --max-sessions 4 > uncapped.log 2>&1 )
-RAW=$(wc -c < "$EV/agg/state/LOG.md" 2>/dev/null | tr -d ' ')
+RAW=$(wc -c < "$EV/agg/private/LOG.md" 2>/dev/null | tr -d ' ')
 [ "${RAW:-0}" -gt 1100 ] && ok "control: uncapped memory really does exceed 1 KB (${RAW}B)" \
                          || bad "control failed — the memcap assertion would be vacuous" "${RAW}B"
-rm -f "$EV/.sess"; rm -rf "$EV/agg/state"
+# wipe BOTH halves — the second run must start from zero memory, and LOG.md lives in private/ while
+# the scratch notes it folds live in state/. Clearing only one leaves the run half-remembering.
+rm -f "$EV/.sess"; rm -rf "$EV/agg/state" "$EV/agg/private"
 ( cd "$EV" && PATH="$EV/bin:$PATH" AGG_MEMORY_MAX_KB=1 "$AGG" run --max-sessions 4 > run.log 2>&1 )
-SZ=$(wc -c < "$EV/agg/state/LOG.md" 2>/dev/null | tr -d ' ')
+SZ=$(wc -c < "$EV/agg/private/LOG.md" 2>/dev/null | tr -d ' ')
 [ "${SZ:-99999}" -le 1100 ] && ok "AGG_MEMORY_MAX_KB=1 overrides the config default (${RAW}B → ${SZ}B)" \
                             || bad "the env override was ignored" "${SZ}B"
-has "…and the rotation notice proves the cap actually fired" "$EV/agg/state/LOG.md" "older entries dropped"
+has "…and the rotation notice proves the cap actually fired" "$EV/agg/private/LOG.md" "older entries dropped"
 
 # ── global flags: --dir, --config (--goals is GONE, §7.1) ─────────────────────────────────
 GF="$(mkproj globalflags)"
@@ -1526,7 +1542,7 @@ chmod +x "$BR/agg/judges/flip.sh"
 cat > "$BR/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat agg/state/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat agg/private/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
 sh bin/rec RUN
 if [ ! -f .flip ]; then : > .flip; git add .flip >/dev/null 2>&1; git commit -qm flip >/dev/null 2>&1; fi
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
@@ -1696,6 +1712,79 @@ EOF
   is     "isolation: none drives the run to done (exit 0)" "$?" "0"
   absent "…and the OS wrapper NEVER fired (no marker)"     "$NB/sandbox_wrap.log"
   has    "…the worker ran directly (unwrapped)"            "$NB/trace.txt" "RUN=run"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9l-b. the runtime-state SPLIT (agg/state/ = the worker's · agg/private/ = agg's)"
+# The layout §9l's carve-out is built on. `agg/state/` sits inside the worker's cwd, so a CONFINED
+# worker could write every file in it — including verdicts.jsonl, which the `stalled`/`stuck`
+# detectors read and a project may wire to `abort_if`: three forged `"outcome":"merged"` rows and the
+# worker ENDS ITS OWN RUN. So runtime state is split by WHO MAY WRITE IT, and isolation::wrap() denies
+# writes to the `private/` half.
+#
+# src/paths.rs asserts the classification and src/isolation asserts the kernel deny. What only a full
+# run can show is the part those two take on faith: that the files really land on the sides the table
+# claims, that NEITHER half reaches git, and that every READER still finds its input — a moved
+# snapshot fails silently (`agg status` reads a missing state.json as "no run yet", not as an error),
+# which is exactly the class of breakage a unit test cannot see.
+SPL="$(mkproj split)"
+agg_do "$SPL" run --max-sessions 1 > "$SPL/run.log" 2>&1
+is "a run against the split layout drives to done (exit 0)" "$?" "0"
+
+# --- 1. each file is on the side that matches who writes it --------------------------------------
+exists "the safety-critical ledger is AGG-owned"        "$SPL/agg/private/verdicts.jsonl"
+absent "…and is NOT in the worker-writable half"        "$SPL/agg/state/verdicts.jsonl"
+exists "the live snapshot is agg-owned"                 "$SPL/agg/private/state.json"
+exists "the run-history ledger is agg-owned"            "$SPL/agg/private/project.json"
+exists "the durable memory is agg-owned"                "$SPL/agg/private/LOG.md"
+# the brief is PRIVATE despite being read every session: it is the worker's ORDERS, and a worker able
+# to rewrite them would launder instructions past the operator.
+exists "the worker's BRIEF is agg-owned (it is its orders)" "$SPL/agg/private/INSTRUCTIONS.md"
+absent "…and no stale copy is left in the worker's half"    "$SPL/agg/state/INSTRUCTIONS.md"
+# the other half: what the worker is SUPPOSED to author stays writable, or confinement breaks it.
+exists "the worker's forward advice stays the WORKER's"  "$SPL/agg/state/STATE.md"
+# and the carve-out is writes-only — the fake claude cat'd its brief out of private/ this very run.
+cmp -s "$SPL/prompt_latest.txt" "$SPL/agg/private/INSTRUCTIONS.md" \
+  && ok "…and the worker still READ its private brief (only WRITES are denied)" \
+  || bad "the captured brief does not match agg/private/INSTRUCTIONS.md" "reads must stay open"
+
+# --- 2. neither half ever reaches git ------------------------------------------------------------
+# agg auto-commits the worker's work with `git add -A`, so an unignored runtime dir would put a live
+# pidfile, the ledger and a half-written state.json into the user's history — and then `checkout base`
+# fails on the actively-written file and isolation dies.
+has "both halves are gitignored — the worker's"  "$SPL/.gitignore" "agg/state/"
+has "…and agg's"                                 "$SPL/.gitignore" "agg/private/"
+( cd "$SPL" && git log --all --name-only --pretty=format: ) | sort -u > "$SPL/committed.txt"
+hasnt "…so no commit on any branch touches agg/state/"  "$SPL/committed.txt" "agg/state/"
+hasnt "…nor agg/private/"                               "$SPL/committed.txt" "agg/private/"
+# the control: the sweep really ran, so the two `hasnt` above are not passing on an empty history.
+has   "…while the worker's WORK did land (the sweep really ran)" "$SPL/committed.txt" "did_work"
+# --first-parent, because a merged session leaves a merge commit whose plain `git show` is empty —
+# the diffstat that reached BASE is the one that matters here. `--pretty=format:` drops the header:
+# the subject is "agg: merge session #1 (agg/<proj>/session-1)", so leaving it in would match `agg/`
+# on the BRANCH NAME and fail for the wrong reason.
+( cd "$SPL" && git show --stat --first-parent --pretty=format: HEAD ) > "$SPL/head.stat" 2>&1
+hasnt "…and the diffstat that reached base carries no runtime state" "$SPL/head.stat" "agg/"
+has   "…though it did carry the work"                                "$SPL/head.stat" "did_work"
+
+# --- 3. every reader still finds its input -------------------------------------------------------
+agg_do "$SPL" status > "$SPL/status.txt" 2>&1
+is    "agg status reads the snapshot from its new home (exit 0)" "$?" "0"
+hasnt "…and does not fall back to \"no run snapshot yet\""       "$SPL/status.txt" "no run snapshot yet"
+has   "…it prints the real scoreboard"                           "$SPL/status.txt" "worked"
+agg_do "$SPL" plan > "$SPL/plan.txt" 2>&1
+is    "agg plan re-runs the judges against the new layout (exit 0)" "$?" "0"
+has   "…and reports the goal"                                       "$SPL/plan.txt" "worked"
+agg_do "$SPL" history > "$SPL/hist.txt" 2>&1
+has   "agg history reads agg/private/project.json"                  "$SPL/hist.txt" "session"
+if [ "$TUI" = "0" ]; then
+  skip "the dashboard tails agg/private/state.json" "--no-tui"
+else
+  # the dashboard is the reader that fails most quietly: no snapshot just paints an empty frame.
+  ( cd "$SPL" && python3 "$ROOT/scripts/tui_drive.py" --seq "2.0:q" --timeout 25 -- "$AGG" dashboard > split_tui.raw 2>&1 )
+  deansi "$SPL/split_tui.raw" "$SPL/split_tui.txt"
+  has "the dashboard tails agg/private/state.json — it paints the project" "$SPL/split_tui.txt" "split"
+  has "…and the judge it read from the snapshot"                           "$SPL/split_tui.txt" "worked"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1925,7 +2014,7 @@ EOF
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "12. the web interface (SvelteKit BFF → agg serve → agg/state/)"
+sec "12. the web interface (SvelteKit BFF → agg serve → agg/private/state.json)"
 if [ "$WEB" = "0" ]; then
   skip "web interface" "--no-web"
 elif ! command -v node >/dev/null 2>&1; then

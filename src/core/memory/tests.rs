@@ -13,8 +13,10 @@ fn tmpdir(tag: &str) -> PathBuf {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&d);
-    // memory_file now lives under agg/state/ — create it so the tests' direct writes land.
+    // BOTH runtime roots: the durable LOG.md is AGG-OWNED (`private/`) while the worker's scratch
+    // notes stay in `state/` — the tests write directly to each, so each must exist.
     std::fs::create_dir_all(crate::paths::agg_dir(&d)).unwrap();
+    std::fs::create_dir_all(crate::paths::private_dir(&d)).unwrap();
     d
 }
 

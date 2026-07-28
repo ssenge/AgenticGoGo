@@ -111,7 +111,7 @@ pub trait Handler {
 }
 
 /// A `pre_start` handler: agg's run-start git preconditions (recover a stranded merge, require a
-/// clean git repo, ensure `agg/state` gitignored, resolve the isolation base branch). Runs before the
+/// clean git repo, ensure `agg/{state,private}` gitignored, resolve the isolation base branch). Runs before the
 /// loop state exists, so it takes `Bootstrap`, not `LoopState`.
 pub trait PreStart {
     fn run(&self, boot: &mut Bootstrap) -> Result<()>;
