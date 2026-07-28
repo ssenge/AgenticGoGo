@@ -66,6 +66,12 @@ impl Handler for RateLimitBackoff {
             let rs = ctx.run_state();
             let ceil = ctx.eng.conditions_only(&rs);
             if ceil.halt {
+                // ponytail: aborts without firing `notify.cmd` — this path leaves the session
+                // before on_gate, so `NotifyOnStuck` never sees it (STUCK_NOTIFY §12.6). Accepted:
+                // reaching here means a ceiling tripped while ALREADY blocked on a rate limit, so
+                // the operator's next question is about quota, not about the loop being stuck.
+                // Upgrade path: `notify::halt_ping(ctx, ceil.halt_reason.as_deref())` before
+                // `abort_now`, which is where the baseline path now calls it from.
                 eprintln!("  ⚠ ceiling tripped during backoff — aborting");
                 let outcome = ctx.abort_now(&format!("abort_if: {}", ceil.halt_reason.unwrap_or_default()));
                 return Ok(Flow::Stop(outcome));

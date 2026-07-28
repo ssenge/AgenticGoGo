@@ -63,57 +63,37 @@ pub struct NotifyOnStuck;
 
 impl Handler for NotifyOnStuck {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        // `res` is still in scratch here — only `CheckRunStop` (on_session_end) takes it.
+        let res = ctx.scratch.get::<AGGScratch>().res.as_ref().expect("an on_verify handler set scratch.res");
+        let halting = res.halt;
+        // read before `ctx` is re-borrowed mutably below
+        let stopping = res.stop;
+        let notify = res.notify.clone();
+        let halt_reason = res.halt_reason.clone();
+
+        // A halt is terminal, so it pings once regardless of the debounce and does not consume it.
+        if halting {
+            halt_ping(ctx, halt_reason.as_deref());
+            return Ok(Flow::Continue);
+        }
+
         let Some(cfg) = ctx.cfg.sequence.notify.clone() else {
             return Ok(Flow::Continue);
         };
         if cfg.cmd.is_empty() {
             return Ok(Flow::Continue);
         }
-        // `res` is still in scratch here — only `CheckRunStop` (on_session_end) takes it.
-        let res = ctx.scratch.get::<AGGScratch>().res.as_ref().expect("an on_verify handler set scratch.res");
-        let halting = res.halt;
-        let notify = res.notify.clone();
-        let halt_reason = res.halt_reason.clone();
-
-        // A halt is terminal, so it pings once regardless of the debounce and does not consume it;
-        // a live `notify_if` is rate-limited, because the whole point is not to nag a human awake.
-        let (reason, kind) = if halting {
-            // §8.5 says `{{reason}} = halt_reason`, which is the raw expression. Kept — but a bare
-            // `blocked OR over_iterations` tells a human nothing, and "stop + notify" (§4) exists
-            // precisely to tell them WHY. So append the winning judge's rationale when the
-            // expression names one: `blocked OR over_iterations — BLOCKED: need the prod key`.
-            // Ceiling-only expressions name no judge, so `notify_reason` echoes the expression and
-            // the guard below leaves the message exactly as §8.5 specifies.
-            let expr = halt_reason.unwrap_or_else(|| "abort_if".into());
-            let detail = ctx.eng.notify_reason(&expr);
-            let text = if detail == expr { expr } else { format!("{expr} — {detail}") };
-            (text, "abort")
-        } else {
-            match notify {
-                Some(r) if self.cooled_down(ctx, cfg.cooldown_sessions) => (r, "stuck"),
-                _ => return Ok(Flow::Continue),
-            }
+        // `!stopping` FIRST, before the cooldown is consulted: a run that just succeeded needs no
+        // human (§12.8), and burning the debounce on a suppressed cycle would silence a real
+        // notification later. `done_if` and `notify_if` measure different axes, so a session can
+        // easily satisfy both — a 3am page for a finished run is exactly the nagging this feature
+        // exists to avoid.
+        let reason = match notify {
+            Some(r) if !stopping && self.cooled_down(ctx, cfg.cooldown_sessions) => r,
+            _ => return Ok(Flow::Continue),
         };
-        if !halting {
-            ctx.ext.get::<AGGState>().notify.last_notify_session = Some(ctx.session);
-        }
-
-        let step = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
-        let vars = [
-            ("reason", reason.clone()),
-            ("project", ctx.cfg.project.clone()),
-            ("session", ctx.session.to_string()),
-            ("step", step),
-        ];
-        let cmds: Vec<String> = cfg.cmd.iter().map(|c| template(c, &vars)).collect();
-
-        // Same jail as the step that just ran (ISOLATION.md §14): `notify.cmd` lives in agg.yaml and
-        // typically execs a project script — both inside the worker's writable cwd. `hooks::run`
-        // SKIPS a command it cannot confine rather than running it unconfined.
-        let tier = ctx.cur_step.as_ref().map(|s| s.isolation).unwrap_or(crate::isolation::Isolation::None);
-        let dir = ctx.dir.to_path_buf();
-        eprintln!("  [notify:{kind}] {reason}");
-        crate::hooks::run("notify", &cmds, &dir, tier);
+        ctx.ext.get::<AGGState>().notify.last_notify_session = Some(ctx.session);
+        deliver(ctx, &cfg, &reason, "stuck");
 
         // ALWAYS Continue — notify is pure signal. A halt still stops the run, but via
         // `CheckRunStop` reading `res.halt`, exactly as it did before this handler existed.
@@ -122,6 +102,63 @@ impl Handler for NotifyOnStuck {
     fn name(&self) -> &'static str {
         "NotifyOnStuck"
     }
+}
+
+/// The §8.5 halt ping: fired ONCE when `abort_if` stops the run, ignoring (and not consuming) the
+/// cooldown, because a terminal event is not something to debounce.
+///
+/// A free fn because there are TWO halt paths that can reach a configured `notify:` — the gate
+/// (`NotifyOnStuck`, a mid-run abort) and the baseline pass (`setup::Baseline`, `abort_if` already
+/// true at launch). The baseline one is the likelier of the two in practice: a stale
+/// `agg/state/BLOCKED.md` survives a crash, a reboot and a rollback, so the very config a user
+/// writes to be paged when the loop stops would have stopped and paged nobody. Owning the reason
+/// composition here is what keeps the two paths from drifting.
+pub(crate) fn halt_ping(ctx: &mut LoopState, halt_reason: Option<&str>) {
+    let Some(cfg) = ctx.cfg.sequence.notify.clone() else {
+        return;
+    };
+    if cfg.cmd.is_empty() {
+        return;
+    }
+    // §8.5 says `{{reason}} = halt_reason`, which is the raw expression. Kept — but a bare
+    // `blocked OR over_iterations` tells a human nothing, and "stop + notify" (§4) exists precisely
+    // to tell them WHY. So append the winning judge's rationale when the expression names one:
+    // `blocked OR over_iterations — BLOCKED: need the prod key`. A ceiling-only expression names no
+    // judge, so `notify_reason` echoes the expression back and the message stays exactly as §8.5
+    // specifies. Compare COLLAPSED forms — `notify_reason` normalises whitespace, so a raw
+    // `blocked  OR  over_iterations` would otherwise never equal its own echo and get duplicated.
+    let expr = halt_reason.unwrap_or("abort_if").to_string();
+    let detail = ctx.eng.notify_reason(&expr);
+    let collapsed = expr.split_whitespace().collect::<Vec<_>>().join(" ");
+    let reason = if detail == collapsed { collapsed } else { format!("{collapsed} — {detail}") };
+    deliver(ctx, &cfg, &reason, "abort");
+}
+
+/// Template the `{{…}}` vars into every command and run them. Shared by both callers so the
+/// variable set, the quoting and the jail cannot diverge between the live and terminal paths.
+fn deliver(ctx: &mut LoopState, cfg: &crate::core::config::NotifyCfg, reason: &str, kind: &str) {
+    let step = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+    let vars = [
+        ("reason", reason.to_string()),
+        ("project", ctx.cfg.project.clone()),
+        ("session", ctx.session.to_string()),
+        ("step", step),
+    ];
+    let cmds: Vec<String> = cfg.cmd.iter().map(|c| template(c, &vars)).collect();
+
+    // Same jail as the step that just ran (ISOLATION.md §14): `notify.cmd` lives in agg.yaml and
+    // typically execs a project script — both inside the worker's writable cwd. `hooks::run`
+    // SKIPS a command it cannot confine rather than running it unconfined. At baseline there is no
+    // step yet, and none has run, so `None` is both the fallback and the correct tier.
+    let tier = ctx.cur_step.as_ref().map(|s| s.isolation).unwrap_or(crate::isolation::Isolation::None);
+    let dir = ctx.dir.to_path_buf();
+    eprintln!("  [notify:{kind}] {reason}");
+    // ponytail: foreground and untimed, exactly like every other agg hook — a notification you
+    // want DELIVERED before the loop moves on. The ceiling is a delivery command that hangs (a
+    // `curl` to a dead host with no `--max-time`), which stalls the loop until the watchdog or the
+    // operator intervenes; the docs tell users to bound their own command. Upgrade path if that
+    // proves insufficient: `hooks::spawn_background` here, at the cost of losing the exit status.
+    crate::hooks::run("notify", &cmds, &dir, tier);
 }
 
 impl NotifyOnStuck {
