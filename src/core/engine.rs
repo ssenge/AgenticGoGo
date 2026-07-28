@@ -36,7 +36,12 @@ const REASON_MAX_CHARS: usize = 400;
 ///
 /// Quoting for the shell happens later and separately (`features::notify::shq`); this is about the
 /// string being READABLE and honest, not about it being safe to execute.
-fn sanitize_reason(text: &str, fallback: &str) -> String {
+///
+/// `pub(crate)` because the halt ping must put the `abort_if` EXPRESSION through the identical rule
+/// before comparing it with this function's echo of it — see `features::notify::halt_ping`.
+/// IDEMPOTENT, which is what makes that comparison sound: sanitizing an already-sanitized string is
+/// a no-op (no control chars or runs of whitespace left, and the cap is already applied).
+pub(crate) fn sanitize_reason(text: &str, fallback: &str) -> String {
     // `split_whitespace` already collapses \n and \t; the filter catches the rest (ESC, BEL, and
     // the C1 range — an untrusted string that can repaint or retitle the operator's terminal).
     let cleaned: String = text
@@ -159,10 +164,12 @@ impl Engine {
     }
 
     /// The one-line `{{reason}}` for a `notify_if` that just fired (STUCK_NOTIFY §5 / §12.3): the
-    /// rationale of the judge NAMED IN THE EXPRESSION with the highest `value`, so a compound
-    /// `stuck.value >= 85 OR blocked` reports whichever detector is actually shouting. Falls back to
-    /// the expression text when no named judge has a usable rationale (e.g. the baseline pass, where
-    /// only run-scalars like `over_iterations` can be true).
+    /// rationale of ONE judge named in the expression — judges reporting `met` are preferred over
+    /// the rest, and the highest `value` wins inside that group — so a compound
+    /// `stuck.value >= 85 OR blocked` reports the detector that is actually shouting rather than the
+    /// one with the bigger scale. Falls back to the expression text when no named judge has a usable
+    /// rationale: every named judge's rationale is empty, or the expression names only run-scalars
+    /// (`over_iterations`, `wall_hours`).
     pub fn notify_reason(&self, expr: &str) -> String {
         let named = stop::judge_names(expr).unwrap_or_default();
         // MET FIRST, then value. Ranking on raw `value` alone is meaningless across judges: a
@@ -631,5 +638,83 @@ mod tests {
             "over_budget OR wall_hours >= 8",
             "a ceiling-only expression names no judge — echo it back so the handler leaves it bare"
         );
+    }
+
+    /// §12.3 — MET FIRST, and only then by value. Judge `value`s are on scales the judges choose
+    /// (a rubric grades 0–100, a script answers 0–1), so ranking on the raw number alone pages the
+    /// human with the rationale of the detector that is NOT complaining. This is the exact shape of
+    /// the docs' flagship expression, and the reason the whole feature delivered the opposite of the
+    /// truth: `blocked` fires at 1/1 and loses to a quiet `stuck` sitting at 10/100.
+    #[test]
+    fn a_firing_detector_outranks_a_louder_quiet_one_across_incomparable_scales() {
+        let eng = engine(
+            vec![
+                goal("feature", false),
+                detector_unmet("stuck", 10.0, "loop is progressing normally"),
+                detector("blocked", 1.0, "MISSING CREDENTIAL: I need the prod deploy key"),
+            ],
+            Some("stuck.value >= 85 OR blocked"),
+        );
+        assert_eq!(
+            cycle(&eng).notify.as_deref(),
+            Some("MISSING CREDENTIAL: I need the prod deploy key"),
+            "the 1/1 judge that MADE the expression true must win over a 10/100 judge that did not"
+        );
+
+        // The all-judges fallback still has to answer "why was I paged". `met` is the judge's own
+        // rubric, not proof it made the expression true — `stuck.value >= 50` fires while a rubric
+        // whose `met` bar is 85 stays unmet — so an expression that names NO met judge must still
+        // produce that judge's rationale rather than falling through to the bare expression text.
+        let threshold_mismatch = engine(
+            vec![goal("feature", false), detector_unmet("stuck", 60.0, "values drifting, nothing landed")],
+            Some("stuck.value >= 50"),
+        );
+        assert_eq!(cycle(&threshold_mismatch).notify.as_deref(), Some("values drifting, nothing landed"));
+    }
+
+    /// `{{reason}}` is worker-INFLUENCED text (the `blocked` detector echoes a line the worker wrote)
+    /// that lands in an operator's terminal, a push notification and a `sh -c` command line.
+    /// `core::memory` already control-strips and caps every worker string it ingests; [`sanitize_reason`]
+    /// is that same discipline on the notify path, and this pins all four of its jobs.
+    #[test]
+    fn a_worker_authored_rationale_cannot_repaint_the_terminal_or_run_off_the_end() {
+        // STRIPPED, not escaped: this rationale would clear the operator's screen (ESC[2J ESC[H),
+        // ring the bell (BEL) and start a colour run via the C1 CSI — all from worker-authored text.
+        let hostile = "\u{1b}[2J\u{1b}[Hall\u{7} is\t\t fine\u{9b}31m";
+        let eng = engine(vec![goal("f", false), detector("stuck", 90.0, hostile)], Some("stuck.value >= 85"));
+        let got = cycle(&eng).notify.expect("notify_if fired");
+        assert!(!got.chars().any(char::is_control), "no control char may survive: {got:?}");
+        assert_eq!(got, "[2J[Hall is fine31m", "…and the runs of whitespace collapse to one space");
+
+        // Capped — and the cut lands on a CHAR boundary. A 600-char multi-byte rationale is where a
+        // naive `&s[..400]` panics, which would turn a notification into a dead loop.
+        let long = engine(vec![goal("f", false), detector("stuck", 90.0, &"é".repeat(600))], Some("stuck.value >= 85"));
+        let got = cycle(&long).notify.expect("notify_if fired");
+        assert_eq!(got.chars().count(), 401, "400 chars plus the ellipsis that says it was cut");
+        assert!(got.ends_with('…') && got.starts_with("éé"));
+
+        // A rationale that is ENTIRELY control characters sanitizes to nothing. Delivering an empty
+        // `curl -d ''` is a notification that looks sent and says nothing — fall back to the
+        // expression, the same answer an empty rationale already gets.
+        let blank = engine(vec![goal("f", false), detector("stuck", 90.0, "\u{1b}\u{7}\0")], Some("stuck.value >= 85"));
+        assert_eq!(cycle(&blank).notify.as_deref(), Some("stuck.value >= 85"));
+    }
+
+    /// A detector that is LOUD but NOT firing — `met: false` with a non-zero `value`. `detector()`
+    /// cannot express this (it derives `met` from `value > 0.0`), which is exactly why the raw-value
+    /// ranking bug survived a six-test module: every named judge in those tests is met, so the
+    /// met-first pass and the value-only pass agree and the difference is invisible.
+    fn detector_unmet(name: &str, value: f64, rationale: &str) -> Judge {
+        let mut j = unjudged(name, false);
+        j.apply(Verdict {
+            met: false,
+            value: Some(value),
+            max: Some(100.0),
+            target: 100.0,
+            rationale: rationale.into(),
+            evidence: vec![],
+            error: None,
+        });
+        j
     }
 }

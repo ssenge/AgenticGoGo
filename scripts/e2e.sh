@@ -821,6 +821,23 @@ EOF
   chmod +x "$1/bin/notify"
 }
 
+# The blocker. STUCK_NOTIFY §6's copy-ready `blocked` judge (docs/CONFIG.md's snippet, same escaping):
+# WORKER-authored evidence read out of agg/state/BLOCKED.md. Two properties make it the right fixture
+# for the halt cases below: its rationale is a string agg does not control (so §12.10b's "append the
+# blocker's own words" is a real claim, not a tautology), and agg/state/ is gitignored runtime state
+# that survives a rollback, a crash and a reboot — which is exactly how an `abort_if` ends up ALREADY
+# TRUE at launch. Its 0–1 scale is also the loser in every scale-blind `value` comparison (case 8).
+mkblocked() { # mkblocked <dir>
+  cat > "$1/agg/judges/blocked.sh" <<'EOF'
+#!/bin/sh
+[ -s agg/state/BLOCKED.md ] \
+  && printf '{"met":true,"value":1,"max":1,"target":1,"rationale":"%s"}\n' \
+       "$(head -1 agg/state/BLOCKED.md | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')" \
+  || printf '{"met":false,"value":0,"max":1,"target":1,"rationale":"no blocker declared"}\n'
+EOF
+  chmod +x "$1/agg/judges/blocked.sh"
+}
+
 # ── 1. the headline: it pings, and the loop DOES NOT DIE ─────────────────────────────────────────
 NTF="$(mkproj notify)"; : > "$NTF/NO_WORK"     # `worked` never fires → only the session cap can end it
 mkstuck "$NTF" "no judge moved in 3 sessions"
@@ -922,11 +939,22 @@ is  "a notify block WITHOUT notify_if loads, and the abort still HALTS (exit 3)"
 has "…the run really ended on the guard"     "$NAB/run.log" "ABORT"
 # once, cooldown ignored (it is terminal), with the halt expression as {{reason}} — that single line
 # is also the proof it did not additionally fire on session 1, where nothing was wrong.
-is  "…and the halt pings exactly once, carrying the abort expression as {{reason}}" \
+#
+# This is ALSO §12.10b's negative half, and the reason case 7 below does not repeat it: `over_iterations`
+# is a run-scalar that names no judge, so `notify_reason` has nothing to append and must echo the
+# expression back BARE. The assertion is exact equality on the whole delivered line, so a stray
+# " — <rationale>" suffix (the shape case 7 asserts is present when a judge IS named) fails it here.
+is  "…and the halt pings exactly once, carrying the abort expression as {{reason}} — BARE, since a ceiling names no judge (§12.10b)" \
     "$(cat "$NAB/agg/state/notified.txt" 2>/dev/null)" "over_iterations"
 
-# ── 5. §12.8: SUCCESS is not a cry for help ──────────────────────────────────────────────────────
+# ── 5. §12.8: SUCCESS is not a cry for help — even with a detector still shouting ────────────────
+# The detector is LATCHED at 90 and `notify_if` is LIVE, so `done_if` and `notify_if` are both true on
+# the winning cycle. That combination is the whole test: they measure different axes (work finished vs.
+# a blocker still declared), so it is the ordinary case, not a contrived one, and it is the only shape
+# that can catch a suppression that keys off `res.halt` alone. A `notify:` block with no `notify_if`
+# cannot fail this check no matter what the handler does.
 NOK="$(mkproj notifyok)"; mknotifier "$NOK"    # default worker writes did_work → `worked` is met
+mkstuck "$NOK" "still shouting"
 cat > "$NOK/agg/agg.yaml" <<'EOF'
 project: notifyok
 defaults: { model: fake }
@@ -934,15 +962,158 @@ steps: { worker: {} }
 sequence:
   steps: [worker]
   done_if: "worked"
+  notify_if: "stuck.value >= 85"
   notify:
+    cooldown_sessions: 0
     cmd: ["sh bin/notify {{reason}}"]
 summary: { enabled: false }
 EOF
 agg_do "$NOK" run --max-sessions 3 > "$NOK/run.log" 2>&1
 is     "a satisfied done_if ends the run normally (exit 0)" "$?" "0"
 has    "…as a success"                                      "$NOK/run.log" "done_if satisfied"
-absent "…and success does NOT notify (§12.8 — hooks.on_stop is the ping-me-whatever-happens knob)" \
+absent "…and success does NOT notify even with notify_if TRUE on that cycle (§12.8 — hooks.on_stop is the ping-me-whatever-happens knob)" \
        "$NOK/agg/state/notified.txt"
+# The positive control for that `absent`, and the reason it means anything. Same project, same
+# detector, same notify block, same delivery script — the ONLY change is JUDGE_FAIL, which withholds
+# the success. If the sink now fills, the empty sink above was suppression; if it stays empty, the
+# feature was simply never wired here and the `absent` was worth nothing. (Also proves the suppressed
+# cycle did not BURN the debounce: `cooled_down` is a fresh `None` per process, but a delivery that
+# had fired above would have left this line unreachable at all.)
+: > "$NOK/JUDGE_FAIL"
+agg_do "$NOK" run --max-sessions 1 > "$NOK/rerun.log" 2>&1
+is     "…and the control: withhold ONLY the success and the same fixture pages at once" \
+       "$(cat "$NOK/agg/state/notified.txt" 2>/dev/null)" "still shouting"
+
+# ── 6. §8.5 at t=0: an abort_if ALREADY TRUE at launch halts at baseline — and must still page ───
+# The likeliest stop of all, and the one that used to deliver nothing. `Baseline` runs on_run_start and
+# returns Flow::Stop(Halt) directly, so it never reaches the gate where the ping used to live; the
+# operator who wrote "stop + notify" precisely to be paged when the loop stops got a dead run and
+# silence. agg/state/BLOCKED.md is gitignored runtime state, so yesterday's blocker is still on disk
+# this morning — no crash or exotic sequence needed to reach this, just a restart.
+NBL="$(mkproj notifybaseline)"; : > "$NBL/NO_WORK"; mknotifier "$NBL"; mkblocked "$NBL"
+NBL_BLOCKER='MISSING CREDENTIAL: I need the prod deploy key to continue'
+printf '%s\n' "$NBL_BLOCKER" > "$NBL/agg/state/BLOCKED.md"      # ← left behind by YESTERDAY's run
+cat > "$NBL/agg/agg.yaml" <<'EOF'
+project: notifybaseline
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  abort_if: "blocked"
+  notify:
+    cmd: ["sh bin/notify {{reason}}"]
+summary: { enabled: false }
+EOF
+agg_do "$NBL" run --max-sessions 3 > "$NBL/run.log" 2>&1
+is  "an abort_if already true at LAUNCH halts the run (exit 3)" "$?" "3"
+has "…from the baseline pass, before session 1 ever starts"     "$NBL/run.log" "ABORT at baseline"
+# the assertion the whole case exists for: a positive on file CONTENT, so it fails on absence AND on
+# a wrong payload. `{{step}}` is empty and the tier is `none` here (no step has run) — both correct,
+# and the delivery still has to happen.
+is  "…and \"stop + notify\" PAGES on that path too, expression + the blocker's own words (§12.10b)" \
+    "$(cat "$NBL/agg/state/notified.txt" 2>/dev/null)" "blocked — $NBL_BLOCKER"
+
+# ── 7. §12.10b: a halt that NAMES a judge carries that judge's rationale ─────────────────────────
+# Case 4 pins the bare half (a ceiling names no judge → the expression, verbatim). This is the other
+# half, on the GATE path: `blocked OR over_iterations` names one judge, the worker declares the blocker
+# mid-run, and the delivered line must be `<expression> — <rationale>`. A push notification reading
+# `blocked OR over_iterations` tells a human nothing, which is why the append exists at all.
+NHR="$(mkproj notifyhaltreason)"; : > "$NHR/NO_WORK"; mknotifier "$NHR"; mkblocked "$NHR"
+NHR_BLOCKER='the staging DB password rotated; I cannot run the migration'
+# staged, not pre-seeded: BLOCKED.md must be ABSENT at the baseline pass or this becomes case 6. The
+# worker copies it in during session 1, so the halt lands at the gate.
+printf '%s\n' "$NHR_BLOCKER" > "$NHR/agg/state/PENDING_BLOCKER.txt"
+cat > "$NHR/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
+sh bin/rec RUN
+cp agg/state/PENDING_BLOCKER.txt agg/state/BLOCKED.md
+printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+chmod +x "$NHR/bin/claude"
+cat > "$NHR/agg/agg.yaml" <<'EOF'
+project: notifyhaltreason
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  abort_if: "blocked OR over_iterations"
+  notify:
+    cmd: ["sh bin/notify {{reason}}"]
+summary: { enabled: false }
+EOF
+agg_do "$NHR" run --max-sessions 3 > "$NHR/run.log" 2>&1
+is  "a worker-declared blocker halts MID-RUN (exit 3)" "$?" "3"
+has "…at the gate, not at baseline"                    "$NHR/run.log" "⚠ ABORT — abort_if true"
+is  "…and {{reason}} is the expression PLUS the blocker's rationale (§12.10b)" \
+    "$(cat "$NHR/agg/state/notified.txt" 2>/dev/null)" "blocked OR over_iterations — $NHR_BLOCKER"
+
+# ── 8. the reason names the judge that FIRED, not the one with the biggest number ────────────────
+# The documented flagship expression (`stuck.value >= 85 OR blocked`), with the two detectors on the
+# scales they actually use: a 0–100 rubric and a 0–1 script. `stuck` is UNMET at 10 and `blocked` is MET
+# at 1 — so the only term making the expression true is the one that loses every scale-blind `value`
+# comparison. Rank on raw value and the operator's phone says "loop is progressing normally" while the
+# worker sits waiting for a credential: the notification asserts the opposite of the truth, which is
+# worse than no notification at all. Exact equality on the delivered line, so the reassuring rationale
+# cannot sneak in as a suffix either.
+NMF="$(mkproj notifymetfirst)"; : > "$NMF/NO_WORK"; mknotifier "$NMF"; mkblocked "$NMF"
+NMF_BLOCKER='MISSING CREDENTIAL: I need the prod deploy key to continue'
+printf '%s\n' "$NMF_BLOCKER" > "$NMF/agg/state/BLOCKED.md"
+cat > "$NMF/agg/judges/stuck.sh" <<'EOF'
+#!/bin/sh
+echo '{"met":false,"value":10,"max":100,"target":100,"rationale":"loop is progressing normally"}'
+EOF
+chmod +x "$NMF/agg/judges/stuck.sh"
+cat > "$NMF/agg/agg.yaml" <<'EOF'
+project: notifymetfirst
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  notify_if: "stuck.value >= 85 OR blocked"
+  notify:
+    cooldown_sessions: 0
+    cmd: ["sh bin/notify {{reason}}"]
+summary: { enabled: false }
+EOF
+agg_do "$NMF" run --max-sessions 1 > "$NMF/run.log" 2>&1
+is "a compound notify_if fires off the term that is actually true, and the loop runs on (exit 4)" "$?" "4"
+is "…and {{reason}} is the FIRING detector's rationale, not the highest-VALUE one's" \
+   "$(cat "$NMF/agg/state/notified.txt" 2>/dev/null)" "$NMF_BLOCKER"
+
+# ── 9. the other three placeholders carry LIVE values, not constants ─────────────────────────────
+# `{{reason}}` is exercised by every case above; `{{project}}`, `{{session}}` and `{{step}}` were not
+# exercised anywhere, so the whole vars array could have been bound to the wrong fields and the suite
+# would stay green (a ping that says nothing about WHICH of three overnight loops paged you is the
+# failure those vars exist to prevent). Three sessions over a TWO-step sequence, cooldown 0, asserted
+# as one ordered transcript: `{{session}}` must ADVANCE (a constant or a stale 0 fails), and `{{step}}`
+# must ALTERNATE (with a single-step sequence "worker" is the only string it could possibly be, so the
+# check would be vacuous). Values arrive unquoted here because agg shell-quotes each one and `sh` then
+# strips the quotes — the same substitution path case 3 proves is injection-proof.
+NVR="$(mkproj notifyvars)"; : > "$NVR/NO_WORK"; mkstuck "$NVR" "flat"
+cat > "$NVR/agg/agg.yaml" <<'EOF'
+project: notifyvars
+defaults: { model: fake }
+steps:
+  worker: {}
+  review: {}
+sequence:
+  steps: [worker, review]
+  done_if: "worked"
+  notify_if: "stuck.value >= 85"
+  notify:
+    cooldown_sessions: 0
+    cmd: ["echo p={{project}} s={{session}} st={{step}} r={{reason}} >> agg/state/ctx.txt"]
+summary: { enabled: false }
+EOF
+agg_do "$NVR" run --max-sessions 3 > "$NVR/run.log" 2>&1
+is "…still just flagging, never stopping (exit 4)" "$?" "4"
+is "{{project}}/{{session}}/{{step}} carry the LIVE values — session advances, step alternates" \
+   "$(tr '\n' '|' < "$NVR/agg/state/ctx.txt" 2>/dev/null)" \
+   "p=notifyvars s=1 st=worker r=flat|p=notifyvars s=2 st=review r=flat|p=notifyvars s=3 st=worker r=flat|"
 
 # ═══════════════════════════════════════════════════════════════════════════
 sec "9g. the git paths the rollback gate does NOT take (auto-accept · conflict · recovery)"

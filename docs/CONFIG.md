@@ -51,9 +51,11 @@ sequence:
   invariants: ["no_regression"]    # judge names that must STAY met
   done_if: "correct_result AND all_tests_pass AND coverage.value >= 80"
   abort_if: "over_budget OR wall_hours >= 8 OR any_regressed(invariants) OR any_judge_error"
-  notify_if: "stalled"             # NON-TERMINAL twin of abort_if: ping a human, KEEP RUNNING
+  notify_if: "stuck.value >= 85"   # NON-TERMINAL twin of abort_if: ping a human, KEEP RUNNING.
+                                   # STRICTER than the `if stalled then` branch above, deliberately —
+                                   # see "the escalation ladder". (`stalled` ships; `stuck` you author.)
   notify:                          # how that ping is delivered (also fires once on an abort_if halt)
-    cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"]   # {{…}} is substituted SHELL-QUOTED — don't quote it
+    cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]   # FOREGROUND — always bound it
     cooldown_sessions: 3           # debounce: min sessions between two notify_if fires (0 = every cycle)
 
 # ---- top-level survivors (all optional) ----
@@ -277,38 +279,37 @@ The zero-authoring version, which runs as-is because `stalled` ships inside the 
 
 ```yaml
 sequence:
+  steps: ["worker"]                # NO `if stalled then …` branch — see the escalation ladder below
   notify_if: "stalled"
   notify:
-    cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"]
+    cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]
 ```
 
-### The three human policies — same primitives, a different clause
-
-| policy | how you write it | what the loop does |
-|---|---|---|
-| **no human at all** | omit `notify_if` **and** `notify` | pure autonomy — today's behaviour |
-| **notify + keep going** | put the condition in **`notify_if`** | fires `notify.cmd`, exit code unchanged, **loop continues** |
-| **stop + notify** | put the same condition in **`abort_if`**, keep a `notify:` block | halts (exit 3) **and** pings once |
+### The three human policies — which clause the condition sits in
 
 There is no `human:` block and no mode switch. The policy is **which clause the condition sits in** —
-the same detector, the same delivery, one word of difference.
+the same detector, the same delivery, one word of difference:
+
+| `notify_if` | `notify.cmd` | policy |
+|---|---|---|
+| set | non-empty | **notify + keep going** — fires `notify.cmd`, exit code unchanged, **loop continues** |
+| absent | non-empty | **stop + notify** — no live ping; it fires once when `abort_if` halts, including an `abort_if` already true at launch |
+| absent | absent | **no human at all** — pure autonomy |
+| set | absent/empty | ✗ **hard error at startup** — nothing would fire, so agg refuses the silent no-op |
 
 ### The escalation ladder is composition, not a config object
 
 "flat progress → try a different-vendor recovery step → still stuck → notify and keep running → hard
-ceiling → stop" is not one object you configure. It decomposes onto three things:
+ceiling → stop" is not one object you configure. Stage 1 is a **sequence** statement
+(`if stalled then reconsider`), stage 2 is **`notify_if`**, stage 3 is **`abort_if`** — two things
+that already existed plus the one new clause.
 
-| ladder stage | configured by | status |
-|---|---|---|
-| flat progress → **recovery** on a different vendor | the **sequence**: `if stalled then reconsider` | exists |
-| still stuck → **notify, keep running** | **`notify_if`** | the one new clause |
-| ceiling / declared blocker → **stop** | **`abort_if`** | exists |
-
-**The ordering is not hardcoded — it emerges.** `if stalled then reconsider` runs because it is a
-sequence statement; `notify_if` can only fire on a *later* cycle, one where the detector is still true
-— i.e. after the recovery step already failed to move anything. You tune the ladder by tuning each
-detector's sensitivity and by choosing **which clause** its threshold sits in. Nothing enforces the
-order; the composition produces it.
+**The ordering emerges from the detectors you choose — so choosing them is on you.** `notify_if` is
+evaluated at the **gate of the session that just ran**; an `if <expr> then …` branch is resolved when
+the **next** session is picked. Name the *same* detector in both and you are paged one full cycle
+**before** the recovery step is even dispatched — the ladder inverted. Give `notify_if` the
+**stricter** detector (a higher threshold, or `stuck` over `stalled`) so it can only be true after
+the recovery already failed to move anything.
 
 ```yaml
 steps:
@@ -320,42 +321,39 @@ sequence:
     - "worker x3"
     - "if stalled then reconsider"      # STAGE 1 — recovery, different vendor, no human involved
   done_if:   "all_tests_pass AND coverage.value >= 80"
-  abort_if:  "over_budget OR wall_hours >= 8"    # STAGE 3 — stop, on ceilings the worker can't fake
-  notify_if: "stuck.value >= 85"                 # STAGE 2 — notify, KEEP RUNNING
+  abort_if:  "over_budget OR wall_hours >= 8"    # STAGE 3 — stop, on ceilings the worker can't reach
+  notify_if: "stuck.value >= 85"                 # STAGE 2 — notify, KEEP RUNNING. STRICTER than the
+                                                 # `stalled` branch above, so it fires only after it failed
   notify:
     cooldown_sessions: 5
-    cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"]
+    cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]
 ```
 
 > ⚠ **This example does not start until you author `stuck`.** `stuck` is a *user-authored* judge
 > ([below](#the-three-stuck-detectors)); a name that resolves to no file is a **hard error at startup**.
-> Swap in `notify_if: "stalled"` for a config that runs with zero authoring.
-
-### Config validity — all four combinations
-
-| `notify_if` | `notify.cmd` | verdict |
-|---|---|---|
-| set | non-empty | ✅ the notify ladder |
-| set | absent/empty | ✗ **hard error at startup** — nothing would fire, so agg refuses the silent no-op |
-| absent | non-empty | ✅ **stop + notify** — the ping fires only when `abort_if` halts |
-| absent | absent | ✅ pure autonomy |
-
-Row 3 is deliberate, not an oversight: a `notify:` block with no `notify_if` never fires on a live
-cycle, only on the halt. That *is* the "stop + notify" policy.
+> For zero authoring use `notify_if: "stalled"` — and then **drop the `if stalled then reconsider`
+> statement**, or the same detector sits in both clauses and the ladder inverts.
 
 ### `notify.cmd` and the cooldown
 
 ```yaml
 notify:
   cmd:                                    # shell commands, run in order
-    - "curl -s -d {{reason}} ntfy.sh/my-topic"
-    - "./agg/notify.sh {{project}} {{session}}"
+    - "curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"
+    - "timeout 10 ./agg/notify.sh {{project}} {{session}}"
   cooldown_sessions: 3                    # default 3. Minimum sessions between two notify_if fires.
 ```
 
 `notify.cmd` runs **exactly like a hook**: foreground, in order, via `sh -c`, output to the loop log,
 and **best-effort** — a command that is missing, fails, or exits non-zero is logged and never kills the
 run. A notification is auxiliary; the loop's job is the loop.
+
+> ⚠ **Foreground means untimed. Bound every command yourself.** Delivery is synchronous on purpose —
+> the page goes out before the loop moves on — and agg imposes **no timeout**, so a `curl` against a
+> host that accepts and then stalls hangs the gate until a human notices. Write
+> `curl --max-time 10`, or wrap anything else in `timeout 10 …`. An unbounded delivery turns a
+> side-channel into the [anti-goal](#stuck-detection-and-notification): a loop waiting on a human
+> channel. (Same exposure as every other hook — this is just the one you point at the network.)
 
 `cooldown_sessions` debounces `notify_if` only. One agg **session is one step execution**, so
 `cooldown_sessions: 3` means "at most one ping per three steps" — the point is not to nag a human awake
@@ -371,12 +369,9 @@ the cooldown** and does not consume it: a halt happens once, and it is the messa
 | `{{session}}` | the session number |
 | `{{step}}` | the step that just ran (empty string if there was none) |
 
-> **⚠ Do NOT put quotes around a placeholder.** agg substitutes every value **already POSIX-shell-quoted**.
-> Quoting it yourself ships literal quote characters inside the message.
-
 ```yaml
-cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"]      # ✅ agg quotes it for you
-cmd: ["curl -s -d '{{reason}}' ntfy.sh/my-topic"]    # ✗ the message arrives wrapped in ' '
+cmd: ["curl -s -m 10 -d {{reason}} ntfy.sh/my-topic"]      # ✅ agg POSIX-shell-quotes it for you
+cmd: ["curl -s -m 10 -d '{{reason}}' ntfy.sh/my-topic"]    # ✗ the message arrives wrapped in ' '
 ```
 
 The quoting is not cosmetic, and it is why you must not fight it: `{{reason}}` is frequently
@@ -390,12 +385,20 @@ substitution is a **single pass**, so a value that happens to contain `{{project
 
 | fired by | `{{reason}}` is |
 |---|---|
-| `notify_if` | the `rationale` of the judge **named in the expression** with the highest `value` — so `stuck.value >= 85 OR blocked` reports whichever detector is actually shouting. Judges with an empty rationale are skipped; a tie goes to the **first** in run-set order. |
-| `notify_if`, no usable rationale | the **`notify_if` expression text** — e.g. at the baseline pass, or when the expression names only run-scalars. |
-| an `abort_if` halt | the **`abort_if` expression text**, plus the winning judge's rationale when the expression names one: `blocked OR over_iterations — BLOCKED: need the prod deploy key`. A ceiling-only expression (`over_budget OR wall_hours >= 8`) names no judge, so it arrives as just the expression. |
+| `notify_if` | the `rationale` of **one judge named in the expression**: judges reporting `met` are preferred over the rest, the highest `value` wins inside that group, and a tie goes to the **first** in run-set order. An empty rationale is skipped. So `stuck.value >= 85 OR blocked` reports the firing 0–1 `blocked` rather than a quiet 0–100 `stuck`. |
+| `notify_if`, no usable rationale | the **`notify_if` expression text** — when every named judge's rationale is empty, or the expression names only run-scalars (`over_iterations`, `wall_hours`). |
+| an `abort_if` halt | the **`abort_if` expression text**, plus that same winning rationale when the expression names a judge: `blocked OR over_iterations — BLOCKED: need the prod deploy key`. A ceiling-only expression (`over_budget OR wall_hours >= 8`) names no judge, so it arrives as just the expression. |
 
-Whitespace collapses: `{{reason}}` is always **one line**, because every sink you would send it to
-(ntfy, syslog, `>> file`, a phone notification) is line-oriented.
+**It is a heuristic, not an attribution.** agg does not evaluate *which subterm* made the expression
+true — `met`-first is a proxy for "this detector has something to say". A judge whose own `met`
+threshold differs from the one you wrote (`stuck.value >= 50` against a rubric that sets `met` at 85)
+can still lose to a met judge that is not the reason you were paged. Put detectors in one `notify_if`
+only if you would want to hear from either of them.
+
+Because that text is worker-authored, agg normalises it before it reaches you: whitespace collapses,
+control characters are stripped, and it is capped at 400 characters. `{{reason}}` is always **one
+line** — every sink you would send it to (ntfy, syslog, `>> file`, a phone notification) is
+line-oriented, and none of them should be repaintable by the worker.
 
 ### Isolation: `notify.cmd` runs in the current step's jail
 
@@ -421,10 +424,8 @@ ending, success or abort:
 
 ```yaml
 hooks:
-  on_stop: ["curl -s -d 'agg finished' ntfy.sh/my-topic"]
+  on_stop: ["curl -s --max-time 10 -d 'agg finished' ntfy.sh/my-topic"]
 ```
-
-Use `on_stop` for "the run is over", `notify_if` for "the run is still going and needs you".
 
 ### The moat — a worker-authored signal belongs in `notify_if`, not `abort_if`
 
@@ -440,13 +441,24 @@ abort_if:  "blocked OR over_budget"      # ⚠ …and now the worker owns the ki
 **The discipline:** wire worker-authored signals to `notify_if` **only**. The worst-case abuse is then
 "the worker made the loop ping a human" — annoying, rate-limited by the cooldown, and adjudicable (an
 LLM `blocked` judge can read `BLOCKED.md` skeptically, as untrusted evidence). The loop keeps running;
-it is never "the agent ended the run." **Termination stays on detectors the worker cannot fake:**
-`over_budget`, `over_cost`, `over_iterations`, `wall_hours`, `any_regressed(invariants)`, and
-`stalled`/`stuck`, which read `agg/state/verdicts.jsonl` — a file **agg** writes.
+it is never "the agent ended the run."
 
-**agg does not enforce this.** There is no startup guard refusing a worker-writable judge in
-`abort_if`: "stop when the worker says it is blocked" is a legitimate policy for a run you are
-watching, and the config is yours. It is a tradeoff you make explicitly, not one agg makes for you.
+**Only one of the three tiers is actually out of the worker's reach.** Be precise about which:
+
+| tier | example terms | what stops the worker |
+|---|---|---|
+| **process-internal** | `over_budget`, `over_cost`, `over_iterations`, `wall_hours`, `any_regressed(invariants)` | agg computes them from its own in-memory run state. Nothing on disk. **Genuinely unfakeable** — these are what termination should stand on. |
+| **agg-owned file** | `stalled`, `stuck` — both read `agg/state/verdicts.jsonl` | a **protocol** boundary, not a permission one. agg writes that ledger and a worker has no sanctioned reason to touch it, so a worker that appends to it is unambiguously tampering — but `agg/state/` sits inside the worker's writable cwd on **every** isolation tier, `sandbox` included, and the ledger carries no integrity check. Forging three flat `merged` rows makes `stalled` report met. |
+| **worker-authored** | `blocked` over `agg/state/BLOCKED.md` | nothing. The worker writes the file. |
+
+`stalled`/`stuck` are a **meaningfully higher bar** than `blocked` — the worker must break the protocol
+rather than use it, and that is visible after the fact — but "the worker cannot fake it" is true only
+of row 1. Detect on any row; **terminate on row 1**.
+
+**agg does not enforce any of this.** There is no startup guard refusing a worker-writable judge in
+`abort_if`, and no integrity check on the ledger: "stop when the worker says it is blocked" is a
+legitimate policy for a run you are watching, and the config is yours. It is a tradeoff you make
+explicitly, not one agg makes for you.
 
 ## Judges resolved by name
 
@@ -551,8 +563,8 @@ first one ships:
 
 | detector | ships? | signal | can the worker fake it? | put it in |
 |---|---|---|---|---|
-| `stalled` | ✅ embedded in the binary | judge values flat over the last 3 merged steps | **no** — agg writes `verdicts.jsonl` | `if … then`, `notify_if` |
-| `stuck` | ✗ **you author it** | a 0–100 confidence over agg's own ledger | **no** — same reason | `notify_if` (or `abort_if`, at a threshold you trust) |
+| `stalled` | ✅ embedded in the binary | judge values flat over the last 3 merged steps | **not without tampering** — agg owns `verdicts.jsonl`, but it is worker-writable on every tier | `if … then`, `notify_if` |
+| `stuck` | ✗ **you author it** | a 0–100 confidence over agg's own ledger | **not without tampering** — same file, same caveat | `notify_if` (or `abort_if`, if you accept [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s middle row) |
 | `blocked` | ✗ **you author it** | the worker declaring a human-only blocker | **yes** — the worker writes the file | `notify_if` — see [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if) |
 
 **A config naming `stuck` or `blocked` is a hard error at startup until the file exists.** Only
@@ -564,12 +576,16 @@ first one ships:
 #!/usr/bin/env bash
 # agg/judges/blocked.sh — WORKER-AUTHORED evidence. Wire it to notify_if, not abort_if.
 [ -s agg/state/BLOCKED.md ] \
-  && echo "{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"$(head -1 agg/state/BLOCKED.md | sed 's/\\/\\\\/g; s/"/\\"/g')\"}" \
+  && echo "{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"$(head -1 agg/state/BLOCKED.md | sed 's/\\/\\\\/g; s/"/\\"/g; s/[[:cntrl:]]/ /g')\"}" \
   || echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"no blocker declared"}'
 ```
 
-The `sed` escapes backslashes then quotes: the rationale is a line the worker wrote, and unescaped it
-would emit invalid JSON — which agg scores as a judge **`error`**, not a blocker.
+The `sed` escapes backslashes, then quotes, then flattens control characters to spaces. All three
+rules are load-bearing: the rationale is a line the *worker* wrote, and JSON forbids a raw tab, CR or
+ESC inside a string just as firmly as an unescaped quote. Emit any of them and agg scores the judge
+as an **`error`** — false, not a blocker — so the one channel a worker has for reaching a human fails
+silently and closed on an everyday indented line. The quote rule is also what stops the file's
+content from forging `met` or `value`: `","met":false` arrives as text, not as JSON.
 
 Plus one line in the project's `agg/AGG.md`, so the worker knows the channel exists:
 
@@ -577,10 +593,11 @@ Plus one line in the project's `agg/AGG.md`, so the worker knows the channel exi
 > you are not allowed to make), write one line describing it to `agg/state/BLOCKED.md` and stop — do
 > NOT guess or fabricate.
 
-`agg/state/` is gitignored runtime state, so the file survives a session rollback and the judge reads
-it as a plain local file. Delete it once you have unblocked the run.
+`agg/state/` is gitignored runtime state, so the file survives a session rollback — and a crash, and a
+reboot. Delete it once you have unblocked the run: a stale `BLOCKED.md` under `abort_if: "blocked"`
+halts the *next* launch at the baseline judge pass (it pings, but it never gets a session in).
 
-#### `stuck` — an objective confidence over agg's own ledger
+#### `stuck` — a confidence score over agg's own ledger
 
 `agg/state/verdicts.jsonl` is the append-only record of every verdict — session, step, the verdict
 fields, the gate decision. A rubric judge reads it through the existing `log:<path>` input, so there is
@@ -598,9 +615,10 @@ Output `value` = that confidence; `met` = (value >= 85).
 ```
 
 A **script** version is equally valid and cheaper — e.g. `python3` over `verdicts.jsonl` computing "max
-goal value unchanged for N sessions" → a confidence. Either way it reads only agg-owned data, so the
-worker cannot corrupt it, which is what makes `stuck` safe to put in `abort_if` when you want the loop
-to give up on its own.
+goal value unchanged for N sessions" → a confidence. Either way it reads **agg-owned** data instead of
+a worker-authored file, which is the higher bar of [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s
+middle row — not an unfakeable one. Putting `stuck` in `abort_if` is a reasonable way to let the loop
+give up on its own; it still trusts the worker not to write into agg's ledger.
 
 ## Choosing an agent
 

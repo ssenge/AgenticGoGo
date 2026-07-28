@@ -212,20 +212,31 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   notify_if: "stalled"                              # `stalled` ships in the binary — nothing to author
   notify:
     cooldown_sessions: 3                            # min sessions between pings (default 3; 0 = every cycle)
-    cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"] # runs like a hook: best-effort, never fatal
+    cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]   # hook-like: best-effort, never fatal
   ```
-  `{{reason}}` is the firing judge's rationale; `{{project}}` / `{{session}}` / `{{step}}` also work.
-  agg substitutes them **shell-quoted**, so **never wrap a placeholder in quotes of your own** — you
-  would get literal quote characters. `notify_if` with an empty `notify.cmd` is refused at startup
-  (nothing would fire); `notify:` **without** `notify_if` is valid and means "stop + notify" — a ping
-  only when `abort_if` halts. A `done_if` success never pings; for that use `hooks.on_stop`.
+  Delivery is **foreground and untimed**, so every command must bound itself (`curl --max-time 10`,
+  or `timeout 10 …`) — an unbounded one hangs the loop, the exact thing `notify_if` exists to avoid.
+  `{{reason}}` is the rationale of a judge named in the expression (`met` first, then highest
+  `value`); `{{project}}` / `{{session}}` / `{{step}}` also work. agg substitutes them
+  **shell-quoted**, so **never wrap a placeholder in quotes of your own** — you would get literal
+  quote characters. `notify_if` with an empty `notify.cmd` is refused at startup (nothing would
+  fire); `notify:` **without** `notify_if` is valid and means "stop + notify" — a ping only when
+  `abort_if` halts, including an `abort_if` already true at launch. A `done_if` success never pings;
+  for that use `hooks.on_stop`.
   - **⚠ THE MOAT — a WORKER-AUTHORED signal goes in `notify_if`, NEVER in `abort_if`.** A detector
     that reads something the worker wrote (a `blocked` judge over `agg/state/BLOCKED.md`, say) hands
     the agent a way to end its own run by declaring itself stuck — the precise failure the judges
     exist to prevent. In `notify_if` the worst case is an annoying ping, rate-limited by the
-    cooldown, and the loop keeps going. Keep TERMINATION on signals the worker cannot fake:
-    `over_budget`, `over_iterations`, `wall_hours`, or a `stuck` detector over agg's own
-    `agg/state/verdicts.jsonl`.
+    cooldown, and the loop keeps going. Keep TERMINATION on the signals the worker genuinely cannot
+    reach — the process-internal ones: `over_budget`, `over_cost`, `over_iterations`, `wall_hours`,
+    `any_regressed(invariants)`. A `stalled`/`stuck` detector over agg's own
+    `agg/state/verdicts.jsonl` is a **higher bar but not unfakeable**: agg owns that file and a
+    worker touching it is tampering, yet `agg/state/` is inside the worker's writable cwd on every
+    isolation tier and the ledger has no integrity check.
+  - **Do not reuse one detector across clauses.** `notify_if: "stalled"` next to a
+    `"if stalled then reconsider"` step pages the human at the gate of the session that just ran,
+    one full cycle before the recovery step is dispatched. Either omit the `if` branch, or give
+    `notify_if` the stricter detector (`stuck.value >= 85`).
   - **Only propose a detector that resolves.** `stalled` is shipped; `stuck` and `blocked` are judges
     you must WRITE into `agg/judges/` in Step 3 first — naming one that resolves to no file is a hard
     startup error, and `agg doctor` will refuse the config.
@@ -372,7 +383,7 @@ sequence:
   # notify_if: "stalled"                 # optional PING that does NOT stop the loop — see Step 4.
   #                                      # `stalled` is shipped; a `stuck`/`blocked` detector must be
   #                                      # AUTHORED in agg/judges/ first, or startup hard-errors.
-  # notify: { cooldown_sessions: 3, cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"] }
+  # notify: { cooldown_sessions: 3, cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"] }
 
 # Optional top-level survivors — omit if unused:
 # heartbeat_secs: 30
