@@ -404,12 +404,14 @@ sequence:
   notify_if: "stalled"                                   # optional PING — the loop KEEPS RUNNING
   notify:
     cooldown_sessions: 5                                 # at most one ping per 5 sessions (default 3)
-    cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"]      # {{reason}} = the firing judge's rationale
+    cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]   # bound it: delivery is FOREGROUND
 ```
 
-`{{reason}}` (plus `{{project}}`, `{{session}}`, `{{step}}`) is substituted **shell-quoted by `agg`** —
-so never wrap a placeholder in quotes of your own. Which clause a detector sits in *is* your human
-policy: none = pure autonomy, `notify_if` = tell me but keep going, `abort_if` = stop. Put
+`{{reason}}` is the rationale of a judge named in the expression (`met` first, then highest `value`) —
+a heuristic, not proof of which subterm fired. It, plus `{{project}}` / `{{session}}` / `{{step}}`, is
+substituted **shell-quoted by `agg`** — so never wrap a placeholder in quotes of your own. Which clause
+a detector sits in *is* your human policy: none = pure autonomy, `notify_if` = tell me but keep going,
+`abort_if` = stop. Put
 **worker-authored** signals in `notify_if` only, or the agent gains a way to end its own run — the
 tradeoff, and the copy-ready `stuck` / `blocked` detectors, are in [`docs/CONFIG.md`](docs/CONFIG.md).
 

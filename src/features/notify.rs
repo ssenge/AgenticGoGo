@@ -125,12 +125,16 @@ pub(crate) fn halt_ping(ctx: &mut LoopState, halt_reason: Option<&str>) {
     // to tell them WHY. So append the winning judge's rationale when the expression names one:
     // `blocked OR over_iterations — BLOCKED: need the prod key`. A ceiling-only expression names no
     // judge, so `notify_reason` echoes the expression back and the message stays exactly as §8.5
-    // specifies. Compare COLLAPSED forms — `notify_reason` normalises whitespace, so a raw
-    // `blocked  OR  over_iterations` would otherwise never equal its own echo and get duplicated.
+    // specifies. Compare SANITIZED forms, using the very function `notify_reason` ends with: it
+    // normalises whitespace, strips control chars AND caps the length, so a raw
+    // `blocked  OR  over_iterations` — or an `abort_if` past the 400-char cap, where a
+    // whitespace-only collapse still never equals the truncated echo — cannot be appended to itself.
+    // It also makes the "capped at 400 chars, always one line" contract hold on the halt path, not
+    // just on the `notify_if` one.
     let expr = halt_reason.unwrap_or("abort_if").to_string();
     let detail = ctx.eng.notify_reason(&expr);
-    let collapsed = expr.split_whitespace().collect::<Vec<_>>().join(" ");
-    let reason = if detail == collapsed { collapsed } else { format!("{collapsed} — {detail}") };
+    let clean = crate::core::engine::sanitize_reason(&expr, &expr);
+    let reason = if detail == clean { clean } else { format!("{clean} — {detail}") };
     deliver(ctx, &cfg, &reason, "abort");
 }
 
@@ -218,5 +222,269 @@ mod tests {
     fn shq_handles_the_quote_itself() {
         assert_eq!(shq("it's"), r"'it'\''s'");
         assert_eq!(shq(""), "''");
+    }
+
+    // ── HANDLER-level tests. `NotifyOnStuck` is where ALL the delivery POLICY lives (the debounce,
+    //    the halt exemption, the success suppression, the jail) and none of it is expressible as a
+    //    pure function. `tests/plugin_api.rs::probe_state` already stands a `LoopState` up from
+    //    OUTSIDE the crate, so building one here is cheap — and every assertion below reads a file
+    //    that a REAL `sh -c` wrote through the REAL `hooks::run`, i.e. what was DELIVERED, never a
+    //    flag the handler set. ─────────────────────────────────────────────────────────────────────
+
+    use crate::core::config::AggConfig;
+    use crate::core::engine::{CycleResult, Engine};
+    use crate::core::model::{Judge, JudgeKind, Lifecycle, Verdict};
+    use crate::isolation::Isolation;
+    use std::path::Path;
+
+    /// A project dir whose `notify:` block runs ONE command appending to a file in the project root.
+    /// That file is the delivery sink for every test below.
+    fn project(cooldown: u32, cmd: &str) -> (tempfile::TempDir, AggConfig) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("agg/state")).unwrap();
+        let yaml = format!(
+            "project: probe\nsequence:\n  steps: []\n  notify:\n    cooldown_sessions: {cooldown}\n    cmd:\n      - '{cmd}'\n"
+        );
+        let path = tmp.path().join("agg.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = AggConfig::load(&path).unwrap();
+        (tmp, cfg)
+    }
+
+    /// What the delivery command actually received, one line per fire, in order.
+    fn pings(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("pings.txt")).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    /// An engine that names no judge: `notify_if` is `None`, so the `CycleResult` these tests plant
+    /// in scratch is the only source of a reason — the handler's POLICY is isolated from the core's
+    /// reason-picking, which `core::engine`'s own tests already cover.
+    fn quiet_engine() -> Engine {
+        Engine::new(vec![], "iterations > 999999".into(), None, None).unwrap()
+    }
+
+    /// A `LoopState` a handler can run against, mirroring `tests/plugin_api.rs::probe_state`.
+    /// `tier` is the CURRENT step's isolation — the value `deliver` must resolve the jail from.
+    fn state<'a>(cfg: &'a AggConfig, dir: &'a Path, eng: Engine, tier: Isolation) -> LoopState<'a> {
+        let loop_start = std::time::Instant::now();
+        let dash = crate::state::DashboardState::default();
+        LoopState {
+            cfg,
+            ruler: crate::backend::for_name("claude").unwrap(),
+            judge_model: "m".into(),
+            judge_timeout: 1,
+            dir,
+            config_base: dir,
+            eng,
+            cursor: crate::core::sequence::Cursor::new(vec![]),
+            cur_step: Some(crate::core::config::ResolvedStep {
+                name: "worker".into(),
+                agent: "claude".into(),
+                model: None,
+                effort: None,
+                worker_args: vec![],
+                state: "agg/state/STATE.md".into(),
+                role_prompt: None,
+                prompt: None,
+                skip_judges: false,
+                isolation: tier,
+                image: crate::isolation::DEFAULT_IMAGE.into(),
+            }),
+            live: crate::state::LiveState::new(dir, loop_start, dash.clone()),
+            dash,
+            ledger: crate::project::RunLedger::begin(dir, "probe", 0, 0),
+            bus: None,
+            budget_total: None,
+            cost_limit: None,
+            max_iter: None,
+            max_sessions: 0,
+            gate_regressions: false,
+            loop_start,
+            lifetime_base: 0,
+            session: 0,
+            tokens_spent: 0,
+            cost_spent: 0.0,
+            per_agent: std::collections::BTreeMap::new(),
+            ext: crate::plugin::Extensions::default(),
+            scratch: crate::plugin::Extensions::default(),
+        }
+    }
+
+    /// Plant the cycle an on_verify handler would have left in scratch, then run ONE session's gate.
+    fn cycle(st: &mut LoopState, session: u32, notify: Option<&str>, stop: bool, halt: Option<&str>) {
+        st.session = session;
+        st.scratch.get::<AGGScratch>().res = Some(CycleResult {
+            stop,
+            halt: halt.is_some(),
+            halt_reason: halt.map(str::to_string),
+            notify: notify.map(str::to_string),
+            ..CycleResult::default()
+        });
+        let flow = NotifyOnStuck.run(st).expect("delivery is best-effort — the handler never errors");
+        assert!(matches!(flow, Flow::Continue), "notify is PURE SIGNAL: it must never gate the loop");
+    }
+
+    /// KILLS `session - last >= cooldown` → `> cooldown` (§9, §12.10). The suppression half is
+    /// observable in the shipped e2e fixture; the REFIRE half — "fires again at exactly N+cooldown" —
+    /// is observable nowhere, and under `>` every escalation after the first arrives a session late
+    /// for the rest of an overnight run.
+    #[test]
+    fn the_debounce_suppresses_its_window_and_refires_at_exactly_n_plus_cooldown() {
+        let (tmp, cfg) = project(3, r#"printf "%s\n" {{session}} >> pings.txt"#);
+        let mut st = state(&cfg, tmp.path(), quiet_engine(), Isolation::None);
+        for s in 1..=5 {
+            cycle(&mut st, s, Some("verdicts are flat"), false, None);
+        }
+        assert_eq!(pings(tmp.path()), ["1", "4"], "fires at 1, silent through 3, REFIRES at 1+3 — not at 5");
+
+        // `cooldown_sessions: 0` is documented as "every qualifying cycle" — the ladder's first rung.
+        let (tmp0, cfg0) = project(0, r#"printf "%s\n" {{session}} >> pings.txt"#);
+        let mut st0 = state(&cfg0, tmp0.path(), quiet_engine(), Isolation::None);
+        for s in 1..=3 {
+            cycle(&mut st0, s, Some("verdicts are flat"), false, None);
+        }
+        assert_eq!(pings(tmp0.path()), ["1", "2", "3"], "0 ⇒ no debounce at all");
+    }
+
+    /// KILLS both halves of §12.10's terminal-ping rule, neither of which any fixture combines with a
+    /// live `notify_if` today: (a) gating the halt branch on `cooled_down` drops the "your overnight
+    /// run gave up, here is why" page whenever a stuck ping happened recently — precisely when a halt
+    /// is likeliest; (b) letting the halt CONSUME the debounce slides the next live ping a session
+    /// late. In production a halt ends the run, so (b) is only observable at handler level — which is
+    /// the argument for pinning it here rather than in the e2e.
+    #[test]
+    fn the_halt_ping_ignores_the_debounce_and_does_not_consume_it() {
+        let (tmp, cfg) = project(3, r#"printf "%s:%s\n" {{session}} {{reason}} >> pings.txt"#);
+        let mut st = state(&cfg, tmp.path(), quiet_engine(), Isolation::None);
+        cycle(&mut st, 1, Some("verdicts are flat"), false, None); // opens a 3-session debounce
+        cycle(&mut st, 2, None, false, Some("over_iterations")); // …the halt fires straight through it
+        cycle(&mut st, 3, Some("verdicts are flat"), false, None); // still inside the ORIGINAL window
+        cycle(&mut st, 4, Some("verdicts are flat"), false, None); // 4 = 1+3 ⇒ due, if the halt stayed out
+        assert_eq!(pings(tmp.path()), ["1:verdicts are flat", "2:over_iterations", "4:verdicts are flat"]);
+    }
+
+    /// KILLS reading `res.notify` without `res.stop`, and KILLS evaluating the cooldown BEFORE that
+    /// check (§12.8). Three docs promise `notify.cmd` does not fire when `done_if` is satisfied and
+    /// nothing enforced it, so a run that SUCCEEDED paged a human at 3am — and burned the debounce on
+    /// the way out, silencing the next real signal.
+    #[test]
+    fn a_successful_session_never_pings_and_never_burns_the_debounce() {
+        let (tmp, cfg) = project(3, r#"printf "%s\n" {{session}} >> pings.txt"#);
+        let mut st = state(&cfg, tmp.path(), quiet_engine(), Isolation::None);
+        cycle(&mut st, 1, Some("the detector is still shouting"), true, None);
+        assert!(pings(tmp.path()).is_empty(), "done_if satisfied — a finished run is not a cry for help");
+        assert!(
+            st.ext.get::<AGGState>().notify.last_notify_session.is_none(),
+            "…and the suppressed cycle must not start a debounce it never used"
+        );
+        // proof the suppression is about `stop` and not about the fixture being unable to deliver:
+        // the very next non-final cycle pings, which it could not do had session 1 opened a window.
+        cycle(&mut st, 2, Some("the detector is still shouting"), false, None);
+        assert_eq!(pings(tmp.path()), ["2"]);
+    }
+
+    /// KILLS comparing the halt expression against `notify_reason`'s echo on anything other than the
+    /// SANITIZED form. `notify_reason` collapses whitespace, strips control chars and caps at 400 —
+    /// so a raw expression that differs from its own echo in ANY of those three ways gets appended to
+    /// itself and the operator is paged the guard twice. A whitespace-only collapse (the obvious
+    /// half-fix) still fails the third case, which is why the cap is tested here too: docs/CONFIG.md
+    /// promises `{{reason}}` is one line capped at 400 chars, and that has to hold on the halt path.
+    #[test]
+    fn a_non_canonical_abort_expression_is_never_appended_to_itself() {
+        let (tmp, cfg) = project(0, r#"printf "%s\n" {{reason}} >> pings.txt"#);
+        let mut st = state(&cfg, tmp.path(), quiet_engine(), Isolation::None);
+        // padded, tab-bearing and multi-line spellings a YAML block scalar produces naturally
+        cycle(&mut st, 1, None, false, Some("over_iterations  OR \t over_budget"));
+        cycle(&mut st, 2, None, false, Some("over_iterations\nOR over_budget\n"));
+        // …and one past the 400-char cap, where the echo is truncated and can never equal the raw text
+        let long = ["over_iterations"; 30].join(" OR ");
+        assert!(long.len() > 400, "the fixture has to exceed the cap to test it");
+        cycle(&mut st, 3, None, false, Some(&long));
+
+        let got = pings(tmp.path());
+        assert_eq!(got[0], "over_iterations OR over_budget");
+        assert_eq!(got[1], "over_iterations OR over_budget");
+        assert_eq!(got.len(), 3, "one line per halt — a multi-line reason would split a line-oriented sink");
+        assert!(!got[2].contains(" — "), "the capped expression must not be appended to its own echo: {}", got[2]);
+        assert_eq!(got[2].chars().count(), 401, "…and it arrives capped at 400 chars plus the ellipsis");
+    }
+
+    /// KILLS `let tier = Isolation::None;` in [`deliver`] (§12.5, ISOLATION.md §14). `notify.cmd`
+    /// typically execs a project script, and both the command and the script live in the WORKER'S
+    /// WRITABLE CWD — so a confined worker escapes through the notification if delivery runs unjailed.
+    ///
+    /// The probe writes to `$HOME`, and it has to be `$HOME` rather than, say, the crate's `target/`:
+    /// the profile grants cwd, `$TMPDIR` AND `/private/tmp` unconditionally, so a probe under a repo
+    /// that happens to sit in a temp dir would be writable INSIDE the jail and this would fail for the
+    /// wrong reason. Unconfined the file lands; under `sandbox` it cannot land by ANY route — the
+    /// profile denies it, and on a host with no wrapper (or a nested jail that refuses, which is why
+    /// the twin test in `hooks.rs` is `#[ignore]`d) `hooks::run` SKIPS the command rather than run it
+    /// unconfined. Every branch agrees on "absent", so this needs no working Seatbelt to mean
+    /// something; only a dropped tier makes the file appear.
+    #[test]
+    #[cfg(unix)]
+    fn delivery_runs_in_the_current_steps_jail() {
+        let home = std::env::var("HOME").expect("a unix test host has $HOME");
+        let escapes = |tier: Isolation| {
+            let probe = Path::new(&home).join(format!(".agg-notify-jail-probe.{}.{tier:?}", std::process::id()));
+            let _ = std::fs::remove_file(&probe);
+            let (tmp, cfg) = project(0, &format!("printf x > {}", probe.display()));
+            let mut st = state(&cfg, tmp.path(), quiet_engine(), tier);
+            cycle(&mut st, 1, Some("stalled hard"), false, None);
+            let landed = probe.exists();
+            let _ = std::fs::remove_file(&probe);
+            landed
+        };
+        assert!(escapes(Isolation::None), "control: an unconfined delivery really does reach outside the project");
+        assert!(!escapes(Isolation::Sandbox), "a `sandbox` step's notify.cmd must not reach outside the jail");
+    }
+
+    /// KILLS moving `NotifyOnStuck` ahead of `GateKeepRollback` in the on_gate registration. That
+    /// order is the entire justification for the placement (§12.6) and nothing observed it: swapping
+    /// the two entries compiles and passes the whole suite. Dispatched through the REAL registry
+    /// entry, so what is under test is the shipped order, not a hand-assembled list.
+    ///
+    /// The scenario is a gate that discards the session (nothing staged ⇒ the `_` arm restores base
+    /// truth and rebuilds `res`). Notifying before that pages a human about work agg is about to throw
+    /// away AND consumes the debounce, so the genuine signal N sessions later is silenced too.
+    #[test]
+    fn the_gate_pings_about_kept_truth_never_about_work_it_just_discarded() {
+        let (tmp, cfg) = project(0, r#"printf "%s\n" {{reason}} >> pings.txt"#);
+        // an engine whose `notify_if` is true against RESTORED base truth …
+        let mut stuck = Judge {
+            name: "stuck".into(),
+            kind: JudgeKind::Script { path: "true".into() },
+            invariant: false,
+            in_dod: false,
+            state: Lifecycle::Pending,
+            last_verdict: None,
+            ever_met: false,
+        };
+        stuck.apply(Verdict {
+            met: true,
+            value: Some(90.0),
+            max: Some(100.0),
+            target: 85.0,
+            rationale: "KEPT — base truth is flat".into(),
+            evidence: vec![],
+            error: None,
+        });
+        let eng = Engine::new(vec![stuck], "iterations > 999999".into(), None, Some("stuck.value >= 85".into())).unwrap();
+        let mut st = state(&cfg, tmp.path(), eng, Isolation::None);
+        // … while the pre-gate cycle carries a reason derived from the session about to be discarded.
+        st.session = 1;
+        st.scratch.get::<AGGScratch>().res = Some(CycleResult {
+            notify: Some("DISCARDED — from the rolled-back session".into()),
+            ..CycleResult::default()
+        });
+
+        let l = crate::registry::Lifecycle::with_hooks(&crate::core::config::Hooks::default(), tmp.path(), Isolation::None);
+        for h in &l.on_gate {
+            h.run(&mut st).expect("the gate ran");
+        }
+
+        // ONE equality pins three things: the discarded reason never left the process (the ordering),
+        // a ping DID fire (so this is not vacuously green), and it carries the recomputed truth.
+        assert_eq!(pings(tmp.path()), ["KEPT — base truth is flat"]);
     }
 }

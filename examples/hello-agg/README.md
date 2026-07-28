@@ -79,7 +79,12 @@ sequence:
 
 Detectors are just judges, so there's no new machinery to learn: `stalled` is a library judge that
 reads `agg/state/verdicts.jsonl` and reports `met` when no judge has moved across the last 3 merged
-steps. Swap in a `curl` to a push service and you get the ping on your phone instead of in a file.
+steps. Swap in a `curl` to a push service and you get the ping on your phone instead of in a file —
+bound it (`curl --max-time 10`), because delivery is foreground and agg imposes no timeout.
+
+`stalled` is the right detector here because this sequence has no `if stalled then …` recovery step.
+Put the same detector in both and the ping lands a cycle *before* the recovery runs; see
+[the escalation ladder](../../docs/CONFIG.md#the-escalation-ladder-is-composition-not-a-config-object).
 
 `{{reason}}` becomes the firing judge's rationale — *"STALLED — no judge moved across the last 3
 merged steps"* — and agg substitutes it **shell-quoted**, so a reason full of spaces, quotes or `;`

@@ -102,9 +102,11 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
         && cfg.sequence.notify.as_ref().map(|n| n.cmd.is_empty()).unwrap_or(true)
     {
         anyhow::bail!(
+            // the suggested command is BOUNDED: delivery is foreground and untimed, and this string is
+            // read at exactly the moment the user is about to write their first notify.cmd.
             "sequence.notify_if is set but sequence.notify.cmd is empty — nothing would fire. Add a \
-             delivery command (e.g. notify: {{ cmd: [\"curl -s -d {{{{reason}}}} ntfy.sh/my-topic\"] }}) \
-             or remove notify_if."
+             delivery command (e.g. notify: {{ cmd: [\"curl -s --max-time 10 -d {{{{reason}}}} \
+             ntfy.sh/my-topic\"] }}) or remove notify_if."
         );
     }
 

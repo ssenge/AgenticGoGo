@@ -38,8 +38,10 @@ sequence:
   # author, and naming a judge that resolves to no file is a HARD startup error — this file must run
   # with zero edits. `notify_if: "stalled"` needs no authoring (shipped judge) if you want it today.
   # {{reason}} is the firing judge's rationale, shell-quoted BY agg — never add quotes of your own.
+  # Delivery is FOREGROUND and untimed, so bound every command (`curl --max-time 10`, `timeout 10 …`):
+  # an unbounded curl against a wedged host stalls the loop, the exact thing this clause avoids.
   # notify_if: "stuck.value >= 85"
-  # notify: { cooldown_sessions: 3, cmd: ["curl -s -d {{reason}} ntfy.sh/my-topic"] }
+  # notify: { cooldown_sessions: 3, cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"] }
 
 heartbeat_secs: 30
 watchdog: { idle_secs: 900, cpu_grace: 180 }

@@ -26,8 +26,11 @@ sequence:
   abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
   # ASK FOR HELP WITHOUT STOPPING. `notify_if` is the non-terminal twin of `abort_if`: when it is
   # true agg runs `notify.cmd` and the loop KEEPS RUNNING. `stalled` is a judge that ships inside
-  # the binary (it reads agg/state/verdicts.jsonl), so this runs as-is — nothing to author. A real
-  # setup would `curl` a push service here; a local append keeps the example offline.
+  # the binary (it reads agg/state/verdicts.jsonl), so this runs as-is — nothing to author.
+  # `stalled` is safe HERE because the sequence above has no `if stalled then …` branch: name one
+  # detector in both and you get paged a cycle BEFORE the recovery step runs (docs/CONFIG.md, "the
+  # escalation ladder"). A real setup would `curl` a push service — and would bound it
+  # (`curl --max-time 10`), since delivery is foreground; a local append keeps the example offline.
   notify_if: "stalled"
   notify:
     cooldown_sessions: 3           # at most one ping per 3 sessions — don't nag (default 3; 0 = every cycle)
