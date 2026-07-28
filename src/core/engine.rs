@@ -24,6 +24,37 @@ fn eval_or_log(expr: &str, ctx: &StopContext, which: &str) -> bool {
     }
 }
 
+/// The longest `{{reason}}` we will emit. A rationale is worker-influenced (a `blocked` detector
+/// echoes a line the worker wrote), and it lands in an operator's terminal, a push notification and
+/// a command line — all of which have opinions about length. `core::memory` already caps and
+/// control-strips every worker string it ingests; this is the same discipline on the notify path.
+const REASON_MAX_CHARS: usize = 400;
+
+/// One safe, single-LINE reason: control characters removed, whitespace collapsed, length capped.
+/// Falls back to `fallback` (the expression text) if sanitizing leaves nothing — an empty
+/// notification looks delivered and says nothing, which is worse than a terse one.
+///
+/// Quoting for the shell happens later and separately (`features::notify::shq`); this is about the
+/// string being READABLE and honest, not about it being safe to execute.
+fn sanitize_reason(text: &str, fallback: &str) -> String {
+    // `split_whitespace` already collapses \n and \t; the filter catches the rest (ESC, BEL, and
+    // the C1 range — an untrusted string that can repaint or retitle the operator's terminal).
+    let cleaned: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let cleaned = if cleaned.is_empty() { fallback.split_whitespace().collect::<Vec<_>>().join(" ") } else { cleaned };
+    match cleaned.char_indices().nth(REASON_MAX_CHARS) {
+        // truncate on a CHAR boundary — `char_indices` gives one by construction, so this cannot
+        // panic on a multi-byte rationale.
+        Some((byte, _)) => format!("{}…", &cleaned[..byte]),
+        None => cleaned,
+    }
+}
+
 /// Outcome of evaluating the run after a step.
 #[derive(Debug, Default)]
 pub struct CycleResult {
@@ -134,24 +165,32 @@ impl Engine {
     /// only run-scalars like `over_iterations` can be true).
     pub fn notify_reason(&self, expr: &str) -> String {
         let named = stop::judge_names(expr).unwrap_or_default();
-        let best = self
-            .judges
-            .iter()
-            .filter(|g| named.iter().any(|n| n == &g.name))
-            .filter_map(|g| g.last_verdict.as_ref().map(|v| (v.value.unwrap_or(0.0), v.rationale.trim())))
-            .filter(|(_, r)| !r.is_empty())
-            // `reduce` keeping only a STRICTLY greater value, not `max_by`: `Iterator::max_by`
-            // returns the LAST of equal maxima, and §12.3 pins ties to the FIRST in run-set order
-            // (which is the order the expression names them in). Both are deterministic; matching
-            // the spec is free here and a documented tie-break is one less surprise to debug.
-            .reduce(|best, cur| if cur.0 > best.0 { cur } else { best });
-        let text = match best {
+        // MET FIRST, then value. Ranking on raw `value` alone is meaningless across judges: a
+        // rubric scores 0–100 and a script scores 0–1, so a quiet `stuck` at 10/100 outranks a
+        // FIRING `blocked` at 1/1 and the human is paged with the rationale of the detector that is
+        // not complaining. `met` is the judge's own verdict, not proof it made the expression true
+        // (`stuck.value >= 50` can fire while the rubric's own `met` threshold of 85 is unmet), so
+        // it is a heuristic — but it is the right one: among the judges an expression names, the
+        // ones reporting trouble are the ones with something to say. The all-judges pass is the
+        // fallback for exactly that threshold-mismatch case.
+        //
+        // `reduce` with a strict `>`, not `max_by`: `Iterator::max_by` returns the LAST of equal
+        // maxima, and §12.3 pins ties to the FIRST in run-set order (the order the expression names
+        // them). Both are deterministic; matching the spec is free and one less thing to debug.
+        let pick = |met_only: bool| {
+            self.judges
+                .iter()
+                .filter(|g| named.iter().any(|n| n == &g.name))
+                .filter(|g| !met_only || g.met())
+                .filter_map(|g| g.last_verdict.as_ref().map(|v| (v.value.unwrap_or(0.0), v.rationale.trim())))
+                .filter(|(_, r)| !r.is_empty())
+                .reduce(|best, cur| if cur.0 > best.0 { cur } else { best })
+        };
+        let text = match pick(true).or_else(|| pick(false)) {
             Some((_, rationale)) => rationale,
             None => expr,
         };
-        // one LINE: a rationale with an embedded newline would break a line-oriented sink (ntfy,
-        // syslog, a `>> file` tail) and is unreadable in a push notification either way.
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+        sanitize_reason(text, expr)
     }
 
     /// Run every run-set judge (unless `skip_judges`), fold verdicts in, and evaluate done/abort
