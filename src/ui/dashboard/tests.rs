@@ -29,6 +29,10 @@ fn demo_state() -> DashboardState {
         cost_spent: 1.25,
         cost_limit: Some(5.0),
         memory_bytes: 2048,
+        // unflagged by default — the flag has its own test, and every OTHER draw test must render
+        // the layout as it looks when the loop is NOT asking for help.
+        notify_session: None,
+        notify_reason: String::new(),
         goals_met: 1,
         goals_total: 2,
         goals: Vec::new(), // the successor `judges` below drives every reader now.
@@ -359,4 +363,25 @@ fn inject_esc_cancels_and_empty_enter_is_a_noop() {
     handle_key(&mut ui, KeyCode::Char(' '));
     assert_eq!(handle_key(&mut ui, KeyCode::Enter), KeyAction::Continue, "empty inject is a no-op");
     assert!(ui.input.is_none());
+}
+
+/// The FLAG must be visible, and must survive a narrow terminal. It is the first droppable segment
+/// on the Info line precisely so that the spend guards — which are re-derivable from the next
+/// refresh — are what a cramped width gives up instead. A flag nobody sees is the feature failing
+/// silently, which is the one outcome worse than not having it.
+#[test]
+fn a_flagged_loop_says_so_and_survives_a_narrow_terminal() {
+    let mut s = demo_state();
+    assert!(!render(&s, 120, 40).contains("FLAGGED"), "an unflagged loop must not cry wolf");
+
+    s.notify_session = Some(7);
+    s.notify_reason = "STALLED — no judge moved across the last 3 merged steps".into();
+    let wide = render(&s, 120, 40);
+    assert!(wide.contains("FLAGGED"), "the flag renders:\n{wide}");
+    assert!(wide.contains("s7"), "…naming the session it started:\n{wide}");
+    assert!(wide.contains("STALLED"), "…and why:\n{wide}");
+
+    // At a width that cannot fit everything, the flag outranks `done_if`/`abort_if`/memory/idle.
+    let narrow = render(&s, 72, 40);
+    assert!(narrow.contains("FLAGGED"), "the flag must outlive the droppable segments:\n{narrow}");
 }

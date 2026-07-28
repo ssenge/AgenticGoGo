@@ -72,6 +72,13 @@ fn render_state(s: &DashboardState) -> String {
     if s.memory_bytes > 0 {
         out.push_str(&format!("memory {} (LOG.md)\n", crate::util::human_bytes(s.memory_bytes)));
     }
+    // FLAGGED — `notify_if` fired and the loop is asking for a human. It KEPT RUNNING (that is the
+    // point), so this is a standing flag, not a status: it stays until the run ends. Spelled out
+    // rather than abbreviated, because `agg status` is what an operator checks from their phone.
+    if let Some(sess) = s.notify_session {
+        out.push_str(&format!("⚑ FLAGGED for help since session #{sess} — {}\n", s.notify_reason));
+        out.push_str("  (the loop is still running; it never blocks on a human)\n");
+    }
     // per-agent token + cost breakdown (§7.4) — otherwise a mixed run's totals are uninterpretable.
     if !s.per_agent.is_empty() {
         out.push_str("\nper-agent\n");
@@ -414,5 +421,20 @@ mod tests {
         s.finish_reason = "3/3 judges met after 9 session(s)".into();
         let out = render_state(&s);
         assert!(out.contains("done — 3/3 judges met"));
+    }
+
+    /// A flagged loop must SAY it is flagged — and must say, in the same breath, that it is still
+    /// running. `agg status` is what an operator checks from their phone; red text that reads like
+    /// a dead run would send them to a terminal for nothing.
+    #[test]
+    fn a_flagged_run_says_so_and_says_it_is_still_running() {
+        let mut s = sample();
+        assert!(!render_state(&s).contains("FLAGGED"), "an unflagged run must not cry wolf");
+        s.notify_session = Some(4);
+        s.notify_reason = "BLOCKED: need the prod deploy key".into();
+        let out = render_state(&s);
+        assert!(out.contains("FLAGGED for help since session #4"), "{out}");
+        assert!(out.contains("BLOCKED: need the prod deploy key"), "the reason, verbatim: {out}");
+        assert!(out.contains("still running"), "must not read as a dead run: {out}");
     }
 }
