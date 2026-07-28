@@ -9,6 +9,7 @@ pub mod finalize;
 pub mod gate;
 pub mod gitsetup;
 pub mod inject;
+pub mod notify;
 pub mod run;
 pub mod setup;
 pub mod shell;

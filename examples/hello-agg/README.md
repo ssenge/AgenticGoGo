@@ -22,7 +22,8 @@ hello-agg/
       prints_two.sh         # the judge — resolved by the NAME `prints_two` in `done_if`
     state/                  # runtime, gitignored — agg writes it each session:
                             #   INSTRUCTIONS.md (the worker's -p target), STATE.md
-                            #   (forward advice), LOG.md (durable memory)
+                            #   (forward advice), LOG.md (durable memory),
+                            #   NOTIFY.log (written by this config's notify.cmd)
 ```
 
 Each session the worker's `-p` is a tiny fixed pointer — "read `agg/state/INSTRUCTIONS.md` and
@@ -38,9 +39,17 @@ agg run         # drive the loop until done_if (`prints_two`) is met
 `agg plan` prints:
 
 ```
+agg: evaluating 2 judge(s) once (dry run)…
 Goals: 0/1   done_if: prints_two
   · prints_two         script     no   — add.py did not print 2
+  · stalled            script     no   — no verdicts.jsonl yet — nothing to stall on
+
+→ 0/1 met; loop would continue. Run `agg run` to start.
 ```
+
+Two judges run, but the scoreboard says **0/1** — `stalled` is only there to drive the `notify_if`
+below. A detector is machinery, not a goal, so it never counts toward your Definition of Done and
+can never block it.
 
 The judge rejects `3` → the worker edits `add.py` to `print(1 + 1)` → the judge sees `2` →
 `met:true` → `done_if` fires → the loop stops. That's the entire model.
@@ -52,6 +61,39 @@ judge, `prints_two`. A real project composes several — `done_if: "outputs_two 
 the loop only stops when every clause holds. The judge NAME in `done_if` resolves to
 `agg/judges/<name>.sh` (a script judge) or `agg/judges/<name>.md` (an LLM rubric judge); the file
 extension decides.
+
+## Getting told when it's stuck — without stopping it
+
+`done_if` ends the run in success, `abort_if` ends it in failure. **`notify_if` ends nothing** — when
+it's true, agg runs `notify.cmd` and the loop *keeps running*. That's the point: an autonomous loop
+that halts to ask a human is just the babysitting you were trying to escape, so the human is a
+side-channel, never a gate. This config wires it up:
+
+```yaml
+sequence:
+  notify_if: "stalled"             # `stalled` ships in the binary — nothing to author
+  notify:
+    cooldown_sessions: 3           # at most one ping per 3 sessions
+    cmd: ["echo session {{session}}: {{reason}} >> agg/state/NOTIFY.log"]
+```
+
+Detectors are just judges, so there's no new machinery to learn: `stalled` is a library judge that
+reads `agg/state/verdicts.jsonl` and reports `met` when no judge has moved across the last 3 merged
+steps. Swap in a `curl` to a push service and you get the ping on your phone instead of in a file —
+bound it (`curl --max-time 10`), because delivery is foreground and agg imposes no timeout.
+
+`stalled` is the right detector here because this sequence has no `if stalled then …` recovery step.
+Put the same detector in both and the ping lands a cycle *before* the recovery runs; see
+[the escalation ladder](../../docs/CONFIG.md#the-escalation-ladder-is-composition-not-a-config-object).
+
+`{{reason}}` becomes the firing judge's rationale — *"STALLED — no judge moved across the last 3
+merged steps"* — and agg substitutes it **shell-quoted**, so a reason full of spaces, quotes or `;`
+can never break out of the command. Don't add quotes of your own around a placeholder; you'd get
+literal quote characters. `{{project}}`, `{{session}}` and `{{step}}` work the same way.
+
+This toy usually finishes in one session, so you won't see a ping — it's here to show the shape. Try
+it by watching `agg/state/NOTIFY.log` on a run that actually grinds. Full reference (the three human
+policies, authoring a `stuck` detector, the sandbox caveat) → [`docs/CONFIG.md`](../../docs/CONFIG.md).
 
 ## Run it on another agent
 
@@ -82,7 +124,7 @@ The loop, the judge and the gate behave identically on all three.
 
 ## Files
 - `add.py` — the (broken) target the worker fixes
-- `agg/agg.yaml` — the config: one `worker` step, `done_if: prints_two`
+- `agg/agg.yaml` — the config: one `worker` step, `done_if: prints_two`, and a `notify_if` that pings without stopping
 - `agg/AGG.md` — the stable goal + rules the worker reads for orientation (agg folds it into `state/INSTRUCTIONS.md` every session)
 - `agg/judges/prints_two.sh` — the judge; prints `{"met":…}` — a plain script, so it works on any agent
 

@@ -244,6 +244,102 @@ fn agent_names_collects_every_distinct_agent() {
     assert_eq!(cfg.agent_names(), vec!["claude", "codex", "copilot"]);
 }
 
+// ---------------- notify_if / notify (STUCK_NOTIFY) ----------------
+
+/// STUCK_NOTIFY §5: the ENTIRE net-new config surface — `notify_if` (the non-terminal twin of
+/// `abort_if`) plus its `notify:` delivery block — parses off `sequence:` next to the DoD keys.
+/// Absent from a config, both are `None` (row 4 of the §12.7 validity matrix: today's pure-autonomy
+/// behaviour is untouched by the feature existing).
+#[test]
+fn notify_if_and_its_delivery_block_parse_off_sequence() {
+    let bare = parse(MINIMAL).unwrap();
+    assert!(bare.sequence.notify_if.is_none(), "no notify_if unless asked for");
+    assert!(bare.sequence.notify.is_none(), "no delivery block unless asked for");
+
+    let cfg = parse(
+        r#"
+project: p
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  abort_if: over_iterations
+  notify_if: "stuck.value >= 85"
+  notify:
+    cooldown_sessions: 5
+    cmd:
+      - "curl -s -d {{reason}} ntfy.sh/my-topic"
+      - "echo {{project}} {{session}} {{step}} >> agg/state/NOTIFY.log"
+"#,
+    )
+    .expect("the full notify ladder must parse under `sequence:`");
+
+    assert_eq!(cfg.sequence.notify_if.as_deref(), Some("stuck.value >= 85"));
+    assert_eq!(cfg.sequence.abort_if.as_deref(), Some("over_iterations"), "notify_if sits BESIDE abort_if, it does not replace it");
+    let notify = cfg.sequence.notify.expect("the delivery block parsed");
+    assert_eq!(notify.cooldown_sessions, 5);
+    assert_eq!(notify.cmd.len(), 2, "every cmd string is kept, in order");
+    // the placeholders survive the LOAD verbatim — substitution (shell-quoted, §12.4) happens at
+    // delivery time, so a config round-trip must not eat or expand them.
+    assert!(notify.cmd[0].contains("{{reason}}"), "got: {}", notify.cmd[0]);
+    assert!(notify.cmd[1].contains("{{project}}") && notify.cmd[1].contains("{{session}}") && notify.cmd[1].contains("{{step}}"));
+}
+
+/// §5/§12.10: `cooldown_sessions` DEFAULTS to 3 — a `notify:` block that names only `cmd:` is still
+/// debounced, so a stuck loop pings a human every third session rather than every single cycle. The
+/// explicit `0` ("every qualifying cycle") must survive as a real 0 and not be re-defaulted.
+#[test]
+fn cooldown_sessions_defaults_to_three_and_an_explicit_zero_survives() {
+    let defaulted = parse(
+        "project: p\nsteps: { worker: {} }\n\
+         sequence: { steps: [worker], notify_if: stalled, notify: { cmd: [\"true\"] } }\n",
+    )
+    .expect("a notify block may name only `cmd:`");
+    assert_eq!(defaulted.sequence.notify.unwrap().cooldown_sessions, 3, "the debounce default is 3");
+
+    let eager = parse(
+        "project: p\nsteps: { worker: {} }\n\
+         sequence: { steps: [worker], notify_if: stalled, notify: { cmd: [\"true\"], cooldown_sessions: 0 } }\n",
+    )
+    .expect("cooldown_sessions: 0 is legal");
+    assert_eq!(eager.sequence.notify.unwrap().cooldown_sessions, 0, "0 means every qualifying cycle, not `use the default`");
+}
+
+/// `NotifyCfg` carries `deny_unknown_fields` like every other config struct: a misspelled delivery
+/// key must be a LOUD load error, never a silently-ignored no-op. Silently dropping `cooldown` is
+/// exactly how a debounced notifier turns into a pager storm.
+#[test]
+fn an_unknown_key_inside_notify_is_a_hard_error() {
+    let typo = parse(
+        "project: p\nsteps: { worker: {} }\n\
+         sequence: { steps: [worker], notify_if: stalled, notify: { cmd: [\"true\"], cooldown: 5 } }\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(typo.contains("unknown field `cooldown`"), "must reject the near-miss key, got: {typo}");
+
+    let plural = parse(
+        "project: p\nsteps: { worker: {} }\n\
+         sequence: { steps: [worker], notify_if: stalled, notify: { cmds: [\"true\"] } }\n",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(plural.contains("unknown field `cmds`"), "got: {plural}");
+}
+
+/// §12.7 ROW 3 — `notify:` WITHOUT `notify_if` is VALID and is the whole point of §8.5: the
+/// "stop + notify" policy, where the only ping you want is the one on an `abort_if` halt. A parser
+/// that required the two keys together would reject one of the three documented human-policies.
+#[test]
+fn a_notify_block_without_notify_if_is_valid_the_stop_plus_notify_policy() {
+    let cfg = parse(
+        "project: p\nsteps: { worker: {} }\n\
+         sequence: { steps: [worker], abort_if: \"blocked OR over_iterations\", notify: { cmd: [\"say {{reason}}\"] } }\n",
+    )
+    .expect("notify: alone must load — it is the stop+notify policy, not a broken ladder");
+    assert!(cfg.sequence.notify_if.is_none(), "no live-cycle notification is configured…");
+    assert_eq!(cfg.sequence.notify.expect("…but a delivery IS").cmd, vec!["say {{reason}}".to_string()]);
+}
+
 /// The env overrides re-home onto the new shape (§4.1): `AGG_MODEL` → `defaults.model`,
 /// `AGG_COST_TOTAL` → `sequence.limits.cost`, `AGG_TOKEN_BUDGET` → `sequence.limits.tokens`.
 /// (Serial: mutates process env.)

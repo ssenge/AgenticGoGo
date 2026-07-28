@@ -62,6 +62,11 @@ impl Handler for Baseline {
         crate::core::verdicts::append(dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
         if pre.halt {
             eprintln!("⚠ ABORT at baseline — abort_if already true: {}", pre.halt_reason.clone().unwrap_or_default());
+            // The "stop + notify" policy has to hold HERE too, and this is its likeliest trigger:
+            // a stale `agg/state/BLOCKED.md` survives a crash, a reboot and a rollback, so the run
+            // an operator kicked off remotely can die at t=0. Without this the config written
+            // expressly to page them on a stop stops and pages nobody.
+            crate::features::notify::halt_ping(ctx, pre.halt_reason.as_deref());
             ctx.dash.phase = Phase::Done;
             ctx.dash.finished = true;
             ctx.dash.finish_reason = format!("ABORT at baseline: {}", pre.halt_reason.clone().unwrap_or_default());

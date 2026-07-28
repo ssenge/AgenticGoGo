@@ -181,7 +181,7 @@ Two kinds, chosen by extension:
 copy it into `agg/judges/<name>.sh` (a project file shadows the library by name). Anything needing an
 argument is a three-line project script.
 
-## Step 4 — Compose the Definition of Done (`done_if`, `abort_if`, `invariants`)
+## Step 4 — Compose the Definition of Done (`done_if`, `abort_if`, `notify_if`, `invariants`)
 
 These live under `sequence:` (Step 6). All use the same whitelisted expression grammar over judge
 **names** (NOT arbitrary code):
@@ -204,6 +204,42 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   # codex / copilot — SAME, minus over_cost (they cannot report dollars):
   abort_if: "any_regressed(invariants) OR over_budget OR over_iterations OR wall_hours >= 8"
   ```
+- **`notify_if`** — *optional, and the ONLY clause that does not end the run.* Same grammar; when it
+  is true agg runs `sequence.notify.cmd` and **the loop keeps running**. A human is a side-channel,
+  never a gate — a loop that halts to ask is exactly the babysitting agg exists to remove. Detectors
+  are ordinary judges, so there is nothing new to learn.
+  ```yaml
+  notify_if: "stalled"                              # `stalled` ships in the binary — nothing to author
+  notify:
+    cooldown_sessions: 3                            # min sessions between pings (default 3; 0 = every cycle)
+    cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]   # hook-like: best-effort, never fatal
+  ```
+  Delivery is **foreground and untimed**, so every command must bound itself (`curl --max-time 10`,
+  or `timeout 10 …`) — an unbounded one hangs the loop, the exact thing `notify_if` exists to avoid.
+  `{{reason}}` is the rationale of a judge named in the expression (`met` first, then highest
+  `value`); `{{project}}` / `{{session}}` / `{{step}}` also work. agg substitutes them
+  **shell-quoted**, so **never wrap a placeholder in quotes of your own** — you would get literal
+  quote characters. `notify_if` with an empty `notify.cmd` is refused at startup (nothing would
+  fire); `notify:` **without** `notify_if` is valid and means "stop + notify" — a ping only when
+  `abort_if` halts, including an `abort_if` already true at launch. A `done_if` success never pings;
+  for that use `hooks.on_stop`.
+  - **⚠ THE MOAT — a WORKER-AUTHORED signal goes in `notify_if`, NEVER in `abort_if`.** A detector
+    that reads something the worker wrote (a `blocked` judge over `agg/state/BLOCKED.md`, say) hands
+    the agent a way to end its own run by declaring itself stuck — the precise failure the judges
+    exist to prevent. In `notify_if` the worst case is an annoying ping, rate-limited by the
+    cooldown, and the loop keeps going. Keep TERMINATION on the signals the worker genuinely cannot
+    reach — the process-internal ones: `over_budget`, `over_cost`, `over_iterations`, `wall_hours`,
+    `any_regressed(invariants)`. A `stalled`/`stuck` detector over agg's own
+    `agg/state/verdicts.jsonl` is a **higher bar but not unfakeable**: agg owns that file and a
+    worker touching it is tampering, yet `agg/state/` is inside the worker's writable cwd on every
+    isolation tier and the ledger has no integrity check.
+  - **Do not reuse one detector across clauses.** `notify_if: "stalled"` next to a
+    `"if stalled then reconsider"` step pages the human at the gate of the session that just ran,
+    one full cycle before the recovery step is dispatched. Either omit the `if` branch, or give
+    `notify_if` the stricter detector (`stuck.value >= 85`).
+  - **Only propose a detector that resolves.** `stalled` is shipped; `stuck` and `blocked` are judges
+    you must WRITE into `agg/judges/` in Step 3 first — naming one that resolves to no file is a hard
+    startup error, and `agg doctor` will refuse the config.
 - **`invariants:`** — a list of judge names that must STAY met (the soundness guards). The gate rolls
   back any session that regresses one, and `any_regressed(invariants)` in `abort_if` gives up on it.
 
@@ -344,6 +380,10 @@ sequence:
   invariants: [<judge names that must STAY met>]
   done_if: "<expression over judge names>"
   abort_if: "<ceiling expression>"       # see Step 4
+  # notify_if: "stalled"                 # optional PING that does NOT stop the loop — see Step 4.
+  #                                      # `stalled` is shipped; a `stuck`/`blocked` detector must be
+  #                                      # AUTHORED in agg/judges/ first, or startup hard-errors.
+  # notify: { cooldown_sessions: 3, cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"] }
 
 # Optional top-level survivors — omit if unused:
 # heartbeat_secs: 30
