@@ -35,6 +35,22 @@
   </div>
 </header>
 
+<!--
+  FLAGGED — `notify_if` fired: the loop is asking for a human. Its own banner, full width, below the
+  header, because a stat tile is exactly where this would be missed. It is a STANDING flag, not a
+  phase: the loop kept running (that is the whole feature), so it stays visible until the run ends
+  rather than blinking past with the phase that produced it. The reassurance is part of the message
+  — an operator seeing red must not think the run died.
+-->
+{#if state?.notify_session != null}
+  <div class="flag card" role="status">
+    <span class="badge">⚑ FLAGGED</span>
+    <span class="why">{state.notify_reason}</span>
+    <span class="since mono">since session #{state.notify_session}</span>
+    <span class="calm">still running — agg never blocks on a human</span>
+  </div>
+{/if}
+
 <style>
   .hdr {
     display: flex;
@@ -69,6 +85,20 @@
   .status[data-c='accent'] .dot { background: var(--accent); }
   .status[data-c='serious'] .dot { background: var(--serious); }
   .status[data-c='muted'] .dot { background: var(--muted); }
+  .flag {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 20px;
+    margin-top: 12px;
+    border-left: 4px solid var(--serious);
+    background: color-mix(in srgb, var(--serious) 12%, transparent);
+  }
+  .badge { color: var(--serious); font-weight: 700; font-size: 13px; letter-spacing: 0.4px; }
+  .why { color: var(--ink); font-size: 14px; flex: 1 1 260px; }
+  .since { color: var(--ink-2); font-size: 13px; }
+  .calm { color: var(--ink-3); font-size: 12px; }
   .pulse { animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse {
     0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent); }

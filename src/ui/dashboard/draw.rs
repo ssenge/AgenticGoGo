@@ -149,7 +149,29 @@ pub(super) fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         label("tokens "),
         Span::raw(tokens),
     ];
+    let span_w = |spans: &[Span]| spans.iter().map(|sp| sp.content.chars().count()).sum::<usize>();
+    let inner_w = area.width.saturating_sub(2) as usize;
+
     let mut segments: Vec<Vec<Span>> = Vec::new();
+    // FIRST droppable segment — the last thing a narrow terminal gives up. "The loop is asking for a
+    // human" outranks every spend guard here: a guard is still true on the next refresh, whereas an
+    // unnoticed flag is the whole feature failing silently. The loop keeps running either way.
+    //
+    // ADAPTIVE, unlike its neighbours: every other segment is short and fixed-width, but the reason
+    // is a free-text rationale. A fixed 60-char truncation makes the segment ~70 wide, which does
+    // not fit an 80-col terminal — and because the greedy loop below STOPS at the first segment that
+    // won't fit, an oversized flag would take done_if/abort_if/memory/idle down with it. So the
+    // reason is sized to the space actually left, and drops out entirely below that, leaving the
+    // badge — which is the part that must survive.
+    if let Some(sess) = s.notify_session {
+        let badge = format!("⚑ FLAGGED s{sess} ");
+        let room = inner_w.saturating_sub(span_w(&line2_spans) + badge.chars().count() + 3);
+        let mut spans = vec![sep(), Span::styled(badge, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))];
+        if room >= 12 {
+            spans.push(Span::styled(crate::util::truncate(&s.notify_reason, room), Style::default().fg(Color::Red)));
+        }
+        segments.push(spans);
+    }
     if let Some(cost) = cost {
         segments.push(vec![sep(), label("usage "), Span::styled(cost, Style::default().fg(Color::Magenta))]);
     }
@@ -169,8 +191,6 @@ pub(super) fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
 
     // Greedily append segments while they fit the inner width; stop at the first that doesn't (the
     // ordering is by importance, so we never skip a spend guard to squeeze in a lesser trailing item).
-    let span_w = |spans: &[Span]| spans.iter().map(|sp| sp.content.chars().count()).sum::<usize>();
-    let inner_w = area.width.saturating_sub(2) as usize;
     let mut used = span_w(&line2_spans);
     for seg in segments {
         let w = span_w(&seg);

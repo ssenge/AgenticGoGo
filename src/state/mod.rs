@@ -184,6 +184,16 @@ pub struct DashboardState {
     /// 0 when memory is empty or a write failed. Named `_bytes` (not `_chars`) because it is a
     /// byte length, displayed as B/KB.
     pub memory_bytes: usize,
+    /// FLAGGED FOR HELP: the session a `notify_if` last fired on, and the `{{reason}}` it
+    /// delivered. `None` = the loop has never asked for a human this run.
+    ///
+    /// A FIELD, deliberately not a `Phase` variant: `phase` says WHERE the loop currently is, and
+    /// notify fires *inside* Gate — a `Phase::Notify` would overwrite `Gate` and tell every reader
+    /// the loop is somewhere it isn't. This is a flag that persists after the phase moves on, which
+    /// is exactly what an operator glancing at the dashboard needs: not "it pinged for one instant"
+    /// but "it is asking for you, and has been since session N".
+    pub notify_session: Option<u32>,
+    pub notify_reason: String,
     /// monotonically increasing; lets the dashboard detect updates
     pub seq: u64,
     /// terminal flag — dashboard shows the final banner and can exit

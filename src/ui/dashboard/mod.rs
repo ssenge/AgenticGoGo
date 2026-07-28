@@ -334,6 +334,10 @@ pub fn sample_state() -> DashboardState {
         summary_cumulative: "17 lifetime sessions. Endpoints wired, build green since session 2. Coverage climbing (52%→64%). no_todos judge broken since session 2. Codex handled the implement steps; Claude handles reconsider + rules the judges.".into(),
         summary_windowed: "This run: brought build to 0 warnings, raised coverage to 64%, hit a stall — now in a reconsider step to repair the judge.".into(),
         memory_bytes: 14_208,
+        // the sample drives `agg dashboard --demo` and the SVG doc shots — flagged, because the
+        // whole point of the flag is that it must be impossible to miss.
+        notify_session: Some(17),
+        notify_reason: "STALLED — no judge moved across the last 3 merged steps".into(),
         seq: 342,
         finished: false,
         finish_reason: String::new(),

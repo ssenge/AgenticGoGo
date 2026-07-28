@@ -855,6 +855,7 @@ sequence:
 summary: { enabled: false }
 EOF
 agg_do "$NTF" run --max-sessions 2 > "$NTF/run.log" 2>&1; NRC=$?
+agg_do "$NTF" status > "$NTF/status.txt" 2>&1
 exists "notify_if runs its delivery command"          "$NTF/agg/state/NOTIFIED"
 # …and the half that IS the feature. exit 4 = the --max-sessions cap, i.e. NOT the exit-3 abort guard
 # and NOT a done_if stop; and with cooldown 0 the ping fired on BOTH sessions, which it could not have
@@ -864,6 +865,15 @@ is    "…because it really ran every session after flagging"  "$(grep -cF '[not
 # the tally is 0/1, not 0/2: `stuck` joined the RUN-set only (§12.1) — a detector is machinery, never a goal.
 is    "…finishing on the cap, with the detector kept out of the DoD" "$(finish_reason "$NTF")" "reached max_sessions=2 (0/1 goals met)"
 hasnt "…and a notification never aborts the run"      "$NTF/run.log" "ABORT"
+# …and the flag reaches every OPERATOR SURFACE, not just the delivery command. This is the half a
+# `notify.cmd` cannot cover: an operator watching the TUI or the web app must see that the loop is
+# asking for help without having configured a working webhook. `notify_session` is a FIELD, not a
+# `phase` — the phase moves on to gate/inject while the flag stands.
+is    "…the flag lands in state.json for the TUI + web to read" \
+   "$(snap "$NTF" notify_session)" "2"
+is    "…carrying the reason, so a surface can say WHY"          \
+   "$(snap "$NTF" notify_reason)" "no judge moved in 3 sessions"
+has   "…and `agg status` shows it, saying the run is still alive" "$NTF/status.txt" "FLAGGED for help since session #2"
 hasnt "…nor ends it as a success"                     "$NTF/run.log" "done_if satisfied"
 
 # ── 2. cooldown_sessions debounces, and {{reason}} carries the rationale on the wire ─────────────

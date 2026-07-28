@@ -156,6 +156,11 @@ fn deliver(ctx: &mut LoopState, cfg: &crate::core::config::NotifyCfg, reason: &s
     // step yet, and none has run, so `None` is both the fallback and the correct tier.
     let tier = ctx.cur_step.as_ref().map(|s| s.isolation).unwrap_or(crate::isolation::Isolation::None);
     let dir = ctx.dir.to_path_buf();
+    // Surface it to the TUI / `agg status` / the web app BEFORE running the command: delivery is
+    // foreground and a slow `curl` must not delay the operator's own dashboard learning about it.
+    ctx.dash.notify_session = Some(ctx.session);
+    ctx.dash.notify_reason = reason.to_string();
+    ctx.publish();
     eprintln!("  [notify:{kind}] {reason}");
     // ponytail: foreground and untimed, exactly like every other agg hook — a notification you
     // want DELIVERED before the loop moves on. The ceiling is a delivery command that hangs (a
