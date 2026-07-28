@@ -18,6 +18,15 @@ pub struct AGGState {
     pub worker: WorkerHealth,
     pub operator: Operator,
     pub inject: Inject,
+    pub notify: Notify,
+}
+/// stuck-notification debounce (STUCK_NOTIFY §8.3). Per-RUN, deliberately not persisted: a fresh
+/// process starting cold and notifying once is acceptable, and the alternative is a state file whose
+/// only job is to suppress a message.
+#[derive(Default)]
+pub struct Notify {
+    /// the session a `notify_if` last fired on. `None` = never fired this run.
+    pub last_notify_session: Option<u32>,
 }
 /// per-session git isolation + spans (was `iso_base`/`session_branch`/`span_tip`/`span_branches`).
 #[derive(Default)]

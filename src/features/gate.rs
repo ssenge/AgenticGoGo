@@ -10,6 +10,11 @@ use crate::core::engine::CycleResult;
 /// phase (R10). Emits nothing; reads scratch by ref (leaves `res`/`staged` for GateKeepRollback).
 pub struct CeilingPoisonGuard;
 impl Handler for CeilingPoisonGuard {
+    // ponytail: this `Flow::Stop` short-circuits the rest of on_gate, so `NotifyOnStuck` never runs
+    // and a run ending here does NOT fire `notify.cmd` (STUCK_NOTIFY §12.6). Accepted: the guard
+    // needs `res.deltas.is_empty()`, which only holds with an EMPTY run-set, and a config with no
+    // judges at all cannot express a notify condition worth delivering. Upgrade path if a real run
+    // ever lands here: `notify::halt_ping(ctx, res.halt_reason.as_deref())` before the Stop.
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         let sc = ctx.scratch.get::<AGGScratch>();
         let res = sc.res.as_ref().expect("an on_verify handler set scratch.res");
@@ -88,6 +93,9 @@ impl Handler for GateKeepRollback {
                         stop: recomputed.stop,
                         halt: recomputed.halt,
                         halt_reason: recomputed.halt_reason,
+                        // recomputed against RESTORED base truth — NotifyOnStuck runs after this
+                        // handler, so it flags what was kept, never what was rolled back.
+                        notify: recomputed.notify,
                         deltas: Vec::new(),
                         fresh_verdicts: Vec::new(),
                         judge_tokens: 0,
@@ -116,6 +124,7 @@ impl Handler for GateKeepRollback {
                     stop: recomputed.stop,
                     halt: recomputed.halt,
                     halt_reason: recomputed.halt_reason,
+                    notify: recomputed.notify,
                     deltas: Vec::new(),
                     fresh_verdicts: Vec::new(),
                     judge_tokens: 0,

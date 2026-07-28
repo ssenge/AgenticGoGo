@@ -228,6 +228,11 @@ fn run_cli() -> Result<ExitCode> {
             // dry run — no worker, clean tree → no confinement needed.
             let res = eng.run_step(&p.dir, &engine::RunState::default(), ruler, &jm, cfg.judge.timeout, "plan", None, false, agg::isolation::Isolation::None);
             print!("{}", eng.scoreboard());
+            // Non-terminal, so it is reported ALONGSIDE the verdict, not instead of it: knowing a
+            // detector already fires is worth having before committing to an overnight run.
+            if let Some(reason) = &res.notify {
+                println!("\n⚑ notify_if is already true: {reason}");
+            }
             if res.halt {
                 println!("\n⚠ abort_if is already true: {}", res.halt_reason.unwrap_or_default());
             } else if res.stop {
