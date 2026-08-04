@@ -301,40 +301,66 @@ pub fn run_with(
 
     // ── the deterministic outer loop, one step at a time ──
     loop {
+        // `over_max_sessions` is the SCHEDULER's ceiling, not the step's: it belongs to whoever owns
+        // the iteration, so it stays here and out of `step_once`.
         if let Some(outcome) = st.over_max_sessions() {
             return Ok(outcome);
         }
-        // reset the per-session channel so no field (esp. `prompt`) leaks across sessions.
-        st.scratch.clear();
-        st.emit(LifecycleEvent::Inject);
-        match run_hook(&lifecycle.on_session_start, &mut st)? {
+        match step_once(&mut st, &lifecycle)? {
             Some(End::Stop(outcome)) => return Ok(outcome),
             Some(End::NextSession) => continue,
             None => {}
         }
-        st.emit(LifecycleEvent::Run);
-        match run_hook(&lifecycle.on_run, &mut st)? {
-            Some(End::Stop(outcome)) => return Ok(outcome), // SIGINT → finish_interrupted → Stopped
-            Some(End::NextSession) => continue,
-            None => {}
-        }
-        if let Some(e) = st.worker_is_broken() {
-            return Err(e);
-        }
-        match run_hook(&lifecycle.on_verify, &mut st)? {
-            Some(End::NextSession) => continue, // rate-limited: incomplete session — go round again
-            Some(End::Stop(outcome)) => return Ok(outcome), // ceiling tripped during backoff → Halt
-            None => {}
-        }
-        // GATE keep/rollback → poison-pill Halt short-circuits here (CeilingPoisonGuard).
-        if let Some(End::Stop(outcome)) = run_hook(&lifecycle.on_gate, &mut st)? {
-            return Ok(outcome);
-        }
-        // session-end work (shell hook, summary, memory fold) then the run-stop check (CheckRunStop).
-        if let Some(End::Stop(outcome)) = run_hook(&lifecycle.on_session_end, &mut st)? {
-            return Ok(outcome);
-        }
     }
+}
+
+/// ONE iteration of the loop body — the whole hook dispatch for a single step, in order.
+///
+/// It exists as a named fn because the Rust driver API replaces exactly this and nothing else: a
+/// driver's `step()` must be the SAME dispatch the YAML path runs, or every feature that hangs off
+/// these hooks (git isolation, keep/rollback, memory, notify, accounting, the watchdog) would have to
+/// be re-plumbed correctly in a second place and would rot out of sync.
+///
+/// The decision of what an `End` MEANS belongs to the caller, so both are returned rather than acted
+/// on. ⚠ The per-hook asymmetry is deliberate and load-bearing: `on_gate` and `on_session_end` honour
+/// only `End::Stop` and DROP a `NextSession`, because at those points the session's remaining work
+/// (Finalize) must still run — a uniform "NextSession ⇒ next lap" would skip it. That asymmetry is
+/// resolved HERE, so no caller can get it wrong.
+pub(crate) fn step_once(st: &mut LoopState, lc: &Lifecycle) -> Result<Option<End>> {
+    // reset the per-session channel so no field (esp. `prompt`) leaks across sessions.
+    st.scratch.clear();
+    st.emit(LifecycleEvent::Inject);
+    match run_hook(&lc.on_session_start, st)? {
+        Some(End::Stop(outcome)) => return Ok(Some(End::Stop(outcome))),
+        Some(End::NextSession) => return Ok(Some(End::NextSession)),
+        None => {}
+    }
+    st.emit(LifecycleEvent::Run);
+    match run_hook(&lc.on_run, st)? {
+        // SIGINT → finish_interrupted → Stopped
+        Some(End::Stop(outcome)) => return Ok(Some(End::Stop(outcome))),
+        Some(End::NextSession) => return Ok(Some(End::NextSession)),
+        None => {}
+    }
+    if let Some(e) = st.worker_is_broken() {
+        return Err(e);
+    }
+    match run_hook(&lc.on_verify, st)? {
+        // rate-limited: incomplete session — go round again
+        Some(End::NextSession) => return Ok(Some(End::NextSession)),
+        // ceiling tripped during backoff → Halt
+        Some(End::Stop(outcome)) => return Ok(Some(End::Stop(outcome))),
+        None => {}
+    }
+    // GATE keep/rollback → poison-pill Halt short-circuits here (CeilingPoisonGuard).
+    if let Some(End::Stop(outcome)) = run_hook(&lc.on_gate, st)? {
+        return Ok(Some(End::Stop(outcome)));
+    }
+    // session-end work (shell hook, summary, memory fold) then the run-stop check (CheckRunStop).
+    if let Some(End::Stop(outcome)) = run_hook(&lc.on_session_end, st)? {
+        return Ok(Some(End::Stop(outcome)));
+    }
+    Ok(None)
 }
 
 pub fn indent(s: &str) -> String {
