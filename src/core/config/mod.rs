@@ -13,7 +13,7 @@
 
 use crate::backend::{for_name, AgentBackend};
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 mod methods;
@@ -291,7 +291,12 @@ impl Default for Watchdog {
 /// loop reads these into the StopContext/state.json `budget_total`/`cost_limit`/`max_sessions`
 /// fields, which back the stable `over_budget`/`over_cost`/`over_iterations` grammar — the SOURCE of
 /// those values moved here; the grammar terms and state.json field names did NOT change.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// ONE struct, shared by both entry points: the YAML path reads it out of `sequence.limits:`, and a
+/// Rust driver hands the same value to `Agg::limits(..)`. That is why [`Limits::wall_hours`] is a
+/// valid `agg.yaml` key even though only the driver path enforces it — a second, driver-only limits
+/// struct would have to be kept in sync with this one forever, for no gain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     /// output-token ceiling — WORKER *and* JUDGE spend (§5.6). null = unlimited. Backs `over_budget`.
@@ -304,6 +309,21 @@ pub struct Limits {
     /// A non-zero `--max-sessions <n>` flag overrides it when passed (§4.1).
     #[serde(default)]
     pub sessions: Option<u32>,
+    /// wall-clock ceiling in hours, measured from the run's start. null = unlimited.
+    ///
+    /// ADDITIVE (BUILD.md §2.2): every config written before this key existed still parses, because
+    /// it is `#[serde(default)]` like its three siblings. It COEXISTS with the `wall_hours`
+    /// CONDITION term (`core::stop`) rather than replacing it — both read the same clock, but
+    /// `wall_hours >= 8 OR stalled` is not expressible as a limit, so the term stays.
+    ///
+    /// ⚠ Enforced only where a driver calls `Agg::check_limits()`. The YAML path keeps using the
+    /// `wall_hours` term in `abort_if`.
+    ///
+    /// ⚠ Known ceiling: the run clock is an `Instant`, so a RESUMED run restarts it and gets the
+    /// full allowance again.
+    /// `ponytail:` upgrade path — seed the clock from `RunRecord.started_at_epoch` (Phase 4).
+    #[serde(default)]
+    pub wall_hours: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
