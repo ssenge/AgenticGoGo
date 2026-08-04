@@ -6,11 +6,13 @@
 //!
 //! Contract the worker must satisfy (public API on the `agg` lib crate):
 //!   * `agg::isolation::Isolation::Container` — a new tier, deserialized from the name `container`.
-//!   * `agg::isolation::containerize(cmd, cwd, writable, image) -> anyhow::Result<Command>` —
+//!   * `agg::isolation::containerize(cmd, cwd, writable, denies, image) -> anyhow::Result<Command>` —
 //!     reshape a built worker `Command` into a `docker run …` (or `podman run …`) that BIND-MOUNTS
-//!     `cwd` read-write, sets it as the workdir, mounts each `writable` path, leaves the network
-//!     open, and runs the original program+args INSIDE `image`. Analogous to `wrap()` for sandbox,
-//!     except the command runs in a container rather than a jailed host process.
+//!     `cwd` read-write, sets it as the workdir, mounts each `writable` path, re-mounts each
+//!     `denies` path `:ro`, leaves the network open, and runs the original program+args INSIDE
+//!     `image`. Analogous to `wrap()` for sandbox, except the command runs in a container rather
+//!     than a jailed host process. (`denies` — this step's `readonly` minus `writable` — was added
+//!     in BUILD.md commit 9; every assertion below predates it and is unchanged.)
 //!   * `agg::isolation::container_available() -> bool` — is a container engine (docker/podman) runnable.
 //!
 //! SCOPE: this proves the CONFINEMENT MECHANISM + wiring against a base image. Running the actual
@@ -35,7 +37,8 @@ fn containerize_builds_a_docker_run_that_bind_mounts_cwd_and_runs_the_inner_comm
     let cwd = Path::new("/private/tmp/agg-container-argv");
     std::fs::create_dir_all(cwd).ok();
 
-    let cmd = agg::isolation::containerize(inner, cwd, &[], "alpine:3.20").expect("build the container command");
+    let cmd = agg::isolation::containerize(inner, cwd, &[], &[], "alpine:3.20")
+        .expect("build the container command");
     let prog = cmd.get_program().to_string_lossy().into_owned();
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
 
@@ -88,7 +91,7 @@ fn container_confines_writes() {
         "echo in > inside.txt && echo INSIDE_OK; echo out > '{}' 2>/dev/null || true",
         escape.display()
     ));
-    let out = agg::isolation::containerize(inner, &jail, &[], "alpine:3.20")
+    let out = agg::isolation::containerize(inner, &jail, &[], &[], "alpine:3.20")
         .expect("build the container command")
         .output()
         .expect("run the container");

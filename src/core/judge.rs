@@ -128,7 +128,10 @@ fn run_script(
         .env("AGG_JUDGE", name)
         .env("AGG_PROJECT_DIR", cwd);
     if isolation == crate::isolation::Isolation::Sandbox {
-        match crate::isolation::wrap(command, cwd, &[]) {
+        // no per-step deny list: a judge is not a step. It still gets the DERIVED `agg/private/`
+        // carve-out, which is the one that matters here — this process is about to be the subject
+        // of a verdict row it must not be able to forge.
+        match crate::isolation::wrap(command, cwd, &[], &[]) {
             Ok(c) => command = c,
             // Loud, not silent: a judge that can't be confined must FAIL, never run unconfined and
             // reopen the escape. Mirrors worker.rs's spawn-failure path.

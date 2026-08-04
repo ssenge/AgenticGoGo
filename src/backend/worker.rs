@@ -65,6 +65,9 @@ impl SessionOutcome {
 /// in by the loop — no process-wide agent, no config read here. `agent` is `&'static` because the
 /// stream-reader thread below needs it inside a `move` closure; every backend is a unit struct, so
 /// this costs nothing. `image` is the step's base image, read ONLY under `isolation: container`.
+/// `denied` is this step's `readonly` minus `writable`, read only under a CONFINING tier — see
+/// [`crate::isolation::wrap`] for why it is a second argument beside the derived carve-out and never
+/// a replacement for it.
 #[allow(clippy::too_many_arguments)]
 pub fn run_session(
     cfg: &AggConfig,
@@ -77,6 +80,7 @@ pub fn run_session(
     session: u32,
     live: &LiveState,
     isolation: crate::isolation::Isolation,
+    denied: &[String],
     image: &str,
 ) -> SessionOutcome {
     let start = Instant::now();
@@ -109,12 +113,17 @@ pub fn run_session(
     //               agent: the container boundary is the confinement, and a nested kernel sandbox
     //               inside it would only get in the way (which is why codex drops its own flags
     //               under this tier — see codex/mod.rs).
+    //
+    // Both confining tiers take `denied` — this step's `readonly` minus `writable` — as a SECOND
+    // deny channel. Neither tier reads it under `none`, which has no wrapper to deliver it to; the
+    // step's own warning about that is emitted by the caller, which is the layer that knows the
+    // step's NAME.
     let confined = match isolation {
         crate::isolation::Isolation::Sandbox => {
-            crate::isolation::wrap(command, dir, &agent.writable_state_paths())
+            crate::isolation::wrap(command, dir, &agent.writable_state_paths(), denied)
         }
         crate::isolation::Isolation::Container => {
-            crate::isolation::containerize(command, dir, &agent.writable_state_paths(), image)
+            crate::isolation::containerize(command, dir, &agent.writable_state_paths(), denied, image)
         }
         _ => Ok(command),
     };

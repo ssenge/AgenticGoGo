@@ -23,7 +23,9 @@ pub fn run(label: &str, cmds: &[String], dir: &Path, isolation: crate::isolation
         eprintln!("  [hook:{label}] $ {cmd}");
         let mut command = shell(cmd, dir);
         if isolation == crate::isolation::Isolation::Sandbox {
-            match crate::isolation::wrap(command, dir, &[]) {
+            // `&[]`: a hook is not a step and carries no `readonly` list of its own; the derived
+            // `agg/private/` carve-out still applies, which is the escape this wrapping is for.
+            match crate::isolation::wrap(command, dir, &[], &[]) {
                 Ok(c) => command = c,
                 Err(e) => {
                     eprintln!("  [hook:{label}] SKIPPED — could not sandbox it ({e}); not run unconfined");

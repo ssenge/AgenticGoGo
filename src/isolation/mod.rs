@@ -100,8 +100,12 @@ pub fn available() -> bool {
 ///
 /// Returns a LOUD `Err` on an unsupported OS rather than silently downgrading to a direct spawn.
 ///
-/// Writes to [`denied`] (agg's own private state) are carved back OUT of the writable cwd.
-pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf]) -> Result<Command> {
+/// # Two deny channels, and the second never replaces the first
+/// `denies` is THIS STEP's `readonly` minus `writable` ([`crate::core::config::ResolvedStep::denied`]),
+/// project-relative. It is handed to [`deny_set`] as an ADDITION to the carve-out [`denied`] derives
+/// from `cwd` — a parameter is a thing a future call site can forget, and forgetting `agg/private/`
+/// is the one hole this module exists to keep shut (BUILD.md §3.8).
+pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf], denies: &[String]) -> Result<Command> {
     // get_program / get_args / get_envs are queryable; that is what lets us reshape a caller's
     // Command without the caller knowing about sandboxing.
     let prog = cmd.get_program().to_owned();
@@ -123,7 +127,8 @@ pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf]) -> Result<Command> {
     let writable: Vec<PathBuf> =
         writable.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
 
-    let mut wrapped = imp::build(&cwd_resolved, &writable, &denied(&cwd_resolved), &prog, &args)?;
+    let mut wrapped =
+        imp::build(&cwd_resolved, &writable, &deny_set(&cwd_resolved, denies), &prog, &args)?;
     for (k, v) in envs {
         match v {
             Some(v) => wrapped.env(k, v),
@@ -241,6 +246,79 @@ fn denied(cwd: &Path) -> Vec<PathBuf> {
     vec![std::fs::canonicalize(&p).unwrap_or(p)]
 }
 
+/// The COMPLETE write-deny set a confining tier is handed: the derived carve-out ([`denied`]) plus
+/// this step's own `readonly` minus `writable`, resolved to absolute paths against `cwd`.
+///
+/// The derived half comes FIRST and is never conditional on the step's list — that ordering is the
+/// invariant BUILD.md §3.8 pins down: the per-step list is a SECOND argument, never a replacement,
+/// so a step that lists nothing still cannot write `agg/private/`.
+///
+/// Both tiers share this so `readonly:` means one thing across `sandbox` and `container`, and a
+/// relative entry (`agg/judges`) resolves against the same cwd the wrapper already canonicalized.
+pub(crate) fn deny_set(cwd: &Path, denies: &[String]) -> Vec<PathBuf> {
+    let mut out = denied(cwd);
+    for d in denies {
+        // An absolute entry stays absolute (`normalize_path` preserves a leading `/`); everything
+        // else is project-relative, which is what a `readonly:` list reads like.
+        let p = if d.starts_with('/') { PathBuf::from(d) } else { cwd.join(d) };
+        let p = std::fs::canonicalize(&p).unwrap_or(p);
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Make a deny path exist, because the two MOUNT-based backends cannot deny one that does not.
+///
+/// Seatbelt denies by path STRING, so `(deny file-write* (subpath "…/agg/judges"))` binds whether
+/// or not the directory is there yet — and keeps binding the moment it appears. `bwrap` and a
+/// container engine deny by READ-ONLY BIND, and a bind needs a mount point, so both used to SKIP a
+/// path that did not exist. That is the same driver getting two different security policies with no
+/// diagnostic: on Linux a step could CREATE the very directory its `readonly:` list named and then
+/// write it, while on macOS it could not.
+///
+/// Creating the directory closes the gap. It is also what the engine would have created under the
+/// mount point anyway — doing it ourselves just means it is owned by the user rather than by root.
+///
+/// ponytail: an entry naming a not-yet-existing FILE materialises as an empty DIRECTORY. The
+/// ceiling is real but narrow (every deny list agg has ever written names directories); the upgrade
+/// path when it bites is to carry the entry's kind on the list and `File::create` instead.
+pub(crate) fn materialize_deny(p: &Path) -> bool {
+    p.exists() || std::fs::create_dir_all(p).is_ok()
+}
+
+/// The warning for a step that lists `readonly:`/`writable:` paths but runs under
+/// [`Isolation::None`] — BUILD.md §0.2 rule 4. `None` = there is nothing to warn about.
+///
+/// Returns the TEXT rather than printing it so the rule is unit-testable without capturing stderr;
+/// the caller ([`crate::features::run`]) prints it.
+///
+/// # Why a warning and not a refusal
+/// The lists are inert under `none` — the deny is delivered by the OS wrapper and no wrapper is
+/// invoked — but a driver may legitimately keep them on a template it also instantiates unconfined.
+/// Refusing would make the safe spelling (list the protections once, on the family) the one that
+/// fails. What is NOT acceptable is silence, or the word "ignored": the operator has to read the
+/// consequence, which is that the step **can write** every path it thought it had protected.
+pub fn unenforced_denies(
+    step: &str,
+    tier: Isolation,
+    readonly: &[String],
+    writable: &[String],
+) -> Option<String> {
+    if tier != Isolation::None || (readonly.is_empty() && writable.is_empty()) {
+        return None;
+    }
+    let paths = denied_paths(readonly, writable);
+    let list =
+        if paths.is_empty() { "every path it lists".to_string() } else { paths.join(", ") };
+    Some(format!(
+        "  ⚠ step `{step}` lists readonly:/writable: paths but runs under `isolation: none` — no OS \
+         wrapper is invoked, so the step CAN WRITE these paths: {list}. Set `isolation: sandbox` \
+         (or `container`) to make the list bind."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +376,57 @@ mod tests {
         let _: bool = available();
     }
 
+    /// ⛔ THE MOAT. The per-step list is a SECOND argument (BUILD.md §3.8): `agg/private/` is in the
+    /// deny set whether the step listed anything or not, and it stays FIRST so no future edit can
+    /// make it conditional on the step's own list.
+    #[test]
+    fn the_per_step_denies_are_added_to_the_derived_carve_out_never_instead_of_it() {
+        let cwd = Path::new("/repo/proj");
+        let private = crate::paths::private_dir(cwd);
+
+        assert_eq!(deny_set(cwd, &[]), vec![private.clone()], "no list ⇒ still the carve-out");
+
+        let with = deny_set(cwd, &["agg/judges".to_string(), "src".to_string()]);
+        assert_eq!(with[0], private, "the derived carve-out comes first and is never dropped");
+        assert_eq!(with[1..], [cwd.join("agg/judges"), cwd.join("src")], "relative ⇒ under cwd");
+
+        // an absolute entry stays absolute (`normalize_path` preserves the leading `/`) — and is
+        // CANONICALIZED when it resolves, because Seatbelt matches canonical paths only and `/etc`
+        // is a symlink to `/private/etc` on every macOS host (ISOLATION.md §11 BUG 1).
+        let abs = PathBuf::from("/etc/ssh");
+        let want = std::fs::canonicalize(&abs).unwrap_or(abs.clone());
+        assert!(deny_set(cwd, &[abs.to_string_lossy().into_owned()]).contains(&want));
+        // …and a step that names the private dir itself does not make it two denies
+        let dup = deny_set(cwd, &[private.strip_prefix(cwd).unwrap().to_string_lossy().into_owned()]);
+        assert_eq!(dup.len(), 1, "the same path twice is one deny: {dup:?}");
+    }
+
+    /// BUILD.md §0.2 rule 4: a list on an UNCONFINED step is inert, and agg says so in the words
+    /// that describe the consequence. "Ignored" would read like agg made a choice; the operator
+    /// needs to read that the step can write the paths it thought it had protected.
+    #[test]
+    fn a_deny_list_without_a_tier_warns_that_the_step_can_write_the_paths() {
+        let ro = normalize_paths(["tests/", "agg/judges/"]);
+        let w = normalize_paths(["tests"]);
+
+        let msg = unenforced_denies("implement", Isolation::None, &ro, &w)
+            .expect("a list under `none` must warn");
+        assert!(msg.contains("implement"), "names the step: {msg}");
+        assert!(msg.contains("CAN WRITE"), "states the consequence: {msg}");
+        assert!(!msg.contains("ignor"), "never `ignored` — agg did not choose this: {msg}");
+        assert!(msg.contains("agg/judges"), "names the path that is not protected: {msg}");
+        assert!(msg.contains("sandbox"), "names the fix: {msg}");
+
+        // …and it is a WARNING, not a refusal: nothing here returns an Err. Under a confining tier
+        // there is nothing to say, and an empty list on an unconfined step is not worth a line.
+        assert_eq!(unenforced_denies("implement", Isolation::Sandbox, &ro, &w), None);
+        assert_eq!(unenforced_denies("implement", Isolation::Container, &ro, &w), None);
+        assert_eq!(unenforced_denies("implement", Isolation::None, &[], &[]), None);
+        // a `writable:`-only step still warns — the list is just as inert, and saying nothing is
+        // how the author concludes it bound.
+        assert!(unenforced_denies("x", Isolation::None, &[], &w).is_some());
+    }
+
     /// On a supported OS, `wrap` preserves the original program + args (after the wrapper prefix)
     /// and sets the wrapper as argv[0]. On an unsupported OS it must return a loud Err.
     #[test]
@@ -306,7 +435,7 @@ mod tests {
         let mut inner = Command::new("claude");
         inner.arg("-p").arg("do the thing");
         let cwd = std::env::temp_dir();
-        let wrapped = wrap(inner, &cwd, &[]).expect("supported OS builds a wrapper");
+        let wrapped = wrap(inner, &cwd, &[], &[]).expect("supported OS builds a wrapper");
         let prog = wrapped.get_program().to_string_lossy().into_owned();
         let args: Vec<String> = wrapped.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         // wrapper program is bwrap / sandbox-exec, never the agent
@@ -328,7 +457,7 @@ mod tests {
         let mut inner = Command::new("/bin/sh");
         inner.arg("-c").arg("true").env("AGG_JUDGE", "answered").env("AGG_SESSION", "3");
         let cwd = std::env::temp_dir();
-        let wrapped = wrap(inner, &cwd, &[]).expect("supported OS builds a wrapper");
+        let wrapped = wrap(inner, &cwd, &[], &[]).expect("supported OS builds a wrapper");
         let got: std::collections::HashMap<String, String> = wrapped
             .get_envs()
             .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
@@ -370,7 +499,7 @@ mod tests {
         );
         let mut inner = Command::new("/bin/sh");
         inner.arg("-c").arg(&script);
-        let out = wrap(inner, &jail, &[])
+        let out = wrap(inner, &jail, &[], &[])
             .expect("build the wrapper")
             .output()
             .expect("run the real OS sandbox");
@@ -418,7 +547,7 @@ mod tests {
         );
         let mut inner = Command::new("/bin/sh");
         inner.arg("-c").arg(&script);
-        let out = wrap(inner, &proj, &[]).expect("build the wrapper").output().expect("run the sandbox");
+        let out = wrap(inner, &proj, &[], &[]).expect("build the wrapper").output().expect("run the sandbox");
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         let ledger_after = std::fs::read_to_string(&ledger).unwrap_or_default();
@@ -432,6 +561,84 @@ mod tests {
         assert!(stdout.contains("FORGE_DENIED"), "the ledger forgery must be DENIED:\n{stdout}\n{stderr}");
         assert!(stdout.contains("NEWFILE_DENIED"), "no new files in private/ either:\n{stdout}\n{stderr}");
         assert!(!ledger_after.contains("forged"), "the ledger was MODIFIED — the carve-out leaked");
+    }
+
+    /// THE PER-STEP DENY LIST, proven by the kernel — the acceptance test for BUILD.md commit 9.
+    ///
+    /// Everything upstream of here (`Step::readonly`'s accumulation, `writable`'s subtraction, the
+    /// trailing-slash normalisation) is tested against strings. This is the one test that asks the
+    /// OS whether any of it actually bound, and it exercises the whole chain in one shot: a driver's
+    /// template denies `tests/` and `agg/judges/`, a derived step adds `src/` and re-grants exactly
+    /// `tests/`, and the kernel is asked which of the four the worker can write.
+    ///
+    /// The fourth assertion is the load-bearing one: `agg/private/` is still carved out. The
+    /// per-step list is a SECOND argument to [`wrap`], and if a future edit ever makes it a
+    /// replacement, everything else here still passes while the moat is gone.
+    ///
+    /// `#[ignore]`d like its siblings — it spawns the real OS sandbox, which CI and nested sandboxes
+    /// refuse. Run on a real host:
+    /// `cargo test --lib -- --ignored a_steps_readonly_list_reaches_the_kernel --nocapture`
+    #[test]
+    #[ignore = "spawns the real OS sandbox; run by hand on a real host"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_steps_readonly_list_reaches_the_kernel() {
+        use crate::driver::Step;
+        assert!(available(), "no OS sandbox on this host — cannot prove confinement");
+        let proj = std::env::temp_dir().join(format!("agg-denylist-{}", std::process::id()));
+        for d in ["tests", "src", "docs", "agg/judges"] {
+            std::fs::create_dir_all(proj.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(crate::paths::private_dir(&proj)).unwrap();
+        let ledger = crate::paths::verdicts_jsonl(&proj);
+        let pristine = "{\"judge\":\"real\"}\n";
+        std::fs::write(&ledger, pristine).unwrap();
+
+        // The driver's own chain, verbatim from the sample: the family protects, the member
+        // re-grants the ONE thing it legitimately needs.
+        let sandboxed =
+            Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "agg/judges/"]);
+        let step = sandboxed.create("implement").readonly(["src/"]).writable(["tests"]);
+        assert_eq!(
+            step.denied(),
+            ["agg/judges", "src"],
+            "inherited from the template + its own, minus the one re-grant"
+        );
+
+        let script = format!(
+            "echo t > '{p}/tests/new.txt' && echo TESTS_OK || echo TESTS_DENIED; \
+             echo s > '{p}/src/new.txt' && echo SRC_OK || echo SRC_DENIED; \
+             echo d > '{p}/docs/new.txt' && echo DOCS_OK || echo DOCS_DENIED; \
+             echo j > '{p}/agg/judges/evil.sh' && echo JUDGES_OK || echo JUDGES_DENIED; \
+             cat '{l}' >/dev/null && echo READ_OK; \
+             echo forged >> '{l}' && echo FORGE_OK || echo FORGE_DENIED",
+            p = proj.display(),
+            l = ledger.display()
+        );
+        let mut inner = Command::new("/bin/sh");
+        inner.arg("-c").arg(&script);
+        let out = wrap(inner, &proj, &[], &step.denied())
+            .expect("build the wrapper")
+            .output()
+            .expect("run the sandbox");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let ledger_after = std::fs::read_to_string(&ledger).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&proj);
+
+        // `.writable()` re-grants EXACTLY that path — and nothing the step never listed is denied.
+        assert!(text.contains("TESTS_OK"), "`writable([\"tests\"])` must re-grant it:\n{text}");
+        assert!(text.contains("DOCS_OK"), "an unlisted path stays writable:\n{text}");
+        // …the step's own `readonly` binds…
+        assert!(text.contains("SRC_DENIED"), "the step's own `readonly([\"src/\"])`:\n{text}");
+        // …and so does the one it INHERITED from the template it was created from.
+        assert!(text.contains("JUDGES_DENIED"), "`agg/judges/` inherited from the template:\n{text}");
+        // ⛔ and the DERIVED carve-out is still there beside the per-step list.
+        assert!(text.contains("READ_OK"), "reads stay open — a judge reads the ledger:\n{text}");
+        assert!(text.contains("FORGE_DENIED"), "`agg/private/` is still carved out:\n{text}");
+        assert_eq!(ledger_after, pristine, "the ledger was MODIFIED — the carve-out leaked");
     }
 
     /// The most permissive kernel sandbox this platform can express, wrapped around `/bin/sh -c`.
@@ -528,11 +735,11 @@ mod tests {
 
         // 1. THE SHAPE §2.4 SHIPS: agg's jail outside, the agent's own inside.
         let (nested, nested_ledger) =
-            run(wrap(self_sandboxing_agent_shaped(&script), &proj, &[]).expect("build the wrapper"));
+            run(wrap(self_sandboxing_agent_shaped(&script), &proj, &[], &[]).expect("build the wrapper"));
         // 2. agg's jail ALONE — the same worker with no inner layer.
         let mut sh = Command::new("/bin/sh");
         sh.arg("-c").arg(&script);
-        let (outer_only, outer_ledger) = run(wrap(sh, &proj, &[]).expect("build the wrapper"));
+        let (outer_only, outer_ledger) = run(wrap(sh, &proj, &[], &[]).expect("build the wrapper"));
         // 3. CONTROL: the inner layer alone, so a denial in (1)/(2) is attributable to agg's.
         let (control, _) = run(self_sandboxing_agent_shaped(&script));
 
@@ -567,7 +774,7 @@ mod tests {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn wrap_is_loud_on_an_unsupported_os() {
         let inner = Command::new("claude");
-        let err = wrap(inner, Path::new("/tmp"), &[]).unwrap_err().to_string();
+        let err = wrap(inner, Path::new("/tmp"), &[], &[]).unwrap_err().to_string();
         assert!(err.contains("not supported"), "must refuse loudly: {err}");
     }
 }
