@@ -10,8 +10,12 @@
 //! # What lives here
 //!
 //! This module is being built in the order of BUILD.md §4. Today it holds the **public value
-//! types** — the things a driver names, matches on and stores. The facade (`Agg`) and the builders
-//! (`Step`, `Judge`) land in later commits.
+//! types** — the things a driver names, matches on and stores — and [`Step`], the step builder with
+//! its template merge rules. The facade (`Agg`) lands in commit 6.
+//!
+//! `Judge` and `Verdict` are NOT here: they are the shipped [`crate::core::model`] types, extended
+//! in place with the driver's constructors ([`Judge::rubric`](crate::core::model::Judge::rubric),
+//! `script`, `native`) rather than twinned — one definition of a judge, whichever path built it.
 //!
 //! # The rule that shapes every type in here
 //!
@@ -21,8 +25,10 @@
 //! are REUSED from the shipped structs rather than redefined, so there is one definition of each
 //! knob — but on this path they are populated in Rust and only in Rust.
 
+mod step;
 mod types;
 
+pub use step::Step;
 pub use types::{
     Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, StepOutcome,
 };

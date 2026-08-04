@@ -168,6 +168,44 @@ fn a_judge_key_in_a_step_body_is_a_hard_error() {
     assert!(err2.contains("unknown field `recheck`"), "got: {err2}");
 }
 
+/// §3.8: `readonly:`/`writable:` are real [`StepBody`] keys — the YAML sample writes them, and
+/// `deny_unknown_fields` means the schema has to admit them or every such config hard-errors.
+/// They are NORMALISED on resolution, because `writable` subtracts from `readonly` BY STRING.
+#[test]
+fn a_step_takes_normalised_readonly_and_writable_lists() {
+    let cfg = parse(
+        "project: p\n\
+         steps:\n  \
+           implement:\n    \
+             isolation: sandbox\n    \
+             readonly: [tests/, agg/judges/, ./src]\n    \
+             writable: [tests]\n\
+         sequence: { steps: [implement] }\n",
+    )
+    .expect("readonly/writable are legal step keys");
+    let step = cfg.resolve_step("implement").expect("resolves");
+
+    // one spelling stored, whatever spelling was written
+    assert_eq!(step.readonly, ["tests", "agg/judges", "src"]);
+    assert_eq!(step.writable, ["tests"]);
+    // …and the subtraction lands despite `readonly: [tests/]` vs `writable: [tests]`
+    assert_eq!(step.denied(), ["agg/judges", "src"]);
+    assert!(step.custom.is_none(), "YAML cannot name a driver-supplied backend");
+}
+
+/// The new keys must not widen the schema: a near-miss is still a HARD ERROR.
+#[test]
+fn a_typod_isolation_list_key_is_still_refused() {
+    let err = parse("project: p\nsteps: { worker: { read_only: [src/] } }\nsequence: { steps: [worker] }\n")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unknown field `read_only`"), "got: {err}");
+    let plural = parse("project: p\nsteps: { worker: { writables: [src/] } }\nsequence: { steps: [worker] }\n")
+        .unwrap_err()
+        .to_string();
+    assert!(plural.contains("unknown field `writables`"), "got: {plural}");
+}
+
 /// §4.1/§7.3: `resume_sessions` is refused unconditionally — a per-agent session id cannot cross
 /// a mixed sequence, so the key is rejected at PARSE time (there is no field for it anywhere).
 #[test]

@@ -48,6 +48,16 @@ impl AggConfig {
                 .clone()
                 .or_else(|| self.defaults.image.clone())
                 .unwrap_or_else(|| crate::isolation::DEFAULT_IMAGE.to_string()),
+            // Normalised HERE, on the way in, exactly as the driver's builder does it — `writable`
+            // subtracts by string, so `writable: [agg/judges]` against `readonly: [agg/judges/]`
+            // would otherwise subtract nothing while reading like it worked. There is no
+            // `defaults.readonly`: the YAML path has one defaults block and repeating the list per
+            // step is the shape `sample_workflow.yaml` documents (the Rust path's templates are the
+            // answer to that repetition).
+            readonly: crate::isolation::normalize_paths(&body.readonly),
+            writable: crate::isolation::normalize_paths(&body.writable),
+            // YAML cannot name a driver-supplied backend; `agent:` is a string there.
+            custom: None,
         })
     }
 

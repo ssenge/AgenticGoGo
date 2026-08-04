@@ -15,6 +15,7 @@ use crate::backend::{for_name, AgentBackend};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 mod methods;
 
@@ -133,9 +134,16 @@ impl Default for JudgeCfg {
     }
 }
 
-/// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_judges`. The
-/// COMPLETE legal key list (§4.1); any other key is a HARD ERROR (deny_unknown), which is what
-/// makes naming a `judge_*` key in a step fail loudly.
+/// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_judges` and the
+/// per-step isolation lists. The COMPLETE legal key list is:
+///
+/// ```text
+/// agent · model · effort · worker_args · state · role_prompt · prompt · skip_judges
+/// isolation · image · readonly · writable
+/// ```
+///
+/// Any other key is a HARD ERROR (deny_unknown), which is what makes naming a `judge_*` key in a
+/// step fail loudly instead of being silently ignored.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepBody {
@@ -166,6 +174,20 @@ pub struct StepBody {
     /// the base image for this step under `isolation: container`; overrides `defaults.image`.
     #[serde(default)]
     pub image: Option<String>,
+    /// project-relative paths this step may READ but not WRITE — extra denies handed to the OS
+    /// wrapper on top of the derived `agg/private/` carve-out.
+    ///
+    /// ⚠ **Inert without a confining tier.** The deny list is delivered by the wrapper, and the
+    /// wrapper only runs under `isolation: sandbox`/`container`; under the default `none` there is
+    /// no mechanism to deliver it to and the step can write every path listed. agg warns; it does
+    /// not silently pretend.
+    #[serde(default)]
+    pub readonly: Vec<String>,
+    /// paths SUBTRACTED from [`Self::readonly`] — how a step re-grants exactly one of the denies it
+    /// would otherwise carry. Matching is exact on the normalised spelling
+    /// ([`crate::isolation::normalize_path`]), so `agg/judges` and `agg/judges/` are one path.
+    #[serde(default)]
+    pub writable: Vec<String>,
 }
 
 /// The sequence: a repeating statement list + the run-level ceilings and Definition of Done. The
@@ -394,6 +416,21 @@ fn default_memory_inject_kb() -> Option<u64> {
     Some(8)
 }
 
+/// An `Arc<dyn AgentBackend>` that is `Debug`.
+///
+/// The trait deliberately does NOT require `Debug` — that would be a tax on every backend author
+/// for one line of formatting — so a bare `Arc<dyn AgentBackend>` field would kill [`ResolvedStep`]'s
+/// derive and force a hand-written 15-field `Debug` that a future field addition would silently
+/// skip. One newtype with one `Debug` impl is cheaper and stays correct.
+#[derive(Clone)]
+pub struct CustomBackend(pub Arc<dyn AgentBackend>);
+
+impl std::fmt::Debug for CustomBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CustomBackend({})", self.0.name())
+    }
+}
+
 /// A step body merged over [`Defaults`] — everything one worker session needs, resolved. The loop
 /// builds one per step at session-build time (§5.5). Agent/model/effort resolve against the STEP's
 /// backend, not a process-wide one.
@@ -413,12 +450,57 @@ pub struct ResolvedStep {
     /// the base image for `isolation: container` (step over defaults, else
     /// [`crate::isolation::DEFAULT_IMAGE`]). Inert on every other tier.
     pub image: String,
+    /// paths this step may read but not write — normalised, and already accumulated down its
+    /// template chain on the driver path. See [`StepBody::readonly`].
+    pub readonly: Vec<String>,
+    /// paths subtracted from [`Self::readonly`]. See [`StepBody::writable`]; [`Self::denied`] is the
+    /// resulting deny set.
+    pub writable: Vec<String>,
+    /// a backend the DRIVER implements itself (`Agent::Custom`), consulted by [`Self::backend`]
+    /// BEFORE `backend::for_name`. Always `None` on the YAML path — `agent:` is a string there and
+    /// an `Arc<dyn AgentBackend>` cannot be `Deserialize`, which is the documented break in the
+    /// "one struct, two constructors" claim (BUILD.md §3.8).
+    pub custom: Option<CustomBackend>,
 }
 
 impl ResolvedStep {
-    /// The backend this step runs on.
-    pub fn backend(&self) -> Result<&'static dyn AgentBackend> {
+    /// The backend this step runs on — the driver's own [`CustomBackend`] first, else the named one.
+    ///
+    /// ⚠ The returned reference borrows `self` rather than being `&'static`: a custom backend lives
+    /// in the step, not in the binary's static data. Every shipped backend still coerces in.
+    pub fn backend(&self) -> Result<&dyn AgentBackend> {
+        match &self.custom {
+            Some(b) => Ok(&*b.0),
+            None => for_name(&self.agent),
+        }
+    }
+
+    /// [`Self::backend`] narrowed to `&'static` — for the ONE call site that hands the backend to
+    /// the worker's stream-reader thread (`worker::run_session`, whose `move` closure needs it to
+    /// outlive the session).
+    ///
+    /// ponytail: a [`CustomBackend`] lives in an `Arc`, not in static data, so it cannot satisfy
+    /// that bound and this REFUSES loudly rather than quietly running the named agent instead. The
+    /// upgrade path is `run_session`/`spawn_reader` taking `Arc<dyn AgentBackend>` (the trait is
+    /// already `Send + Sync`, and a cloned `Arc` into the thread costs one refcount) — commit 6
+    /// makes that change, when there is finally a custom backend to run.
+    pub fn static_backend(&self) -> Result<&'static dyn AgentBackend> {
+        if let Some(b) = &self.custom {
+            anyhow::bail!(
+                "step `{}` names a driver-supplied backend (`{}`), which the worker launch cannot \
+                 run yet — see `ResolvedStep::static_backend`",
+                self.name,
+                b.0.name()
+            );
+        }
         for_name(&self.agent)
+    }
+
+    /// The paths this step may NOT write: `readonly` minus `writable`
+    /// ([`crate::isolation::denied_paths`]). Handed to the wrapper as a SECOND argument beside its
+    /// derived `agg/private/` carve-out — never as a replacement for it.
+    pub fn denied(&self) -> Vec<String> {
+        crate::isolation::denied_paths(&self.readonly, &self.writable)
     }
     /// The worker model, resolved against the step's backend. Absent = the backend's own default.
     pub fn model<'a>(&'a self, b: &dyn AgentBackend) -> &'a str {
