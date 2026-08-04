@@ -89,14 +89,36 @@ impl Handler for CheckRunStop {
     }
 }
 
-/// On abort with a span still staged, leave the branches and print them for inspection (§5.7).
+/// THE UNGATED-SPAN WARNING (BUILD.md §3.10): the run is over with work still staged and never
+/// gated, so the base branch does not have it.
+///
+/// Pure, and separate from [`report_stranded_span`], for two reasons: the driver's `Drop for Agg`
+/// needs the same sentence the YAML path's abort prints, and a test must be able to assert the exact
+/// text against the state a real run ended in rather than one it reconstructed.
+///
+/// ⛔ **agg never auto-merges** — landing work the operator never gated is a call agg was not given
+/// — and **never auto-rolls-back**: discarding an overnight run over a late regression is far worse
+/// than keeping it. So the only honest action is to say precisely where the work is and how to land
+/// it, naming the TIP (which descends from every other branch in the span, so one merge takes all of
+/// them).
+pub fn stranded_span_message(span_branches: &[String], span_tip: Option<&str>, base: &str) -> Option<String> {
+    let tip = span_tip?;
+    if span_branches.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "⚠ {} session(s) staged on {tip}, never gated — {base} is unchanged.\n  \
+         Merge with: git merge {tip}",
+        span_branches.len()
+    ))
+}
+
+/// Print [`stranded_span_message`] if there is one. Called at run end on both paths — from
+/// `CheckRunStop`'s abort on the YAML path, and from `Drop for Agg` on the driver path.
 pub fn report_stranded_span(ctx: &mut LoopState) {
-    let span_branches = &ctx.ext.get::<AGGState>().git.span_branches;
-    if !span_branches.is_empty() {
-        eprintln!(
-            "  [span] {} staged branch(es) left un-merged for inspection: {}",
-            span_branches.len(),
-            span_branches.join(", ")
-        );
+    let git = &ctx.ext.get::<AGGState>().git;
+    let msg = stranded_span_message(&git.span_branches, git.span_tip.as_deref(), &git.iso_base);
+    if let Some(msg) = msg {
+        eprintln!("{msg}");
     }
 }

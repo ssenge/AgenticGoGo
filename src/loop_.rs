@@ -206,7 +206,8 @@ pub fn run_with(
     // ── session isolation (MANDATORY): the git preconditions run as `pre_start` hooks — recover a
     //    stranded merge, require a clean git repo, ensure `agg/{state,private}` gitignored, resolve the base
     //    branch. Any bail is a hard error out of run(), exactly as the old inline block. ──
-    let mut boot = Bootstrap { dir, cfg: &cfg, iso_base: None };
+    // `resume: false` — the YAML path has no resume, so a dirty tree still ends the run here.
+    let mut boot = Bootstrap { dir, cfg: &cfg, resume: false, iso_base: None };
     run_pre_start(&lifecycle.pre_start, &mut boot)?;
     let iso_base = boot.iso_base.expect("ResolveIsoBase set iso_base");
 
@@ -252,6 +253,9 @@ pub fn run_with(
         model: worker_model_display,
         stop_when: eng.done_if.clone().unwrap_or_default(),
         halt_when: eng.abort_if.clone().unwrap_or_default(),
+        // RECORDED for the next run, not for a reader (§3.9 rule 1): a run that starts with HEAD
+        // stranded on a crashed session branch recovers its real base from here.
+        iso_base: iso_base.clone(),
         budget_total,
         cost_limit,
         phase: Phase::Starting,

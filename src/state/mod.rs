@@ -143,6 +143,15 @@ pub struct DashboardState {
     pub step_model: String,
     pub stop_when: String,
     pub halt_when: String,
+    /// the isolation BASE branch this run merges into — the branch `gate()` stages onto and the one
+    /// the run-end warning says is unchanged.
+    ///
+    /// It is RECORDED here for the next run, not for a reader: `base_branch` defaults to empty, so a
+    /// run that starts with HEAD stranded on a crashed run's session branch would otherwise resolve
+    /// its base FROM that dead branch — every gate would merge into it, report `Kept`, and never
+    /// touch `main` while nothing warned (BUILD.md §3.9 rule 1). `GitSetup` reads this field back to
+    /// recover the real base.
+    pub iso_base: String,
     /// epoch secs the loop started (for an absolute "started at" in the Info block)
     pub started_at_epoch: u64,
     pub up_secs: u64,

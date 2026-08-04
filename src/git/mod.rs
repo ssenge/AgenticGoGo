@@ -232,6 +232,31 @@ pub fn delete_branch(dir: &Path, branch: &str) -> bool {
     git(dir, &["branch", "-D", branch]).0
 }
 
+/// Every local branch whose name starts with `stem`, in git's own (sorted) order.
+///
+/// `--list <stem>*` rather than a filtered `branch --list`: the glob is git's, so a project name
+/// containing a glob metacharacter cannot be matched by accident — the caller re-checks the prefix
+/// literally below.
+pub fn branches_starting_with(dir: &Path, stem: &str) -> Vec<String> {
+    let pattern = format!("{stem}*");
+    let (ok, out, _) = git(dir, &["branch", "--list", &pattern, "--format=%(refname:short)"]);
+    if !ok {
+        return Vec::new();
+    }
+    out.lines().map(str::trim).filter(|b| b.starts_with(stem)).map(str::to_string).collect()
+}
+
+/// Rename `from` to `to` (`git branch -m`), never clobbering an existing `to`. Returns true on
+/// success. Used to PARK a previous run's stranded span out of the way of this run's session
+/// numbering — a rename keeps every commit reachable, which a delete would not.
+pub fn rename_branch(dir: &Path, from: &str, to: &str) -> bool {
+    let (ok, _, err) = git(dir, &["branch", "-m", from, to]);
+    if !ok {
+        eprintln!("  [git] could not rename {from} → {to}: {err}");
+    }
+    ok
+}
+
 /// Does `path` exist relative to `dir`? (for the red-file veto check)
 pub fn file_exists(dir: &Path, path: &str) -> bool {
     dir.join(path).exists()

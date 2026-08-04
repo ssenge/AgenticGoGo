@@ -13,8 +13,10 @@
 //! types** — the things a driver names, matches on and stores — [`Step`], the step builder with its
 //! template merge rules, and [`Agg`], the facade itself.
 //!
-//! ⚠ The run-end contract (the ungated-span warning, `Drop for Agg`) is the next commit; until it
-//! lands, a driver that never calls [`Agg::gate`] ends silently with its work on the span branch.
+//! Run end is `Drop for Agg`: `main` returning IS the end of the run, so the ledger, `state.json`
+//! and the ungated-span warning are written there rather than by a post-loop block no driver would
+//! call. ⛔ agg never auto-merges an ungated span and never auto-rolls it back — it names the branch
+//! and the `git merge` that lands it, and leaves the call to the operator.
 //!
 //! `Judge` and `Verdict` are NOT here: they are the shipped [`crate::core::model`] types, extended
 //! in place with the driver's constructors ([`Judge::rubric`](crate::core::model::Judge::rubric),
