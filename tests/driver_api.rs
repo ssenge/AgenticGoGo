@@ -1,0 +1,302 @@
+//! THE RUST DRIVER API's load-bearing properties (BUILD.md §5).
+//!
+//! These drive the REAL facade against a REAL project — a git repo, the real hook pipeline, real
+//! session branches — with a fake `claude` on PATH standing in for the model, exactly as
+//! `tests/cli.rs` does for the YAML path. Nothing here asserts on a flag the facade set; every
+//! assertion reads something the pipeline actually produced (the session counter, a marker file a
+//! judge script wrote, `state.json`).
+//!
+//! # Why one shared PATH/HOME, set once
+//!
+//! Tests inside one binary run in parallel threads, and mutating the process environment while
+//! another thread is spawning is a race. So the environment is mutated EXACTLY ONCE, inside a
+//! `LazyLock` that every test touches before it does anything else — every thread therefore
+//! synchronises on that initialisation before any of them can spawn a worker.
+//!
+//! Unix-only (the fake agent is a shell script), like the rest of the suite.
+
+#![cfg(unix)]
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::LazyLock;
+
+use agg::core::config::Limits;
+use agg::prelude::*;
+
+/// The one environment mutation in this binary: a shared `bin/` holding the fake `claude`, and a
+/// throwaway `HOME` so `ensure_library` never writes the developer's real `~/.agg/judges`.
+static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
+    let root = std::env::temp_dir().join(format!("agg-driver-env-{}", std::process::id()));
+    let bin = root.join("bin");
+    let home = root.join("home");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+
+    // The fake `claude`. `--version` answers preflight. A WORKER session is recognised by the
+    // instructions pointer in its prompt — a ruler one-shot (summary / LLM judge) must not be
+    // mistaken for one, or every summary would commit a phantom session.
+    let claude = bin.join("claude");
+    std::fs::write(
+        &claude,
+        r#"#!/bin/sh
+worker=
+for a in "$@"; do
+  case "$a" in
+    --version) echo "fake-claude 0.0.0"; exit 0 ;;
+    *INSTRUCTIONS.md*) worker=1 ;;
+  esac
+done
+if [ -n "$worker" ]; then
+  echo "session $$" >> work.log
+  git add -A >/dev/null 2>&1
+  git commit -qm "worker: did work" >/dev/null 2>&1
+fi
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+exit 0
+"#,
+    )
+    .unwrap();
+    chmod_x(&claude);
+
+    std::env::set_var("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
+    std::env::set_var("HOME", &home);
+    root
+});
+
+fn chmod_x(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(p).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(p, perms).unwrap();
+}
+
+/// A clean git repo on `main` with one empty commit — session isolation is MANDATORY, so every
+/// driver run needs one. Touching [`ENV`] first is what serialises the environment setup.
+fn project() -> tempfile::TempDir {
+    LazyLock::force(&ENV);
+    let tmp = tempfile::tempdir().unwrap();
+    let g = |args: &[&str]| Command::new("git").args(args).current_dir(tmp.path()).output().unwrap();
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "t@t"]);
+    g(&["config", "user.name", "t"]);
+    g(&["commit", "-q", "--allow-empty", "-m", "agg baseline"]);
+    tmp
+}
+
+/// A driver step that costs one fake session.
+fn work() -> Step {
+    Step::new("implement").model("fake").prompt("do a chunk")
+}
+
+/// Write an executable script judge at `agg/judges/<name>.sh` that APPENDS one line to `<name>.runs`
+/// every time it executes, then reports `met`. The marker file is how "did this judge actually run"
+/// is observed — a count, not a flag agg set.
+fn marker_judge(dir: &Path, name: &str, met: bool) -> Judge {
+    let rel = format!("agg/judges/{name}.sh");
+    let p = dir.join(&rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(
+        &p,
+        format!(
+            "#!/bin/sh\necho ran >> \"$AGG_PROJECT_DIR/{name}.runs\"\nprintf '%s\\n' '{{\"met\":{met}}}'\n"
+        ),
+    )
+    .unwrap();
+    chmod_x(&p);
+    Judge::script(name, rel)
+}
+
+/// How many times a marker judge has executed.
+fn runs(dir: &Path, name: &str) -> usize {
+    std::fs::read_to_string(dir.join(format!("{name}.runs"))).map(|t| t.lines().count()).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------------------------
+
+/// THE PIPELINE IS SHARED. A driver step runs the same hook dispatch a YAML lap does, so agg's own
+/// artefacts appear without the facade writing any of them itself.
+///
+/// ⚠ `verdicts.jsonl` is asserted NOWHERE here: with `step()` always staging, `verdicts::append` is
+/// not called by a step — it is called by a gate.
+#[test]
+fn a_driver_step_runs_the_real_pipeline() {
+    let tmp = project();
+    let dir = tmp.path();
+
+    let agg = Agg::open(dir).unwrap();
+    let out = agg.step(&work()).unwrap();
+
+    assert_eq!(out.session, 1);
+    assert_eq!(out.step, "implement");
+    assert_eq!(out.landed, Landing::Span, "step() STAGES; nothing merges until gate()");
+    assert!(out.tokens >= 1, "the worker's reported tokens reached the run counters: {out:?}");
+    assert!(out.verdicts.is_empty(), "the run-set is EMPTY on the driver path — judges are lazy");
+
+    assert!(agg::paths::state_json(dir).exists(), "the dashboard snapshot is published");
+    let status = agg::ui::status::render(dir);
+    assert!(status.contains("session"), "`agg status` renders this run:\n{status}");
+    assert!(agg::paths::run_pid(dir).exists(), "the double-run guard is armed while the run is live");
+
+    drop(agg);
+    assert!(!agg::paths::run_pid(dir).exists(), "…and released when the Agg is dropped");
+}
+
+/// THE LATCH. A driver that ignores every `Err` and keeps calling `step()` after a ceiling fired
+/// launches **zero** further workers.
+///
+/// Asserted on the SESSION COUNTER, not on the error: an `Err` that is returned while the pipeline
+/// still runs a worker is exactly the failure this test exists to catch.
+#[test]
+fn after_a_ceiling_every_further_step_launches_no_worker() {
+    let tmp = project();
+    let agg = Agg::open(tmp.path()).unwrap().limits(Limits { sessions: Some(1), ..Limits::default() });
+
+    agg.step(&work()).expect("the first step is under the ceiling");
+    assert_eq!(agg.sessions(), 1);
+
+    let breach = agg.check_limits().expect_err("session 1 of 1 is the ceiling");
+    assert!(matches!(breach, Fatal::Ended(RunOutcome::MaxSessions)), "got {breach:?}");
+
+    // the driver ignores it and ploughs on, exactly as a careless one would.
+    for _ in 0..5 {
+        let _ = agg.step(&work());
+    }
+    assert_eq!(agg.sessions(), 1, "the latch must make every later call a no-op that spends nothing");
+    assert_eq!(agg.ended(), Some(RunOutcome::MaxSessions));
+
+    // …and a judge asked after the latch reports NOT MET with no number — never a fabricated pass.
+    let j = marker_judge(tmp.path(), "always", true);
+    let v = agg.judge(&j);
+    assert!(!v.met() && v.value().is_none(), "a latched judge is not-met and numberless: {v:?}");
+    assert_eq!(runs(tmp.path(), "always"), 0, "…and it did not RUN");
+}
+
+/// JUDGES ARE LAZY AND MEMOIZED PER STEP. Asking twice inside one step runs the judge once; the next
+/// step is a fresh world and it runs again.
+#[test]
+fn a_judge_asked_twice_in_one_step_runs_once_and_again_next_step() {
+    let tmp = project();
+    let dir = tmp.path();
+    let tests = marker_judge(dir, "tests_pass", true);
+
+    let agg = Agg::open(dir).unwrap();
+    agg.step(&work()).unwrap();
+
+    assert!(agg.judge(&tests).met());
+    assert!(agg.judge(&tests).met());
+    assert_eq!(runs(dir, "tests_pass"), 1, "memoized for the step — two asks, one execution");
+
+    agg.step(&work()).unwrap();
+    assert!(agg.judge(&tests).met());
+    assert_eq!(runs(dir, "tests_pass"), 2, "a new step clears the cache — the judge runs again");
+}
+
+/// `&&` IS THE GATE. The expensive judge is never reached on a cycle where the cheap one failed —
+/// which is the entire replacement for the deleted per-judge `gate:` field.
+#[test]
+fn a_failed_first_judge_short_circuits_the_expensive_one() {
+    let tmp = project();
+    let dir = tmp.path();
+    let build = marker_judge(dir, "builds", false);
+    let load = marker_judge(dir, "load_test", true);
+
+    let agg = Agg::open(dir).unwrap();
+    agg.step(&work()).unwrap();
+
+    assert!(!(agg.judge(&build).met() && agg.judge(&load).met()));
+    assert_eq!(runs(dir, "builds"), 1);
+    assert_eq!(runs(dir, "load_test"), 0, "Rust's `&&` never reached the 40-minute judge");
+
+    // …and it is genuinely reachable — the same expression with a passing first judge runs both.
+    let ok = marker_judge(dir, "lint_clean", true);
+    assert!(agg.judge(&ok).met() && agg.judge(&load).met());
+    assert_eq!(runs(dir, "load_test"), 1);
+}
+
+/// `check_limits()` IS OPT-IN, IN BOTH DIRECTIONS. This is the whole ruling: all four ceilings are
+/// opt-in TOGETHER, so `limits.sessions` must NOT be enforced behind the driver's back the way the
+/// YAML path's `over_max_sessions` enforces it at the top of every lap.
+#[test]
+fn check_limits_is_opt_in_in_both_directions() {
+    // (a) never called ⇒ no ceiling: the run sails past `limits.sessions`.
+    let unchecked = project();
+    let agg = Agg::open(unchecked.path())
+        .unwrap()
+        .limits(Limits { sessions: Some(2), ..Limits::default() });
+    for _ in 0..4 {
+        agg.step(&work()).expect("a driver that never checks has no ceilings");
+    }
+    assert_eq!(agg.sessions(), 4, "limits.sessions must not be enforced from the step path");
+    assert_eq!(agg.ended(), None);
+
+    // (b) called ⇒ it stops at exactly the ceiling.
+    let checked = project();
+    let agg = Agg::open(checked.path())
+        .unwrap()
+        .limits(Limits { sessions: Some(2), ..Limits::default() });
+    let mut done = 0;
+    for _ in 0..4 {
+        if agg.check_limits().is_err() {
+            break;
+        }
+        agg.step(&work()).unwrap();
+        done += 1;
+    }
+    assert_eq!(done, 2, "the same limits, checked, stop the run at the ceiling");
+    assert_eq!(agg.ended(), Some(RunOutcome::MaxSessions));
+}
+
+/// ⛔ A STRAY `agg.yaml` IS IGNORED — not merged, not a fallback.
+///
+/// The project below declares a token ceiling of 1 in YAML; the driver declares a far larger one in
+/// Rust and runs past the YAML number. The second half is the sharper one: the `agg.yaml` is
+/// **malformed**, and the run does not care — a file that is never parsed cannot be malformed.
+///
+/// The policy half of the rule (`on_regression`) is asserted with the `gate()` tests, since a policy
+/// about what happens to a span is only observable once a span is closed.
+#[test]
+fn a_stray_and_even_malformed_agg_yaml_changes_nothing() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("agg")).unwrap();
+    std::fs::write(
+        dir.join("agg/agg.yaml"),
+        "project: [this is not\n  valid: yaml at all\nsequence: { limits: { tokens: 1 } }\n",
+    )
+    .unwrap();
+
+    let agg = Agg::open(dir)
+        .unwrap()
+        .limits(Limits { tokens: Some(1_000_000), ..Limits::default() })
+        .on_regression(OnRegression::Annotate);
+
+    let mut last = None;
+    for _ in 0..3 {
+        agg.check_limits().expect("the RUST ceiling is 1,000,000 tokens — nowhere near");
+        last = Some(agg.step(&work()).unwrap());
+    }
+    let last = last.unwrap();
+    assert_eq!(agg.sessions(), 3, "the YAML `limits.tokens: 1` never applied");
+    assert!(last.tokens > 1, "…and the run really did spend past it: {} tokens", last.tokens);
+    assert_eq!(agg.ended(), None, "a malformed agg.yaml cannot fail a run that never reads it");
+}
+
+/// `pos` is RAII and removes ITS OWN frame — never the top one. A non-LIFO drop is legal Rust
+/// (`drop(outer)` before an inner guard) and must not corrupt the label path.
+#[test]
+fn a_pos_frame_is_removed_by_id_not_by_popping() {
+    let tmp = project();
+    let agg = Agg::open(tmp.path()).unwrap();
+
+    let outer = agg.pos("cycle", 20);
+    let inner = agg.pos("attempt", 3);
+    outer.update(7);
+    inner.update(2);
+    assert_eq!(agg.label_path(), "cycle 7/20 › attempt 2/3");
+
+    drop(outer); // NOT the top of the stack
+    assert_eq!(agg.label_path(), "attempt 2/3", "the wrong frame would have been popped");
+    drop(inner);
+    assert_eq!(agg.label_path(), "");
+}

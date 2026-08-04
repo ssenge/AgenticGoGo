@@ -40,7 +40,7 @@ impl Handler for BusDrain {
                         return Ok(Flow::Stop(ctx.stopped_via_bus(reason)));
                     }
                 }
-                Command::Resume => {}
+                Command::Resume => ctx.ext.get::<AGGState>().operator.resumed = true,
                 Command::Stop { reason } => return Ok(Flow::Stop(ctx.stopped_via_bus(reason))),
                 Command::Note { text } => eprintln!("  [bus] note: {text}"),
             }
@@ -54,9 +54,16 @@ impl Handler for BusDrain {
 
 /// Advance the sequence cursor → resolve the next step; then (ONLY on a resolved step) bump the
 /// session counter, update the ledger, print the banner, and set `cur_step` + `scratch.skip_judges`.
+///
+/// A Rust driver hands its step in through `ctx.next_step`, which is consulted FIRST — the cursor,
+/// the `if`-conditions and `resolve_step` are then never reached on that path (BUILD.md §3.8).
 pub struct PickStep;
 impl Handler for PickStep {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        if let Some(step) = ctx.next_step.take() {
+            announce(ctx, step);
+            return Ok(Flow::Continue);
+        }
         let step_name = {
             let rs = ctx.run_state();
             let eng = &ctx.eng;
@@ -83,30 +90,35 @@ impl Handler for PickStep {
             Ok(s) => s,
             Err(e) => return Ok(Flow::Stop(ctx.abort_now(&format!("{e}")))),
         };
-
-        ctx.session += 1;
-        ctx.dash.session = ctx.session;
-        ctx.dash.lifetime_session = ctx.lifetime_base + ctx.session;
-        let (gm, gt) = ctx.eng.tally();
-        ctx.ledger.update(ctx.session, ctx.tokens_spent, gm, gt);
-        let up = ctx.loop_start.elapsed().as_secs();
-        eprintln!(
-            "\n──── session #{} (#{} lifetime)  step `{}` [{}]  (up {}h{:02}m)  goals {gm}/{gt} ────",
-            ctx.session,
-            ctx.dash.lifetime_session,
-            step.name,
-            step.agent,
-            up / 3600,
-            (up % 3600) / 60,
-        );
-        // skip_judges into the channel BEFORE cur_step is moved (later hooks read the channel).
-        ctx.scratch.get::<AGGScratch>().skip_judges = step.skip_judges;
-        ctx.cur_step = Some(step);
+        announce(ctx, step);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
         "PickStep"
     }
+}
+
+/// The half of `PickStep` that runs once a step is RESOLVED, whichever path resolved it: bump the
+/// session counter, update the ledger, print the banner, and publish the step into the state.
+fn announce(ctx: &mut LoopState, step: ResolvedStep) {
+    ctx.session += 1;
+    ctx.dash.session = ctx.session;
+    ctx.dash.lifetime_session = ctx.lifetime_base + ctx.session;
+    let (gm, gt) = ctx.eng.tally();
+    ctx.ledger.update(ctx.session, ctx.tokens_spent, gm, gt);
+    let up = ctx.loop_start.elapsed().as_secs();
+    eprintln!(
+        "\n──── session #{} (#{} lifetime)  step `{}` [{}]  (up {}h{:02}m)  goals {gm}/{gt} ────",
+        ctx.session,
+        ctx.dash.lifetime_session,
+        step.name,
+        step.agent,
+        up / 3600,
+        (up % 3600) / 60,
+    );
+    // skip_judges into the channel BEFORE cur_step is moved (later hooks read the channel).
+    ctx.scratch.get::<AGGScratch>().skip_judges = step.skip_judges;
+    ctx.cur_step = Some(step);
 }
 
 /// Cut this session's git branch off the span tip (or base).
@@ -228,9 +240,12 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
         }
     }
 
-    // ── AGG.md → a POINTER (the standing project instructions) ──
-    if crate::paths::config_base(&ctx.dir).join("AGG.md").exists() {
-        s.push_str("\n## Project instructions\nRead `agg/AGG.md` — the standing scope, architecture, and rules for this project.\n");
+    // ── the instructions file → a POINTER (the standing project instructions), never its bytes ──
+    if ctx.dir.join(&ctx.cfg.instructions).exists() {
+        s.push_str(&format!(
+            "\n## Project instructions\nRead `{}` — the standing scope, architecture, and rules for this project.\n",
+            ctx.cfg.instructions
+        ));
     }
 
     // ── the LLM wiki — list its pages if any exist ──

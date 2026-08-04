@@ -61,6 +61,11 @@ pub struct WorkerHealth {
 #[derive(Default)]
 pub struct Operator {
     pub pending_instruction: Option<String>,
+    /// the operator answered `agg send resume`. Recorded by `BusDrain` rather than swallowed,
+    /// because `Agg::block` waits for exactly this — and it drains the bus through `BusDrain` so
+    /// that the driver path and the loop cannot disagree about what a command means. The YAML path
+    /// ignores it (a `Resume` outside a `Pause` was always a no-op there).
+    pub resumed: bool,
 }
 /// compose-time inputs (was `prompt_prefix`/`state_before`).
 #[derive(Default)]

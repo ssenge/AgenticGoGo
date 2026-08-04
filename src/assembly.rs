@@ -17,6 +17,16 @@ pub struct Assembly {
 /// Build the run-set engine + parse the sequence from `cfg` (§5.3/§5.4). Refuses at startup:
 /// an unknown step name, an all-`skip_judges` sequence (nothing could ever merge), or a judge name
 /// that resolves to no file.
+///
+/// # The DRIVER variant (BUILD.md §3.6)
+///
+/// An EMPTY `sequence.steps` **is** a Rust-driver project: the flow lives in the driver's own
+/// `for`/`if`, so there is no statement list to validate and no `done_if` for agg to evaluate. Both
+/// startup refusals below are about the statement list, so with no statements there is nothing to
+/// refuse — and the all-`skip_judges` guard would otherwise reject every driver project outright.
+/// The resulting run-set is EMPTY (nothing is declared to agg on that path: no `abort_if`, no
+/// `notify_if`, no `invariants`), which is correct rather than a gap — driver judges are LAZY and
+/// the driver asks for them by hand.
 pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
     use crate::core::judges;
     use crate::core::model::{Judge, Lifecycle};
@@ -26,7 +36,10 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
         eprintln!("  ⚠ could not refresh ~/.agg/judges: {e}");
     }
 
-    let statements = sequence::parse(&cfg.sequence.steps)?;
+    let driver = cfg.sequence.steps.is_empty();
+    // `sequence::parse` refuses an empty list ("a run needs at least one step") — true of a YAML
+    // run and false of a driver one, where the steps are `agg.step(&s)` calls in Rust.
+    let statements = if driver { Vec::new() } else { sequence::parse(&cfg.sequence.steps)? };
 
     // every referenced step name must be a key in `steps:` (§5.4).
     for st in &statements {
@@ -45,7 +58,7 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
         .iter()
         .flat_map(|s| s.step_names())
         .any(|n| cfg.steps.get(n).map(|b| !b.skip_judges).unwrap_or(false));
-    if !has_judged {
+    if !driver && !has_judged {
         anyhow::bail!(
             "every step in the sequence is skip_judges — nothing can ever merge and done_if can \
              never fire (§5.7). At least one judged step is required."
@@ -53,7 +66,13 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
     }
 
     // DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ every if-condition (§5.3).
-    let mut dod: Vec<String> = stop::judge_names(&cfg.sequence.done_if)?;
+    // On the driver path there is no DoD at all — agg is never told what "done" means, so it must
+    // not claim success. `Sequence::done_if` still carries its YAML default; it is simply not read.
+    let done_if = (!driver).then(|| cfg.sequence.done_if.clone());
+    let mut dod: Vec<String> = match &done_if {
+        Some(d) => stop::judge_names(d)?,
+        None => Vec::new(),
+    };
     for inv in &cfg.sequence.invariants {
         push_unique(&mut dod, inv);
     }
@@ -114,7 +133,7 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
 
     let engine = Engine::new(
         judges_vec,
-        cfg.sequence.done_if.clone(),
+        done_if,
         cfg.sequence.abort_if.clone(),
         cfg.sequence.notify_if.clone(),
     )?;

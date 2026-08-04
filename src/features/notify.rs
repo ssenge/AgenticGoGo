@@ -138,6 +138,28 @@ pub(crate) fn halt_ping(ctx: &mut LoopState, halt_reason: Option<&str>) {
     deliver(ctx, &cfg, &reason, "abort");
 }
 
+/// A DRIVER's own message — `agg.info` / `agg.ask` / `agg.block` — through the SAME `notify.cmd`
+/// channel, templating and shell-quoting as everything else (§4.5 rule 1). Not a second channel: a
+/// second notification path is exactly the divergence the shared pipeline exists to prevent.
+///
+/// ⛔ **The `cooldown_sessions` debounce is neither applied nor consumed here.** It exists to stop a
+/// *detector* — re-evaluated every session — from paging a human every cycle. A driver's `ask` is
+/// one call site in compiled source that its author wrote because THAT condition warranted a
+/// message; swallowing it is the failure mode the debounce was invented to prevent, pointed the
+/// wrong way. And a `block` that waits for a human without telling one is a hang. Leaving
+/// `AGGState.notify.last_notify_session` untouched is the other half: a chatty driver must not
+/// silence the run's real stuck detector.
+pub(crate) fn driver_ping(ctx: &mut LoopState, level: &str, msg: &str) {
+    let Some(cfg) = ctx.cfg.sequence.notify.clone() else {
+        return;
+    };
+    if cfg.cmd.is_empty() {
+        return;
+    }
+    let reason = crate::core::engine::sanitize_reason(msg, msg);
+    deliver(ctx, &cfg, &reason, level);
+}
+
 /// Template the `{{…}}` vars into every command and run them. Shared by both callers so the
 /// variable set, the quoting and the jail cannot diverge between the live and terminal paths.
 fn deliver(ctx: &mut LoopState, cfg: &crate::core::config::NotifyCfg, reason: &str, kind: &str) {
@@ -268,7 +290,7 @@ mod tests {
     /// in scratch is the only source of a reason — the handler's POLICY is isolated from the core's
     /// reason-picking, which `core::engine`'s own tests already cover.
     fn quiet_engine() -> Engine {
-        Engine::new(vec![], "iterations > 999999".into(), None, None).unwrap()
+        Engine::new(vec![], Some("iterations > 999999".into()), None, None).unwrap()
     }
 
     /// A `LoopState` a handler can run against, mirroring `tests/plugin_api.rs::probe_state`.
@@ -285,6 +307,7 @@ mod tests {
             config_base: dir.to_path_buf(),
             eng,
             cursor: crate::core::sequence::Cursor::new(vec![]),
+            next_step: None,
             cur_step: Some(crate::core::config::ResolvedStep {
                 name: "worker".into(),
                 agent: "claude".into(),
@@ -481,7 +504,7 @@ mod tests {
             evidence: vec![],
             error: None,
         });
-        let eng = Engine::new(vec![stuck], "iterations > 999999".into(), None, Some("stuck.value >= 85".into())).unwrap();
+        let eng = Engine::new(vec![stuck], Some("iterations > 999999".into()), None, Some("stuck.value >= 85".into())).unwrap();
         let mut st = state(&cfg, tmp.path(), eng, Isolation::None);
         // … while the pre-gate cycle carries a reason derived from the session about to be discarded.
         st.session = 1;

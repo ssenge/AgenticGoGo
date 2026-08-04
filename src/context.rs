@@ -38,6 +38,13 @@ pub struct LoopState {
     pub cursor: Cursor,
     /// the step being run THIS cycle (set by INJECT).
     pub cur_step: Option<ResolvedStep>,
+    /// the step a Rust DRIVER handed to `agg.step(&s)`. `PickStep` `take()`s it BEFORE it consults
+    /// anything else, which is how a driver's flow replaces the `sequence:` list without a second
+    /// dispatch path existing anywhere. Always `None` on the YAML path.
+    ///
+    /// It is a [`ResolvedStep`] and not a `StepBody` because `StepBody` has no `name` (names are the
+    /// `steps:` map keys) and `PickStep` needs one for the banner, the dashboard and `cur_step`.
+    pub next_step: Option<ResolvedStep>,
 
     pub dash: DashboardState,
     pub live: LiveState,

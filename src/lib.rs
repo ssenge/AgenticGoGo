@@ -66,8 +66,8 @@ pub mod prelude {
     pub use crate::core::config::Limits;
     pub use crate::core::model::{Judge, JudgeCtx, Verdict};
     pub use crate::driver::{
-        Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, Step,
-        StepOutcome,
+        Agg, Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, PosFrame,
+        Step, StepOutcome,
     };
     pub use crate::isolation::Isolation;
     pub use crate::plugin::RunOutcome;

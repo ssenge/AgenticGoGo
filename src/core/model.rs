@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Derived lifecycle state of a judge across steps.
@@ -184,12 +184,108 @@ impl Verdict {
 /// ledger. A judge that genuinely needs the clock is a [`Judge::script`], where the impurity lives
 /// in a separate file a reviewer can see.
 ///
-/// ponytail: the ctx is EMPTY until the facade lands (BUILD.md §3.7, commit 6), which adds
-/// `met`/`value`/`verdict`/`previous`/`history`/`session`/`step`/`dir`/`read`/`diff` and the two
-/// construction sites. The lifetime is here from day one on purpose — the ctx BORROWS the verdict
-/// source it consults, and adding the parameter later would change every native closure's signature.
+/// # What it can reach
+///
+/// Committed repo state (`dir`, `read`, `diff`) and agg's own ledger (`previous`, `history`), plus
+/// the other judges — through the SAME lazy per-step cache `agg.judge()` uses, so asking for an
+/// unconsulted judge RUNS it, memoized, with its spend charged exactly as a direct ask would be.
+/// That is the price of `met`/`verdict` returning non-`Option` values, and it is the right price:
+/// the alternative is fabricating a verdict. Recursion (a judge asking for itself, directly or
+/// through a cycle) is REFUSED with a [`Verdict::failed`] naming the cycle.
 pub struct JudgeCtx<'a> {
+    source: &'a dyn JudgeSource,
+    session: u32,
+    step: &'a str,
+    dir: &'a Path,
+    /// captured EAGERLY at construction — see [`JudgeCtx::diff`].
+    diff: String,
     _borrow: PhantomData<&'a ()>,
+}
+
+/// "Give me the verdict for this judge, running it if needed."
+///
+/// The ONE seam both [`JudgeCtx`] construction sites go through, so they build the ctx identically
+/// while seeing different verdict stores: the facade's per-step `RefCell` cache on the Rust path,
+/// and `Engine` state on the YAML path.
+pub trait JudgeSource {
+    fn verdict_for(&self, j: &Judge) -> Verdict;
+}
+
+impl<'a> JudgeCtx<'a> {
+    /// `diff` is the session's diff against the isolation base, captured by the CALLER before any
+    /// judge runs — see [`JudgeCtx::diff`] for why it cannot be lazy.
+    pub fn new(
+        source: &'a dyn JudgeSource,
+        session: u32,
+        step: &'a str,
+        dir: &'a Path,
+        diff: String,
+    ) -> JudgeCtx<'a> {
+        JudgeCtx { source, session, step, dir, diff, _borrow: PhantomData }
+    }
+
+    /// Did `j` say GOOD? Runs `j` if this step has not asked for it yet.
+    pub fn met(&self, j: &Judge) -> bool {
+        self.verdict(j).met
+    }
+
+    /// `j`'s measured number, or `None` for a binary judge. ⛔ NEVER a fabricated `0`.
+    pub fn value(&self, j: &Judge) -> Option<f64> {
+        self.verdict(j).value
+    }
+
+    /// `j`'s whole verdict this step, from the shared lazy cache (running it on a miss).
+    pub fn verdict(&self, j: &Judge) -> Verdict {
+        self.source.verdict_for(j)
+    }
+
+    /// `j`'s last MERGED verdict — `verdicts.jsonl`'s `merged`/`baseline` rows, i.e. the very
+    /// baseline the regression gate measures against, so a native judge and the gate cannot
+    /// disagree about what "before" means. `None` = `j` has no landed row yet.
+    pub fn previous(&self, j: &Judge) -> Option<Verdict> {
+        crate::core::verdicts::rows_for(self.dir, &j.name, true).last().map(|r| r.verdict())
+    }
+
+    /// `j`'s last `n` recorded verdicts, OLDEST FIRST — every outcome, not just the landed ones,
+    /// because "the test count must never shrink" is a statement about the series agg observed.
+    pub fn history(&self, j: &Judge, n: usize) -> Vec<Verdict> {
+        let rows = crate::core::verdicts::rows_for(self.dir, &j.name, false);
+        rows[rows.len().saturating_sub(n)..].iter().map(|r| r.verdict()).collect()
+    }
+
+    pub fn session(&self) -> u32 {
+        self.session
+    }
+
+    /// The step whose session is being graded.
+    pub fn step(&self) -> &str {
+        self.step
+    }
+
+    pub fn dir(&self) -> &Path {
+        self.dir
+    }
+
+    /// Read a project file, RELATIVE to the project dir — which is the whole reason this exists
+    /// beside [`Self::dir`]: it is the one place that rule is enforced, and it is what makes a
+    /// judge relocatable.
+    ///
+    /// ponytail: no path-traversal check. CEILING: `read("../../etc/passwd")` resolves. Harmless
+    /// today (the path is a literal in the driver's own compiled source, not worker-authored).
+    /// UPGRADE PATH: reject `..` the first time a judge reads a path the worker can influence.
+    pub fn read(&self, rel: &str) -> anyhow::Result<String> {
+        let p = self.dir.join(rel);
+        std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))
+    }
+
+    /// This session's diff against the isolation base, captured EAGERLY when the ctx was built.
+    ///
+    /// The `&str` return says so. It is not lazy on purpose: a lazy read would see the tree AFTER
+    /// some other judge's script had perturbed it, and determinism is this type's whole reason for
+    /// its shape.
+    pub fn diff(&self) -> &str {
+        &self.diff
+    }
 }
 
 /// A [`JudgeKind::Native`] body.
@@ -480,11 +576,70 @@ mod tests {
         let j = Judge::native("always", |_| Verdict::binary(true).with_rationale("yes"));
         let copy = j.clone();
         let JudgeKind::Native { f } = &copy.kind else { panic!("kind survives the clone") };
-        // the closure is callable through the clone. `JudgeCtx` is empty until commit 6; a judge
-        // that ignores it is exactly what this asserts on.
-        let ctx = JudgeCtx { _borrow: PhantomData };
+        // the closure is callable through the clone.
+        let src = FixedSource(Verdict::binary(false));
+        let ctx = JudgeCtx::new(&src, 1, "worker", Path::new("."), String::new());
         let v = f(&ctx);
         assert!(v.met() && v.rationale() == "yes");
+    }
+
+    /// A verdict store that answers every judge the same way — enough to build a `JudgeCtx`.
+    struct FixedSource(Verdict);
+    impl JudgeSource for FixedSource {
+        fn verdict_for(&self, _j: &Judge) -> Verdict {
+            self.0.clone()
+        }
+    }
+
+    /// The ctx's ten readers, and the two that are easy to get wrong: `value` never fabricates a
+    /// `0`, and `diff` is the string the CALLER captured, not a fresh read.
+    #[test]
+    fn the_ctx_reads_its_source_the_ledger_and_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("VERSION"), "1.2.3").unwrap();
+        let src = FixedSource(Verdict::binary(true).with_value(7.0));
+        let ctx = JudgeCtx::new(&src, 4, "implement", tmp.path(), "diff --git a/x".into());
+        let other = Judge::script("builds", "agg/judges/build.sh");
+
+        assert!(ctx.met(&other));
+        assert_eq!(ctx.value(&other), Some(7.0));
+        assert_eq!(ctx.verdict(&other).value(), Some(7.0));
+        assert_eq!(ctx.session(), 4);
+        assert_eq!(ctx.step(), "implement");
+        assert_eq!(ctx.dir(), tmp.path());
+        assert_eq!(ctx.read("VERSION").unwrap(), "1.2.3");
+        assert!(ctx.read("nope.txt").is_err(), "a missing file is an Err, never an empty string");
+        assert_eq!(ctx.diff(), "diff --git a/x");
+
+        // no ledger yet ⇒ honestly no history, never a crash.
+        assert!(ctx.previous(&other).is_none());
+        assert!(ctx.history(&other, 5).is_empty());
+
+        // …and a binary verdict still reports NO number through the ctx.
+        let bare = FixedSource(Verdict::binary(true));
+        let ctx = JudgeCtx::new(&bare, 1, "s", tmp.path(), String::new());
+        assert_eq!(ctx.value(&other), None, "never a fabricated 0");
+    }
+
+    /// `previous` is the last LANDED verdict and `history` is every row — the distinction the gate
+    /// depends on. A rolled-back row describes code that does not exist, so it must not be "before".
+    #[test]
+    fn previous_reads_landed_rows_only_while_history_reads_them_all() {
+        use crate::core::verdicts::{append, Outcome};
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        append(d, None, "baseline", &[("cov".into(), Verdict::scored(10.0, 100.0))], Outcome::Baseline).unwrap();
+        append(d, Some(1), "w", &[("cov".into(), Verdict::scored(50.0, 100.0))], Outcome::Merged).unwrap();
+        append(d, Some(2), "w", &[("cov".into(), Verdict::scored(20.0, 100.0))], Outcome::RolledBack).unwrap();
+
+        let src = FixedSource(Verdict::binary(false));
+        let ctx = JudgeCtx::new(&src, 3, "w", d, String::new());
+        let cov = Judge::script("cov", "agg/judges/cov.sh");
+
+        assert_eq!(ctx.previous(&cov).and_then(|v| v.value()), Some(50.0), "the rolled-back 20 never landed");
+        let series: Vec<_> = ctx.history(&cov, 10).iter().filter_map(|v| v.value()).collect();
+        assert_eq!(series, [10.0, 50.0, 20.0], "history is every row, OLDEST first — the series `no_shrink` reads");
+        assert_eq!(ctx.history(&cov, 2).len(), 2, "…and `n` takes the most recent");
     }
 
     /// `JudgeKind`'s `Debug` is hand-written (an `Arc<dyn Fn>` has none). It must still print

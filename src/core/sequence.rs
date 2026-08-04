@@ -147,6 +147,12 @@ impl Cursor {
     /// no step at all (a pathological all-`if`-false config; the loop already refuses an
     /// all-`skip_judges` sequence at startup).
     pub fn next_step(&mut self, eval: &mut impl FnMut(&str) -> Result<bool>) -> Result<String> {
+        // An empty statement list is a DRIVER project (`assemble` no longer parses one), and a
+        // driver never reaches the cursor — `PickStep` takes `next_step` first. A YAML run that
+        // somehow gets here must bail rather than index into nothing.
+        if self.statements.is_empty() {
+            bail!("the sequence is empty — `agg run` needs at least one step in `sequence.steps`");
+        }
         loop {
             if self.stmt_idx >= self.statements.len() {
                 self.stmt_idx = 0; // wrap
