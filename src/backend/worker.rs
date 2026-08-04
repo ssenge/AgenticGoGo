@@ -98,15 +98,19 @@ pub fn run_session(
     // An unavailable mechanism is a LOUD failure here, never a silent direct spawn (and
     // capability::check already refuses it at startup).
     //
-    //   sandbox   → the OS jail, but only when the agent does not confine ITSELF. Codex reads
-    //               `spec.isolation` and adds its own kernel-sandbox flags above, so it is NEVER
-    //               wrapped; Claude/Copilot have only permission layers, so they get the real jail.
-    //   container → the command is re-hosted inside `image` with `dir` bind-mounted. This applies
-    //               to EVERY agent, self-sandboxing or not: the container boundary is the
-    //               confinement, and a nested kernel sandbox inside it would only get in the way
-    //               (which is why codex drops its own flags under this tier — see codex/mod.rs).
+    //   sandbox   → the OS jail, applied to EVERY agent unconditionally. agg never delegates its
+    //               jail to an agent that vouches for itself: an agent's own sandbox is the agent's
+    //               promise, and agg's moat does not rest on promises. Codex still adds its own
+    //               kernel-sandbox flags above (`spec.isolation`) — those are now the INNER of two
+    //               layers, and agg owns the outer one. Practically it is also what makes per-path
+    //               denies work at all for Codex, whose native `workspace-write` is
+    //               workspace-granular with no deny list.
+    //   container → the command is re-hosted inside `image` with `dir` bind-mounted. Also every
+    //               agent: the container boundary is the confinement, and a nested kernel sandbox
+    //               inside it would only get in the way (which is why codex drops its own flags
+    //               under this tier — see codex/mod.rs).
     let confined = match isolation {
-        crate::isolation::Isolation::Sandbox if !agent.self_sandboxes() => {
+        crate::isolation::Isolation::Sandbox => {
             crate::isolation::wrap(command, dir, &agent.writable_state_paths())
         }
         crate::isolation::Isolation::Container => {

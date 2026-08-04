@@ -93,11 +93,28 @@ impl AgentBackend for Codex {
         DEFAULT_SUMMARY_MODEL
     }
 
-    /// Codex has a REAL kernel sandbox (`--sandbox workspace-write`), so agg confines it with flags
-    /// (see [`Self::session_command`]) and must NOT wrap it in the OS sandbox. This is what makes
-    /// [`crate::backend::worker::run_session`] skip the wrapper for Codex.
+    /// Codex has a REAL kernel sandbox of its own (`sandbox_mode=workspace-write`), which
+    /// [`Self::session_command`] switches on — the INNER of two layers.
+    ///
+    /// ⛔ It does **not** buy Codex an exemption from agg's wrapper: under `isolation: sandbox`
+    /// [`crate::backend::worker::run_session`] wraps every agent, Codex included. It used to skip
+    /// Codex here, which meant `.readonly()` on a Codex step was inert (workspace-write is
+    /// workspace-granular, with no per-path deny list) and, more to the point, that agg's jail was
+    /// whatever Codex said it was. See `internal/BUILD.md` §2.4.
     fn self_sandboxes(&self) -> bool {
         true
+    }
+
+    /// `~/.codex` — REQUIRED as of §2.4, and it was not before.
+    ///
+    /// While Codex was exempt from the OS wrapper this was correctly empty: nothing confined the
+    /// `codex` process, so its own state dir was writable by default. Now that agg wraps it, the
+    /// deny-default profile takes that dir away — and Codex writes to it on every run (`sessions/`
+    /// rollouts, `history.jsonl`, the sqlite WAL, and `auth.json` on token refresh), OUTSIDE its
+    /// own `workspace-write` jail, which confines the tools it runs rather than itself. Without
+    /// this grant a wrapped Codex session fails on its own bookkeeping.
+    fn writable_state_paths(&self) -> Vec<std::path::PathBuf> {
+        crate::backend::state_paths_that_exist(&[".codex"])
     }
 
     /// `high` — the most reasoning Codex offers. (agg's blanket `max` is Claude's vocabulary; see
@@ -118,8 +135,9 @@ impl AgentBackend for Codex {
             command.arg("resume").arg(id); // SUBCOMMAND, not a flag
         }
         command.arg("--json");
-        // Blast-radius isolation is agent-NATIVE for Codex: it has a real kernel sandbox, so we
-        // pick its flags rather than wrapping the process (see `self_sandboxes`).
+        // Codex ALSO has a kernel sandbox of its own, so we pick its flags here — IN ADDITION to
+        // agg's OS wrapper, which worker.rs now applies to every agent (§2.4). This is the inner
+        // layer; agg owns the outer one and does not delegate it (see `self_sandboxes`).
         //   none    → `--dangerously-bypass-approvals-and-sandbox` (auto's behaviour today).
         //   sandbox → workspace-write (writes confined to cwd + tmp, kernel-enforced) PLUS
         //             `-c sandbox_workspace_write.network_access=true` — workspace-write DENIES
@@ -306,8 +324,9 @@ impl AgentBackend for Codex {
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
-        // No-op for Codex (self_sandboxes → returns unchanged): `--sandbox read-only` already
-        // kernel-confines the judge more tightly than the OS wrapper would. Kept for uniformity.
+        // Wrapped like every other backend (§2.4) — this used to no-op for Codex on the grounds
+        // that `--sandbox read-only` already confines the judge more tightly. That is Codex's own
+        // report of its own flag; agg's outer jail is not conditional on it.
         let command = self.confine_one_shot(command, cwd, isolation)?;
         let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
         let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);

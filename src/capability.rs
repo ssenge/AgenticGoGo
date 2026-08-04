@@ -102,21 +102,20 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
         if let Some(c) = b.config_conflict(&model, &effort) {
             problems.push(format!("step `{step_name}` (agent `{agent}`): model + effort — {c}"));
         }
-        // Blast-radius isolation: `sandbox` on an agent that does NOT self-sandbox needs an OS
-        // wrapper (bwrap / sandbox-exec). If none is available on this host, refuse at startup
-        // rather than silently downgrade to `none` — a worker that thinks it is confined but is not
-        // is exactly the blast radius this feature exists to bound. Codex self-sandboxes, so it is
-        // exempt; a wrapper-backed agent on a supported OS with the tool installed passes.
-        if step.isolation == crate::isolation::Isolation::Sandbox
-            && !b.self_sandboxes()
-            && !crate::isolation::available()
-        {
+        // Blast-radius isolation: `sandbox` needs an OS wrapper (bwrap / sandbox-exec) for EVERY
+        // agent — §2.4, agg never delegates its jail — so this is no longer gated on
+        // `self_sandboxes()`. If no wrapper is available on this host, refuse at startup rather
+        // than let the run discover it: `worker.rs` would fail every session at spawn, and the
+        // alternative (a silent downgrade to `none`) is a worker that thinks it is confined and is
+        // not, which is exactly the blast radius this feature exists to bound.
+        if step.isolation == crate::isolation::Isolation::Sandbox && !crate::isolation::available() {
             problems.push(format!(
-                "step `{step_name}` (agent `{agent}`): `isolation: sandbox` is set, but this agent \
-                 has no native sandbox and no OS wrapper (bubblewrap on Linux, sandbox-exec on \
-                 macOS) is available on this host — the worker would NOT actually be confined.\n      \
+                "step `{step_name}` (agent `{agent}`): `isolation: sandbox` is set, but no OS \
+                 wrapper (bubblewrap on Linux, sandbox-exec on macOS) is available on this host — \
+                 the worker could not be confined, and agg confines every agent itself rather than \
+                 trusting the agent's own sandbox.\n      \
                  fix: install the wrapper (`apt install bubblewrap` on Linux), use `isolation: none`, \
-                 or run the step on an agent with its own sandbox (codex)."
+                 or run on a supported OS."
             ));
         }
         // Same rule one rung up: `container` needs a container engine that ANSWERS (the client

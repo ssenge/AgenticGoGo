@@ -62,8 +62,8 @@ pub fn run(
 ///
 /// Under `isolation: Sandbox` the script runs in the OS jail (write = cwd + tmp, nothing outside).
 /// A script judge is arbitrary shell — the exact thing a confined worker rewrites to escape — so it
-/// is ALWAYS wrapped when the step is sandboxed (unlike an LLM judge, a shell script has no
-/// `self_sandboxes`). `writable: &[]`: it needs no state dir of its own; the wrapper still grants
+/// is ALWAYS wrapped when the step is sandboxed. (So is an LLM judge, as of §2.4; the wrapper is
+/// unconditional now.) `writable: &[]`: it needs no state dir of its own; the wrapper still grants
 /// cwd + tmp so a judge can scribble scratch files where it always could.
 #[allow(clippy::too_many_arguments)]
 fn run_script(

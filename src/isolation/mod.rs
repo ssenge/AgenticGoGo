@@ -16,12 +16,14 @@
 //! `container` targets the same policy from the other side: the only host paths that exist inside
 //! the container are the ones bind-mounted, so read is confined too.
 //!
-//! # Agent-awareness lives at the seam, not here
-//! Codex has its OWN kernel sandbox (`--sandbox workspace-write`), so it is confined by flags in
-//! its backend and NEVER wrapped ([`crate::backend::AgentBackend::self_sandboxes`] is true for it).
-//! Claude/Copilot have only permission layers, not a kernel jail, so they are wrapped by this
-//! module. [`Isolation`] itself is a LEAF type: it knows nothing about config or backends; they
-//! import it.
+//! # agg ALWAYS confines — no agent is exempt
+//! Under `sandbox` this module wraps EVERY agent, including Codex, which has a kernel sandbox of
+//! its own (`sandbox_mode=workspace-write`, still emitted by its backend). Those are two nested
+//! layers and agg owns the outer one: an agent's own sandbox is the agent's promise, and it also
+//! has no delivery channel for agg's per-path denies. See `internal/BUILD.md` §2.4 and the
+//! `an_agents_own_kernel_sandbox_nests_inside_aggs` spike below.
+//! [`crate::backend::AgentBackend::self_sandboxes`] survives as a REPORTING flag only.
+//! [`Isolation`] itself is a LEAF type: it knows nothing about config or backends; they import it.
 //!
 //! # Platform
 //! Linux → `bwrap` (bubblewrap, rootless via user namespaces). macOS → `sandbox-exec` (Seatbelt).
@@ -315,6 +317,135 @@ mod tests {
         assert!(stdout.contains("FORGE_DENIED"), "the ledger forgery must be DENIED:\n{stdout}\n{stderr}");
         assert!(stdout.contains("NEWFILE_DENIED"), "no new files in private/ either:\n{stdout}\n{stderr}");
         assert!(!ledger_after.contains("forged"), "the ledger was MODIFIED — the carve-out leaked");
+    }
+
+    /// The most permissive kernel sandbox this platform can express, wrapped around `/bin/sh -c`.
+    ///
+    /// This stands in for an agent that confines ITSELF — Codex's `sandbox_mode=workspace-write`
+    /// (Seatbelt on macOS, Landlock on Linux, the same primitives). Deliberately permissive: the
+    /// spike below must attribute a denial to agg's OUTER jail, so the inner layer has to be one
+    /// that would allow the write on its own. A real `codex` binary is not used — it would need an
+    /// auth'd account and a live model call to prove a property of the kernel, not of the agent.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn self_sandboxing_agent_shaped(script: &str) -> Command {
+        #[cfg(target_os = "macos")]
+        {
+            let mut c = Command::new("sandbox-exec");
+            c.arg("-p").arg("(version 1)(allow default)").arg("--").arg("/bin/sh").arg("-c").arg(script);
+            c
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut c = Command::new("bwrap");
+            c.arg("--dev-bind").arg("/").arg("/").arg("--share-net").arg("--").arg("/bin/sh").arg("-c").arg(script);
+            c
+        }
+    }
+
+    /// ⚡ **THE NESTING SPIKE** (`internal/BUILD.md` §2.4) — and it comes back **RED on macOS**.
+    ///
+    /// §2.4 makes agg wrap EVERY agent under `Isolation::Sandbox`, including one that then applies
+    /// its own kernel sandbox (Codex). Nothing in agg had ever exercised two nested kernel jails,
+    /// and the ruling assumed they compose. Measured on a real host, 2026-08-05, macOS 15 (Darwin
+    /// 25.5): **they do not.**
+    ///
+    /// > `sandbox-exec: sandbox_apply: Operation not permitted`
+    ///
+    /// Seatbelt permits a second `sandbox_apply` only from a process whose current profile is
+    /// **entirely unrestricted**. Probed one rule at a time: `(allow default)` nests fine;
+    /// `(allow default)(deny nvram*)` — a deny on an operation nothing here touches — already
+    /// fails, as does an inner profile that is strictly *more* restrictive than the outer. It is
+    /// not a missing clause in agg's profile; no operation name grants it (`sandbox-create` /
+    /// `system-sandbox` do not even parse), and adding `system-privilege`, `job-creation`,
+    /// `process-info*`, `system*` changes nothing. Any real confinement disables nesting.
+    ///
+    /// **What that costs, measured with the real binary** (`codex exec` under agg's profile, with
+    /// `-c sandbox_mode=workspace-write` as §2.4 ships it): the codex PROCESS survives — it streams
+    /// JSON, reaches the network, writes `~/.codex` — but every shell tool call it makes dies, and
+    /// it answers *"I couldn't create the file because the shell sandbox denied the operation."*
+    /// A session that does zero work while reporting success is worse than one that fails to spawn.
+    ///
+    /// **What DOES deliver the ruling** (same run, inner layer dropped via
+    /// `--dangerously-bypass-approvals-and-sandbox` — exactly what `Isolation::Container` already
+    /// does): real work succeeds AND agg's carve-out binds. Codex's own shell reported
+    /// `zsh:1: operation not permitted: agg/private/verdicts.jsonl` and the ledger stayed
+    /// byte-identical. **One layer — agg's — is both sufficient and strictly better than Codex's**
+    /// (`workspace-write` has no per-path deny list at all). The fix is therefore to treat
+    /// `Sandbox` like `Container` in `codex/mod.rs`; that file is frozen by BUILD.md §2.4 item (b),
+    /// so this commit does not make the change. Owner's call.
+    ///
+    /// Linux (`bwrap` inside `bwrap`) is UNVERIFIED — no Linux host was available. The mechanisms
+    /// differ enough (mount namespaces, not a MAC policy) that it may well nest; do not assume the
+    /// macOS answer carries.
+    ///
+    /// The test asserts what we WANT, so it stays red until the mechanism changes. The two
+    /// assertions before it pass today and are the load-bearing ones: agg's jail ALONE delivers
+    /// §2.4, and the control proves the denial is attributable to agg rather than to the inner
+    /// layer. Run it: `cargo test --lib -- --ignored an_agents_own_kernel_sandbox_nests --nocapture`
+    #[test]
+    #[ignore = "KNOWN RED on macOS (nesting is refused by Seatbelt); spawns real OS sandboxes — run by hand"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn an_agents_own_kernel_sandbox_nests_inside_aggs() {
+        assert!(available(), "no OS sandbox on this host — cannot prove confinement");
+        let proj = std::env::temp_dir().join(format!("agg-nest-{}", std::process::id()));
+        std::fs::create_dir_all(crate::paths::private_dir(&proj)).unwrap();
+        let ledger = crate::paths::verdicts_jsonl(&proj);
+        let pristine = "{\"judge\":\"real\"}\n";
+
+        let script = format!(
+            "echo INNER_RAN; \
+             echo work > '{p}/source.txt' && echo SRC_OK; \
+             cat '{l}' >/dev/null && echo READ_OK; \
+             echo forged >> '{l}' && echo FORGE_OK || echo FORGE_DENIED",
+            p = proj.display(), l = ledger.display()
+        );
+        // Every run starts from the same ledger, so `ledger_after` is attributable to that run alone.
+        let run = |mut c: Command| {
+            std::fs::write(&ledger, pristine).unwrap();
+            let out = c.output().expect("run the sandbox");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            (text, std::fs::read_to_string(&ledger).unwrap_or_default())
+        };
+
+        // 1. THE SHAPE §2.4 SHIPS: agg's jail outside, the agent's own inside.
+        let (nested, nested_ledger) =
+            run(wrap(self_sandboxing_agent_shaped(&script), &proj, &[]).expect("build the wrapper"));
+        // 2. agg's jail ALONE — the same worker with no inner layer.
+        let mut sh = Command::new("/bin/sh");
+        sh.arg("-c").arg(&script);
+        let (outer_only, outer_ledger) = run(wrap(sh, &proj, &[]).expect("build the wrapper"));
+        // 3. CONTROL: the inner layer alone, so a denial in (1)/(2) is attributable to agg's.
+        let (control, _) = run(self_sandboxing_agent_shaped(&script));
+
+        let _ = std::fs::remove_dir_all(&proj);
+        eprintln!("--- nested:\n{nested}\n--- agg's jail alone:\n{outer_only}\n--- control:\n{control}");
+
+        // agg's own layer delivers the ruling on its own. This is the half that PASSES.
+        assert!(outer_only.contains("SRC_OK"), "real work must survive agg's jail:\n{outer_only}");
+        assert!(outer_only.contains("READ_OK"), "reads stay open:\n{outer_only}");
+        assert!(outer_only.contains("FORGE_DENIED"), "agg's carve-out must bind:\n{outer_only}");
+        assert_eq!(outer_ledger, pristine, "the ledger was MODIFIED under agg's jail");
+        assert!(
+            control.contains("FORGE_OK"),
+            "the CONTROL must be able to forge — an inner layer that denies on its own would prove \
+             nothing about agg's:\n{control}"
+        );
+
+        // ⚡ THE SPIKE. RED on macOS: Seatbelt refuses `sandbox_apply` from a restricted process.
+        assert!(
+            nested.contains("INNER_RAN"),
+            "NESTING DOES NOT COMPOSE — the agent's own kernel sandbox could not start inside \
+             agg's, so a Codex step under `isolation: sandbox` can run no tool at all. §2.4 needs \
+             the inner layer DROPPED (as `Isolation::Container` already does), not stacked; agg's \
+             own jail is sufficient and strictly stronger. See this test's doc comment.\n{nested}"
+        );
+        assert!(nested.contains("SRC_OK"), "real work must survive BOTH layers:\n{nested}");
+        assert!(nested.contains("FORGE_DENIED"), "agg's carve-out must survive the nesting:\n{nested}");
+        assert_eq!(nested_ledger, pristine, "the ledger was MODIFIED through the nested sandbox");
     }
 
     #[test]
