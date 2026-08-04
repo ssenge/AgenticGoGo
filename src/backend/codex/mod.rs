@@ -135,36 +135,36 @@ impl AgentBackend for Codex {
             command.arg("resume").arg(id); // SUBCOMMAND, not a flag
         }
         command.arg("--json");
-        // Codex ALSO has a kernel sandbox of its own, so we pick its flags here — IN ADDITION to
-        // agg's OS wrapper, which worker.rs now applies to every agent (§2.4). This is the inner
-        // layer; agg owns the outer one and does not delegate it (see `self_sandboxes`).
-        //   none    → `--dangerously-bypass-approvals-and-sandbox` (auto's behaviour today).
-        //   sandbox → workspace-write (writes confined to cwd + tmp, kernel-enforced) PLUS
-        //             `-c sandbox_workspace_write.network_access=true` — workspace-write DENIES
-        //             network by default, and the owner wants full internet.
+        // ⛔ CODEX'S OWN KERNEL SANDBOX IS OFF ON EVERY TIER, AND THAT IS NOT A WEAKENING.
+        // agg's OS wrapper now confines every agent (§2.4) — agg owns the jail and does not
+        // delegate it. The double layer we WANTED here is not available: kernel sandboxes DO NOT
+        // NEST. Measured on a real host (`isolation::tests::an_agents_own_kernel_sandbox_nests_
+        // inside_aggs`): Seatbelt permits a second `sandbox_apply` only from a process whose
+        // current profile is entirely unrestricted, so agg's wrapper + Codex's own apply =
+        // `sandbox-exec: sandbox_apply: Operation not permitted`, and the worker dies at launch.
+        // Even `(allow default)(deny nvram*)` outside — a deny on an operation nothing touches —
+        // is enough to break the inner apply. No profile clause grants it.
         //
-        // The CONFIG form `-c sandbox_mode=…`, not the `--sandbox` FLAG, and that is load-bearing:
-        // `codex exec` accepts `--sandbox`, but `codex exec resume` does NOT (verified on the wire:
-        // `error: unexpected argument '--sandbox' found`). Since the resume branch above reshapes
-        // argv into that subcommand, the flag form would make every resumed sandboxed session die
-        // on argv parsing. The config form parses and enforces identically on both shapes.
-        //   container → the CONTAINER is the jail (worker.rs re-hosts the whole command inside it),
-        //             so Codex's own kernel sandbox is redundant here and would only add a second,
-        //             stricter policy nobody asked for — worse, a nested seccomp/landlock jail is
-        //             not reliably available inside a container. Same argv as `none`; the
-        //             confinement is one level out.
-        match spec.isolation {
-            crate::isolation::Isolation::None | crate::isolation::Isolation::Container => {
-                command.arg("--dangerously-bypass-approvals-and-sandbox");
-            }
-            crate::isolation::Isolation::Sandbox => {
-                command
-                    .arg("-c")
-                    .arg("sandbox_mode=workspace-write")
-                    .arg("-c")
-                    .arg("sandbox_workspace_write.network_access=true");
-            }
-        }
+        // So the flag below disables CODEX's sandbox, not agg's: the process is still inside
+        // agg's kernel jail on the `sandbox` tier. Its alarming name describes Codex's own
+        // approval prompts and confinement, which agg has deliberately replaced.
+        //   none      → agg does not confine either. Genuinely unconfined; that is the tier.
+        //   sandbox   → AGG's Seatbelt/bwrap jail is the confinement (worker.rs).
+        //   container → the CONTAINER is the jail; agg re-hosts the whole command inside it.
+        //
+        // ⚠ OWNER REVIEW WANTED — this is the one place the 2026-08-04 always-confine ruling met a
+        // hardware fact and lost a detail. The ruling asked for BOTH layers ("we can also pass the
+        // folders to the agent so that we have a double protection"). The outer layer ships; the
+        // inner one cannot, on macOS. If a future Codex grows a *non-kernel* deny mechanism, or
+        // Linux is shown to nest, this arm is where the second layer goes back in.
+        //
+        // The `-c sandbox_mode=…` CONFIG form is kept in this comment on purpose, for whoever
+        // restores it: `codex exec` accepts `--sandbox` but `codex exec resume` does NOT (verified
+        // on the wire: `error: unexpected argument '--sandbox' found`), and the resume branch above
+        // reshapes argv into that subcommand — so the flag form would kill every resumed confined
+        // session on argv parsing. The config form parses identically on both shapes.
+        command.arg("--dangerously-bypass-approvals-and-sandbox");
+        let _ = spec.isolation; // every tier: agg's wrapper is the confinement, or there is none
         // don't refuse to run outside a git repo (headless), under either isolation tier.
         command.arg("--skip-git-repo-check");
         // Only pass --model if the operator actually named one. Empty = let Codex decide, which is

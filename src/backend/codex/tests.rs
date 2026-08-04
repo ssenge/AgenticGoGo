@@ -87,11 +87,14 @@ fn resume_is_a_subcommand_not_a_flag() {
     assert_eq!(args.last().unwrap(), "carry on");
 }
 
-/// Blast-radius isolation is agent-NATIVE for Codex: it self-sandboxes, so `spec.isolation` picks
-/// its flags rather than the OS wrapper. `None` keeps today's bypass; `Sandbox` swaps to
-/// workspace-write and re-enables network (workspace-write denies it by default).
+/// ⛔ INVERTED 2026-08-05. Blast-radius isolation is AGG's on every tier: `worker.rs` wraps every
+/// agent, and Codex's own kernel sandbox is disabled because kernel sandboxes DO NOT NEST —
+/// Seatbelt refuses a second `sandbox_apply` from an already-confined process, so agg's jail plus
+/// Codex's own apply killed the worker at launch (measured:
+/// `isolation::tests::an_agents_own_kernel_sandbox_nests_inside_aggs`). The bypass flag therefore
+/// appears under EVERY tier; it disables Codex's confinement, never agg's.
 #[test]
-fn isolation_selects_codex_native_sandbox_flags() {
+fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
     let base = SessionSpec {
         prompt: "do the thing",
         model: "",
@@ -114,24 +117,20 @@ fn isolation_selects_codex_native_sandbox_flags() {
     );
     assert!(!none.contains(&"--sandbox".to_string()), "none must NOT pass --sandbox");
 
-    // Sandbox ⇒ Codex's own kernel sandbox, writes confined to the workspace, network re-opened.
+    // Sandbox ⇒ Codex's own sandbox stays OFF. agg's OS wrapper is the confinement, and a second
+    // kernel sandbox inside it does not merely add nothing — it fails to apply and kills the run.
     let sb: Vec<String> = Codex
         .session_command(&SessionSpec { isolation: crate::isolation::Isolation::Sandbox, ..base })
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     assert!(
-        sb.contains(&"sandbox_mode=workspace-write".to_string()),
-        "workspace-write is exactly agg's target policy"
+        !sb.contains(&"sandbox_mode=workspace-write".to_string()),
+        "Codex must NOT apply its own kernel sandbox — it cannot nest inside agg's"
     );
     assert!(
-        !sb.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
-        "the bypass must be GONE once confined"
-    );
-    // network is denied by workspace-write by default; the owner wants full internet, so re-enable it.
-    assert!(
-        sb.contains(&"sandbox_workspace_write.network_access=true".to_string()),
-        "workspace-write denies net by default — sandbox tier must re-open it (owner wants full internet)"
+        sb.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
+        "the flag disables CODEX's confinement; agg's wrapper is still around this process"
     );
     // --skip-git-repo-check survives under BOTH tiers (headless runs outside a repo).
     assert!(sb.contains(&"--skip-git-repo-check".to_string()) && none.contains(&"--skip-git-repo-check".to_string()));
@@ -161,7 +160,10 @@ fn isolation_selects_codex_native_sandbox_flags() {
     for argv in [&sb, &resumed] {
         assert!(!argv.contains(&"--sandbox".to_string()), "the flag form breaks `codex exec resume`: {argv:?}");
     }
-    assert!(resumed.contains(&"sandbox_mode=workspace-write".to_string()), "a RESUMED session is confined too");
+    assert!(
+        resumed.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
+        "a RESUMED session is confined by agg's wrapper too — and equally must not self-apply"
+    );
 }
 
 /// Codex has its own kernel jail — and that buys it NO exemption from agg's (§2.4). The flag stays
