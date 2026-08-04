@@ -5,12 +5,35 @@ use std::path::Path;
 
 /// The session branch name for a given project + session number.
 pub fn session_branch(prefix: &str, project: &str, session: u32) -> String {
-    // sanitize project for a git ref (no spaces / odd chars).
-    let proj: String = project
+    format!("{}{session}", session_branch_stem(prefix, project))
+}
+
+/// The common stem of EVERY session branch of one project: `<prefix>/<project>/session-`.
+///
+/// Split out of [`session_branch`] because two moat rules (BUILD.md §3.9) must recognise a session
+/// branch they did not create — one to refuse resolving the isolation base from a crash-stranded
+/// HEAD, one to park a previous run's surviving span aside before `create_branch` deletes it. Both
+/// have to spell the name exactly as the creator did, so there is one spelling of it.
+pub fn session_branch_stem(prefix: &str, project: &str) -> String {
+    format!("{prefix}/{}/session-", ref_safe(project))
+}
+
+/// Where a previous run's stranded span is PARKED so this run's `session-<N>` cannot delete it:
+/// `<prefix>/<project>/orphaned-<ts>/session-<N>`.
+///
+/// The session number is PRESERVED — the run-end warning told the operator to
+/// `git merge <prefix>/<project>/session-47`, and a parked name that hid which session it was would
+/// make that instruction unfollowable. The timestamp keeps two parkings apart.
+pub fn parked_branch(prefix: &str, project: &str, ts: u64, session_suffix: &str) -> String {
+    format!("{prefix}/{}/orphaned-{ts}/session-{session_suffix}", ref_safe(project))
+}
+
+/// The project name as a git ref component (no spaces / odd chars).
+fn ref_safe(project: &str) -> String {
+    project
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-        .collect();
-    format!("{prefix}/{proj}/session-{session}")
+        .collect()
 }
 
 // ── per-session branch resolution: a pure decision + its execution ──────────────────────────

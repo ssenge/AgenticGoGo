@@ -124,5 +124,12 @@ pub trait PreStart {
 pub struct Bootstrap<'a> {
     pub dir: &'a Path,
     pub cfg: &'a AggConfig,
+    /// this run CONTINUES a previous one (`Opts { resume: true }`). It changes exactly one
+    /// precondition: a dirty tree is DISCARDED loudly instead of refusing to start (BUILD.md §3.9
+    /// rule 2). A power cut mid-worker leaves uncommitted tracked changes by construction —
+    /// `GitAutoCommit` only commits *after* a session — so refusing would make the flagship resume
+    /// scenario the one scenario that cannot start. Always `false` on the YAML path, which has no
+    /// resume.
+    pub resume: bool,
     pub iso_base: Option<String>,
 }

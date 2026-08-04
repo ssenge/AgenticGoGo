@@ -126,14 +126,19 @@ fn agg_branches(dir: &Path) -> Vec<String> {
     out.lines().map(str::to_string).collect()
 }
 
-/// How many worker sessions' work is reachable from `main` — one line per session in `work.log`,
+/// How many worker sessions' work is reachable from `rev` — one line per session in `work.log`,
 /// written by the fake agent. A commit count would also move for merge commits; this counts WORK.
-fn work_landed_on_main(dir: &Path) -> usize {
-    let out = Command::new("git").args(["show", "main:work.log"]).current_dir(dir).output().unwrap();
+fn work_on(dir: &Path, rev: &str) -> usize {
+    let out =
+        Command::new("git").args(["show", &format!("{rev}:work.log")]).current_dir(dir).output().unwrap();
     if !out.status.success() {
         return 0;
     }
     String::from_utf8_lossy(&out.stdout).lines().count()
+}
+
+fn work_landed_on_main(dir: &Path) -> usize {
+    work_on(dir, "main")
 }
 
 /// Seed `verdicts.jsonl` with a LANDED, met row for `name` — the state a previous gate would have
@@ -438,6 +443,138 @@ fn a_conflicted_span_fails_without_discarding_it() {
         agg.gate().unwrap(),
         GateOutcome::Failed(GateFailure::Conflict),
         "the span is still OPEN and still gateable"
+    );
+}
+
+// ── git normalization at open + the run end (BUILD.md §3.9 / §3.10) ──────────────────────────
+
+/// A STALE SPAN SURVIVES A FRESH RUN. Run 1 stages two sessions and never gates; run 2 starts, and
+/// run 1's branches are still there with their commits.
+///
+/// Without §3.9 rule 3 this is a silent data-loss bug and not a small one: session numbering restarts
+/// per run and `create_branch` opens with `git branch -D`, so run 2's session-1 deletes run 1's
+/// session-1, session-2 deletes session-2, and the very branch run 1's exit warning told the operator
+/// to `git merge` is gone by the time they read it.
+#[test]
+fn a_previous_runs_stranded_span_is_parked_aside_not_deleted() {
+    let tmp = project();
+    let dir = tmp.path();
+
+    // run 1: two sessions, never gated. The `Agg` is dropped, which is the whole of "run 1 ended".
+    {
+        let agg = Agg::open(dir).unwrap();
+        agg.step(&work()).unwrap();
+        agg.step(&work()).unwrap();
+    }
+    let after_run_1 = agg_branches(dir);
+    assert_eq!(after_run_1.len(), 2, "run 1 left its span: {after_run_1:?}");
+    let tip = after_run_1.iter().find(|b| b.ends_with("session-2")).unwrap().clone();
+    assert_eq!(work_on(dir, &tip), 2, "both of run 1's sessions are on its tip");
+
+    // run 2 starts in exactly the state run 1 left behind.
+    let agg = Agg::open(dir).unwrap();
+    agg.step(&work()).unwrap();
+
+    let parked: Vec<String> = agg_branches(dir).into_iter().filter(|b| b.contains("/orphaned-")).collect();
+    assert_eq!(parked.len(), 2, "run 1's whole span was parked, not eaten: {parked:?}");
+    let parked_tip = parked.iter().find(|b| b.ends_with("session-2")).expect("the tip keeps its number");
+    assert_eq!(work_on(dir, parked_tip), 2, "…and it still carries run 1's two sessions' commits");
+
+    // and run 2 really did reuse the numbering the parking freed up.
+    assert!(
+        agg_branches(dir).iter().any(|b| !b.contains("/orphaned-") && b.ends_with("session-1")),
+        "run 2 cut its own session-1: {:?}",
+        agg_branches(dir)
+    );
+}
+
+/// A CRASHED HEAD DOES NOT BECOME THE BASE. A run that never gates leaves HEAD on its session branch,
+/// which is exactly the state a mid-span crash leaves — so the next run must recover the RECORDED
+/// base rather than resolve one from the dead branch it happens to be standing on.
+///
+/// Without §3.9 rule 1 every gate in run 2 merges into the dead branch, returns `Kept`, writes
+/// `Merged` to `verdicts.jsonl`, and `main` never moves — with nothing warning, because the span
+/// genuinely *was* gated. `work_landed_on_main` is what separates the two worlds.
+#[test]
+fn a_crashed_head_on_a_session_branch_never_becomes_the_base() {
+    let tmp = project();
+    let dir = tmp.path();
+    {
+        let agg = Agg::open(dir).unwrap();
+        agg.step(&work()).unwrap();
+    }
+    let head = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert!(head.starts_with("agg/"), "the span left HEAD on its session branch: {head}");
+
+    let agg = Agg::open(dir).unwrap();
+    agg.step(&work()).unwrap();
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+
+    assert_eq!(
+        agg::state::DashboardState::read(dir).unwrap().iso_base,
+        "main",
+        "the base is the RECORDED one, never the dead session branch"
+    );
+    assert_eq!(work_landed_on_main(dir), 1, "run 2's session landed on `main` — the gate merged there");
+    let parked: Vec<String> = agg_branches(dir).into_iter().filter(|b| b.contains("/orphaned-")).collect();
+    assert_eq!(parked.len(), 1, "run 1's dead span is parked, not merged: {parked:?}");
+}
+
+/// THE UNGATED-SPAN WARNING. A driver that never gates ends with `main` unchanged and every session's
+/// work on the span branch — so the run's last word must name that branch and the command that lands
+/// it.
+///
+/// The commit count is asserted alongside the wording on purpose: a warning that fires while the work
+/// is actually gone would be worse than no warning at all.
+#[test]
+fn a_run_that_never_gates_names_the_branch_and_the_merge_that_lands_it() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap();
+    for _ in 0..3 {
+        agg.step(&work()).unwrap();
+    }
+    let tip = agg_branches(dir).into_iter().find(|b| b.ends_with("session-3")).unwrap();
+
+    // the sentence agg is about to print, taken from the run's OWN git state.
+    assert_eq!(
+        agg.ungated_span().expect("three sessions staged, no gate"),
+        format!("⚠ 3 session(s) staged on {tip}, never gated — main is unchanged.\n  Merge with: git merge {tip}")
+    );
+    drop(agg);
+
+    assert_eq!(work_landed_on_main(dir), 0, "`main` really is unchanged");
+    assert_eq!(work_on(dir, &tip), 3, "…and all three sessions really are on the branch it named");
+}
+
+/// ⛔ THE RESUME PATH DISCARDS A DIRTY TREE; A FRESH START STILL REFUSES.
+///
+/// A power cut mid-worker leaves uncommitted tracked changes by construction — agg commits a session's
+/// work only after it ends — so a resume that refused to start would make the flagship resume scenario
+/// the one scenario that cannot start. Both directions, because the refusal is the moat for everyone
+/// who is NOT resuming: a dirty tree there means the operator's own uncommitted work.
+#[test]
+fn a_dirty_tree_refuses_a_fresh_start_and_is_discarded_on_a_resume() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::write(dir.join("seed.txt"), "committed\n").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-qm", "seed"]);
+
+    let dirty = || std::fs::write(dir.join("seed.txt"), "a crashed worker's half-finished edit\n").unwrap();
+
+    dirty();
+    let refused = Agg::open(dir).unwrap().step(&work()).expect_err("a fresh start must refuse a dirty tree");
+    assert!(format!("{refused}").contains("uncommitted tracked changes"), "got {refused:?}");
+    assert_eq!(std::fs::read_to_string(dir.join("seed.txt")).unwrap(), "a crashed worker's half-finished edit\n");
+
+    dirty();
+    let agg = Agg::open_with(dir, Opts { resume: true }).unwrap();
+    agg.step(&work()).expect("a resume starts, and says loudly what it discarded");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("seed.txt")).unwrap(),
+        "committed\n",
+        "the dead session's edit was discarded, not carried into the new run's baseline"
     );
 }
 

@@ -49,6 +49,9 @@ const BLOCK_CHUNK_SECS: u64 = 5;
 pub struct Agg {
     cfg: AggConfig,
     dir: PathBuf,
+    /// this run CONTINUES a previous one. Today it reaches exactly one decision — `GitSetup`
+    /// discards a crashed session's dirty tree instead of refusing to start (§3.9 rule 2).
+    resume: bool,
     /// the deferred run-level setup. `None` until the first spending call.
     started: OnceCell<Started>,
     /// THE LATCH. Once set, every call is a no-op that spends nothing (BUILD.md §3.3).
@@ -122,11 +125,16 @@ impl Agg {
             ..AggConfig::default()
         };
         if opts.resume {
-            eprintln!("  ⚠ `Opts.resume` is set, but the call ledger is Phase 1 — this run starts from the top.");
+            eprintln!(
+                "  ⚠ `Opts.resume`: the CALL LEDGER is Phase 1, so this run still starts from the top.\n\
+                 \x20   What it does today is tolerate the state a crash leaves — a dirty work tree is\n\
+                 \x20   discarded rather than refused (§3.9 rule 2)."
+            );
         }
         Ok(Agg {
             cfg,
             dir,
+            resume: opts.resume,
             started: OnceCell::new(),
             ended: Cell::new(None),
             ord: Cell::new(0),
@@ -223,7 +231,8 @@ impl Agg {
         let judge_timeout = cfg.judge.timeout;
 
         let mut lifecycle = Lifecycle::default_pipeline(&cfg, &dir);
-        let mut boot = crate::plugin::Bootstrap { dir: &dir, cfg: &cfg, iso_base: None };
+        let mut boot =
+            crate::plugin::Bootstrap { dir: &dir, cfg: &cfg, resume: self.resume, iso_base: None };
         crate::registry::run_pre_start(&lifecycle.pre_start, &mut boot)?;
         let iso_base = boot.iso_base.expect("ResolveIsoBase set iso_base");
 
@@ -257,6 +266,9 @@ impl Agg {
             budget_total: limits.tokens,
             cost_limit: limits.cost,
             phase: crate::state::Phase::Starting,
+            // RECORDED for the next run, not for a reader (§3.9 rule 1): a run that starts with HEAD
+            // stranded on a crashed session branch recovers its real base from here.
+            iso_base: iso_base.clone(),
             ..Default::default()
         };
         let live = crate::state::LiveState::new(&dir, loop_start, dash.clone());
@@ -868,6 +880,42 @@ impl Agg {
         &self.dir
     }
 
+    /// THE UNGATED-SPAN WARNING this run would print if it ended now, or `None` if everything the
+    /// driver staged has been gated.
+    ///
+    /// Deliberately NOT one of the eleven calls, and it exists for one reason: "is the run about to
+    /// tell the operator their work is stranded, and does it name the right branch" is a question
+    /// only the run's own git state can answer, and a test that rebuilt the sentence from its own
+    /// idea of the branch names would assert nothing.
+    pub fn ungated_span(&self) -> Option<String> {
+        let started = self.started.get()?;
+        let mut st = started.st.borrow_mut();
+        let git = &mut st.ext.get::<AGGState>().git;
+        crate::features::finalize::stranded_span_message(
+            &git.span_branches,
+            git.span_tip.as_deref(),
+            &git.iso_base,
+        )
+    }
+
+    /// End the run EXPLICITLY, with the outcome the driver means.
+    ///
+    /// The optional twelfth call. A clean drop records [`RunOutcome::GoalsMet`], because `Drop` cannot
+    /// see whether `main` returned `Ok` or `Err` — this is how a driver that cares says which it was.
+    /// Idempotent, and a no-op once a ceiling has already latched an outcome.
+    pub fn finish(&self, outcome: RunOutcome) {
+        if self.ended.get().is_some() {
+            return;
+        }
+        // NOT `ready()`: booting a whole run — preflight, guards, the banner — just to record that it
+        // is over would be absurd. A driver that never spent anything simply latches.
+        if let Some(started) = self.started.get() {
+            let mut st = started.st.borrow_mut();
+            record_end(&mut st, outcome);
+        }
+        self.ended.set(Some(outcome));
+    }
+
     /// How many worker sessions this run has launched. `0` before the first `step()`.
     ///
     /// Deliberately NOT one of the eleven calls: a driver reads per-step numbers off
@@ -875,5 +923,69 @@ impl Agg {
     /// really stop the pipeline" is a question only the counter can answer.
     pub fn sessions(&self) -> u32 {
         self.started.get().map(|s| s.st.borrow().session).unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// run end — BUILD.md §3.10
+// ---------------------------------------------------------------------------------------------
+
+/// Stamp the run's end into `state.json` (`dash.finished` + the reason) and the run ledger
+/// (`ledger.finish`), through the SAME `emit(Finished)` every `Flow::Stop` on the YAML path uses —
+/// so `agg status`, the dashboard and `agg history` cannot come to mean one thing per entry point.
+fn record_end(st: &mut LoopState, outcome: RunOutcome) {
+    let n = st.session;
+    let (reason, tag) = match outcome {
+        RunOutcome::GoalsMet => (format!("driver returned after {n} session(s)"), "goals-met"),
+        RunOutcome::Halt => (format!("driver ended the run after {n} session(s)"), "abort:driver"),
+        RunOutcome::MaxSessions => (format!("driver stopped at its session ceiling ({n})"), "max-sessions"),
+        RunOutcome::Stopped => (format!("driver stopped the run after {n} session(s)"), "stopped"),
+    };
+    st.emit(crate::plugin::LifecycleEvent::Finished { reason, ledger_tag: tag.to_string() });
+}
+
+/// RUN END. For a driver, "run end" is `main` returning or panicking — there is no post-loop
+/// finalize to inherit, because on the YAML path all of it happens inside `CheckRunStop`.
+///
+/// Order is load-bearing: this body runs FIRST, then `Agg`'s fields drop, which fires `StopHooks`
+/// (the `on_stop` shell hook) and `RunPidGuard` (releases the double-run guard). So the run is
+/// recorded as ended before anything the operator wired to `on_stop` observes it.
+///
+/// | how the driver ends | how agg learns | recorded |
+/// |---|---|---|
+/// | a ceiling fired | the latch | the latched [`RunOutcome`] |
+/// | panic | `std::thread::panicking()` | the ledger's own pessimistic `crashed` |
+/// | clean drop, no latch | `Drop` | [`RunOutcome::GoalsMet`] |
+///
+/// The last row's `Err`-return ambiguity is ACCEPTED: `Drop` cannot see whether `main` returned
+/// `Ok` or `Err`. [`Agg::finish`] is the explicit form for a driver that wants the distinction.
+impl Drop for Agg {
+    fn drop(&mut self) {
+        // ⚠ ONE `eprintln!` AND NOTHING ELSE while unwinding. A panic inside `Drop` aborts the
+        // process, and the frame that panicked may well have been holding the `RefCell` — so a
+        // `borrow_mut()` here would BE that second panic. The ledger already carries a pessimistic
+        // `crashed` end_reason from `RunLedger::begin` and stamps the end time in its own `Drop`, so
+        // the run is still recorded as failed without agg touching anything.
+        if std::thread::panicking() {
+            eprintln!("  ⚠ agg: the driver PANICKED — any staged span is left on its branch, un-merged.");
+            return;
+        }
+        let Some(started) = self.started.get() else {
+            return; // nothing ever spent: there is no run to finalize.
+        };
+        // `try_borrow_mut` and not `borrow_mut`: a Drop that panics is strictly worse than a Drop
+        // that silently skips a report, and nothing else can be holding this borrow here.
+        let Ok(mut st) = started.st.try_borrow_mut() else { return };
+
+        // the ungated span, named, with the command that lands it. ⛔ Never auto-merged (agg must not
+        // make a call it was not given) and never auto-rolled-back (discarding an overnight run over a
+        // late regression is far worse than keeping it).
+        crate::features::finalize::report_stranded_span(&mut st);
+
+        // `dash.finished`, not the latch: a `Flow::Stop` that already emitted `Finished` must not be
+        // re-recorded, while a latched outcome that never got emitted still must be.
+        if !st.dash.finished {
+            record_end(&mut st, self.ended.get().unwrap_or(RunOutcome::GoalsMet));
+        }
     }
 }

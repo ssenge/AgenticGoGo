@@ -250,6 +250,7 @@ pub fn sample_state() -> DashboardState {
         step_model: "claude-opus-4-8".into(),
         stop_when: "all_goals".into(),
         halt_when: "session > 40 OR over_cost".into(),
+        iso_base: "main".into(),
         started_at_epoch: 1_751_000_000,
         up_secs: 5_231, // 1h27m
         session: 3,

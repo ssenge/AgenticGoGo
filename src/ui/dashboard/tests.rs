@@ -18,6 +18,7 @@ fn demo_state() -> DashboardState {
         step_model: "gpt-5-codex".into(),
         stop_when: "all_goals".into(),
         halt_when: "regressed".into(),
+        iso_base: "main".into(),
         started_at_epoch: 1_700_000_000,
         up_secs: 11520,
         session: 7,
