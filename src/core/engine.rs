@@ -403,6 +403,7 @@ mod tests {
             kind: JudgeKind::Script { path: "true".into() },
             invariant: false,
             in_dod,
+            timeout: None,
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,

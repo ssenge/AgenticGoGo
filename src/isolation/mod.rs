@@ -138,6 +138,89 @@ pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf]) -> Result<Command> {
     Ok(wrapped)
 }
 
+/// Normalise a per-step `readonly:`/`writable:` entry to ONE canonical spelling, or reject it.
+///
+/// # Why this exists at all
+/// `writable` SUBTRACTS from what `readonly` accumulated, and the subtraction compares STRINGS.
+/// Without this, `writable(["agg/judges"])` against `readonly(["agg/judges/"])` subtracts nothing
+/// while looking to its author like it worked — a step that believes it may write the graders and
+/// silently cannot, or (with the lists swapped) a deny the author thinks they lifted and did not.
+/// One spelling in, one spelling stored, one comparison that means what it reads like.
+///
+/// The canonical form drops a trailing `/`, drops `.` and empty components (so `./src`, `src` and
+/// `src//` are one path), and resolves `..` lexically (`agg/judges/../judges` ⇒ `agg/judges`).
+/// A leading `/` survives — an absolute entry stays absolute.
+///
+/// # `None` = rejected
+/// Two inputs have no canonical form: one that climbs ABOVE the project root (`../secrets`), and
+/// one that names the root itself (`""`, `"."`, `"/"`). Both are dropped by [`normalize_paths`],
+/// loudly. Dropping is the SAFE direction in both lists: a path outside the project is already
+/// unwritable under any confining tier (the jail grants cwd + tmp + the agent's state dir and
+/// nothing else), so a dropped `readonly` entry loses no protection and a dropped `writable` entry
+/// only fails to lift a deny that was never in force.
+pub fn normalize_path(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let absolute = raw.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for c in raw.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                // nothing left to pop ⇒ the entry escapes the project root.
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let joined = parts.join("/");
+    Some(if absolute { format!("/{joined}") } else { joined })
+}
+
+/// [`normalize_path`] over a list, dropping what it rejects with a WARNING naming the entry.
+///
+/// A warning rather than a hard error because a driver's `.readonly([..])` is an infallible builder
+/// method — making it return a `Result` would put a `?` on every line of every step definition for
+/// a case that is a typo, and dropping is the safe direction (see [`normalize_path`]).
+/// ponytail: the ceiling is that a warning can be scrolled past. Upgrade path when that bites: a
+/// `try_readonly` returning `Result`, or a startup refusal collected in `capability::check`.
+pub fn normalize_paths<I, S>(paths: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = Vec::new();
+    for p in paths {
+        let raw = p.as_ref();
+        match normalize_path(raw) {
+            // dedup: a repeated path is not two denies, and an accumulating template chain repeats.
+            Some(n) if !out.contains(&n) => out.push(n),
+            Some(_) => {}
+            None => eprintln!(
+                "  ⚠ ignoring the isolation path `{raw}` — it names the project root or climbs \
+                 above it, which no per-step deny can express"
+            ),
+        }
+    }
+    out
+}
+
+/// The paths a step may NOT write: `readonly` minus `writable`.
+///
+/// The asymmetry is the point (BUILD.md §0.2 rule 5). `readonly` ACCUMULATES down a template chain
+/// so a derived step cannot silently lose a protection its template set; `writable` SUBTRACTS so a
+/// step that legitimately needs one of them re-grants exactly that one instead of re-listing the
+/// ones it still wants.
+///
+/// Matching is EXACT, on the canonical spelling both lists arrive in (see [`normalize_path`]) —
+/// `writable(["src/foo"])` does not carve a hole in `readonly(["src"])`. A subtree re-grant would
+/// need the wrapper to express deny-then-allow ordering, which neither backend does today.
+pub fn denied_paths(readonly: &[String], writable: &[String]) -> Vec<String> {
+    readonly.iter().filter(|p| !writable.contains(p)).cloned().collect()
+}
+
 /// The write CARVE-OUT: paths that stay readable but are denied for WRITING, even though they sit
 /// inside the otherwise-writable `cwd`. Today that is exactly `agg/private/` — see [`crate::paths`]
 /// for what lives there and why.
@@ -175,6 +258,38 @@ mod tests {
     #[test]
     fn the_default_is_none() {
         assert_eq!(Isolation::default(), Isolation::None);
+    }
+
+    /// The trailing slash is the whole reason normalisation exists: `writable` subtracts by string.
+    #[test]
+    fn one_directory_has_exactly_one_spelling() {
+        for spelling in ["agg/judges", "agg/judges/", "./agg/judges", "agg//judges//", " agg/judges "] {
+            assert_eq!(normalize_path(spelling).as_deref(), Some("agg/judges"), "spelled `{spelling}`");
+        }
+        // `..` resolves lexically rather than surviving into the comparison
+        assert_eq!(normalize_path("agg/judges/../judges").as_deref(), Some("agg/judges"));
+        // an absolute entry stays absolute
+        assert_eq!(normalize_path("/etc/").as_deref(), Some("/etc"));
+    }
+
+    /// Rejected: a path that climbs above the project root, and one that names the root itself.
+    #[test]
+    fn a_path_with_no_canonical_form_is_rejected() {
+        for bad in ["..", "../secrets", "a/../..", "", ".", "/", "./"] {
+            assert_eq!(normalize_path(bad), None, "`{bad}` must have no canonical form");
+        }
+        // …and the list form drops it rather than storing a lie
+        assert_eq!(normalize_paths(["src/", "../escape", "src"]), vec!["src".to_string()]);
+    }
+
+    /// `writable` subtracts from what `readonly` accumulated — and only ever exactly.
+    #[test]
+    fn writable_subtracts_from_readonly() {
+        let ro = normalize_paths(["tests/", "agg/judges/", "src/"]);
+        let w = normalize_paths(["agg/judges"]); // spelled WITHOUT the slash on purpose
+        assert_eq!(denied_paths(&ro, &w), vec!["tests".to_string(), "src".to_string()]);
+        // exact match only: a subtree does not carve a hole
+        assert_eq!(denied_paths(&normalize_paths(["src/"]), &normalize_paths(["src/foo"])), vec!["src".to_string()]);
     }
 
     #[test]

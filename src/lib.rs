@@ -59,14 +59,15 @@ pub mod util;
 /// HARNESS needs them, not where a driver would look.
 ///
 /// ⚠ It re-exports the SHIPPED types rather than driver-local twins. There is exactly one
-/// [`Limits`](crate::core::config::Limits), one [`Isolation`](crate::isolation::Isolation) and one
-/// [`Verdict`](crate::core::model::Verdict) in agg; a second definition on the driver path would be
-/// a split-brain waiting to drift.
+/// [`Limits`](crate::core::config::Limits), one [`Isolation`](crate::isolation::Isolation), one
+/// [`Judge`](crate::core::model::Judge) and one [`Verdict`](crate::core::model::Verdict) in agg; a
+/// second definition on the driver path would be a split-brain waiting to drift.
 pub mod prelude {
     pub use crate::core::config::Limits;
-    pub use crate::core::model::Verdict;
+    pub use crate::core::model::{Judge, JudgeCtx, Verdict};
     pub use crate::driver::{
-        Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, StepOutcome,
+        Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, Step,
+        StepOutcome,
     };
     pub use crate::isolation::Isolation;
     pub use crate::plugin::RunOutcome;

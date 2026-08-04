@@ -52,6 +52,19 @@ pub fn run(
             (run_script(path, cwd, name, session, step, timeout_secs, isolation), Spend::default())
         }
         JudgeKind::Llm { path, inputs } => run_llm(path, inputs, model, timeout_secs, cwd, ruler, isolation),
+        // A native judge is constructed only by `Judge::native`, i.e. only on the Rust driver path;
+        // `judges::resolve` decides the kind by file extension and can never produce one, so this
+        // arm is unreachable from YAML. Saying so beats a silent `Verdict::binary(false)`, which
+        // would read as "the goal is not met" rather than "agg cannot run this here".
+        // ponytail: this is the SHAPE only. BUILD.md §3.6 item 4 (commit 6) replaces it with the
+        // real dispatch — call the closure with a `JudgeCtx` under `catch_unwind`, because every
+        // other kind is crash-safe by construction (it is a subprocess) and this one is not.
+        JudgeKind::Native { .. } => (
+            Verdict::failed(format!(
+                "judge `{name}` is native (a Rust closure) and is not runnable from the YAML path"
+            )),
+            Spend::default(),
+        ),
     }
 }
 

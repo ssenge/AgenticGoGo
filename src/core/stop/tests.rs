@@ -12,6 +12,7 @@ fn unjudged(id: &str, invariant: bool) -> Judge {
         kind: JudgeKind::Script { path: "true".into() },
         invariant,
         in_dod: true,
+        timeout: None,
         state: Lifecycle::Pending,
         last_verdict: None,
         ever_met: false,

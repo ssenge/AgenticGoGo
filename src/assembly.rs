@@ -90,6 +90,8 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
             kind,
             invariant: cfg.sequence.invariants.iter().any(|i| i == name),
             in_dod: dod.iter().any(|d| d == name),
+            // no per-judge `timeout:` key in YAML — the run-level `judge.timeout` covers every one.
+            timeout: None,
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,

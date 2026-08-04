@@ -13,7 +13,9 @@ impl Handler for LaunchWorker {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         let prompt = ctx.scratch.get::<AGGScratch>().prompt.take().expect("WriteInstructions set scratch.prompt");
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
-        let agent = match step.backend() {
+        // `static_backend`, not `backend`: the stream-reader thread below needs the backend to be
+        // `&'static`, which a driver's own `Arc`-held one is not (see `ResolvedStep::static_backend`).
+        let agent = match step.static_backend() {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("  step `{}` names an unknown agent: {e}", step.name);
