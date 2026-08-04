@@ -88,6 +88,40 @@ pub fn landed_met(dir: &Path) -> HashMap<String, bool> {
     out
 }
 
+impl VerdictRecord {
+    /// The [`Verdict`] this row wraps, without the envelope fields (`session`/`step`/`outcome`/`ts`).
+    pub fn verdict(&self) -> Verdict {
+        Verdict {
+            met: self.met,
+            value: self.value,
+            max: self.max,
+            target: self.target,
+            rationale: self.rationale.clone(),
+            evidence: self.evidence.clone(),
+            error: self.error.clone(),
+        }
+    }
+}
+
+/// Every recorded row for ONE judge, oldest first — what a native judge reads through
+/// [`crate::core::model::JudgeCtx::history`] / `previous`.
+///
+/// `landed_only` keeps just the rows that describe work that actually LANDED and was gradeable
+/// (`merged`/`baseline`, no `error`) — the identical filter [`landed_met`] applies, so a native
+/// judge and the regression gate agree on what "before" means by construction.
+///
+/// A missing or rubbish file is honestly "no history", never a crash.
+pub fn rows_for(dir: &Path, judge: &str, landed_only: bool) -> Vec<VerdictRecord> {
+    let Ok(text) = std::fs::read_to_string(crate::paths::verdicts_jsonl(dir)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<VerdictRecord>(l).ok())
+        .filter(|r| r.judge == judge)
+        .filter(|r| !landed_only || (r.error.is_none() && matches!(r.outcome, Outcome::Merged | Outcome::Baseline)))
+        .collect()
+}
+
 /// Append one row per verdict, stamped with `outcome` and `session` (`None` = baseline). `O_APPEND`
 /// + **fsync per line**. Empty input is a no-op (no file is created).
 ///

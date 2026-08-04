@@ -133,8 +133,8 @@ pub fn wait_for_resume(bus: &Bus) -> Option<String> {
 /// Owns the registered `on_stop` handlers and fires them on Drop — so the teardown hook runs on
 /// EVERY exit (normal return, early return, or panic-unwind), which a loop-body dispatch can't
 /// guarantee. `on_stop` is a registry hook like the rest; the Drop guard is just its dispatcher.
-struct StopHooks {
-    handlers: Vec<Box<dyn Handler>>,
+pub(crate) struct StopHooks {
+    pub(crate) handlers: Vec<Box<dyn Handler>>,
 }
 impl Drop for StopHooks {
     fn drop(&mut self) {
@@ -144,8 +144,8 @@ impl Drop for StopHooks {
     }
 }
 
-struct RunPidGuard {
-    dir: PathBuf,
+pub(crate) struct RunPidGuard {
+    pub(crate) dir: PathBuf,
 }
 impl Drop for RunPidGuard {
     fn drop(&mut self) {
@@ -227,7 +227,8 @@ pub fn run_with(
          ════════════════════════════════════════════════════════════\n\
          ▶ watch live:  run `agg dashboard` in another terminal\n\
          ⏹ stop anytime: `agg stop`",
-        cfg.project, eng.done_if
+        cfg.project,
+        eng.done_if.clone().unwrap_or_default()
     );
 
     // max_sessions: the CLI flag WINS when passed (§4.1), else the config key. The flag keeps its
@@ -249,7 +250,7 @@ pub fn run_with(
     let dash = DashboardState {
         project: cfg.project.clone(),
         model: worker_model_display,
-        stop_when: eng.done_if.clone(),
+        stop_when: eng.done_if.clone().unwrap_or_default(),
         halt_when: eng.abort_if.clone().unwrap_or_default(),
         budget_total,
         cost_limit,
@@ -271,6 +272,7 @@ pub fn run_with(
         eng,
         cursor: Cursor::new(statements),
         cur_step: None,
+        next_step: None, // the YAML path drives the cursor; only a Rust driver seeds this.
         dash,
         live,
         ledger,
@@ -311,7 +313,7 @@ pub fn run_with(
         if let Some(outcome) = st.over_max_sessions() {
             return Ok(outcome);
         }
-        match step_once(&mut st, &lifecycle)? {
+        match step_once(&mut st, &lifecycle)?.end {
             Some(End::Stop(outcome)) => return Ok(outcome),
             Some(End::NextSession) => continue,
             None => {}
@@ -331,41 +333,124 @@ pub fn run_with(
 /// only `End::Stop` and DROP a `NextSession`, because at those points the session's remaining work
 /// (Finalize) must still run — a uniform "NextSession ⇒ next lap" would skip it. That asymmetry is
 /// resolved HERE, so no caller can get it wrong.
-pub(crate) fn step_once(st: &mut LoopState, lc: &Lifecycle) -> Result<Option<End>> {
+pub(crate) fn step_once(st: &mut LoopState, lc: &Lifecycle) -> Result<StepEnd> {
     // reset the per-session channel so no field (esp. `prompt`) leaks across sessions.
     st.scratch.clear();
     st.emit(LifecycleEvent::Inject);
-    match run_hook(&lc.on_session_start, st)? {
-        Some(End::Stop(outcome)) => return Ok(Some(End::Stop(outcome))),
-        Some(End::NextSession) => return Ok(Some(End::NextSession)),
-        None => {}
+    if let Some(end) = run_hook(&lc.on_session_start, st)? {
+        return Ok(StepEnd::ended(end));
     }
     st.emit(LifecycleEvent::Run);
-    match run_hook(&lc.on_run, st)? {
-        // SIGINT → finish_interrupted → Stopped
-        Some(End::Stop(outcome)) => return Ok(Some(End::Stop(outcome))),
-        Some(End::NextSession) => return Ok(Some(End::NextSession)),
-        None => {}
+    // SIGINT → finish_interrupted → Stopped
+    if let Some(end) = run_hook(&lc.on_run, st)? {
+        return Ok(StepEnd::ended(end));
     }
     if let Some(e) = st.worker_is_broken() {
         return Err(e);
     }
-    match run_hook(&lc.on_verify, st)? {
-        // rate-limited: incomplete session — go round again
-        Some(End::NextSession) => return Ok(Some(End::NextSession)),
-        // ceiling tripped during backoff → Halt
-        Some(End::Stop(outcome)) => return Ok(Some(End::Stop(outcome))),
-        None => {}
+    // rate-limited: incomplete session — go round again. Ceiling tripped during backoff → Halt.
+    if let Some(end) = run_hook(&lc.on_verify, st)? {
+        return Ok(StepEnd::ended(end));
     }
+    // ⚠ The outcome is snapshotted HERE, while the values still exist: `GateKeepRollback`
+    // `take()`s `scratch.staged` and `CheckRunStop` `take()`s `scratch.res`, and `landed` cannot be
+    // reconstructed from what is left (BUILD.md §3.4 item 6).
+    let staged = StepStaging::capture(st);
     // GATE keep/rollback → poison-pill Halt short-circuits here (CeilingPoisonGuard).
     if let Some(End::Stop(outcome)) = run_hook(&lc.on_gate, st)? {
-        return Ok(Some(End::Stop(outcome)));
+        return Ok(StepEnd::ended(End::Stop(outcome)));
     }
     // session-end work (shell hook, summary, memory fold) then the run-stop check (CheckRunStop).
     if let Some(End::Stop(outcome)) = run_hook(&lc.on_session_end, st)? {
-        return Ok(Some(End::Stop(outcome)));
+        return Ok(StepEnd { end: Some(End::Stop(outcome)), outcome: Some(staged.finish(st)) });
     }
-    Ok(None)
+    Ok(StepEnd { end: None, outcome: Some(staged.finish(st)) })
+}
+
+/// What one [`step_once`] produced: the loop-control answer, and — when the step got far enough to
+/// have one — what it DID.
+///
+/// The `outcome` exists for the Rust driver (`agg.step(&s)?` returns it). The YAML path ignores it;
+/// it is built regardless because building it costs a handful of field copies and making it
+/// conditional would mean a second code path through the one function this design says there is
+/// only one of.
+pub(crate) struct StepEnd {
+    pub end: Option<End>,
+    /// `None` when the step never reached VERIFY — an early `Stop`/`NextSession` means nothing
+    /// landed anywhere and there is no honest `Landing` to report.
+    pub outcome: Option<crate::driver::StepOutcome>,
+}
+
+impl StepEnd {
+    fn ended(end: End) -> StepEnd {
+        StepEnd { end: Some(end), outcome: None }
+    }
+}
+
+/// The per-step values that do not survive the GATE, captured between VERIFY and GATE.
+struct StepStaging {
+    step: String,
+    session: u32,
+    verdicts: Vec<(String, crate::core::model::Verdict)>,
+    tokens: u64,
+    cost: f64,
+    secs: u64,
+    exit: i32,
+    staged: Option<(String, crate::git::StagedSession)>,
+    on_span: bool,
+}
+
+impl StepStaging {
+    fn capture(st: &mut LoopState) -> StepStaging {
+        let (verdicts, staged, secs, exit) = {
+            let sc = st.scratch.get::<AGGScratch>();
+            let (secs, exit) = sc
+                .outcome
+                .as_ref()
+                .map(|o| (o.duration_secs, o.exit_code.unwrap_or(-1)))
+                .unwrap_or((0, -1));
+            (sc.res.as_ref().map(|r| r.fresh_verdicts.clone()).unwrap_or_default(), sc.staged.clone(), secs, exit)
+        };
+        StepStaging {
+            step: st.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
+            session: st.session,
+            verdicts,
+            tokens: st.tokens_spent,
+            cost: st.cost_spent,
+            secs,
+            exit,
+            staged,
+            on_span: st.ext.get::<AGGState>().git.span_tip.is_some(),
+        }
+    }
+
+    fn finish(self, st: &mut LoopState) -> crate::driver::StepOutcome {
+        use crate::driver::Landing;
+        let rolled_back = st.scratch.get::<AGGScratch>().rolled_back;
+        let landed = match &self.staged {
+            // a judged step whose merge was staged: the gate either kept it (it is on base now) or
+            // discarded it.
+            Some((_, crate::git::StagedSession::Staged)) if !rolled_back => Landing::Base,
+            Some((_, crate::git::StagedSession::Staged)) => Landing::RolledBack,
+            // Vetoed / NoChanges / Conflict / CheckoutFailed — nothing merged, and the `_` arm of
+            // `GateKeepRollback` restored base truth. No work landed anywhere.
+            Some(_) => Landing::Nothing,
+            // no merge was staged: the driver/`skip_judges` path. The span tip says whether this
+            // session's branch joined the open span or was discarded (a red_file veto).
+            None if self.on_span => Landing::Span,
+            None => Landing::Nothing,
+        };
+        crate::driver::StepOutcome {
+            step: self.step,
+            session: self.session,
+            landed,
+            verdicts: self.verdicts,
+            tokens: self.tokens,
+            cost: self.cost,
+            secs: self.secs,
+            exit: self.exit,
+        }
+    }
 }
 
 pub fn indent(s: &str) -> String {

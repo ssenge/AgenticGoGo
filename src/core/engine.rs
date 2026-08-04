@@ -129,11 +129,37 @@ pub struct Engine {
     /// if-condition, §5.3). Each carries its `in_dod`/`invariant` membership.
     pub judges: Vec<Judge>,
     /// the Definition of Done (success stop).
-    pub done_if: String,
+    ///
+    /// `None` = **there is no DoD** — the Rust driver path, where flow lives in the driver's own
+    /// `if`/`break` and nothing is declared to agg (BUILD.md §3.6). An empty string cannot express
+    /// that: it fails the expression parser. A `None` short-circuits the DoD read (`stop` is always
+    /// false) and prints nothing in the scoreboard header.
+    pub done_if: Option<String>,
     /// the giving-up guard.
     pub abort_if: Option<String>,
     /// the non-terminal notify guard (STUCK_NOTIFY §3). Same grammar, no effect on stop/halt.
     pub notify_if: Option<String>,
+}
+
+/// The YAML path's verdict store for a native judge's [`crate::core::model::JudgeCtx`]: this step's
+/// run-set state, read by name.
+///
+/// ponytail: it does NOT run an unconsulted judge on demand the way the facade's cache does. It
+/// cannot be reached: `judges::resolve` decides a judge's kind by FILE EXTENSION and has no way to
+/// produce a `Native` one, so no YAML run has a native judge to build a ctx for. CEILING: if that
+/// ever changes, a native judge asking about a judge that has not run this step gets a `failed`
+/// verdict rather than a fresh run. UPGRADE PATH: give `Engine` the same lazy cache the facade has,
+/// once there is a second producer of `JudgeKind::Native`.
+struct LastVerdicts<'a>(&'a [Judge]);
+
+impl crate::core::model::JudgeSource for LastVerdicts<'_> {
+    fn verdict_for(&self, j: &Judge) -> Verdict {
+        self.0
+            .iter()
+            .find(|g| g.name == j.name)
+            .and_then(|g| g.last_verdict.clone())
+            .unwrap_or_else(|| Verdict::failed(format!("judge `{}` was not consulted this step", j.name)))
+    }
 }
 
 /// A snapshot of one judge's per-step runtime state (see [`Engine::snapshot_goal_state`]).
@@ -149,11 +175,13 @@ impl Engine {
     /// typo fails at load, not 3 sessions into a run.
     pub fn new(
         judges: Vec<Judge>,
-        done_if: String,
+        done_if: Option<String>,
         abort_if: Option<String>,
         notify_if: Option<String>,
     ) -> Result<Self> {
-        stop::validate(&done_if, &judges)?;
+        if let Some(d) = &done_if {
+            stop::validate(d, &judges)?;
+        }
         if let Some(a) = &abort_if {
             stop::validate(a, &judges)?;
         }
@@ -286,9 +314,12 @@ impl Engine {
         step: &str,
         isolation: crate::isolation::Isolation,
     ) -> Vec<(Verdict, crate::backend::Spend)> {
+        let src = LastVerdicts(&self.judges);
         self.judges
             .iter()
-            .map(|g| judge::run(&g.kind, &g.name, cwd, ruler, judge_model, timeout, session, step, isolation))
+            .map(|g| {
+                judge::run(&g.kind, &g.name, cwd, ruler, judge_model, timeout, session, step, isolation, &src, None)
+            })
             .collect()
     }
 
@@ -337,7 +368,9 @@ impl Engine {
             max_sessions: run.max_sessions,
             wall_hours: run.wall_hours,
         };
-        let stop = eval_or_log(&self.done_if, &ctx, "done_if");
+        // No `done_if` ⇒ never a DoD stop. That is the driver path: agg is not told what "done"
+        // means there, so it must never claim the run succeeded.
+        let stop = self.done_if.as_deref().is_some_and(|d| eval_or_log(d, &ctx, "done_if"));
         let (halt, halt_reason) = match &self.abort_if {
             Some(expr) => {
                 let h = eval_or_log(expr, &ctx, "abort_if");
@@ -375,7 +408,10 @@ impl Engine {
     /// Plain-text scoreboard.
     pub fn scoreboard(&self) -> String {
         let (met, total) = self.tally();
-        let mut out = format!("Goals: {met}/{total}   done_if: {}\n", self.done_if);
+        let mut out = match &self.done_if {
+            Some(d) => format!("Goals: {met}/{total}   done_if: {d}\n"),
+            None => format!("Goals: {met}/{total}\n"),
+        };
         for g in &self.judges {
             out.push_str("  ");
             out.push_str(&g.scoreboard_line());
@@ -446,7 +482,7 @@ mod tests {
     /// The engine under test: an unmet DoD plus a guard that cannot trip on a default `RunState`,
     /// so `stop`/`halt` are false unless the thing under test moves them.
     fn engine(judges: Vec<Judge>, notify_if: Option<&str>) -> Engine {
-        Engine::new(judges, "all_goals".into(), Some("over_iterations".into()), notify_if.map(String::from))
+        Engine::new(judges, Some("all_goals".into()), Some("over_iterations".into()), notify_if.map(String::from))
             .expect("the test engine's expressions must validate")
     }
 
@@ -552,7 +588,7 @@ mod tests {
         // `.map(|_| ())` only so the failure path is printable — `Engine` is not `Debug`.
         let err = format!(
             "{:#}",
-            Engine::new(run_set(), "all_goals".into(), None, Some("stuck.value >= 85".into()))
+            Engine::new(run_set(), Some("all_goals".into()), None, Some("stuck.value >= 85".into()))
                 .map(|_| ())
                 .expect_err("an unresolvable notify_if must not build an Engine")
         );
@@ -560,12 +596,12 @@ mod tests {
         assert!(err.contains("stuck.value >= 85"), "…and quote the offending expression back: {err}");
 
         // identical treatment for the terminal twin — this is a mirror, not a new policy.
-        assert!(Engine::new(run_set(), "all_goals".into(), Some("stuck".into()), None).is_err());
+        assert!(Engine::new(run_set(), Some("all_goals".into()), Some("stuck".into()), None).is_err());
 
         // …and the very same expression builds clean once the detector IS in the run-set.
         let mut with_detector = run_set();
         with_detector.push(unjudged("stuck", false));
-        assert!(Engine::new(with_detector, "all_goals".into(), None, Some("stuck.value >= 85".into())).is_ok());
+        assert!(Engine::new(with_detector, Some("all_goals".into()), None, Some("stuck.value >= 85".into())).is_ok());
     }
 
     /// §12.7 row 4 / §12.8: with no `notify_if`, `CycleResult.notify` is `None` on EVERY cycle —

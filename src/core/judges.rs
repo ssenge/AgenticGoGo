@@ -101,7 +101,7 @@ pub fn resolve(name: &str, config_base: &Path) -> Result<JudgeKind> {
 
 /// The [`JudgeKind`] for a resolved file: extension decides. An `.md` reads its `inputs:` from its
 /// own frontmatter here, at resolution time.
-fn kind_for(path: &Path) -> JudgeKind {
+pub(crate) fn kind_for(path: &Path) -> JudgeKind {
     if path.extension().and_then(|e| e.to_str()) == Some("md") {
         let inputs = std::fs::read_to_string(path)
             .ok()

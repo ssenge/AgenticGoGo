@@ -279,7 +279,22 @@ fn run_cli() -> Result<ExitCode> {
                 Err(_) => (ruler.default_summary_model().to_string(), 300),
             };
             // Manual `agg judge` — no worker ran this session, so no confinement is needed.
-            let (verdict, _spend) = judge::run(&kind, name, &p.dir, ruler, &jm, timeout, None, "judge", agg::isolation::Isolation::None);
+            // No run-set here (this is one judge, by hand), so a native judge's ctx would have
+            // nothing to consult — and `agg judge` resolves by file extension, which cannot
+            // produce one. `None` iso_base ⇒ `diff()` is the working tree against HEAD.
+            let (verdict, _spend) = judge::run(
+                &kind,
+                name,
+                &p.dir,
+                ruler,
+                &jm,
+                timeout,
+                None,
+                "judge",
+                agg::isolation::Isolation::None,
+                &agg::core::judge::NoJudges,
+                None,
+            );
             // raw verdict JSON (the judge contract), then a one-line human summary.
             println!("{}", serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".into()));
             let mark = if verdict.met { "✔ met" } else { "✖ not met" };

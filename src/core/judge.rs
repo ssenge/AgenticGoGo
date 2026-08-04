@@ -18,7 +18,7 @@
 //! `Verdict::failed(...)` rather than panicking.
 
 use crate::backend::{AgentBackend, Spend};
-use crate::core::model::{JudgeKind, Verdict};
+use crate::core::model::{JudgeCtx, JudgeKind, JudgeSource, Verdict};
 use crate::os::proc::{self, Captured};
 use crate::util::last_json_object;
 use std::path::Path;
@@ -35,6 +35,10 @@ use std::process::{Command, Stdio};
 /// worker did — otherwise a confined worker escapes trivially by rewriting `agg/judges/*.sh` (they
 /// live in its writable cwd) for agg to run unconfined (ISOLATION.md §12). Baseline/manual judging
 /// (no worker ran) passes `None`.
+///
+/// `src` is the verdict store a NATIVE judge's [`JudgeCtx`] consults when its closure asks for
+/// another judge; every other kind ignores it. `iso_base` is the branch [`JudgeCtx::diff`] is taken
+/// against.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     kind: &JudgeKind,
@@ -46,25 +50,46 @@ pub fn run(
     session: Option<u32>,
     step: &str,
     isolation: crate::isolation::Isolation,
+    src: &dyn JudgeSource,
+    iso_base: Option<&str>,
 ) -> (Verdict, Spend) {
     match kind {
         JudgeKind::Script { path } => {
             (run_script(path, cwd, name, session, step, timeout_secs, isolation), Spend::default())
         }
         JudgeKind::Llm { path, inputs } => run_llm(path, inputs, model, timeout_secs, cwd, ruler, isolation),
-        // A native judge is constructed only by `Judge::native`, i.e. only on the Rust driver path;
-        // `judges::resolve` decides the kind by file extension and can never produce one, so this
-        // arm is unreachable from YAML. Saying so beats a silent `Verdict::binary(false)`, which
-        // would read as "the goal is not met" rather than "agg cannot run this here".
-        // ponytail: this is the SHAPE only. BUILD.md §3.6 item 4 (commit 6) replaces it with the
-        // real dispatch — call the closure with a `JudgeCtx` under `catch_unwind`, because every
-        // other kind is crash-safe by construction (it is a subprocess) and this one is not.
-        JudgeKind::Native { .. } => (
-            Verdict::failed(format!(
-                "judge `{name}` is native (a Rust closure) and is not runnable from the YAML path"
-            )),
-            Spend::default(),
-        ),
+        // A native judge is a Rust closure in the DRIVER's own binary — the one judge kind that is
+        // not a subprocess, and therefore the one kind that is not crash-safe by construction.
+        // Hence `catch_unwind`: a panicking judge must report "I could not grade this" and let the
+        // run continue, exactly as a segfaulting script does. The per-judge `timeout` is meaningless
+        // here (there is nothing to kill) and `Spend` is zero (no ruler call).
+        JudgeKind::Native { f } => {
+            let ctx = JudgeCtx::new(src, session.unwrap_or(0), step, cwd, session_diff(cwd, iso_base));
+            let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&ctx)))
+                .unwrap_or_else(|_| Verdict::failed(format!("native judge `{name}` panicked")));
+            (verdict, Spend::default())
+        }
+    }
+}
+
+/// A verdict store with nothing in it — for the call sites that judge ONE judge with no run-set
+/// around it (`agg judge`). A native judge asking about a sibling there is asking about something
+/// that does not exist in that invocation, and saying so is better than fabricating a verdict.
+pub struct NoJudges;
+
+impl JudgeSource for NoJudges {
+    fn verdict_for(&self, j: &crate::core::model::Judge) -> Verdict {
+        Verdict::failed(format!("judge `{}` is not part of this invocation", j.name))
+    }
+}
+
+/// The diff [`JudgeCtx::diff`] hands a native judge, captured EAGERLY — before the closure runs, so
+/// one judge's scribbling cannot change what a later judge sees. With no isolation base resolved
+/// (the manual `agg judge`), fall back to the working tree against HEAD.
+fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
+    match iso_base {
+        Some(base) if !base.is_empty() => git(&["diff", base], cwd),
+        _ => git(&["diff", "HEAD"], cwd),
     }
 }
 

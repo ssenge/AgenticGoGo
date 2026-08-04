@@ -60,6 +60,16 @@ pub struct AggConfig {
     pub summary: Summary,
     #[serde(default)]
     pub session_isolation: SessionIsolation,
+    /// The standing project-instructions file the session brief POINTS AT, relative to the PROJECT
+    /// dir. Default `agg/AGG.md` — today's hardcoded path, now nameable.
+    ///
+    /// ⚠ agg never reads its bytes. It checks `.exists()` and emits "Read `<path>`" into the brief;
+    /// a file that is not there produces no pointer at all. That is what makes it safe for the file
+    /// to be arbitrarily long — it never enters agg's context budget.
+    ///
+    /// ADDITIVE, like `limits.wall_hours`: a config written before this key existed still parses.
+    #[serde(default = "default_instructions")]
+    pub instructions: String,
 }
 
 /// Values inherited by every step (§4). A step body overrides any of them.
@@ -225,6 +235,49 @@ pub struct Sequence {
     pub notify: Option<NotifyCfg>,
 }
 
+impl Default for Sequence {
+    fn default() -> Self {
+        Sequence {
+            steps: vec![],
+            limits: Limits::default(),
+            gate_regressions: default_true(),
+            invariants: vec![],
+            done_if: default_done_if(),
+            abort_if: None,
+            notify_if: None,
+            notify: None,
+        }
+    }
+}
+
+/// The DRIVER's starting config — every key at exactly the value an `agg.yaml` that mentioned
+/// nothing would deserialize to, with an EMPTY `sequence.steps` (which is what marks a project as
+/// driver-driven, BUILD.md §3.6) and an empty `project` for the caller to name.
+///
+/// The YAML path never reaches this: it always deserializes a real file. It exists because
+/// `Agg::open` must produce a config the builder chain can fill, and `AggConfig::load` is the one
+/// thing the driver path must NOT do — a stray `agg.yaml` in a driver project is IGNORED.
+impl Default for AggConfig {
+    fn default() -> Self {
+        AggConfig {
+            project: String::new(),
+            defaults: Defaults::default(),
+            judge: JudgeCfg::default(),
+            steps: BTreeMap::new(),
+            sequence: Sequence::default(),
+            heartbeat_secs: default_heartbeat(),
+            watchdog: Watchdog::default(),
+            ratelimit_backoff_secs: default_backoff(),
+            memory: Memory::default(),
+            hooks: Hooks::default(),
+            prompt_includes: vec![],
+            summary: Summary::default(),
+            session_isolation: SessionIsolation::default(),
+            instructions: default_instructions(),
+        }
+    }
+}
+
 /// Delivery for `notify_if` / an `abort_if` halt (STUCK_NOTIFY §5).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -375,6 +428,9 @@ fn default_agent() -> String {
 }
 fn default_state() -> String {
     "state/STATE.md".into()
+}
+fn default_instructions() -> String {
+    format!("{}/AGG.md", crate::paths::CONFIG_DIR)
 }
 fn default_branch_prefix() -> String {
     "agg".into()
