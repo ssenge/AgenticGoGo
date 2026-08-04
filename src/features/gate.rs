@@ -60,7 +60,7 @@ impl Handler for GateKeepRollback {
                 // its flip as a regression would roll back the work that escaped the stall (and, because
                 // rolled-back rows never land, livelock the loop). §5.7 protects the DoD-set; a judge
                 // named only in an `if` condition is not in it.
-                let landed = crate::core::verdicts::landed_met(ctx.dir);
+                let landed = crate::core::verdicts::landed_met(&ctx.dir);
                 let regressed = res.fresh_verdicts.iter().any(|(id, v)| {
                     ctx.eng.judges.iter().any(|g| g.in_dod && &g.name == id)
                         && v.error.is_none()
@@ -68,13 +68,13 @@ impl Handler for GateKeepRollback {
                         && landed.get(id).copied().unwrap_or(false)
                 });
                 let keep = if ctx.gate_regressions { !regressed } else { true };
-                crate::git::finalize_session(ctx.dir, br, ctx.session, keep);
+                crate::git::finalize_session(&ctx.dir, br, ctx.session, keep);
                 let tag = if keep {
                     crate::core::verdicts::Outcome::Merged
                 } else {
                     crate::core::verdicts::Outcome::RolledBack
                 };
-                crate::core::verdicts::append(ctx.dir, Some(ctx.session), &step_name, &res.fresh_verdicts, tag)?;
+                crate::core::verdicts::append(&ctx.dir, Some(ctx.session), &step_name, &res.fresh_verdicts, tag)?;
                 if keep {
                     // the whole span merged with this branch (it descends from the span). Clear it.
                     // ponytail: intermediate span branches are left as refs (no public delete);
@@ -112,7 +112,7 @@ impl Handler for GateKeepRollback {
                 ctx.ext.get::<AGGState>().git.span_tip = None;
                 ctx.ext.get::<AGGState>().git.span_branches.clear();
                 crate::core::verdicts::append(
-                    ctx.dir,
+                    &ctx.dir,
                     Some(ctx.session),
                     &step_name,
                     &res.fresh_verdicts,

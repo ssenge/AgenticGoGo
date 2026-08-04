@@ -17,14 +17,14 @@ pub struct Setup;
 impl Handler for Setup {
     fn run(&self, st: &mut LoopState) -> Result<Flow> {
         st.ext.get::<AGGState>().inject.prompt_prefix =
-            crate::hooks::gather_prompt_includes(&st.cfg.prompt_includes, st.dir);
+            crate::hooks::gather_prompt_includes(&st.cfg.prompt_includes, &st.dir);
         st.ext.get::<AGGState>().summary.last_summary =
             Some(Instant::now() - Duration::from_secs(st.cfg.summary.min_interval_secs));
         if st.cfg.memory.enabled {
-            crate::core::memory::ensure_scratch_dir(st.dir);
-            crate::core::memory::sweep_scratch(st.dir);
+            crate::core::memory::ensure_scratch_dir(&st.dir);
+            crate::core::memory::sweep_scratch(&st.dir);
         }
-        st.bus = Bus::open(st.dir).ok();
+        st.bus = Bus::open(&st.dir).ok();
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -43,7 +43,6 @@ impl Handler for Baseline {
         eprintln!("  baseline: running judges once before the first session…");
         ctx.dash.phase = Phase::Verify;
         ctx.publish();
-        let dir = ctx.dir;
         let ruler = ctx.ruler;
         let judge_model = ctx.judge_model.clone();
         let judge_timeout = ctx.judge_timeout;
@@ -58,7 +57,7 @@ impl Handler for Baseline {
         // it — unconfined, before any jail exists — forging `merged` rows straight into the ledger.
         // `stalled` then reports met and an `abort_if: "stalled"` project has its worker end its own
         // run. Clean-and-committed is not the same as untampered.
-        let pre = ctx.eng.run_step(dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false, ctx.cfg.run_isolation());
+        let pre = ctx.eng.run_step(&ctx.dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false, ctx.cfg.run_isolation());
         ctx.tokens_spent += pre.judge_tokens;
         if let Some(c) = pre.judge_cost {
             ctx.cost_spent += c;
@@ -67,7 +66,7 @@ impl Handler for Baseline {
         ctx.charge(&ruler_agent, pre.judge_tokens, pre.judge_cost);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
         ctx.publish();
-        crate::core::verdicts::append(dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
+        crate::core::verdicts::append(&ctx.dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
         if pre.halt {
             eprintln!("⚠ ABORT at baseline — abort_if already true: {}", pre.halt_reason.clone().unwrap_or_default());
             // The "stop + notify" policy has to hold HERE too, and this is its likeliest trigger:
@@ -109,7 +108,7 @@ pub struct BackgroundSpawn {
 }
 impl Handler for BackgroundSpawn {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        crate::hooks::spawn_background(&self.cmds, ctx.dir);
+        crate::hooks::spawn_background(&self.cmds, &ctx.dir);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {

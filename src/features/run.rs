@@ -26,13 +26,13 @@ impl Handler for LaunchWorker {
         let effort = step.effort(agent).to_string();
         let isolation = step.isolation;
         let outcome = worker::run_session(
-            ctx.cfg,
+            &ctx.cfg,
             agent,
             &model,
             &effort,
             &step.worker_args,
             &prompt,
-            ctx.dir,
+            &ctx.dir,
             ctx.session,
             &ctx.live,
             isolation,
