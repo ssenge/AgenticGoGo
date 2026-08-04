@@ -51,7 +51,7 @@ impl Handler for RateLimitBackoff {
             None => eprintln!("  rate limit detected — backing off {secs}s (no reset time reported)"),
         }
         if ctx.cfg.memory.enabled {
-            crate::core::memory::clear_scratch(ctx.dir, ctx.session);
+            crate::core::memory::clear_scratch(&ctx.dir, ctx.session);
         }
         ctx.emit(LifecycleEvent::Backoff);
 
@@ -100,7 +100,7 @@ impl Handler for GitAutoCommit {
         if let Some(br) = ctx.ext.get::<AGGState>().git.session_branch.clone() {
             let step = ctx.cur_step.clone().expect("PickStep set cur_step");
             let msg = format!("agg: session {} ({}) on {}", ctx.session, step.name, step.agent);
-            if crate::git::auto_commit_tracked(ctx.dir, &msg) {
+            if crate::git::auto_commit_tracked(&ctx.dir, &msg) {
                 eprintln!("  [git] agg committed the worker's edits on {br}");
             }
         }
@@ -138,7 +138,7 @@ impl Handler for StageSpan {
         let sb = ctx.ext.get::<AGGState>().git.session_branch.clone();
         if vetoed {
             eprintln!("  [span] session #{} VETOED (red_file) → work discarded, not staged", ctx.session);
-            crate::git::remove_file(ctx.dir, &red_file);
+            crate::git::remove_file(&ctx.dir, &red_file);
             // leave the branch orphaned; the span tip is unchanged.
         } else if let Some(br) = sb {
             eprintln!("  [span] session #{} staged on {br} (skip_judges) — nothing merged yet", ctx.session);
@@ -149,7 +149,7 @@ impl Handler for StageSpan {
         // ceilings only (no judges ran) — done_if reads stale state and cannot fire, ceilings can.
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         let rs = ctx.run_state();
-        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), true, step.isolation);
+        let res = ctx.eng.run_step(&ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), true, step.isolation);
         ctx.scratch.get::<AGGScratch>().res = Some(res);
         ctx.scratch.get::<AGGScratch>().staged = None;
         ctx.publish();
@@ -168,7 +168,7 @@ impl Handler for StageMerge {
         let red_file = ctx.cfg.session_isolation.red_file.clone();
         let iso_base = ctx.ext.get::<AGGState>().git.iso_base.clone();
         let staged = ctx.ext.get::<AGGState>().git.session_branch.clone().map(|br| {
-            let s = crate::git::stage_session(ctx.dir, &iso_base, &br, &red_file);
+            let s = crate::git::stage_session(&ctx.dir, &iso_base, &br, &red_file);
             (br, s)
         });
         ctx.scratch.get::<AGGScratch>().staged = staged;
@@ -193,7 +193,7 @@ impl Handler for RunJudges {
         let rs = ctx.run_state();
         // §12: judges for a sandboxed step run in the SAME jail — a confined worker could otherwise
         // rewrite agg/judges/*.sh (in its writable cwd) and escape through agg's unconfined run.
-        let res = ctx.eng.run_step(ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), false, step.isolation);
+        let res = ctx.eng.run_step(&ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), false, step.isolation);
         // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
         ctx.tokens_spent += res.judge_tokens;
         if let Some(c) = res.judge_cost {
@@ -231,7 +231,7 @@ pub fn fold_memory_floor(ctx: &mut LoopState, outcome: &SessionOutcome) -> bool 
             &[],
         );
         ctx.dash.memory_bytes = crate::core::memory::append_entry(
-            ctx.dir,
+            &ctx.dir,
             ctx.session,
             "session-start",
             &body,

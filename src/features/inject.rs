@@ -116,8 +116,8 @@ impl Handler for SessionBranchCut {
         let base_ref = base_ref(ctx); // owned; ends the &mut-self borrow before we touch cfg below
         let iso = &ctx.cfg.session_isolation;
         let br = crate::git::session_branch(&iso.branch_prefix, &ctx.cfg.project, ctx.session);
-        crate::git::remove_file(ctx.dir, &iso.red_file); // clear a stale veto
-        ctx.ext.get::<AGGState>().git.session_branch = if crate::git::create_branch(ctx.dir, &br, &base_ref) {
+        crate::git::remove_file(&ctx.dir, &iso.red_file); // clear a stale veto
+        ctx.ext.get::<AGGState>().git.session_branch = if crate::git::create_branch(&ctx.dir, &br, &base_ref) {
             eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", ctx.session);
             Some(br)
         } else {
@@ -136,7 +136,7 @@ impl Handler for SessionBranchCut {
 pub struct WriteInstructions;
 impl Handler for WriteInstructions {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if let Some(change) = crate::os::spawns::scan(ctx.dir) {
+        if let Some(change) = crate::os::spawns::scan(&ctx.dir) {
             eprintln!("  [spawn] {change}");
         }
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
@@ -156,7 +156,7 @@ pub struct ClearMemScratch;
 impl Handler for ClearMemScratch {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         if ctx.cfg.memory.enabled {
-            crate::core::memory::clear_scratch(ctx.dir, ctx.session);
+            crate::core::memory::clear_scratch(&ctx.dir, ctx.session);
         }
         Ok(Flow::Continue)
     }
@@ -186,7 +186,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
             "\n## ⚠ HIGH-PRIORITY OPERATOR INSTRUCTION — do this FIRST (it overrides the default plan)\n{instr}\n"
         ));
     }
-    if let Some(status) = crate::os::spawns::summary_for_prompt(ctx.dir) {
+    if let Some(status) = crate::os::spawns::summary_for_prompt(&ctx.dir) {
         s.push_str(&format!("\n{status}\n"));
     }
 
@@ -209,7 +209,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     // ── context: memory recent-tail excerpt + a conditional pointer to the full LOG ──
     if ctx.cfg.memory.enabled {
         let last_session = ctx.ext.get::<AGGState>().memory.last_session.clone();
-        let mem = crate::core::memory::read_block(ctx.dir, &last_session, ctx.cfg.memory.inject_kb);
+        let mem = crate::core::memory::read_block(&ctx.dir, &last_session, ctx.cfg.memory.inject_kb);
         if !mem.trim().is_empty() {
             s.push_str(&format!("\n## What's been tried\n{}\n", mem.trim()));
             s.push_str(
@@ -229,12 +229,12 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     }
 
     // ── AGG.md → a POINTER (the standing project instructions) ──
-    if crate::paths::config_base(ctx.dir).join("AGG.md").exists() {
+    if crate::paths::config_base(&ctx.dir).join("AGG.md").exists() {
         s.push_str("\n## Project instructions\nRead `agg/AGG.md` — the standing scope, architecture, and rules for this project.\n");
     }
 
     // ── the LLM wiki — list its pages if any exist ──
-    let wiki = crate::paths::wiki_dir(ctx.dir);
+    let wiki = crate::paths::wiki_dir(&ctx.dir);
     if wiki.exists() {
         let pages = wiki_pages(&wiki);
         if !pages.is_empty() {
@@ -250,7 +250,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     s.push_str(&EXIT_FOOTER.replace("{{STATE}}", &step.state));
 
     // write the composed brief to disk; the worker's actual `-p` is the tiny pointer.
-    let path = crate::paths::instructions_md(ctx.dir);
+    let path = crate::paths::instructions_md(&ctx.dir);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

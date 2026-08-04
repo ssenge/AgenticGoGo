@@ -273,16 +273,16 @@ mod tests {
 
     /// A `LoopState` a handler can run against, mirroring `tests/plugin_api.rs::probe_state`.
     /// `tier` is the CURRENT step's isolation — the value `deliver` must resolve the jail from.
-    fn state<'a>(cfg: &'a AggConfig, dir: &'a Path, eng: Engine, tier: Isolation) -> LoopState<'a> {
+    fn state(cfg: &AggConfig, dir: &Path, eng: Engine, tier: Isolation) -> LoopState {
         let loop_start = std::time::Instant::now();
         let dash = crate::state::DashboardState::default();
         LoopState {
-            cfg,
+            cfg: cfg.clone(),
             ruler: crate::backend::for_name("claude").unwrap(),
             judge_model: "m".into(),
             judge_timeout: 1,
-            dir,
-            config_base: dir,
+            dir: dir.to_path_buf(),
+            config_base: dir.to_path_buf(),
             eng,
             cursor: crate::core::sequence::Cursor::new(vec![]),
             cur_step: Some(crate::core::config::ResolvedStep {

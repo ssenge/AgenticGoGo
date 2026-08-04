@@ -1,6 +1,6 @@
 //! The shared `LoopState` context a plugin operates on.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Instant;
 use crate::backend::AgentBackend;
 use crate::bus::Bus;
@@ -18,16 +18,20 @@ use crate::util::now_epoch;
 /// per the crate's no-facade convention (lib.rs) so a plugin in ANY module/crate reaches what it
 /// needs — most importantly its own typed state via `ext`/`scratch`. The core knows only the hook
 /// registry + this shared bus; every feature (agg's own included) is a plugin against it.
-pub struct LoopState<'a> {
-    pub cfg: &'a AggConfig,
+///
+/// `cfg`/`dir`/`config_base` are OWNED, not borrowed (RUST_API §3.1). A driver facade holds the
+/// config AND the state in one struct; borrowing a sibling field is self-referential and not
+/// expressible in safe Rust, so the lifetime parameter had to go. Reads still deref through.
+pub struct LoopState {
+    pub cfg: AggConfig,
     /// the RULER — LLM judges + summarizer. Immutable across the run (§4).
     pub ruler: &'static dyn AgentBackend,
     /// the ruler model (`judge.model`, resolved).
     pub judge_model: String,
     /// EVERY judge's timeout (`judge.timeout`).
     pub judge_timeout: u64,
-    pub dir: &'a Path,
-    pub config_base: &'a Path,
+    pub dir: PathBuf,
+    pub config_base: PathBuf,
 
     pub eng: Engine,
     /// the sequence cursor — yields the next step name each cycle.
@@ -64,7 +68,7 @@ pub struct LoopState<'a> {
     pub scratch: Extensions,
 }
 
-impl LoopState<'_> {
+impl LoopState {
     pub fn emit(&mut self, event: LifecycleEvent) {
         self.dash.phase = event.phase();
         if let LifecycleEvent::Finished { reason, ledger_tag } = &event {

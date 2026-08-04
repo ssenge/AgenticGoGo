@@ -20,7 +20,7 @@ use crate::core::config::AggConfig;
 use crate::core::sequence::Cursor;
 use crate::state::{DashboardState, LiveState, Phase};
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 
@@ -144,12 +144,12 @@ impl Drop for StopHooks {
     }
 }
 
-struct RunPidGuard<'a> {
-    dir: &'a Path,
+struct RunPidGuard {
+    dir: PathBuf,
 }
-impl Drop for RunPidGuard<'_> {
+impl Drop for RunPidGuard {
     fn drop(&mut self) {
-        crate::os::detach::clear_run_pid(self.dir);
+        crate::os::detach::clear_run_pid(&self.dir);
     }
 }
 
@@ -191,7 +191,7 @@ pub fn run_with(
         }
     }
     crate::os::detach::write_run_pid(dir);
-    let _run_pid_guard = RunPidGuard { dir };
+    let _run_pid_guard = RunPidGuard { dir: dir.to_path_buf() };
     crate::os::signals::install();
 
     let ruler = cfg.ruler_backend()?;
@@ -241,13 +241,18 @@ pub fn run_with(
         .model
         .clone()
         .unwrap_or_else(|| cfg.worker_backend().map(|b| b.default_model().to_string()).unwrap_or_default());
+    // read off `cfg` BEFORE it moves into the `LoopState` below (which now OWNS it, §3.1).
+    let budget_total = cfg.sequence.limits.tokens;
+    let cost_limit = cfg.sequence.limits.cost;
+    let gate_regressions = cfg.sequence.gate_regressions;
+
     let dash = DashboardState {
         project: cfg.project.clone(),
         model: worker_model_display,
         stop_when: eng.done_if.clone(),
         halt_when: eng.abort_if.clone().unwrap_or_default(),
-        budget_total: cfg.sequence.limits.tokens,
-        cost_limit: cfg.sequence.limits.cost,
+        budget_total,
+        cost_limit,
         phase: Phase::Starting,
         ..Default::default()
     };
@@ -257,12 +262,12 @@ pub fn run_with(
     let lifetime_base = ledger.prior_lifetime_sessions();
 
     let mut st = LoopState {
-        cfg: &cfg,
+        cfg,
         ruler,
         judge_model,
         judge_timeout,
-        dir,
-        config_base,
+        dir: dir.to_path_buf(),
+        config_base: config_base.to_path_buf(),
         eng,
         cursor: Cursor::new(statements),
         cur_step: None,
@@ -270,11 +275,11 @@ pub fn run_with(
         live,
         ledger,
         bus: None,
-        budget_total: cfg.sequence.limits.tokens,
-        cost_limit: cfg.sequence.limits.cost,
+        budget_total,
+        cost_limit,
         max_iter: if max_sessions == 0 { None } else { Some(max_sessions) },
         max_sessions,
-        gate_regressions: cfg.sequence.gate_regressions,
+        gate_regressions,
         loop_start,
         lifetime_base,
         session: 0,

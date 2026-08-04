@@ -46,16 +46,16 @@ impl Handler for Observe {
 
 /// Build a minimal `LoopState` from OUTSIDE the crate — proof the context itself is fully public
 /// (no facade), so a plugin host can stand one up. Only the pieces a plugin needs are exercised.
-fn probe_state<'a>(cfg: &'a agg::core::config::AggConfig, dir: &'a Path) -> LoopState<'a> {
+fn probe_state(cfg: &agg::core::config::AggConfig, dir: &Path) -> LoopState {
     let loop_start = Instant::now();
     let dash = agg::state::DashboardState::default();
     LoopState {
-        cfg,
+        cfg: cfg.clone(),
         ruler: agg::backend::for_name("claude").unwrap(),
         judge_model: "m".into(),
         judge_timeout: 1,
-        dir,
-        config_base: dir,
+        dir: dir.to_path_buf(),
+        config_base: dir.to_path_buf(),
         eng: agg::core::engine::Engine::new(vec![], "iterations > 999999".into(), None, None).unwrap(),
         cursor: agg::core::sequence::Cursor::new(vec![]),
         cur_step: None,

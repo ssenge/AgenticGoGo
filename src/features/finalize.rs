@@ -29,7 +29,7 @@ impl Handler for RefineFold {
                  NOT on the base branch (kept on the session branch for inspection).\n{mech}"
             );
         }
-        let worker_note = crate::core::memory::read_worker_note(ctx.dir, ctx.session);
+        let worker_note = crate::core::memory::read_worker_note(&ctx.dir, ctx.session);
         let (source, body) = match worker_note {
             Some(note) => (
                 "mechanical+worker",
@@ -42,9 +42,9 @@ impl Handler for RefineFold {
             None => ("mechanical", mech),
         };
         ctx.dash.memory_bytes = crate::core::memory::fold_entry(
-            ctx.dir, ctx.session, source, &body, ctx.cfg.memory.max_kb, true,
+            &ctx.dir, ctx.session, source, &body, ctx.cfg.memory.max_kb, true,
         );
-        crate::core::memory::clear_scratch(ctx.dir, ctx.session);
+        crate::core::memory::clear_scratch(&ctx.dir, ctx.session);
         ctx.ext.get::<AGGState>().memory.last_session =
             crate::core::memory::last_session_block(&deltas, &scoreboard);
         eprintln!("  [memory] session #{} folded ({source}); LOG.md {} B", ctx.session, ctx.dash.memory_bytes);
