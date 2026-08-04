@@ -112,6 +112,44 @@ fn runs(dir: &Path, name: &str) -> usize {
     std::fs::read_to_string(dir.join(format!("{name}.runs"))).map(|t| t.lines().count()).unwrap_or(0)
 }
 
+// ── the gate's helpers ───────────────────────────────────────────────────────────────────────
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Every `agg/*` branch that still exists — the span's refs, seen from outside agg.
+fn agg_branches(dir: &Path) -> Vec<String> {
+    let out = git(dir, &["branch", "--list", "agg/*", "--format=%(refname:short)"]);
+    out.lines().map(str::to_string).collect()
+}
+
+/// How many worker sessions' work is reachable from `main` — one line per session in `work.log`,
+/// written by the fake agent. A commit count would also move for merge commits; this counts WORK.
+fn work_landed_on_main(dir: &Path) -> usize {
+    let out = Command::new("git").args(["show", "main:work.log"]).current_dir(dir).output().unwrap();
+    if !out.status.success() {
+        return 0;
+    }
+    String::from_utf8_lossy(&out.stdout).lines().count()
+}
+
+/// Seed `verdicts.jsonl` with a LANDED, met row for `name` — the state a previous gate would have
+/// left. `landed_met` is what the regression rule compares against, so without this a first-ever
+/// failing judge is not a regression, it is just news.
+fn seed_landed_met(dir: &Path, name: &str) {
+    agg::core::verdicts::append(
+        dir,
+        Some(0),
+        "baseline",
+        &[(name.to_string(), Verdict::binary(true))],
+        agg::core::verdicts::Outcome::Merged,
+    )
+    .unwrap();
+}
+
 // ---------------------------------------------------------------------------------------------
 
 /// THE PIPELINE IS SHARED. A driver step runs the same hook dispatch a YAML lap does, so agg's own
@@ -280,6 +318,127 @@ fn a_stray_and_even_malformed_agg_yaml_changes_nothing() {
     assert_eq!(agg.sessions(), 3, "the YAML `limits.tokens: 1` never applied");
     assert!(last.tokens > 1, "…and the run really did spend past it: {} tokens", last.tokens);
     assert_eq!(agg.ended(), None, "a malformed agg.yaml cannot fail a run that never reads it");
+}
+
+// ── the gate ─────────────────────────────────────────────────────────────────────────────────
+
+/// `gate()` SEES A VERDICT ASKED FOR THE FIRST TIME AFTER EVERY STEP — under both policies.
+///
+/// This is the test the pre-D2 design (a gate inside `step()`) passes neither half of: the judge is
+/// never consulted while a step is running, so a gate that closed inside `step()` would have had
+/// nothing to weigh. Both halves run the SAME script judge against the same seeded history and
+/// differ only in `on_regression`, so the policy is the only variable.
+#[test]
+fn gate_weighs_a_lazily_asked_verdict_under_both_policies() {
+    for (policy, expected, landed) in [
+        (OnRegression::Rollback, GateOutcome::RolledBack, 0),
+        (OnRegression::Annotate, GateOutcome::Kept, 2),
+    ] {
+        let tmp = project();
+        let dir = tmp.path();
+        let build = marker_judge(dir, "builds", false);
+        seed_landed_met(dir, "builds"); // it WAS met as of the last gate — so this is a regression.
+
+        let agg = Agg::open(dir).unwrap().on_regression(policy);
+        agg.step(&work()).unwrap();
+        agg.step(&work()).unwrap();
+        assert_eq!(runs(dir, "builds"), 0, "{policy:?}: nothing asked yet — judges are LAZY");
+
+        assert!(!agg.judge(&build).met(), "{policy:?}: the judge is red");
+        assert_eq!(agg.gate().unwrap(), expected, "{policy:?}");
+        assert_eq!(work_landed_on_main(dir), landed, "{policy:?}: sessions on `main`");
+    }
+}
+
+/// `gate()` LANDS THE WHOLE SPAN, not the last session. Three steps stage on one span; one gate puts
+/// all three on `main` and leaves NO span branch behind — every one of them, not just the tip.
+///
+/// The rollback twin is the other half: `main` untouched, the intermediate branches gone, and the
+/// span closed. The tip survives on purpose — `finalize_session` keeps it for inspection, and a
+/// rollback that also destroyed the evidence would be a worse failure than the regression.
+#[test]
+fn gate_lands_the_whole_span_and_the_rollback_twin_clears_every_branch() {
+    // (a) keep.
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap();
+    for _ in 0..3 {
+        agg.step(&work()).unwrap();
+    }
+    assert_eq!(work_landed_on_main(dir), 0, "nothing lands until the gate says so");
+
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    assert_eq!(work_landed_on_main(dir), 3, "ALL THREE sessions merged, not just the tip's");
+    assert!(agg_branches(dir).is_empty(), "every span branch is gone: {:?}", agg_branches(dir));
+    drop(agg);
+
+    // (b) roll back.
+    let tmp = project();
+    let dir = tmp.path();
+    let build = marker_judge(dir, "builds", false);
+    seed_landed_met(dir, "builds");
+    let agg = Agg::open(dir).unwrap().on_regression(OnRegression::Rollback);
+    agg.step(&work()).unwrap();
+    agg.step(&work()).unwrap();
+    assert!(!agg.judge(&build).met());
+
+    assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack);
+    assert_eq!(work_landed_on_main(dir), 0, "`main` is untouched");
+    let left = agg_branches(dir);
+    assert_eq!(left.len(), 1, "only the tip survives, for inspection: {left:?}");
+    assert!(left[0].ends_with("session-2"), "…and it is the TIP, holding the whole span: {left:?}");
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing, "the span is CLOSED — nothing is left open");
+}
+
+/// `gate()` WITH NOTHING STAGED returns `Nothing` and touches no ref. A driver may call it at the
+/// bottom of every `for` body without first asking whether a step ran.
+#[test]
+fn gate_with_nothing_staged_touches_no_ref() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap();
+    let before = git(dir, &["rev-parse", "main"]);
+
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing);
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing, "…and it is idempotent");
+    assert_eq!(git(dir, &["rev-parse", "main"]), before, "no ref moved");
+    assert!(agg_branches(dir).is_empty());
+}
+
+/// A CONFLICTED SPAN IS `Failed(Conflict)`, NEVER `RolledBack` — and the span SURVIVES.
+///
+/// A merge conflict is not a policy decision and not a discard: git aborted, base is untouched and
+/// the tip still holds the work, so the span is still gateable once the operator resolves it.
+/// Asserted by gating AGAIN and getting the same answer — `Nothing` there would mean `gate()` had
+/// quietly thrown the span away.
+#[test]
+fn a_conflicted_span_fails_without_discarding_it() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap();
+    agg.step(&work()).unwrap();
+
+    // Move base under the span, in a SEPARATE worktree — the primary tree must stay where the run
+    // left it (on the span tip), or the test would be measuring its own `git checkout`.
+    let wt = tempfile::tempdir().unwrap();
+    let base = wt.path().join("base");
+    let base_str = base.to_str().unwrap();
+    git(dir, &["worktree", "add", "-f", base_str, "main"]);
+    std::fs::write(base.join("work.log"), "the operator edited base\n").unwrap();
+    git(&base, &["add", "-A"]);
+    git(&base, &["commit", "-qm", "base moved under the span"]);
+    git(dir, &["worktree", "remove", "--force", base_str]);
+
+    let before = git(dir, &["rev-parse", "main"]);
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Failed(GateFailure::Conflict));
+    assert_eq!(git(dir, &["rev-parse", "main"]), before, "a conflict leaves base exactly as it was");
+    let left = agg_branches(dir);
+    assert_eq!(left.len(), 1, "the span tip is KEPT — the work is still there: {left:?}");
+    assert_eq!(
+        agg.gate().unwrap(),
+        GateOutcome::Failed(GateFailure::Conflict),
+        "the span is still OPEN and still gateable"
+    );
 }
 
 /// `pos` is RAII and removes ITS OWN frame — never the top one. A non-LIFO drop is legal Rust
