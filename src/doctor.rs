@@ -57,17 +57,14 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
             Err(e) => check(false, "sequence + judges resolve", &format!("{e}"), &mut fail),
         }
 
-        // 3c) blast-radius isolation: if any step asks for `isolation: sandbox` on an agent that
-        //     does NOT self-sandbox, an OS wrapper (bwrap / sandbox-exec) must be present — else the
-        //     worker would run unconfined. Checked only when the config actually requests it.
+        // 3c) blast-radius isolation: if any step asks for `isolation: sandbox`, an OS wrapper
+        //     (bwrap / sandbox-exec) must be present — for EVERY agent, since §2.4 agg wraps them
+        //     all rather than trusting an agent's own sandbox. Checked only when the config asks.
         let wants_wrapper = c
             .steps
             .keys()
             .filter_map(|n| c.resolve_step(n).ok())
-            .any(|s| {
-                s.isolation == crate::isolation::Isolation::Sandbox
-                    && s.backend().map(|b| !b.self_sandboxes()).unwrap_or(false)
-            });
+            .any(|s| s.isolation == crate::isolation::Isolation::Sandbox);
         if wants_wrapper {
             check(
                 crate::isolation::available(),

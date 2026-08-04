@@ -164,12 +164,20 @@ fn isolation_selects_codex_native_sandbox_flags() {
     assert!(resumed.contains(&"sandbox_mode=workspace-write".to_string()), "a RESUMED session is confined too");
 }
 
-/// Codex is the ONE backend agg must not wrap in the OS sandbox — it has its own kernel jail.
+/// Codex has its own kernel jail — and that buys it NO exemption from agg's (§2.4). The flag stays
+/// as a report; the consequence is that Codex now needs the same `~/.codex` write carve-out every
+/// wrapped backend needs, because agg's deny-default profile otherwise takes its own state dir away.
 #[test]
-fn codex_self_sandboxes_so_it_is_never_os_wrapped() {
+fn codex_self_sandboxes_but_agg_wraps_it_anyway() {
     use crate::backend::AgentBackend;
-    assert!(Codex.self_sandboxes(), "Codex has a native kernel sandbox — worker.rs must skip the OS wrapper");
-    assert!(Codex.writable_state_paths().is_empty(), "self-sandboxing Codex needs no OS-wrapper write carve-out");
+    assert!(Codex.self_sandboxes(), "Codex has a native kernel sandbox — it is the INNER of two layers");
+    // Only asserted when the dir is actually there: `state_paths_that_exist` filters, deliberately.
+    if std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".codex").exists()).unwrap_or(false) {
+        assert!(
+            Codex.writable_state_paths().iter().any(|p| p.ends_with(".codex")),
+            "a WRAPPED codex must still write its own sessions/history/auth state"
+        );
+    }
 }
 
 #[test]

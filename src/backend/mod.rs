@@ -184,9 +184,9 @@ pub trait AgentBackend: Send + Sync {
     /// `isolation` confines it exactly like a worker session (ISOLATION.md §12): a judge grading a
     /// sandboxed step must not itself be an escape hatch. The LLM judge already denies tool writes
     /// at the agent-permission layer, but that is defense-in-depth, "NOT a host jail" — so under
-    /// `Sandbox` a non-self-sandboxing backend gets the real OS wrapper here too. Requires a `cwd`
-    /// to anchor the jail; a `None` cwd (the summarizer) is never confined. Codex self-sandboxes its
-    /// one-shot with `--sandbox read-only`, so it is never wrapped.
+    /// `Sandbox` EVERY backend gets the real OS wrapper here too (§2.4; Codex's own
+    /// `--sandbox read-only` no longer exempts it). Requires a `cwd` to anchor the jail; a `None`
+    /// cwd (the summarizer) is never confined.
     ///
     /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
@@ -199,9 +199,14 @@ pub trait AgentBackend: Send + Sync {
         isolation: crate::isolation::Isolation,
     ) -> Result<OneShot, String>;
 
-    /// Wrap a one-shot's built [`Command`] in the OS sandbox when the step is confined and this
-    /// backend does not confine itself — the shared tail of every non-self-sandboxing `one_shot`.
-    /// A `None` cwd cannot be jailed (no anchor), so it is returned unwrapped.
+    /// Wrap a one-shot's built [`Command`] in the OS sandbox whenever the step is confined — the
+    /// shared tail of every `one_shot`. A `None` cwd cannot be jailed (no anchor), so it is
+    /// returned unwrapped.
+    ///
+    /// **Applied to EVERY backend, including one that confines itself.** A judge that runs under
+    /// the agent's own `--sandbox read-only` is confined by the agent's promise; agg's carve-out
+    /// (`agg/private/`, the verdict ledger it is about to append to) exists precisely because that
+    /// promise is not agg's to make. The two layers compose — the outer one is ours.
     fn confine_one_shot(
         &self,
         command: Command,
@@ -209,7 +214,7 @@ pub trait AgentBackend: Send + Sync {
         isolation: crate::isolation::Isolation,
     ) -> Result<Command, String> {
         match cwd {
-            Some(dir) if isolation == crate::isolation::Isolation::Sandbox && !self.self_sandboxes() => {
+            Some(dir) if isolation == crate::isolation::Isolation::Sandbox => {
                 crate::isolation::wrap(command, dir, &self.writable_state_paths()).map_err(|e| e.to_string())
             }
             _ => Ok(command),
@@ -284,13 +289,18 @@ pub trait AgentBackend: Send + Sync {
         None
     }
 
-    /// Does this agent have its OWN kernel-enforced sandbox, so agg must NOT wrap it in the OS
-    /// sandbox?
+    /// Can this agent ADDITIONALLY confine itself, on top of agg's jail?
     ///
-    /// Only Codex does (`--sandbox workspace-write`, Seatbelt/Landlock under the hood). Claude and
-    /// Copilot have permission layers, not kernel jails, so they return `false` and get the OS
-    /// wrapper ([`crate::isolation::wrap`]) applied in [`worker::run_session`]. When `true`, the
-    /// backend's own [`Self::session_command`] must confine itself by reading `spec.isolation`.
+    /// ⛔ **This does NOT gate the OS wrapper.** Under `isolation: sandbox` agg wraps EVERY agent
+    /// unconditionally ([`worker::run_session`], [`Self::confine_one_shot`]) — an agent's own
+    /// sandbox is the agent's promise, and agg's moat does not rest on promises. It used to mean
+    /// "skip the wrapper for this agent"; that rule is deleted.
+    ///
+    /// What survives is REPORTING: `true` says the agent has a second, inner kernel jail of its own
+    /// (only Codex — `sandbox_mode=workspace-write`, Seatbelt/Landlock under the hood), which its
+    /// [`Self::session_command`] switches on by reading `spec.isolation`. Claude and Copilot have
+    /// permission layers, not kernel jails, so they return `false`. Nothing in the confinement path
+    /// branches on it; `agg doctor` and diagnostics may.
     fn self_sandboxes(&self) -> bool {
         false
     }
