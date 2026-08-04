@@ -13,8 +13,8 @@
 //! types** — the things a driver names, matches on and stores — [`Step`], the step builder with its
 //! template merge rules, and [`Agg`], the facade itself.
 //!
-//! ⚠ `Agg::gate()` and the run-end contract are the next commits; until they land a driver stages
-//! work on the span and nothing merges into the base branch.
+//! ⚠ The run-end contract (the ungated-span warning, `Drop for Agg`) is the next commit; until it
+//! lands, a driver that never calls [`Agg::gate`] ends silently with its work on the span branch.
 //!
 //! `Judge` and `Verdict` are NOT here: they are the shipped [`crate::core::model`] types, extended
 //! in place with the driver's constructors ([`Judge::rubric`](crate::core::model::Judge::rubric),

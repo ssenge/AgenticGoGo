@@ -21,8 +21,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::core::config::{AggConfig, CustomBackend, Limits, ResolvedStep};
+use crate::core::engine::GoalRuntime;
 use crate::core::model::{Judge, JudgeKind, JudgeSource, Verdict};
-use crate::driver::{Agent, Fatal, OnRegression, Opts, Step, StepOutcome};
+use crate::driver::{Agent, Fatal, GateFailure, GateOutcome, OnRegression, Opts, Step, StepOutcome};
+use crate::git::StagedSession;
 use crate::loop_::{
     run_hook, AGGState, End, Flow, Handler, Lifecycle, LoopState, RunPidGuard, RunOutcome, StopHooks,
 };
@@ -57,6 +59,12 @@ pub struct Agg {
     verdicts: RefCell<HashMap<String, Verdict>>,
     /// every verdict consulted since the last `gate()`; `gate()` reads and clears it.
     span: RefCell<HashMap<String, Verdict>>,
+    /// the engine's goal truth as of the moment the open span began — what a rollback restores.
+    ///
+    /// On this path it is provably EMPTY (§3.6 item 3: the run-set is empty, so the engine has no
+    /// goals), and it is carried anyway so the shared keep/rollback body gets the same argument from
+    /// both callers rather than a hard-coded `&[]` that would quietly rot if a driver ever grew one.
+    span_goals: RefCell<Vec<GoalRuntime>>,
     /// the recorded calls a `--resume` fast-forwards through.
     ///
     /// ponytail: `core::calls` is Phase 1, so this is always empty and `Opts { resume: true }`
@@ -124,6 +132,7 @@ impl Agg {
             ord: Cell::new(0),
             verdicts: RefCell::new(HashMap::new()),
             span: RefCell::new(HashMap::new()),
+            span_goals: RefCell::new(Vec::new()),
             replay: Vec::new(),
             pos: RefCell::new(Vec::new()),
         })
@@ -291,6 +300,8 @@ impl Agg {
         st.ext.get::<AGGState>().git.iso_base = iso_base;
         st.publish();
         st.dash.lifetime_session = lifetime_base;
+        // the first span opens here, against the engine's launch truth.
+        *self.span_goals.borrow_mut() = st.eng.snapshot_goal_state();
 
         run_hook(&lifecycle.background, &mut st)?;
         // the `Baseline` pass can stop the run at launch (abort_if already true / done_if already
@@ -382,6 +393,110 @@ impl Agg {
                 _ => None,
             },
         })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// gate — close the span, apply the policy
+// ---------------------------------------------------------------------------------------------
+
+impl Agg {
+    /// CLOSE the open span: merge everything `step()` staged since the last gate into the base
+    /// branch, or discard it, according to [`OnRegression`].
+    ///
+    /// This is where the design's split lands. `step()` says WHEN work is produced; `gate()` says
+    /// when it may LAND; and the project's `on_regression` policy says what a regression means. A
+    /// driver that never gates loses nothing — every session is committed on its own branch and the
+    /// span tip holds them all — but base is never touched either.
+    ///
+    /// # What a regression is
+    ///
+    /// Every judge asked since the last gate that is now `!met`, did not error, and whose last
+    /// LANDED verdict said met. **That is the whole rule** — no exclusion list, no opt-in marker. It
+    /// is sound only because of the one convention this path depends on: **a judge's `met` means
+    /// GOOD** (BUILD.md §0.2 rule 3), so met→unmet always means worse. An inverted detector
+    /// (met-when-bad) must be inverted before it is used as a driver judge.
+    ///
+    /// Because judges are LAZY, the verdicts that count are the ones the driver actually asked for —
+    /// including one asked for the first time long after the steps it judges. A gate inside `step()`
+    /// could not see those, which is the reason `gate()` is a separate call at all.
+    pub fn gate(&self) -> Result<GateOutcome, Fatal> {
+        // 1. the latch, before anything else.
+        if let Some(o) = self.ended.get() {
+            return Err(Fatal::Ended(o));
+        }
+        // 2. Phase 1: a recorded gate fast-forwards to its recorded GateOutcome here.
+        let started = self.ready()?;
+        let mut st = started.st.borrow_mut();
+
+        // 3. nothing staged ⇒ nothing to decide. No ref is touched, no record is appended and no
+        //    ordinal is consumed — a gate on an empty span must be free to call unconditionally at
+        //    the bottom of a driver's `for`.
+        let Some(tip) = st.ext.get::<AGGState>().git.span_tip.clone() else {
+            return Ok(GateOutcome::Nothing);
+        };
+
+        // 4. FIVE results, and four of them are not `Staged`.
+        let iso_base = st.ext.get::<AGGState>().git.iso_base.clone();
+        let red_file = st.cfg.session_isolation.red_file.clone();
+        let staged = crate::git::stage_session(&st.dir, &iso_base, &tip, &red_file);
+
+        // ⚠ `Conflict` and `CheckoutFailed` KEEP the span, so they return HERE, above the shared
+        // body (which closes the span unconditionally). git aborted and left base untouched with
+        // the tip in place: the work is still there and still gateable once the operator resolves
+        // it. Reporting it as `RolledBack` would be a lie twice over — nothing was discarded, and
+        // no policy decided anything.
+        let failure = match staged {
+            StagedSession::Conflict => Some(GateFailure::Conflict),
+            StagedSession::CheckoutFailed => Some(GateFailure::CheckoutFailed),
+            _ => None,
+        };
+        if let Some(f) = failure {
+            self.ord.set(self.ord.get() + 1); // Phase 1: …and append the CallRecord::Gate.
+            return Ok(GateOutcome::Failed(f));
+        }
+
+        // 5. the regression set: every judge asked since the last gate (§0.2 rule 3 is what makes
+        //    an unscoped rule safe here). Sorted so `verdicts.jsonl` does not inherit a HashMap's
+        //    iteration order.
+        let mut fresh: Vec<(String, Verdict)> =
+            self.span.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        fresh.sort_by(|a, b| a.0.cmp(&b.0));
+        let landed = crate::core::verdicts::landed_met(&st.dir);
+        let regressed = fresh
+            .iter()
+            .any(|(id, v)| v.error.is_none() && !v.met && landed.get(id).copied().unwrap_or(false));
+
+        // 6/7/8 — the policy, the merge, the `verdicts.jsonl` row and the span teardown, all in the
+        // body the YAML path's `GateKeepRollback` runs. One decision, two call sites.
+        let pre_goals = std::mem::take(&mut *self.span_goals.borrow_mut());
+        let gated = crate::features::gate::keep_or_rollback(
+            &mut st,
+            Some(&(tip, staged.clone())),
+            &fresh,
+            regressed,
+            &pre_goals,
+        )?;
+
+        let outcome = match (&staged, gated) {
+            (StagedSession::Staged, crate::features::gate::Gated::Merged) => GateOutcome::Kept,
+            (StagedSession::Staged, _) => GateOutcome::RolledBack,
+            // the worker vetoed: git already deleted the tip and the span is closed.
+            (StagedSession::Vetoed, _) => GateOutcome::Failed(GateFailure::Vetoed),
+            // no commits in the whole span — the tip is deleted and base is exactly as it was.
+            _ => GateOutcome::Nothing,
+        };
+
+        // 9. the next span opens now, and it opens against the tree this gate just decided on.
+        *self.span_goals.borrow_mut() = st.eng.snapshot_goal_state();
+        drop(st);
+        self.span.borrow_mut().clear();
+        // ⚠ and the PER-STEP cache too. A gate is a state discontinuity inside a step window: after
+        // a rollback the tree is base again while a memoized verdict still describes the span that
+        // was just discarded, and the driver's next `if` would read it as current.
+        self.verdicts.borrow_mut().clear();
+        self.ord.set(self.ord.get() + 1); // Phase 1: …and append the CallRecord::Gate.
+        Ok(outcome)
     }
 }
 
