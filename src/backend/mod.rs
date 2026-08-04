@@ -215,7 +215,10 @@ pub trait AgentBackend: Send + Sync {
     ) -> Result<Command, String> {
         match cwd {
             Some(dir) if isolation == crate::isolation::Isolation::Sandbox => {
-                crate::isolation::wrap(command, dir, &self.writable_state_paths()).map_err(|e| e.to_string())
+                // `&[]`: a one-shot is not a step, so there is no per-step `readonly` list to
+                // deliver — only the derived `agg/private/` carve-out, which `wrap` adds itself.
+                crate::isolation::wrap(command, dir, &self.writable_state_paths(), &[])
+                    .map_err(|e| e.to_string())
             }
             _ => Ok(command),
         }

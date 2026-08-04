@@ -47,7 +47,11 @@ pub fn container_available() -> bool {
 }
 
 /// Reshape a built [`Command`] into `<engine> run …` that runs it inside `image`, with `cwd`
-/// bind-mounted read-write and set as the workdir, plus a mount per `writable` path.
+/// bind-mounted read-write and set as the workdir, plus a mount per `writable` path and a `:ro`
+/// re-mount per denied one.
+///
+/// `denies` is THIS STEP's `readonly` minus `writable`, and it is an ADDITION to the derived
+/// `agg/private/` carve-out, never a replacement for it — see [`super::deny_set`] and BUILD.md §3.8.
 ///
 /// The analogue of [`super::wrap`] for this tier, and it keeps that function's two contracts:
 /// the inner program + args survive IN ORDER (after the image name), and the uniform stdio is
@@ -63,7 +67,13 @@ pub fn container_available() -> bool {
 /// refusal ([`crate::capability::check`]), not a per-session surprise, and building the argv must
 /// stay possible on a host with no daemon so the argv-shape tests remain hermetic. A missing engine
 /// binary then surfaces loudly at spawn.
-pub fn containerize(cmd: Command, cwd: &Path, writable: &[PathBuf], image: &str) -> Result<Command> {
+pub fn containerize(
+    cmd: Command,
+    cwd: &Path,
+    writable: &[PathBuf],
+    denies: &[String],
+    image: &str,
+) -> Result<Command> {
     let prog = cmd.get_program().to_owned();
     let args: Vec<OsString> = cmd.get_args().map(|a| a.to_owned()).collect();
     let envs: Vec<(OsString, Option<OsString>)> =
@@ -72,24 +82,34 @@ pub fn containerize(cmd: Command, cwd: &Path, writable: &[PathBuf], image: &str)
     let cwd_resolved = canonical(cwd);
     let mut out = Command::new(engine().unwrap_or(ENGINES[0]));
     out.arg("run").arg("--rm").arg("--network").arg("host");
-    mount(&mut out, &cwd_resolved)?;
+    mount(&mut out, &cwd_resolved, false)?;
     out.arg("-w").arg(&cwd_resolved);
     for w in writable {
-        mount(&mut out, &canonical(w))?;
+        mount(&mut out, &canonical(w), false)?;
     }
-    // The CARVE-OUT: agg's private state is inside the mounted cwd, so re-mount it READ-ONLY on top.
-    // The engine applies the more specific mount, and `:ro` is enforced by the kernel inside the
-    // container exactly as the Seatbelt deny / bwrap `--ro-bind` are on the other tiers.
+    // The DENIES: agg's private state and this step's `readonly` minus `writable` all sit inside the
+    // mounted cwd, so re-mount each of them READ-ONLY on top. The engine applies the more specific
+    // mount, and `:ro` is enforced by the kernel inside the container exactly as the Seatbelt deny /
+    // bwrap `--ro-bind` are on the other tiers.
     //
-    // Only when it EXISTS: `docker run` creates a missing bind source as an empty root-owned
-    // directory, which would leave a stray dir in a fresh project.
-    let private = canonical(&crate::paths::private_dir(&cwd_resolved));
-    if private.exists() {
-        let mut spec = OsString::from(&private);
-        spec.push(":");
-        spec.push(&private);
-        spec.push(":ro");
-        out.arg("-v").arg(spec);
+    // The derived carve-out comes from the SAME [`super::deny_set`] the `sandbox` tier uses, so the
+    // two tiers cannot drift about what `readonly:` means — or about `agg/private/` being in the set
+    // whether or not the step listed anything.
+    //
+    // A path that does not exist is materialized first rather than skipped ([`super::materialize_deny`]):
+    // skipping was a silent hole (the step could create the directory it named and then write it),
+    // and creating it ourselves also avoids the root-owned stray dir `docker run` leaves behind when
+    // it invents a missing bind source.
+    for d in super::deny_set(&cwd_resolved, denies) {
+        if super::materialize_deny(&d) {
+            mount(&mut out, &d, true)?;
+        } else {
+            eprintln!(
+                "  ⚠ cannot deny writes to `{}` — it does not exist and could not be created, and \
+                 the container tier denies by read-only bind mount, which needs a source",
+                d.display()
+            );
+        }
     }
     for (k, v) in envs {
         if let Some(v) = v {
@@ -137,12 +157,13 @@ fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Add one `-v <p>:<p>` bind mount, host path == container path.
+/// Add one `-v <p>:<p>[:ro]` bind mount, host path == container path. `ro` is what turns a mount
+/// into a DENY: the same path, re-mounted read-only on top of the writable cwd.
 ///
 /// Both refusals are LOUD because both fail silently otherwise: a relative source makes the engine
 /// reject the run outright, and a `:` in the path makes it split the spec in the wrong place and
 /// mount something else entirely — a "confined" session writing to a path nobody meant.
-fn mount(cmd: &mut Command, p: &Path) -> Result<()> {
+fn mount(cmd: &mut Command, p: &Path, ro: bool) -> Result<()> {
     if !p.is_absolute() {
         bail!(
             "`isolation: container` needs an absolute path to bind-mount, got `{}` — the container \
@@ -160,6 +181,9 @@ fn mount(cmd: &mut Command, p: &Path) -> Result<()> {
     let mut spec = p.as_os_str().to_owned();
     spec.push(OsStr::new(":"));
     spec.push(p.as_os_str());
+    if ro {
+        spec.push(OsStr::new(":ro"));
+    }
     cmd.arg("-v").arg(spec);
     Ok(())
 }
@@ -179,7 +203,7 @@ mod tests {
         let mut inner = Command::new("claude");
         inner.arg("-p").arg("do the thing");
         let cwd = std::env::temp_dir();
-        let cmd = containerize(inner, &cwd, &[], "alpine:3.20").expect("build the run");
+        let cmd = containerize(inner, &cwd, &[], &[], "alpine:3.20").expect("build the run");
         let args = argv(&cmd);
 
         assert_eq!(cmd.get_program().to_string_lossy(), engine().unwrap_or(ENGINES[0]));
@@ -202,10 +226,48 @@ mod tests {
     fn containerize_mounts_every_writable_path() {
         let cwd = std::env::temp_dir();
         let extra = cwd.join("agg-container-writable-probe");
-        let cmd = containerize(Command::new("true"), &cwd, std::slice::from_ref(&extra), DEFAULT_IMAGE)
-            .expect("build the run");
+        let cmd =
+            containerize(Command::new("true"), &cwd, std::slice::from_ref(&extra), &[], DEFAULT_IMAGE)
+                .expect("build the run");
         let want = format!("{p}:{p}", p = canonical(&extra).display());
         assert!(argv(&cmd).contains(&want), "writable path mounted: {:?}", argv(&cmd));
+    }
+
+    /// A step's `readonly` minus `writable` reaches the engine as a `:ro` re-mount — and the DERIVED
+    /// `agg/private/` carve-out is still there beside it. The second argument never replaces the
+    /// first (BUILD.md §3.8), which is the assertion that keeps the moat from being one edit away
+    /// from a step that lists nothing.
+    #[test]
+    fn containerize_denies_the_per_step_paths_and_still_carves_out_private() {
+        let cwd = std::env::temp_dir().join(format!("agg-container-deny-{}", std::process::id()));
+        std::fs::create_dir_all(cwd.join("agg/judges")).unwrap();
+        let cmd = containerize(Command::new("true"), &cwd, &[], &["agg/judges".to_string()], DEFAULT_IMAGE)
+            .expect("build the run");
+        let args = argv(&cmd);
+        let ro = |p: PathBuf| format!("{p}:{p}:ro", p = canonical(&p).display());
+        assert!(args.contains(&ro(cwd.join("agg/judges"))), "the step's deny is mounted :ro: {args:?}");
+        assert!(
+            args.contains(&ro(crate::paths::private_dir(&canonical(&cwd)))),
+            "the DERIVED carve-out survives the per-step list: {args:?}"
+        );
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    /// The platform divergence, closed on this tier too: a deny path that does not exist yet is
+    /// MATERIALIZED and mounted, not skipped. Skipping let a step create the very directory its
+    /// `readonly:` list named and then write it — while the same config bound on macOS, where
+    /// Seatbelt denies by path string.
+    #[test]
+    fn containerize_denies_a_path_that_does_not_exist_yet() {
+        let cwd = std::env::temp_dir().join(format!("agg-container-absent-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let absent = cwd.join("agg/judges");
+        assert!(!absent.exists(), "the point of the test is that it is not there");
+        let cmd = containerize(Command::new("true"), &cwd, &[], &["agg/judges".to_string()], DEFAULT_IMAGE)
+            .expect("build the run");
+        let want = format!("{p}:{p}:ro", p = canonical(&absent).display());
+        assert!(argv(&cmd).contains(&want), "an absent deny still binds: {:?}", argv(&cmd));
+        std::fs::remove_dir_all(&cwd).ok();
     }
 
     /// A container does not inherit our environment, so env the caller set must cross as `-e K=V`
@@ -214,7 +276,8 @@ mod tests {
     fn containerize_forwards_the_inner_command_env() {
         let mut inner = Command::new("true");
         inner.env("AGG_JUDGE", "answered").env_remove("SHOULD_BE_ABSENT");
-        let cmd = containerize(inner, &std::env::temp_dir(), &[], DEFAULT_IMAGE).expect("build the run");
+        let cmd =
+            containerize(inner, &std::env::temp_dir(), &[], &[], DEFAULT_IMAGE).expect("build the run");
         let args = argv(&cmd);
         assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "AGG_JUDGE=answered"), "env forwarded: {args:?}");
         // a removal needs no flag: the container starts from the image's env, so it is absent already
@@ -225,9 +288,10 @@ mod tests {
     /// message that names the path — not left to a raw engine error mid-session.
     #[test]
     fn containerize_refuses_a_mount_source_it_cannot_express() {
-        let err = containerize(Command::new("true"), Path::new("relative/not-a-real-dir"), &[], DEFAULT_IMAGE)
-            .unwrap_err()
-            .to_string();
+        let err =
+            containerize(Command::new("true"), Path::new("relative/not-a-real-dir"), &[], &[], DEFAULT_IMAGE)
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("absolute"), "must say why: {err}");
         assert!(err.contains("relative/not-a-real-dir"), "must name the path: {err}");
     }

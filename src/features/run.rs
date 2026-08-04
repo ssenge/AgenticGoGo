@@ -27,6 +27,18 @@ impl Handler for LaunchWorker {
         let model = step.model(agent).to_string();
         let effort = step.effort(agent).to_string();
         let isolation = step.isolation;
+        // The step's own deny list, on its way to the OS wrapper. Under `Isolation::None` there is
+        // no wrapper to deliver it to — say so, in the operator's terms ("the step CAN WRITE these
+        // paths"), because the failure mode is a step that believes it is protected.
+        //
+        // ponytail: this fires once per SESSION, so a long run repeats it. The ceiling is noise, not
+        // correctness; the upgrade path when it bites is a once-per-step-name set on `AGGState`.
+        if let Some(w) =
+            crate::isolation::unenforced_denies(&step.name, isolation, &step.readonly, &step.writable)
+        {
+            eprintln!("{w}");
+        }
+        let denied = step.denied();
         let outcome = worker::run_session(
             &ctx.cfg,
             agent,
@@ -38,6 +50,7 @@ impl Handler for LaunchWorker {
             ctx.session,
             &ctx.live,
             isolation,
+            &denied,
             &step.image,
         );
         ctx.tokens_spent += outcome.output_tokens;

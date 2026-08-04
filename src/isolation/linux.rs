@@ -29,7 +29,8 @@ pub fn available() -> bool {
 }
 
 /// Build the `bwrap` wrapper command around `prog args…`, writable = cwd + tmpfs /tmp + `writable`,
-/// minus `denied` (agg's own private state, which lives inside cwd).
+/// minus `denied` (agg's own private state plus this step's `readonly` set — see
+/// [`super::deny_set`]), which lives inside cwd.
 pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], prog: &OsStr, args: &[OsString]) -> Result<Command> {
     let mut cmd = Command::new("bwrap");
     cmd.arg("--die-with-parent")
@@ -41,16 +42,30 @@ pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], prog: &OsStr,
     for w in writable {
         cmd.arg("--bind").arg(w).arg(w);
     }
-    // The CARVE-OUT: re-bind agg's private state READ-ONLY on top of the writable cwd. bwrap applies
-    // binds in argv ORDER, so this must come AFTER `--bind <cwd>` — reversing them lets the later
-    // writable bind win and silently reopens the hole.
+    // The DENIES: agg's own `agg/private/` carve-out plus this step's `readonly` minus `writable`,
+    // re-bound READ-ONLY on top of the writable cwd. bwrap applies binds in argv ORDER, so this must
+    // come AFTER `--bind <cwd>` — reversing them lets the later writable bind win and silently
+    // reopens the hole.
     //
     // `--ro-bind`, not `--tmpfs`: reads must keep working (a judge reads `verdicts.jsonl`, the
-    // worker reads its brief). A path that does not exist is skipped — bwrap FAILS the whole spawn
-    // on a missing source, which would turn "no private dir yet" into "the worker cannot start".
+    // worker reads its brief).
+    //
+    // A path that does not exist is MATERIALIZED first rather than skipped. bwrap fails the whole
+    // spawn on a missing bind source, so skipping was the only way to keep a fresh project bootable
+    // — but it also meant a `readonly:` entry bound on macOS (where Seatbelt denies by path string)
+    // and not on Linux, which is one config with two security policies. See
+    // [`super::materialize_deny`] for what that costs.
     for d in denied {
-        if d.exists() {
+        if super::materialize_deny(d) {
             cmd.arg("--ro-bind").arg(d).arg(d);
+        } else {
+            // Loud, and not fatal: everything outside the project is already read-only under
+            // `--ro-bind / /`, so an unmakeable deny is almost always one that was never writable.
+            eprintln!(
+                "  ⚠ cannot deny writes to `{}` — it does not exist and could not be created, and \
+                 bwrap denies by read-only bind, which needs a mount point",
+                d.display()
+            );
         }
     }
     cmd.arg("--tmpfs").arg("/tmp")
