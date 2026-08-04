@@ -38,6 +38,39 @@ fn the_retired_ceiling_keys_are_a_hard_error_not_silently_ignored() {
         .expect("`limits` under `sequence:` is the unified home and must parse");
 }
 
+/// BUILD.md §2.2: `wall_hours` is ADDITIVE to the one shared `Limits` struct. Two things must hold
+/// at once — a config written before the key existed still parses (no YAML behaviour change), and a
+/// config that DOES set it round-trips, so the driver path and `agg.yaml` cannot disagree about the
+/// value. Serde round-trip rather than a bare parse: `deny_unknown_fields` makes a serializer/
+/// deserializer mismatch a hard error, which is exactly the regression worth catching.
+#[test]
+fn limits_round_trips_with_and_without_wall_hours() {
+    let round = |l: &Limits| serde_yaml::from_str::<Limits>(&serde_yaml::to_string(l).unwrap()).unwrap();
+
+    // WITHOUT: every pre-existing config omits the key, and it must stay unlimited.
+    let old: Limits = serde_yaml::from_str("tokens: 5\ncost: 1.5\nsessions: 3\n").unwrap();
+    assert_eq!(old.wall_hours, None, "an absent `wall_hours` is unlimited, not zero");
+    let back = round(&old);
+    assert_eq!((back.tokens, back.sessions, back.wall_hours), (Some(5), Some(3), None));
+    assert_eq!(back.cost, Some(1.5));
+
+    // WITH: the new key parses under `sequence.limits:` and survives a round-trip.
+    let new: Limits = serde_yaml::from_str("wall_hours: 12\n").unwrap();
+    assert_eq!(new.wall_hours, Some(12.0));
+    assert_eq!(round(&new).wall_hours, Some(12.0));
+
+    // …and it is a real `agg.yaml` key, not just a Rust field.
+    let cfg = parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], limits: { wall_hours: 12 } }\n")
+        .expect("`limits.wall_hours` is a valid agg.yaml key");
+    assert_eq!(cfg.sequence.limits.wall_hours, Some(12.0));
+
+    // the guard the whole config module rests on still bites.
+    let typo = parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], limits: { wall_hour: 12 } }\n")
+        .unwrap_err()
+        .to_string();
+    assert!(typo.contains("unknown field `wall_hour`"), "a typo'd limit must be a hard error, got: {typo}");
+}
+
 /// Extract the bodies of every ```` ```yaml ```` fenced block from a markdown string (the fence
 /// line itself is dropped). Used to pull the config scaffold out of an embedded SKILL.md.
 fn fenced_yaml_blocks(md: &str) -> Vec<String> {

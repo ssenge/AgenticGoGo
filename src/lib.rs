@@ -35,6 +35,7 @@ pub mod bus;
 pub mod capability;
 pub mod context;
 pub mod doctor;
+pub mod driver;
 pub mod features;
 pub mod git;
 pub mod hooks;
@@ -49,3 +50,24 @@ pub mod skills;
 pub mod state;
 pub mod summary;
 pub mod util;
+
+/// Everything a Rust driver needs from one `use agg::prelude::*;`.
+///
+/// This is the ONE curated surface in an otherwise no-facade crate, and it earns the exception:
+/// a driver is written by a human against a documented API, not by a test reaching into internals,
+/// and `Isolation`/`Limits`/`Verdict` live three different modules apart because of where the
+/// HARNESS needs them, not where a driver would look.
+///
+/// ⚠ It re-exports the SHIPPED types rather than driver-local twins. There is exactly one
+/// [`Limits`](crate::core::config::Limits), one [`Isolation`](crate::isolation::Isolation) and one
+/// [`Verdict`](crate::core::model::Verdict) in agg; a second definition on the driver path would be
+/// a split-brain waiting to drift.
+pub mod prelude {
+    pub use crate::core::config::Limits;
+    pub use crate::core::model::Verdict;
+    pub use crate::driver::{
+        Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, StepOutcome,
+    };
+    pub use crate::isolation::Isolation;
+    pub use crate::plugin::RunOutcome;
+}
