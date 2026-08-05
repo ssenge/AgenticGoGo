@@ -578,6 +578,193 @@ fn a_dirty_tree_refuses_a_fresh_start_and_is_discarded_on_a_resume() {
     );
 }
 
+// ── the sample driver, actually RUN (BUILD.md §5 — "the samples work as expected") ────────────
+
+/// A script judge that reports `met` and writes NOTHING.
+///
+/// ⚠ Deliberately NOT [`marker_judge`], and the reason is a real edge this suite found the first
+/// time the sample ran for more than one cycle: its `<name>.runs` marker lands in the project dir,
+/// the worker's `git add -A` commits it on the NEXT session, and the judge's next append then leaves
+/// a DIRTY TRACKED file — which is enough to make `gate()`'s `git checkout <base>` refuse, so the
+/// gate returns `Failed(CheckoutFailed)` and the span stays open. agg is being loud and correct
+/// there (it will not clobber a local change it did not make), but the consequence is worth knowing:
+/// **a judge that scribbles into a tracked path can wedge a span.** Real projects gitignore judge
+/// scratch output; this one simply produces none.
+fn quiet_judge(dir: &Path, name: &str, met: bool) -> Judge {
+    let rel = format!("agg/judges/{name}.sh");
+    let p = dir.join(&rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, format!("#!/bin/sh\nprintf '%s\\n' '{{\"met\":{met}}}'\n")).unwrap();
+    chmod_x(&p);
+    Judge::script(name, rel)
+}
+
+/// `examples/workflow.rs`, cut to its skeleton: one cycle is
+/// **survey (bounded retry) → implement → `&&`-gated lazy judges → `gate()`**.
+///
+/// This is a REAL driver, not a test body: `&Agg` in, `Result<_, Fatal>` out, `?` on every spending
+/// call — the shape a compiled driver's `main` has. `check` and `gate` are the two lines whose
+/// ABSENCE is the interesting case (`check_limits()` is opt-in; a driver that never gates must be
+/// told its work is stranded), so the three tests below differ by those flags and nothing else.
+///
+/// Three things are cut from the sample, each because the fake agent cannot honour it:
+/// the two RUBRIC judges (they cost a ruler call the fake agent answers with prose, not a verdict),
+/// `block()` (it waits for an operator who is not there), and `Isolation::Sandbox` (a real kernel
+/// jail — the `#[ignore]`d isolation tests own that). Everything else is the sample's own flow.
+///
+/// Returns how many cycles closed a span.
+fn sample_driver(agg: &Agg, dir: &Path, cycles: u64, check: bool, gate: bool) -> Result<usize, Fatal> {
+    // Two scripts and one native cover every judge dispatch arm reachable without a model.
+    let builds = quiet_judge(dir, "builds", true);
+    let tests = quiet_judge(dir, "tests_pass", true);
+    let load = quiet_judge(dir, "load_ok", true);
+    let worked = Judge::native("worked", |c| {
+        // a pure function of committed repo state — no clock, no env, exactly as the sample's is.
+        Verdict::binary(c.read("work.log").map(|t| !t.trim().is_empty()).unwrap_or(false))
+    });
+
+    // The sample's template family, minus the tier. ⚠ NO `.readonly()` either: it binds to nothing
+    // under `Isolation::None`, and a sample that relied on that would be teaching the lie.
+    let harness = Step::template().agent(Agent::Claude).model("fake").effort(Effort::High);
+    let survey = harness.create("survey").prompt("Survey the approaches. Write agg/state/wiki/survey.md.");
+    let implement = harness.create("implement").prompt("Implement the spec. Add tests alongside.");
+
+    let cycle = agg.pos("cycle", cycles);
+    let mut gated = 0usize;
+    for c in 0..cycles {
+        cycle.update(c);
+        // THE CEILINGS, ENFORCED WHERE THIS DRIVER SAYS. Never called ⇒ never enforced.
+        if check {
+            agg.check_limits()?;
+        }
+
+        // ── DISCOVER — the sample's bounded attempt loop, and its nested `pos` frame ──
+        let attempt = agg.pos("attempt", 2);
+        for a in 0..2 {
+            attempt.update(a);
+            agg.step(&survey)?;
+            assert_eq!(agg.label_path(), format!("cycle {c}/{cycles} › attempt {a}/2"));
+            if agg.judge(&builds).met() {
+                break;
+            }
+            agg.info("survey still thin — trying a different angle");
+        }
+        drop(attempt);
+
+        // ── BUILD ──
+        let r = agg.step(&implement)?;
+        agg.log(&format!("implement: {} tokens, landed={:?}", r.tokens, r.landed));
+        assert_eq!(r.landed, Landing::Span, "step() STAGES; only gate() lands anything");
+        assert_eq!(
+            work_landed_on_main(dir),
+            gated * 2,
+            "`main` is exactly where the last gate left it — this cycle's sessions are only STAGED"
+        );
+
+        // ── HARDEN — `&&` short-circuits, and it is the only judge gating in the design ──
+        if !(agg.judge(&tests).met() && agg.judge(&load).met() && agg.judge(&worked).met()) {
+            agg.ask("performance gate failed — ship anyway, or keep tuning?");
+            continue;
+        }
+
+        // ── SHIP ──
+        if gate {
+            assert_eq!(agg.gate()?, GateOutcome::Kept);
+            gated += 1;
+        }
+    }
+    Ok(gated)
+}
+
+/// THE SAMPLE DRIVER, RUN. `examples/workflow.rs` compiles, which proves the SURFACE; this proves
+/// the LOOP — two cycles of the sample's own shape against the fake agent, with every artefact the
+/// pipeline is supposed to produce read back from OUTSIDE the facade (git, `state.json`,
+/// `verdicts.jsonl`), never from a flag the facade set.
+#[test]
+fn the_sample_drivers_cycle_runs_end_to_end_and_lands_every_span() {
+    let tmp = project();
+    let dir = tmp.path();
+    // the `agg/` scaffold a real driver project has. `instructions()` only POINTS at this file —
+    // agg never reads its bytes — so its content is irrelevant and its existence is not.
+    std::fs::create_dir_all(dir.join("agg")).unwrap();
+    std::fs::write(dir.join("agg/AGG.md"), "# house rules\n").unwrap();
+
+    let agg = Agg::open(dir)
+        .unwrap()
+        .limits(Limits { tokens: Some(40_000_000), cost: None, sessions: Some(400), wall_hours: Some(12.0) })
+        .on_regression(OnRegression::Annotate)
+        .instructions("agg/AGG.md");
+
+    assert_eq!(sample_driver(&agg, dir, 2, true, true).unwrap(), 2, "both cycles closed their span");
+
+    // sessions really ran, and the loop published itself as it went.
+    assert_eq!(agg.sessions(), 4, "two cycles × (one survey + one implement)");
+    assert!(agg::paths::state_json(dir).exists(), "the dashboard snapshot is published");
+    assert!(agg.summary().contains("session"), "`agg status` renders this run:\n{}", agg.summary());
+    assert!(agg::paths::run_pid(dir).exists(), "the double-run guard is armed while the run is live");
+
+    // the work LANDED — all of it — and no span is left open.
+    assert_eq!(work_landed_on_main(dir), 4, "every gated session is on `main`");
+    assert!(agg_branches(dir).is_empty(), "every span branch is gone: {:?}", agg_branches(dir));
+    assert!(agg.ungated_span().is_none(), "nothing is stranded — both spans were gated");
+
+    // ⚠ ONE `verdicts.jsonl` ROW PER GATE, never per step — `verdicts::append` is the gate's call.
+    // Both gates kept, so both rows say `merged`, which is what `landed_met` reads back next run.
+    let rows = agg::core::verdicts::rows_for(dir, "tests_pass", false);
+    assert_eq!(rows.len(), 2, "one row per gate, not one per step: {rows:?}");
+    assert!(rows.iter().all(|r| r.met && r.outcome == agg::core::verdicts::Outcome::Merged), "{rows:?}");
+    // the NATIVE judge is in there too: a closure in the driver's own binary reaches the same
+    // durable ledger a script judge does.
+    assert_eq!(agg::core::verdicts::rows_for(dir, "worked", true).len(), 2);
+    // …and a judge the driver never asked for appears in NO row. Laziness is visible from the ledger.
+    assert!(agg::core::verdicts::rows_for(dir, "spec_sound", false).is_empty());
+
+    drop(agg);
+    assert!(!agg::paths::run_pid(dir).exists(), "…and released when the run ends");
+}
+
+/// THE SAME DRIVER WITH ITS `gate()` REMOVED. Nothing is lost and nothing moves — and the run's last
+/// word names the branch that holds the work plus the one command that lands it.
+///
+/// The commit count is asserted next to the wording deliberately: a warning that fires while the
+/// work is actually gone would be worse than no warning at all.
+#[test]
+fn the_sample_driver_without_its_gate_strands_the_span_and_says_so() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap();
+
+    assert_eq!(sample_driver(&agg, dir, 2, true, false).unwrap(), 0, "no cycle closed a span");
+
+    let tip = agg_branches(dir).into_iter().find(|b| b.ends_with("session-4")).expect("the span tip");
+    assert_eq!(
+        agg.ungated_span().expect("four sessions staged, never gated"),
+        format!("⚠ 4 session(s) staged on {tip}, never gated — main is unchanged.\n  Merge with: git merge {tip}")
+    );
+    assert_eq!(work_landed_on_main(dir), 0, "`main` really is unchanged");
+    assert_eq!(work_on(dir, &tip), 4, "…and all four sessions really are on the branch it named");
+}
+
+/// `check_limits()` IS OPT-IN, ON THE SAMPLE'S OWN SHAPE — where the call sits at the top of the
+/// cycle and `?` carries the breach out of the driver. Same driver, same ceiling, one line different.
+#[test]
+fn the_sample_drivers_ceiling_binds_only_because_the_cycle_checks_it() {
+    // (a) the line is there: `limits.sessions: 2` ends the run at the top of cycle 2.
+    let tmp = project();
+    let agg = Agg::open(tmp.path()).unwrap().limits(Limits { sessions: Some(2), ..Limits::default() });
+    let stopped = sample_driver(&agg, tmp.path(), 2, true, true).expect_err("cycle 2 is over the ceiling");
+    assert!(matches!(stopped, Fatal::Ended(RunOutcome::MaxSessions)), "got {stopped:?}");
+    assert_eq!(agg.sessions(), 2, "it landed BEFORE cycle 2 spent anything");
+    assert_eq!(work_landed_on_main(tmp.path()), 2, "…and cycle 1's gated work is still on `main`");
+
+    // (b) the line is gone: the identical ceiling never binds.
+    let tmp = project();
+    let agg = Agg::open(tmp.path()).unwrap().limits(Limits { sessions: Some(2), ..Limits::default() });
+    assert_eq!(sample_driver(&agg, tmp.path(), 2, false, true).unwrap(), 2, "both cycles ran to their gate");
+    assert_eq!(agg.sessions(), 4, "a driver that never checks has no ceilings");
+    assert_eq!(agg.ended(), None);
+}
+
 /// `pos` is RAII and removes ITS OWN frame — never the top one. A non-LIFO drop is legal Rust
 /// (`drop(outer)` before an inner guard) and must not corrupt the label path.
 #[test]
