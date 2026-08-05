@@ -240,7 +240,11 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // The bound is DECLARED once (`pos`) and iterated once (`for`) — one number, from the caller.
     let cycle = agg.pos("cycle", cycles as u64);
 
-    'cycle: for c in 0..cycles {
+    // ⚠ `1..=`, not `0..`. The bound handed to `pos()` is a COUNT, so the counter shown against it
+    // has to be 1-based or the first cycle renders "cycle 0/2" and the last renders "1/2" — a run
+    // that looks like it stopped one short. `c` is also interpolated into the `ask()` prompts below,
+    // where a human reads it. This was invisible until `pos` was actually published to a reader.
+    'cycle: for c in 1..=cycles {
         cycle.update(c as u64);
 
         // THE CEILINGS, ENFORCED — once per cycle, where THIS driver wants them enforced. agg does
