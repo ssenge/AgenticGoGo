@@ -256,7 +256,10 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // Declared once (`pos`) and iterated once (`for`) — one number, from the caller.
     let cycle = agg.pos("cycle", cycles as u64);
 
-    'cycle: for c in 0..cycles {
+    // ⚠ `1..=`, not `0..` — the bound given to `pos()` is a COUNT, so a 0-based counter renders
+    // "cycle 0/2" first and "1/2" last. `c` is also the generation number in the landing log a human
+    // reads. Invisible until `pos` was published to a reader.
+    'cycle: for c in 1..=cycles {
         cycle.update(c as u64);
 
         // THE CEILINGS, ENFORCED. `.limits(..)` above is a budget; this is what makes it a ceiling.
