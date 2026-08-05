@@ -8,6 +8,48 @@ fn parse(body: &str) -> Result<AggConfig, serde_yaml::Error> {
 /// The smallest config that parses — `project` + `sequence` are the only required keys.
 const MINIMAL: &str = "project: p\nsteps: { worker: {} }\nsequence: { steps: [worker] }\n";
 
+/// THE NEW `sequence.steps` SHAPE (RUST_API §11.1): serde fields, not a grammar. Both spellings
+/// land on the same struct, `deny_unknown_fields` still names a typo'd entry key, and the retired
+/// line syntax (`worker x4`, `if … then …`) is now just a step NAME — caught later, by name, by
+/// `assemble`'s unknown-step refusal.
+#[test]
+fn a_sequence_entry_parses_in_both_spellings() {
+    let cfg = parse(
+        "project: p\nsteps: { survey: {}, fix: {} }\nsequence:\n  steps:\n    \
+         - survey\n    - { step: fix, until: tests_pass AND lint_clean, max: 8 }\n",
+    )
+    .expect("both entry spellings must parse");
+    let (a, b) = (&cfg.sequence.steps[0], &cfg.sequence.steps[1]);
+    assert_eq!(a.step, "survey");
+    assert!(a.times.is_none() && a.until.is_none() && a.max.is_none(), "a bare name is `{{ step: NAME }}`");
+    assert_eq!(b.step, "fix");
+    assert_eq!(b.until.as_deref(), Some("tests_pass AND lint_clean"), "conditions are UNQUOTED plain scalars");
+    assert_eq!(b.max, Some(8));
+
+    // a typo'd key inside an entry must still be REJECTED BY NAME (an untagged enum would report
+    // the useless "data did not match any variant" here — this is why the impl is hand-written).
+    let err = parse("project: p\nsteps: { fix: {} }\nsequence: { steps: [{ step: fix, untl: x, max: 2 }] }\n")
+        .expect_err("a typo'd entry key must be a hard parse error")
+        .to_string();
+    assert!(err.contains("untl"), "the parse error must name the unknown key, got: {err}");
+
+    // ⛔ there is NO `if:` on an entry (owner cut, 2026-08-04) — naming one is a parse error, not a
+    // silently ignored key.
+    let err = parse("project: p\nsteps: { fix: {} }\nsequence: { steps: [{ step: fix, if: stalled }] }\n")
+        .expect_err("`if:` was CUT from the schema and must not parse")
+        .to_string();
+    assert!(err.contains("if"), "got: {err}");
+}
+
+/// An `agg.yaml` with no `sequence:` at all is a DRIVER project (BUILD.md §3.6) and must LOAD —
+/// the key is `#[serde(default)]`, as is `sequence.steps`.
+#[test]
+fn a_config_with_no_sequence_at_all_parses_as_a_driver_project() {
+    let cfg = parse("project: p\n").expect("a driver project's config need not declare a sequence");
+    assert!(cfg.sequence.steps.is_empty(), "an absent `sequence:` is the empty (driver) one");
+    assert_eq!(cfg.sequence.done_if, "all_goals", "…and every other sequence key keeps its default");
+}
+
 #[test]
 fn the_minimal_config_parses_with_all_defaults() {
     let cfg = parse(MINIMAL).expect("minimal config parses");

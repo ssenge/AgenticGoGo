@@ -52,11 +52,11 @@ impl Handler for BusDrain {
     }
 }
 
-/// Advance the sequence cursor → resolve the next step; then (ONLY on a resolved step) bump the
+/// Advance the sequence walk → resolve the next step; then (ONLY on a resolved step) bump the
 /// session counter, update the ledger, print the banner, and set `cur_step` + `scratch.skip_judges`.
 ///
-/// A Rust driver hands its step in through `ctx.next_step`, which is consulted FIRST — the cursor,
-/// the `if`-conditions and `resolve_step` are then never reached on that path (BUILD.md §3.8).
+/// A Rust driver hands its step in through `ctx.next_step`, which is consulted FIRST — the walk,
+/// its `until:` conditions and `resolve_step` are then never reached on that path (BUILD.md §3.8).
 pub struct PickStep;
 impl Handler for PickStep {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {

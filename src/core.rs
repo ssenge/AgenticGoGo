@@ -16,4 +16,5 @@ pub mod memory;
 pub mod model;
 pub mod sequence;
 pub mod stop;
+pub mod walk;
 pub mod verdicts;

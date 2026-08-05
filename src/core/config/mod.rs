@@ -40,7 +40,10 @@ pub struct AggConfig {
     #[serde(default)]
     pub steps: BTreeMap<String, StepBody>,
 
-    /// The repeating list of statements + the run-level ceilings/DoD.
+    /// The repeating list of steps + the run-level ceilings/DoD. `#[serde(default)]` because an
+    /// `agg.yaml` may legitimately declare no flow at all — that is a Rust-DRIVER project, whose
+    /// steps are `agg.step(&s)` calls (BUILD.md §3.6).
+    #[serde(default)]
     pub sequence: Sequence,
 
     // ---- top-level survivors (unchanged, §4.1) ----
@@ -200,14 +203,80 @@ pub struct StepBody {
     pub writable: Vec<String>,
 }
 
-/// The sequence: a repeating statement list + the run-level ceilings and Definition of Done. The
+/// One entry in `sequence.steps` — a step name plus how many times to dispatch it.
+///
+/// **These are SERDE FIELDS, NOT A GRAMMAR** (RUST_API §11.1), which is the whole point: the terse
+/// line syntax (`worker x4`, `if stalled then reconsider`) needed a hand-written lexer + parser to
+/// read, and this needs a derive. There is deliberately no `if:` — per-entry conditionals were CUT
+/// by the owner on 2026-08-04 (§14.14): *"only simple loops, all judges run after every step, then
+/// gating — everything more complex is the Rust API."* A lap dispatches EVERY entry, in order.
+///
+/// `times:` and `until:`+`max:` are alternatives, and a bound is mandatory on both: an unbounded
+/// repetition in a config file is a run that cannot be reasoned about, and `limits:` is a RUN-level
+/// ceiling, not a per-entry one. [`crate::assembly::assemble`] refuses anything else at startup.
+#[derive(Debug, Clone)]
+pub struct SeqStep {
+    /// the step to dispatch — a key in `steps:`.
+    pub step: String,
+    /// dispatch it this many times before moving on. Mutually exclusive with `until`.
+    pub times: Option<u32>,
+    /// repeat until this expression holds (the §5.3 `stop::` grammar), re-evaluated after each
+    /// dispatch. Requires `max`.
+    pub until: Option<String>,
+    /// the ceiling on `until`'s repetition.
+    pub max: Option<u32>,
+}
+
+/// The mapping form, and the ONLY place the field names live — [`SeqStep`]'s hand-written
+/// `Deserialize` delegates to it so `deny_unknown_fields` still names a typo'd key precisely (an
+/// `#[serde(untagged)]` enum would report the useless "data did not match any variant" instead).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeqStepBody {
+    step: String,
+    #[serde(default)]
+    times: Option<u32>,
+    #[serde(default)]
+    until: Option<String>,
+    #[serde(default)]
+    max: Option<u32>,
+}
+
+/// A bare `- worker` is the SHORTHAND for `- { step: worker }` — the same step, dispatched once.
+///
+/// It exists because "run this step, once per lap" is what most entries are, and because it is what
+/// every shipped config, example and doc already writes. It is a spelling, not a second shape: it
+/// deserializes into the same struct with every option `None`.
+impl<'de> Deserialize<'de> for SeqStep {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = SeqStep;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a step name, or a mapping `{ step: NAME, times|until+max: … }`")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<SeqStep, E> {
+                Ok(SeqStep { step: v.to_string(), times: None, until: None, max: None })
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<SeqStep, A::Error> {
+                let b = SeqStepBody::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(SeqStep { step: b.step, times: b.times, until: b.until, max: b.max })
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// The sequence: a repeating step list + the run-level ceilings and Definition of Done. The
 /// three ceilings (tokens, cost, sessions) are UNIFIED under one `limits:` block (§4.1) — previously
 /// separate `budget:`/`cost:`/`max_sessions:` keys.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sequence {
-    /// statement lines (`worker x4`, `if stalled then reconsider`) — parsed by `core::sequence`.
-    pub steps: Vec<String>,
+    /// the entries, walked top to bottom and wrapped forever. EMPTY is legal and meaningful: it
+    /// marks a Rust-driver project (BUILD.md §3.6), where the flow is the driver's own `for`/`if`.
+    #[serde(default)]
+    pub steps: Vec<SeqStep>,
     /// the run-level ceilings — tokens (worker AND judge spend), dollars, sessions. Each null/absent
     /// = unlimited. The loop reads these into the `budget_total`/`cost_limit`/`max_sessions` fields
     /// that back the stable `over_budget`/`over_cost`/`over_iterations` grammar.
