@@ -236,9 +236,9 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
     so the kernel refuses the write. Under the default `isolation: none` it is a protocol boundary
     only — the worker can reach it and the ledger has no integrity check.
   - **Do not reuse one detector across clauses.** `notify_if: "stalled"` next to a
-    `"if stalled then reconsider"` step pages the human at the gate of the session that just ran,
-    one full cycle before the recovery step is dispatched. Either omit the `if` branch, or give
-    `notify_if` the stricter detector (`stuck.value >= 85`).
+    `{ step: worker, until: "NOT stalled", max: 3 }` entry pages the human at the gate of the session
+    that just ran, one full cycle before the recovery step is dispatched. Either drop the `until:`
+    bound, or give `notify_if` the stricter detector (`stuck.value >= 85`).
   - **Only propose a detector that resolves.** `stalled` is shipped; `stuck` and `blocked` are judges
     you must WRITE into `agg/judges/` in Step 3 first — naming one that resolves to no file is a hard
     startup error, and `agg doctor` will refuse the config.
@@ -247,13 +247,13 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
 
 **Never leave an autonomous loop with no ceiling at all.** If you drop `over_cost` for codex/copilot,
 you MUST keep `over_budget` (with a real `sequence.limits.tokens`) in its place. **Never put a judge
-that only appears in an `if` branch (like `stalled`) into `done_if`** — the loop would "succeed" by
+that only bounds an entry's `until:` (like `stalled`) into `done_if`** — the loop would "succeed" by
 getting stuck.
 
 ## Step 4.5 — Design the steps and the sequence
 
 This is what's new and powerful. A **step** is an `(agent, model, role)` triple; a **sequence** is a
-repeating list of statements over those steps. Most projects need just one plain `worker` step. Reach
+repeating list of entries over those steps. Most projects need just one plain `worker` step. Reach
 for more when the run risks going down a rabbit hole.
 
 - **`steps:`** — a palette. Each NAME maps to a body of *overrides* over `defaults:` (legal keys:
@@ -262,11 +262,15 @@ for more when the run risks going down a rabbit hole.
   generic ROLE framing composed *above* `prompt:` (e.g. a red-team "reconsider" step). `skip_judges:
   true` means no judges run after that step, so nothing merges — its work **stages**, and the next
   judged step gates the whole span.
-- **`sequence.steps:`** — a list of statements, each one of:
-  - `NAME` — run that step once
-  - `NAME xN` — run it N times (e.g. `worker x4`)
-  - `if <expr> then NAME [else NAME]` — run a step only when a condition holds; `<expr>` is the
-    Step-4 grammar (e.g. `if stalled then reconsider`)
+- **`sequence.steps:`** — a list of entries, each one of:
+  - `NAME` — run that step once (shorthand for `{ step: NAME }`)
+  - `{ step: NAME, times: N }` — run it exactly N times, then move on
+  - `{ step: NAME, until: <expr>, max: N }` — repeat it until the condition holds, at most N times;
+    `<expr>` is the Step-4 grammar (e.g. `until: "NOT stalled"`), checked AFTER each dispatch
+
+  `times:` and `until:`+`max:` are alternatives, and both bounds are mandatory — agg refuses an
+  unbounded or zero repetition at startup. There is **no `if:`**: a lap dispatches every entry, in
+  order. Conditional flow is the Rust driver API, not this file.
 
   The sequence repeats from the top, forever, until `done_if` fires (exit 0) or `abort_if` (exit 3).
 
@@ -286,12 +290,12 @@ steps:
     skip_judges: true              # stages; the next worker step gates it
 sequence:
   steps:
-    - "worker x4"
-    - "if stalled then reconsider"
+    - { step: worker, until: "NOT stalled", max: 4 }   # up to 4 tries, stop early if it's moving
+    - reconsider                                       # reached only when 4 tries stayed stalled
 ```
 
-`stalled` is the library judge (it reads the verdict history). If you use `if stalled then …`, the
-`stalled` judge is automatically in the run-set — you don't list it anywhere else. **Only propose a
+`stalled` is the library judge (it reads the verdict history). Naming it in an `until:` puts the
+`stalled` judge in the run-set automatically — you don't list it anywhere else. **Only propose a
 second agent the user actually has installed** (Step 0b) — `agg doctor` checks every agent named.
 
 ## Step 4.7 — Detect the user's tools and offer to wire them in (NO hardcoded tool list)

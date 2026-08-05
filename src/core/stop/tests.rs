@@ -157,13 +157,14 @@ fn all_goals() {
 
 #[test]
 fn aggregates_range_over_the_dod_set_not_the_run_set() {
-    // THE quantifier split (§5.3): `stalled` is a run-set-only judge (in an `if` condition, so
-    // in_dod:false) and is UNMET; `feature` is in the DoD-set and met. If the aggregates ranged
+    // THE quantifier split (§5.3): `stalled` is a run-set-only judge (named in an `until:`/
+    // `notify_if` condition, so in_dod:false) and is UNMET; `feature` is in the DoD-set and met.
+    // If the aggregates ranged
     // over the run-set, `done_if: all_goals` could not fire until `stalled` was met — i.e. the
     // loop would "succeed" only once it got stuck. They must range over the DoD-set, so:
     let feature = g("feature", true, false); // in_dod:true (via the helper)
     let mut stalled = g("stalled", false, false);
-    stalled.in_dod = false; // run-set only — an `if stalled then …` condition judge
+    stalled.in_dod = false; // run-set only — a condition judge, never a goal
     let judges = [feature, stalled];
 
     // all_goals ignores the unmet run-set-only judge → the DoD (just `feature`) is fully met.

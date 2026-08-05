@@ -7,11 +7,12 @@
 //!         if entry.until and eval(entry.until): break
 //! ```
 //!
-//! It replaces `core::sequence`'s `Cursor` over a hand-parsed statement list, and it dispatches
-//! through the SAME primitive a Rust driver's `agg.step()` calls — one execution primitive, two
-//! drivers over it. There is no `if:` (owner simplification, 2026-08-04, §14.14), so unlike
-//! `Cursor` a lap ALWAYS dispatches: the no-dispatch-lap refusal is unrepresentable here rather
-//! than guarded.
+//! This is the ONLY execution model in the tree: it dispatches through the SAME primitive a Rust
+//! driver's `agg.step()` calls — one primitive, two drivers over it. The hand-written lexer +
+//! parser + branching cursor that used to read the terse line syntax is gone (BUILD.md §4 row 13).
+//! There is no `if:` either (owner simplification, 2026-08-04, §14.14), so a lap ALWAYS dispatches:
+//! the old "a lap ended with every branch false" refusal is unrepresentable here rather than
+//! guarded — which is why deleting it was safe.
 //!
 //! The walk is written as a cursor rather than as literal nested `for`s because the caller is the
 //! handler pipeline: `PickStep` asks for ONE step name per session and everything between two
@@ -86,7 +87,7 @@ mod tests {
     }
 
     /// TODAY'S ORDER, REPRODUCED: a bare list dispatches each entry once per lap and wraps forever
-    /// — what `Cursor` did for `Statement::Step`.
+    /// — what a bare `NAME` line did under the retired parser.
     #[test]
     fn a_plain_list_laps_forever_in_order() {
         let mut w = Walk::new(vec![entry("plan", None, None, None), entry("build", None, None, None)]);

@@ -46,7 +46,7 @@ judge:                           # THE RULER — runs .md judges + the summarize
 steps:                           # palette. legal keys: agent model effort worker_args state role_prompt prompt skip_judges
   worker: {}
 sequence:
-  steps: ["worker"]              # e.g. "worker x4", "if stalled then reconsider"
+  steps: ["worker"]              # entries; e.g. { step: worker, times: 4 } / { step: w, until: X, max: 4 }
   limits: { tokens: null, cost: null, sessions: null }   # null = unlimited
   invariants: []                 # judge names that must STAY met
   done_if: "tests_pass"          # SUCCESS (exit 0)
@@ -74,12 +74,12 @@ file) in `notify_if`, never `abort_if` — otherwise the agent can end its own r
 read agg's `verdicts.jsonl`, which is a PROTOCOL boundary, not a permission one — it sits in the
 worker's writable cwd on every isolation tier. Only the process-internal terms (`over_budget`,
 `over_cost`, `over_iterations`, `wall_hours`, `any_regressed(invariants)`) are unfakeable.
-Do NOT name the SAME detector in `notify_if` and an `if <expr> then …` branch: the branch is resolved
-at the start of the next session, so the human is paged before the recovery step runs.
+Do NOT name the SAME detector in `notify_if` and an entry's `until:`: the `until:` is resolved at the
+start of the next session, so the human is paged before the recovery step runs.
 
 ## Writing a judge (a judge IS a goal)
 A judge lives at `agg/judges/<name>.{sh,md}` and is referenced by its **bare NAME** in
-`done_if`/`abort_if`/`invariants`/`if`-conditions.
+`done_if`/`abort_if`/`notify_if`/`invariants`/an entry's `until:`.
 - **`.sh`** = SCRIPT judge — runs and prints ONE line of verdict JSON to stdout. Runs from the PROJECT
   ROOT (sees the worker's files). `chmod +x` it.
 - **`.md`** = LLM RUBRIC judge — agg sends it to the ruler as a READ-ONLY one-shot; it must return the same JSON.

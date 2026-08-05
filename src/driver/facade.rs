@@ -205,7 +205,7 @@ impl Agg {
         let dir = self.dir.clone();
         let config_base = crate::paths::config_base(&dir);
 
-        // the driver variant: an empty `sequence.steps` means no statement list to validate, no
+        // the driver variant: an empty `sequence.steps` means no entry list to validate, no
         // `done_if`, and an EMPTY run-set — judges are lazy and the driver asks.
         let asm = crate::assembly::assemble(&cfg, &config_base)?;
         crate::capability::check(&cfg, &asm.engine.judges)?;

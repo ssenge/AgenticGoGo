@@ -36,8 +36,12 @@ steps:
 # The repeating sequence + the run-level ceilings and Definition of Done.
 sequence:
   steps:
-    - "worker x4"                        # four grunt sessions on Opus…
-    - "if stalled then reconsider"       # …then, only if progress has flat-lined, step back on Codex
+    # up to four grunt sessions on Opus — but the repeat ENDS EARLY the moment progress resumes…
+    - { step: worker, until: "NOT stalled", max: 4 }
+    # …so `reconsider` is reached only when all four stayed flat: step back on Codex. There is no
+    # `if:` in a sequence entry (the Rust driver API owns conditional flow); a converging `until:`
+    # repeat falling through to the next entry is how a recovery step stays conditional here.
+    - reconsider
   limits: { tokens: 50000000 }           # output-token ceiling → over_budget. A hopeless run can't run forever.
                                          # NOTE: no `cost` here — it is Claude-only, and this sequence
                                          # names a `codex` step, so a dollar guard could never cover the

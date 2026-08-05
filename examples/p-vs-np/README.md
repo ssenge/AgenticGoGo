@@ -63,8 +63,8 @@ The `.sh`/`.md` extension is what decides script-vs-LLM.
 - **binary judge** `proof_verified` — the (unreachable) prize
 - **LLM judge** `paper_written` — an `.md` rubric graded on the cheap RULER model
 - **invariant** `no_sorry` + **`abort_if: any_regressed(invariants)`** — aborts the run if it cheats
-- **per-step agents** — a `worker x4` grunt loop on Opus, then `if stalled then reconsider` on a
-  **different vendor (Codex)**: a Claude rabbit hole is not necessarily a Codex one
+- **per-step agents** — an Opus grunt loop bounded by `until: "NOT stalled", max: 4`, falling through
+  to `reconsider` on a **different vendor (Codex)**: a Claude rabbit hole is not necessarily a Codex one
 - **`skip_judges`** on the reconsider step — nothing merges; its work stages and the next worker gates it
 - **hooks** (`on_start: lake build`) — wires the Lean toolchain (agg stays tool-agnostic)
 - **budget** ceiling — a hopeless run can't run forever
@@ -90,8 +90,8 @@ Goals: 1/3   done_if: proof_verified AND paper_written
 ```
 
 Note the scoreboard is **1/3** (the Definition-of-Done set: `proof_verified`, `paper_written`,
-`no_sorry`) while **4 judges** ran — `stalled` is evaluated because the sequence branches on it
-(`if stalled then reconsider`), but it is not part of the DoD, so it never counts toward "done".
+`no_sorry`) while **4 judges** ran — `stalled` is evaluated because it bounds the worker repeat
+(`until: "NOT stalled"`), but it is not part of the DoD, so it never counts toward "done".
 
 ## The two moats on show
 
@@ -114,10 +114,11 @@ else
 fi
 ```
 
-**2. When it stalls, a different vendor reconsiders.** Most sessions are grunt work (`worker x4` on
-Opus). Only when `stalled` fires — the run has made no verdict progress across the last few merged
-steps — does the sequence step back on **Codex**, told to assume the current route is a dead end and
-name a different one. Its `skip_judges: true` means nothing merges from that step: the work stages,
+**2. When it stalls, a different vendor reconsiders.** Most sessions are grunt work (the repeated `worker` on
+Opus). The repeat ends the moment `stalled` clears, so the next entry is reached only when the run
+made no verdict progress across the last few merged steps for four sessions running — then the
+sequence steps back on **Codex**, told to assume the current route is a dead end and name a different
+one. Its `skip_judges: true` means nothing merges from that step: the work stages,
 and the next worker step gates the whole span. The rejected routes reach institutional memory
 (`agg/private/LOG.md`, agg-owned) through the worker's scratch note in `agg/state/sessions/`, so no
 future session repeats them. That indirection is the point of the split: the note is the worker's to
@@ -132,8 +133,8 @@ steps:
     skip_judges: true            # stages; the next worker step gates it
 sequence:
   steps:
-    - "worker x4"
-    - "if stalled then reconsider"
+    - { step: worker, until: "NOT stalled", max: 4 }
+    - reconsider
 ```
 
 ## Porting to another agent
