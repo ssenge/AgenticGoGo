@@ -1969,3 +1969,78 @@ fn a_sequence_entry_that_exhausts_max_without_converging_aborts_the_run() {
     assert!(combined.contains("exhausted `max: 2`"), "the abort names the bound:\n{combined}");
     assert!(combined.contains("until: worked"), "…and the condition that never held:\n{combined}");
 }
+
+/// A step whose whole OUTPUT is gitignored worker-state must still be able to satisfy its `until:`.
+///
+/// `agg/state/` is gitignored BY DESIGN — the OKF wiki and STATE.md are durable, multi-session and
+/// first-class — so a `survey`/`spec`/`plan` step commits NOTHING every time and resolves as
+/// `NoChanges`. The gate's `_` arm used to `restore_goal_state` on that, throwing away the verdict
+/// the judge had just measured against the real filesystem and putting the pre-step value back.
+///
+/// The consequence was invisible until `max:` became a contract: a real `examples/workflow.yaml` run
+/// had `spec` score 100/100, get restored to 75, re-dispatch, score 100/100 again, and then abort
+/// with "exhausted `max: 2` without `until: spec_sound` ever holding" — about a condition that had
+/// held twice. This asserts the loop CONVERGES instead: exit 0, not exit 3.
+#[test]
+fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    // gitignore the worker-state dir, exactly as a real project does — so the worker's output is
+    // real, durable, and invisible to git. agg's auto-commit then finds nothing: `NoChanges`.
+    // `bin/` too, or agg's auto-commit sweeps the fake worker's own binary onto the session branch —
+    // the session then resolves as `Staged`, not `NoChanges`, and the bug under test cannot occur.
+    write(dir, ".gitignore", "agg/\nbin/\n.home/\n");
+    Command::new("git").args(["add", ".gitignore"]).current_dir(dir).output().unwrap();
+    Command::new("git").args(["commit", "-qm", "gitignore agg/"]).current_dir(dir).output().unwrap();
+
+    // A worker that writes ONLY into the gitignored state dir, so its sessions commit nothing.
+    //
+    // ⚠ It writes a COUNTER, not a marker, and the judge needs TWO. That is not padding: agg appends
+    // its own entries to `.gitignore` on the first run, so session #1 always has something to commit
+    // and always resolves as `Staged`. A judge that flips on session #1 therefore converges through
+    // the merge path and never touches the arm under test. The judge must become met on a LATER,
+    // commit-free session — which is exactly the shape of the real failure, where `spec` scored
+    // 100/100 on a `NoChanges` session.
+    write(
+        &dir.join("bin"),
+        "claude",
+        "#!/bin/sh\n\
+         for a in \"$@\"; do if [ \"$a\" = \"--version\" ]; then echo 'fake 0.0.0'; exit 0; fi; done\n\
+         mkdir -p agg/state/wiki && echo x >> agg/state/wiki/spec.md\n\
+         printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"usage\":{\"output_tokens\":1}}'\n",
+    );
+    chmod_x(&dir.join("bin/claude"));
+    write_judge(
+        dir,
+        "spec_ok",
+        "#!/bin/sh\nn=$(wc -l < agg/state/wiki/spec.md 2>/dev/null || echo 0)\n\
+         if [ \"$n\" -ge 2 ]; then echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}'; \
+         else echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'; fi\n",
+    );
+    // never met, so `done_if` cannot end the run before the walk re-visits the entry — which is the
+    // only moment `until:` is evaluated, and therefore the only moment the bug is observable.
+    write_judge(dir, "never", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: statework\n\
+         defaults: { model: fake }\n\
+         steps:\n  worker: {}\n  second: {}\n\
+         sequence:\n  steps: [{ step: worker, until: spec_ok, max: 3 }, { step: second }]\n  done_if: \"never\"\n\
+         summary: { enabled: false }\n",
+    );
+    write_state_md(dir, "write the spec\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "4"]).output().unwrap();
+    let combined =
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !combined.contains("exhausted `max: 3`"),
+        "the judge measured the real filesystem and said MET — the bound must not be spent:\n{combined}"
+    );
+    assert!(
+        combined.contains("step `second`"),
+        "converging on the first entry must ADVANCE the walk, not re-dispatch it:\n{combined}"
+    );
+    assert_exit(&out, 4, &combined); // `never` never fires, so the session cap is the exit
+}

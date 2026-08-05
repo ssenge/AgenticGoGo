@@ -155,10 +155,36 @@ pub(crate) fn keep_or_rollback(
                 Gated::RolledBack
             }
         }
+        // ⚠ `NoChanges` IS NOT A DISCARD. Nothing was committed because nothing GIT-VISIBLE changed,
+        // so base is byte-for-byte the tree the judges just graded and their verdicts describe it
+        // EXACTLY. Restoring the pre-step state overwrites a true reading with a stale one.
+        //
+        // It bites the moment a step's whole output is worker-state rather than source. `agg/state/`
+        // is gitignored BY DESIGN — the OKF wiki and STATE.md are durable, multi-session and
+        // first-class — so a `survey`/`spec`/`plan` step produces zero commits EVERY time, and such a
+        // step could therefore never satisfy an `until:`. A real run of examples/workflow.yaml
+        // surfaced it: `spec` wrote agg/state/wiki/spec.md, the judge read it and scored 100/100, the
+        // restore put 75 back, `until: spec_sound` read the stale 75 and re-dispatched — twice, then
+        // aborted on `max: 2` reporting that a condition which HAD held "never held".
+        //
+        // Note the fixture comment in tests/cli.rs that says "a worker that means its work commits
+        // it": that is true of a FAKE worker, which runs git itself. A real one never does — agg owns
+        // all git — so "commit it" is not a lever the worker has.
+        Some((_, StagedSession::NoChanges)) | None => {
+            // ⚠ NO `restore_goal_state` — that is the whole fix. The LEDGER tag stays `RolledBack`,
+            // because OD-13 closed that question (`RUST_API.md` §OD-13: the `_` arm records
+            // `RolledBack` for Vetoed/NoChanges/Conflict under every policy) and nothing landed in
+            // git. What changes is only the ENGINE's live judge state, which is a reading of the
+            // filesystem rather than a claim about what merged.
+            clear_span(ctx, staged.map(|(br, _)| br.as_str()));
+            crate::core::verdicts::append(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack)?;
+            Gated::NotStaged
+        }
         _ => {
-            // Vetoed / NoChanges / Conflict / CheckoutFailed / no branch: nothing merged. The
-            // judged verdicts describe base, not a landed merge — record them rolled_back and
-            // restore base truth so the next step isn't gated against a phantom.
+            // Vetoed / Conflict / CheckoutFailed: work EXISTED and did not reach base — it was
+            // discarded, or it is stranded on a branch. Either way the judged verdicts describe a
+            // tree that base is not, so record them rolled_back and restore base truth, or the next
+            // step is gated against a phantom.
             ctx.eng.restore_goal_state(pre_goals);
             clear_span(ctx, staged.map(|(br, _)| br.as_str()));
             crate::core::verdicts::append(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack)?;
