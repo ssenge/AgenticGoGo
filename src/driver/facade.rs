@@ -348,6 +348,11 @@ impl Agg {
         let started = self.ready()?;
 
         let mut st = started.st.borrow_mut();
+        // The breadcrumb, stamped where the driver's flow ENTERS agg. agg cannot observe the
+        // hand-written `for` between two `step()` calls, so this is the only moment the live
+        // `PosFrame` stack and the snapshot are in the same place at the same time. `step_once`
+        // publishes several times below and every one of them carries it.
+        st.dash.pos = self.label_path();
         loop {
             // ⚠ RE-SEEDED INSIDE THE LOOP. `PickStep` `take()`s `next_step`, so a `NextSession`
             // retry (the rate-limit path) would otherwise find `None` and fall through to the
@@ -550,7 +555,11 @@ impl Agg {
         let (ruler, model, timeout, session, step, isolation, iso_base) = {
             let mut st = started.st.borrow_mut();
             let step = st.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "driver".into());
-            let isolation = st.cur_step.as_ref().map(|s| s.isolation).unwrap_or_default();
+            // §2.5: the RUN tier, never `cur_step.isolation`. A driver's judge is an evaluator whose
+            // confinement follows from its ROLE, not from whichever step happened to run last —
+            // otherwise a judge asked after a `Isolation::None` step runs unconfined, and one asked
+            // after a hardened step inherits deny paths it exists to read and execute.
+            let isolation = st.cfg.run_isolation();
             let base = st.ext.get::<AGGState>().git.iso_base.clone();
             (
                 st.ruler,
@@ -585,9 +594,56 @@ impl Agg {
             }
             let ruler_agent = st.cfg.judge.agent.clone();
             st.charge(&ruler_agent, spend.tokens, spend.cost_usd);
+            // …and the VERDICT reaches the snapshot, not just the spend. Charging alone was the whole
+            // of this block, which is why a driver run published `judges: []` to every reader while
+            // its judges ran. `publish()` leaves `dash.judges` alone when the engine has none, so
+            // this upsert is what the TUI, the web BFF and Progress actually render.
+            Self::publish_verdict(&mut st.dash.judges, &j.name, &kind, &verdict);
+            st.dash.pos = self.label_path();
             st.publish();
         }
         verdict
+    }
+
+    /// Upsert one driver verdict into the published judge scoreboard, keeping the run-lifetime LATEST
+    /// per judge — the same shape `judges_from_engine` produces for the YAML path, so every reader
+    /// (TUI, web BFF, `agg status`) renders both paths through one code path and one wire format.
+    ///
+    /// `delta` is computed against the value this judge published last, which is why the row is
+    /// updated in place rather than pushed: a driver asks the same judge many times across a run.
+    /// `in_dod`/`invariant` are FALSE by construction — a driver declares no DoD and no invariants;
+    /// it decides it is done by returning.
+    fn publish_verdict(views: &mut Vec<crate::state::JudgeView>, name: &str, kind: &JudgeKind, v: &Verdict) {
+        let prev = views.iter().find(|p| p.name == name).and_then(|p| p.value);
+        let delta = match (v.value, prev) {
+            (Some(now), Some(was)) => now - was,
+            _ => 0.0,
+        };
+        let row = crate::state::JudgeView {
+            name: name.to_string(),
+            kind: kind.tag().to_string(),
+            in_dod: false,
+            invariant: false,
+            // a driver has no `Lifecycle` machine (that is the engine's), so the state IS the verdict:
+            // errored judges read `pending` because they measured nothing, not because they passed.
+            state: match (v.error.is_some(), v.met) {
+                (true, _) => "pending",
+                (false, true) => "met",
+                (false, false) => "in_progress",
+            }
+            .to_string(),
+            met: v.met,
+            value: v.value,
+            max: v.max,
+            target: v.target,
+            delta,
+            rationale: v.rationale.clone(),
+            error: v.error.clone(),
+        };
+        match views.iter_mut().find(|p| p.name == name) {
+            Some(slot) => *slot = row,
+            None => views.push(row),
+        }
     }
 
     /// A driver-constructed [`JudgeKind`] with its paths resolved against the project dir.
@@ -936,7 +992,13 @@ impl Agg {
 fn record_end(st: &mut LoopState, outcome: RunOutcome) {
     let n = st.session;
     let (reason, tag) = match outcome {
-        RunOutcome::GoalsMet => (format!("driver returned after {n} session(s)"), "goals-met"),
+        // ⚠ NOT "goals-met". A driver declares no DoD — it decides it is done by RETURNING — so
+        // claiming its goals were met is a statement about something that does not exist, and
+        // `agg history` rendered it beside `goals_met: 0, goals_total: 0`: vacuously true and read by
+        // a human as "it finished having achieved nothing". `driver-returned` says the one thing agg
+        // actually knows. The OUTCOME stays `GoalsMet` (exit 0, the success path); only the recorded
+        // wording changes, because the ledger is the human-facing artefact.
+        RunOutcome::GoalsMet => (format!("driver returned after {n} session(s)"), "driver-returned"),
         RunOutcome::Halt => (format!("driver ended the run after {n} session(s)"), "abort:driver"),
         RunOutcome::MaxSessions => (format!("driver stopped at its session ceiling ({n})"), "max-sessions"),
         RunOutcome::Stopped => (format!("driver stopped the run after {n} session(s)"), "stopped"),

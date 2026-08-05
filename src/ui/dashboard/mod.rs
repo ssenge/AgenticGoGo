@@ -248,6 +248,7 @@ pub fn sample_state() -> DashboardState {
         step: "reconsider".into(),
         step_agent: "claude".into(),
         step_model: "claude-opus-4-8".into(),
+        pos: "cycle 3/20 › attempt 2/3".into(),
         stop_when: "all_goals".into(),
         halt_when: "session > 40 OR over_cost".into(),
         iso_base: "main".into(),
