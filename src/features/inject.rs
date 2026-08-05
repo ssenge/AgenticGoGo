@@ -67,10 +67,21 @@ impl Handler for PickStep {
         let step_name = {
             let rs = ctx.run_state();
             let eng = &ctx.eng;
+            // The judges that ERRORED on the step this `until:` is judging. `PickStep` runs at the
+            // top of the next session, so each judge's `last_verdict` is exactly that fresh state.
+            // Hardcoding `&[]` here (what this did until 2026-08-05) left `any_judge_error`
+            // permanently false at the ONE site where an operator can act on it — a timing-out judge
+            // and a judge reporting a genuine miss were the same event to every `until:` expression.
+            let judge_errors: Vec<String> = eng
+                .judges
+                .iter()
+                .filter(|g| g.last_verdict.as_ref().is_some_and(|v| v.error.is_some()))
+                .map(|g| g.name.clone())
+                .collect();
             let picked = ctx.cursor.next_step(&mut |cond| {
                 let sc = StopContext {
                     judges: &eng.judges,
-                    judge_errors: &[],
+                    judge_errors: &judge_errors,
                     tokens_spent: rs.tokens_spent,
                     budget_total: rs.budget_total,
                     cost_spent: rs.cost_spent,
@@ -83,7 +94,17 @@ impl Handler for PickStep {
             });
             match picked {
                 Ok(n) => n,
-                Err(e) => return Ok(Flow::Stop(ctx.abort_now(&format!("sequence error: {e}")))),
+                Err(e) => {
+                    // Name the errored judges in the abort. An entry that exhausted `max` because
+                    // its judge kept timing out and one that exhausted it because the work was
+                    // genuinely not there otherwise read identically — and only the first is a
+                    // fault in the harness rather than in the work.
+                    let mut reason = format!("sequence error: {e}");
+                    if !judge_errors.is_empty() {
+                        reason.push_str(&format!(" — judges that errored: {}", judge_errors.join(", ")));
+                    }
+                    return Ok(Flow::Stop(ctx.abort_now(&reason)));
+                }
             }
         };
         let step = match ctx.cfg.resolve_step(&step_name) {
