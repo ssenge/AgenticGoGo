@@ -125,6 +125,24 @@ met, so a project with `abort_if: "stalled"` has its worker end its own run. `sr
 authority — the classification IS a test there. Binds only under `isolation: sandbox`/`container`; under
 the default `none` the worker has the whole filesystem and no layout changes that.
 
+## The two ways to drive the loop (`src/` map)
+One engine, two front ends. `agg.step()` and the YAML walk dispatch through the **same** primitive —
+there is no second execution model, and adding one is the thing to refuse.
+
+```
+src/core/walk.rs      the WHOLE of the YAML flow (~30 lines): lap the list, honour times/until+max.
+                      Exhausting `max` without the condition holding is an ERROR, not an advance.
+src/driver/facade.rs  the Rust API — `Agg`, the eleven calls, lazy+memoized judges, `gate()`.
+src/core/judge.rs     runs a judge (script/rubric/native) and confines it AS A JUDGE: run-level tier,
+                      project READ-ONLY, writes relocated to a shared per-session `$AGG_JUDGE_SCRATCH`.
+src/core/verdicts.rs  `agg/private/verdicts.jsonl` — one row per judge per GATE, never per step.
+src/assembly.rs       builds the run-set: `done_if ∪ abort_if ∪ invariants ∪ every until:`.
+                      A judge named by NO expression never runs, however many files sit in agg/judges/.
+```
+Driver-path traps: `Agg` boots **lazily** (a `cycles=0` driver publishes nothing and is invisible to
+both readers); `eng.judges` is **empty** on that path, so anything reading it sees no judges — the
+facade publishes its own into `dash.judges`. Tests: `tests/driver_api.rs`, `tests/samples.rs`.
+
 ## The three "agent" surfaces — do NOT conflate
 - **The worker** (agg's inner agent) reads `agg/AGG.md` + the agg-composed `agg/private/INSTRUCTIONS.md`.
 - **An agent OPERATING agg** uses the CLI above + the `/agg:*` skills (`agg:new` / `agg:status` / `agg:supervise`).

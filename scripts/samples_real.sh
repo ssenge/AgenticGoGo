@@ -51,7 +51,11 @@ while [ $# -gt 0 ]; do
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
-case "${RUN:-}" in ""|workflow|selfimprove) ;; *) echo "--run takes workflow|selfimprove" >&2; exit 2 ;; esac
+case "${RUN:-}" in ""|workflow|selfimprove|yaml) ;; *) echo "--run takes workflow|selfimprove|yaml" >&2; exit 2 ;; esac
+# A lap of examples/workflow.yaml is at most 3+2+1+8+1+1 = 16 dispatches, so this is the session
+# budget that lets `--cycles N` mean "N full laps" on the YAML path too. `agg run` has no notion of
+# a lap — the walk wraps forever — so a ceiling is the only way to bound it.
+MAX_SESSIONS=$(( CYCLES * 16 ))
 
 sec() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 ok()  { printf '  \033[32m✔\033[0m %s\n' "$1"; }
@@ -335,10 +339,16 @@ cat > "$J/loadtest.sh" <<'EOF'
 #!/bin/sh
 # LOAD — a fast STAND-IN for a 40-minute soak, but it genuinely measures: 200k real allow() calls
 # against a synthetic clock, per-op latency sampled with perf_counter_ns, p50/p99 in ms and
-# throughput written to agg/state/bench.json (which examples/workflow.rs's native `p99` judge reads).
+# throughput written to $AGG_JUDGE_SCRATCH/bench.json — which the `p99_ok` judge (YAML) and
+# examples/workflow.rs's native p99 closure (Rust) both read.
+#
+# ⚠ NOT agg/state/bench.json. Since §2.5 the project tree is READ-ONLY to a judge — a judge that can
+# write the tree it grades can make the code pass — so the measure/threshold handoff goes through the
+# per-session judge scratch, which is the one place judges may write and is shared between them.
 python3 - <<'PY'
 import json, os, pathlib, sys, time
 sys.path.insert(0, "src")
+SCRATCH = pathlib.Path(os.environ.get("AGG_JUDGE_SCRATCH", "agg/state"))
 
 OPS, SAMPLE, FLOOR = 200_000, 20_000, 50_000.0   # ops, latency samples, min ops/sec to pass
 try:
@@ -359,8 +369,8 @@ try:
     ops = OPS / wall if wall else 0.0
     res = {"ops": OPS, "wall_s": round(wall, 4), "ops_per_sec": round(ops, 1),
            "p50_ms": round(p(0.50), 6), "p99_ms": round(p(0.99), 6)}
-    pathlib.Path("agg/state").mkdir(parents=True, exist_ok=True)
-    pathlib.Path("agg/state/bench.json").write_text(json.dumps(res, indent=2) + "\n")
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    (SCRATCH / "bench.json").write_text(json.dumps(res, indent=2) + "\n")
     met = ops >= FLOOR
     print(json.dumps({"met": met, "value": res["ops_per_sec"], "max": None, "target": FLOOR,
                       "rationale": f"{res['ops_per_sec']} ops/s, p99 {res['p99_ms']}ms over {OPS} real calls"}))
@@ -404,13 +414,43 @@ except Exception as e:
 PY
 EOF
 
-# examples/selfimprove.rs names agg's OWN ladder (it drives agg's repo). Same three checks, the
-# names that driver asks for — an alias, not a second implementation.
-for a in "build_ok.sh:build.sh" "lint_clean.sh:lint.sh" "cargo_test.sh:tests.sh"; do
+# ALIASES. The two sample paths NAME judges differently, and only one of them can choose:
+#
+#   Rust  — `Judge::script("tests_pass", "agg/judges/tests.sh")` maps a NAME to any PATH it likes.
+#   YAML  — resolves by NAME ONLY: `tests_pass` is `agg/judges/tests_pass.{sh,md}` or it is a
+#           STARTUP ERROR. That is `agg doctor`'s "no judge named `tests_pass`".
+#
+# So the YAML sample cannot run against a project that only has `tests.sh`, however good that script
+# is. One implementation per check, as many names as the samples ask for — never a second copy,
+# because two implementations of one check drift and then the two samples grade differently.
+# p99_ok is NOT an alias: it is workflow.yaml's gap (1) made real — the Rust sample's native closure
+# reads one field out of the benchmark, and the YAML path has no native judges, so the same threshold
+# has to be a script. It reads what load_ok measured; it never measures again.
+cat > "$J/p99_ok.sh" <<'EOF'
+#!/bin/sh
+# P99 — a THRESHOLD over load_ok's measurement, not a second measurement. Reads bench.json out of
+# the shared per-session judge scratch (the one place a judge may write since §2.5).
+python3 - <<'PY'
+import json, os, pathlib, sys
+CEIL = 0.5   # ms
+b = pathlib.Path(os.environ.get("AGG_JUDGE_SCRATCH", "agg/state")) / "bench.json"
+if not b.exists():
+    # NOT met, and NOT a lie about latency: say which judge has to run first.
+    print(json.dumps({"met": False, "value": None, "max": None, "target": CEIL,
+                      "rationale": "no bench.json — load_ok has not run this session"}))
+    sys.exit(1)
+p99 = json.loads(b.read_text())["p99_ms"]
+print(json.dumps({"met": p99 <= CEIL, "value": p99, "max": None, "target": CEIL,
+                  "rationale": f"p99 {p99}ms against a {CEIL}ms ceiling"}))
+sys.exit(0 if p99 <= CEIL else 1)
+PY
+EOF
+
+for a in "build_ok.sh:build.sh" "lint_clean.sh:lint.sh" "cargo_test.sh:tests.sh" \
+         "builds.sh:build.sh" "tests_pass.sh:tests.sh" "load_ok.sh:loadtest.sh"; do
   cat > "$J/${a%%:*}" <<EOF
 #!/bin/sh
-# ALIAS — examples/selfimprove.rs names this judge (it drives agg's own Rust repo); against THIS
-# project the same check is ${a#*:}. One implementation, two names.
+# ALIAS — a sample names this judge; against THIS project the same check is ${a#*:}.
 exec "\$(dirname "\$0")/${a#*:}"
 EOF
 done
@@ -518,6 +558,7 @@ if [ -z "$RUN" ]; then
 next (each spends REAL subscription usage):
   $0 --run workflow    --cycles $CYCLES --dir $DIR --keep
   $0 --run selfimprove --cycles $CYCLES --dir $DIR --keep
+  $0 --run yaml        --cycles $CYCLES --dir $DIR --keep   # examples/workflow.yaml, verbatim
 watch:   (cd $DIR && $ROOT/target/debug/agg dashboard)
 release a block():     $ROOT/scripts/agg_unblock.sh $DIR
 EOF
@@ -525,10 +566,22 @@ EOF
 fi
 
 sec "RUN — $RUN, $CYCLES cycles, against a real model"
-BIN="$ROOT/target/debug/examples/$RUN"
 LOG="$DIR/$RUN.log"
+if [ "$RUN" = yaml ]; then
+  # ⚠ THE COMMITTED FILE, BYTE FOR BYTE. The point of this mode is that the sample a user reads is
+  # the sample that ran — an earlier "the YAML sample works" claim rested on a hand-edited variant
+  # (cheaper models, shorter timeouts) that differed from the shipped file in ~68 lines, which is
+  # not evidence about the shipped file. Do NOT add sed overrides here; if a knob makes the sample
+  # unrunnable, fix the SAMPLE.
+  cp "$ROOT/examples/workflow.yaml" "$DIR/agg/agg.yaml"
+  ok "agg/agg.yaml ← examples/workflow.yaml (verbatim, $(wc -l < "$ROOT/examples/workflow.yaml" | tr -d ' ') lines)"
+  BIN="$ROOT/target/debug/agg"
+  printf '  driver: %s run --max-sessions %s  (the WALK, not a Rust driver)\n  log:    %s\n' "$BIN" "$MAX_SESSIONS" "$LOG"
+else
+  BIN="$ROOT/target/debug/examples/$RUN"
+  printf '  driver: %s\n  log:    %s\n' "$BIN" "$LOG"
+fi
 [ -x "$BIN" ] || { bad "missing $BIN"; exit 1; }
-printf '  driver: %s\n  log:    %s\n' "$BIN" "$LOG"
 printf '  \033[33mthis spends real subscription usage (the $ agg prints is API-equivalent list price).\033[0m\n'
 
 # The samples call `agg.block(..)` and WAIT on the operator bus. Unattended, nobody answers — so
@@ -541,9 +594,13 @@ if [ "$UNBLOCK" = 1 ]; then
 fi
 
 T0=$(date +%s)
-( cd "$DIR" && PATH="$DIR/bin:$PATH" \
-    AGG_SAMPLE_HEAVY_MODEL="$HEAVY" AGG_SAMPLE_GRIND_MODEL="$GRIND" \
-    "$BIN" . "$CYCLES" ) > "$LOG" 2>&1
+if [ "$RUN" = yaml ]; then
+  ( cd "$DIR" && PATH="$DIR/bin:$PATH" "$BIN" run --max-sessions "$MAX_SESSIONS" ) > "$LOG" 2>&1
+else
+  ( cd "$DIR" && PATH="$DIR/bin:$PATH" \
+      AGG_SAMPLE_HEAVY_MODEL="$HEAVY" AGG_SAMPLE_GRIND_MODEL="$GRIND" \
+      "$BIN" . "$CYCLES" ) > "$LOG" 2>&1
+fi
 RC=$?
 EL=$(( $(date +%s) - T0 ))
 

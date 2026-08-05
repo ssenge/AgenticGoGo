@@ -43,6 +43,15 @@ sequence:
   # notify_if: "stuck.value >= 85"
   # notify: { cooldown_sessions: 3, cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"] }
 
+# ── IF THIS FILE EVER STOPS BEING ENOUGH ─────────────────────────────────────────────────────
+# The `sequence:` above is a list that laps forever. It cannot branch on a verdict, and every
+# run-set judge runs after every judged step — so a 40-minute check runs on the cycles where the
+# build is already red. When that starts costing you, the same engine has a Rust driver API:
+# `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, where `&&` short-circuits and an
+# `if` skips a step. It is heavier and Rust-only — stay here unless you need it.
+#   → docs/RUST_API.md, examples/workflow.rs
+# (COMMENTED ON PURPOSE: this file must run with zero edits.)
+
 heartbeat_secs: 30
 watchdog: { idle_secs: 900, cpu_grace: 180 }
 ratelimit_backoff_secs: 1800
