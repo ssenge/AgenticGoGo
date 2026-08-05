@@ -33,11 +33,18 @@ fn the_yaml_sample_loads() {
     let names: Vec<&str> = cfg.steps.keys().map(String::as_str).collect();
     assert_eq!(names, ["document", "fix", "harden", "implement", "spec", "survey"], "BTreeMap ⇒ sorted");
 
-    // `spec` escapes the `defaults:` model with the EMPTY-STRING sentinel, not `null`: `null`
-    // deserializes to `None`, which `resolve_step` then fills from `defaults`. The sample's comment
-    // says so; this asserts the file actually spells it that way.
-    assert_eq!(cfg.steps["spec"].agent.as_deref(), Some("codex"));
-    assert_eq!(cfg.steps["spec"].model.as_deref(), Some(""), "the opt-out sentinel is \"\", not null");
+    // `spec` is the PERSPECTIVE-DIVERSITY step: it overrides the `defaults:` model so a second
+    // reviewer looks at the survey. It shipped as `agent: codex` (a different VENDOR — the stronger
+    // form) until 2026-08-05 and now names a different MODEL, so the sample runs for a reader with
+    // one agent installed. What must hold either way is that the override EXISTS and differs from
+    // `defaults.model` — a step that silently inherits the default reviews nothing.
+    let spec_model = cfg.steps["spec"].model.as_deref().expect("`spec` must override the reviewer");
+    assert_ne!(
+        Some(spec_model),
+        cfg.defaults.model.as_deref(),
+        "a second opinion from the same model as everything else is not a second opinion"
+    );
+    assert!(!spec_model.is_empty(), "`\"\"` is the CODEX opt-out sentinel; a claude step names a real model");
 
     // the three sandboxed steps, and the readonly/writable asymmetry the sample is built around
     for s in ["implement", "fix", "harden"] {
@@ -71,13 +78,29 @@ fn the_yaml_sample_loads() {
         walk,
         [
             ("survey", None, Some("survey_good.value >= 85"), Some(3)),
-            ("spec", None, None, None),
+            ("spec", None, Some("spec_sound"), Some(2)),
             ("implement", None, None, None),
             ("fix", None, Some("tests_pass AND lint_clean"), Some(8)),
             ("harden", None, None, None),
             ("document", None, None, None),
         ],
         "the lap runs every entry in order — there is no `if:` in YAML since the 2026-08-04 cut"
+    );
+    // …and `spec` carries an `until:` for a reason beyond retrying: the run-set is
+    // `done_if ∪ abort_if ∪ invariants ∪ every until:`, so this is the ONLY thing that puts
+    // `spec_sound` in it. Without it the rubric file shipped, resolved, and never ran — the Rust
+    // sample graded the spec and this one did not.
+    // `stop::judge_names` is the exact function `assembly.rs` folds over every `until:` to build the
+    // run-set, so this asks the real question rather than restating the line above.
+    let from_until: Vec<String> = seq
+        .steps
+        .iter()
+        .filter_map(|e| e.until.as_deref())
+        .flat_map(|c| agg::core::stop::judge_names(c).expect("every sample `until:` must parse"))
+        .collect();
+    assert!(
+        from_until.iter().any(|n| n == "spec_sound"),
+        "the spec rubric must reach the run-set, or it ships and never runs: {from_until:?}"
     );
 
     assert_eq!(seq.done_if, "tests_pass AND lint_clean AND load_ok AND p99_ok");

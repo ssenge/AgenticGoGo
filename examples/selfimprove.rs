@@ -115,11 +115,16 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
                  unstarted item completable in one overnight run. Write the choice and your \
                  reasoning to agg/state/wiki/next.md. Do NOT edit source.");
 
-    // The design doc comes BEFORE the code, and from a different vendor. This is how agg's own
+    // The design doc comes BEFORE the code, and from a DIFFERENT REVIEWER. This is how agg's own
     // features were actually built: internal/STUCK_NOTIFY.md existed before src/features/notify.rs,
     // and the implementation session found four gaps in it. The doc is what makes gaps findable.
+    //
+    // ⚠ A different VENDOR is the stronger version of "different reviewer" and is one word away
+    // (`.agent(Agent::Codex)`), which is what this shipped until 2026-08-05. A different MODEL keeps
+    // the sample runnable for a reader with a single agent installed; put the vendor back if you have
+    // two. Either way the point stands: the knob is PER STEP, not per run.
     let design = Step::new("design")
-        .agent(Agent::Codex)
+        .model(model("claude-sonnet-5", "AGG_SAMPLE_REVIEW_MODEL"))
         .effort(Effort::High)
         .prompt("Turn agg/state/wiki/next.md into an implementation contract another session will \
                  build from without your context. Ground every claim in code anchors you have read.");
@@ -150,10 +155,13 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
         .prompt("Write a judge under agg/judges/ that fails if this feature regresses. \
                  Exit 0 = met. Do not touch src/.");
 
-    // The step-back gets a different vendor on the theory that if Claude dug the hole, Claude is
-    // the least likely to see it.
+    // The step-back gets a different reviewer on the theory that whoever dug the hole is the least
+    // likely to see it. ⚠ A different VENDOR is the real version of that theory — `.agent()`, one
+    // word — and this is the step where it is worth the most, because a stall is exactly the failure
+    // a same-family model reproduces. It is a model override here only so the sample runs with one
+    // agent installed.
     let reconsider = Step::new("reconsider")
-        .agent(Agent::Codex)
+        .model(model("claude-sonnet-5", "AGG_SAMPLE_REVIEW_MODEL"))
         .prompt("Assume the current approach is wrong. Name 2-3 alternatives and pick one.");
 
     let land = Step::new("land")
@@ -338,10 +346,15 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
 
         // Every `step()` above only STAGED — work committed on the session branch, nothing merged.
         // `gate()` closes the span and hands agg the keep/rollback call over every verdict consulted
-        // since the last gate, under the `on_regression` set in `main` (here: `Rollback`, so a
-        // regression in the ladder discards the span instead of landing on base). The driver says
-        // WHEN, the policy says WHAT — an `agg.rollback()` was proposed and rejected for inverting
-        // exactly that. Note this is unrelated to the deleted judge-level `gate:` field above.
+        // since the last gate, under the `on_regression` set in `main`. The driver says WHEN, the
+        // policy says WHAT — an `agg.rollback()` was proposed and rejected for inverting exactly
+        // that. Note this is unrelated to the deleted judge-level `gate:` field above.
+        //
+        // ⚠ AT THIS GATE THE POLICY IS A BACKSTOP, NOT THE MECHANISM. The `&&` ladder above already
+        // refused to reach here with any judge unmet, so this span's regression set is all-met by
+        // construction and `Rollback` cannot fire. That is not a defect — the ladder is the STRICTER
+        // rule (it blocks red work whether or not it ever landed green). `Rollback` earns its keep at
+        // the SECOND gate below, where the span is graded after the work instead of before it.
         //
         // THE REGRESSION SET IS SIMPLY WHAT THIS DRIVER ASKED: `builds`, `lint`, `tests`, `e2e`,
         // `no_shrink` — every one of them met = GOOD, so "was met, now unmet" always means "worse".
@@ -361,6 +374,18 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
         agg.block("generation is green end-to-end. Tag it as the next agg?")?;
 
         agg.step(&land)?;
+
+        // GRADE THE SECOND SPAN BEFORE IT LANDS. This span writes a NEW JUDGE and the tag the next
+        // generation boots from — the one merge in the whole driver that must never go in unverified.
+        // Asking here is what puts any verdict in the span AT ALL: with none, `gate()`'s regression
+        // set is empty, `verdicts::append` returns early on the empty slice (no `verdicts.jsonl` row
+        // is written), and the span merges silently ungraded. It is also the only place
+        // `OnRegression::Rollback` can fire in this driver — `builds`/`tests` were landed-met one
+        // gate ago, so a generation that breaks its own build is DISCARDED here rather than tagged
+        // as the next agg. The policy does the discarding; this `if` only names the reason.
+        if !(agg.judge(&builds).met() && agg.judge(&tests).met()) {
+            agg.info("authoring the judge or tagging broke the tree — this generation is not landable");
+        }
         agg.gate()?;                       // second span: author_judge + land, same policy
         agg.log(&format!(
             "generation {c} landed. The NEXT `agg run` uses it; this process does not."
