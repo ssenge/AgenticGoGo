@@ -350,7 +350,16 @@ pub fn looks_rate_limited(text: &str) -> bool {
     const PATS: &[&str] = &[
         // ---- Anthropic / Claude prose ----
         "rate_limit_error",
-        "usage limit reached",
+        // ⚠ "usage limit", NOT "usage limit reached". Codex's SUBSCRIPTION exhaustion is prose with
+        // no 429 and no `reached`, captured on the wire 2026-08-05 during a real sample run:
+        //   "You've hit your usage limit. To continue using Codex and get access to GPT-5.3-Codex,
+        //    start a free trial of Plus today (…), or try again at Aug 11th, 2026 2:06 PM."
+        // It matched NOTHING in this list — the third time that has happened here, and each time the
+        // consequence is the same: no backoff, the failed session is scored as ordinary work, and its
+        // `until:`/`max:` attempt is burned on an agent that never ran. In that run it consumed one of
+        // `spec`'s two attempts in 4 seconds for 0 tokens. The wider pattern subsumes the API's
+        // "usage limit reached" too, so this is one entry rather than two.
+        "usage limit",
         "overloaded_error",
         // Claude Code SUBSCRIPTION limits (Pro/Max) — a DIFFERENT wording from the API "usage
         // limit reached" above, and the one a subscription actually hits. Verified on the wire:
