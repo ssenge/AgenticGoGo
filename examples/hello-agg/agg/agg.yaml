@@ -27,7 +27,7 @@ sequence:
   # ASK FOR HELP WITHOUT STOPPING. `notify_if` is the non-terminal twin of `abort_if`: when it is
   # true agg runs `notify.cmd` and the loop KEEPS RUNNING. `stalled` is a judge that ships inside
   # the binary (it reads agg/private/verdicts.jsonl), so this runs as-is — nothing to author.
-  # `stalled` is safe HERE because the sequence above has no `if stalled then …` branch: name one
+  # `stalled` is safe HERE because the sequence above has no `until: "NOT stalled"` repeat: name one
   # detector in both and you get paged a cycle BEFORE the recovery step runs (docs/CONFIG.md, "the
   # escalation ladder"). A real setup would `curl` a push service — and would bound it
   # (`curl --max-time 10`), since delivery is foreground; a local append keeps the example offline.

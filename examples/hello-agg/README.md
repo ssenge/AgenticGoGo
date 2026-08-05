@@ -88,7 +88,7 @@ reads `agg/private/verdicts.jsonl` and reports `met` when no judge has moved acr
 steps. Swap in a `curl` to a push service and you get the ping on your phone instead of in a file —
 bound it (`curl --max-time 10`), because delivery is foreground and agg imposes no timeout.
 
-`stalled` is the right detector here because this sequence has no `if stalled then …` recovery step.
+`stalled` is the right detector here because this sequence has no `until: "NOT stalled"` recovery repeat.
 Put the same detector in both and the ping lands a cycle *before* the recovery runs; see
 [the escalation ladder](../../docs/CONFIG.md#the-escalation-ladder-is-composition-not-a-config-object).
 

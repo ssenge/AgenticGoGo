@@ -212,7 +212,7 @@ mod tests {
     /// THE PORTED REFUSAL (BUILD.md §4 row 12, RUST_API §11.3(2)). An all-`skip_judges` sequence can
     /// never merge, so `done_if` can never fire — and the failure is INVISIBLE until the ceiling
     /// fires hours later, which is why this stays a STARTUP check. It now reads the serde entry
-    /// structs (`e.step`) instead of `Vec<Statement>`; the fixture is the only thing that changed.
+    /// structs (`e.step`) instead of a parsed statement list; the fixture is all that changed.
     #[test]
     fn an_all_skip_judges_sequence_is_refused_at_startup() {
         let tmp = base_with_judges(&["goal"]);
@@ -255,7 +255,7 @@ mod tests {
     }
 
     /// A name in an entry that is not a key in `steps:` is the same hard startup error it always was
-    /// (§5.4) — the check moved from `Statement::step_names()` to `e.step`, not away.
+    /// (§5.4) — the check moved from a statement's `step_names()` to the one `e.step` field, not away.
     #[test]
     fn an_entry_naming_an_unknown_step_is_refused() {
         let tmp = base_with_judges(&["goal"]);

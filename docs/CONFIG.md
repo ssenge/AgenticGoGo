@@ -41,8 +41,8 @@ steps:
 # The repeating sequence + the run-level ceilings and Definition of Done.
 sequence:
   steps:
-    - "worker x4"
-    - "if stalled then reconsider"
+    - { step: worker, until: "all_tests_pass", max: 4 }   # hammer, but stop as soon as it lands …
+    - reconsider                   # … and when 4 sessions did not land it, step back once
   limits:                          # the run-level ceilings, unified. Each null/absent = unlimited.
     tokens: 5000000                # output-token ceiling (worker AND judge spend) → over_budget
     cost: null                     # dollar ceiling → over_cost. CLAUDE-ONLY (null = unlimited)
@@ -52,7 +52,7 @@ sequence:
   done_if: "correct_result AND all_tests_pass AND coverage.value >= 80"
   abort_if: "over_budget OR wall_hours >= 8 OR any_regressed(invariants) OR any_judge_error"
   notify_if: "stuck.value >= 85"   # NON-TERMINAL twin of abort_if: ping a human, KEEP RUNNING.
-                                   # STRICTER than the `if stalled then` branch above, deliberately —
+                                   # STRICTER than whatever bounds the repeat above, deliberately —
                                    # see "the escalation ladder". (`stalled` ships; `stuck` you author.)
   notify:                          # how that ping is delivered (also fires once on an abort_if halt)
     cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]   # FOREGROUND — always bound it
@@ -167,26 +167,41 @@ compose.
 
 ## `sequence` — the loop
 
-### `sequence.steps` — the statement grammar
+### `sequence.steps` — the entries
 
-A list of statement lines. Each line is one of:
+A list of entries. Each is a **step name**, or a mapping that says how many times to dispatch it:
 
+```yaml
+steps:
+  - survey                                    # run `survey` once
+  - { step: fix, times: 4 }                   # run `fix` 4 times, then move on
+  - { step: build, until: tests_pass, max: 8 } # repeat `build` until the condition holds, ≤ 8 times
 ```
-NAME                          # run step NAME once
-NAME xN                       # run it N times (N ≥ 1), e.g.  worker x4
-if <expr> then NAME           # run NAME only when <expr> is true
-if <expr> then NAME else NAME # …otherwise run the else step
-```
 
-- `<expr>` is the [condition grammar](#the-condition-grammar) below.
-- Keywords (`if` / `then` / `else` / `x`) are case-insensitive. **No nesting** — a branch target is a
-  single step name.
+| key | meaning |
+|---|---|
+| `step` | the step to dispatch — a key in `steps:`. A bare `- survey` is shorthand for `{ step: survey }`. |
+| `times` | dispatch it exactly this many times (≥ 1) before moving on. |
+| `until` | repeat until this expression holds — the [condition grammar](#the-condition-grammar) below, re-evaluated **after** each dispatch. Requires `max`. |
+| `max` | the ceiling on an `until` repetition (≥ 1). |
+
+- `times` and `until`+`max` are **alternatives** — a fixed count and a condition cannot both bound
+  one entry, and a bound is mandatory on both. An unbounded repetition in a config file is a run you
+  cannot reason about; `limits:` is a RUN-level ceiling, not a per-entry one.
+- `until` is checked only **after** a dispatch (`repeat … until`), so a condition that is already
+  true still buys exactly one session.
+- There is **no `if:`** — a lap dispatches every entry, in order. Conditional flow belongs to the
+  Rust driver API, not to this file. Naming `if:` on an entry is a parse error, not a silently
+  ignored key.
 - An **unknown step name, or a judge name that resolves to no file, is a hard error at startup**,
-  listing what does exist. Never a runtime surprise.
+  listing what does exist. Never a runtime surprise. So is a typo'd entry key, by name.
 
 The sequence repeats from the top, forever, until `done_if` fires (exit **0**) or `abort_if` fires
 (exit **3**). Before session 1, every judge in the run-set runs once against the untouched repo (the
 **baseline**), so a run can end immediately as already-done or already-aborting.
+
+A judge named in an `until` condition joins the **run-set** (it has to execute, or the condition
+could never become true) but never the **DoD-set** — it is machinery, not a goal.
 
 ### `sequence` keys
 
@@ -233,8 +248,8 @@ it at startup** and tells you to use `coverage.value >= 80`. A threshold has one
 ### The two quantifiers — the DoD-set vs the run-set
 
 - **The RUN-SET** = every judge named in `done_if` ∪ `abort_if` ∪ `notify_if` ∪ `invariants:` ∪ every
-  `if` condition. These are the judges that actually execute after each step. `any_judge_error` ranges
-  over this set. (This is why a `stalled` judge used only in `if stalled then …` — or a `stuck`
+  entry's `until:`. These are the judges that actually execute after each step. `any_judge_error` ranges
+  over this set. (This is why a `stalled` judge used only in an `until:` — or a `stuck`
   detector used only in `notify_if` — runs, without being listed anywhere else.)
 - **The DoD-set** = judges named in `done_if` ∪ `invariants:` only. The aggregates (`all_goals`,
   `count_met`, `total`, `met_fraction`, `any_regressed`) range over **this** set — and it is what the
@@ -242,7 +257,7 @@ it at startup** and tells you to use `coverage.value >= 80`. A threshold has one
 
 They differ deliberately: if `all_goals` ranged over the run-set, `done_if: all_goals` could not be
 true until `stalled` was met — i.e. the loop would "succeed" by getting stuck. **Never put a judge
-that only appears in an `if` branch into `done_if`.** A `notify_if` detector is machinery, not a goal,
+that only bounds an `until:` into `done_if`.** A `notify_if` detector is machinery, not a goal,
 for exactly the same reason: it is run-set only, so it never counts toward `N/M` and a session is
 never rolled back because a detector flipped.
 
@@ -285,7 +300,7 @@ The zero-authoring version, which runs as-is because `stalled` ships inside the 
 
 ```yaml
 sequence:
-  steps: ["worker"]                # NO `if stalled then …` branch — see the escalation ladder below
+  steps: ["worker"]                # NO `stalled`-bounded repeat — see the escalation ladder below
   notify_if: "stalled"
   notify:
     cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]
@@ -306,13 +321,17 @@ the same detector, the same delivery, one word of difference:
 ### The escalation ladder is composition, not a config object
 
 "flat progress → try a different-vendor recovery step → still stuck → notify and keep running → hard
-ceiling → stop" is not one object you configure. Stage 1 is a **sequence** statement
-(`if stalled then reconsider`), stage 2 is **`notify_if`**, stage 3 is **`abort_if`** — two things
-that already existed plus the one new clause.
+ceiling → stop" is not one object you configure. Stage 1 is a **sequence** entry (a `max`-bounded
+`until:` repeat that falls through to a recovery step), stage 2 is **`notify_if`**, stage 3 is
+**`abort_if`** — two things that already existed plus the one new clause.
+
+Stage 1 is composition too: an entry with `until:` stops repeating the moment its condition holds,
+so the *next* entry is reached only when it did **not** hold within `max` tries. That fall-through is
+the recovery dispatch — no `if:` needed, and it cannot be skipped by a lap where nothing was true.
 
 **The ordering emerges from the detectors you choose — so choosing them is on you.** `notify_if` is
-evaluated at the **gate of the session that just ran**; an `if <expr> then …` branch is resolved when
-the **next** session is picked. Name the *same* detector in both and you are paged one full cycle
+evaluated at the **gate of the session that just ran**; an `until:` condition is evaluated when the
+**next** session is picked. Name the *same* detector in both and you are paged one full cycle
 **before** the recovery step is even dispatched — the ladder inverted. Give `notify_if` the
 **stricter** detector (a higher threshold, or `stuck` over `stalled`) so it can only be true after
 the recovery already failed to move anything.
@@ -324,12 +343,13 @@ steps:
 
 sequence:
   steps:
-    - "worker x3"
-    - "if stalled then reconsider"      # STAGE 1 — recovery, different vendor, no human involved
+    - { step: worker, until: "NOT stalled", max: 3 }   # STAGE 1a — up to 3 tries, stop early if moving
+    - reconsider                        # STAGE 1b — reached only when 3 tries stayed stalled:
+                                        #            recovery, different vendor, no human involved
   done_if:   "all_tests_pass AND coverage.value >= 80"
   abort_if:  "over_budget OR wall_hours >= 8"    # STAGE 3 — stop, on ceilings the worker can't reach
   notify_if: "stuck.value >= 85"                 # STAGE 2 — notify, KEEP RUNNING. STRICTER than the
-                                                 # `stalled` branch above, so it fires only after it failed
+                                                 # `stalled` repeat above, so it fires only after it failed
   notify:
     cooldown_sessions: 5
     cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]
@@ -337,8 +357,9 @@ sequence:
 
 > ⚠ **This example does not start until you author `stuck`.** `stuck` is a *user-authored* judge
 > ([below](#the-three-stuck-detectors)); a name that resolves to no file is a **hard error at startup**.
-> For zero authoring use `notify_if: "stalled"` — and then **drop the `if stalled then reconsider`
-> statement**, or the same detector sits in both clauses and the ladder inverts.
+> For zero authoring use `notify_if: "stalled"` — and then **drop the `until: "NOT stalled"` bound**
+> (a plain `{ step: worker, times: 3 }`), or the same detector sits in both clauses and the ladder
+> inverts.
 
 ### `notify.cmd` and the cooldown
 
@@ -545,7 +566,7 @@ argument is a three-line script in your own `agg/judges/` — library judges tak
 
 ### `stalled` — the shipped stall detector
 
-`stalled` is the detector behind `if stalled then …` and the zero-authoring `notify_if: "stalled"`. It
+`stalled` is the detector behind `until: "NOT stalled"` and the zero-authoring `notify_if: "stalled"`. It
 reads `agg/private/verdicts.jsonl` and is **met** when, across the last **K = 3 MERGED steps**, no binary
 judge changed its `met` and no numeric judge changed its `value`. The details that decide whether it
 fires when you expect:

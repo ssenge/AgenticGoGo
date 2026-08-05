@@ -425,7 +425,7 @@ the resulting artifacts — tests, a compiler, a proof checker — not the agent
 there*. Most projects need one plain step; the power shows up on long, open-ended runs.
 
 A **step** is an `(agent, model, role)` triple — a body of overrides over `defaults:`. A **sequence**
-is a repeating list of statements over those steps:
+is a repeating list of entries over those steps:
 
 ```yaml
 steps:
@@ -440,12 +440,15 @@ steps:
 
 sequence:
   steps:
-    - "worker x4"                  # four grunt sessions…
-    - "if stalled then reconsider" # …then, only if progress has flat-lined, step back on Codex
+    - { step: worker, until: "NOT stalled", max: 4 }  # grunt sessions — stop early if it's moving…
+    - reconsider                   # …reached only when 4 tries stayed flat: step back on Codex
 ```
 
-The statement grammar is tiny: `NAME`, `NAME xN`, and `if <expr> then NAME [else NAME]` (the `<expr>`
-is the same `done_if` grammar). The list repeats from the top until `done_if` or `abort_if` fires.
+An entry is tiny: a bare `NAME`, or `{ step: NAME, times: N }`, or `{ step: NAME, until: <expr>,
+max: N }` (the `<expr>` is the same `done_if` grammar, checked after each dispatch). Both bounds are
+mandatory. There is no `if:` — a lap dispatches every entry, in order, and an `until:` repeat that
+converges early *falls through* to the next one, which is how the step-back above stays conditional.
+The list repeats from the top until `done_if` or `abort_if` fires.
 
 **Why per-step *agents* is the headline, not a bonus.** The clearest finding in the reflection
 literature is that an agent reflecting on its own reasoning tends to *reinforce* the flaw rather than
@@ -457,7 +460,8 @@ context every session and carries state in git + memory (both agent-agnostic), s
 sessions **costs nothing** — there is no conversation to hand over.
 
 **Plus cost.** Most sessions in a long run are grunt work — run them on a cheap model/agent, and spend
-the strong one only on the step-back. `worker x4` on a cheap worker, `reconsider` on the expensive one.
+the strong one only on the step-back. The repeated `worker` on a cheap agent, `reconsider` on the
+expensive one.
 
 The `stalled` builtin (a library judge over the verdict history) is what triggers the step-back; a
 `skip_judges: true` step **stages** its work rather than merging it, and the next judged step gates the

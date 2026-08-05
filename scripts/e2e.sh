@@ -247,11 +247,11 @@ sec "0. build"
 #   the new step/sequence model → an_unknown_step_in_the_sequence_is_a_startup_error ·
 #                                 a_sequence_of_only_skip_judges_is_refused_at_startup ·
 #                                 a_skip_judges_span_is_gated_and_merged_by_the_next_judged_step ·
-#                                 done_if_all_goals_ignores_an_if_condition_judge
+#                                 done_if_all_goals_ignores_an_until_condition_judge
 #
 # What REMAINS in this file is what cli.rs cannot or does not drive: live loops steered over
 # the bus, detached runs, spawn, the watchdog, git merge/conflict/recovery paths, the HTTP API,
-# a real pty TUI, the browser, and the observable end-to-end shape of the sequence grammar.
+# a real pty TUI, the browser, and the observable end-to-end shape of the sequence entries.
 sec "5. steering a LIVE loop over the bus  (inject · note · pause/resume · budget · stop)"
 
 # a queued command with no loop running is accepted but warns
@@ -1502,7 +1502,7 @@ is "…with the reason that send stop gave" "$(finish_reason "$SN")" "stopped vi
 # ═══════════════════════════════════════════════════════════════════════════
 sec "9k. the sequence/step model, observed end-to-end (§5.4 · §5.7 · §4.1)"
 
-# ── `worker x4` — a repeat runs the step four times before the sequence wraps ────────────
+# ── `times: 4` — a repeat runs the step four times before the sequence wraps ─────────────
 RX="$(mkproj repeatx)"; : > "$RX/NO_WORK"
 cat > "$RX/agg/agg.yaml" <<'EOF'
 project: repeatx
@@ -1510,28 +1510,33 @@ defaults: { model: fake }
 steps: { worker: {} }
 sequence:
   steps:
-    - worker x4
+    - { step: worker, times: 4 }
   done_if: "worked"
 summary: { enabled: false }
 hooks:
   on_session_start: ["sh bin/rec INJECT"]
 EOF
 agg_do "$RX" run --max-sessions 4 > "$RX/run.log" 2>&1
-# NB: the backticks below MUST be escaped. Unescaped, bash runs `worker x4` as a command
+# NB: the backticks below MUST be escaped. Unescaped, bash runs the quoted YAML as a command
 # substitution while expanding this line's args — that clobbers $? (to 127, "command not found")
 # BEFORE the "$?" arg is read, so the assertion would test the wrong exit code entirely.
-is  "a \`worker x4\` repeat runs to the session cap (exit 4, DoD never met)" "$?" "4"
+is  "a \`times: 4\` repeat runs to the session cap (exit 4, DoD never met)" "$?" "4"
 RUNS=$(grep -c 'RUN=run' "$RX/trace.txt" 2>/dev/null || echo 0)
 [ "$RUNS" -eq 4 ] && ok "…dispatching the worker step exactly 4 times" \
-                  || bad "\`worker x4\` ran the step $RUNS times, expected 4"
+                  || bad "\`times: 4\` ran the step $RUNS times, expected 4"
 
-# ── `if <cond> then <step>` — the branch fires its step only when the condition is met ────
-# `flip` is a run-set-only control judge (named ONLY in the if-condition): met once .flip is
+# ── `until:` + `max:` — a repeat stops early and FALLS THROUGH to the next entry ──────────
+# This is the successor of the retired `if <cond> then <step>` branch: there is no `if:` any more
+# (§14.14), so "recovery only when the worker did not get there" is spelled as an `until:`-bounded
+# repeat whose FALL-THROUGH is the recovery step.
+# `flip` is a run-set-only control judge (named ONLY in the `until:` condition): met once .flip is
 # COMMITTED, which the FIRST worker session does (uncommitted work is NoChanges and the gate would
-# restore flip to not-met, so the branch would never fire). So session 1 = worker; session 2 = the
-# branch target `reconsider` (skip_judges), which STAGES. A per-step override proves reconsider ran:
-# it names a distinct `prompt:` that lands in that worker's prompt additively (§5.6). We assert
-# against prompts.txt (which accumulates every prompt) so the check is independent of session order.
+# restore flip to not-met, so the repeat would run to `max` instead). `until:` is evaluated only
+# AFTER a dispatch, so session 1 = worker; at session 2 `flip` holds, the entry is done well short
+# of `max: 8`, and the walk advances to `reconsider` (skip_judges), which STAGES. A per-step override
+# proves reconsider ran: it names a distinct `prompt:` that lands in that worker's prompt additively
+# (§5.6). We assert against prompts.txt (which accumulates every prompt) so the check is independent
+# of session order.
 BR="$(mkproj branch)"
 cat > "$BR/agg/judges/flip.sh" <<'EOF'
 #!/bin/sh
@@ -1556,15 +1561,15 @@ steps:
   reconsider: { skip_judges: true, prompt: "RECONSIDER_MARKER_QRS" }
 sequence:
   steps:
-    - worker
-    - if flip then reconsider
+    - { step: worker, until: flip, max: 8 }
+    - reconsider
   done_if: "worked"
 summary: { enabled: false }
 EOF
 echo base > "$BR/tracked.txt"; gitbase "$BR"
 agg_do "$BR" run --max-sessions 3 > "$BR/run.log" 2>&1
-has "an `if <cond> then <step>` fires its target once the condition holds" "$BR/run.log" "(skip_judges) — nothing merged yet"
-has "…and the branch target's per-step prompt reaches that worker"         "$BR/prompts.txt" "RECONSIDER_MARKER_QRS"
+has "an \`until:\` repeat ends early and falls through to the next entry" "$BR/run.log" "(skip_judges) — nothing merged yet"
+has "…and the fall-through step's per-step prompt reaches that worker"    "$BR/prompts.txt" "RECONSIDER_MARKER_QRS"
 
 # ── a per-step AGENT override is honoured (the whole point: perspective diversity, §3) ────
 # `build` overrides the worker agent to `codex`; the loop must launch THAT agent for that step. We
@@ -1619,7 +1624,7 @@ summary: { enabled: false }
 budget: { total: 5 }
 EOF
 agg_do "$DK" run --max-sessions 1 > "$DK/run.log" 2>&1
-# escaped backticks (see the `worker x4` note above): an unescaped `budget:` would run as a command
+# escaped backticks (see the `times: 4` note above): an unescaped `budget:` would run as a command
 # substitution and clobber $? to 127 before the exit code is asserted.
 is  "a stray top-level \`budget:\` (retired — ceilings live under sequence.limits) is refused, not ignored" "$?" "1"
 has "…naming the unknown field"                                                          "$DK/run.log" "unknown field \`budget\`"
