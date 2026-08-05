@@ -318,7 +318,10 @@ impl Engine {
         self.judges
             .iter()
             .map(|g| {
-                judge::run(&g.kind, &g.name, cwd, ruler, judge_model, timeout, session, step, isolation, &src, None)
+                // `g.timeout` is the `judges:` block's per-judge override; `timeout` is the
+                // run-level `judge.timeout`. Without this the override would parse and do nothing.
+                let secs = g.timeout.unwrap_or(timeout);
+                judge::run(&g.kind, &g.name, cwd, ruler, judge_model, secs, session, step, isolation, &src, None)
             })
             .collect()
     }

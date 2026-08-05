@@ -129,8 +129,8 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
             kind,
             invariant: cfg.sequence.invariants.iter().any(|i| i == name),
             in_dod: dod.iter().any(|d| d == name),
-            // no per-judge `timeout:` key in YAML — the run-level `judge.timeout` covers every one.
-            timeout: None,
+            // the `judges:` block's only key; absent ⇒ the run-level `judge.timeout` (300s).
+            timeout: cfg.judges.get(name).and_then(|j| j.timeout),
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,

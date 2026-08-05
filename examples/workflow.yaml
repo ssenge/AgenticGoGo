@@ -1,0 +1,376 @@
+# SAMPLE — the YAML path.
+#
+# ✅ THIS LOADS. `tests/samples.rs::the_yaml_sample_loads` parses this exact file through
+# `AggConfig::load` — the same call `agg run` makes — and asserts the steps, judges, limits, walk
+# and regression policy below. Every struct in `core::config` is `deny_unknown_fields`, so a key
+# that stopped existing fails that test rather than being silently ignored. It is not meant to be
+# RUN as-is (the judge files it names are illustrative); it is meant to be COPIED from.
+#
+# REVISION 6 (2026-08-05): loaded for the first time against the shipped schema. Two changes, both
+# annotated where they happen — the regression policy is `sequence.gate_regressions: <bool>`, not a
+# top-level `on_regression:`, and the stale Rust snippet in the header below was corrected.
+#
+# REVISION 5 (2026-08-04). Same workflow as examples/workflow.rs, and the honest gap between
+# them. Read the two side by side; where they differ, the difference is the point.
+#
+# ⛔ REV 5 = THE OWNER SIMPLIFICATION (2026-08-04, RUST_API §14.14): per-entry `if:` and per-judge
+# `gate:`/`when:` are CUT from YAML. "Only simple loops, all judges run after every step, then
+# gating — everything more complex is the Rust API." The walk is a plain dispatch loop; `until:` +
+# `max:`/`times:` and per-judge `timeout:` survive; the word "gate" now means ONLY `agg.gate()`.
+#
+# ═══ WHAT THIS FILE IS, EXACTLY (HANDOFF §4c, D1) ═════════════════════════════════════════════
+# THIS FILE IS THE YAML PATH'S CONFIGURATION, AND NOTHING ELSE. **A RUST DRIVER NEVER READS IT.**
+#
+# The two paths are INDEPENDENT. The YAML path reads `agg.yaml`. The Rust path configures in Rust:
+#
+#     let agg = Agg::open(".")?
+#         .limits(Limits { tokens: Some(40_000_000), cost: None,
+#                          sessions: Some(400), wall_hours: Some(12.0) })
+#         .on_regression(OnRegression::Annotate);
+#
+# (Corrected in rev 6, two ways. There is NO `.abort_if()` on the Rust path — a driver has judges
+# and `if`, and writing the same logic twice, once in Rust and once in a mini-language, is what that
+# path exists to delete; the ceilings are `.limits(..)` plus an explicit `agg.check_limits()?`. And
+# `Limits` has FOUR fields: `wall_hours` was added for exactly this, so a driver has somewhere to
+# put it. That field is shared with YAML — `limits: { wall_hours: 12 }` is legal here too — and it
+# COEXISTS with the `wall_hours` CONDITION term used in this file's `abort_if:` below, because
+# `wall_hours >= 8 OR stalled` is not expressible as a limit. The Rust builder fills the very struct
+# this YAML deserializes into: one struct, two constructors.)
+#
+# So every knob below — `limits:`, `gate_regressions:`, `abort_if:`, `notify:`, `defaults:` — has a
+# Rust-side twin that is a METHOD, not a file. If you write Rust, everything is Rust. Drop an
+# `agg.yaml` next to a Rust driver and it is IGNORED — not layered, not merged, not consulted.
+#
+# WHY SO ABSOLUTE: a half-merge is the split-brain this design spent months avoiding. If `.limits()`
+# were overlaid on `limits:`, "what is my token ceiling" would have two answers and a precedence
+# rule to remember, get wrong, and debug at 3am. One path, one source of truth.
+#
+# THE ONLY THINGS THE TWO PATHS SHARE ARE **FILES, NOT CONFIG**: `agg/judges/*.sh` and `*.md`,
+# `agg/AGG.md`, `agg/state/`. Those are artefacts read off disk by both. None of them is config.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+#
+# THE DIVISION (HANDOFF §4b.6, tightened by the rev-5 cut):
+#   YAML = LINEAR FLOW.  A step list, bounded repetition, a Definition of Done. The 80% case.
+#   RUST = REAL CONTROL FLOW.  Branching on a value, nesting, knowing WHY something stopped.
+#
+# They are deliberately NOT equivalent. Chasing equivalence is what produced the node model
+# (Stage/Sequence/Action/Loop/guard/if_else) that mirrored Rust's own control flow as data —
+# rejected. YAML gets a SHAPE, not a language.
+#
+# ═══ THE PAYOFF ═══════════════════════════════════════════════════════════════════════════════
+# `step` / `times` / `until` + `max` / `if` are SERDE FIELDS, NOT A GRAMMAR. So
+# `src/core/sequence.rs` — ~14K of hand-written lexer + parser for `worker x3` and
+# `if stalled then reconsider` — is DELETED, not rewritten. What replaces it is serde derives over
+# a Vec of small structs, plus a ~30-line linear walk that calls the SAME `agg.step()` primitive
+# the Rust driver calls.  ONE EXECUTION PRIMITIVE, TWO DRIVERS OVER IT.
+#
+# And the steps below deserialize into the SAME shape the Rust builder produces —
+# `Step::template().create("fix").model(..)` and `fix: { model: .. }` land on identical values.
+# (The constructor is `create`, not `named`: a template is INSTANTIATED, not renamed, and it
+# survives being created from. Rev 6 corrected the spelling.) That is why the two paths cannot
+# drift: there is no second definition of what a step is.
+# ══════════════════════════════════════════════════════════════════════════════════════════════
+#
+# `stop::` (the whitelisted condition evaluator, `src/core/stop/mod.rs`) STAYS — `done_if`,
+# `abort_if` and `notify_if` need it regardless, so `until:` costs nothing extra. Since rev 5 those
+# four are the ONLY expression sites in YAML: `if:` and per-judge `gate:`/`when:` are gone.
+
+project: rate-limiting
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# defaults — YAML has exactly ONE of these. Rust has as many templates as the workflow has kinds
+# of step (`reading`, `sandboxed`, …). See gap (8): this is the single biggest thing YAML loses.
+# (The Rust sample's read-only family was called `thinking` until D6; it was named for the naked-LLM
+# ideation step that D6 cut. It is `reading` now, and every agent is a harness.)
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# ⚠ `isolation: none` IS THE DEFAULT, HERE AND IN agg. Under `none` NOTHING below binds: not the
+# `readonly:`/`writable:` lists, not the `agg/judges/` deny, not even the `agg/private/` carve-out.
+# The worker has the whole filesystem. Only the three steps that say `isolation: sandbox` are
+# confined at all. Never read a `readonly:` line in this file as a protection without checking the
+# tier of the step it sits on.
+defaults:
+  agent: claude                    # `claude` · `codex` · `copilot`. ONE closed set — there is no
+                                   # `harness/` or `llm/` prefix any more. Revision 3 of this file
+                                   # had `harness/claude`, which only made sense while a second
+                                   # family (naked LLMs) existed. D6 cut that family: without tools
+                                   # a model cannot open a file or explore a repo, so it only ever
+                                   # covered fixed-input steps — not worth an HTTP client plus an
+                                   # async runtime in a codebase that has neither. Every agent is a
+                                   # coding harness now, so the prefix distinguishes nothing.
+  model: claude-opus-4-8[1m]       # a String, not an enum: new models arrive weekly
+  effort: high
+  isolation: none
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# steps — a bag of overrides per name, keyed by name. Same `Step` struct as the Rust builder.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+steps:
+  survey:
+    effort: high                   # nothing else to override: `agent: claude` from `defaults:` is
+                                   # already right. Revision 3 set `agent: llm/claude` here on the
+                                   # argument that ideation needs no tools — D6 retired that whole
+                                   # option, and the argument was weaker than it looked: a survey
+                                   # worth 85/100 cites sources and reads what the repo already
+                                   # does, which is tool work.
+    prompt: >
+      Survey rate-limiting approaches (token bucket, sliding window, GCRA).
+      Cite sources. Write the comparison to agg/state/wiki/survey.md.
+
+  spec:
+    agent: codex                   # a different VENDOR reviews the survey — the strongest
+    model: ""                      # perspective diversity agg offers is a different model family.
+                                   # Codex must not be handed a model name: on a ChatGPT account it
+                                   # is a hard 400, and which models are legal depends on how the
+                                   # user AUTHENTICATED, which agg cannot know (backend/codex/mod.rs
+                                   # :37-46). `defaults:` above would otherwise inject one.
+                                   #
+                                   # ⚠ THE SENTINEL IS `""`, NOT `null`, and revision 2 of this file
+                                   # had it wrong. `StepBody.model` is `Option<String>`, so YAML
+                                   # `null` deserializes to exactly what OMITTING the key gives —
+                                   # and `resolve_step` merges with
+                                   # `body.model.or_else(|| defaults.model)` (config/methods.rs:37),
+                                   # so `null` inherits the default instead of clearing it. The
+                                   # empty string is the opt-out the tree already honours:
+                                   # `if !spec.model.is_empty() { --model }` (codex/mod.rs:152-156),
+                                   # and `effort: ""` works the same way. Clearing a default needs a
+                                   # value that survives `Option`, not an absence.
+    prompt: >
+      Turn agg/state/wiki/survey.md into an implementable spec at agg/state/wiki/spec.md.
+      Assume the survey is incomplete; say what it missed.
+
+  # The next three steps touch real source. Each one repeats `isolation` + `readonly` because the
+  # single `defaults:` block is already spent on the harness/model/effort family. In Rust these are
+  # three `.create()` calls off one `sandboxed` template. See gap (8).
+  implement:
+    isolation: sandbox             # under THIS tier: `agg/private/` is carved out with no knob
+                                   # (SHIPPED at cc30d43, isolation/mod.rs:151) and `agg/judges/`
+                                   # is denied by default (DESIGN ONLY — HANDOFF §4b.5, not code)
+    readonly: [tests/, agg/judges/]
+    writable: [tests/]             # this step SHOULD add tests, so it re-grants exactly that one
+                                   # deny. `agg/judges/` stays denied.
+    prompt: "Implement agg/state/wiki/spec.md. Add tests alongside."
+
+  fix:
+    model: claude-sonnet-5         # a cheaper model for the grind
+    isolation: sandbox
+    readonly: [tests/, agg/judges/]  # NOT re-granted: the obvious way to make a failing test pass
+                                     # is to delete it. Enforced by the kernel, not by the prompt.
+    prompt: "Make the failing tests and lints pass. Do not delete tests."
+
+  harden:
+    isolation: sandbox
+    readonly: [tests/, agg/judges/]
+    prompt: >
+      Review the rate limiter for abuse: clock skew, distributed counters, burst handling.
+      Fix what you find.
+
+  document:
+    prompt: "Document the rate limiter in docs/ and write a release note."
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# judges — resolved by NAME from agg/judges/<name>.{sh,md}; the extension decides the kind
+# (`.sh` = script, `.md` = rubric). Only judges needing NON-DEFAULT config appear here; the other
+# five (survey_good, spec_sound, builds, lint_clean, tests_pass) need none and are never listed.
+#
+# ⛔ REV 5: THE JUDGE-LEVEL `gate:` IS CUT (owner, 2026-08-04 — RUST_API §14.14), and with it the
+# old "two meanings of gate" hazard: **"gate" now means ONLY `agg.gate()`** (the Rust git control).
+# ALL run-set judges run after every judged step — which is what the shipped engine already does —
+# and the per-step keep/rollback gate follows. The "final exam" pattern (cheap judges stop the
+# expensive one running) is exclusively a Rust-path feature: `agg.judge(&tests).met() &&
+# agg.judge(&load).met()` short-circuits, so `&&` IS the gating.
+#
+# THE ACCEPTED COST, VISIBLE RIGHT HERE: `load_ok` is ~40 min of synthetic load and now runs after
+# EVERY judged step — across ~20 cycles that is ~40 HOURS where the Rust sample spends ~40 minutes.
+# The honest YAML answers: make the load judge cheap (a smoke variant), run the full one rarely by
+# hand, or take the Rust path. That boundary is the point of the ruling.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+judges:
+  load_ok:
+    timeout: 2700                    # the run-level 300s default would kill it
+
+  p99_ok:
+    timeout: 60                      # a Rust closure in the Rust sample; here a script. See gap (1).
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# sequence — a plain LIST walked top to bottom, wrapping forever until `done_if` or a ceiling.
+# No grammar: `step`, `times`, `until` + `max` are serde fields on one small struct.
+#   step:   the name to dispatch
+#   until:  repeat until the condition holds …
+#   max:    … but never more than this many times
+#   times:  fixed-count repetition, the sibling of until+max — unused in this workflow
+#
+# CONDITIONS ARE UNQUOTED. YAML indicator characters only matter as the FIRST character of a plain
+# scalar, and no expression in this grammar can start with one — `(` is not an indicator, and there
+# is no prefix `>`. ONE GOTCHA: write `NOT x`, never the symbolic `!x`, because a leading `!` is a
+# YAML tag and the parse fails before agg sees it — so what `agg doctor` reports for `!x` is a
+# config-LOAD error, not an expression error. What it genuinely validates is every well-formed
+# expression: it calls `assemble()`, so a typo'd judge name IS a hard startup error there.
+#
+# ⛔ REV 5: the NO-DISPATCH-LAP REFUSAL (`sequence.rs:155`) is MOOT, not ported — with `if:` cut,
+# every lap dispatches unless the list is empty, and the empty case is the §12.6/OD-5 rule. The
+# guard dies with the parser. (Rev 4 of this file said "port this"; the owner simplification
+# deleted the condition that made it reachable.)
+#
+# ⛔ REV 5: per-entry `if:` is CUT. A lap now runs EVERY entry in order — survey converges (until:),
+# then spec, implement, fix-until-green, harden, document — then the list wraps, until `done_if`
+# or a ceiling ends the run. What `if:` used to
+# buy here (skip `spec` while the survey is thin, skip `document` until perf is proven) is exactly
+# the conditional dispatch that now belongs to the Rust path. The cost is a wasted-ish step early
+# on (documenting before perf is green); the win is a grammar with no conditionals, no fall-through
+# semantics, and no all-false-lap edge case.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+sequence:
+  steps:
+    - { step: survey,    until: survey_good.value >= 85, max: 3 }
+    - { step: spec }
+    - { step: implement }
+    - { step: fix,       until: tests_pass AND lint_clean, max: 8 }
+    - { step: harden }
+    - { step: document }
+
+  # A DEFINITION OF DONE. YAML-ONLY: on the Rust path the driver decides it is done by RETURNING,
+  # so there is nothing to declare. Here the walk would otherwise never stop.
+  done_if:  tests_pass AND lint_clean AND load_ok AND p99_ok
+
+  # Also YAML-only in spelling, though the effect is shared: on the Rust path these surface as
+  # `Err(Fatal::Ended)` and unwind through every `?`.
+  abort_if: over_budget OR wall_hours >= 12 OR any_regressed(invariants)
+
+  limits:     { tokens: 40000000, sessions: 400 }
+  invariants: [builds]              # scopes `any_regressed(invariants)` to the DoD-set subset
+
+  notify_if: stalled                # non-terminal: the loop KEEPS RUNNING. See gap (6).
+  notify:
+    cooldown_sessions: 5            # debounce; defaults to 3, and an explicit 0 means every cycle
+    cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]   # ALWAYS bound it: delivery is
+                                                                    # foreground and untimed
+
+  # WHAT A REGRESSION MEANS. `false` = annotate: always merge, and tell the next session what
+  # regressed plus the commit SHA to revert to; the AGENT decides what to do about it. `true` (the
+  # YAML default) discards the session.
+  #
+  # ⚠ THE KEY IS `sequence.gate_regressions`, A BOOL — not a top-level `on_regression: annotate`.
+  # Revisions 1-5 of this file wrote the latter. The `on_regression: annotate|rollback` SPELLING is
+  # a decided rename that is NOT shipped (BUILD.md §6 item 4), and adding it as a second spelling
+  # of one knob would be exactly the split-brain this file's header argues against. The RUST path
+  # already has the nice name — `.on_regression(OnRegression::Annotate)` — because it is a new
+  # surface with no existing key to collide with.
+  gate_regressions: false
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# THE HONEST GAP vs examples/workflow.rs — read this before choosing YAML
+#
+# (1) NO NATIVE JUDGES.  `p99_ok` is a Rust closure in the Rust sample — it reads one field out of
+#     agg/state/bench.json and returns a Verdict with the number attached. Here it must become
+#     agg/judges/p99_ok.sh parsing the same JSON with jq.
+#     CONSEQUENCE for this workflow: equivalent in effect, but a fork per judge per step, and the
+#     rationale string ("p99 4.2ms") is now the script's stdout contract instead of a compiler-
+#     checked `format!`. Cheap to accept here. It stops being cheap when the check needs state the
+#     shell cannot hold.
+#
+# (2) NO BRANCHING ON *WHY* SOMETHING STOPPED.  The Rust sample distinguishes "the survey loop ran
+#     3 times and never got good" from "it got good on try 2", and asks the human for prior art
+#     only in the first case. Here `until: … max: 3` runs and the lap simply moves on — and since
+#     rev 5 cut `if:`, the next entry cannot even re-test the condition: there is NO conditional
+#     dispatch in YAML at all. An entry cannot be skipped; the lap runs everything until `done_if`.
+#     CONSEQUENCE: the same steps run in the same order — but the "3 surveys and still thin" message
+#     has nowhere to come from, so the human never learns the loop gave up on discovery rather than
+#     skipping it. Anything that needs the reason, not just the result, is a Rust case.
+#
+# (3) NO NESTING.  Every entry is one step at the top level. The Rust sample has an 8-iteration
+#     grind loop INSIDE a 20-cycle outer loop, each with its own exit condition.
+#     CONSEQUENCE here: none visible, because `until: max: 8` on `fix` happens to be exactly the
+#     inner loop, and the outer cycle is the walk's own wrap-around. That coincidence is why this
+#     workflow fits YAML at all. Add one more level — "retry the whole build phase twice before
+#     reconsidering the spec" — and it stops fitting.
+#
+# (4) NO ARBITRARY SIDE EFFECTS.  The Rust sample ends with
+#     `std::fs::write("agg/state/RELEASE_NOTES.md", agg.summary())`.
+#     CONSEQUENCE: here that must become part of the `document` step's prompt (the worker writes it,
+#     and may not) or an `on_session_end` hook. The deterministic thing became a probabilistic one.
+#
+# (5) EXPRESSIONS, NOT CLOSURES.  Every `until:` / `done_if:` / `abort_if:` above is the whitelisted
+#     `stop::` grammar: judge names, `.value` / `.max`, the aggregates, run-level scalars,
+#     AND/OR/NOT. No arithmetic across judges, no reading the diff, no calling out.
+#     CONSEQUENCE: nothing in THIS workflow needs more. And the trade runs the other way too —
+#     an expression is startup-VALIDATED by `agg doctor` and DISPLAYABLE on the dashboard, and a
+#     Rust closure is neither. This gap is not purely a loss.
+#
+# (6) ONE NOTIFICATION LEVEL, NOT THREE.  The answer is explicit:
+#       info   NO YAML SPELLING. There is no field that emits a mid-flow message. Steps and
+#              verdicts still land in the log automatically; commentary does not.
+#       ask    REACHED, exactly once, as `notify_if:` + `notify:`. That pair IS the `ask` contract —
+#              a message goes out, the loop continues regardless.
+#       block  NOT REACHABLE, and that is deliberate. `block` is USER-driven by construction: only
+#              the driver author may halt the run, and in YAML there is no driver author separate
+#              from the config the worker can see. The worker can never block the run.
+#     CONSEQUENCE for this workflow, and it is the sharpest one on this list: the Rust sample calls
+#     `agg.block("rate limiter is green and ready to tag. Approve the release?")` before it ships.
+#     This file CANNOT wait for that approval. It ships unattended — or you end `done_if` one step
+#     short of shipping and tag by hand. Additionally, the Rust sample's three `ask` sites carry
+#     three DIFFERENT messages (survey thin / build did not converge / performance gate failed);
+#     `notify_if: stalled` fires one templated `{{reason}}` for all of them.
+#
+# (7) NO CONTROL OVER *WHEN* THE KEEP-OR-ROLLBACK DECISION HAPPENS.  This is `agg.gate()`
+#     (HANDOFF §4c, D2). Since rev 5 there is no naming hazard left: the judge-level `gate:` field
+#     was cut (owner, 2026-08-04), so "gate" means exactly this — whether WORK LANDS.
+#       RUST:  `agg.step()` ALWAYS STAGES — every session is committed on its own branch and the
+#              span accumulates, nothing merges. The driver then calls `agg.gate()?` at a moment it
+#              chooses, and agg decides keep-or-rollback over ALL verdicts consulted since the last
+#              gate, applying `on_regression`. The driver says WHEN; the policy says WHAT.
+#       YAML:  the walk gates after EVERY judged step, automatically. There is no field for it and
+#              no way to widen or narrow the span. (This file's span is therefore always one step.)
+#     WHICH IS BETTER FOR WHICH CASE — the honest answer is that YAML's automatic gate is right most
+#     of the time:
+#       · AUTOMATIC (YAML) WINS when each step is independently good-or-bad — a build-test-fix loop
+#         like this one. Gating per step gives the tightest possible blast radius: a bad `fix`
+#         session is discarded immediately and never contaminates the next. It also needs no
+#         discipline: there is no line to forget.
+#       · EXPLICIT (RUST) WINS when a UNIT OF WORK SPANS SEVERAL STEPS AND IS ONLY JUDGEABLE AT THE
+#         END — the migration case. `implement` alone leaves the tree red BY DESIGN and `fix` makes
+#         it green; judged per step, `implement` looks like a regression and a `rollback` policy
+#         throws away the half that was correct, then the loop redoes it and livelocks. One
+#         `agg.gate()` after `fix` judges the pair as one thing, which is what it is.
+#         (This is the same asymmetry that made `on_regression: annotate` the default: a regression
+#         is sometimes the necessary local minimum. YAML's answer is to never roll back; Rust's is
+#         to widen what "the change" means.)
+#     CONSEQUENCE for THIS workflow: none — every step here is independently judgeable, which is
+#     part of why it fits YAML. Cost of the Rust version: an ungated span is a NO-OP, so a driver
+#     that forgets `agg.gate()` advances base never. agg does not guess — it neither auto-merges
+#     (it must not make a call it was not given) nor auto-rolls-back (discarding an overnight run
+#     over a late regression is far worse than keeping it); it prints the branch and the one
+#     `git merge` command that lands it. YAML cannot have that bug at all.
+#
+# (8) STEP TEMPLATES — ONE `defaults:` BLOCK IS NOT ENOUGH.  Rust has two families here, `reading`
+#     and `sandboxed`, and could have as many as the workflow has kinds of step. Merge rules there:
+#     scalars OVERRIDE, `readonly` ACCUMULATES, `writable` SUBTRACTS — and the two lists must spell
+#     a directory IDENTICALLY (trailing slash included), because subtraction compares paths.
+#     CONSEQUENCE, visible above: `defaults:` is spent on the harness family, so `survey` must
+#     re-state `agent` and `effort` to escape it, and `implement`/`fix`/`harden` each REPEAT
+#     `isolation: sandbox` and `readonly: [tests/, agg/judges/]` — three copies of one protection.
+#     What is lost is not the typing, it is the ACCUMULATION: in Rust a derived step cannot silently
+#     drop a `readonly` its template set, so a fourth sandboxed step is safe by construction. Here,
+#     a fourth sandboxed step that forgets the `readonly:` line can delete tests, and nothing warns.
+#     `defaults:` overrides; it does not accumulate. If ONE thing on this list should be fixed in
+#     the YAML schema, it is this one — note that (7) explicitly is NOT: automatic gating is the
+#     right default, not a missing feature.
+#     AND THE SECOND-ORDER COST, visible at `spec:` above: because there is exactly one `defaults:`,
+#     every step that does not belong to its family has to ESCAPE it, and escaping needs an opt-out
+#     value (`model: ""`) rather than simply not opting in. Rust has no such problem — `Step::new`
+#     starts from nothing and `Step::template()` families are opted INTO — so this whole class of
+#     bug (clear-a-default) does not exist on that path. That is a real difference, not a spelling.
+#
+# ── WHAT YAML KEEPS, which is most of it ─────────────────────────────────────────────────────
+# Every step option (agent, model, effort, isolation, readonly, writable, prompt) · script AND
+# rubric judges · per-judge `timeout:` · repetition with a bound (`until:`+`max:`/`times:`) ·
+# ceilings · invariants · `done_if` / `abort_if` · `on_regression` · `notify_if` / `notify` · and
+# per-step keep-or-rollback with no line to forget. For a linear build-test-fix loop — which is most projects, and very nearly this one —
+# this file is the better choice: it is shorter, it is validated at startup rather than at runtime,
+# the dashboard can render its conditions, and it needs no Rust toolchain. Reach for the Rust driver
+# when you hit (2), (3), (4), (6) or (7) — not before.
+#
+# AND THE THING THAT IS NOT A GAP AT ALL: this file is a COMPLETE description of its run. There is
+# no Rust to read alongside it, and equally, a Rust driver's `.limits()` / `.on_regression()` are a
+# complete description of ITS run with no YAML to read alongside. Pick one path; you never have to
+# hold two configuration systems in your head at once. That is D1, and it is the point.
+# ═════════════════════════════════════════════════════════════════════════════════════════════

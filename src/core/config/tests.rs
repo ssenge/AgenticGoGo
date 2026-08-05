@@ -471,3 +471,21 @@ fn env_overrides_land_on_the_new_shape() {
     assert_eq!(cfg.sequence.limits.cost, Some(12.5));
     assert_eq!(cfg.sequence.limits.tokens, Some(700_000));
 }
+
+/// PER-JUDGE `timeout:` — the plural `judges:` block. Absent ⇒ the run-level `judge.timeout`, which
+/// is what every judge used before this key existed, so an old config parses unchanged.
+///
+/// `deny_unknown_fields` matters more here than almost anywhere else: `judges:` and `judge:` differ
+/// by one letter and mean completely different things (per-judge overrides vs. THE RULER), so a
+/// mistyped block must name the key rather than be silently ignored.
+#[test]
+fn a_per_judge_timeout_overrides_the_run_level_one() {
+    let cfg = parse(&format!("{MINIMAL}judges:\n  load_ok: {{ timeout: 2700 }}\n")).unwrap();
+    assert_eq!(cfg.judges["load_ok"].timeout, Some(2700));
+    assert_eq!(cfg.judge.timeout, 300, "the run-level default is untouched");
+
+    assert!(parse(MINIMAL).unwrap().judges.is_empty(), "absent ⇒ empty, and every judge takes the run default");
+
+    let e = parse(&format!("{MINIMAL}judges:\n  load_ok: {{ gate: tests_pass }}\n")).unwrap_err().to_string();
+    assert!(e.contains("gate"), "the cut judge-level `gate:` must be NAMED, not ignored: {e}");
+}

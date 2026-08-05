@@ -97,6 +97,29 @@ block precisely because it is immutable: a moving grader makes verdicts incompar
 If the ruler is rate-limited or unreachable, the run **parks in backoff and merges nothing** — it
 never fails over to another agent (that would move the ruler) and never fabricates a verdict.
 
+## `judges` — per-judge overrides
+
+Plural `judges:` is not the ruler. It is a map of judge NAME → overrides, with **exactly one key**:
+
+| key | default | notes |
+|---|---|---|
+| `timeout` | `judge.timeout` (300) | seconds, for this judge alone. |
+
+```yaml
+judges:
+  load_ok:   { timeout: 2700 }   # 45 minutes of synthetic load
+  e2e:       { timeout: 1200 }
+```
+
+Only judges that need it appear here; everything else uses the run-level default and is never
+listed. This is the one per-judge knob that survived the judge-level `gate:`/`when:` cut, and it
+survived because it is not flow and not gating: a judge slower than 300s simply **dies** without it.
+
+⚠ It does not make an expensive judge cheap — in YAML every run-set judge runs after every judged
+step, so a 45-minute judge costs 45 minutes per step. Short-circuiting an expensive judge behind
+cheap ones is a Rust-path feature (`agg.judge(&tests).met() && agg.judge(&load).met()`); see
+`examples/workflow.yaml`, which spells out that trade in full.
+
 ## `steps` — the palette
 
 Each NAME maps to a body of overrides. **The complete legal key list** (anything else is a hard error):
