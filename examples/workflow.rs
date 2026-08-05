@@ -36,12 +36,23 @@
 
 use agg::prelude::*;
 
+/// `main` is the ENTRY POINT ONLY: it reads the two knobs a run needs from outside (where, and how
+/// many cycles), opens the project, and hands off. Everything that IS the sample — steps, judges,
+/// the flow — lives in [`drive`], so a harness can drive this exact driver against a scratch project
+/// (`scripts/samples_real.sh`) without a fork of it existing to drift from this one.
+///
+///   ./workflow                      # cwd, 20 cycles — today's values, unchanged
+///   ./workflow /tmp/proj 2          # argv:  <dir> [cycles]
+///   AGG_SAMPLE_DIR=… AGG_SAMPLE_CYCLES=2 ./workflow      # or env, for a launcher that has no argv
 fn main() -> Result<(), Fatal> {
+    let dir = arg(1, "AGG_SAMPLE_DIR").unwrap_or_else(|| ".".to_string());
+    let cycles = arg(2, "AGG_SAMPLE_CYCLES").and_then(|s| s.parse().ok()).unwrap_or(20);
+
     // NO CONFIG FILE. A Rust driver configures EVERYTHING in Rust; a stray `agg.yaml` is ignored.
     // The two paths are independent — half of the policy in YAML and half in code is the split-brain
     // this design spent months avoiding. What the paths share is FILES, not config: `agg/judges/*`,
     // `agg/AGG.md`, `agg/state/`.
-    let agg = Agg::open(".")?              // no `mut` — see idea 4
+    let agg = Agg::open(dir)?              // no `mut` — see idea 4
         // A BUDGET, NOT A TRIPWIRE. `.limits()` records the ceilings; `agg.check_limits()?` in the
         // flow is what enforces them. Nothing fires on its own — see the call in the cycle below.
         // (`wall_hours` is a `Limits` field on the Rust path; in YAML it is a condition term.)
@@ -52,6 +63,25 @@ fn main() -> Result<(), Fatal> {
         // span. The driver says WHEN to gate; this says WHAT a failure means.
         .on_regression(OnRegression::Annotate);
 
+    drive(&agg, cycles)
+}
+
+/// One positional arg, or an env var, or nothing. The env fallback exists because the process that
+/// launches an unattended run is often a script that already has the values in its environment.
+fn arg(n: usize, var: &str) -> Option<String> {
+    std::env::args().nth(n).or_else(|| std::env::var(var).ok()).filter(|s| !s.is_empty())
+}
+
+/// A model name a RUN may need to pin. The default is the one the narrative names; the override is
+/// how `scripts/samples_real.sh` points a real session at a model that exists on the day it runs,
+/// without editing (and so drifting) the driver. Nothing else about the step changes.
+fn model(default: &str, var: &str) -> String {
+    std::env::var(var).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| default.to_string())
+}
+
+/// THE SAMPLE. `&Agg` (idea 4) and a cycle bound — the two things a driver needs and the only two
+/// things the caller decides. Read from here down as if it were `main`; it was, until the split.
+fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // ⛔ THERE IS NO `.abort_if()` / `.notify_if()` ON THE RUST PATH. They are condition STRINGS
     // over judges, and this file already has judges and `if` — writing the same logic twice, once in
     // Rust and once in a mini-language, is the thing this API exists to delete. Want to stop when a
@@ -117,8 +147,10 @@ fn main() -> Result<(), Fatal> {
                  agg/state/wiki/spec.md. Assume the survey is incomplete; say what it missed.");
 
     let implement = sandboxed.create("implement")
-        .model("claude-opus-4-8[1m]")     // a String: new models arrive weekly; an enum would need
-        .effort(Effort::High)              // an agg release for each one
+        // a String: new models arrive weekly; an enum would need an agg release for each one — and
+        // for the same reason a RUN can pin one (`AGG_SAMPLE_HEAVY_MODEL`), see `model()` above.
+        .model(model("claude-opus-4-8[1m]", "AGG_SAMPLE_HEAVY_MODEL"))
+        .effort(Effort::High)
         // This step SHOULD add tests, so it re-grants that one deny. `agg/judges/` stays denied —
         // which is the payoff of `writable` subtracting rather than replacing.
         .writable(["tests/"])
@@ -128,7 +160,7 @@ fn main() -> Result<(), Fatal> {
     // make a failing test pass is to delete it, and `fix` has no legitimate reason to touch
     // `tests/` — enforced by the kernel, not by the prompt below.
     let fix = sandboxed.create("fix")
-        .model("claude-sonnet-5")          // a cheaper model for the grind
+        .model(model("claude-sonnet-5", "AGG_SAMPLE_GRIND_MODEL"))   // a cheaper model for the grind
         .prompt("Make the failing tests and lints pass. Do not delete tests.");
 
     let harden = sandboxed.create("harden")
@@ -187,10 +219,11 @@ fn main() -> Result<(), Fatal> {
 
     // `pos` is the one thing agg needs from a hand-written loop: it cannot see `for`, so this is
     // how "cycle 7/20" reaches the TUI. Its Drop pops the frame on every exit path.
-    let cycle = agg.pos("cycle", 20);
+    // The bound is DECLARED once (`pos`) and iterated once (`for`) — one number, from the caller.
+    let cycle = agg.pos("cycle", cycles as u64);
 
-    'cycle: for c in 0..20 {
-        cycle.update(c);
+    'cycle: for c in 0..cycles {
+        cycle.update(c as u64);
 
         // THE CEILINGS, ENFORCED — once per cycle, where THIS driver wants them enforced. agg does
         // not stop the run behind your back: `.limits(..)` above is a budget, and this is the check.
