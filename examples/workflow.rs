@@ -133,15 +133,28 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
         .prompt("Survey rate-limiting approaches (token bucket, sliding window, GCRA). \
                  Cite sources. Write the comparison to agg/state/wiki/survey.md.");
 
-    // A different VENDOR reviews the survey. The strongest perspective diversity agg offers is a
-    // different model family, not a different prompt. Not from `reading` — it overrides the agent.
+    // A DIFFERENT REVIEWER looks at the survey — perspective diversity, which agg buys per step and
+    // which a different prompt alone does not give you. Not built from `reading`, because this step
+    // overrides the agent-level knobs that template fixes.
     //
-    // Codex is confined by the SAME OS wrapper as every other agent. agg does not delegate its moat
-    // to an agent's own sandbox — an agent vouching for itself is not a guarantee — so the wrapper
-    // is applied unconditionally and Codex's native `sandbox_mode=workspace-write` rides on top of
-    // it. Two layers, and agg owns the outer one.
+    // ⚠ The STRONGEST form of this is a different VENDOR — `.agent(Agent::Codex)`, one word — and it
+    // is what this step shipped until 2026-08-05. It is written with a different MODEL here so the
+    // sample runs for a reader who has only one agent installed; a run that has both should put the
+    // vendor back. What is being demonstrated either way is that the knob is PER STEP.
+    //
+    // Whichever agent this is, it is confined by the SAME OS wrapper as every other one. agg does not
+    // delegate its moat to an agent's own sandbox — an agent vouching for itself is not a guarantee —
+    // so the wrapper is applied unconditionally.
+    //
+    // ⚠ There is exactly ONE layer, and it is agg's. Kernel sandboxes do not NEST: Seatbelt permits
+    // a second `sandbox_apply` only from a process whose current profile is entirely unrestricted,
+    // so agg's wrapper plus Codex's own `-c sandbox_mode=workspace-write` gives
+    // `sandbox_apply: Operation not permitted` and the worker dies at launch. agg therefore disables
+    // an agent's NATIVE sandbox on every tier — that flag disables the AGENT's confinement, never
+    // agg's, and on the `sandbox` tier the process still runs inside agg's kernel jail. The moat was
+    // never the agent's to hold.
     let spec = Step::new("spec")
-        .agent(Agent::Codex)
+        .model(model("claude-sonnet-5", "AGG_SAMPLE_REVIEW_MODEL"))
         .isolation(Isolation::Sandbox)
         .prompt("Turn agg/state/wiki/survey.md into an implementable spec at \
                  agg/state/wiki/spec.md. Assume the survey is incomplete; say what it missed.");
@@ -202,7 +215,12 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // env — deliberately. A judge that reads the wall clock returns a different verdict on replay,
     // and `--resume` fast-forward would then silently diverge from the run it claims to reproduce.
     let p99 = Judge::native("p99_ok", |c| {
-        let ms = c.read("agg/state/bench.json").ok()
+        // `c.scratch()` — the per-session directory judges may write, SHARED between them. That
+        // sharing is the point here: `load_ok` above measures and writes `bench.json`, this judge
+        // applies the threshold. It cannot be `agg/state/bench.json` any more, because since §2.5 the
+        // project tree is read-only to a judge — a judge able to write the tree it grades can make
+        // the code pass, which is the same hole as letting one declare its own writable set.
+        let ms = std::fs::read_to_string(c.scratch().join("bench.json")).ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v["p99_ms"].as_f64())
             .unwrap_or(f64::MAX);

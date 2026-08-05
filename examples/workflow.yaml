@@ -117,14 +117,22 @@ steps:
       Cite sources. Write the comparison to agg/state/wiki/survey.md.
 
   spec:
-    agent: codex                   # a different VENDOR reviews the survey — the strongest
-    model: ""                      # perspective diversity agg offers is a different model family.
-                                   # Codex must not be handed a model name: on a ChatGPT account it
-                                   # is a hard 400, and which models are legal depends on how the
-                                   # user AUTHENTICATED, which agg cannot know (backend/codex/mod.rs
+    model: "claude-sonnet-5"       # a DIFFERENT REVIEWER looks at the survey — perspective
+                                   # diversity, bought per step.
+                                   #
+                                   # ⚠ THE STRONGEST FORM IS A DIFFERENT VENDOR, and this step shipped
+                                   # as `agent: codex` until 2026-08-05. It is a model override now so
+                                   # the sample runs for a reader with a single agent installed; if
+                                   # you have two, put `agent: codex` back — the point being
+                                   # demonstrated is that the knob is PER STEP either way.
+                                   #
+                                   # ⚠ IF YOU DO: Codex must ALSO get `model: ""`. It must not be
+                                   # handed a model name — on a ChatGPT account that is a hard 400,
+                                   # and which models are legal depends on how the user
+                                   # AUTHENTICATED, which agg cannot know (backend/codex/mod.rs
                                    # :37-46). `defaults:` above would otherwise inject one.
                                    #
-                                   # ⚠ THE SENTINEL IS `""`, NOT `null`, and revision 2 of this file
+                                   # THE SENTINEL IS `""`, NOT `null`, and revision 2 of this file
                                    # had it wrong. `StepBody.model` is `Option<String>`, so YAML
                                    # `null` deserializes to exactly what OMITTING the key gives —
                                    # and `resolve_step` merges with
@@ -171,6 +179,8 @@ steps:
 # judges — resolved by NAME from agg/judges/<name>.{sh,md}; the extension decides the kind
 # (`.sh` = script, `.md` = rubric). Only judges needing NON-DEFAULT config appear here; the other
 # five (survey_good, spec_sound, builds, lint_clean, tests_pass) need none and are never listed.
+# ⚠ "Not listed here" does NOT mean "does not run", and it does not mean "runs" either — what makes a
+# judge run is being named in an expression (see the run-set note above `sequence:`).
 #
 # ⛔ REV 5: THE JUDGE-LEVEL `gate:` IS CUT (owner, 2026-08-04 — RUST_API §14.14), and with it the
 # old "two meanings of gate" hazard: **"gate" now means ONLY `agg.gate()`** (the Rust git control).
@@ -219,10 +229,30 @@ judges:
 # on (documenting before perf is green); the win is a grammar with no conditionals, no fall-through
 # semantics, and no all-false-lap edge case.
 # ─────────────────────────────────────────────────────────────────────────────────────────────
+# ⚠ TWO THINGS ABOUT `until:` THAT ARE EASY TO READ PAST:
+#
+# (a) `until:` IS ALSO WHAT PUTS A JUDGE IN THE RUN-SET. The run-set is
+#     `done_if ∪ abort_if ∪ invariants ∪ every until:` — nothing else. A judge file can sit in
+#     `agg/judges/` forever, parse, resolve, and never run, because no expression names it. That is
+#     not a bug (a judge library is allowed to be larger than one workflow) but it IS a trap: until
+#     rev 6 `spec_sound` was described above as one of this workflow's judges and was named in no
+#     expression, so the Rust sample graded the spec and this file silently did not. The `until:` on
+#     `spec` below is what makes the two workflows the same workflow.
+#
+# (b) `max:` IS A CONTRACT, NOT A BUDGET. Spending it without the condition ever holding ABORTS the
+#     run (`core/walk.rs`) — it does not quietly move to the next entry. Exhaustion and convergence
+#     used to take the same branch, which meant a step burning its whole bound against a judge that
+#     was TIMING OUT looked exactly like a step that had succeeded. Choose these numbers as the
+#     point at which a human should be told, because that is what they now mean.
+#
+# ⚠ AND ONE DIVERGENCE FROM THE RUST SAMPLE, HERE IN THE OPEN: on a rejected spec `workflow.rs` does
+# `continue 'cycle` and starts the cycle over with a different approach. YAML has no conditional
+# dispatch (rev 5 cut `if:`), so it cannot express "go back and try differently". The honest YAML
+# translation is a bounded retry that stops the run: two attempts, then a human looks at it.
 sequence:
   steps:
     - { step: survey,    until: survey_good.value >= 85, max: 3 }
-    - { step: spec }
+    - { step: spec,      until: spec_sound, max: 2 }
     - { step: implement }
     - { step: fix,       until: tests_pass AND lint_clean, max: 8 }
     - { step: harden }
