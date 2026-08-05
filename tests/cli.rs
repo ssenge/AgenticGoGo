@@ -1933,3 +1933,39 @@ exit 0
     let ls = std::process::Command::new("git").args(["ls-files", ".regressed"]).current_dir(dir).output().unwrap();
     assert!(String::from_utf8_lossy(&ls.stdout).trim().is_empty(), "the regressing session's marker must not be on base");
 }
+
+/// ⛔ `max` BOUNDS an `until`; it does not SATISFY it. An entry that spends its whole budget with the
+/// condition still false has BROKEN A CONTRACT, and the run aborts naming the bound and the
+/// condition — it does not advance to the next entry as though it had converged.
+///
+/// This is the engine-level half of `core::walk`'s unit test: it proves the walk's error survives the
+/// handler pipeline and ends the process, rather than being swallowed on the way. Exit 3 (abort), not
+/// 4 (max-sessions), is the whole assertion — the run stops at the BOUND, with sessions to spare.
+///
+/// The 2026-08-05 real run is why this exists: `survey` burned its `max: 3` against a judge that was
+/// timing out, the walk moved on silently, and the worker went on to shrink the artefact by 61% so
+/// the broken grader could finish inside its timeout.
+#[test]
+fn a_sequence_entry_that_exhausts_max_without_converging_aborts_the_run() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    // never met, however many times it runs — so `until: worked` can never hold.
+    write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
+    write(
+        dir,
+        "agg/agg.yaml",
+        "project: bounded\n\
+         defaults: { model: fake }\n\
+         steps:\n  worker: {}\n\
+         sequence:\n  steps: [{ step: worker, until: worked, max: 2 }]\n  done_if: \"worked\"\n\
+         summary: { enabled: false }\n",
+    );
+    write_state_md(dir, "do work\n");
+
+    let out = agg(dir, &path).args(["run", "--max-sessions", "9"]).output().unwrap();
+    let combined =
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 3, &combined);
+    assert!(combined.contains("exhausted `max: 2`"), "the abort names the bound:\n{combined}");
+    assert!(combined.contains("until: worked"), "…and the condition that never held:\n{combined}");
+}

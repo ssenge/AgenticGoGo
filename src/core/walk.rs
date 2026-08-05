@@ -5,6 +5,7 @@
 //!     for _ in 0 .. entry.reps():      # times / until+max / once
 //!         dispatch(entry.step)
 //!         if entry.until and eval(entry.until): break
+//!     else if entry.until: ABORT       # `max` spent, condition never held — a broken contract
 //! ```
 //!
 //! This is the ONLY execution model in the tree: it dispatches through the SAME primitive a Rust
@@ -59,10 +60,30 @@ impl Walk {
                 _ => false,
             };
             // `max` bounds `until`; `times` is a fixed count; a plain entry runs once. `assemble`
-            // refuses `until` without `max` and any count below 1, so `cap >= 1` always and the
-            // loop below can advance at most `entries.len()` times before it dispatches.
+            // refuses `until` without `max`, `times` TOGETHER WITH `until` (they are alternatives),
+            // and any count below 1 — so `cap >= 1` always, and an entry carrying an `until` is
+            // bounded by exactly its `max`.
             let cap = e.times.or(e.max).unwrap_or(1);
-            if converged || self.reps >= cap {
+            if converged {
+                self.idx += 1;
+                self.reps = 0;
+                continue;
+            }
+            if self.reps >= cap {
+                // ⛔ `max` BOUNDS an `until`; it does not SATISFY it. An entry that burns its whole
+                // budget without the condition ever holding has FAILED, and the walk says so —
+                // `PickStep` turns this into an abort carrying the reason.
+                //
+                // Advancing here (what this did until 2026-08-05) made exhaustion and convergence
+                // take the SAME branch, so a bound blown was indistinguishable from a bound
+                // respected. A real run spent three `survey` sessions against a judge that was
+                // timing out, moved on as if it had converged, and the only trace was one log line.
+                //
+                // `times:` is NOT a contract — a fixed count that finishes is complete, not failed —
+                // so only an `until:` entry can fail here.
+                if let Some(cond) = &e.until {
+                    bail!("step `{}` exhausted `max: {cap}` without `until: {cond}` ever holding", e.step);
+                }
                 self.idx += 1;
                 self.reps = 0;
                 continue;
@@ -112,11 +133,16 @@ mod tests {
         assert_eq!(w.next_step(&mut |_| Ok(true)).unwrap(), "ship");
     }
 
-    /// … but never more than `max` times, however stubborn the condition.
+    /// … and blowing through `max` without ever converging is an ERROR, not a silent advance to the
+    /// next entry. The bound is a CONTRACT: a run that spends it and still has not met the condition
+    /// has failed the entry, and must say so rather than lap on looking identical to a success.
     #[test]
-    fn max_bounds_an_until_that_never_holds() {
+    fn exhausting_max_without_converging_aborts() {
         let mut w = Walk::new(vec![entry("fix", None, Some("green"), Some(3)), entry("ship", None, None, None)]);
-        assert_eq!(plain(&mut w, 5), vec!["fix", "fix", "fix", "ship", "fix"]);
+        assert_eq!(plain(&mut w, 3), vec!["fix", "fix", "fix"], "it still gets its full `max`");
+        let err = w.next_step(&mut |_| Ok(false)).unwrap_err().to_string();
+        assert!(err.contains("exhausted `max: 3`"), "the bound is named: {err}");
+        assert!(err.contains("green"), "…and so is the condition that never held: {err}");
     }
 
     /// The condition is re-evaluated between dispatches, not sampled once.
