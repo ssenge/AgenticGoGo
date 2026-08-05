@@ -47,10 +47,20 @@
 
 use agg::prelude::*;
 
+/// `main` is the ENTRY POINT ONLY — where to run and how many generations. The sample itself (steps,
+/// judges, the flow) is [`drive`], so a harness can run THIS driver against a scratch project
+/// (`scripts/samples_real.sh`) instead of a copy of it that drifts.
+///
+///   ./selfimprove                   # cwd, 12 generations — today's values, unchanged
+///   ./selfimprove /tmp/proj 2       # argv:  <dir> [cycles]
+///   AGG_SAMPLE_DIR=… AGG_SAMPLE_CYCLES=2 ./selfimprove    # or env
 fn main() -> Result<(), Fatal> {
+    let dir = arg(1, "AGG_SAMPLE_DIR").unwrap_or_else(|| ".".to_string());
+    let cycles = arg(2, "AGG_SAMPLE_CYCLES").and_then(|s| s.parse().ok()).unwrap_or(12);
+
     // A Rust driver configures EVERYTHING in Rust — ceilings and regression policy included. This
     // path never reads `agg.yaml`; a stray one is ignored rather than half-merged.
-    let agg = Agg::open(".")?
+    let agg = Agg::open(dir)?
         // Declared here, ENFORCED by `agg.check_limits()?` at the top of each generation. No
         // condition strings: there is no `.abort_if()` on the Rust path, because a driver that
         // wants to stop on a judge writes `if agg.judge(&x).met() { return Ok(()); }`.
@@ -58,6 +68,23 @@ fn main() -> Result<(), Fatal> {
                          sessions: Some(300), wall_hours: Some(10.0) })
         .on_regression(OnRegression::Rollback);   // self-improvement: a regression must not land
 
+    drive(&agg, cycles)
+}
+
+/// One positional arg, or an env var, or nothing.
+fn arg(n: usize, var: &str) -> Option<String> {
+    std::env::args().nth(n).or_else(|| std::env::var(var).ok()).filter(|s| !s.is_empty())
+}
+
+/// A model name a RUN may pin (`AGG_SAMPLE_HEAVY_MODEL` / `_GRIND_MODEL`). The default is the model
+/// the narrative names; the override lets a real run name one that exists today without editing the
+/// driver. Nothing else about the step changes.
+fn model(default: &str, var: &str) -> String {
+    std::env::var(var).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| default.to_string())
+}
+
+/// THE SAMPLE — read from here down as if it were `main`; it was, until the split.
+fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // STEPS — two templates, one per trust level. `readonly` ACCUMULATES down a chain and
     // `writable` SUBTRACTS from what accumulated, which is what makes the two grants below
@@ -98,7 +125,7 @@ fn main() -> Result<(), Fatal> {
                  build from without your context. Ground every claim in code anchors you have read.");
 
     let implement = sandboxed.create("implement")
-        .model("claude-opus-4-8[1m]")
+        .model(model("claude-opus-4-8[1m]", "AGG_SAMPLE_HEAVY_MODEL"))
         .effort(Effort::Max)
         .writable(["tests/"])                  // it SHOULD add tests; `agg/judges/` stays denied
         .prompt("Implement the contract in the design doc. Add tests alongside.");
@@ -107,7 +134,7 @@ fn main() -> Result<(), Fatal> {
     // and this is the step that would take it — so `tests/` is kernel-read-only for it, and
     // `agg/judges/` is too. The prompt below is a courtesy; the deny is the enforcement.
     let repair = sandboxed.create("repair")
-        .model("claude-sonnet-5")              // the grind runs on the cheap model
+        .model(model("claude-sonnet-5", "AGG_SAMPLE_GRIND_MODEL"))   // the grind runs cheap
         .prompt("Make the failing tests and lints pass. Do not delete or ignore tests.");
 
     // The ONLY step that may write graders — a real use of `writable` subtracting. Every landed
@@ -218,10 +245,11 @@ fn main() -> Result<(), Fatal> {
     // THE FLOW
     // ═════════════════════════════════════════════════════════════════════════════════════════
 
-    let cycle = agg.pos("cycle", 12);
+    // Declared once (`pos`) and iterated once (`for`) — one number, from the caller.
+    let cycle = agg.pos("cycle", cycles as u64);
 
-    'cycle: for c in 0..12 {
-        cycle.update(c);
+    'cycle: for c in 0..cycles {
+        cycle.update(c as u64);
 
         // THE CEILINGS, ENFORCED. `.limits(..)` above is a budget; this is what makes it a ceiling.
         // Once per generation is right for this loop — a generation is long, and stopping halfway
