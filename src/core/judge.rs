@@ -31,10 +31,16 @@ use std::process::{Command, Stdio};
 /// judge calls (a script judge ignores it). `model`/`timeout` are the RUN-LEVEL `judge:` block's —
 /// no longer per-judge. `session`/`step`/`name` populate the judge's env contract.
 ///
-/// `isolation` is the CURRENT step's tier. Under `Sandbox` the judge runs in the same jail as the
-/// worker did — otherwise a confined worker escapes trivially by rewriting `agg/judges/*.sh` (they
-/// live in its writable cwd) for agg to run unconfined (ISOLATION.md §12). Baseline/manual judging
-/// (no worker ran) passes `None`.
+/// `isolation` is the RUN-LEVEL tier (`cfg.run_isolation()`), **not the current step's** (§2.5).
+/// Under `Sandbox` the judge runs in a kernel jail — otherwise a confined worker escapes trivially by
+/// rewriting `agg/judges/*.sh` (they live in its writable cwd) for agg to run unconfined
+/// (ISOLATION.md §12). Baseline/manual judging (no worker ran) passes `None`.
+///
+/// # Why the RUN tier and not the step's
+/// A step's tier and deny list describe what the **worker** must not do. A judge is an **evaluator**,
+/// and the paths a worker must not change are exactly the paths a judge most needs to read and
+/// execute — so inheriting them inverts the policy. Taking the step's tier also meant a judge fired
+/// from an `isolation: none` step ran unconfined in a run that had sandboxing on elsewhere.
 ///
 /// `src` is the verdict store a NATIVE judge's [`JudgeCtx`] consults when its closure asks for
 /// another judge; every other kind ignores it. `iso_base` is the branch [`JudgeCtx::diff`] is taken
@@ -64,7 +70,12 @@ pub fn run(
         // run continue, exactly as a segfaulting script does. The per-judge `timeout` is meaningless
         // here (there is nothing to kill) and `Spend` is zero (no ruler call).
         JudgeKind::Native { f } => {
-            let ctx = JudgeCtx::new(src, session.unwrap_or(0), step, cwd, session_diff(cwd, iso_base));
+            // the SAME scratch a script judge gets, so a measure/threshold pair works across kinds.
+            // An unwritable scratch is not fatal here (a native judge may never touch it) — it falls
+            // back to the path, and the first write is what would fail, loudly, in the closure.
+            let scratch = scratch_dir(cwd, session).unwrap_or_else(|_| std::env::temp_dir());
+            let ctx =
+                JudgeCtx::new(src, session.unwrap_or(0), step, cwd, session_diff(cwd, iso_base), scratch);
             let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&ctx)))
                 .unwrap_or_else(|_| Verdict::failed(format!("native judge `{name}` panicked")));
             (verdict, Spend::default())
@@ -93,16 +104,110 @@ fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
     }
 }
 
+// ---------------- the judge's scratch (§2.5) ----------------
+
+/// The one directory a judge may write. **Per project and per session — SHARED by every judge in
+/// that step**, which is deliberate and is the only part of §2.5's table that experience moved.
+///
+/// It lives under `$TMPDIR`, which the sandbox already grants, so relocating a write here needs no
+/// new grant — only a redirect. That is the whole trick: agg never has to GUESS that some judge
+/// wanted `tests/__pycache__`.
+///
+/// # Why shared and not per-judge
+/// A per-judge dir is the tighter default and was the first cut. It breaks a pattern both shipped
+/// samples use and that is genuinely good practice: **one judge MEASURES and a second judge applies
+/// a THRESHOLD to the measurement** (`load_ok` runs the benchmark, `p99_ok` reads the latency out of
+/// it). Split their scratch and the second judge has nothing to read, so the choice was either to
+/// re-run a benchmark per threshold or to let the pair share a directory. Sharing costs nothing that
+/// matters: the determinism guarantee is that the TREE BEING GRADED does not move under the judges,
+/// and the tree stays read-only to all of them either way.
+///
+/// # Why per session and not per run
+/// A stale measurement read as current is the failure mode that actually bites — `p99_ok` passing on
+/// last session's benchmark while this session regressed it. A fresh directory each session makes
+/// that unrepresentable rather than guarded against.
+///
+/// The project hash keeps two agg runs on one machine (same session number, different projects) from
+/// colliding — the scratch is under a shared `$TMPDIR`, so the path has to carry the project.
+fn scratch_dir(cwd: &Path, session: Option<u32>) -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!("agg-judges-{}-{}", project_key(cwd), session.unwrap_or(0)));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// The judges' TOOLCHAIN CACHE — per project, and deliberately **not** per session.
+///
+/// Splitting this out of [`scratch_dir`] is not tidiness, it is the difference between a Rust
+/// project's `cargo_test` judge doing an incremental build and doing a COLD one every single
+/// session. `CARGO_TARGET_DIR` used to point at the project's own `target/`; the project tree is
+/// read-only to a judge now (§2.5), so it has to point somewhere — and pointing it at a directory
+/// that is thrown away each session turns a 5-second judge into a 3-minute one, on every step, for
+/// the whole run.
+///
+/// Persisting it is safe in a way persisting the SCRATCH is not: a compile cache is content-
+/// addressed and fingerprinted by the toolchain that owns it — staleness is the case cargo, go and
+/// npm are built to detect. A stale *measurement* (`bench.json`) is not detectable by anyone, which
+/// is exactly why that one is per-session and this one is not.
+fn cache_dir(cwd: &Path) -> std::io::Result<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join(format!("agg-judge-cache-{}", project_key(cwd)));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// A stable, filesystem-safe key for a project directory. Both judge dirs live under a shared
+/// `$TMPDIR`, so the path has to carry the project or two agg runs on one machine collide.
+fn project_key(cwd: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()).hash(&mut h);
+    format!("{:x}", h.finish())
+}
+
+/// Point every toolchain cache agg knows about at the scratch dir.
+///
+/// The failure this prevents, verbatim from the 2026-08-05 run: `build.sh` runs
+/// `python3 -m compileall`, Python writes `tests/__pycache__`, the kernel says EPERM, and the judge
+/// reports a failure that has nothing to do with the code it was grading. Session #13 spent
+/// 732s / 137k tokens / $2.81 chasing that phantom. `PYTHONPYCACHEPREFIX` exists precisely so
+/// bytecode lands in a parallel tree instead of beside the source: with it set, nothing WANTS to
+/// write `tests/` any more and the failure disappears without granting anything.
+///
+/// ponytail: a fixed table, not a config knob. Every entry is a documented, stable env var of a
+/// major toolchain — if a judge needs one agg does not know about, it exports it itself from
+/// `$AGG_JUDGE_SCRATCH`, which is why that variable is published rather than kept internal.
+fn redirect_caches(command: &mut Command, scratch: &Path, cache: &Path) {
+    // per SESSION — the judge's own workspace, and the measure→threshold handoff.
+    command.env("AGG_JUDGE_SCRATCH", scratch).env("TMPDIR", scratch);
+    // per PROJECT — toolchain caches, which must survive the session or every judge rebuilds cold.
+    for key in ["XDG_CACHE_HOME", "PYTHONPYCACHEPREFIX", "CARGO_TARGET_DIR", "GOCACHE", "npm_config_cache"] {
+        command.env(key, cache);
+    }
+    // pytest's cache is a directory it insists on placing at the rootdir; the plugin is the only
+    // way to turn it off, and there is no variable pointing it elsewhere.
+    command.env("PYTEST_ADDOPTS", "-p no:cacheprovider");
+}
+
 // ---------------- script judge ----------------
 
 /// Execute the judge FILE. cwd = project root; stdin = `/dev/null` (script judges inherited agg's
 /// stdin before — §5.2 nulls it); env carries the four NEW `AGG_*` keys.
 ///
-/// Under `isolation: Sandbox` the script runs in the OS jail (write = cwd + tmp, nothing outside).
-/// A script judge is arbitrary shell — the exact thing a confined worker rewrites to escape — so it
-/// is ALWAYS wrapped when the step is sandboxed. (So is an LLM judge, as of §2.4; the wrapper is
-/// unconditional now.) `writable: &[]`: it needs no state dir of its own; the wrapper still grants
-/// cwd + tmp so a judge can scribble scratch files where it always could.
+/// Under `isolation: Sandbox` the script runs in the OS jail. A script judge is arbitrary shell —
+/// the exact thing a confined worker rewrites to escape — so it is ALWAYS wrapped when the run is
+/// sandboxed.
+///
+/// # §2.5 — the judge's policy is its own, and STRICTER than a step's
+/// | | |
+/// |---|---|
+/// | read | the whole project, as always — reads stay open at every tier |
+/// | write | **`$AGG_JUDGE_SCRATCH` only.** The project tree is READ-ONLY to a judge |
+/// | denied | all of `cwd`, which subsumes the two that must never be writable: `agg/private/` (it is about to hold this judge's verdict row) and `agg/judges/` (a judge must not rewrite the grader, itself included) |
+/// | the step's `readonly`/`writable` | not inherited — they describe the worker |
+///
+/// agg does not GUESS which folders a judge needs; it RELOCATES the writes ([`scratch_dir`]). A judge
+/// that still writes in-tree gets EPERM and fails loudly, which is correct: a judge that mutates the
+/// tree it is grading is a bug whether or not a sandbox catches it. It also extends the determinism
+/// `session_diff` already buys natively — a write-free judge cannot perturb what a later judge sees.
 #[allow(clippy::too_many_arguments)]
 fn run_script(
     path: &Path,
@@ -119,6 +224,10 @@ fn run_script(
         Ok(p) => p,
         Err(e) => return Verdict::failed(format!("judge script {}: {e}", path.display())),
     };
+    let (scratch, cache) = match (scratch_dir(cwd, session), cache_dir(cwd)) {
+        (Ok(s), Ok(c)) => (s, c),
+        (Err(e), _) | (_, Err(e)) => return Verdict::failed(format!("judge `{name}`: {e}")),
+    };
     let mut command = Command::new(&abs);
     command
         .current_dir(cwd)
@@ -127,11 +236,15 @@ fn run_script(
         .env("AGG_STEP", step)
         .env("AGG_JUDGE", name)
         .env("AGG_PROJECT_DIR", cwd);
+    redirect_caches(&mut command, &scratch, &cache);
     if isolation == crate::isolation::Isolation::Sandbox {
-        // no per-step deny list: a judge is not a step. It still gets the DERIVED `agg/private/`
-        // carve-out, which is the one that matters here — this process is about to be the subject
-        // of a verdict row it must not be able to forge.
-        match crate::isolation::wrap(command, cwd, &[], &[]) {
+        // `denies` = the whole project. Emitted AFTER the allow-list (`isolation/macos.rs`), so it
+        // WINS over the `cwd` grant every wrapped command gets — which is the point: this judge may
+        // read everything and write only its scratch. One entry covers both paths that must never be
+        // writable (`agg/private/`, `agg/judges/`) plus every path a step's `readonly:` would have
+        // named, so nothing here has to be kept in sync with a step's lists.
+        let denies = [".".to_string()];
+        match crate::isolation::wrap(command, cwd, &[scratch.clone(), cache.clone()], &denies) {
             Ok(c) => command = c,
             // Loud, not silent: a judge that can't be confined must FAIL, never run unconfined and
             // reopen the escape. Mirrors worker.rs's spawn-failure path.
@@ -371,5 +484,60 @@ mod tests {
 
         assert!(!escaped, "the confined judge ESCAPED — it wrote {}", outside.display());
         assert!(verdict.met, "the judge still ran through the wrapper and returned its verdict: {verdict:?}");
+    }
+
+    /// §2.5 — A JUDGE IS CONFINED AS A JUDGE. This is the 2026-08-05 failure written as a test: a
+    /// script judge byte-compiles the project's `tests/` (exactly what `build.sh` does), which makes
+    /// Python want to write `tests/__pycache__` beside the source. Under the old policy — the STEP's
+    /// tier and deny list forwarded straight into the judge — that was EPERM, and session #13 spent
+    /// 732s / 137k tokens / $2.81 concluding the code was broken when the sandbox was.
+    ///
+    /// Three assertions, and the third is the one that proves the mechanism rather than the symptom:
+    /// the judge returns a REAL verdict, the project tree is untouched, and the bytecode actually
+    /// LANDED — in `$AGG_JUDGE_SCRATCH`, because agg relocated the write instead of guessing which
+    /// folder to grant. Without the third, a judge that silently wrote nothing would pass too.
+    ///
+    /// `cargo test -- --ignored a_judge_writes_only_scratch --nocapture`
+    #[test]
+    #[ignore = "spawns the real OS sandbox; run by hand on a real host"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn a_judge_writes_only_scratch_and_leaves_the_project_clean() {
+        assert!(crate::isolation::available(), "no OS sandbox on this host — cannot prove confinement");
+        if Command::new("python3").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("no python3 on this host — skipping");
+            return;
+        }
+        let proj = std::env::temp_dir().join(format!("agg-judge-pyc-{}", std::process::id()));
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("tests/test_x.py"), "def test_x():\n    assert True\n").unwrap();
+
+        let judge = proj.join("compiles.sh");
+        std::fs::write(
+            &judge,
+            "#!/bin/sh\n\
+             python3 -m compileall -q tests 1>&2 || echo 'compileall FAILED' 1>&2\n\
+             echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"compiled\"}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&judge, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let verdict = run_script(&judge, &proj, "compiles", Some(7), "fix", 60, Isolation::Sandbox);
+        // bytecode is a TOOLCHAIN CACHE, so `PYTHONPYCACHEPREFIX` points at the per-project cache,
+        // not at the per-session scratch — otherwise every session recompiles from cold.
+        let cache = cache_dir(&proj).unwrap();
+        let scratch = scratch_dir(&proj, Some(7)).unwrap();
+        let in_tree = proj.join("tests/__pycache__").exists();
+        let relocated = std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false);
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&scratch);
+        let _ = std::fs::remove_dir_all(&cache);
+
+        assert!(verdict.met, "the judge must return a REAL verdict, not a sandbox phantom: {verdict:?}");
+        assert!(!in_tree, "a judge must not write the tree it grades — `tests/__pycache__` appeared");
+        assert!(relocated, "the bytecode must land in the judge cache — an empty cache means the redirect never fired");
     }
 }

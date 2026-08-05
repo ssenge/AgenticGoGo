@@ -199,6 +199,8 @@ pub struct JudgeCtx<'a> {
     dir: &'a Path,
     /// captured EAGERLY at construction — see [`JudgeCtx::diff`].
     diff: String,
+    /// the shared per-session judge scratch — see [`JudgeCtx::scratch`].
+    scratch: std::path::PathBuf,
     _borrow: PhantomData<&'a ()>,
 }
 
@@ -220,8 +222,22 @@ impl<'a> JudgeCtx<'a> {
         step: &'a str,
         dir: &'a Path,
         diff: String,
+        scratch: std::path::PathBuf,
     ) -> JudgeCtx<'a> {
-        JudgeCtx { source, session, step, dir, diff, _borrow: PhantomData }
+        JudgeCtx { source, session, step, dir, diff, scratch, _borrow: PhantomData }
+    }
+
+    /// The directory judges may WRITE this session — the same `$AGG_JUDGE_SCRATCH` a script judge
+    /// gets, so a native closure and a script can hand a measurement to each other.
+    ///
+    /// A native judge is a Rust closure running IN-PROCESS, so nothing stops it writing wherever it
+    /// likes; this exists so it does not have to want to. The project tree is read-only to every
+    /// SCRIPT judge (§2.5), and a native judge that writes there anyway breaks the same guarantee
+    /// silently instead of loudly — it is a bug either way, so point it here.
+    ///
+    /// Shared per session, not per judge: `load_ok` writes `bench.json` here, `p99_ok` reads it.
+    pub fn scratch(&self) -> &Path {
+        &self.scratch
     }
 
     /// Did `j` say GOOD? Runs `j` if this step has not asked for it yet.
@@ -578,7 +594,7 @@ mod tests {
         let JudgeKind::Native { f } = &copy.kind else { panic!("kind survives the clone") };
         // the closure is callable through the clone.
         let src = FixedSource(Verdict::binary(false));
-        let ctx = JudgeCtx::new(&src, 1, "worker", Path::new("."), String::new());
+        let ctx = JudgeCtx::new(&src, 1, "worker", Path::new("."), String::new(), std::env::temp_dir());
         let v = f(&ctx);
         assert!(v.met() && v.rationale() == "yes");
     }
@@ -598,7 +614,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("VERSION"), "1.2.3").unwrap();
         let src = FixedSource(Verdict::binary(true).with_value(7.0));
-        let ctx = JudgeCtx::new(&src, 4, "implement", tmp.path(), "diff --git a/x".into());
+        let ctx =
+            JudgeCtx::new(&src, 4, "implement", tmp.path(), "diff --git a/x".into(), std::env::temp_dir());
         let other = Judge::script("builds", "agg/judges/build.sh");
 
         assert!(ctx.met(&other));
@@ -617,7 +634,7 @@ mod tests {
 
         // …and a binary verdict still reports NO number through the ctx.
         let bare = FixedSource(Verdict::binary(true));
-        let ctx = JudgeCtx::new(&bare, 1, "s", tmp.path(), String::new());
+        let ctx = JudgeCtx::new(&bare, 1, "s", tmp.path(), String::new(), std::env::temp_dir());
         assert_eq!(ctx.value(&other), None, "never a fabricated 0");
     }
 
@@ -633,7 +650,7 @@ mod tests {
         append(d, Some(2), "w", &[("cov".into(), Verdict::scored(20.0, 100.0))], Outcome::RolledBack).unwrap();
 
         let src = FixedSource(Verdict::binary(false));
-        let ctx = JudgeCtx::new(&src, 3, "w", d, String::new());
+        let ctx = JudgeCtx::new(&src, 3, "w", d, String::new(), std::env::temp_dir());
         let cov = Judge::script("cov", "agg/judges/cov.sh");
 
         assert_eq!(ctx.previous(&cov).and_then(|v| v.value()), Some(50.0), "the rolled-back 20 never landed");
