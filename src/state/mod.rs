@@ -141,6 +141,15 @@ pub struct DashboardState {
     /// uninterpretable without knowing who ran THIS step. Empty before the first step / off-cycle.
     pub step_agent: String,
     pub step_model: String,
+    /// A Rust DRIVER's position in its own control flow — `cycle 3/20 › attempt 2/3` — assembled from
+    /// the live [`crate::driver::PosFrame`] stack (`Agg::label_path`). Empty on the YAML path and for
+    /// any driver that declares no `pos()`: agg CANNOT see a hand-written `for`, so a loop with no
+    /// breadcrumb shows no counter rather than a fabricated one.
+    ///
+    /// It is the only progress signal that exists for driver flow — `session N` counts sessions, not
+    /// cycles — and Phase 1 keys the call ledger's identity check on this same string (BUILD.md
+    /// §3.4), which is why it has to be a published, observable value and not a debug helper.
+    pub pos: String,
     pub stop_when: String,
     pub halt_when: String,
     /// the isolation BASE branch this run merges into — the branch `gate()` stages onto and the one

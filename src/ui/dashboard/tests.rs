@@ -16,6 +16,9 @@ fn demo_state() -> DashboardState {
         step: "worker".into(),
         step_agent: "codex".into(),
         step_model: "gpt-5-codex".into(),
+        // empty: this fixture is the YAML path, which has no driver `pos()` — the `pos` segment must
+        // stay absent rather than render "pos —" on every run that never had a breadcrumb.
+        pos: String::new(),
         stop_when: "all_goals".into(),
         halt_when: "regressed".into(),
         iso_base: "main".into(),

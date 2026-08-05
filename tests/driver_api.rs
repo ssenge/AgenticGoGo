@@ -719,8 +719,32 @@ fn the_sample_drivers_cycle_runs_end_to_end_and_lands_every_span() {
     // …and a judge the driver never asked for appears in NO row. Laziness is visible from the ledger.
     assert!(agg::core::verdicts::rows_for(dir, "spec_sound", false).is_empty());
 
+    // THE SNAPSHOT CARRIES THEM TOO, not just the ledger. Charging spend was once the whole of
+    // `run_judge`, and `publish()` rebuilt `dash.judges` from an engine that a driver leaves empty —
+    // so the TUI showed `(no judges in snapshot)`, the web BFF served `judges: []` and Progress read
+    // `0/0 · 0%`, all while the rows above were being written. Read from the FILE, not the facade.
+    let snap: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(agg::paths::state_json(dir)).unwrap()).unwrap();
+    let names: Vec<&str> =
+        snap["judges"].as_array().expect("state.json carries a judges array").iter().map(|j| j["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"tests_pass"), "a SCRIPT judge reaches the readers: {names:?}");
+    assert!(names.contains(&"worked"), "…and so does a NATIVE closure in the driver's own binary: {names:?}");
+    assert!(!names.contains(&"spec_sound"), "a judge never asked for is never published either: {names:?}");
+    // a driver declares no DoD, so `eng.tally()` is 0/0 — the scoreboard falls back to what the
+    // driver actually ASKED rather than reporting a vacuous zero that reads as "nothing to do".
+    assert_eq!(snap["goals_total"].as_u64().unwrap() as usize, names.len(), "{snap:#}");
+
     drop(agg);
     assert!(!agg::paths::run_pid(dir).exists(), "…and released when the run ends");
+
+    // HOW THE LEDGER SAYS IT ENDED. `driver-returned`, never `goals-met`: a driver declares no DoD —
+    // it decides it is done by RETURNING — so "goals met" printed beside `0/0` in `agg history` read
+    // as a claim about goals rather than as the absence of any. Both are exit 0; only the word differs.
+    let proj: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(agg::paths::project_json(dir)).unwrap()).unwrap();
+    let last = proj["runs"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["end_reason"].as_str().unwrap(), "driver-returned", "{last:#}");
+    assert!(last["goals_total"].as_u64().unwrap() > 0, "…and the tally is the judges it ASKED: {last:#}");
 }
 
 /// THE SAME DRIVER WITH ITS `gate()` REMOVED. Nothing is lost and nothing moves — and the run's last
@@ -782,4 +806,27 @@ fn a_pos_frame_is_removed_by_id_not_by_popping() {
     assert_eq!(agg.label_path(), "attempt 2/3", "the wrong frame would have been popped");
     drop(inner);
     assert_eq!(agg.label_path(), "");
+}
+
+/// …AND THE BREADCRUMB REACHES A READER. `label_path()` used to have zero callers in the entire tree
+/// and `state.json` had no `pos` key, so `agg.pos("cycle", 20)` recorded frames that nothing on earth
+/// could observe — the sample documented it as "this is how `cycle 7/20` reaches the TUI" and it
+/// reached nothing. Asserted from the published FILE, because that is the only thing the TUI, the
+/// web BFF and `agg status` actually read.
+#[test]
+fn the_pos_breadcrumb_is_published_where_the_readers_look() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap().limits(Limits { tokens: None, cost: None, sessions: Some(9), wall_hours: None });
+
+    let cycle = agg.pos("cycle", 4);
+    cycle.update(2);
+    let attempt = agg.pos("attempt", 3);
+    attempt.update(1);
+    // a real step: `Agg` boots LAZILY, so nothing is published at all until work happens.
+    agg.step(&Step::new("worker").prompt("work")).unwrap();
+
+    let snap: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(agg::paths::state_json(dir)).unwrap()).unwrap();
+    assert_eq!(snap["pos"].as_str().unwrap(), "cycle 2/4 › attempt 1/3", "{snap:#}");
 }

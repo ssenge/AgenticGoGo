@@ -81,11 +81,27 @@ impl LoopState {
         if let LifecycleEvent::Finished { reason, ledger_tag } = &event {
             self.dash.finished = true;
             self.dash.finish_reason = reason.clone();
-            let (gm, gt) = self.eng.tally();
+            let (gm, gt) = self.tally();
             self.ledger.update(self.session, self.tokens_spent, gm, gt);
             self.ledger.finish(now_epoch(), ledger_tag);
         }
         self.publish();
+    }
+
+    /// met / total for every scoreboard — the snapshot AND the run ledger, which must never disagree
+    /// about the same run (they did: `state.json` said `2/2` while `agg history` said `0/0`).
+    ///
+    /// [`Engine::tally`] counts the DoD-set, which only the YAML path has; a driver decides it is done
+    /// by RETURNING and leaves `eng.judges` empty by construction. Falling back to the judges it
+    /// actually ASKED keeps the number honest — a vacuous `0/0` reads as "achieved nothing", not as
+    /// "declared no DoD".
+    fn tally(&self) -> (usize, usize) {
+        match self.eng.tally() {
+            (_, 0) if !self.dash.judges.is_empty() => {
+                (self.dash.judges.iter().filter(|j| j.met).count(), self.dash.judges.len())
+            }
+            counted => counted,
+        }
     }
 
     /// Attribute one spend to an agent's running tally (§7.4). A `None` cost is an agent that cannot
@@ -112,11 +128,20 @@ impl LoopState {
             // the RESOLVED model (step override, else the agent's default) — what actually ran.
             self.dash.step_model = cs.backend().map(|b| cs.model(b).to_string()).unwrap_or_default();
         }
-        let (m, t) = self.eng.tally();
+        self.dash.goals = DashboardState::goals_from_engine(&self.eng, &self.dash.goals);
+        // ⚠ ONLY when the engine HAS judges. On the DRIVER path `eng.judges` is empty by construction
+        // — the run-set is built solely from YAML expressions (`assembly.rs`), and a driver's judges
+        // are `Judge` VALUES in its own binary that it hands to `agg.judge(&j)` one at a time.
+        // Rebuilding unconditionally here overwrote what the facade had just written with an empty
+        // vec, so the TUI rendered `(no judges in snapshot)`, the web BFF served `judges: []` and
+        // Progress read `0/0 · 0%` — all while the judges were demonstrably running and their
+        // verdicts were reaching `verdicts.jsonl`. The publisher, not the ledger, was the broken half.
+        if !self.eng.judges.is_empty() {
+            self.dash.judges = DashboardState::judges_from_engine(&self.eng, &self.dash.judges);
+        }
+        let (m, t) = self.tally();
         self.dash.goals_met = m;
         self.dash.goals_total = t;
-        self.dash.goals = DashboardState::goals_from_engine(&self.eng, &self.dash.goals);
-        self.dash.judges = DashboardState::judges_from_engine(&self.eng, &self.dash.judges);
         let snapshot = self.dash.clone();
         self.live.update(|s| {
             let now = std::mem::take(&mut s.now);

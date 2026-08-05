@@ -51,6 +51,10 @@ fn render_state(s: &DashboardState) -> String {
         let model = if s.step_model.is_empty() { "agent default" } else { s.step_model.as_str() };
         out.push_str(&format!("step   {}  ·  {agent} / {model}\n", s.step));
     }
+    // a driver's own loop position; empty on the YAML path and for a driver with no `pos()`.
+    if !s.pos.is_empty() {
+        out.push_str(&format!("pos    {}\n", s.pos));
+    }
     // budget line (only when a ceiling is set)
     if let Some(total) = s.budget_total {
         out.push_str(&format!("tokens {} / {} ({:.0}%)\n", s.tokens_spent, total, pct(s.tokens_spent, total)));

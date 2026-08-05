@@ -37,8 +37,13 @@ pub struct RunRecord {
     /// goals met / total at the moment the run ended.
     pub goals_met: usize,
     pub goals_total: usize,
-    /// how the run ended: "goals-met" | "halt:<reason>" | "stopped" |
+    /// how the run ended: "goals-met" | "driver-returned" | "halt:<reason>" | "stopped" |
     /// "max-sessions" | "error" | "crashed" (in-flight record never finalized).
+    ///
+    /// `goals-met` and `driver-returned` are both the success path (exit 0) and are deliberately
+    /// distinct: only the YAML path HAS a `done_if` to satisfy, so only it can report that one was.
+    /// A driver decides it is done by returning, and saying "goals met" next to `0/0` reads as a
+    /// claim about goals rather than the absence of any.
     pub end_reason: String,
 }
 

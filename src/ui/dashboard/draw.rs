@@ -112,7 +112,7 @@ pub(super) fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         "agent default"
     };
 
-    let line1 = Line::from(vec![
+    let mut line1_spans = vec![
         label("project "),
         Span::styled(project.to_string(), Style::default().bold()),
         sep(),
@@ -135,7 +135,17 @@ pub(super) fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         label("step "),
         Span::styled(step.to_string(), Style::default().fg(Color::Cyan).bold()),
         Span::styled(format!(" [{step_agent} · {step_model}]"), Style::default().fg(Color::Blue)),
-    ]);
+    ];
+    // A Rust driver's own position — `cycle 3/20 › attempt 2/3`. Appended rather than given a slot:
+    // it is empty on the YAML path and for any driver that declares no `pos()`, and an always-present
+    // "pos —" would be noise on every run that has no such thing. `session #N` counts SESSIONS, so
+    // without this a driver's cycle bound reaches no reader at all.
+    if !s.pos.is_empty() {
+        line1_spans.push(sep());
+        line1_spans.push(label("pos "));
+        line1_spans.push(Span::styled(s.pos.clone(), Style::default().fg(Color::Magenta).bold()));
+    }
+    let line1 = Line::from(line1_spans);
     let idle_color = if s.idle_secs >= 240 { Color::Red } else { Color::DarkGray };
     // Ordered by importance so the LEAST critical items (memory/idle/started) are the ones a narrow
     // terminal truncates first — the spend guards and the run's done/abort conditions survive.
