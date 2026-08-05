@@ -67,6 +67,14 @@ fn the_rate_limit_detector_matches_what_each_agent_really_sends() {
     // Claude's prose shape must keep working — this is a widening, not a replacement.
     assert!(looks_rate_limited(r#"{"type":"result","result":"rate_limit_error: slow down"}"#));
     assert!(looks_rate_limited("Usage limit reached — resets at 5pm"));
+    // Codex SUBSCRIPTION exhaustion — prose, no 429, no "reached". Captured verbatim on the wire
+    // during a real `agg run` on 2026-08-05, where it matched nothing: the loop scored a 4-second
+    // 0-token failure as ordinary work and burned one of that step's two `max:` attempts on it.
+    assert!(looks_rate_limited(
+        "You've hit your usage limit. To continue using Codex and get access to GPT-5.3-Codex, \
+         start a free trial of Plus today (https://chatgpt.com/explore/plus), or try again at \
+         Aug 11th, 2026 2:06 PM."
+    ));
     // Copilot's 402.
     assert!(looks_rate_limited(r#"{"error":{"code":"quota_exceeded"}}"#));
 
