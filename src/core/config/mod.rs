@@ -35,6 +35,11 @@ pub struct AggConfig {
     #[serde(default)]
     pub judge: JudgeCfg,
 
+    /// PER-JUDGE overrides, keyed by judge NAME. One key only — `timeout:`. Singular `judge:` above
+    /// is the ruler; plural `judges:` is this. See [`JudgeOverride`].
+    #[serde(default)]
+    pub judges: BTreeMap<String, JudgeOverride>,
+
     /// The step palette. NAME → a body of overrides. The name is a user string literal; any key in
     /// the body other than the [`StepBody`] fields (esp `judge_*`) is a HARD ERROR (deny_unknown).
     #[serde(default)]
@@ -145,6 +150,22 @@ impl Default for JudgeCfg {
     fn default() -> Self {
         JudgeCfg { agent: default_agent(), model: None, timeout: default_judge_timeout() }
     }
+}
+
+/// PER-JUDGE config: NAME → overrides. Exactly one key, `timeout:` — the YAML twin of
+/// [`Judge::timeout`](crate::core::model::Judge::timeout).
+///
+/// It survived the 2026-08-04 owner simplification that cut the judge-level `gate:`/`when:` because
+/// it is neither flow nor gating: a judge that takes longer than the run-level 300s (a load test, an
+/// e2e suite) simply DIES without it, and no amount of "use the Rust path" makes that a design
+/// choice rather than a hole. Only judges needing non-default config appear here; the rest are never
+/// listed, which is why the map is `#[serde(default)]` and usually absent.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeOverride {
+    /// seconds. `None` = the run-level [`JudgeCfg::timeout`].
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 /// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_judges` and the
@@ -332,6 +353,7 @@ impl Default for AggConfig {
             project: String::new(),
             defaults: Defaults::default(),
             judge: JudgeCfg::default(),
+            judges: BTreeMap::new(),
             steps: BTreeMap::new(),
             sequence: Sequence::default(),
             heartbeat_secs: default_heartbeat(),
