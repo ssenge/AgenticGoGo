@@ -6,7 +6,7 @@ use crate::backend::AgentBackend;
 use crate::bus::Bus;
 use crate::core::config::{AggConfig, ResolvedStep};
 use crate::core::engine::{Engine, RunState};
-use crate::core::sequence::Cursor;
+use crate::core::walk::Walk;
 use crate::features::state::AGGState;
 use crate::plugin::{Extensions, RunOutcome, LifecycleEvent};
 use crate::state::{DashboardState, LiveState};
@@ -34,8 +34,8 @@ pub struct LoopState {
     pub config_base: PathBuf,
 
     pub eng: Engine,
-    /// the sequence cursor — yields the next step name each cycle.
-    pub cursor: Cursor,
+    /// the sequence walk — yields the next step name each cycle (`core::walk`).
+    pub cursor: Walk,
     /// the step being run THIS cycle (set by INJECT).
     pub cur_step: Option<ResolvedStep>,
     /// the step a Rust DRIVER handed to `agg.step(&s)`. `PickStep` `take()`s it BEFORE it consults

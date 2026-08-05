@@ -306,7 +306,7 @@ mod tests {
             dir: dir.to_path_buf(),
             config_base: dir.to_path_buf(),
             eng,
-            cursor: crate::core::sequence::Cursor::new(vec![]),
+            cursor: crate::core::walk::Walk::new(vec![]),
             next_step: None,
             cur_step: Some(crate::core::config::ResolvedStep {
                 name: "worker".into(),

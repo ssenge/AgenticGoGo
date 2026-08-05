@@ -2,28 +2,27 @@
 
 use std::path::Path;
 use anyhow::Result;
-use crate::core::config::AggConfig;
+use crate::core::config::{AggConfig, SeqStep};
 use crate::core::engine::Engine;
-use crate::core::sequence::{self, Statement};
 use crate::core::stop;
 
-/// The engine + parsed sequence, assembled from config. Built once, before the loop (and by
+/// The engine + the sequence entries, assembled from config. Built once, before the loop (and by
 /// `agg plan`).
 pub struct Assembly {
     pub engine: Engine,
-    pub statements: Vec<Statement>,
+    pub steps: Vec<SeqStep>,
 }
 
-/// Build the run-set engine + parse the sequence from `cfg` (§5.3/§5.4). Refuses at startup:
-/// an unknown step name, an all-`skip_judges` sequence (nothing could ever merge), or a judge name
-/// that resolves to no file.
+/// Build the run-set engine + validate the sequence from `cfg` (§5.3/§5.4). Refuses at startup:
+/// an unknown step name, an all-`skip_judges` sequence (nothing could ever merge), an unbounded or
+/// zero repetition, or a judge name that resolves to no file.
 ///
 /// # The DRIVER variant (BUILD.md §3.6)
 ///
 /// An EMPTY `sequence.steps` **is** a Rust-driver project: the flow lives in the driver's own
-/// `for`/`if`, so there is no statement list to validate and no `done_if` for agg to evaluate. Both
-/// startup refusals below are about the statement list, so with no statements there is nothing to
-/// refuse — and the all-`skip_judges` guard would otherwise reject every driver project outright.
+/// `for`/`if`, so there is no entry list to validate and no `done_if` for agg to evaluate. Every
+/// refusal below is about the entry list, so with no entries there is nothing to refuse — and the
+/// all-`skip_judges` guard would otherwise reject every driver project outright.
 /// The resulting run-set is EMPTY (nothing is declared to agg on that path: no `abort_if`, no
 /// `notify_if`, no `invariants`), which is correct rather than a gap — driver judges are LAZY and
 /// the driver asks for them by hand.
@@ -36,28 +35,46 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
         eprintln!("  ⚠ could not refresh ~/.agg/judges: {e}");
     }
 
-    let driver = cfg.sequence.steps.is_empty();
-    // `sequence::parse` refuses an empty list ("a run needs at least one step") — true of a YAML
-    // run and false of a driver one, where the steps are `agg.step(&s)` calls in Rust.
-    let statements = if driver { Vec::new() } else { sequence::parse(&cfg.sequence.steps)? };
+    let entries = &cfg.sequence.steps;
+    let driver = entries.is_empty();
 
-    // every referenced step name must be a key in `steps:` (§5.4).
-    for st in &statements {
-        for name in st.step_names() {
-            if !cfg.steps.contains_key(name) {
-                let defined: Vec<&str> = cfg.steps.keys().map(String::as_str).collect();
-                anyhow::bail!(
-                    "sequence references unknown step `{name}` — defined steps: {}",
-                    defined.join(", ")
-                );
+    for e in entries {
+        // every referenced step name must be a key in `steps:` (§5.4).
+        if !cfg.steps.contains_key(&e.step) {
+            let defined: Vec<&str> = cfg.steps.keys().map(String::as_str).collect();
+            anyhow::bail!(
+                "sequence references unknown step `{}` — defined steps: {}",
+                e.step,
+                defined.join(", ")
+            );
+        }
+        // the repetition must be BOUNDED and non-zero, or the walk either spins forever on one
+        // entry or dispatches nothing at all. `max` is required with `until` (§11.1): an unbounded
+        // `until` in a config file is a run that cannot be reasoned about, and `limits:` is a
+        // RUN-level ceiling, not a per-entry one.
+        if e.times.is_some() && e.until.is_some() {
+            anyhow::bail!(
+                "step `{}`: `times:` and `until:`+`max:` are alternatives — a fixed count and a \
+                 condition cannot both bound one entry.",
+                e.step
+            );
+        }
+        if e.until.is_some() && e.max.is_none() {
+            anyhow::bail!("step `{}`: `until:` requires `max:` — an unbounded repetition is not expressible in YAML.", e.step);
+        }
+        if e.max.is_some() && e.until.is_none() {
+            anyhow::bail!("step `{}`: `max:` without `until:` bounds nothing — use `times:` for a fixed count.", e.step);
+        }
+        for (key, n) in [("times", e.times), ("max", e.max)] {
+            if n == Some(0) {
+                anyhow::bail!("step `{}`: `{key}: 0` dispatches nothing — it must be >= 1.", e.step);
             }
         }
     }
     // an all-`skip_judges` sequence never merges, so `done_if` can never fire (§5.7) — refuse.
-    let has_judged = statements
+    let has_judged = entries
         .iter()
-        .flat_map(|s| s.step_names())
-        .any(|n| cfg.steps.get(n).map(|b| !b.skip_judges).unwrap_or(false));
+        .any(|e| cfg.steps.get(&e.step).map(|b| !b.skip_judges).unwrap_or(false));
     if !driver && !has_judged {
         anyhow::bail!(
             "every step in the sequence is skip_judges — nothing can ever merge and done_if can \
@@ -92,8 +109,11 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
             push_unique(&mut run_set, &name);
         }
     }
-    for st in &statements {
-        if let Some(c) = st.condition() {
+    // an `until:` expression joins the RUN-SET on the same terms the old `if` condition did: its
+    // judges must EXECUTE every step or the condition could never become true — and, like a
+    // detector, they stay OUT of the DoD-set (converging a loop is machinery, not a goal).
+    for e in entries {
+        if let Some(c) = &e.until {
             for n in stop::judge_names(c)? {
                 push_unique(&mut run_set, &n);
             }
@@ -137,7 +157,7 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
         cfg.sequence.abort_if.clone(),
         cfg.sequence.notify_if.clone(),
     )?;
-    Ok(Assembly { engine, statements })
+    Ok(Assembly { engine, steps: cfg.sequence.steps.clone() })
 }
 
 fn push_unique(v: &mut Vec<String>, s: &str) {
@@ -171,6 +191,15 @@ mod tests {
         serde_yaml::from_str(&body).unwrap_or_else(|e| panic!("test config must parse: {e}\n--- body ---\n{body}"))
     }
 
+    /// `cfg_with`'s twin for the entry shape: `seq_steps` is the whole `sequence.steps` list as it
+    /// would be written inline in YAML. One judged step (`worker`) is always defined.
+    fn cfg_with_steps(seq_steps: &str) -> AggConfig {
+        let body = format!(
+            "project: p\nsteps: {{ worker: {{}} }}\nsequence:\n  steps: {seq_steps}\n  done_if: \"goal\"\n"
+        );
+        serde_yaml::from_str(&body).unwrap_or_else(|e| panic!("test config must parse: {e}\n--- body ---\n{body}"))
+    }
+
     /// The message of an `assemble` that must FAIL. Hand-rolled because `Assembly` is deliberately
     /// not `Debug` (it holds judge state), so `Result::unwrap_err` is unavailable here.
     fn assemble_err(cfg: &AggConfig, base: &Path) -> String {
@@ -178,6 +207,96 @@ mod tests {
             Ok(_) => panic!("assemble was expected to REFUSE this config, but it succeeded"),
             Err(e) => e.to_string(),
         }
+    }
+
+    /// THE PORTED REFUSAL (BUILD.md §4 row 12, RUST_API §11.3(2)). An all-`skip_judges` sequence can
+    /// never merge, so `done_if` can never fire — and the failure is INVISIBLE until the ceiling
+    /// fires hours later, which is why this stays a STARTUP check. It now reads the serde entry
+    /// structs (`e.step`) instead of `Vec<Statement>`; the fixture is the only thing that changed.
+    #[test]
+    fn an_all_skip_judges_sequence_is_refused_at_startup() {
+        let tmp = base_with_judges(&["goal"]);
+        // the new shape, in both spellings: the mapping form and the scalar shorthand.
+        for steps in ["[{ step: stage }]", "[stage]"] {
+            let body = format!(
+                "project: p\nsteps: {{ stage: {{ skip_judges: true }} }}\nsequence:\n  steps: {steps}\n  done_if: \"goal\"\n"
+            );
+            let cfg: AggConfig = serde_yaml::from_str(&body).expect("the fixture must parse");
+            let err = assemble_err(&cfg, tmp.path());
+            assert!(
+                err.contains("skip_judges") && err.contains("never fire"),
+                "an all-skip_judges sequence must be refused at STARTUP, got: {err}"
+            );
+        }
+    }
+
+    /// The other half of the same rule: ONE judged step is enough, whatever the entry looks like.
+    /// A repeated (`times:`) or bounded (`until:`+`max:`) entry is still a judged step.
+    #[test]
+    fn one_judged_step_anywhere_in_the_sequence_is_enough() {
+        let tmp = base_with_judges(&["goal"]);
+        let body = "project: p\nsteps: { stage: { skip_judges: true }, worker: {} }\nsequence:\n  \
+                    steps: [{ step: stage }, { step: worker, until: goal, max: 3 }]\n  done_if: \"goal\"\n";
+        let cfg: AggConfig = serde_yaml::from_str(body).expect("the fixture must parse");
+        assemble(&cfg, tmp.path()).expect("one judged step must be enough");
+    }
+
+    /// BUILD.md §3.6 / §12.6: an EMPTY `sequence:` is a DRIVER project — it starts, and NEITHER
+    /// startup refusal fires (the all-`skip_judges` one would otherwise reject every driver project,
+    /// which has no `steps:` at all).
+    #[test]
+    fn an_empty_sequence_assembles_and_neither_refusal_fires() {
+        let tmp = base_with_judges(&["goal"]);
+        for body in ["project: p\n", "project: p\nsequence: { steps: [] }\n"] {
+            let cfg: AggConfig = serde_yaml::from_str(body).expect("an empty sequence must parse");
+            let asm = assemble(&cfg, tmp.path()).expect("an empty sequence is a driver project and must assemble");
+            assert!(asm.engine.judges.is_empty(), "a driver project declares nothing to agg — the run-set is EMPTY");
+        }
+    }
+
+    /// A name in an entry that is not a key in `steps:` is the same hard startup error it always was
+    /// (§5.4) — the check moved from `Statement::step_names()` to `e.step`, not away.
+    #[test]
+    fn an_entry_naming_an_unknown_step_is_refused() {
+        let tmp = base_with_judges(&["goal"]);
+        let cfg = cfg_with_steps("[worker, { step: ghost }]");
+        let err = assemble_err(&cfg, tmp.path());
+        assert!(err.contains("ghost"), "the refusal must NAME the unknown step, got: {err}");
+    }
+
+    /// The bounds that keep the walk finite. `until:` without `max:` is an unbounded repetition in a
+    /// config file (§11.1: "`max` is required"), and a zero count dispatches nothing — the old
+    /// parser refused `worker x0` for the same reason.
+    #[test]
+    fn the_repetition_bounds_are_validated_at_startup() {
+        let tmp = base_with_judges(&["goal"]);
+        for (steps, needle) in [
+            ("[{ step: worker, until: goal }]", "max"),
+            ("[{ step: worker, times: 0 }]", ">= 1"),
+            ("[{ step: worker, until: goal, max: 0 }]", ">= 1"),
+            ("[{ step: worker, times: 2, until: goal, max: 3 }]", "alternatives"),
+        ] {
+            let err = assemble_err(&cfg_with_steps(steps), tmp.path());
+            assert!(err.contains(needle), "`{steps}` must be refused mentioning `{needle}`, got: {err}");
+        }
+    }
+
+    /// An `until:` expression is a RUN-SET member on exactly the terms the old `if` condition was:
+    /// its judge must EXECUTE every step or the condition could never become true, and it must stay
+    /// out of the DoD-set (it is machinery, not a goal).
+    #[test]
+    fn an_until_condition_judge_joins_the_run_set_but_never_the_dod() {
+        let tmp = base_with_judges(&["goal", "converged"]);
+        let cfg = cfg_with_steps("[{ step: worker, until: \"converged.value >= 85\", max: 3 }]");
+        let asm = assemble(&cfg, tmp.path()).expect("an until-condition judge must assemble");
+        let c = asm
+            .engine
+            .judges
+            .iter()
+            .find(|g| g.name == "converged")
+            .expect("`converged` must be in the run-set — it has to EXECUTE or `until:` can never fire");
+        assert!(!c.in_dod, "an until-condition judge is machinery, not a goal");
+        assert_eq!(asm.engine.tally(), (0, 1), "the scoreboard counts the goal only");
     }
 
     /// THE §12.1 REGRESSION — the gap that would have made the whole feature dead on arrival. A judge

@@ -832,7 +832,7 @@ exit 0
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
     write(dir, "tracked.txt", "ok\n");
-    // stalled (run-set-only, named ONLY in the `if` condition → NOT in the DoD-set): met at baseline
+    // stalled (run-set-only, named ONLY in the `until:` condition → NOT in the DoD-set): met at baseline
     // (`.escaped` absent), then FLIPS to not-met once the worker drops `.escaped`. Its landed baseline
     // `met:true` is exactly what a naive gate would read as a regression when it goes false.
     write_judge(dir, "stalled", "#!/bin/sh\n[ -f .escaped ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"escaped the stall\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"stalled\"}'\n");
@@ -843,8 +843,8 @@ exit 0
         dir,
         "agg/agg.yaml",
         "project: stallflip\ndefaults: { model: fake }\n\
-         steps:\n  worker: {}\n  reconsider: { skip_judges: true }\n\
-         sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  \
+         steps:\n  worker: {}\n\
+         sequence:\n  steps:\n    - { step: worker, until: stalled, max: 4 }\n  \
          done_if: \"feature\"\nsummary: { enabled: false }\nmemory: { enabled: false }\n",
     );
     write_state_md(dir, "do work\n");
@@ -1260,23 +1260,23 @@ exit 0
 }
 
 /// §5.3 end-to-end: the aggregates range over the DoD-set, NOT the run-set. A judge named only in an
-/// `if` condition (`stalled`) is in the run-set but not the DoD-set, so `done_if: all_goals` can fire
-/// while `stalled` is unmet. If aggregates ranged over the run-set, the run would never finish (the
-/// success condition would become "we got stuck") and hit the session cap (exit 4) instead.
+/// `until:` condition (`stalled`) is in the run-set but not the DoD-set, so `done_if: all_goals` can
+/// fire while `stalled` is unmet. If aggregates ranged over the run-set, the run would never finish
+/// (the success condition would become "we got stuck") and hit the session cap (exit 4) instead.
 #[test]
-fn done_if_all_goals_ignores_an_if_condition_judge() {
+fn done_if_all_goals_ignores_an_until_condition_judge() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
     // feature (the DoD judge, via `invariants` → it is in the DoD-set): met once did_work exists.
     write_judge(dir, "feature", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
-    // stalled (a run-set-only judge, named ONLY in the `if` condition): NEVER met.
+    // stalled (a run-set-only judge, named ONLY in the `until:` condition): NEVER met.
     write_judge(dir, "stalled", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"still churning\"}'\n");
     write(
         dir,
         "agg/agg.yaml",
         "project: dodset\ndefaults: { model: fake }\n\
-         steps:\n  worker: {}\n  reconsider: { skip_judges: true }\n\
-         sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  \
+         steps:\n  worker: {}\n\
+         sequence:\n  steps:\n    - { step: worker, until: stalled, max: 3 }\n  \
          done_if: \"all_goals\"\n  invariants: [feature]\nsummary: { enabled: false }\nmemory: { enabled: false }\n",
     );
     write_state_md(dir, "create the file did_work\n");
@@ -1287,7 +1287,7 @@ fn done_if_all_goals_ignores_an_if_condition_judge() {
     assert_exit(&out, 0, &combined);
     assert!(
         combined.contains("done_if satisfied"),
-        "all_goals must fire over the DoD-set even while the if-condition judge `stalled` is unmet:\n{combined}"
+        "all_goals must fire over the DoD-set even while the until-condition judge `stalled` is unmet:\n{combined}"
     );
 }
 
@@ -1611,14 +1611,16 @@ exit 0
     assert!(jp.contains("evidence.txt"), "…under its input label:\n{jp}");
 }
 
-/// #8 — a run-set-only `if`-condition judge is EVALUATED and its verdict drives its branch (the
-/// execution half; the DoD-EXCLUSION half is already covered by `done_if_all_goals_ignores_…`).
-/// `stalled` is named ONLY in `if stalled then reconsider`, so it is in the run-set but not the
+/// #8 — a run-set-only `until:`-condition judge is EVALUATED and its verdict ends the repetition
+/// (the execution half; the DoD-EXCLUSION half is already covered by `done_if_all_goals_ignores_…`).
+/// `stalled` is named ONLY in the `until:` of the `worker` entry, so it is in the run-set but not the
 /// DoD-set. It must actually RUN each judged step (a filesystem side-effect proves it) AND, once met,
-/// fire the reconsider step (whose per-step prompt marker then appears). If `if`-condition judges were
-/// left out of the run-set, `stalled` would never run and the branch would never fire.
+/// end `worker`'s repetition early so the walk reaches `reconsider` (whose per-step prompt marker then
+/// appears) INSIDE the 3-session cap — `max: 3` alone would spend the whole cap on `worker`. If
+/// `until:` judges were left out of the run-set, `stalled` would never run and the walk would never
+/// converge.
 #[test]
-fn a_run_set_only_if_condition_judge_is_evaluated_and_fires_its_branch() {
+fn a_run_set_only_until_condition_judge_is_evaluated_and_ends_its_repetition() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
@@ -1648,7 +1650,7 @@ exit 0
         "agg/agg.yaml",
         "project: ifcond\ndefaults: { model: fake }\n\
          steps:\n  worker: {}\n  reconsider: { skip_judges: true, prompt: \"RECONSIDER_MARKER_888\" }\n\
-         sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  done_if: \"feature\"\n\
+         sequence:\n  steps:\n    - { step: worker, until: stalled, max: 3 }\n    - reconsider\n  done_if: \"feature\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
     write_state_md(dir, "do work\n");
@@ -1660,18 +1662,20 @@ exit 0
     // (a) `stalled` actually EXECUTED — the run-set really contains it.
     let ran = fs::read_to_string(dir.join("stalled_ran.txt")).expect("`stalled` should have run at least once");
     assert!(ran.contains("STALLED_RAN"), "the if-condition judge `stalled` must be EVALUATED (run):\n{ran}");
-    // (b) its evaluated verdict drove the branch — reconsider fired, injecting its per-step prompt.
+    // (b) its evaluated verdict ended the repetition — the walk moved on and reconsider fired,
+    // injecting its per-step prompt.
     let prompts = fs::read_to_string(dir.join("prompts.txt")).unwrap_or_default();
     assert!(
         prompts.contains("RECONSIDER_MARKER_888"),
-        "`if stalled then reconsider` must fire once stalled evaluates met:\n{combined}"
+        "`until: stalled` must end `worker`'s repetition once stalled evaluates met:\n{combined}"
     );
 }
 
 /// FLAGSHIP CIRCUIT-BREAKER, end-to-end: the BUILTIN `stalled` judge — the one that ships inside the
 /// binary and reads `agg/private/verdicts.jsonl` (met when, across the last K=3 MERGED steps, no binary
 /// judge changed `met` and no numeric judge changed `value`) — must actually flip to met on a
-/// no-progress run and fire `if stalled then reconsider`. Unlike `…fires_its_branch` above (which
+/// no-progress run and end `worker`'s repetition so `reconsider` runs. Unlike `…ends_its_repetition`
+/// above (which
 /// FAKES `stalled` with a `.signal` file), this writes NO `agg/judges/stalled.sh`: it exercises the
 /// real library judge resolved from `~/.agg/judges/` (installed by `ensure_library`), driven purely
 /// by the verdict history the loop records.
@@ -1680,8 +1684,9 @@ exit 0
 /// step. The fake worker COMMITS a unique no-op line each session (so worker steps MERGE — stalled
 /// counts only merged rows) while touching nothing any judge reads, and records every `-p` prompt to
 /// an UNTRACKED file (survives all branch churn). After 3 flat merged worker steps the builtin
-/// `stalled` flips to met, so `if stalled then reconsider` dispatches `reconsider`, whose injected
-/// marker prompt reaches the worker — that marker's presence PROVES the mechanism fired.
+/// `stalled` flips to met, so `until: stalled` ends the `worker` entry and the walk dispatches
+/// `reconsider`, whose injected marker prompt reaches the worker — that marker's presence PROVES the
+/// mechanism fired.
 #[test]
 fn the_builtin_stalled_judge_fires_reconsider_on_a_no_progress_run() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1721,7 +1726,7 @@ exit 0
         "agg/agg.yaml",
         "project: stallfire\ndefaults: { model: fake }\n\
          steps:\n  worker: {}\n  reconsider: { skip_judges: true, prompt: \"RECONSIDER_FIRED_MARKER\" }\n\
-         sequence:\n  steps:\n    - worker\n    - if stalled then reconsider\n  done_if: \"feature\"\n\
+         sequence:\n  steps:\n    - { step: worker, until: stalled, max: 8 }\n    - reconsider\n  done_if: \"feature\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
     write_state_md(dir, "do work\n");
@@ -1740,17 +1745,17 @@ exit 0
         "this test must exercise the builtin stalled judge, not a project shadow"
     );
     // THE proof: the builtin stalled→reconsider circuit-breaker fired. reconsider's injected marker
-    // reached the worker, which only happens if `if stalled then reconsider` took its branch.
+    // reached the worker, which only happens if `until: stalled` ended the worker entry early.
     let prompts = fs::read_to_string(dir.join("prompts.txt")).unwrap_or_default();
     assert!(
         prompts.contains("RECONSIDER_FIRED_MARKER"),
-        "the builtin `stalled` must flip to met after K=3 merged no-progress steps and fire \
-         `if stalled then reconsider` — its marker prompt never reached the worker:\n{combined}"
+        "the builtin `stalled` must flip to met after K=3 merged no-progress steps and end the \
+         `worker` entry — reconsider's marker prompt never reached the worker:\n{combined}"
     );
     // …and the loop actually dispatched the reconsider STEP (the session banner names it).
     assert!(
         combined.contains("`reconsider`"),
-        "the loop must dispatch the reconsider step, not merely evaluate the condition:\n{combined}"
+        "the walk must dispatch the reconsider step, not merely evaluate the condition:\n{combined}"
     );
 }
 

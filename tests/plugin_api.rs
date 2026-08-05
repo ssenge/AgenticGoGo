@@ -57,7 +57,7 @@ fn probe_state(cfg: &agg::core::config::AggConfig, dir: &Path) -> LoopState {
         dir: dir.to_path_buf(),
         config_base: dir.to_path_buf(),
         eng: agg::core::engine::Engine::new(vec![], Some("iterations > 999999".into()), None, None).unwrap(),
-        cursor: agg::core::sequence::Cursor::new(vec![]),
+        cursor: agg::core::walk::Walk::new(vec![]),
         cur_step: None,
         next_step: None,
         live: agg::state::LiveState::new(dir, loop_start, dash.clone()),

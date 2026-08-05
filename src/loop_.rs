@@ -17,7 +17,7 @@
 
 use crate::bus::{Bus, Command};
 use crate::core::config::AggConfig;
-use crate::core::sequence::Cursor;
+use crate::core::walk::Walk;
 use crate::state::{DashboardState, LiveState, Phase};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -178,7 +178,7 @@ pub fn run_with(
     max_sessions_flag: u32,
     register: impl FnOnce(&mut Lifecycle),
 ) -> Result<RunOutcome> {
-    let Assembly { engine: eng, statements } = assembly;
+    let Assembly { engine: eng, steps: seq_steps } = assembly;
 
     // ── double-run guard ──
     if let Some(pid) = crate::os::detach::live_pid(dir) {
@@ -274,7 +274,7 @@ pub fn run_with(
         dir: dir.to_path_buf(),
         config_base: config_base.to_path_buf(),
         eng,
-        cursor: Cursor::new(statements),
+        cursor: Walk::new(seq_steps),
         cur_step: None,
         next_step: None, // the YAML path drives the cursor; only a Rust driver seeds this.
         dash,

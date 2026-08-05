@@ -284,7 +284,7 @@ impl Agg {
             dir: dir.clone(),
             config_base,
             eng: asm.engine,
-            cursor: crate::core::sequence::Cursor::new(asm.statements),
+            cursor: crate::core::walk::Walk::new(asm.steps),
             cur_step: None,
             next_step: None,
             dash,
