@@ -547,7 +547,8 @@ crashes / times out / prints garbage is an **`error`** — never counted as a re
 ### Script judges
 
 Run from the **project root** (cwd = project root, stdin = `/dev/null`), with env `AGG_SESSION`,
-`AGG_STEP`, `AGG_JUDGE`, `AGG_PROJECT_DIR` set. Just a file that prints the verdict:
+`AGG_STEP`, `AGG_JUDGE`, `AGG_PROJECT_DIR`, `AGG_JUDGE_SCRATCH` set. Just a file that prints the
+verdict:
 
 ```bash
 #!/usr/bin/env bash
@@ -556,6 +557,35 @@ pct=$(coverage report | awk '/TOTAL/ {print $NF}' | tr -d '%')
 met=$([ "$pct" -ge 80 ] && echo true || echo false)
 printf '{"met":%s,"value":%s,"max":100,"target":80,"rationale":"%s%% covered"}\n' "$met" "$pct" "$pct"
 ```
+
+#### ⚠ A judge MAY NOT WRITE THE PROJECT TREE
+
+Under `isolation: sandbox` (or `container`) a judge reads everything and writes **only**
+`$AGG_JUDGE_SCRATCH`. The project tree is read-only to it, and `agg/private/` + `agg/judges/` are
+denied outright. The reason is short: a judge that can write the tree it grades can edit its way to
+a pass, which is the same hole as letting a judge choose its own writable paths.
+
+**agg does not guess which folders your judge needs — it relocates the writes.** Before every judge
+it points the standard toolchain variables at a scratch directory, so the common cases need no
+change from you:
+
+| variable | scope | for |
+|---|---|---|
+| `AGG_JUDGE_SCRATCH`, `TMPDIR` | per **session**, shared by that step's judges | your own temp files, and measurement hand-off |
+| `CARGO_TARGET_DIR`, `GOCACHE`, `XDG_CACHE_HOME`, `PYTHONPYCACHEPREFIX`, `npm_config_cache` | per **project**, persistent | build caches — kept across sessions so nothing rebuilds cold |
+| `PYTEST_ADDOPTS=-p no:cacheprovider` | — | pytest insists on a rootdir cache dir and has no variable for it |
+
+Two consequences worth knowing:
+
+- **A judge that still writes in-tree gets `EPERM` and fails loudly.** That is intended — it is a bug
+  whether or not a sandbox catches it. Export your own variable from `$AGG_JUDGE_SCRATCH`, or copy
+  what you need there and work on the copy.
+- **The scratch is SHARED between the judges of one step**, which is how a *measure → threshold* pair
+  works: one judge runs the benchmark and writes `bench.json`, another reads it and applies the
+  ceiling. It is fresh each session, so a stale measurement can never be read as current.
+
+Under `isolation: none` nothing is confined and the variables are still set, so a judge written for
+the sandbox works identically either way.
 
 ### LLM (rubric) judges
 
