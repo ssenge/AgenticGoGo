@@ -136,6 +136,9 @@ src/driver/facade.rs  the Rust API — `Agg`, the eleven calls, lazy+memoized ju
 src/core/judge.rs     runs a judge (script/rubric/native) and confines it AS A JUDGE: run-level tier,
                       project READ-ONLY, writes relocated to a shared per-session `$AGG_JUDGE_SCRATCH`.
 src/core/verdicts.rs  `agg/private/verdicts.jsonl` — one row per judge per GATE, never per step.
+src/core/calls.rs     `agg/private/calls.jsonl` — the DRIVER CALL ledger that makes `--resume` work.
+                      Fast-forward is sound only back to the last KEPT gate (OD-12): everything after
+                      it is parked on per-run span branches the ledger cannot carry.
 src/assembly.rs       builds the run-set: `done_if ∪ abort_if ∪ invariants ∪ every until:`.
                       A judge named by NO expression never runs, however many files sit in agg/judges/.
 ```

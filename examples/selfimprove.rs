@@ -60,7 +60,12 @@ fn main() -> Result<(), Fatal> {
 
     // A Rust driver configures EVERYTHING in Rust — ceilings and regression policy included. This
     // path never reads `agg.yaml`; a stray one is ignored rather than half-merged.
-    let agg = Agg::open(dir)?
+    // RESUME — and it matters more here than anywhere. A generation that dies after `implement` has
+    // burned an hour of a heavy model; replaying it from `select` would spend that hour again to
+    // reach the same place. Recorded calls are answered from `agg/private/calls.jsonl`, back as far
+    // as the last `gate()` that KEPT.
+    let resume = arg(3, "AGG_SAMPLE_RESUME").is_some();
+    let agg = Agg::open_with(dir, Opts { resume })?
         // Declared here, ENFORCED by `agg.check_limits()?` at the top of each generation. No
         // condition strings: there is no `.abort_if()` on the Rust path, because a driver that
         // wants to stop on a judge writes `if agg.judge(&x).met() { return Ok(()); }`.
