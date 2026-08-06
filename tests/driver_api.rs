@@ -830,3 +830,154 @@ fn the_pos_breadcrumb_is_published_where_the_readers_look() {
         serde_json::from_str(&std::fs::read_to_string(agg::paths::state_json(dir)).unwrap()).unwrap();
     assert_eq!(snap["pos"].as_str().unwrap(), "cycle 2/4 › attempt 1/3", "{snap:#}");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// PHASE 1 — durable execution
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/// A marker judge whose tally lives OUTSIDE the repo.
+///
+/// ⚠ [`marker_judge`]'s `<name>.runs` sits in the project dir, so the fake worker's `git add -A`
+/// commits it onto a session branch — and a resume that checks out base then makes the file vanish.
+/// The count would read 0 for a reason that has nothing to do with fast-forwarding, which is exactly
+/// the kind of false green this test exists to avoid.
+fn resume_marker_judge(dir: &Path, name: &str, tally: &Path) -> Judge {
+    let rel = format!("agg/judges/{name}.sh");
+    let p = dir.join(&rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(
+        &p,
+        format!("#!/bin/sh\necho ran >> '{}'\nprintf '%s\\n' '{{\"met\":true}}'\n", tally.display()),
+    )
+    .unwrap();
+    chmod_x(&p);
+    Judge::script(name, rel)
+}
+
+fn tally_of(p: &Path) -> usize {
+    std::fs::read_to_string(p).map(|t| t.lines().count()).unwrap_or(0)
+}
+
+/// A RESUMED DRIVER FAST-FORWARDS THROUGH ITS RECORDED CALLS AND DOES NO WORK FOR THEM.
+///
+/// The whole trick, asserted from the outside: a driver's position is never serialized. Each
+/// completed call appends one line to `calls.jsonl`, and on resume the same calls are answered from
+/// the file — so the driver walks itself back to the interruption point by *running*, because
+/// identical inputs produce identical branches.
+///
+/// Every assertion here reads something the pipeline PRODUCED — a judge's marker file, the session
+/// counter, git — never a flag the facade set.
+#[test]
+fn a_resumed_driver_fast_forwards_recorded_calls_and_re_executes_the_rest() {
+    let tmp = project();
+    let dir = tmp.path();
+    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_hours: None };
+    let tally = std::env::temp_dir().join(format!("agg-resume-tally-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tally);
+
+    // ── RUN 1: step, judge, gate(Kept), step ── the last step lands AFTER the kept gate, so OD-12
+    //    must drop it: its work is parked on a per-run span branch the ledger cannot carry.
+    let sessions_run1 = {
+        let agg = Agg::open(dir).unwrap().limits(lim());
+        let j = resume_marker_judge(dir, "checked", &tally);
+        agg.step(&work()).unwrap();
+        assert!(agg.judge(&j).met());
+        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+        agg.step(&work()).unwrap(); // ← after the boundary
+        agg.sessions()
+    };
+    assert_eq!(sessions_run1, 2, "two real worker sessions ran");
+    assert_eq!(tally_of(&tally), 1, "the judge ran once, for real");
+    let landed_after_run1 = work_landed_on_main(dir);
+    assert_eq!(landed_after_run1, 1, "only the pre-gate session reached main");
+
+    // ── RUN 2: the SAME flow, resumed.
+    {
+        let agg = Agg::open_with(dir, Opts { resume: true }).unwrap().limits(lim());
+        let j = resume_marker_judge(dir, "checked", &tally);
+
+        // ord 0 — recorded: no worker launches, and the session counter is RESTORED rather than
+        // restarted. A resume that reset it would hand `over_iterations` the whole budget again.
+        agg.step(&work()).unwrap();
+        assert_eq!(agg.sessions(), 1, "the recorded step restored its counter, it did not re-run");
+
+        // ord 1 — recorded: the judge is answered from the ledger, so its marker does NOT grow.
+        assert!(agg.judge(&j).met());
+        assert_eq!(tally_of(&tally), 1, "a fast-forwarded judge must not EXECUTE");
+
+        // …and asking a SECOND time in the same step still costs nothing and, crucially, consumes no
+        // second ordinal — memoization and the ledger have to agree on what counts as one call.
+        assert!(agg.judge(&j).met());
+        assert_eq!(tally_of(&tally), 1);
+
+        // ord 2 — recorded: the gate returns its recorded outcome WITHOUT performing the merge
+        // again. Re-running it would merge against a base that already has it.
+        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+
+        // ord 3 — the ledger is exhausted here: the post-gate step was truncated by OD-12, so this
+        // is REAL work again, and the counter continues from the restored value.
+        agg.step(&work()).unwrap();
+        assert_eq!(agg.sessions(), 2, "the truncated step re-executed");
+    }
+
+    // main is unchanged by the replay: the recorded gate did not merge a second time.
+    assert_eq!(work_landed_on_main(dir), landed_after_run1, "a fast-forwarded gate must touch no ref");
+}
+
+/// A FRESH RUN MUST NOT FAST-FORWARD AGAINST A PREVIOUS RUN'S LEDGER.
+///
+/// Without the truncate in `open`, the second run would answer its calls with the first run's
+/// results — skipping real work and reporting verdicts nobody measured this time.
+#[test]
+fn a_non_resume_run_starts_from_an_empty_ledger() {
+    let tmp = project();
+    let dir = tmp.path();
+    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_hours: None };
+
+    {
+        let agg = Agg::open(dir).unwrap().limits(lim());
+        let j = marker_judge(dir, "fresh", true);
+        agg.step(&work()).unwrap();
+        assert!(agg.judge(&j).met());
+        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    }
+    assert_eq!(runs(dir, "fresh"), 1);
+
+    {
+        let agg = Agg::open(dir).unwrap().limits(lim()); // NOT a resume
+        let j = marker_judge(dir, "fresh", true);
+        agg.step(&work()).unwrap();
+        assert!(agg.judge(&j).met());
+        assert_eq!(agg.sessions(), 1, "a fresh run counts its OWN sessions from zero");
+    }
+    assert_eq!(runs(dir, "fresh"), 2, "the judge really ran again — nothing was fast-forwarded");
+}
+
+/// A RESUME WHOSE DRIVER HAS CHANGED IS A HARD ERROR, NEVER A WRONG ANSWER.
+///
+/// Ordinals alone would happily answer `agg.judge(&security)` with a recorded `agg.judge(&lint)`
+/// verdict, and the run would proceed on a fabricated result. The label path plus the call's own
+/// name is the consistency check that makes that impossible.
+#[test]
+fn a_resume_that_diverges_from_the_ledger_refuses_to_guess() {
+    let tmp = project();
+    let dir = tmp.path();
+    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_hours: None };
+
+    {
+        let agg = Agg::open(dir).unwrap().limits(lim());
+        let a = marker_judge(dir, "alpha", true);
+        agg.step(&work()).unwrap();
+        assert!(agg.judge(&a).met());
+        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    }
+
+    // the resumed driver asks for a DIFFERENT judge at the same ordinal.
+    let agg = Agg::open_with(dir, Opts { resume: true }).unwrap().limits(lim());
+    let b = marker_judge(dir, "beta", true);
+    agg.step(&work()).unwrap();
+    let v = agg.judge(&b);
+    assert!(!v.met(), "a divergent resume must not report a fabricated met");
+    assert!(v.rationale().contains("DIVERGED"), "…and must say so plainly: {}", v.rationale());
+    assert_eq!(runs(dir, "beta"), 0, "…without running the judge it could not answer");
+}

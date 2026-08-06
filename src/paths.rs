@@ -113,6 +113,17 @@ pub fn verdicts_jsonl(dir: &Path) -> PathBuf {
     private_dir(dir).join("verdicts.jsonl")
 }
 
+/// Append-only DRIVER CALL ledger: `agg/private/calls.jsonl` (`core::calls`).
+///
+/// A sibling of [`verdicts_jsonl`] and private for a strictly stronger reason. A worker able to
+/// append rows here could make agg **skip work and fabricate verdicts** on the next `--resume`,
+/// because that is precisely what a ledger hit does: it answers a call without executing it. The
+/// rule this file states — *if the worker writing it could change when the loop ends, what it may
+/// spend, or what agg believes happened, it belongs here* — covers all three at once.
+pub fn calls_jsonl(dir: &Path) -> PathBuf {
+    private_dir(dir).join("calls.jsonl")
+}
+
 /// Long-task registry: `agg/state/spawns.json`. WORKER-WRITABLE — `agg spawn` is documented as
 /// "used by the worker, not to start the loop", so confining this would break the feature. Its
 /// blast radius is bounded: it records what to reap and what to tell the next session, nothing
@@ -167,6 +178,9 @@ mod tests {
         // AGG-OWNED — the worker writing any of these could change when the loop ends, what it may
         // spend, or what agg believes happened.
         assert_eq!(verdicts_jsonl(d), Path::new("/proj/agg/private/verdicts.jsonl"));
+        // a ledger HIT skips work and returns a recorded verdict — a worker able to append here
+        // could make agg fabricate both. Strictly stronger than the verdicts.jsonl case.
+        assert_eq!(calls_jsonl(d), Path::new("/proj/agg/private/calls.jsonl"));
         assert_eq!(bus_dir(d), Path::new("/proj/agg/private/bus"));
         assert_eq!(state_json(d), Path::new("/proj/agg/private/state.json"));
         assert_eq!(project_json(d), Path::new("/proj/agg/private/project.json"));
@@ -176,7 +190,7 @@ mod tests {
 
         // and the carve-out must actually CONTAIN the private files, or the sandbox deny (which is
         // one subpath rule) would confine nothing.
-        for p in [verdicts_jsonl(d), bus_dir(d), state_json(d), run_pid(d)] {
+        for p in [verdicts_jsonl(d), calls_jsonl(d), bus_dir(d), state_json(d), run_pid(d)] {
             assert!(p.starts_with(private_dir(d)), "{} must live under the carve-out", p.display());
         }
     }
