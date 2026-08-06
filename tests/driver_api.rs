@@ -981,3 +981,37 @@ fn a_resume_that_diverges_from_the_ledger_refuses_to_guess() {
     assert!(v.rationale().contains("DIVERGED"), "…and must say so plainly: {}", v.rationale());
     assert_eq!(runs(dir, "beta"), 0, "…without running the judge it could not answer");
 }
+
+/// `Agg::open` IS INERT — it must not touch the call ledger.
+///
+/// Deciding the ledger means WRITING it: a resume truncates it, a fresh run clears it. That decision
+/// therefore has to sit behind the double-run guard, and it did not — `open()` cleared the file
+/// immediately while the guard is only reached at the first spending call. A second driver PROCESS
+/// opened on a live project would wipe the RUNNING driver's ledger microseconds before being
+/// rejected, and the running driver would keep appending from its current ordinal into a file whose
+/// earlier records were gone. A later resume would then answer call 0 with the record of call 11.
+///
+/// ⚠ The guard itself compares PIDs, so it cannot fire between two `Agg`s in one process and the
+/// two-process race is not reachable from a unit test. What IS reachable is the property that fixes
+/// it, and it is the sharper one anyway: **opening writes nothing.**
+#[test]
+fn opening_a_driver_does_not_touch_the_call_ledger() {
+    let tmp = project();
+    let dir = tmp.path();
+
+    let a = Agg::open(dir).unwrap();
+    a.step(&work()).unwrap();
+    assert_eq!(a.gate().unwrap(), GateOutcome::Kept);
+    let ledger = agg::paths::calls_jsonl(dir);
+    let before = std::fs::read_to_string(&ledger).unwrap();
+    assert!(before.lines().count() >= 2, "the live run recorded its step and its gate: {before}");
+
+    // merely opening a second handle on the same project must change nothing on disk.
+    let _b = Agg::open(dir).unwrap();
+    let after = std::fs::read_to_string(&ledger).unwrap();
+    assert_eq!(after, before, "`open()` truncated a live ledger:\n--- before\n{before}\n--- after\n{after}");
+
+    // …and the same for a RESUME handle, whose truncate is the more destructive of the two.
+    let _c = Agg::open_with(dir, Opts { resume: true }).unwrap();
+    assert_eq!(std::fs::read_to_string(&ledger).unwrap(), before, "a resume `open()` truncated a live ledger");
+}
