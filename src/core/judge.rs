@@ -129,6 +129,14 @@ fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
 ///
 /// The project hash keeps two agg runs on one machine (same session number, different projects) from
 /// colliding — the scratch is under a shared `$TMPDIR`, so the path has to carry the project.
+///
+/// ponytail: NEITHER DIR IS EVER REMOVED. One scratch per session and one cache per project stay in
+/// `$TMPDIR` until the OS sweeps it — measured after one day of development: 1783 scratch dirs and
+/// 646 cache dirs, though the great majority are the test suite's throwaway projects rather than
+/// real runs. The ceiling is untidiness, not growth that matters: the dirs are small, `$TMPDIR` is
+/// exactly where transient state belongs, and keeping them is what makes a failed judge debuggable
+/// after the fact. Upgrade path when it bites: sweep this project's `agg-judges-<key>-*` on run end
+/// (`Agg::drop` / the loop's finalize), keeping the newest few.
 fn scratch_dir(cwd: &Path, session: Option<u32>) -> std::io::Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join(format!("agg-judges-{}-{}", project_key(cwd), session.unwrap_or(0)));
     std::fs::create_dir_all(&dir)?;
