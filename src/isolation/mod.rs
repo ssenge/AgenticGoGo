@@ -77,6 +77,32 @@ pub enum Isolation {
     Container,
 }
 
+impl Isolation {
+    /// Confinement STRENGTH — `none` < `sandbox` < `container`.
+    fn rank(self) -> u8 {
+        match self {
+            Isolation::None => 0,
+            Isolation::Sandbox => 1,
+            Isolation::Container => 2,
+        }
+    }
+
+    /// The stronger of two tiers.
+    ///
+    /// A RUN's tier is the strongest any of its steps asked for — never the weakest, and never
+    /// whichever step happened to run last. That is what lets a judge's confinement follow from its
+    /// ROLE (§2.5) instead of from its caller: a judge fired after an `isolation: none` step must not
+    /// be the one unconfined process in a run that sandboxes everywhere else, because a judge script
+    /// is exactly what a confined worker rewrites in order to escape.
+    pub fn strongest(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
 /// Is the OS sandbox mechanism available on this host (the wrapper binary is present)?
 ///
 /// Linux probes `bwrap`; macOS probes `sandbox-exec`; every other OS is `false`. Used by
