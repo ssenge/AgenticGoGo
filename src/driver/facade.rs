@@ -69,6 +69,15 @@ pub struct Agg {
     /// goals), and it is carried anyway so the shared keep/rollback body gets the same argument from
     /// both callers rather than a hard-coded `&[]` that would quietly rot if a driver ever grew one.
     span_goals: RefCell<Vec<GoalRuntime>>,
+    /// the strongest isolation tier any step of this run has declared — the driver path's answer to
+    /// `cfg.run_isolation()`.
+    ///
+    /// ⚠ It exists because `cfg.run_isolation()` reads `cfg.steps`, which a DRIVER NEVER POPULATES:
+    /// its steps are values in its own binary, not config entries. So that call returns `None` here
+    /// unconditionally, and §2.5's "judges take the RUN tier" silently meant "judges take no tier at
+    /// all" — every driver judge ran unconfined, which is the exact escape §2.5 exists to close.
+    /// Proven by a real-kernel test that watched a driver's judge write outside the project.
+    iso_seen: Cell<crate::isolation::Isolation>,
     /// the label path — see [`Agg::pos`].
     pos: RefCell<Vec<PosItem>>,
 }
@@ -139,6 +148,7 @@ impl Agg {
             verdicts: RefCell::new(HashMap::new()),
             span: RefCell::new(HashMap::new()),
             span_goals: RefCell::new(Vec::new()),
+            iso_seen: Cell::new(crate::isolation::Isolation::None),
             pos: RefCell::new(Vec::new()),
         })
     }
@@ -355,6 +365,9 @@ impl Agg {
         // 2. a fresh step is a fresh world: this is what makes memoization PER-STEP.
         self.verdicts.borrow_mut().clear();
         let body = self.resolve(step)?;
+        // the run's tier is the STRONGEST any step declared — recorded here because a driver's steps
+        // never reach `cfg.steps`, so `cfg.run_isolation()` cannot see them (see `iso_seen`).
+        self.iso_seen.set(self.iso_seen.get().strongest(body.isolation));
         let started = self.ready()?;
 
         // 3. THE FAST-FORWARD. A recorded step returns its recorded outcome with no worker launched,
@@ -639,7 +652,7 @@ impl Agg {
             // confinement follows from its ROLE, not from whichever step happened to run last —
             // otherwise a judge asked after a `Isolation::None` step runs unconfined, and one asked
             // after a hardened step inherits deny paths it exists to read and execute.
-            let isolation = st.cfg.run_isolation();
+            let isolation = st.cfg.run_isolation().strongest(self.iso_seen.get());
             let base = st.ext.get::<AGGState>().git.iso_base.clone();
             (
                 st.ruler,

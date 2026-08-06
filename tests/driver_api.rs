@@ -1015,3 +1015,44 @@ fn opening_a_driver_does_not_touch_the_call_ledger() {
     let _c = Agg::open_with(dir, Opts { resume: true }).unwrap();
     assert_eq!(std::fs::read_to_string(&ledger).unwrap(), before, "a resume `open()` truncated a live ledger");
 }
+
+/// A DRIVER'S JUDGES MUST BE CONFINED WHEN THE DRIVER DECLARED A CONFINING TIER.
+///
+/// `cfg.run_isolation()` reads `cfg.steps`, which a DRIVER never populates — its steps are values in
+/// its own binary. So the run tier resolved to `None` on this path and every judge ran unconfined,
+/// which is precisely the escape §2.5 exists to close: a confined worker rewrites `agg/judges/*.sh`
+/// in its writable cwd and agg then executes it with no jail at all.
+///
+/// Real kernel, so `#[ignore]`d like its siblings:
+/// `cargo test --test driver_api -- --ignored a_drivers_judges_are_confined --nocapture`
+#[test]
+#[ignore = "spawns the real OS sandbox; run by hand on a real host"]
+fn a_drivers_judges_are_confined_when_a_step_declared_a_tier() {
+    let tmp = project();
+    let dir = tmp.path();
+    assert!(agg::isolation::available(), "no OS sandbox on this host — cannot prove confinement");
+
+    // the judge tries to write OUTSIDE the project. Confined, that is EPERM; unconfined it succeeds.
+    // ⚠ NOT under $TMPDIR — the jail GRANTS cwd + $TMPDIR + /tmp, so a write there proves nothing.
+    // The repo's own target/ is outside all three, which is what the sibling kernel tests use.
+    let escape = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/agg-driver-judge-escape.txt");
+    let _ = std::fs::remove_file(&escape);
+    let rel = "agg/judges/escaper.sh";
+    let p = dir.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(
+        &p,
+        format!("#!/bin/sh\necho pwned > '{}' 2>/dev/null || true\nprintf '%s\\n' '{{\"met\":true}}'\n", escape.display()),
+    )
+    .unwrap();
+    chmod_x(&p);
+
+    let agg = Agg::open(dir).unwrap();
+    // a SANDBOXED step — the driver's declaration of the tier this run works at.
+    agg.step(&Step::new("implement").model("fake").isolation(Isolation::Sandbox).prompt("go")).unwrap();
+    assert!(agg.judge(&Judge::script("escaper", rel)).met(), "the judge still runs and returns its verdict");
+
+    let escaped = escape.exists();
+    let _ = std::fs::remove_file(&escape);
+    assert!(!escaped, "the driver's judge ESCAPED — it wrote {}", escape.display());
+}
