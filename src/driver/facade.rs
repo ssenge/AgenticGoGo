@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::core::calls::{CallRecord, NoteLevel};
 use crate::core::config::{AggConfig, CustomBackend, Limits, ResolvedStep};
 use crate::core::engine::GoalRuntime;
 use crate::core::model::{Judge, JudgeKind, JudgeSource, Verdict};
@@ -68,13 +69,12 @@ pub struct Agg {
     /// goals), and it is carried anyway so the shared keep/rollback body gets the same argument from
     /// both callers rather than a hard-coded `&[]` that would quietly rot if a driver ever grew one.
     span_goals: RefCell<Vec<GoalRuntime>>,
-    /// the recorded calls a `--resume` fast-forwards through.
+    /// the recorded calls a `--resume` fast-forwards through, truncated to the last KEPT gate.
     ///
-    /// ponytail: `core::calls` is Phase 1, so this is always empty and `Opts { resume: true }`
-    /// currently only records the intent. CEILING: a resumed driver re-executes everything.
-    /// UPGRADE PATH: `Vec<CallRecord>` and the fast-forward arms in `step`/`judge`/`gate`.
-    #[allow(dead_code)]
-    replay: Vec<()>,
+    /// Empty on a fresh run. Indexed by ORDINAL: `replay[n]` answers the run's n-th agg call, and
+    /// the driver walks itself back to the interruption point by *running* — identical inputs
+    /// produce identical branches, so its position never has to be serialized.
+    replay: Vec<CallRecord>,
     /// the label path — see [`Agg::pos`].
     pos: RefCell<Vec<PosItem>>,
 }
@@ -124,13 +124,20 @@ impl Agg {
             project: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "driver".into()),
             ..AggConfig::default()
         };
-        if opts.resume {
-            eprintln!(
-                "  ⚠ `Opts.resume`: the CALL LEDGER is Phase 1, so this run still starts from the top.\n\
-                 \x20   What it does today is tolerate the state a crash leaves — a dirty work tree is\n\
-                 \x20   discarded rather than refused (§3.9 rule 2)."
-            );
-        }
+        // THE LEDGER, decided here and nowhere else.
+        //
+        // A resume truncates to the last KEPT gate and replays what survives; a fresh run CLEARS the
+        // file, because fast-forwarding against a previous run's ledger would answer this run's calls
+        // with another run's results. Both are `?`-hard: a ledger we cannot read or cannot reset is
+        // not something to continue past.
+        let replay = if opts.resume {
+            let recs = crate::core::calls::truncate_to_base(&dir).map_err(Fatal::Other)?;
+            eprintln!("  [resume] {} recorded call(s) will be fast-forwarded (no work, no tokens).", recs.len());
+            recs
+        } else {
+            crate::core::calls::truncate(&dir).map_err(Fatal::Other)?;
+            Vec::new()
+        };
         Ok(Agg {
             cfg,
             dir,
@@ -141,7 +148,7 @@ impl Agg {
             verdicts: RefCell::new(HashMap::new()),
             span: RefCell::new(HashMap::new()),
             span_goals: RefCell::new(Vec::new()),
-            replay: Vec::new(),
+            replay,
             pos: RefCell::new(Vec::new()),
         })
     }
@@ -342,10 +349,28 @@ impl Agg {
         }
         // 2. a fresh step is a fresh world: this is what makes memoization PER-STEP.
         self.verdicts.borrow_mut().clear();
-        // Phase 1: a recorded step fast-forwards here, assigning session/tokens/cost from the
-        // record and consuming one ordinal, with no work done.
         let body = self.resolve(step)?;
         let started = self.ready()?;
+
+        // 3. THE FAST-FORWARD. A recorded step returns its recorded outcome with no worker launched,
+        //    no git touched and no tokens spent.
+        if let Some(CallRecord::Step { outcome, .. }) = self.replayed(&body.name)? {
+            {
+                let mut st = started.st.borrow_mut();
+                // ⛔ COUNTER RESTORATION, and it is not optional: a resume that launders the ceilings
+                // is a moat hole. These are CUMULATIVE as of that step, so they are ASSIGNED, not
+                // added — `over_budget`/`over_cost`/`over_iterations` then survive the restart
+                // instead of getting the whole budget back for free.
+                st.session = outcome.session;
+                st.tokens_spent = outcome.tokens;
+                st.cost_spent = outcome.cost;
+                st.dash.pos = self.label_path();
+                st.publish();
+            }
+            eprintln!("  [resume] ord {} · step `{}` — fast-forwarded", self.ord.get(), body.name);
+            self.skip();
+            return Ok(outcome);
+        }
 
         let mut st = started.st.borrow_mut();
         // The breadcrumb, stamped where the driver's flow ENTERS agg. agg cannot observe the
@@ -367,8 +392,18 @@ impl Agg {
                     return Err(Fatal::Ended(outcome));
                 }
                 None => {
-                    self.ord.set(self.ord.get() + 1); // Phase 1: …and append the record.
-                    return Ok(end.outcome.expect("a step that ran to the end reports its outcome"));
+                    let outcome = end.outcome.expect("a step that ran to the end reports its outcome");
+                    // Recorded ON COMPLETION, and after `st` is released: a torn line means this call
+                    // did not finish, which is exactly right — it must re-execute.
+                    let label = self.label_path();
+                    drop(st);
+                    self.record(CallRecord::Step {
+                        ord: self.ord.get(),
+                        label,
+                        outcome: outcome.clone(),
+                        ts: crate::util::now_epoch(),
+                    })?;
+                    return Ok(outcome);
                 }
             }
         }
@@ -442,8 +477,19 @@ impl Agg {
         if let Some(o) = self.ended.get() {
             return Err(Fatal::Ended(o));
         }
-        // 2. Phase 1: a recorded gate fast-forwards to its recorded GateOutcome here.
+        // 2. THE FAST-FORWARD, and this is the one that makes resume SAFE rather than merely cheap:
+        //    a recorded gate must not re-execute, because re-running it would perform a real merge
+        //    against a base that already has it.
         let started = self.ready()?;
+        if let Some(CallRecord::Gate { outcome, .. }) = self.replayed("gate")? {
+            // the span this gate closed is behind us; the next one opens against today's tree.
+            *self.span_goals.borrow_mut() = started.st.borrow().eng.snapshot_goal_state();
+            self.span.borrow_mut().clear();
+            self.verdicts.borrow_mut().clear();
+            eprintln!("  [resume] ord {} · gate — fast-forwarded ({outcome:?})", self.ord.get());
+            self.skip();
+            return Ok(outcome);
+        }
         let mut st = started.st.borrow_mut();
 
         // 3. nothing staged ⇒ nothing to decide. No ref is touched, no record is appended and no
@@ -469,8 +515,11 @@ impl Agg {
             _ => None,
         };
         if let Some(f) = failure {
-            self.ord.set(self.ord.get() + 1); // Phase 1: …and append the CallRecord::Gate.
-            return Ok(GateOutcome::Failed(f));
+            let outcome = GateOutcome::Failed(f);
+            let label = self.label_path();
+            drop(st);
+            self.record(CallRecord::Gate { ord: self.ord.get(), label, outcome, ts: crate::util::now_epoch() })?;
+            return Ok(outcome);
         }
 
         // 5. the regression set: every judge asked since the last gate (§0.2 rule 3 is what makes
@@ -512,7 +561,15 @@ impl Agg {
         // a rollback the tree is base again while a memoized verdict still describes the span that
         // was just discarded, and the driver's next `if` would read it as current.
         self.verdicts.borrow_mut().clear();
-        self.ord.set(self.ord.get() + 1); // Phase 1: …and append the CallRecord::Gate.
+        // 10. THE TRUNCATE BOUNDARY. A `Kept` row here is what `truncate_to_base` searches for: it is
+        //     the only point at which this run's work is on BASE rather than parked on a per-run span
+        //     branch the ledger cannot carry. Everything appended after it is provisional.
+        self.record(CallRecord::Gate {
+            ord: self.ord.get(),
+            label: self.label_path(),
+            outcome,
+            ts: crate::util::now_epoch(),
+        })?;
         Ok(outcome)
     }
 }
@@ -552,6 +609,24 @@ impl Agg {
             Ok(s) => s,
             Err(e) => return Verdict::failed(format!("judge `{}`: {e}", j.name)),
         };
+        // THE FAST-FORWARD. A recorded judge returns its recorded verdict — no ruler call, no script
+        // fork. Its spend is ADDED (not assigned): a `Step`'s counters are cumulative as of that
+        // step, but a judge's are its own bill, and dropping them would hand `over_budget` fresh
+        // headroom on every resume. The §5.4 flagship example is a three-hour judge.
+        match self.replayed(&j.name) {
+            Err(e) => return Verdict::failed(format!("judge `{}`: {e}", j.name)),
+            Ok(Some(CallRecord::Judge { verdict, tokens, cost, .. })) => {
+                let mut st = started.st.borrow_mut();
+                st.tokens_spent += tokens;
+                st.cost_spent += cost;
+                st.publish();
+                drop(st);
+                eprintln!("  [resume] ord {} · judge `{}` — fast-forwarded", self.ord.get(), j.name);
+                self.skip();
+                return verdict;
+            }
+            Ok(_) => {}
+        }
         let (ruler, model, timeout, session, step, isolation, iso_base) = {
             let mut st = started.st.borrow_mut();
             let step = st.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "driver".into());
@@ -601,6 +676,20 @@ impl Agg {
             Self::publish_verdict(&mut st.dash.judges, &j.name, &kind, &verdict);
             st.dash.pos = self.label_path();
             st.publish();
+        }
+        // …and the call is recorded, carrying ITS OWN spend. A judge failing to record is not a
+        // reason to fail the judge — the verdict is real and the driver should get it — but the
+        // ledger is then short one row, so say so loudly rather than resume against it silently.
+        if let Err(e) = self.record(CallRecord::Judge {
+            ord: self.ord.get(),
+            label: self.label_path(),
+            judge: j.name.clone(),
+            verdict: verdict.clone(),
+            tokens: spend.tokens,
+            cost: spend.cost_usd.unwrap_or(0.0),
+            ts: crate::util::now_epoch(),
+        }) {
+            eprintln!("  ⚠ could not record judge `{}` in the call ledger — resume will re-run it: {e}", j.name);
         }
         verdict
     }
@@ -686,6 +775,10 @@ impl JudgeSource for Lazy<'_> {
         self.asking.borrow_mut().push(j.name.clone());
         let verdict = self.agg.run_judge(j, self);
         self.asking.borrow_mut().pop();
+        // ⚠ THE CACHE IS POPULATED WHETHER THE VERDICT WAS RUN OR REPLAYED. A ledger hit that skipped
+        // the cache would let a second ask in the same step reach the ledger AGAIN and consume a
+        // second ordinal — every later call would then answer from the wrong record, silently, by
+        // one. Memoization and the ledger have to agree on what counts as ONE call.
         self.agg.verdicts.borrow_mut().insert(j.name.clone(), verdict.clone());
         // …and into the span, so `gate()` sees every verdict asked for since the last gate — which
         // is the whole reason `gate()` exists (a gate inside `step()` could not see a lazy ask).
@@ -812,6 +905,19 @@ impl Agg {
             return;
         }
         let Ok(started) = self.ready() else { return };
+        // A recorded note replays as a NO-OP: it consumes its ordinal and delivers nothing. Not
+        // re-notifying is the point — the driver contract tells authors that an `agg.*` call is a
+        // safe place for a once-only side effect, which is exactly why `log` is recorded like the
+        // rest. A `Result`-less signature means a divergence here cannot be returned, so it is
+        // reported and the note is delivered again; the next returning call raises it properly.
+        match self.replayed(&format!("note:{level}")) {
+            Ok(Some(_)) => {
+                self.skip();
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("  ⚠ {e}"),
+        }
         let _ = self.operator_check(started);
         if self.ended.get().is_some() {
             return;
@@ -820,6 +926,20 @@ impl Agg {
         if level != "log" {
             let mut st = started.st.borrow_mut();
             crate::features::notify::driver_ping(&mut st, level, msg);
+        }
+        if let Err(e) = self.record(CallRecord::Note {
+            ord: self.ord.get(),
+            label: self.label_path(),
+            level: match level {
+                "info" => NoteLevel::Info,
+                "ask" => NoteLevel::Ask,
+                "block" => NoteLevel::Block,
+                _ => NoteLevel::Log,
+            },
+            msg: msg.to_string(),
+            ts: crate::util::now_epoch(),
+        }) {
+            eprintln!("  ⚠ could not record this note in the call ledger: {e}");
         }
     }
 
@@ -834,6 +954,15 @@ impl Agg {
     /// hanging until morning.
     pub fn block(&self, msg: &str) -> Result<(), Fatal> {
         let started = self.ready()?;
+        // A recorded block replays as a no-op — it was already answered. ⚠ This is only reachable
+        // for a block BEFORE the last kept gate: `truncate_to_base` drops everything after it, so a
+        // block answered later in the run is dropped with the rest and WILL ask again, with the
+        // original answer unrecoverable. That cost is real, which is why the truncate prints it.
+        if self.replayed("note:block")?.is_some() {
+            eprintln!("  [resume] ord {} · block — already answered, not asking again", self.ord.get());
+            self.skip();
+            return Ok(());
+        }
         self.operator_check(started)?;
         {
             let mut st = started.st.borrow_mut();
@@ -847,6 +976,15 @@ impl Agg {
             self.check_limits()?;
             if std::mem::take(&mut started.st.borrow_mut().ext.get::<AGGState>().operator.resumed) {
                 eprintln!("  [block] resumed by the operator.");
+                // recorded only once ANSWERED — a block that never got its answer did not complete,
+                // so a resume must ask again rather than walk past a human decision nobody made.
+                self.record(CallRecord::Note {
+                    ord: self.ord.get(),
+                    label: self.label_path(),
+                    level: NoteLevel::Block,
+                    msg: msg.to_string(),
+                    ts: crate::util::now_epoch(),
+                })?;
                 return Ok(());
             }
             std::thread::sleep(Duration::from_secs(BLOCK_CHUNK_SECS));
@@ -913,6 +1051,50 @@ impl Agg {
             .map(|f| format!("{} {}/{}", f.label, f.value, f.max))
             .collect::<Vec<_>>()
             .join(" › ")
+    }
+
+    /// The record this call would be answered from, if the ledger has one at this ordinal.
+    ///
+    /// ⚠ It also enforces the CONSISTENCY CHECK, which is the whole reason a record carries a label
+    /// path. Fast-forward is sound only if the resumed driver is the same driver in the same place:
+    /// ordinals alone would happily answer `agg.judge(&security)` with a recorded `agg.judge(&lint)`
+    /// verdict if the flow had changed, and the run would proceed on a fabricated result. A mismatch
+    /// is therefore a HARD error naming both sides — never a silent re-execution, because "the
+    /// driver changed" and "the ledger is stale" are the operator's call, not agg's.
+    fn replayed(&self, want: &str) -> Result<Option<CallRecord>, Fatal> {
+        let Some(rec) = self.replay.get(self.ord.get() as usize).cloned() else {
+            return Ok(None);
+        };
+        let here = self.label_path();
+        if rec.label() != here || rec.what() != want {
+            return Err(Fatal::Other(anyhow::anyhow!(
+                "resume DIVERGED at ordinal {}: the ledger recorded `{}` at \"{}\", but this run \
+                 asked for `{}` at \"{}\".\n  \
+                 The driver's control flow is not what it was when the ledger was written — either \
+                 the binary changed, or something it branches on did.\n  \
+                 Re-run WITHOUT resume to start fresh (this discards the recorded work), or restore \
+                 the driver that wrote it.",
+                rec.ord(),
+                rec.what(),
+                rec.label(),
+                want,
+                here
+            )));
+        }
+        Ok(Some(rec))
+    }
+
+    /// Append a completed call and advance the ordinal. **Not called on a fast-forward** — the
+    /// record is already there, and re-appending it would double every ordinal on the next resume.
+    fn record(&self, rec: CallRecord) -> Result<(), Fatal> {
+        crate::core::calls::append(&self.dir, &rec).map_err(Fatal::Other)?;
+        self.ord.set(self.ord.get() + 1);
+        Ok(())
+    }
+
+    /// Advance past a fast-forwarded call without writing anything.
+    fn skip(&self) {
+        self.ord.set(self.ord.get() + 1);
     }
 
     /// The run's human-readable status — the same view `agg status` renders, from the same
