@@ -150,9 +150,18 @@ steps:
   # single `defaults:` block is already spent on the harness/model/effort family. In Rust these are
   # three `.create()` calls off one `sandboxed` template. See gap (8).
   implement:
-    isolation: sandbox             # under THIS tier: `agg/private/` is carved out with no knob
-                                   # (SHIPPED at cc30d43, isolation/mod.rs:151) and `agg/judges/`
-                                   # is denied by default (DESIGN ONLY — HANDOFF §4b.5, not code)
+    isolation: sandbox             # under THIS tier the WORKER gets: `agg/private/` carved out of
+                                   # its writable cwd with no knob (SHIPPED, isolation/mod.rs), plus
+                                   # whatever `readonly:` below denies. `agg/judges/` is NOT denied
+                                   # to a worker by default — that is why the line below names it.
+                                   #
+                                   # ⚠ DIFFERENT RULE FOR JUDGES, and do not conflate them: naming a
+                                   # confining tier ANYWHERE in this file also confines every JUDGE
+                                   # in the run, and a judge gets the whole project tree read-only —
+                                   # `agg/judges/` included, so it cannot rewrite the grader, itself
+                                   # included. Its writes are relocated to `$AGG_JUDGE_SCRATCH`
+                                   # instead, so that costs a well-behaved judge nothing.
+                                   # See docs/CONFIG.md → "A judge may not write the project tree".
     readonly: [tests/, agg/judges/]
     writable: [tests/]             # this step SHOULD add tests, so it re-grants exactly that one
                                    # deny. `agg/judges/` stays denied.
