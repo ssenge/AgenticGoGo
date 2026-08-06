@@ -295,10 +295,10 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Fresh session every iteration** — no context degradation; git + memory carry state, not a long chat.
 - **Incorruptible judges** — agg runs them, the agent never grades itself ([script or LLM-as-judge](#building-judges)).
 - **Judges-as-DoD** — compose judge names with `AND` / `OR` / `NOT` (plus numeric accessors like `coverage.value >= 80`) into one `done_if` expression; resolved by name from disk, no registry.
-- **Per-step agents + sequences** — a repeating list of steps, each with its own agent/model, so a stall can step back on a *different vendor* ([Steps and sequences](#steps-and-sequences)). Making that step-back **conditional** ("only when stalled") is the [Rust driver API](docs/RUST_API.md) — YAML has no `if:`.
+- **Per-step agents + sequences** — a repeating list of steps, each with its own agent/model, so a stall can step back on a *different vendor* ([Steps and sequences](#steps-and-sequences)). Making that step-back **conditional** ("only when stalled") is the [Rust driver API](#when-yaml-is-not-enough-the-rust-driver-api) — YAML has no `if:`.
 - **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
-- **A Rust driver API, when the flow is a program** — `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, for control flow `agg.yaml` cannot express: branch on a verdict's number, step back only when stalled, or short-circuit a 40-minute judge behind three cheap ones with `&&`. Same engine, same judges — heavier, and Rust-only, so **use YAML unless you need it** ([details](docs/RUST_API.md)).
-- **Crash-resumable driver runs** — every completed `agg.*` call is recorded, so a driver that dies at hour six replays its finished work in seconds and spends nothing on it. Your loop is never serialized: it runs from the top and its own `if`/`for` walk it back. Fast-forward reaches back to the last gate that landed on base — never past it, because staged work lives on a branch the ledger cannot describe ([details](docs/RUST_API.md)).
+- **A Rust driver API, when the flow is a program** — `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, for control flow `agg.yaml` cannot express: branch on a verdict's number, step back only when stalled, or short-circuit a 40-minute judge behind three cheap ones with `&&`. Same engine, same judges — heavier, and Rust-only, so **use YAML unless you need it** ([when YAML is not enough](#when-yaml-is-not-enough-the-rust-driver-api)).
+- **Crash-resumable driver runs** — every completed `agg.*` call is recorded, so a driver that dies at hour six replays its finished work in seconds and spends nothing on it. Your loop is never serialized: it runs from the top and its own `if`/`for` walk it back. Fast-forward reaches back to the last gate that landed on base — never past it, because staged work lives on a branch the ledger cannot describe ([details](#when-yaml-is-not-enough-the-rust-driver-api)).
 
 **Guardrails for unattended runs**
 - **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. On both tiers `agg/private/` is carved back **out** of the writable set, so a confined worker cannot forge the verdict ledger that decides when its own run ends. ⚠ **A JUDGE is confined more tightly than the worker**: the project tree is **read-only** to it — a judge able to write what it grades can edit its way to a pass — and its writes are *relocated* to `$AGG_JUDGE_SCRATCH` plus a persistent toolchain cache (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, …), so a well-behaved judge needs no change ([details](docs/CONFIG.md)). Refused at startup if the mechanism is missing, never a silent downgrade ([details](docs/CONFIG.md)). *macOS verified; Linux experimental.*
@@ -481,6 +481,60 @@ it does not *trigger* the next entry, since every entry runs every lap; a
 whole span — so a red-team detour can never get the *next* session rolled back in its place. See
 [`examples/p-vs-np/`](examples/p-vs-np/) for a full sequence, and [`docs/CONFIG.md`](docs/CONFIG.md)
 for the complete grammar.
+
+## When YAML is not enough: the Rust driver API
+
+**Heavier and Rust-only — use `agg.yaml` unless you need flow it cannot express.** The section above
+is the honest boundary: a YAML sequence is a list that laps, with bounded repetition. Four things it
+deliberately cannot do, each of which is an `if` or a `for` in Rust:
+
+| you want | YAML | Rust |
+|---|---|---|
+| skip a step based on a verdict | ✗ — a lap runs every entry | `if agg.judge(&x).met() { continue }` |
+| **not run** an expensive judge unless cheap ones pass | ✗ — every run-set judge runs after every judged step | `agg.judge(&cheap).met() && agg.judge(&slow).met()` |
+| a bound that changes with what the run learned | ✗ — `max:` is a literal | any expression |
+| state that changes *within* a cycle | ✗ — verdict rows land per gate | a local variable |
+
+The second row is the one that costs money: a 40-minute load test in a YAML run-set executes after
+**every** judged step; in a driver, `&&` short-circuits and it runs only where it matters.
+
+It is the **same engine** — `agg.step()` dispatches through the identical primitive the YAML walk
+does, so session isolation, the keep/rollback gate, memory, judges and the ledger all behave
+identically. What you gain is ordinary Rust; what you pay is a compiled binary instead of a config
+file.
+
+```rust
+let agg = Agg::open(".")?
+    .limits(Limits { tokens: Some(40_000_000), cost: None,
+                     sessions: Some(300), wall_hours: Some(10.0) })
+    .on_regression(OnRegression::Rollback);
+
+let cycle = agg.pos("cycle", 20);              // the breadcrumb the TUI renders
+for c in 1..=20 {
+    cycle.update(c);
+    agg.check_limits()?;                       // ceilings are OPT-IN — they fire here
+
+    agg.step(&implement)?;                     // stages on a session branch; nothing merged yet
+    if !(agg.judge(&tests).met() && agg.judge(&load).met()) {
+        continue;                              // `&&` IS the cost gate: `load` never runs when red
+    }
+    agg.gate()?;                               // land the whole span, or discard it per policy
+}
+```
+
+Eleven calls in total. **`step()` stages, `gate()` lands** — a driver that never gates loses nothing
+(every session is committed on its own branch) but never advances the base branch either. Judges are
+**lazy and memoized per step**, which is what makes `&&` a real cost gate rather than a style choice.
+
+A crashed run resumes with `Agg::open_with(".", Opts { resume: true })`: completed calls are answered
+from `agg/private/calls.jsonl` — no worker, no ruler, no tokens — back as far as the last gate that
+landed. Your loop is never serialized; it runs from the top and its own control flow walks it back.
+
+Full surface, the resume rules, and the three things a driver author must design around:
+[`docs/RUST_API.md`](docs/RUST_API.md). Working drivers: [`examples/workflow.rs`](examples/workflow.rs)
+and [`examples/selfimprove.rs`](examples/selfimprove.rs), with
+[`examples/workflow.yaml`](examples/workflow.yaml) as the same workflow in YAML plus an honest list
+of what it loses.
 
 ## State and memory
 
