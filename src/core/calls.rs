@@ -12,6 +12,7 @@
 //! `verdicts.jsonl` hole the private split exists to close.
 //!
 //! ## Relationship to `verdicts.jsonl`
+//!
 //! Different questions, both durable. `verdicts.jsonl` records what a GATE decided about a span —
 //! one row per judge per gate, the record of what landed. This file records what the DRIVER asked
 //! for, at call time, in order. A judge consulted three times in one span appears once per gate
