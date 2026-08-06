@@ -69,12 +69,6 @@ pub struct Agg {
     /// goals), and it is carried anyway so the shared keep/rollback body gets the same argument from
     /// both callers rather than a hard-coded `&[]` that would quietly rot if a driver ever grew one.
     span_goals: RefCell<Vec<GoalRuntime>>,
-    /// the recorded calls a `--resume` fast-forwards through, truncated to the last KEPT gate.
-    ///
-    /// Empty on a fresh run. Indexed by ORDINAL: `replay[n]` answers the run's n-th agg call, and
-    /// the driver walks itself back to the interruption point by *running* — identical inputs
-    /// produce identical branches, so its position never has to be serialized.
-    replay: Vec<CallRecord>,
     /// the label path — see [`Agg::pos`].
     pos: RefCell<Vec<PosItem>>,
 }
@@ -87,6 +81,17 @@ pub struct Agg {
 struct Started {
     st: RefCell<LoopState>,
     lc: Lifecycle,
+    /// the recorded calls a resume fast-forwards through, already truncated to the last KEPT gate.
+    ///
+    /// Empty on a fresh run. Indexed by ORDINAL: `replay[n]` answers the run's n-th agg call, and
+    /// the driver walks itself back to the interruption point by *running* — identical inputs
+    /// produce identical branches, so its position never has to be serialized.
+    ///
+    /// ⚠ It lives HERE, not on `Agg`, because deciding it means WRITING the ledger (truncating it,
+    /// or clearing it for a fresh run) and that must happen behind the double-run guard. Doing it in
+    /// `open()` meant a second driver opening a live project wiped the RUNNING driver's ledger before
+    /// failing the guard a moment later.
+    replay: Vec<CallRecord>,
     /// the Drop guards live HERE, so dropping the `Agg` fires them on return, early return AND
     /// panic-unwind.
     _stop: StopHooks,
@@ -124,20 +129,6 @@ impl Agg {
             project: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "driver".into()),
             ..AggConfig::default()
         };
-        // THE LEDGER, decided here and nowhere else.
-        //
-        // A resume truncates to the last KEPT gate and replays what survives; a fresh run CLEARS the
-        // file, because fast-forwarding against a previous run's ledger would answer this run's calls
-        // with another run's results. Both are `?`-hard: a ledger we cannot read or cannot reset is
-        // not something to continue past.
-        let replay = if opts.resume {
-            let recs = crate::core::calls::truncate_to_base(&dir).map_err(Fatal::Other)?;
-            eprintln!("  [resume] {} recorded call(s) will be fast-forwarded (no work, no tokens).", recs.len());
-            recs
-        } else {
-            crate::core::calls::truncate(&dir).map_err(Fatal::Other)?;
-            Vec::new()
-        };
         Ok(Agg {
             cfg,
             dir,
@@ -148,7 +139,6 @@ impl Agg {
             verdicts: RefCell::new(HashMap::new()),
             span: RefCell::new(HashMap::new()),
             span_goals: RefCell::new(Vec::new()),
-            replay,
             pos: RefCell::new(Vec::new()),
         })
     }
@@ -232,6 +222,21 @@ impl Agg {
         crate::os::detach::write_run_pid(&dir);
         let pid_guard = RunPidGuard { dir: dir.clone() };
         crate::os::signals::install();
+
+        // THE LEDGER, decided here and nowhere else — and deliberately AFTER the double-run guard
+        // above, because both branches WRITE. A resume truncates to the last KEPT gate and replays
+        // what survives; a fresh run CLEARS the file, since fast-forwarding against a previous run's
+        // ledger would answer this run's calls with another run's results. Doing this in `open()`
+        // meant a second driver wiped a LIVE driver's ledger microseconds before the guard rejected
+        // it. Both are `?`-hard: a ledger we can neither read nor reset is not one to continue past.
+        let replay = if self.resume {
+            let recs = crate::core::calls::truncate_to_base(&dir).map_err(Fatal::Other)?;
+            eprintln!("  [resume] {} recorded call(s) will be fast-forwarded (no work, no tokens).", recs.len());
+            recs
+        } else {
+            crate::core::calls::truncate(&dir).map_err(Fatal::Other)?;
+            Vec::new()
+        };
 
         let ruler = cfg.ruler_backend()?;
         let judge_model = cfg.judge_model(ruler);
@@ -329,7 +334,7 @@ impl Agg {
             self.ended.set(Some(outcome));
         }
 
-        Ok(Started { st: RefCell::new(st), lc: lifecycle, _stop: stop_hooks, _pid: pid_guard })
+        Ok(Started { st: RefCell::new(st), lc: lifecycle, replay, _stop: stop_hooks, _pid: pid_guard })
     }
 }
 
@@ -354,7 +359,7 @@ impl Agg {
 
         // 3. THE FAST-FORWARD. A recorded step returns its recorded outcome with no worker launched,
         //    no git touched and no tokens spent.
-        if let Some(CallRecord::Step { outcome, .. }) = self.replayed(&body.name)? {
+        if let Some(CallRecord::Step { outcome, .. }) = self.replayed(started, &body.name)? {
             {
                 let mut st = started.st.borrow_mut();
                 // ⛔ COUNTER RESTORATION, and it is not optional: a resume that launders the ceilings
@@ -481,7 +486,7 @@ impl Agg {
         //    a recorded gate must not re-execute, because re-running it would perform a real merge
         //    against a base that already has it.
         let started = self.ready()?;
-        if let Some(CallRecord::Gate { outcome, .. }) = self.replayed("gate")? {
+        if let Some(CallRecord::Gate { outcome, .. }) = self.replayed(started, "gate")? {
             // the span this gate closed is behind us; the next one opens against today's tree.
             *self.span_goals.borrow_mut() = started.st.borrow().eng.snapshot_goal_state();
             self.span.borrow_mut().clear();
@@ -613,7 +618,7 @@ impl Agg {
         // fork. Its spend is ADDED (not assigned): a `Step`'s counters are cumulative as of that
         // step, but a judge's are its own bill, and dropping them would hand `over_budget` fresh
         // headroom on every resume. The §5.4 flagship example is a three-hour judge.
-        match self.replayed(&j.name) {
+        match self.replayed(started, &j.name) {
             Err(e) => return Verdict::failed(format!("judge `{}`: {e}", j.name)),
             Ok(Some(CallRecord::Judge { verdict, tokens, cost, .. })) => {
                 let mut st = started.st.borrow_mut();
@@ -910,7 +915,7 @@ impl Agg {
         // safe place for a once-only side effect, which is exactly why `log` is recorded like the
         // rest. A `Result`-less signature means a divergence here cannot be returned, so it is
         // reported and the note is delivered again; the next returning call raises it properly.
-        match self.replayed(&format!("note:{level}")) {
+        match self.replayed(started, &format!("note:{level}")) {
             Ok(Some(_)) => {
                 self.skip();
                 return;
@@ -958,7 +963,7 @@ impl Agg {
         // for a block BEFORE the last kept gate: `truncate_to_base` drops everything after it, so a
         // block answered later in the run is dropped with the rest and WILL ask again, with the
         // original answer unrecoverable. That cost is real, which is why the truncate prints it.
-        if self.replayed("note:block")?.is_some() {
+        if self.replayed(started, "note:block")?.is_some() {
             eprintln!("  [resume] ord {} · block — already answered, not asking again", self.ord.get());
             self.skip();
             return Ok(());
@@ -1061,8 +1066,8 @@ impl Agg {
     /// verdict if the flow had changed, and the run would proceed on a fabricated result. A mismatch
     /// is therefore a HARD error naming both sides — never a silent re-execution, because "the
     /// driver changed" and "the ledger is stale" are the operator's call, not agg's.
-    fn replayed(&self, want: &str) -> Result<Option<CallRecord>, Fatal> {
-        let Some(rec) = self.replay.get(self.ord.get() as usize).cloned() else {
+    fn replayed(&self, started: &Started, want: &str) -> Result<Option<CallRecord>, Fatal> {
+        let Some(rec) = started.replay.get(self.ord.get() as usize).cloned() else {
             return Ok(None);
         };
         let here = self.label_path();
