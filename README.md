@@ -295,12 +295,13 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Fresh session every iteration** — no context degradation; git + memory carry state, not a long chat.
 - **Incorruptible judges** — agg runs them, the agent never grades itself ([script or LLM-as-judge](#building-judges)).
 - **Judges-as-DoD** — compose judge names with `AND` / `OR` / `NOT` (plus numeric accessors like `coverage.value >= 80`) into one `done_if` expression; resolved by name from disk, no registry.
-- **Per-step agents + sequences** — a repeating list of steps, each with its own agent/model; step back on a *different vendor* when the run stalls ([Steps and sequences](#steps-and-sequences)).
+- **Per-step agents + sequences** — a repeating list of steps, each with its own agent/model, so a stall can step back on a *different vendor* ([Steps and sequences](#steps-and-sequences)). Making that step-back **conditional** ("only when stalled") is the [Rust driver API](docs/RUST_API.md) — YAML has no `if:`.
 - **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
-- **A Rust driver API, when the flow is a program** — `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, for control flow `agg.yaml` cannot express: branch on a verdict's number, or short-circuit a 40-minute judge behind three cheap ones with `&&`. Same engine, same judges — heavier, and Rust-only, so **use YAML unless you need it** ([details](docs/RUST_API.md)).
+- **A Rust driver API, when the flow is a program** — `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, for control flow `agg.yaml` cannot express: branch on a verdict's number, step back only when stalled, or short-circuit a 40-minute judge behind three cheap ones with `&&`. Same engine, same judges — heavier, and Rust-only, so **use YAML unless you need it** ([details](docs/RUST_API.md)).
+- **Crash-resumable driver runs** — every completed `agg.*` call is recorded, so a driver that dies at hour six replays its finished work in seconds and spends nothing on it. Your loop is never serialized: it runs from the top and its own `if`/`for` walk it back. Fast-forward reaches back to the last gate that landed on base — never past it, because staged work lives on a branch the ledger cannot describe ([details](docs/RUST_API.md)).
 
 **Guardrails for unattended runs**
-- **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. On both tiers `agg/private/` is carved back **out** of the writable set, so a confined worker cannot forge the verdict ledger that decides when its own run ends. Refused at startup if the mechanism is missing, never a silent downgrade ([details](docs/CONFIG.md)). *macOS verified; Linux experimental.*
+- **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. On both tiers `agg/private/` is carved back **out** of the writable set, so a confined worker cannot forge the verdict ledger that decides when its own run ends. ⚠ **A JUDGE is confined more tightly than the worker**: the project tree is **read-only** to it — a judge able to write what it grades can edit its way to a pass — and its writes are *relocated* to `$AGG_JUDGE_SCRATCH` plus a persistent toolchain cache (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, …), so a well-behaved judge needs no change ([details](docs/CONFIG.md)). Refused at startup if the mechanism is missing, never a silent downgrade ([details](docs/CONFIG.md)). *macOS verified; Linux experimental.*
 - **Rate-limit backoff** *(Claude + Codex)* — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
 - **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `agg` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just judges — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](docs/CONFIG.md)).
@@ -441,15 +442,25 @@ steps:
 
 sequence:
   steps:
-    - { step: worker, until: "NOT stalled", max: 4 }  # grunt sessions — stop early if it's moving…
-    - reconsider                   # …reached only when 4 tries stayed flat: step back on Codex
+    - { step: worker, until: "NOT stalled", max: 4 }  # repeat while stalled, at most 4 sessions
+    - reconsider                   # step back on a different vendor — runs EVERY lap, see below
 ```
 
 An entry is tiny: a bare `NAME`, or `{ step: NAME, times: N }`, or `{ step: NAME, until: <expr>,
 max: N }` (the `<expr>` is the same `done_if` grammar, checked after each dispatch). Both bounds are
-mandatory. There is no `if:` — a lap dispatches every entry, in order, and an `until:` repeat that
-converges early *falls through* to the next one, which is how the step-back above stays conditional.
-The list repeats from the top until `done_if` or `abort_if` fires.
+mandatory. The list repeats from the top until `done_if` or `abort_if` fires.
+
+⚠ **Two things about `until:` that decide whether a sequence does what you think.**
+
+**There is no `if:`** — a lap dispatches *every* entry, in order. `reconsider` above runs on every
+lap, not only after a stall. YAML cannot say "step back **only when** stalled"; that is conditional
+dispatch, and it belongs to the [Rust driver API](docs/RUST_API.md), where it is an ordinary `if`.
+
+**`max:` is a contract, not a budget.** An entry that spends its whole bound with the condition still
+false has failed, and the run **aborts** naming the bound and the condition — it does not quietly
+advance. Exhaustion and convergence used to take the same branch, which meant a step burning four
+sessions against a judge that was *timing out* looked exactly like a step that had succeeded. Pick
+these numbers as the point at which a human should be told, because that is what they now mean.
 
 **Why per-step *agents* is the headline, not a bonus.** The clearest finding in the reflection
 literature is that an agent reflecting on its own reasoning tends to *reinforce* the flaw rather than
@@ -464,7 +475,8 @@ sessions **costs nothing** — there is no conversation to hand over.
 the strong one only on the step-back. The repeated `worker` on a cheap agent, `reconsider` on the
 expensive one.
 
-The `stalled` builtin (a library judge over the verdict history) is what triggers the step-back; a
+The `stalled` builtin (a library judge over the verdict history) is what BOUNDS the grunt repeat —
+it does not *trigger* the next entry, since every entry runs every lap; a
 `skip_judges: true` step **stages** its work rather than merging it, and the next judged step gates the
 whole span — so a red-team detour can never get the *next* session rolled back in its place. See
 [`examples/p-vs-np/`](examples/p-vs-np/) for a full sequence, and [`docs/CONFIG.md`](docs/CONFIG.md)
