@@ -52,7 +52,16 @@ fn main() -> Result<(), Fatal> {
     // The two paths are independent — half of the policy in YAML and half in code is the split-brain
     // this design spent months avoiding. What the paths share is FILES, not config: `agg/judges/*`,
     // `agg/AGG.md`, `agg/state/`.
-    let agg = Agg::open(dir)?              // no `mut` — see idea 4
+    // RESUME. An overnight run that dies at hour six must not start again at hour zero: every
+    // completed `agg.*` call is in `agg/private/calls.jsonl`, and with `resume` they are answered
+    // from it — no worker, no ruler, no tokens. This loop is NOT serialized and does not need to be;
+    // it runs from the top and the `for` and `if` below walk it back to where it stopped, because
+    // identical inputs produce identical branches.
+    //
+    // ⚠ Only as far back as the last `gate()` that KEPT. Later calls re-execute, `block()` included.
+    // That is why the `fs::write` at the bottom of this file is idempotent — see the note there.
+    let resume = arg(3, "AGG_SAMPLE_RESUME").is_some();
+    let agg = Agg::open_with(dir, Opts { resume })?   // no `mut` — see idea 4
         // A BUDGET, NOT A TRIPWIRE. `.limits()` records the ceilings; `agg.check_limits()?` in the
         // flow is what enforces them. Nothing fires on its own — see the call in the cycle below.
         // (`wall_hours` is a `Limits` field on the Rust path; in YAML it is a condition term.)

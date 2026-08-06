@@ -115,6 +115,37 @@ able to write the tree it grades can make the code pass.
 
 ---
 
+## Resuming a crashed run
+
+An overnight driver that dies at hour six should not start again at hour zero.
+
+```rust
+let agg = Agg::open_with(".", Opts { resume: true })?;   // instead of Agg::open(".")
+```
+
+Every completed call appended a line to `agg/private/calls.jsonl`, and on resume the same calls are
+answered from that file — no worker, no ruler, no git, no tokens. **Your loop is not serialized and
+does not need to be:** it runs from the top and its own `if`/`for` walk it back to where it stopped,
+because identical inputs produce identical branches.
+
+⚠ **Fast-forward reaches back only as far as the last `gate()` that returned `Kept`.** Everything
+after it is discarded and re-executes. That is not conservatism: `step()` always *stages*, so until
+a gate lands it the work is on a per-run branch the ledger cannot describe — replaying such a step
+as "done" would leave the next session building on an orphaned ref. agg prints exactly what it
+drops.
+
+Three consequences worth designing around:
+
+- **Side effects outside `agg.*` re-execute.** A `println!`, a file write or an HTTP POST in your
+  loop body happens again during replay. Put once-only effects behind an `agg.*` call (`log`, `info`,
+  `ask`, `block` are all recorded) or make them idempotent.
+- **An answered `block()` after the last kept gate will ask again**, and the original answer is not
+  recoverable. Gate before you block if that matters.
+- **Don't branch on the clock, `rand`, or an env var.** Anything derived from a `Verdict` or a
+  `StepOutcome` is safe by construction; anything else can send the replay down a different path,
+  and agg will refuse rather than guess — a call that does not match the record aborts the resume
+  naming both sides.
+
 ## Two rules that are easy to get wrong
 
 **A judge's `met` must mean GOOD.** `gate()`'s regression rule is *"was met, now unmet"*, which only
