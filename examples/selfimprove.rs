@@ -415,8 +415,15 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
 //                                   re-grants nothing — a deny, not a prompt       (design, §4b.5)
 //   disable a test from inside a    `no_shrink`: the count must not fall. A        always — but it
 //   file it may legitimately write  detector, cleared by a human `agg send inject` detects, not bars
-//   suborn a script judge into      `agg/judges/` denied by default under sandbox; sandbox only
-//   met:true                        only `author_judge` re-grants it               (design, §4b.5)
+//   suborn a script judge into      A JUDGE IS CONFINED AS A JUDGE (§2.5): the    sandbox|container
+//   met:true                        project tree is READ-ONLY to it, so it can    — SHIPPED
+//                                   neither rewrite `agg/judges/` nor edit the
+//                                   `src/` it grades into passing. Its writes are
+//                                   RELOCATED to `$AGG_JUDGE_SCRATCH`, so this
+//                                   costs no judge anything. ⚠ What turns it on
+//                                   is `.isolation()` on a STEP — the run's tier
+//                                   is the strongest any step declared, and the
+//                                   judges take that, never the current step's.
 //   forge verdicts.jsonl to fake    `agg/private/` carve-out, derived from cwd in  sandbox|container
 //   progress — or a stall           `wrap()` (isolation/mod.rs:151), no knob.      — SHIPPED cc30d43
 //                                   Proven by `isolation::tests::private_dir_

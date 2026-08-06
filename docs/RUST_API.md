@@ -110,8 +110,25 @@ diverge from the run it claims to reproduce. A check that genuinely needs the cl
 `Judge::script`, where the impurity sits in a file a reviewer can see.
 
 `c.scratch()` is the per-session directory judges may write — **shared between them**, so one judge
-can measure and another apply a threshold. The project tree is read-only to every judge: a judge
-able to write the tree it grades can make the code pass.
+can measure and another apply a threshold. A judge able to write the tree it grades can make the code
+pass, so under a confining tier the project tree is read-only to it and writes are relocated:
+`$AGG_JUDGE_SCRATCH` for working files, a persistent per-project dir for toolchain caches
+(`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, `GOCACHE`, …). Full table in
+[docs/CONFIG.md](CONFIG.md#-a-judge-may-not-write-the-project-tree).
+
+⚠ **What confines a driver's judges is `.isolation()` on its STEPS.** There is no separate knob: the
+run's tier is the strongest tier any step has declared, and judges take that — never the tier of
+whichever step happens to be current, because a judge's confinement follows from its role, not from
+its caller.
+
+```rust
+let build = Step::new("implement").isolation(Isolation::Sandbox);   // ← this confines the JUDGES too
+```
+
+A driver that declares no tier anywhere runs its judges unconfined, exactly as it runs its workers
+unconfined. That is the default and it is the honest one — but if you sandbox the worker and not the
+judges, the judge script is the way out, because a confined worker can rewrite `agg/judges/*.sh` in
+its own writable cwd.
 
 ---
 

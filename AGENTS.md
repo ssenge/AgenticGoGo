@@ -133,7 +133,10 @@ there is no second execution model, and adding one is the thing to refuse.
 src/core/walk.rs      the WHOLE of the YAML flow (~30 lines): lap the list, honour times/until+max.
                       Exhausting `max` without the condition holding is an ERROR, not an advance.
 src/driver/facade.rs  the Rust API — `Agg`, the eleven calls, lazy+memoized judges, `gate()`.
-src/core/judge.rs     runs a judge (script/rubric/native) and confines it AS A JUDGE: run-level tier,
+src/core/judge.rs     runs a judge (script/rubric/native) and confines it AS A JUDGE. The tier is the
+                      STRONGEST any step declared — ⚠ NOT `cfg.run_isolation()`, which reads
+                      `cfg.steps` and so returns `none` for every driver (they build steps in code).
+                      Then: run-level tier,
                       project READ-ONLY, writes relocated to a shared per-session `$AGG_JUDGE_SCRATCH`.
 src/core/verdicts.rs  `agg/private/verdicts.jsonl` — one row per judge per GATE, never per step.
 src/core/calls.rs     `agg/private/calls.jsonl` — the DRIVER CALL ledger that makes `--resume` work.

@@ -587,6 +587,13 @@ Two consequences worth knowing:
 Under `isolation: none` nothing is confined and the variables are still set, so a judge written for
 the sandbox works identically either way.
 
+**Which tier applies to a judge?** The RUN's, never the tier of whichever step invoked it — a judge is
+an evaluator, and the paths a worker must not change are exactly the ones a judge needs to read and
+execute. The run's tier is the **strongest** any step declares: in YAML that is `defaults.isolation`
+or any step's `isolation:`; in a Rust driver it is `.isolation(..)` on any `Step` it builds. So
+sandboxing one step confines every judge in the run, which is deliberate — otherwise the judge fired
+after an unconfined step would be the way out.
+
 ### LLM (rubric) judges
 
 An `.md` file **is** the rubric. It declares the files it reads in its own YAML **frontmatter**; the
