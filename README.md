@@ -4,8 +4,8 @@
 </h1>
 
 <p align="center">
-  <em>A deterministic outer Ralph loop with incorruptible judges around a stochastic inner agent.</em><br>
-  <em><strong>Agents as Code</strong> · <strong>Graph Engineering</strong> · <strong>Ralph loop</strong></em>
+  <em>Define your agent workflow as code — YAML or Rust — and let a deterministic outer loop<br>with incorruptible judges drive it to done.</em><br>
+  <em><strong>Loop Engineering</strong> · <strong>Graph Engineering</strong> · <strong>Agents as Code</strong></em>
 </p>
 
 <p align="center"><em>Stop typing “go go”.</em></p>
@@ -18,8 +18,11 @@ quietly stop one step short — leaving you to babysit a terminal?
 
 **Then AgenticGoGo is for you.**
 
-AgenticGoGo (`agg`) is a deterministic outer **[Ralph loop](https://ghuntley.com/ralph/)** that
-drives a stochastic inner coding agent (currently supported: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex/cli), [GitHub Copilot](https://github.com/github/copilot-cli)) — relaunching a **fresh** session, verifying its work against gates
+AgenticGoGo (`agg`) is a framework for **Loop Engineering**, **Graph Engineering** and **Agents as
+Code**. You define the workflow as a versioned artifact — in **YAML** for a sequence that laps, or in
+**Rust** when the flow has to branch — and `agg` runs it as a deterministic outer
+**[Ralph loop](https://ghuntley.com/ralph/)** around a stochastic inner coding agent (currently
+supported: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex/cli), [GitHub Copilot](https://github.com/github/copilot-cli)) — relaunching a **fresh** session each cycle, verifying its work against gates
 *it can't fake* (the **judges**), and repeating until your goals are actually met. The loop is plain code: it never hallucinates a decision. The agent does the work, inside one step, and never decides when it's done. *(A similar LLM-based approach — generate → verify → keep, as in evolutionary code search — was
 proposed years ago, outside the Ralph-loop community, by DeepMind's
 [AlphaCode](https://arxiv.org/abs/2203.07814) and its open-source variant
@@ -43,7 +46,7 @@ carry equal weight in `agg`, and every design decision here follows from one of 
   `agg/state/wiki/` is a **knowledge graph** (one concept per file, typed, cross-linked), not an
   append-only log — so the next session enters at the right node instead of re-reading everything.
 
-Ralph gives you the loop · Agents-as-Code makes it reviewable · the graph gives it a memory.
+The loop gives you determinism · Agents-as-Code makes it reviewable · the graph gives it a memory.
 [Read the three in full ↓](#three-ideas-it-is-built-on)
 
 <p align="center">
@@ -83,7 +86,7 @@ the [guide](docs/GUIDE.md).
 
 ## Three ideas it is built on
 
-### 1 · The Ralph loop — the loop is code, not a conversation
+### 1 · Loop Engineering — the loop is code, not a conversation
 
 [Ralph](https://ghuntley.com/ralph/) is the insight that a *fresh* agent session in a deterministic
 outer loop beats one long conversation: no context rot, no drift, no "where were we". `agg` is that

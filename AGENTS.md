@@ -14,10 +14,10 @@ Loop: **INJECT** (compose the worker's brief) → **RUN** (one fresh worker on i
 **VERIFY** (agg runs the judges itself, externally) → **GATE** (merge the branch if judges pass, else
 roll back). Repeat until `done_if` (exit 0) or `abort_if` (exit 3).
 
-**Three ideas everything here follows from** — if a change violates one of these, it is the change
-that is wrong:
-- **Ralph loop.** A FRESH session each cycle beats one long conversation, and the agent NEVER decides
-  it is done. Judges do, and the worker cannot run them.
+**The three ideas everything here follows from** — Loop Engineering ·
+Graph Engineering · Agents as Code. If a change violates one of these, it is the CHANGE that is wrong:
+- **Loop Engineering.** A FRESH session each cycle beats one long conversation, and the agent NEVER
+  decides it is done. Judges do, and the worker cannot run them. (The Ralph loop, made deterministic.)
 - **Agents as Code.** The workflow is committed source — `agg/agg.yaml` + `agg/judges/*`, diffable and
   reviewable; in Rust, a compiled driver you can unit-test. This is also why the moat holds: judges
   are committed, so a tampered judge is restored by a rollback.
