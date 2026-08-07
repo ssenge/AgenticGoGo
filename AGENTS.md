@@ -1,6 +1,7 @@
 # AGENTS.md — AgenticGoGo (`agg`)
 
-Condensed, imperative reference for AI agents. Humans: read `README.md`. Full config: `docs/CONFIG.md`.
+Condensed, imperative reference for AI agents. Humans: read `README.md` (short) then `docs/GUIDE.md` (full). Config: `docs/CONFIG.md`.
+Rust driver API: `docs/RUST_API.md`.
 Design specs: `internal/` (gitignored). This file covers what an agent needs to **use** agg (drive the
 CLI, write judges, configure a run) and to **work on** this repo.
 
@@ -12,6 +13,18 @@ harness is deterministic Rust; the worker is the one stochastic step. **A judge 
 Loop: **INJECT** (compose the worker's brief) → **RUN** (one fresh worker on its own git branch) →
 **VERIFY** (agg runs the judges itself, externally) → **GATE** (merge the branch if judges pass, else
 roll back). Repeat until `done_if` (exit 0) or `abort_if` (exit 3).
+
+**Three ideas everything here follows from** — if a change violates one of these, it is the change
+that is wrong:
+- **Ralph loop.** A FRESH session each cycle beats one long conversation, and the agent NEVER decides
+  it is done. Judges do, and the worker cannot run them.
+- **Agents as Code.** The workflow is committed source — `agg/agg.yaml` + `agg/judges/*`, diffable and
+  reviewable; in Rust, a compiled driver you can unit-test. This is also why the moat holds: judges
+  are committed, so a tampered judge is restored by a rollback.
+- **Graph Engineering.** Durable knowledge is a GRAPH, not a log: `agg/state/wiki/` is an OKF wiki —
+  one concept per file, typed frontmatter, cross-linked — so the next fresh session can enter at the
+  right node. `STATE.md` is rewritten every session; a multi-session PLAN parked there is LOST. It
+  belongs in the wiki, which also survives rollbacks.
 
 ## CLI (run from the project root)
 - `agg init [--agent claude|codex|copilot] [--force]` — scaffold `agg.yaml` + `AGG.md` + `state/STATE.md` + a starter judge.
