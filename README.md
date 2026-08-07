@@ -18,7 +18,7 @@ quietly stop one step short — leaving you to babysit a terminal?
 
 **Then AgenticGoGo is for you.**
 
-AgenticGoGo (`agg`) is a framework for **Loop Engineering**, **Graph Engineering** and **Agents as
+AgenticGoGo (`agg`) is a framework for **Loop Engineering** (e.g. Ralph Loops), **Graph Engineering** and **Agents as
 Code**. You define the workflow as a versioned artifact — in **YAML** for a sequence that laps, or in
 **Rust** when the flow has to branch — and `agg` runs it as a deterministic outer
 **[Ralph loop](https://ghuntley.com/ralph/)** around a stochastic inner coding agent (currently
