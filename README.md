@@ -4,7 +4,8 @@
 </h1>
 
 <p align="center">
-  <em>A deterministic outer Ralph loop with incorruptible judges around a stochastic inner agent.</em>
+  <em>A deterministic outer Ralph loop with incorruptible judges around a stochastic inner agent.</em><br>
+  <em><strong>Agents as Code</strong> · <strong>Graph Engineering</strong> · <strong>Ralph loop</strong></em>
 </p>
 
 <p align="center"><em>Stop typing “go go”.</em></p>
@@ -28,6 +29,22 @@ A **judge** is a small, incorruptible check that decides whether one goal is met
 inspecting the artifact (tests, a compiler, a proof checker), or an LLM grading against a rubric. You
 compose several with a boolean grammar (`and` / `or` / `not`, e.g. `outputs_two and tests_pass`) to
 say exactly what *done* means.
+
+**A loop alone is not enough, and this is the part most agent tooling leaves out.** Two more ideas
+carry equal weight in `agg`, and every design decision here follows from one of the three:
+
+- **[Agents as Code](#2--agents-as-code--your-workflow-is-a-reviewable-artifact)** — your workflow is
+  **committed source**, not a prompt in someone's terminal history. `agg/agg.yaml` + `agg/judges/*`
+  are diffed and code-reviewed like anything else; in Rust it is a **compiled program you can
+  unit-test**. It is also what makes the judges incorruptible: they live in git, so a run that
+  tampers with one is rolled back to the committed version.
+- **[Graph Engineering](#3--graph-engineering--knowledge-that-survives-a-fresh-session)** — because
+  every session starts **fresh**, what the run learned must live somewhere durable *and navigable*.
+  `agg/state/wiki/` is a **knowledge graph** (one concept per file, typed, cross-linked), not an
+  append-only log — so the next session enters at the right node instead of re-reading everything.
+
+Ralph gives you the loop · Agents-as-Code makes it reviewable · the graph gives it a memory.
+[Read the three in full ↓](#three-ideas-it-is-built-on)
 
 <p align="center">
   <img src="assets/loop.png" alt="The four stages of the agg loop — INJECT, RUN, VERIFY, GATE — arranged in a circle" width="620">
@@ -66,13 +83,15 @@ the [guide](docs/GUIDE.md).
 
 ## Three ideas it is built on
 
-**1 · The Ralph loop — the loop is code, not a conversation.**
+### 1 · The Ralph loop — the loop is code, not a conversation
+
 [Ralph](https://ghuntley.com/ralph/) is the insight that a *fresh* agent session in a deterministic
 outer loop beats one long conversation: no context rot, no drift, no "where were we". `agg` is that
 loop with the missing half added — **the agent never decides it is done.** Judges do, and the agent
 cannot run them.
 
-**2 · Agents as Code — your workflow is a reviewable artifact.**
+### 2 · Agents as Code — your workflow is a reviewable artifact
+
 The loop, the steps, the agents, the Definition of Done and the judges are **files in your repo**:
 `agg/agg.yaml` and `agg/judges/*`, committed, diffed and code-reviewed like anything else. A prompt
 in someone's terminal history is not reproducible; this is. It is also *why the moat holds* — the
@@ -80,15 +99,14 @@ judges are committed, so a run that tampers with one gets rolled back to the ver
 YAML stops being enough the same idea goes further: the workflow becomes a **compiled Rust program**
 you can unit-test.
 
-**3 · Graph Engineering — knowledge that survives a fresh session.**
+### 3 · Graph Engineering — knowledge that survives a fresh session
+
 Every session starts clean, so what the run *learned* has to live somewhere durable and
 *navigable*. `agg/state/wiki/` is an **OKF (Open Knowledge Format) knowledge graph**:
 one concept per markdown file, typed frontmatter, cross-linked with ordinary
 `[label](page.md)` links. Not an append-only log — a graph the next session can *enter at the right
 node*. Plans, decisions and dead-ends go there and survive rollbacks. Open `agg/` as an
 [Obsidian](https://obsidian.md) vault to see it.
-
-> Ralph gives you the loop · Agents-as-Code makes it reviewable · the graph gives it a memory.
 
 ## Install
 
