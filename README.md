@@ -107,7 +107,7 @@ you can unit-test.
 Every session starts clean, so what the run *learned* has to live somewhere durable and
 *navigable*. `agg/state/wiki/` is an **OKF (Open Knowledge Format) knowledge graph**:
 one concept per markdown file, typed frontmatter, cross-linked with ordinary
-`[label](page.md)` links. Not an append-only log — a graph the next session can *enter at the right
+ordinary relative Markdown links between pages. Not an append-only log — a graph the next session can *enter at the right
 node*. Plans, decisions and dead-ends go there and survive rollbacks. Open `agg/` as an
 [Obsidian](https://obsidian.md) vault to see it.
 
@@ -196,6 +196,26 @@ stages, `gate()` lands. A crashed run resumes from a call ledger without re-spen
 → [The Rust driver API](docs/RUST_API.md) · working drivers:
 [`examples/workflow.rs`](examples/workflow.rs),
 [`examples/selfimprove.rs`](examples/selfimprove.rs)
+
+## CLI reference
+
+Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
+
+| Command | What it does |
+|---|---|
+| `agg init` | Scaffold `agg.yaml`, `AGG.md`, state and a starter judge |
+| `agg plan` | Dry run: evaluate every judge once, print the starting scoreboard |
+| `agg run` | Run the loop until `done_if` or `abort_if` |
+| `agg status` | Live scoreboard, read from state; cheap, does not re-judge |
+| `agg dashboard` | Live TUI, or a one-shot snapshot with `--once` |
+| `agg doctor` | Check the chosen agent is installed and the config is valid for it |
+| `agg judge <name>` | Run one judge and print its verdict, for authoring and debugging |
+| `agg history` | Run history and lifetime totals |
+| `agg send` | Steer a running loop: `inject`, `pause`, `resume`, `budget`, `stop`, `note` |
+| `agg stop` | Graceful stop, an alias of `agg send stop` |
+| `agg spawn` | Start a long task that outlives one worker session |
+| `agg skills` | Install the `/agg:*` skills where your agent finds them |
+| `agg serve` | JSON HTTP API for the web UI |
 
 ## Where to go next
 
