@@ -195,14 +195,14 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   - Examples: `"tests_pass"` · `"tests_pass AND coverage.value >= 80"` · `"met_fraction >= 0.75"` ·
     `"count_met >= 3"`.
 - **`abort_if`** — the giving-up guard (exit 3). NOT part of the DoD — a ceiling, not a definition of
-  done. Terms: `over_budget`, `over_cost` (Claude-only), `over_iterations`, `wall_hours`,
+  done. Terms: `over_budget`, `over_cost` (Claude-only), `over_iterations`, `wall_time`/`work_time`,
   `any_regressed(invariants)`, `any_judge_error`. They OR together — the loop aborts the moment any
   trips.
   ```yaml
   # claude:
-  abort_if: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 8"
+  abort_if: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR work_time >= 28800"
   # codex / copilot — SAME, minus over_cost (they cannot report dollars):
-  abort_if: "any_regressed(invariants) OR over_budget OR over_iterations OR wall_hours >= 8"
+  abort_if: "any_regressed(invariants) OR over_budget OR over_iterations OR work_time >= 28800"
   ```
 - **`notify_if`** — *optional, and the ONLY clause that does not end the run.* Same grammar; when it
   is true agg runs `sequence.notify.cmd` and **the loop keeps running**. A human is a side-channel,
@@ -228,7 +228,7 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
     the agent a way to end its own run by declaring itself stuck — the precise failure the judges
     exist to prevent. In `notify_if` the worst case is an annoying ping, rate-limited by the
     cooldown, and the loop keeps going. Keep TERMINATION on the signals the worker genuinely cannot
-    reach — the process-internal ones: `over_budget`, `over_cost`, `over_iterations`, `wall_hours`,
+    reach — the process-internal ones: `over_budget`, `over_cost`, `over_iterations`, `wall_time`/`work_time`,
     `any_regressed(invariants)`. A `stalled`/`stuck` detector over agg's own
     `agg/private/verdicts.jsonl` is a **higher bar, and how much higher depends on the isolation
     tier**: agg owns that file and a worker touching it is tampering, and under `isolation:

@@ -691,7 +691,7 @@ fn the_sample_drivers_cycle_runs_end_to_end_and_lands_every_span() {
 
     let agg = Agg::open(dir)
         .unwrap()
-        .limits(Limits { tokens: Some(40_000_000), cost: None, sessions: Some(400), wall_hours: Some(12.0) })
+        .limits(Limits { tokens: Some(40_000_000), cost: None, sessions: Some(400), wall_time: Some(43200.0), work_time: None })
         .on_regression(OnRegression::Annotate)
         .instructions("agg/AGG.md");
 
@@ -817,7 +817,7 @@ fn a_pos_frame_is_removed_by_id_not_by_popping() {
 fn the_pos_breadcrumb_is_published_where_the_readers_look() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { tokens: None, cost: None, sessions: Some(9), wall_hours: None });
+    let agg = Agg::open(dir).unwrap().limits(Limits { tokens: None, cost: None, sessions: Some(9), wall_time: None, work_time: None });
 
     let cycle = agg.pos("cycle", 4);
     cycle.update(2);
@@ -871,7 +871,7 @@ fn tally_of(p: &Path) -> usize {
 fn a_resumed_driver_fast_forwards_recorded_calls_and_re_executes_the_rest() {
     let tmp = project();
     let dir = tmp.path();
-    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_hours: None };
+    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_time: None, work_time: None };
     let tally = std::env::temp_dir().join(format!("agg-resume-tally-{}", std::process::id()));
     let _ = std::fs::remove_file(&tally);
 
@@ -932,7 +932,7 @@ fn a_resumed_driver_fast_forwards_recorded_calls_and_re_executes_the_rest() {
 fn a_non_resume_run_starts_from_an_empty_ledger() {
     let tmp = project();
     let dir = tmp.path();
-    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_hours: None };
+    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_time: None, work_time: None };
 
     {
         let agg = Agg::open(dir).unwrap().limits(lim());
@@ -962,7 +962,7 @@ fn a_non_resume_run_starts_from_an_empty_ledger() {
 fn a_resume_that_diverges_from_the_ledger_refuses_to_guess() {
     let tmp = project();
     let dir = tmp.path();
-    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_hours: None };
+    let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_time: None, work_time: None };
 
     {
         let agg = Agg::open(dir).unwrap().limits(lim());
@@ -1055,4 +1055,312 @@ fn a_drivers_judges_are_confined_when_a_step_declared_a_tier() {
     let escaped = escape.exists();
     let _ = std::fs::remove_file(&escape);
     assert!(!escaped, "the driver's judge ESCAPED — it wrote {}", escape.display());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// HiL — the human-in-the-loop calls (`internal/HUMAN_LOOP.md`)
+//
+// The load-bearing property is that a `hil_*` call **blocks until a human answers**, with no
+// timeout and no way for the run to walk past the question. That is only safe because the wait is
+// interruptible and because `work_time` does not count it — both asserted here.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/// Answer an ask from "outside", the way an operator does: queue it on the bus. Runs on another
+/// thread because the call under test is, correctly, blocking.
+fn answer_from_outside(dir: &Path, want_case: &str, value: &str) -> std::thread::JoinHandle<String> {
+    let dir = dir.to_path_buf();
+    let want_case = want_case.to_string();
+    let value = value.to_string();
+    std::thread::spawn(move || {
+        // Poll for the ask to appear rather than sleeping a fixed time: the driver has to boot the
+        // run first, and a fixed sleep would either be flaky or slow.
+        for _ in 0..600 {
+            if let Some(a) = agg::core::asks::open(&dir).into_iter().next() {
+                let id = a.id.clone();
+                assert_eq!(
+                    match a.case {
+                        agg::core::asks::AskCase::Bool => "bool",
+                        agg::core::asks::AskCase::Choose => "choose",
+                        agg::core::asks::AskCase::Input => "input",
+                    },
+                    want_case
+                );
+                agg::bus::queue_command(
+                    &dir,
+                    &agg::bus::Command::Answer { id: id.clone(), text: value, by: "test".into() },
+                )
+                .unwrap();
+                return id;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("no ask ever appeared in the ledger");
+    })
+}
+
+/// The round trip: each call blocks, the answer arrives on the bus, the call returns the VALUE —
+/// not a doorbell. Returning the value is the whole difference from the old `block()`.
+#[test]
+fn a_hil_call_blocks_until_an_answer_arrives_on_the_bus_and_returns_it() {
+    let tmp = project();
+    let agg = Agg::open(tmp.path()).unwrap();
+
+    let h = answer_from_outside(tmp.path(), "bool", "yes");
+    assert!(agg.hil_bool("ship it?").unwrap(), "an answered `yes` is a true");
+    let id = h.join().unwrap();
+
+    // The ledger is the audit trail: who was asked what, and what came back.
+    let a = agg::core::asks::get(tmp.path(), &id).unwrap();
+    assert_eq!(a.question, "ship it?");
+    assert_eq!(a.answer.as_deref(), Some("yes"));
+    assert_eq!(a.by.as_deref(), Some("test"), "the answerer is recorded, not just the answer");
+    assert!(!a.is_open(), "an answered ask stops being open");
+
+    let h = answer_from_outside(tmp.path(), "choose", "sqlite");
+    assert_eq!(agg.hil_choose("which store?", &["postgres", "sqlite"]).unwrap(), 1);
+    h.join().unwrap();
+
+    let h = answer_from_outside(tmp.path(), "input", "db-prod-eu1");
+    assert_eq!(agg.hil_input("which instance?").unwrap(), "db-prod-eu1");
+    h.join().unwrap();
+}
+
+/// A `no` is a legitimate answer, not an error: a workflow that asked has to be able to act on it.
+#[test]
+fn a_denial_returns_false_rather_than_failing_the_run() {
+    let tmp = project();
+    let agg = Agg::open(tmp.path()).unwrap();
+    let h = answer_from_outside(tmp.path(), "bool", "no");
+    assert!(!agg.hil_bool("deploy to prod?").unwrap());
+    h.join().unwrap();
+}
+
+/// `agg stop` interrupts a wait — the reason no timeout is needed. Verified on the wire by hand
+/// first; this is that check, automated, so it cannot silently regress.
+#[test]
+fn a_blocked_hil_call_is_interruptible_by_agg_stop() {
+    let tmp = project();
+    let dir = tmp.path().to_path_buf();
+    let stopper = std::thread::spawn(move || {
+        for _ in 0..600 {
+            if !agg::core::asks::open(&dir).is_empty() {
+                agg::bus::queue_command(&dir, &agg::bus::Command::Stop { reason: "test".into() })
+                    .unwrap();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("no ask appeared");
+    });
+
+    let agg = Agg::open(tmp.path()).unwrap();
+    let err = agg.hil_bool("will anyone answer this?").unwrap_err();
+    stopper.join().unwrap();
+
+    assert!(
+        matches!(err, Fatal::Ended(RunOutcome::Stopped)),
+        "a stop during a wait must end the run, not be swallowed: got {err:?}"
+    );
+    // ⚠ And it must be distinguishable from success at the process level — an operator stop used to
+    // share exit 0 with a met goal.
+    assert_eq!(err.exit_code(), 5, "a stopped run is not a successful one");
+    assert!(
+        agg::core::asks::open(tmp.path()).len() == 1,
+        "the ask stays OPEN — nobody answered it, and pretending otherwise would fake a decision"
+    );
+}
+
+/// An out-of-range choice never reaches the driver. The options are recorded WITH the ask, so the
+/// boundary can refuse — that closed answer set is the whole reason `hil_choose` exists next to
+/// `hil_input`.
+#[test]
+fn an_answer_off_the_recorded_option_list_is_refused_and_the_ask_stays_open() {
+    let tmp = project();
+    let dir = tmp.path();
+    agg::core::asks::append(
+        dir,
+        &agg::core::asks::Row::Open {
+            id: "z1".into(),
+            case: agg::core::asks::AskCase::Choose,
+            question: "which store?".into(),
+            options: Some(vec!["postgres".into(), "sqlite".into()]),
+            origin: agg::core::asks::Origin::Driver,
+            session: 1,
+            step: None,
+            ts: 100,
+        },
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_agg"))
+            .args(["--dir", dir.to_str().unwrap()])
+            .args(args)
+            .env("PATH", format!("{}:{}", ENV.join("bin").display(), std::env::var("PATH").unwrap()))
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["send", "answer", "z1", "mysql"]);
+    assert!(!out.status.success(), "an unlisted answer must be refused");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("postgres") && err.contains("sqlite"), "it re-prints the options: {err}");
+    assert!(agg::core::asks::get(dir, "z1").unwrap().is_open(), "a refused answer is not queued");
+
+    // A 1-based number is accepted too — an operator answering from a phone should not have to
+    // retype an exact option string.
+    assert!(run(&["send", "answer", "z1", "2"]).status.success());
+    // The bus carries the RESOLVED option, not the number the operator typed.
+    let queued = std::fs::read_dir(agg::paths::bus_dir(dir).join("in"))
+        .unwrap()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect::<String>();
+    assert!(queued.contains("sqlite"), "the number resolves to the option: {queued}");
+
+    // And a second answer is refused rather than silently overwriting a decision already acted on.
+    agg::core::asks::answer(dir, "z1", "sqlite", "op", 200).unwrap();
+    let out = run(&["send", "answer", "z1", "postgres"]);
+    assert!(!out.status.success(), "the first answer wins");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already answered"));
+}
+
+/// The worker's front-end RECORDS AND EXITS. It must not wait, and it must not be able to write the
+/// private ledger directly — only agg promotes a request into an ask.
+#[test]
+fn the_workers_hil_command_records_a_request_and_returns_immediately() {
+    let tmp = project();
+    let dir = tmp.path();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_agg"))
+        .args(["--dir", dir.to_str().unwrap(), "hil", "bool", "Is the firewall open?"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("Do NOT wait"), "the worker must be told to end its session: {said}");
+
+    // Request in the WORKER's directory; nothing in the agg-owned ledger yet.
+    assert_eq!(std::fs::read_dir(agg::paths::worker_asks_dir(dir)).unwrap().count(), 1);
+    assert!(agg::core::asks::all(dir).is_empty(), "a request is not yet an ask");
+
+    // Promotion is agg's: it mints the id, so a worker cannot choose one that collides with a real
+    // ask and answer it.
+    let minted = agg::core::asks::promote_worker_requests(dir, 7, 500);
+    assert_eq!(minted.len(), 1);
+    assert_eq!(minted[0].question, "Is the firewall open?");
+    assert!(matches!(minted[0].origin, agg::core::asks::Origin::Worker));
+    assert_eq!(minted[0].session, 7);
+
+    // Consumed exactly once — a second boundary must not re-ask the same question.
+    assert!(agg::core::asks::promote_worker_requests(dir, 8, 600).is_empty());
+    assert_eq!(agg::core::asks::all(dir).len(), 1);
+}
+
+/// A backstop that ends a wait nobody is going to answer.
+///
+/// Every test below blocks on purpose, so a bug that stops answers arriving would HANG the suite —
+/// which is a far worse failure mode than a red test. This turns any such hang into
+/// `Fatal::Ended(Stopped)` and a legible assertion.
+fn stop_after(dir: &Path, secs: u64) -> std::thread::JoinHandle<()> {
+    let dir = dir.to_path_buf();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        let _ = agg::bus::queue_command(&dir, &agg::bus::Command::Stop { reason: "watchdog".into() });
+    })
+}
+
+/// A resumed run must not ask a human the same question twice: the recorded answer replays.
+///
+/// ⚠ The `step()` + `gate()` is REQUIRED, not scenery. `truncate_to_base` drops every record after
+/// the last gate that KEPT, so an ask with no kept gate behind it is dropped on resume and asked
+/// again — the documented cost in `docs/RUST_API.md`, and the reason `internal/HUMAN_LOOP.md` §4.7
+/// says to gate before a `hil_*` call whose answer you cannot afford to lose. This test pins the
+/// capability that DOES exist; the first draft of it asserted the opposite and hung.
+#[test]
+fn a_resumed_run_replays_an_answer_recorded_before_a_kept_gate() {
+    let tmp = project();
+
+    {
+        let agg = Agg::open(tmp.path()).unwrap();
+        let h = answer_from_outside(tmp.path(), "input", "eu-west-1");
+        assert_eq!(agg.hil_input("which region?").unwrap(), "eu-west-1");
+        h.join().unwrap();
+        // Land a span so the ask is BEHIND a kept gate and survives truncation.
+        agg.step(&work()).unwrap();
+        assert!(matches!(agg.gate().unwrap(), GateOutcome::Kept), "the ask needs a kept gate behind it");
+    }
+
+    // Nothing answers this time. Without replay the call would block until the watchdog stops the
+    // run, and the assertion below names exactly that.
+    let watchdog = stop_after(tmp.path(), 45);
+    let resumed = Agg::open_with(tmp.path(), Opts { resume: true }).unwrap();
+    let got = resumed.hil_input("which region?");
+    assert_eq!(
+        got.as_deref().ok(),
+        Some("eu-west-1"),
+        "the recorded answer must replay; a human is not asked twice (got {got:?})"
+    );
+    drop(watchdog);
+}
+
+/// `open_asks()` is how a driver sees a question the WORKER asked — it never learns that id
+/// otherwise, because `agg hil` mints it in another process.
+#[test]
+fn a_driver_can_see_the_asks_its_worker_opened() {
+    let tmp = project();
+    let dir = tmp.path();
+    agg::core::asks::write_worker_request(
+        dir,
+        &agg::core::asks::WorkerRequest {
+            case: agg::core::asks::AskCase::Input,
+            question: "which licence key?".into(),
+            options: None,
+            ts: 1,
+        },
+    )
+    .unwrap();
+    agg::core::asks::promote_worker_requests(dir, 3, 100);
+
+    let agg = Agg::open(dir).unwrap();
+    let seen = agg.open_asks();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].question, "which licence key?");
+    assert!(matches!(seen[0].origin, agg::core::asks::Origin::Worker));
+}
+
+/// An indefinite block is only survivable because the waiting does not count against an EFFORT
+/// ceiling. This asserts the banking actually happens — the ledger, not a flag.
+#[test]
+fn time_spent_blocked_is_banked_as_human_wait_not_as_work() {
+    let tmp = project();
+    let agg = Agg::open(tmp.path()).unwrap();
+
+    // Answer only after the wait has had to poll at least once, so a chunk of wait is banked.
+    let dir = tmp.path().to_path_buf();
+    let h = std::thread::spawn(move || {
+        for _ in 0..600 {
+            if let Some(a) = agg::core::asks::open(&dir).into_iter().next() {
+                std::thread::sleep(std::time::Duration::from_millis(5_200));
+                agg::bus::queue_command(
+                    &dir,
+                    &agg::bus::Command::Answer { id: a.id, text: "yes".into(), by: "test".into() },
+                )
+                .unwrap();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("no ask appeared");
+    });
+    assert!(agg.hil_bool("waiting on purpose?").unwrap());
+    h.join().unwrap();
+
+    let clock = agg::core::clock::Clock::open(tmp.path(), 0, false);
+    assert!(
+        clock.human_wait_secs >= 5.0,
+        "the wait must be banked as human time (got {}s) — otherwise `work_time` charges the run \
+         for a person's thinking",
+        clock.human_wait_secs
+    );
 }

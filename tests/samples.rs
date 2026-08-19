@@ -104,7 +104,7 @@ fn the_yaml_sample_loads() {
     );
 
     assert_eq!(seq.done_if, "tests_pass AND lint_clean AND load_ok AND p99_ok");
-    assert_eq!(seq.abort_if.as_deref(), Some("over_budget OR wall_hours >= 12 OR any_regressed(invariants)"));
+    assert_eq!(seq.abort_if.as_deref(), Some("over_budget OR work_time >= 43200 OR any_regressed(invariants)"));
     assert_eq!(seq.invariants, ["builds"]);
     assert_eq!(seq.notify_if.as_deref(), Some("stalled"));
     let notify = seq.notify.as_ref().expect("notify_if without notify.cmd is a startup refusal");
@@ -116,7 +116,7 @@ fn the_yaml_sample_loads() {
     assert_eq!(seq.limits.tokens, Some(40_000_000));
     assert_eq!(seq.limits.sessions, Some(400));
     assert_eq!(seq.limits.cost, None);
-    assert_eq!(seq.limits.wall_hours, None, "this file says `wall_hours` as an abort_if TERM, not a limit");
+    assert_eq!(seq.limits.wall_time, None, "this file says `wall_hours` as an abort_if TERM, not a limit");
 
     // ---- on_regression: `annotate` = do not discard a regressed span ----
     assert!(!seq.gate_regressions, "`annotate` is the sample's policy: always merge, tell the next session");

@@ -37,5 +37,5 @@ mod types;
 pub use facade::{Agg, PosFrame};
 pub use step::Step;
 pub use types::{
-    Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, StepOutcome,
+    run, Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, StepOutcome,
 };

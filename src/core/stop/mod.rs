@@ -53,8 +53,15 @@ pub struct StopContext<'a> {
     pub sessions_done: u32,
     /// the `max_sessions` cap, if any (backs `over_iterations`)
     pub max_sessions: Option<u32>,
-    /// wall-clock hours since the loop started
-    pub wall_hours: f64,
+    /// END-TO-END seconds since the run began, human waiting INCLUDED (backs `wall_time`).
+    ///
+    /// Seconds, not hours, and end-to-end across resumes: `internal/HUMAN_LOOP.md` §7.4. The old
+    /// `wall_hours` term is REMOVED rather than aliased, because the unit changed by 3600× and a
+    /// mechanical rename would silently turn an 8-hour ceiling into an 8-second one.
+    pub wall_secs: f64,
+    /// seconds spent blocked inside a `hil_*` call, accumulated across resumes (backs
+    /// `human_wait_time`).
+    pub human_wait_secs: f64,
 }
 
 impl<'a> StopContext<'a> {
@@ -69,7 +76,8 @@ impl<'a> StopContext<'a> {
             cost_limit: None,
             sessions_done: 0,
             max_sessions: None,
-            wall_hours: 0.0,
+            wall_secs: 0.0,
+            human_wait_secs: 0.0,
         }
     }
 }
@@ -138,7 +146,8 @@ pub fn validate(expr: &str, judges: &[Judge]) -> Result<()> {
 pub fn judge_names(expr: &str) -> Result<Vec<String>> {
     const RESERVED: &[&str] = &[
         "all_goals", "count_met", "count_regressed", "total", "met_fraction", "any_regressed",
-        "tokens_spent", "budget_total", "wall_hours", "over_budget", "cost_spent", "cost_limit",
+        "tokens_spent", "budget_total", "wall_time", "human_wait_time", "work_time",
+        "over_budget", "cost_spent", "cost_limit",
         "over_cost", "iterations", "max_iterations", "over_iterations", "any_judge_error",
         "invariants",
     ];

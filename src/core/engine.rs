@@ -121,7 +121,8 @@ pub struct RunState {
     pub cost_limit: Option<f64>,
     pub sessions_done: u32,
     pub max_sessions: Option<u32>,
-    pub wall_hours: f64,
+    pub wall_secs: f64,
+    pub human_wait_secs: f64,
 }
 
 pub struct Engine {
@@ -369,7 +370,8 @@ impl Engine {
             cost_limit: run.cost_limit,
             sessions_done: run.sessions_done,
             max_sessions: run.max_sessions,
-            wall_hours: run.wall_hours,
+            wall_secs: run.wall_secs,
+            human_wait_secs: run.human_wait_secs,
         };
         // No `done_if` ⇒ never a DoD stop. That is the driver path: agg is not told what "done"
         // means there, so it must never claim the run succeeded.

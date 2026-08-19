@@ -8,7 +8,9 @@
 //! spawns an agent, touches a process group, or paints a terminal — those are [`crate::backend`],
 //! [`crate::os`] and [`crate::ui`].
 
+pub mod asks;
 pub mod calls;
+pub mod clock;
 pub mod config;
 pub mod engine;
 pub mod judge;
