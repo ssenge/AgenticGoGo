@@ -110,9 +110,106 @@ impl AggConfig {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
+        // BEFORE serde, because `deny_unknown_fields` would report `wall_hours` as merely unknown
+        // and the reader would "fix" it by renaming — which is the one migration that silently
+        // breaks. Checked on the RAW text so it catches the key AND the condition term in one pass.
+        Self::reject_removed_keys(path)?;
         let mut cfg: AggConfig = crate::util::load_yaml(path)?;
         cfg.apply_env_overrides();
+        cfg.warn_suspicious_clock_bounds();
         Ok(cfg)
+    }
+
+    /// A hard error naming the replacement AND doing the arithmetic.
+    ///
+    /// `wall_hours` became `wall_time`, in **seconds** — a 3600x unit change. serde's
+    /// `deny_unknown_fields` catches `limits.wall_hours`, but its message ("unknown field") invites
+    /// exactly the wrong repair, and it cannot see `abort_if: "wall_hours >= 8"` at all because that
+    /// is a string. Both surfaces are caught here, in the raw YAML, and the message converts the
+    /// value for the reader. See `internal/HUMAN_LOOP.md` §7.4.1.
+    fn reject_removed_keys(path: &Path) -> Result<()> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => return Ok(()), // a missing/unreadable file is `load_yaml`'s error to report
+        };
+        for (n, line) in text.lines().enumerate() {
+            // Comment-aware: a config that DOCUMENTS the migration must still load.
+            let code = line.split('#').next().unwrap_or("");
+            if !code.contains("wall_hours") {
+                continue;
+            }
+            let hint = code
+                .split(|c: char| !c.is_ascii_digit() && c != '.')
+                .filter(|t| !t.is_empty())
+                .find_map(|t| t.parse::<f64>().ok())
+                .map(|h| format!("\n    you wrote {h} — in seconds that is {}", (h * 3600.0) as u64))
+                .unwrap_or_default();
+            anyhow::bail!(
+                "{}:{}: `wall_hours` was REPLACED by `wall_time`, and the unit is now SECONDS.{}\n\n\
+                 \x20   abort_if: \"wall_hours >= 8\"  ->  abort_if: \"work_time >= 28800\"\n\
+                 \x20   limits: {{ wall_hours: 8 }}    ->  limits: {{ wall_time: 28800 }}\n\n\
+                 \x20 There is no alias on purpose: renaming the key without converting the number turns \
+                 an 8-hour ceiling into an 8-second one.\n\
+                 \x20 `wall_time` is END-TO-END (a deadline; human waiting counts against it). \
+                 `work_time` excludes time spent waiting for a human, and is usually what you want.",
+                path.display(),
+                n + 1,
+                hint,
+            );
+        }
+        Ok(())
+    }
+
+    /// Warn when a clock bound looks like it was written in hours.
+    ///
+    /// A fresh config has no old key to catch, so this is the only guard against the trap the rename
+    /// creates. `work_time >= 8` is legal — a smoke test may want eight seconds — and is nearly
+    /// always somebody thinking in hours. A warning, never an error: agg does not overrule a bound
+    /// its operator actually meant.
+    fn warn_suspicious_clock_bounds(&self) {
+        const FLOOR: f64 = 60.0;
+        const TERMS: [&str; 3] = ["wall_time", "human_wait_time", "work_time"];
+        let mut sus: Vec<String> = Vec::new();
+
+        for (what, v) in [
+            ("limits.wall_time", self.sequence.limits.wall_time),
+            ("limits.work_time", self.sequence.limits.work_time),
+        ] {
+            if let Some(v) = v {
+                if v > 0.0 && v < FLOOR {
+                    sus.push(format!("{what}: {v}"));
+                }
+            }
+        }
+
+        let mut exprs: Vec<(&str, &str)> = vec![("done_if", self.sequence.done_if.as_str())];
+        for (what, e) in [("abort_if", &self.sequence.abort_if), ("notify_if", &self.sequence.notify_if)] {
+            if let Some(e) = e.as_deref() {
+                exprs.push((what, e));
+            }
+        }
+        for (what, expr) in exprs {
+            for term in TERMS {
+                for rest in expr.split(term).skip(1) {
+                    let n = rest
+                        .trim_start_matches(|c: char| matches!(c, '>' | '<' | '=' | '!') || c.is_whitespace())
+                        .split_whitespace()
+                        .next()
+                        .and_then(|t| t.trim_end_matches(')').parse::<f64>().ok());
+                    if let Some(n) = n {
+                        if n > 0.0 && n < FLOOR {
+                            sus.push(format!("{what}: `{term}` compared against {n}"));
+                        }
+                    }
+                }
+            }
+        }
+
+        for s in sus {
+            eprintln!(
+                "  ⚠ {s} — the clock terms are in SECONDS. If you meant hours, multiply by 3600 (8h = 28800). Proceeding as written."
+            );
+        }
     }
 
     /// CI-friendly env overrides, re-homed under the new shape (§4.1). `AGG_MODEL` → defaults.model,

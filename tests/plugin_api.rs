@@ -50,6 +50,7 @@ fn probe_state(cfg: &agg::core::config::AggConfig, dir: &Path) -> LoopState {
     let loop_start = Instant::now();
     let dash = agg::state::DashboardState::default();
     LoopState {
+        clock: Default::default(),
         cfg: cfg.clone(),
         ruler: agg::backend::for_name("claude").unwrap(),
         judge_model: "m".into(),

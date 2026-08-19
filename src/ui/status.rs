@@ -83,6 +83,27 @@ fn render_state(s: &DashboardState) -> String {
         out.push_str(&format!("⚑ FLAGGED for help since session #{sess} — {}\n", s.notify_reason));
         out.push_str("  (the loop is still running; it never blocks on a human)\n");
     }
+    // OPEN ASKS — a blocked run must never be a silent state. With no timeout on a `hil_*` call,
+    // this block plus `notify.cmd` is the whole mitigation for "somebody forgot to answer", so it
+    // goes ABOVE the scoreboard and carries the exact command that unblocks the run.
+    if !s.asks.is_empty() {
+        out.push_str(&format!("\n⏳ WAITING ON A HUMAN — {} open ask(s)\n", s.asks.len()));
+        for a in &s.asks {
+            out.push_str(&format!(
+                "  [{}] {} · asked by the {} in session #{}\n      {}\n",
+                a.id,
+                crate::util::fmt_dur(a.age_secs),
+                a.origin,
+                a.session,
+                a.question
+            ));
+            match (&a.options, a.case.as_str()) {
+                (Some(o), _) => out.push_str(&format!("      → agg send answer {} <{}>\n", a.id, o.join("|"))),
+                (None, _) => out.push_str(&format!("      → agg send answer {} \"<value>\"\n", a.id)),
+            }
+        }
+    }
+
     // per-agent token + cost breakdown (§7.4) — otherwise a mixed run's totals are uninterpretable.
     if !s.per_agent.is_empty() {
         out.push_str("\nper-agent\n");

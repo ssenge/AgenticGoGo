@@ -57,7 +57,12 @@ pub struct LoopState {
     pub max_sessions: u32,
     pub gate_regressions: bool,
 
+    /// Process uptime, monotonic. Backs `up_secs` in the reader — an honest "this process has been
+    /// alive N seconds", which is NOT the same question as `wall_time`.
     pub loop_start: Instant,
+    /// The END-TO-END run clock, persisted so it survives a resume, plus the human wait banked so
+    /// far. Backs the `wall_time`/`human_wait_time`/`work_time` terms. See [`crate::core::clock`].
+    pub clock: crate::core::clock::Clock,
     pub lifetime_base: u32,
 
     pub session: u32,
@@ -117,6 +122,13 @@ impl LoopState {
 
     pub fn publish(&mut self) {
         self.dash.up_secs = self.loop_start.elapsed().as_secs();
+        // Republished on every publish rather than cached: an ask's AGE changes with the clock, and a
+        // reader showing "waiting 0s" for the last twenty minutes is worse than showing nothing.
+        let now = crate::util::now_epoch();
+        self.dash.asks = crate::core::asks::open(&self.dir)
+            .iter()
+            .map(|a| crate::state::AskView::of(a, now))
+            .collect();
         self.dash.tokens_spent = self.tokens_spent;
         self.dash.cost_spent = self.cost_spent;
         self.dash.per_agent = self.per_agent.clone();
@@ -166,7 +178,10 @@ impl LoopState {
             cost_limit: self.cost_limit,
             sessions_done: self.session,
             max_sessions: self.max_iter,
-            wall_hours: self.loop_start.elapsed().as_secs_f64() / 3600.0,
+            // NOT `loop_start.elapsed()`: that is process uptime, and `wall_time` is defined as
+            // end-to-end across resumes (`internal/HUMAN_LOOP.md` §7.4).
+            wall_secs: self.clock.wall_secs(crate::util::now_epoch()),
+            human_wait_secs: self.clock.human_wait_secs,
         }
     }
 

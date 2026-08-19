@@ -343,6 +343,7 @@ pub fn sample_state() -> DashboardState {
         seq: 342,
         finished: false,
         finish_reason: String::new(),
+        asks: Vec::new(),
     }
 }
 

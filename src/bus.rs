@@ -37,6 +37,15 @@ pub enum Command {
     Stop { reason: String },
     /// A free-form note (logged, shown once; no behavior change).
     Note { text: String },
+    /// The answer to an open human ask (`internal/HUMAN_LOOP.md` §4.3).
+    ///
+    /// This is the ONE command whose delivery channel is load-bearing rather than convenient: the
+    /// bus is carved out of the worker's writable set under `sandbox`/`container`, so an answer that
+    /// arrives here provably came from outside the worker. A worker able to answer its own question
+    /// would make "a human approved the deploy" meaningless.
+    ///
+    /// `id` correlates it with the ask; an answer for an unknown or already-answered id is inert.
+    Answer { id: String, text: String, by: String },
 }
 
 /// Queue a steering command onto a project's bus with a send-ordered filename. Shared by the CLI

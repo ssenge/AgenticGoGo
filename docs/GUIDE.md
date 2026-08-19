@@ -111,7 +111,7 @@ sequence:
   steps:
     - "worker"                     # run `worker`, forever, until done_if fires
   done_if: "outputs_two AND tests_pass"        # your Definition of Done — a boolean over judge names
-  abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
+  abort_if: "over_iterations OR work_time >= 3600"   # a ceiling, not part of the DoD
 ```
 
 Each fresh session's entire `-p` is now a tiny fixed pointer — *"read `agg/private/INSTRUCTIONS.md`
@@ -249,7 +249,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
 - **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `agg` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just judges — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](CONFIG.md)).
 - **No orphaned compute** — process-group reaping sweeps stragglers when a session or the loop ends.
-- **Token ceilings on every agent, dollar ceilings on Claude** — `over_budget` / `over_iterations` / `wall_hours` everywhere; `over_cost` only where the agent reports dollars. Asking for a guard your agent can't report is refused at startup, never silently ignored.
+- **Token ceilings on every agent, dollar ceilings on Claude** — `over_budget` / `over_iterations` / `wall_time`/`work_time` everywhere; `over_cost` only where the agent reports dollars. Asking for a guard your agent can't report is refused at startup, never silently ignored.
 - **Long-task tracking** — `agg spawn` keeps a sim/build alive across sessions so the reaper spares it.
 
 **State & memory**
@@ -449,7 +449,7 @@ file.
 ```rust
 let agg = Agg::open(".")?
     .limits(Limits { tokens: Some(40_000_000), cost: None,
-                     sessions: Some(300), wall_hours: Some(10.0) })
+                     sessions: Some(300), wall_time: Some(36000.0), work_time: None })
     .on_regression(OnRegression::Rollback);
 
 let cycle = agg.pos("cycle", 20);              // the breadcrumb the TUI renders

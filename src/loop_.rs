@@ -220,6 +220,10 @@ pub fn run_with(
     let _stop_hooks = StopHooks { handlers: std::mem::take(&mut lifecycle.on_stop) };
 
     let loop_start = Instant::now();
+    // The YAML path has no resume opt-in, so its clock always starts fresh. It is still persisted:
+    // `human_wait_time`/`work_time` must read the same file the driver path writes, or the two entry
+    // points would disagree about what a ceiling means.
+    let clock = crate::core::clock::Clock::open(dir, now_epoch(), true);
     let (m, t) = eng.tally();
     eprintln!(
         "════════════════════════════════════════════════════════════\n\
@@ -287,6 +291,7 @@ pub fn run_with(
         max_sessions,
         gate_regressions,
         loop_start,
+        clock,
         lifetime_base,
         session: 0,
         tokens_spent: 0,

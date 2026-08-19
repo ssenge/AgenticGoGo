@@ -44,7 +44,14 @@ use agg::prelude::*;
 ///   ./workflow                      # cwd, 20 cycles — today's values, unchanged
 ///   ./workflow /tmp/proj 2          # argv:  <dir> [cycles]
 ///   AGG_SAMPLE_DIR=… AGG_SAMPLE_CYCLES=2 ./workflow      # or env, for a launcher that has no argv
-fn main() -> Result<(), Fatal> {
+// ⚠ `-> ExitCode`, NOT `-> Result<(), Fatal>`. Rust's `Termination` impl collapses EVERY error to
+// exit 1, so a driver that returns a `Result` reports `agg stop`, a blown ceiling and a genuine
+// panic identically. `agg::driver::run` maps the ending to the same codes `agg run` uses.
+fn main() -> std::process::ExitCode {
+    agg::driver::run(real_main)
+}
+
+fn real_main() -> Result<(), Fatal> {
     let dir = arg(1, "AGG_SAMPLE_DIR").unwrap_or_else(|| ".".to_string());
     let cycles = arg(2, "AGG_SAMPLE_CYCLES").and_then(|s| s.parse().ok()).unwrap_or(20);
 
@@ -64,9 +71,12 @@ fn main() -> Result<(), Fatal> {
     let agg = Agg::open_with(dir, Opts { resume })?   // no `mut` — see idea 4
         // A BUDGET, NOT A TRIPWIRE. `.limits()` records the ceilings; `agg.check_limits()?` in the
         // flow is what enforces them. Nothing fires on its own — see the call in the cycle below.
-        // (`wall_hours` is a `Limits` field on the Rust path; in YAML it is a condition term.)
-        .limits(Limits { tokens: Some(40_000_000), cost: None,
-                         sessions: Some(400), wall_hours: Some(12.0) })
+        // (`wall_time`/`work_time` are `Limits` fields on the Rust path; in YAML they are condition
+        // terms. Both are SECONDS: `wall_hours` was removed and its unit changed by 3600×.)
+        // SECONDS, not hours, and `work_time` excludes time blocked on a human — see
+        // `docs/CONFIG.md` and `hil_*` in the API card at the bottom of this file.
+        .limits(Limits { tokens: Some(40_000_000), cost: None, sessions: Some(400),
+                         wall_time: Some(12.0 * 3600.0), work_time: None })
         // What a regression MEANS, applied by `gate()`. `Annotate` (the default) always merges and
         // tells the next session what regressed plus the SHA to revert to; `Rollback` discards the
         // span. The driver says WHEN to gate; this says WHAT a failure means.

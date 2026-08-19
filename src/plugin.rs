@@ -15,7 +15,12 @@ pub enum RunOutcome {
     Halt,
     /// The `--max-sessions` cap was reached with the DoD not met.
     MaxSessions,
-    /// The operator stopped the run.
+    /// The operator stopped the run — `agg stop`, `agg send stop`, or Ctrl-C.
+    ///
+    /// ⚠ This used to share exit **0** with [`RunOutcome::GoalsMet`], which made an abandoned run
+    /// indistinguishable from a met goal: `if agg run; then ship; fi` shipped on `agg stop`. It is
+    /// its own code (5) since the HiL work, where "a human ended it" is an everyday outcome rather
+    /// than a corner case. BREAKING for any wrapper that treated a stop as success — deliberately.
     Stopped,
 }
 
@@ -23,9 +28,9 @@ impl RunOutcome {
     pub fn exit_code(self) -> u8 {
         match self {
             RunOutcome::GoalsMet => 0,
-            RunOutcome::Stopped => 0,
             RunOutcome::Halt => 3,
             RunOutcome::MaxSessions => 4,
+            RunOutcome::Stopped => 5,
         }
     }
 }

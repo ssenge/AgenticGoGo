@@ -54,7 +54,12 @@ use agg::prelude::*;
 ///   ./selfimprove                   # cwd, 12 generations — today's values, unchanged
 ///   ./selfimprove /tmp/proj 2       # argv:  <dir> [cycles]
 ///   AGG_SAMPLE_DIR=… AGG_SAMPLE_CYCLES=2 ./selfimprove    # or env
-fn main() -> Result<(), Fatal> {
+// `-> ExitCode`: `Termination` would collapse every ending to exit 1. See `agg::driver::run`.
+fn main() -> std::process::ExitCode {
+    agg::driver::run(real_main)
+}
+
+fn real_main() -> Result<(), Fatal> {
     let dir = arg(1, "AGG_SAMPLE_DIR").unwrap_or_else(|| ".".to_string());
     let cycles = arg(2, "AGG_SAMPLE_CYCLES").and_then(|s| s.parse().ok()).unwrap_or(12);
 
@@ -69,8 +74,10 @@ fn main() -> Result<(), Fatal> {
         // Declared here, ENFORCED by `agg.check_limits()?` at the top of each generation. No
         // condition strings: there is no `.abort_if()` on the Rust path, because a driver that
         // wants to stop on a judge writes `if agg.judge(&x).met() { return Ok(()); }`.
-        .limits(Limits { tokens: Some(60_000_000), cost: None,
-                         sessions: Some(300), wall_hours: Some(10.0) })
+        // SECONDS. `work_time` excludes time blocked on a human (`hil_*`); this driver has no
+        // human calls, so a plain e2e deadline is the honest ceiling here.
+        .limits(Limits { tokens: Some(60_000_000), cost: None, sessions: Some(300),
+                         wall_time: Some(10.0 * 3600.0), work_time: None })
         .on_regression(OnRegression::Rollback);   // self-improvement: a regression must not land
 
     drive(&agg, cycles)

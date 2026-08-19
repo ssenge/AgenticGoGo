@@ -1116,10 +1116,13 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
     let took = signalled_at.elapsed();
 
     let err = fs::read_to_string(dir.join("run.err")).unwrap_or_default();
-    assert_eq!(status.code(), Some(0), "an operator interrupt is a clean stop:\n{err}");
+    // ⚠ 5, not 0. An operator interrupt is a CLEAN stop but it is NOT a met goal, and it used to
+    // share exit 0 with `GoalsMet` — so `if agg run; then ship; fi` shipped on Ctrl-C. The codes are
+    // 0 = goals met · 3 = abort_if · 4 = max-sessions · 5 = stopped (`RunOutcome::exit_code`).
+    assert_eq!(status.code(), Some(5), "an interrupt is a STOP, distinguishable from success:\n{err}");
     // The worker above sleeps 30s. The loop can only come back this fast if the signal path
     // actually SIGKILLed the worker's process GROUP — without that kill we'd simply wait the
-    // sleep out and still exit 0, so every other assertion here would pass on a broken kill.
+    // sleep out and still exit cleanly, so every other assertion here would pass on a broken kill.
     assert!(
         took < std::time::Duration::from_secs(15),
         "interrupt took {took:?} — the worker group was not killed, we waited out its sleep:\n{err}"
