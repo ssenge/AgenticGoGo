@@ -19,4 +19,8 @@ tags: [parser]
 Chose recursive-descent over a table-driven parser. Rejected alternatives are in [dead-ends](dead-ends.md); grammar notes in [grammar](grammar.md).
 ```
 4. Just edit files — you NEVER run git (no `add`/`commit`/`merge`/`push`). agg version-controls and commits your work automatically, runs each session on its own throwaway branch, and keeps the work only if the judges pass. Everything is handled for you, including `agg/state/` (your STATE.md and the wiki).
-5. Inside `agg/`, write only under `agg/state/` (STATE.md, `wiki/`, scratch). `agg/private/` is agg's own bookkeeping — your brief, the verdict ledger, the operator bus: read it if useful, never write it. Under `isolation: sandbox` those writes just fail; don't spend a session fighting it.
+5. BLOCKED by something only a human can do? `agg hil bool|choose|input "<question>"`, then END the
+   session. It records and returns instantly — it does NOT wait, and nothing you can write makes the
+   loop wait for you. The answer is at the top of your next brief. Never ask for a secret's value:
+   ask for it to be PLACED and confirm with `agg hil bool`.
+6. Inside `agg/`, write only under `agg/state/` (STATE.md, `wiki/`, scratch). `agg/private/` is agg's own bookkeeping — your brief, the verdict ledger, the operator bus: read it if useful, never write it. Under `isolation: sandbox` those writes just fail; don't spend a session fighting it.

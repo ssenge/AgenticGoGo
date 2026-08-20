@@ -33,6 +33,17 @@ want the state of the currently-running loop without re-judging.
 
 Summarize from the state JSON:
 
+- **⏳ OPEN ASKS FIRST, above everything else.** If `asks` is non-empty the loop is **waiting on a
+  human and cannot proceed** — there is no timeout, so it waits indefinitely. This outranks the
+  scoreboard: report the question, how long it has been waiting (`age_secs`), whether the `driver`
+  or the `worker` asked, and the exact command to unblock it:
+  ```bash
+  agg send answer <id> "<value>"   # a choice takes an option name or its 1-based number
+  agg send approve <id>            # yes/no sugar          agg send deny <id>
+  ```
+  A `worker`-origin ask does NOT block the loop (the worker asked and ended its session); a
+  `driver`-origin one does. Say which. If an ask is hours old, lead with that — a forgotten ask is
+  the failure mode this design deliberately accepts, and noticing it is your job.
 - **Headline**: `N/M judges met` and the `done_if` condition (are we close?). `done_if` is the
   project's Definition of Done, composed from judge names.
 - **Per judge**: name, current measure (`18/28`, `82%`, `yes`), lifecycle state
