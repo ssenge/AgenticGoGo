@@ -291,8 +291,14 @@ finalized, base branch untouched.
 Steering above is *you* interrupting the loop. This is the loop needing *you*: an approval before a
 deploy, a value only you have, a real-world action no agent can perform, a task the agent failed.
 
-**The worker asks and exits.** It never waits — a session is a paid subprocess holding a git branch —
-so the question is recorded, you are paged, and the answer arrives at the top of its next brief:
+> **Off by default.** Declare no human call and the run is fully unattended, exactly as before this
+> existed. Only a Rust driver can make the loop *wait*, and only where its author wrote the call;
+> `agg.yaml` has no `hil` key. The worker's channel is opt-in per project and can never stop the loop.
+
+**The worker asks and exits** — once you have turned that channel on by adding the paragraph from
+[Letting the worker ask](CONFIG.md#letting-the-worker-ask) to your `AGG.md`. It never waits (a session
+is a paid subprocess holding a git branch), so the question is recorded, you are paged, and the answer
+arrives at the top of its next brief:
 
 ```bash
 agg hil bool   "Firewall piercing for :443 requested. Done?"

@@ -201,18 +201,23 @@ stages, `gate()` lands. A crashed run resumes from a call ledger without re-spen
 
 Some work genuinely needs a person: an approval before a deploy, a value only they have, a
 real-world action no agent can perform, a task the agent tried and failed. Unattended was never the
-same as unassisted — but agg exists because a raw coding agent stops every few minutes to ask, so
-**who is allowed to make the loop wait** is the whole design.
+same as unassisted.
 
-The **worker** asks and *exits*. It never waits: a session is a paid subprocess holding a branch,
-and the answer reaches its next brief.
+**This is off by default and stays off.** A project that declares no human call runs exactly as it
+always did — start to finish, nobody watching. agg exists because a raw coding agent stops every few
+minutes to ask, so **who is allowed to make the loop wait** is the entire design: only a Rust driver,
+only at a call site a human wrote. `agg.yaml` has no `hil` key at all.
+
+The **worker** can be given a channel too (opt-in, per project) — but it asks and *exits*, and can
+never make the loop wait. A session is a paid subprocess holding a branch; the answer reaches its
+next brief.
 
 ```bash
 agg hil bool "Firewall piercing for :443 requested. Done?"   # records, exits — there is no --wait
 ```
 
 A **driver** may block, because driver code runs between sessions and blocking costs only
-wall-clock. Only in Rust, only at a call site a human wrote — `agg.yaml` has no `hil` key:
+wall-clock:
 
 ```rust
 let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize

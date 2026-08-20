@@ -338,9 +338,52 @@ whole allowance.
 
 ## Asking a human (`hil`)
 
-agg's premise is that a run ends when the goal is met, not when the agent gets bored — so the loop
-never stops to ask a human unless a human wrote the call that stops it. There are two channels, and
-which one you get depends on **who is asking**.
+> **The default is that there is no human.** A project with no `hil_*` call in its driver and no
+> opt-in paragraph in its `AGG.md` behaves exactly as it did before this feature existed: fully
+> unattended, start to finish. Nothing below is on unless you turn it on, and that is the point —
+> agg exists because a raw coding agent stops every few minutes to ask.
+
+HiL is opt-in **twice over**, once per channel:
+
+| channel | how it is turned on | can it stop the loop? |
+|---|---|---|
+| a **driver** `hil_*` call | by existing — a Rust author writes the call site | **yes**, it blocks there |
+| the **worker**'s `agg hil` | by the project adding the paragraph [below](#letting-the-worker-ask) to its `AGG.md` | **no**, ever — it records and the session ends |
+| `agg.yaml` | ⛔ not at all — there is no `hil` key | — |
+
+Note the asymmetry in the last column, because it is the whole safety argument: the only thing that
+can make the loop *wait* is a line of Rust a human wrote. A worker with the channel turned on can
+page you, but it cannot stop the run, so the worst case is an unwanted notification and not a loop
+that sits idle.
+
+### Letting the worker ask
+
+**Nothing tells the worker this exists.** The scaffolded `AGG.md` says *"There is NO human to answer
+questions"* and leaves it there, deliberately: a worker shown an escape hatch in every session's brief
+will reach for it, and a loop that asks instead of working is the failure this whole design is
+against. Exactly like the [`blocked` judge](#blocked--the-workers-self-report-a-hint-not-a-fact), the
+channel is real but unadvertised until **you** add it to your project's `AGG.md`:
+
+```markdown
+- If you hit something ONLY a human can resolve — a missing credential, a decision you are not
+  allowed to make, a real-world action (provision an account, open a firewall, sign something) —
+  ask through agg and END YOUR SESSION IMMEDIATELY: `agg hil bool "…"` / `agg hil choose "…"
+  --option a --option b` / `agg hil input "…"`. It records and exits at once; the answer is at the
+  top of your next brief. Do NOT guess, fabricate, or poll for it. This is a LAST RESORT — if you
+  can make progress on anything else, do that instead.
+- Never ask for a secret's VALUE. Ask for the credential to be PLACED (environment, keychain,
+  `.env`) and confirm with `agg hil bool`.
+```
+
+Add it when your project genuinely has human-only steps in it (credentials, a real-world action, an
+irreversible decision). Leave it out otherwise. Under `isolation: sandbox` the CLI still works — it
+writes to `agg/state/asks/`, which is the worker's own directory.
+
+Two guards apply, because a worker re-reads the same unresolved situation every session and *will*
+ask again: a repeat of a question that is **already open** is dropped rather than paging you twice,
+and at most **five** worker asks may be open at once. Neither is a permission boundary — a worker
+cannot stop the loop whatever it does — they just stop the channel becoming a pager loop. An answered
+question may be asked again, because the situation can genuinely recur.
 
 ### The worker: `agg hil` records and exits
 
@@ -363,8 +406,10 @@ with `agg hil bool`: *an answer may NAME a secret, never CONTAIN one.*
 
 ### The driver: `hil_*` blocks until answered
 
-`agg.yaml` has **no** `hil` key, on purpose — the YAML path never blocks. Blocking is a Rust driver's
-call, at a call site its author wrote:
+This is the channel that can stop the loop, which is why it is reachable **only** from Rust, only at a
+call site a human wrote, and never from `agg.yaml` (there is no `hil` key — the YAML path never
+blocks). A driver with no `hil_*` call runs unattended, exactly like every driver written before this
+existed:
 
 ```rust
 let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize
