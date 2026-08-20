@@ -107,7 +107,7 @@ you can unit-test.
 Every session starts clean, so what the run *learned* has to live somewhere durable and
 *navigable*. `agg/state/wiki/` is an **OKF (Open Knowledge Format) knowledge graph**:
 one concept per markdown file, typed frontmatter, cross-linked with ordinary
-ordinary relative Markdown links between pages. Not an append-only log — a graph the next session can *enter at the right
+relative Markdown links between pages. Not an append-only log — a graph the next session can *enter at the right
 node*. Plans, decisions and dead-ends go there and survive rollbacks. Open `agg/` as an
 [Obsidian](https://obsidian.md) vault to see it.
 
@@ -197,6 +197,43 @@ stages, `gate()` lands. A crashed run resumes from a call ledger without re-spen
 [`examples/workflow.rs`](examples/workflow.rs),
 [`examples/selfimprove.rs`](examples/selfimprove.rs)
 
+## When a human is unavoidable
+
+Some work genuinely needs a person: an approval before a deploy, a value only they have, a
+real-world action no agent can perform, a task the agent tried and failed. Unattended was never the
+same as unassisted — but agg exists because a raw coding agent stops every few minutes to ask, so
+**who is allowed to make the loop wait** is the whole design.
+
+The **worker** asks and *exits*. It never waits: a session is a paid subprocess holding a branch,
+and the answer reaches its next brief.
+
+```bash
+agg hil bool "Firewall piercing for :443 requested. Done?"   # records, exits — there is no --wait
+```
+
+A **driver** may block, because driver code runs between sessions and blocking costs only
+wall-clock. Only in Rust, only at a call site a human wrote — `agg.yaml` has no `hil` key:
+
+```rust
+let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize
+let ok = agg.hil_bool("Deploy v2.3 to prod?")?;                      // -> bool
+```
+
+Answer from anywhere with a shell — `agg status` lists open asks with their age:
+
+```bash
+agg send answer 4f2a 2      # a choice, by name or number; anything off the list is refused
+agg send approve 4f2a       # yes/no sugar
+```
+
+No timeout, no default: an idle process spends no tokens, and `agg stop` interrupts a wait. Two
+rules make that safe — **`work_time` excludes time spent waiting**, so a sleeping human never blows
+a ceiling meant to measure the agent's effort; and **a human's answer unblocks the step, while a
+judge still owns the verdict**, so a "done" is checked against the world, never taken on trust.
+
+→ [Asking a human](docs/CONFIG.md#asking-a-human-hil) · worked driver:
+[`examples/hil.rs`](examples/hil.rs)
+
 ## CLI reference
 
 Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
@@ -211,8 +248,9 @@ Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
 | `agg doctor` | Check the chosen agent is installed and the config is valid for it |
 | `agg judge <name>` | Run one judge and print its verdict, for authoring and debugging |
 | `agg history` | Run history and lifetime totals |
-| `agg send` | Steer a running loop: `inject`, `pause`, `resume`, `budget`, `stop`, `note` |
-| `agg stop` | Graceful stop, an alias of `agg send stop` |
+| `agg send` | Steer a running loop: `inject`, `pause`, `resume`, `budget`, `stop`, `note`, and `answer`/`approve`/`deny` an open ask |
+| `agg hil` | **For the worker:** ask a human `bool`/`choose`/`input`. Records and exits — it never waits |
+| `agg stop` | Graceful stop, an alias of `agg send stop`. Exits **5** — a stop is not a met goal |
 | `agg spawn` | Start a long task that outlives one worker session |
 | `agg skills` | Install the `/agg:*` skills where your agent finds them |
 | `agg serve` | JSON HTTP API for the web UI |
@@ -225,7 +263,7 @@ Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
 | [docs/CONFIG.md](docs/CONFIG.md) | every `agg.yaml` key, and what a judge may write |
 | [docs/RUST_API.md](docs/RUST_API.md) | the driver API, resume, and what a driver author must design around |
 | [docs/INSTALL.md](docs/INSTALL.md) | prebuilt binaries, from source, version pinning |
-| [examples/](examples/) | a full YAML workflow, two Rust drivers, and a research loop |
+| [examples/](examples/) | a full YAML workflow, three Rust drivers (incl. [`hil.rs`](examples/hil.rs)), and a research loop |
 | [AGENTS.md](AGENTS.md) | the condensed reference for an agent working **on** this repo |
 
 ## License

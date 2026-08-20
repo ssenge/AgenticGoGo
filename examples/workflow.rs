@@ -365,7 +365,7 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
 
         // ── SHIP ───────────────────────────────────────────────────────────────────────────
         // The one place this loop genuinely cannot proceed alone. `block` drains the operator bus
-        // and waits — and ceilings keep running while it does, so `wall_hours` ends the run rather
+        // and waits — and ceilings keep running while it does, so `wall_time` ends the run rather
         // than hanging forever. It is opt-in and explicit; nothing else here blocks.
         agg.block("rate limiter is green and ready to tag. Approve the release?")?;
 

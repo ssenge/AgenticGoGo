@@ -384,7 +384,7 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
 
         // The one human gate, and the only one. Landing is autonomous; deciding that a generation
         // is the one the next run picks up is not. `block` is USER-driven — the worker can never
-        // reach it — and ceilings keep firing while it waits, so `wall_hours` ends the run rather
+        // reach it — and ceilings keep firing while it waits, so `wall_time` ends the run rather
         // than hanging until morning.
         agg.block("generation is green end-to-end. Tag it as the next agg?")?;
 
