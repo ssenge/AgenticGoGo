@@ -229,11 +229,27 @@ pub fn write_worker_request(dir: &Path, req: &WorkerRequest) -> std::io::Result<
     Ok(path)
 }
 
+/// The most worker-authored asks that may be open at once.
+///
+/// A worker cannot stop the loop, so the worst it can do with this channel is NAG — and a worker that
+/// asks on every session pages a human on every session, because a driver-level ping does not go
+/// through `notify.cooldown_sessions`. This is the cap on that. It is deliberately generous: it
+/// exists to bound a runaway, not to ration a legitimate question.
+const MAX_OPEN_WORKER_ASKS: usize = 5;
+
 /// Promote every pending worker request into the ledger, oldest first. Returns the new asks.
 ///
 /// Called at the session boundary. Each request is CONSUMED (the file is removed) once its `Open`
 /// row is durable, so a request cannot be promoted twice; a request that fails to promote is left
 /// in place for the next boundary rather than dropped.
+///
+/// Two things a worker's own channel is guarded against, both because a worker re-reads the same
+/// unresolved situation every session and will ask about it again:
+///
+/// - **A repeat of a question already open is dropped.** Without this, "which instance is prod?"
+///   becomes a new ask and a new page every single session until somebody answers.
+/// - **At most [`MAX_OPEN_WORKER_ASKS`] worker asks are open at once.** Different wording every
+///   session would slip past the dedupe; this bounds it anyway.
 pub fn promote_worker_requests(dir: &Path, session: u32, now_epoch: u64) -> Vec<Ask> {
     let d = crate::paths::worker_asks_dir(dir);
     let mut files: Vec<std::path::PathBuf> = match std::fs::read_dir(&d) {
@@ -248,6 +264,21 @@ pub fn promote_worker_requests(dir: &Path, session: u32, now_epoch: u64) -> Vec<
 
     let mut minted: Vec<Ask> = Vec::new();
     for f in files {
+        // Recomputed per file: two requests in one batch must not both slip past the cap or the
+        // dedupe by reading a snapshot taken before either landed.
+        let existing = all(dir);
+        let open_worker = existing
+            .iter()
+            .filter(|a| a.is_open() && matches!(a.origin, Origin::Worker))
+            .count();
+        if open_worker >= MAX_OPEN_WORKER_ASKS {
+            eprintln!(
+                "  ⚠ {MAX_OPEN_WORKER_ASKS} worker asks are already open — dropping further requests \
+                 until some are answered. The worker is asking faster than anyone can answer."
+            );
+            let _ = std::fs::remove_file(&f);
+            continue;
+        }
         let Some(req) = std::fs::read_to_string(&f)
             .ok()
             .and_then(|t| serde_json::from_str::<WorkerRequest>(&t).ok())
@@ -258,10 +289,18 @@ pub fn promote_worker_requests(dir: &Path, session: u32, now_epoch: u64) -> Vec<
             let _ = std::fs::remove_file(&f);
             continue;
         };
-        let taken = all(dir);
+        // Already asked and still unanswered? Drop the repeat rather than page again.
+        if existing
+            .iter()
+            .any(|a| a.is_open() && matches!(a.origin, Origin::Worker) && a.question == req.question)
+        {
+            eprintln!("  [ask] the worker re-asked an open question; not paging again");
+            let _ = std::fs::remove_file(&f);
+            continue;
+        }
         let id = (0..u64::MAX)
             .map(|seq| mint_id(seq, now_epoch))
-            .find(|id| !taken.iter().any(|a| &a.id == id))
+            .find(|id| !existing.iter().any(|a| &a.id == id))
             .unwrap_or_else(|| format!("{now_epoch:x}"));
         let row = Row::Open {
             id: id.clone(),
@@ -382,6 +421,57 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         answer(d.path(), "ghost", "yes", "operator", 5).unwrap();
         assert!(all(d.path()).is_empty());
+    }
+
+    /// A worker re-reads the same unresolved situation every session and asks again. Without the
+    /// dedupe that is a new ask AND a new page every session — the worker cannot stop the loop, but
+    /// it can make the channel unusable by nagging.
+    #[test]
+    fn a_worker_re_asking_an_open_question_does_not_page_again() {
+        let d = tempfile::tempdir().unwrap();
+        let ask_it = || {
+            write_worker_request(
+                d.path(),
+                &WorkerRequest {
+                    case: AskCase::Input,
+                    question: "which instance is prod?".into(),
+                    options: None,
+                    ts: 1,
+                },
+            )
+            .unwrap();
+        };
+
+        ask_it();
+        assert_eq!(promote_worker_requests(d.path(), 1, 100).len(), 1);
+        ask_it();
+        assert!(promote_worker_requests(d.path(), 2, 200).is_empty(), "the repeat is dropped");
+        assert_eq!(open(d.path()).len(), 1, "still exactly one open ask");
+
+        // Once answered, the same question CAN be asked again — the situation may have recurred, and
+        // refusing forever would silently break the channel.
+        answer(d.path(), &open(d.path())[0].id.clone(), "db-1", "operator", 300).unwrap();
+        ask_it();
+        assert_eq!(promote_worker_requests(d.path(), 3, 400).len(), 1, "an answered question may recur");
+    }
+
+    /// Different wording every session slips past the dedupe, so the count is bounded too.
+    #[test]
+    fn open_worker_asks_are_capped() {
+        let d = tempfile::tempdir().unwrap();
+        for i in 0..MAX_OPEN_WORKER_ASKS + 3 {
+            write_worker_request(
+                d.path(),
+                &WorkerRequest { case: AskCase::Bool, question: format!("q{i}?"), options: None, ts: i as u64 },
+            )
+            .unwrap();
+            promote_worker_requests(d.path(), 1, 100 + i as u64);
+        }
+        assert_eq!(
+            open(d.path()).len(),
+            MAX_OPEN_WORKER_ASKS,
+            "a runaway worker cannot open unbounded asks"
+        );
     }
 
     #[test]

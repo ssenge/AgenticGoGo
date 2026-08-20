@@ -14,22 +14,10 @@ Fill this in so a fresh worker orients fast: key modules/entry points, and the e
 commands to run.
 
 # Rules
-- You are AUTONOMOUS: **never pause to wait for anyone.** Nothing is watching your session, so a
-  question you stop on is a session that burns tokens doing nothing.
-- If you hit something ONLY a human can resolve — a missing credential, a decision you are not
-  allowed to make, a real-world action (provision an account, open a firewall, sign something) —
-  ask through agg and **END YOUR SESSION IMMEDIATELY**:
-  ```bash
-  agg hil bool   "Firewall piercing for :443 requested. Done?"
-  agg hil choose "Which store?" --option postgres --option sqlite
-  agg hil input  "Which instance is prod?"
-  ```
-  These record the question and exit at once — they never wait, and there is no flag that makes
-  them. A human is paged, and their answer arrives at the top of your NEXT session's brief. Do not
-  guess, do not fabricate, and do not poll for the answer.
-- ⛔ **Never ask for a secret's VALUE.** Your question and its answer are written to disk. Ask for
-  the credential to be PLACED (in the environment, a keychain, a `.env`) and confirm with
-  `agg hil bool` — an answer may name a secret, never contain one.
+- You are AUTONOMOUS. There is NO human to answer questions — never pause to ask.
+  <!-- OPT-IN: if this project WANTS the worker to be able to reach a human, add the paragraph from
+       docs/CONFIG.md#letting-the-worker-ask here. Leave it out and the run stays fully unattended,
+       which is the default and the point. -->
 - Real, correct work only — no stubs. Keep changes focused.
 - `agg/state/` is YOURS (STATE.md, wiki/). `agg/private/` is agg's — read it if you like, never
   write it; under `isolation: sandbox` the attempt just fails.
