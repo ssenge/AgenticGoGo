@@ -14,17 +14,25 @@ Loop: **INJECT** (compose the worker's brief) → **RUN** (one fresh worker on i
 **VERIFY** (agg runs the judges itself, externally) → **GATE** (merge the branch if judges pass, else
 roll back). Repeat until `done_if` (exit 0) or `abort_if` (exit 3).
 
-**The three ideas everything here follows from** — Loop Engineering ·
-Graph Engineering · Agents as Code. If a change violates one of these, it is the CHANGE that is wrong:
+**The three ideas everything here follows from**, IN THIS ORDER — Loop Engineering · Graph
+Engineering · Agentic Workflows as Code. They are a ladder, each rung generalising the last. If a
+change violates one, it is the CHANGE that is wrong:
 - **Loop Engineering.** A FRESH session each cycle beats one long conversation, and the agent NEVER
   decides it is done. Judges do, and the worker cannot run them. (The Ralph loop, made deterministic.)
-- **Agents as Code.** The workflow is committed source — `agg/agg.yaml` + `agg/judges/*`, diffable and
+- **Graph Engineering.** A loop laps in a FIXED order; a graph CHOOSES — a loop is the degenerate
+  graph (one node, one back-edge). Generalising it buys conditional work, cost control (order checks
+  cheap-to-expensive and short-circuit), recovery paths, and bounds that respond to what the run
+  learned. In agg that is the RUST DRIVER: `agg.judge(&cheap).met() && agg.judge(&slow).met()` is a
+  real cost gate, not a style choice. ⚠ It is about TOPOLOGY, not memory.
+  · **Second sense, different level:** durable knowledge is a graph too — `agg/state/wiki/` is an OKF
+  wiki (one concept per file, typed frontmatter, cross-linked), so a fresh session enters at the right
+  node. `STATE.md` is rewritten every session; a multi-session PLAN parked there is LOST. It belongs
+  in the wiki, which also survives rollbacks.
+- **Agentic Workflows as Code.** A graph is a program, so write it in a language built for control
+  flow. The whole orchestration is committed source — `agg/agg.yaml` + `agg/judges/*`, diffable and
   reviewable; in Rust, a compiled driver you can unit-test. This is also why the moat holds: judges
-  are committed, so a tampered judge is restored by a rollback.
-- **Graph Engineering.** Durable knowledge is a GRAPH, not a log: `agg/state/wiki/` is an OKF wiki —
-  one concept per file, typed frontmatter, cross-linked — so the next fresh session can enter at the
-  right node. `STATE.md` is rewritten every session; a multi-session PLAN parked there is LOST. It
-  belongs in the wiki, which also survives rollbacks.
+  are committed, so a tampered judge is restored by a rollback. ⚠ NOT "Agents as Code" — the agents
+  stay agents; it is the WORKFLOW around them that becomes code.
 
 ## CLI (run from the project root)
 - `agg init [--agent claude|codex|copilot] [--force]` — scaffold `agg.yaml` + `AGG.md` + `state/STATE.md` + a starter judge.
