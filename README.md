@@ -5,7 +5,7 @@
 
 <p align="center">
   <em>Define your agent workflow as code — YAML or Rust — and let a deterministic outer loop<br>with incorruptible judges drive it to done.</em><br>
-  <em><strong>Loop Engineering</strong> · <strong>Graph Engineering</strong> · <strong>Agents as Code</strong></em>
+  <em><strong>Loop Engineering</strong> · <strong>Graph Engineering</strong> · <strong>Agentic Workflows as Code</strong></em>
 </p>
 
 <p align="center"><em>Stop typing “go go”.</em></p>
@@ -18,8 +18,8 @@ quietly stop one step short — leaving you to babysit a terminal?
 
 **Then AgenticGoGo is for you.**
 
-AgenticGoGo (`agg`) is a framework for **Loop Engineering** (e.g. Ralph Loops), **Graph Engineering** and **Agents as
-Code**. You define the workflow as a versioned artifact — in **YAML** for a sequence that laps, or in
+AgenticGoGo (`agg`) is a framework for **Loop Engineering** (e.g. Ralph Loops), **Graph Engineering** and
+**Agentic Workflows as Code**. You define the workflow as a versioned artifact — in **YAML** for a sequence that laps, or in
 **Rust** when the flow has to branch — and `agg` runs it as a deterministic outer
 **[Ralph loop](https://ghuntley.com/ralph/)** around a stochastic inner coding agent (currently
 supported: [Claude Code](https://claude.com/claude-code), [OpenAI Codex](https://developers.openai.com/codex/cli), [GitHub Copilot](https://github.com/github/copilot-cli)) — relaunching a **fresh** session each cycle, verifying its work against gates
@@ -36,17 +36,17 @@ say exactly what *done* means.
 **A loop alone is not enough, and this is the part most agent tooling leaves out.** Two more ideas
 carry equal weight in `agg`, and every design decision here follows from one of the three:
 
-- **[Agents as Code](#2--agents-as-code--your-workflow-is-a-reviewable-artifact)** — your workflow is
-  **committed source**, not a prompt in someone's terminal history. `agg/agg.yaml` + `agg/judges/*`
-  are diffed and code-reviewed like anything else; in Rust it is a **compiled program you can
-  unit-test**. It is also what makes the judges incorruptible: they live in git, so a run that
-  tampers with one is rolled back to the committed version.
-- **[Graph Engineering](#3--graph-engineering--knowledge-that-survives-a-fresh-session)** — because
-  every session starts **fresh**, what the run learned must live somewhere durable *and navigable*.
-  `agg/state/wiki/` is a **knowledge graph** (one concept per file, typed, cross-linked), not an
-  append-only log — so the next session enters at the right node instead of re-reading everything.
+- **[Graph Engineering](#2--graph-engineering--a-loop-laps-in-a-fixed-order-a-graph-chooses)** — a
+  loop laps in a **fixed order**; a graph **chooses**. Generalise the loop and which step runs next
+  can depend on what the last one produced: skip a step a verdict made pointless, take a recovery
+  route when the current one is exhausted, run the expensive check only where it can matter.
+- **[Agentic Workflows as Code](#3--agentic-workflows-as-code--the-workflow-is-a-reviewable-artifact)**
+  — that graph is a **program**, so write it in a language built for control flow. The whole
+  orchestration is **committed source**, not a prompt in someone's terminal history. It is also what
+  makes the judges incorruptible: they live in git, so a run that tampers with one is rolled back to
+  the committed version.
 
-The loop gives you determinism · Agents-as-Code makes it reviewable · the graph gives it a memory.
+The loop makes it deterministic · the graph lets it **choose** · as-code makes it reviewable.
 [Read the three in full ↓](#three-ideas-it-is-built-on)
 
 <p align="center">
@@ -93,23 +93,45 @@ outer loop beats one long conversation: no context rot, no drift, no "where were
 loop with the missing half added — **the agent never decides it is done.** Judges do, and the agent
 cannot run them.
 
-### 2 · Agents as Code — your workflow is a reviewable artifact
+### 2 · Graph Engineering — a loop laps in a fixed order; a graph chooses
 
-The loop, the steps, the agents, the Definition of Done and the judges are **files in your repo**:
-`agg/agg.yaml` and `agg/judges/*`, committed, diffed and code-reviewed like anything else. A prompt
-in someone's terminal history is not reproducible; this is. It is also *why the moat holds* — the
-judges are committed, so a run that tampers with one gets rolled back to the version in git. When
-YAML stops being enough the same idea goes further: the workflow becomes a **compiled Rust program**
-you can unit-test.
+A **loop is the degenerate graph**: one node, one back-edge, one condition. Generalise it and the
+transitions become explicit — which step runs next may depend on what the last one produced. That
+buys four things a fixed cycle cannot express: **conditional work** (skip a step a verdict made
+pointless), **cost control** (order checks cheap-to-expensive and short-circuit), **recovery paths**
+(three flat laps → step back, try another approach, escalate to a human), and **bounds that respond
+to what the run learned** rather than constants chosen up front.
 
-### 3 · Graph Engineering — knowledge that survives a fresh session
+In `agg` that is the [Rust driver](#a-driver-in-rust) — and the cost lever is not rhetorical:
 
-Every session starts clean, so what the run *learned* has to live somewhere durable and
-*navigable*. `agg/state/wiki/` is an **OKF (Open Knowledge Format) knowledge graph**:
-one concept per markdown file, typed frontmatter, cross-linked with ordinary
-relative Markdown links between pages. Not an append-only log — a graph the next session can *enter at the right
-node*. Plans, decisions and dead-ends go there and survive rollbacks. Open `agg/` as an
-[Obsidian](https://obsidian.md) vault to see it.
+```rust
+if agg.judge(&tests).met() && agg.judge(&load).met() { agg.gate()?; }
+```
+
+`&&` short-circuits, so the 40-minute load test never runs on a red build. In a YAML run-set it would
+execute after *every* judged step.
+
+> The word carries a **second sense** here, at a different level: `agg/state/wiki/` is a knowledge
+> graph — one concept per file, typed frontmatter, cross-linked, not an append-only log — so a fresh
+> session enters at the right node instead of re-reading everything. Control flow and memory both
+> stop being lines. Open `agg/` as an [Obsidian](https://obsidian.md) vault to see it.
+
+### 3 · Agentic Workflows as Code — the workflow is a reviewable artifact
+
+A graph is a **program**: branches, joins, state between steps, conditions evaluated in flight.
+Expressing that in a config format means inventing a small language for control flow — which acquires
+a conditional, then an expression syntax, then variables, and arrives at a bad programming language
+with no type checker and no debugger. Languages built for control flow already exist.
+
+So the whole orchestration — steps, topology, checks, Definition of Done — is **committed source**:
+`agg/agg.yaml` + `agg/judges/*` for a sequence that laps, a **compiled Rust program you can
+unit-test** when the flow has to branch. A prompt in someone's terminal history is not reproducible;
+this is. It is also *why the moat holds* — the judges are committed, so a run that tampers with one
+gets rolled back to the version in git.
+
+**Why "workflows" and not "agents".** The agents stay agents — stochastic, swappable, doing the work
+inside one step. It is the *workflow around them* that becomes code. Naming it after the agents points
+at the one part of the system that is **not** a reviewable artifact.
 
 ## Install
 
@@ -171,9 +193,10 @@ sequences](docs/GUIDE.md#steps-and-sequences) · [full config reference](docs/CO
 
 ## A driver in Rust
 
-YAML is a list that laps. When the flow needs to **branch** — skip a step on a verdict, or refuse to
-run a 40-minute judge unless three cheap ones passed — it becomes an ordinary Rust program against
-the *same engine*:
+**This is [Graph Engineering](#2--graph-engineering--a-loop-laps-in-a-fixed-order-a-graph-chooses)
+made concrete.** YAML is a list that laps — the degenerate graph. When the flow needs to **branch** —
+skip a step on a verdict, or refuse to run a 40-minute judge unless three cheap ones passed — it
+becomes an ordinary Rust program against the *same engine*:
 
 ```rust
 let agg = Agg::open(".")?.limits(limits).on_regression(OnRegression::Rollback);
