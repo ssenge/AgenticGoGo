@@ -299,6 +299,7 @@ mod tests {
         let loop_start = std::time::Instant::now();
         let dash = crate::state::DashboardState::default();
         LoopState {
+            clock: Default::default(),
             cfg: cfg.clone(),
             ruler: crate::backend::for_name("claude").unwrap(),
             judge_model: "m".into(),

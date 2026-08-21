@@ -111,7 +111,7 @@ sequence:
   steps:
     - "worker"                     # run `worker`, forever, until done_if fires
   done_if: "outputs_two AND tests_pass"        # your Definition of Done — a boolean over judge names
-  abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
+  abort_if: "over_iterations OR work_time >= 3600"   # a ceiling, not part of the DoD
 ```
 
 Each fresh session's entire `-p` is now a tiny fixed pointer — *"read `agg/private/INSTRUCTIONS.md`
@@ -249,7 +249,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
 - **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `agg` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just judges — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](CONFIG.md)).
 - **No orphaned compute** — process-group reaping sweeps stragglers when a session or the loop ends.
-- **Token ceilings on every agent, dollar ceilings on Claude** — `over_budget` / `over_iterations` / `wall_hours` everywhere; `over_cost` only where the agent reports dollars. Asking for a guard your agent can't report is refused at startup, never silently ignored.
+- **Token ceilings on every agent, dollar ceilings on Claude** — `over_budget` / `over_iterations` / `wall_time`/`work_time` everywhere; `over_cost` only where the agent reports dollars. Asking for a guard your agent can't report is refused at startup, never silently ignored.
 - **Long-task tracking** — `agg spawn` keeps a sim/build alive across sessions so the reaper spares it.
 
 **State & memory**
@@ -285,6 +285,59 @@ you.
 
 `Ctrl-C` or `agg stop` shuts the agent and the loop down cleanly — no orphaned worker, ledger
 finalized, base branch untouched.
+
+## When a human is unavoidable
+
+Steering above is *you* interrupting the loop. This is the loop needing *you*: an approval before a
+deploy, a value only you have, a real-world action no agent can perform, a task the agent failed.
+
+> **Off by default.** Declare no human call and the run is fully unattended, exactly as before this
+> existed. Only a Rust driver can make the loop *wait*, and only where its author wrote the call;
+> `agg.yaml` has no `hil` key. The worker's channel is opt-in per project and can never stop the loop.
+
+**The worker asks and exits** — once you have turned that channel on by adding the paragraph from
+[Letting the worker ask](CONFIG.md#letting-the-worker-ask) to your `AGG.md`. It never waits (a session
+is a paid subprocess holding a git branch), so the question is recorded, you are paged, and the answer
+arrives at the top of its next brief:
+
+```bash
+agg hil bool   "Firewall piercing for :443 requested. Done?"
+agg hil choose "Which store?" --option postgres --option sqlite
+agg hil input  "Which instance is prod?"
+```
+
+**A Rust driver may block**, because driver code runs *between* sessions. Only in Rust, at a call
+site a human wrote — `agg.yaml` has no `hil` key, so the YAML path never blocks:
+
+```rust
+let ok = agg.hil_bool("Deploy v2.3 to prod?")?;      // blocks until answered
+```
+
+**Answering**, from anywhere with a shell — no loop need be running:
+
+```bash
+agg status                    # lists open asks: id, question, how long it has waited
+agg send answer 4f2a 2        # a choice: the option name, or its 1-based number
+agg send approve 4f2a         # yes/no sugar          agg send deny 4f2a
+```
+
+An answer off the recorded option list is refused with the options re-printed, and the ask stays
+open. The first answer wins. Answers travel the operator bus, which a confined worker cannot write —
+that channel is what makes "a human approved this" mean something.
+
+There is **no timeout**: an idle process spends no tokens, and `agg stop` interrupts a wait. Two
+rules keep that safe:
+
+- **`work_time` excludes waiting.** Ceilings keep firing while blocked, so bound a run with humans in
+  it on `work_time` (effort), not just `wall_time` (a deadline) — otherwise an overnight question
+  aborts a healthy run. Both are **seconds**.
+- **An answer unblocks the step; a judge still owns the verdict.** Never let a human's "done" satisfy
+  a goal — re-run the check that looks at the world.
+
+⛔ **Never ask for a secret's value.** The question and answer are written to disk. Ask for the
+credential to be *placed* (env, keychain, `.env`) and confirm with `agg hil bool`.
+
+→ [Asking a human](CONFIG.md#asking-a-human-hil) · worked driver: [`examples/hil.rs`](../examples/hil.rs)
 
 ## Building judges
 
@@ -449,7 +502,7 @@ file.
 ```rust
 let agg = Agg::open(".")?
     .limits(Limits { tokens: Some(40_000_000), cost: None,
-                     sessions: Some(300), wall_hours: Some(10.0) })
+                     sessions: Some(300), wall_time: Some(36000.0), work_time: None })
     .on_regression(OnRegression::Rollback);
 
 let cycle = agg.pos("cycle", 20);              // the breadcrumb the TUI renders
@@ -607,10 +660,18 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `POST /api/send` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` |
 | `agg spawn` | *(used by the worker, not to start the loop)* track a long child task so the reaper spares it and the next session polls it | `--name <n>` · `--reason <why>` · `-- <cmd…>` |
 | `agg stop [reason]` | Graceful stop at the next session boundary (the one top-level steering alias) | |
-| `agg send <cmd>` | All steering, applied at the next session boundary | `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` |
+| `agg send <cmd>` | All steering, applied at the next session boundary | `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` · `answer <id> <value>` · `approve <id>` · `deny <id>` |
+| `agg hil <kind>` | *(used by the worker, not the operator)* ask a human. **Records and exits — it never waits** | `bool <q>` · `choose <q> --option … --option …` · `input <q>` |
 
-`agg run` exit codes, so automation can branch on the outcome: **0** `done_if` met (or an operator
-stop) · **1** hard error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions`.
+`agg run` exit codes, so automation can branch on the outcome: **0** `done_if` met · **1** hard
+error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions` · **5** an operator stopped it.
+
+> ⚠ **5 is new, and it changed.** An operator stop used to report **0**, sharing it with a met goal —
+> so `if agg run; then ship; fi` shipped on `agg stop`. A stop is not success. A wrapper that wants
+> the old behaviour writes `case $? in 0|5)`.
+>
+> A **Rust driver** needs `fn main() -> ExitCode { agg::driver::run(real_main) }` to get these codes
+> at all: `-> Result<(), Fatal>` collapses every ending to 1. See [docs/RUST_API.md](RUST_API.md).
 
 ## Configuration
 

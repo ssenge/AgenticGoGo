@@ -23,7 +23,7 @@ sequence:
   steps:
     - "worker"                     # run `worker`, forever, until done_if fires
   done_if: "prints_two"            # your Definition of Done: the `prints_two` judge is met
-  abort_if: "over_iterations OR wall_hours >= 1"   # a ceiling, not part of the DoD
+  abort_if: "over_iterations OR work_time >= 3600"   # a ceiling (SECONDS), not part of the DoD
   # ASK FOR HELP WITHOUT STOPPING. `notify_if` is the non-terminal twin of `abort_if`: when it is
   # true agg runs `notify.cmd` and the loop KEEPS RUNNING. `stalled` is a judge that ships inside
   # the binary (it reads agg/private/verdicts.jsonl), so this runs as-is — nothing to author.

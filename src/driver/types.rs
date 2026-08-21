@@ -41,6 +41,47 @@ pub enum Fatal {
     Other(anyhow::Error),
 }
 
+impl Fatal {
+    /// The process exit code this ending deserves.
+    ///
+    /// ⚠ Without this, a driver is INDISTINGUISHABLE from a panic to any wrapper. `fn main() ->
+    /// Result<(), Fatal>` uses Rust's `Termination` impl, which prints `Error: {:?}` and exits **1**
+    /// for every error — so `agg stop`, a blown ceiling, a max-sessions stop and a genuine bug all
+    /// arrived as 1. Measured, not assumed. The `RunOutcome` codes existed only on the `agg run`
+    /// path; this is the driver half of the same contract.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Fatal::Ended(o) => o.exit_code(),
+            // A real fault, not a run outcome: 1 is correct here and only here.
+            Fatal::Io(_) | Fatal::Other(_) => 1,
+        }
+    }
+}
+
+/// Run a driver and turn its ending into the right process exit code.
+///
+/// The one-liner every driver's `main` should be, because `fn main() -> Result<(), Fatal>` cannot do
+/// this: `Termination` collapses every ending to 1 (see [`Fatal::exit_code`]).
+///
+/// ```ignore
+/// fn main() -> std::process::ExitCode {
+///     agg::driver::run(|| drive(&Agg::open(".")?))
+/// }
+/// ```
+pub fn run(f: impl FnOnce() -> Result<(), Fatal>) -> std::process::ExitCode {
+    match f() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // `Ended` is a normal outcome that already printed its own banner; anything else is a
+            // fault nobody has reported yet.
+            if !matches!(e, Fatal::Ended(_)) {
+                eprintln!("error: {e}");
+            }
+            std::process::ExitCode::from(e.exit_code())
+        }
+    }
+}
+
 impl From<std::io::Error> for Fatal {
     fn from(e: std::io::Error) -> Self {
         Fatal::Io(e)

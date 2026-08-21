@@ -3,6 +3,15 @@
 //! `last_json_object` was byte-identical in judge.rs and summary.rs. One home, one definition.
 
 /// Seconds since the Unix epoch (UTC). 0 if the clock is somehow before the epoch.
+/// Write `content` to `path` via a sibling tmp file + `rename(2)`, so a reader never sees a
+/// half-written file. The same write-then-rename the bus, the ledgers and `state.json` already do
+/// by hand; this is the shared spelling for new call sites.
+pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
+}
+
 pub fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

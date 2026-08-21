@@ -14,6 +14,7 @@
 //! the borrow checker into the driver's control flow for no gain: the loop is single-threaded, so
 //! the interior mutability below (`Cell`/`RefCell`/`OnceCell`) is free and invisible.
 
+use crate::core::asks::AskCase;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -266,6 +267,10 @@ impl Agg {
         let stop_hooks = StopHooks { handlers: std::mem::take(&mut lifecycle.on_stop) };
 
         let loop_start = std::time::Instant::now();
+        // ⚠ `fresh = !resume` is the load-bearing half of the e2e definition: a resumed run must
+        // inherit the original `started_at_epoch` and the human wait already banked, or every
+        // answered question would hand the run a fresh full allowance.
+        let clock = crate::core::clock::Clock::open(&dir, crate::util::now_epoch(), !self.resume);
         eprintln!(
             "════════════════════════════════════════════════════════════\n\
              AgenticGoGo — project {} (rust driver)\n\
@@ -323,6 +328,7 @@ impl Agg {
             max_sessions: 0,
             gate_regressions,
             loop_start,
+            clock,
             lifetime_base,
             session: 0,
             tokens_spent: 0,
@@ -829,9 +835,10 @@ impl Agg {
         self.operator_check(started)?;
 
         let limits = self.cfg.sequence.limits.clone();
-        let (session, tokens, cost, elapsed) = {
+        let now = crate::util::now_epoch();
+        let (session, tokens, cost, wall, work) = {
             let st = started.st.borrow();
-            (st.session, st.tokens_spent, st.cost_spent, st.loop_start.elapsed())
+            (st.session, st.tokens_spent, st.cost_spent, st.clock.wall_secs(now), st.clock.work_secs(now))
         };
         // The order is the table's. A `None` limit is not checked.
         if let Some(max) = limits.sessions {
@@ -854,10 +861,18 @@ impl Agg {
                 return Err(self.end_now(started, RunOutcome::Halt, format!("over_cost: ${cost:.4}/${max:.4}"), "abort:over_cost"));
             }
         }
-        if let Some(max) = limits.wall_hours {
-            let hours = elapsed.as_secs_f64() / 3600.0;
-            if hours >= max {
-                return Err(self.end_now(started, RunOutcome::Halt, format!("wall_hours: {hours:.2}/{max}"), "abort:wall_hours"));
+        // The two clock ceilings, in SECONDS, both read from the PERSISTED clock rather than from
+        // process uptime — a resumed run must not be handed a fresh allowance.
+        if let Some(max) = limits.wall_time {
+            if wall >= max {
+                return Err(self.end_now(started, RunOutcome::Halt, format!("wall_time: {wall:.0}s/{max:.0}s"), "abort:wall_time"));
+            }
+        }
+        // ⚠ `work_time` is what makes an indefinite `hil_*` block survivable: ceilings keep firing
+        // while blocked, so a run whose only ceiling is `wall_time` dies on an overnight question.
+        if let Some(max) = limits.work_time {
+            if work >= max {
+                return Err(self.end_now(started, RunOutcome::Halt, format!("work_time: {work:.0}s/{max:.0}s"), "abort:work_time"));
             }
         }
         Ok(())
@@ -959,6 +974,184 @@ impl Agg {
         }) {
             eprintln!("  ⚠ could not record this note in the call ledger: {e}");
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+    // hil_* — the human-in-the-loop calls (`internal/HUMAN_LOOP.md` §4.5)
+    //
+    // THREE calls, one behaviour: **block until a human answers.** No timeout, no default, no
+    // ending the run. The stopping in an earlier design existed only to avoid holding a process
+    // open, which is an aesthetic worry rather than a cost — an idle agg process spends no tokens
+    // and no money, and waiting is cheaper than the machinery that avoids waiting.
+    //
+    // ⛔ THE WORKER CANNOT REACH THESE. `agg hil` records an ask and exits; only a driver author,
+    // at a call site they wrote, can make the loop wait. With no bound on the wait that asymmetry
+    // is the ONLY thing standing between this feature and the interactive agent agg replaces — so
+    // do not add a `--wait` to `agg hil`, and do not give `agg.yaml` a `hil` key.
+    //
+    // Two things make an indefinite wait safe rather than reckless:
+    //   · `agg stop` / Ctrl-C interrupt it — the bus is drained on every poll (verified on the wire);
+    //   · `work_time` excludes the waiting, so a ceiling meant to measure the agent's effort is not
+    //     consumed by a human who was asleep. `wall_time` still fires: a deadline is a deadline.
+    // ═════════════════════════════════════════════════════════════════════════════════════════
+
+    /// Ask a human to pick one of `options`; returns the INDEX chosen.
+    ///
+    /// The base form. `options` is a **closed set**: it is recorded with the ask, so `agg send
+    /// answer` refuses anything not on the list and re-prints it, and this call cannot hand you a
+    /// value you did not offer. That boundary check is the reason `hil_choose` exists next to
+    /// [`Agg::hil_input`], which cannot have one.
+    pub fn hil_choose(&self, question: &str, options: &[&str]) -> Result<usize, Fatal> {
+        if options.len() < 2 {
+            return Err(Fatal::Other(anyhow::anyhow!(
+                "hil_choose needs at least two options (got {}) — a question with one answer is not a question",
+                options.len()
+            )));
+        }
+        let opts: Vec<String> = options.iter().map(|s| s.to_string()).collect();
+        let answer = self.hil(AskCase::Choose, question, Some(opts.clone()))?;
+        // The CLI validated it, so a miss here means a hand-edited ledger. Fall back to a hard error
+        // rather than to index 0: silently picking the first option is how a "no" becomes a "yes".
+        opts.iter().position(|o| o == &answer).ok_or_else(|| {
+            Fatal::Other(anyhow::anyhow!("answer {answer:?} is not one of {opts:?}"))
+        })
+    }
+
+    /// Ask a human a yes/no question. Sugar for a two-option [`Agg::hil_choose`].
+    ///
+    /// Carries most real usage, which is why it has a name: authorize a deploy, confirm a real-world
+    /// change was made, hand a failed task over. A `false` is a legitimate outcome, not an error —
+    /// the human said no, and a workflow that asked should handle it.
+    pub fn hil_bool(&self, question: &str) -> Result<bool, Fatal> {
+        Ok(self.hil(AskCase::Bool, question, Some(vec!["yes".into(), "no".into()]))? == "yes")
+    }
+
+    /// Ask a human for a value. Returns what they typed, verbatim.
+    ///
+    /// ⚠ An OPEN answer set: agg cannot validate free text, so **pair it with a judge** — ask, check,
+    /// re-ask with the failure in the question. `examples/` shows the loop.
+    ///
+    /// ⛔ **Never route a secret through this.** The value would land in `asks.jsonl`, in the next
+    /// session's `INSTRUCTIONS.md`, in `run.log`, and — because the bus is files on disk — in
+    /// `agg/private/bus/in/`. Ask the human to put the credential where credentials go and confirm
+    /// with [`Agg::hil_bool`] instead: **an answer may NAME a secret, never CONTAIN one.**
+    pub fn hil_input(&self, question: &str) -> Result<String, Fatal> {
+        self.hil(AskCase::Input, question, None)
+    }
+
+    /// The open asks a human still owes an answer to, oldest first.
+    ///
+    /// Exists for the WORKER's asks, which a driver cannot otherwise see: `agg hil` records and
+    /// exits, so the id is minted somewhere this driver never was. Without a reader, a question the
+    /// worker asked is invisible to the flow that has to react to it.
+    ///
+    /// A driver MAY choose to block on one — and that choice being the author's, at a call site, is
+    /// what keeps the asymmetry above honest: the worker asked, the AUTHOR decided to wait.
+    pub fn open_asks(&self) -> Vec<crate::core::asks::Ask> {
+        crate::core::asks::open(&self.dir)
+    }
+
+    /// The shared body: record the ask, page the human, wait for the ledger to carry an answer.
+    fn hil(&self, case: AskCase, question: &str, options: Option<Vec<String>>) -> Result<String, Fatal> {
+        let started = self.ready()?;
+
+        // REPLAY. A recorded answer is returned verbatim, so a resumed run does not ask a human the
+        // same question twice. ⚠ Only reachable for an ask BEFORE the last kept gate — `truncate_to_base`
+        // drops what follows it — which is why the ledger is keyed by ask id: the fix for the rest is
+        // to read `asks.jsonl` instead of the call ledger, and it stays a few lines away.
+        if let Some(CallRecord::Hil { answer, .. }) = self.replayed(started, "hil")? {
+            eprintln!("  [resume] ord {} · hil — answered {answer:?} already, not asking again", self.ord.get());
+            self.skip();
+            return Ok(answer);
+        }
+        self.operator_check(started)?;
+
+        let id = self.mint_ask_id();
+        let (session, step) = {
+            let st = started.st.borrow();
+            (st.session, st.cur_step.as_ref().map(|s| s.name.clone()))
+        };
+        crate::core::asks::append(
+            &self.dir,
+            &crate::core::asks::Row::Open {
+                id: id.clone(),
+                case,
+                question: question.to_string(),
+                options: options.clone(),
+                origin: crate::core::asks::Origin::Driver,
+                session,
+                step,
+                ts: crate::util::now_epoch(),
+            },
+        )?;
+
+        // ⚠ THE ONE PLACEMENT RULE. `step()` only STAGES — work sits on a session branch until a
+        // gate lands it — so a human who edits the tree while a span is open collides with staged
+        // work. agg knows when that is, so it warns; it does not refuse, because most asks (a
+        // decision, a choice) touch nothing at all.
+        let span_open = started.st.borrow_mut().ext.get::<AGGState>().git.span_tip.is_some();
+        if span_open {
+            eprintln!(
+                "  ⚠ blocking with STAGED work on a session branch. If the human is going to touch \
+                 the tree, `gate()` FIRST — their edits will collide with the open span."
+            );
+        }
+
+        {
+            let mut st = started.st.borrow_mut();
+            crate::features::notify::driver_ping(&mut st, "block", &format!("[{id}] {question}"));
+        }
+        eprintln!("  [hil {id}] {question}");
+        match &options {
+            Some(o) => eprintln!("      answer: `agg send answer {id} <{}>`", o.join("|")),
+            None => eprintln!("      answer: `agg send answer {id} \"<value>\"`"),
+        }
+        eprintln!("      or end the run with `agg stop` — a block is interruptible.");
+
+        // ⚠ PUBLISH, and keep publishing. Found on the wire, not in a test: without this the ask is
+        // in `asks.jsonl` but NOT in `state.json`, so `agg status`, the TUI and `agg serve` all show
+        // nothing at the one moment a human is needed — which defeats the entire mitigation for "a
+        // forgotten ask hangs the run forever" (`internal/HUMAN_LOOP.md` §5.7). The age has to keep
+        // moving too, or a reader shows "waiting 0s" for twenty minutes.
+        started.st.borrow_mut().publish();
+
+        let wait_from = crate::util::now_epoch();
+        let answer = loop {
+            // Ceilings + Ctrl-C + the bus drain that records the answer. Every 5s, the same chunking
+            // `RateLimitBackoff` uses.
+            self.check_limits()?;
+            if let Some(a) = crate::core::asks::get(&self.dir, &id).and_then(|a| a.answer) {
+                break a;
+            }
+            std::thread::sleep(Duration::from_secs(BLOCK_CHUNK_SECS));
+            // Banked as we go, not at the end: a crash mid-wait must not lose the waiting time, or
+            // the resumed run's `work_time` silently gains everything the human spent thinking.
+            let mut st = started.st.borrow_mut();
+            st.clock.add_human_wait(&self.dir, BLOCK_CHUNK_SECS as f64);
+            st.publish();
+        };
+        let waited = crate::util::now_epoch().saturating_sub(wait_from);
+        eprintln!("  [hil {id}] answered {answer:?} after {waited}s");
+
+        self.record(CallRecord::Hil {
+            ord: self.ord.get(),
+            label: self.label_path(),
+            case,
+            msg: question.to_string(),
+            answer: answer.clone(),
+            ts: crate::util::now_epoch(),
+        })?;
+        Ok(answer)
+    }
+
+    /// A short id an operator can retype off a phone, unique against what the ledger already holds.
+    fn mint_ask_id(&self) -> String {
+        let now = crate::util::now_epoch();
+        let taken = crate::core::asks::all(&self.dir);
+        (0..u64::MAX)
+            .map(|seq| crate::core::asks::mint_id(seq, now))
+            .find(|id| !taken.iter().any(|a| &a.id == id))
+            .unwrap_or_else(|| format!("{now:x}"))
     }
 
     /// Cannot proceed without a human: deliver `msg` and WAIT on the operator bus until

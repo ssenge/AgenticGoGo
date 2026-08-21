@@ -188,7 +188,7 @@ sequence:
     - "worker"
   limits: { tokens: 2000000 }      # output-token ceiling → over_budget. Works on ANY agent.
   done_if: "tests_pass"            # the Definition of Done: the suite is green
-  abort_if: "over_budget OR wall_hours >= 0.5"   # give up after 30 min or the token ceiling
+  abort_if: "over_budget OR work_time >= 1800"   # give up after 30 min (SECONDS) or the token ceiling
 ```
 
 The three ceilings — tokens, cost, sessions — are unified under **`sequence.limits:`** now. A stray

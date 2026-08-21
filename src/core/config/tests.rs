@@ -91,20 +91,20 @@ fn limits_round_trips_with_and_without_wall_hours() {
 
     // WITHOUT: every pre-existing config omits the key, and it must stay unlimited.
     let old: Limits = serde_yaml::from_str("tokens: 5\ncost: 1.5\nsessions: 3\n").unwrap();
-    assert_eq!(old.wall_hours, None, "an absent `wall_hours` is unlimited, not zero");
+    assert_eq!(old.wall_time, None, "an absent `wall_hours` is unlimited, not zero");
     let back = round(&old);
-    assert_eq!((back.tokens, back.sessions, back.wall_hours), (Some(5), Some(3), None));
+    assert_eq!((back.tokens, back.sessions, back.wall_time), (Some(5), Some(3), None));
     assert_eq!(back.cost, Some(1.5));
 
     // WITH: the new key parses under `sequence.limits:` and survives a round-trip.
-    let new: Limits = serde_yaml::from_str("wall_hours: 12\n").unwrap();
-    assert_eq!(new.wall_hours, Some(12.0));
-    assert_eq!(round(&new).wall_hours, Some(12.0));
+    let new: Limits = serde_yaml::from_str("wall_time: 12\n").unwrap();
+    assert_eq!(new.wall_time, Some(12.0));
+    assert_eq!(round(&new).wall_time, Some(12.0));
 
     // …and it is a real `agg.yaml` key, not just a Rust field.
-    let cfg = parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], limits: { wall_hours: 12 } }\n")
-        .expect("`limits.wall_hours` is a valid agg.yaml key");
-    assert_eq!(cfg.sequence.limits.wall_hours, Some(12.0));
+    let cfg = parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], limits: { wall_time: 12 } }\n")
+        .expect("`limits.wall_time` is a valid agg.yaml key");
+    assert_eq!(cfg.sequence.limits.wall_time, Some(12.0));
 
     // the guard the whole config module rests on still bites.
     let typo = parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], limits: { wall_hour: 12 } }\n")

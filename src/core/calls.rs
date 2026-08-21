@@ -68,6 +68,13 @@ pub enum CallRecord {
     /// against its own schema — a resumed gate would re-execute a real merge.
     Gate { ord: u64, label: String, outcome: GateOutcome, ts: u64 },
     Note { ord: u64, label: String, level: NoteLevel, msg: String, ts: u64 },
+    /// A human ask and the answer it got (`internal/HUMAN_LOOP.md` §4.7).
+    ///
+    /// ⛔ Recorded ONLY once answered. A `hil_*` that never got its answer did not complete, so a
+    /// resume must ask again rather than walk past a decision no human made. The `answer` is what
+    /// makes replay silent: re-asking a human the same question is the one resume cost that is paid
+    /// by a person rather than by tokens.
+    Hil { ord: u64, label: String, case: crate::core::asks::AskCase, msg: String, answer: String, ts: u64 },
 }
 
 impl CallRecord {
@@ -76,7 +83,8 @@ impl CallRecord {
             CallRecord::Step { ord, .. }
             | CallRecord::Judge { ord, .. }
             | CallRecord::Gate { ord, .. }
-            | CallRecord::Note { ord, .. } => *ord,
+            | CallRecord::Note { ord, .. }
+            | CallRecord::Hil { ord, .. } => *ord,
         }
     }
 
@@ -85,7 +93,8 @@ impl CallRecord {
             CallRecord::Step { label, .. }
             | CallRecord::Judge { label, .. }
             | CallRecord::Gate { label, .. }
-            | CallRecord::Note { label, .. } => label,
+            | CallRecord::Note { label, .. }
+            | CallRecord::Hil { label, .. } => label,
         }
     }
 
@@ -101,6 +110,10 @@ impl CallRecord {
             CallRecord::Judge { judge, .. } => judge.clone(),
             CallRecord::Gate { .. } => "gate".into(),
             CallRecord::Note { level, .. } => format!("note:{}", level.tag()),
+            // ONE tag for all three calls, deliberately: the divergence check compares it, and a
+            // driver edited from `hil_bool` to `hil_choose` at the same call site is asking the same
+            // human the same thing in a different shape — not a control-flow divergence.
+            CallRecord::Hil { .. } => "hil".into(),
         }
     }
 
@@ -208,8 +221,29 @@ pub fn truncate_to_base(dir: &Path) -> Result<Vec<CallRecord>> {
     for r in dropped {
         eprintln!("             ord {} · {} `{}`", r.ord(), kind_of(r), r.what());
     }
-    if dropped.iter().any(|r| matches!(r, CallRecord::Note { level: NoteLevel::Block, .. })) {
-        eprintln!("           ⚠ one of them is an ANSWERED block() — it will ask again, and the answer is not recoverable.");
+    // A dropped, ALREADY-ANSWERED human call is the one resume cost paid by a person rather than by
+    // tokens, so it is called out separately from the rest of the truncation.
+    let human = dropped
+        .iter()
+        .filter(|r| {
+            matches!(r, CallRecord::Note { level: NoteLevel::Block, .. }) || matches!(r, CallRecord::Hil { .. })
+        })
+        .count();
+    if human > 0 {
+        eprintln!(
+            "           ⚠ {human} of them ANSWERED a human ({}). Those questions will be asked \
+             AGAIN and the original answers are not recoverable — `gate()` before a `hil_*` call if \
+             that matters.",
+            dropped
+                .iter()
+                .filter_map(|r| match r {
+                    CallRecord::Hil { answer, .. } => Some(answer.as_str()),
+                    CallRecord::Note { level: NoteLevel::Block, .. } => Some("block"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     let kept: Vec<CallRecord> = all.into_iter().take(keep).collect();
     rewrite(dir, &kept)?;
@@ -222,6 +256,7 @@ fn kind_of(r: &CallRecord) -> &'static str {
         CallRecord::Judge { .. } => "judge",
         CallRecord::Gate { .. } => "gate",
         CallRecord::Note { .. } => "note",
+        CallRecord::Hil { .. } => "hil",
     }
 }
 

@@ -50,7 +50,7 @@ sequence:
   gate_regressions: true           # roll a session back if a previously-met judge regresses
   invariants: ["no_regression"]    # judge names that must STAY met
   done_if: "correct_result AND all_tests_pass AND coverage.value >= 80"
-  abort_if: "over_budget OR wall_hours >= 8 OR any_regressed(invariants) OR any_judge_error"
+  abort_if: "over_budget OR work_time >= 28800 OR any_regressed(invariants) OR any_judge_error"
   notify_if: "stuck.value >= 85"   # NON-TERMINAL twin of abort_if: ping a human, KEEP RUNNING.
                                    # STRICTER than whatever bounds the repeat above, deliberately —
                                    # see "the escalation ladder". (`stalled` ships; `stuck` you author.)
@@ -234,6 +234,8 @@ could never become true) but never the **DoD-set** — it is machinery, not a go
 | `limits.tokens` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. |
 | `limits.cost` | unlimited | **dollar** ceiling → `over_cost`. **CLAUDE-ONLY** — see [Choosing an agent](#agent-specific-rules). |
 | `limits.sessions` | unlimited (`null`) | session cap → `over_iterations`. A **non-zero** `agg run --max-sessions <n>` overrides it; the flag's default `0` falls back to this key (not to unlimited). |
+| `limits.wall_time` | unlimited | **END-TO-END wall ceiling in SECONDS**, human waiting INCLUDED — a *deadline*. ⚠ Replaces `wall_hours`; the unit changed by 3600×, so the old key is a **hard error at startup**, never an alias. |
+| `limits.work_time` | unlimited | **EFFORT ceiling in SECONDS**: `wall_time` minus time spent blocked on a human. The ceiling a run with humans in it actually wants — see [the clock](#the-clock--three-terms-all-in-seconds). |
 | `gate_regressions` | `true` | roll a session back if a previously-met judge now fails. The rename of the old `rollback_on_regression`. |
 | `invariants` | `[]` | judge names that must STAY met. The gate protects them; `any_regressed(invariants)` gives up on them. |
 | `done_if` | `all_goals` | the **Definition of Done** — success stop (exit 0). |
@@ -254,7 +256,7 @@ comparisons `== != >= <= > <`, and parentheses. Precedence: `or > and > cmp > at
 | **judge (bare name)** | any judge name → its `met` **bool**. |
 | **judge accessor** | `name.value`, `name.max` → the number the judge emitted. (`.target` is NOT an accessor — it is presentational.) |
 | **aggregates** | `all_goals`, `count_met`, `count_regressed`, `total`, `met_fraction`, `any_regressed` |
-| **run scalars/ceilings** | `tokens_spent`, `budget_total`, `over_budget`, `cost_spent`, `cost_limit`, `over_cost`, `iterations`, `max_iterations`, `over_iterations`, `wall_hours`, `any_judge_error` |
+| **run scalars/ceilings** | `tokens_spent`, `budget_total`, `over_budget`, `cost_spent`, `cost_limit`, `over_cost`, `iterations`, `max_iterations`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_judge_error` |
 | **invariant subset** | `(invariants)` — an argument on exactly `count_met`, `count_regressed`, `total`, `met_fraction`, `any_regressed`, e.g. `any_regressed(invariants)`. |
 
 ### Numeric thresholds — use the accessor
@@ -292,15 +294,172 @@ Typical values:
 
 ```yaml
 # any agent:
-abort_if: "any_regressed(invariants) OR over_budget OR over_iterations OR wall_hours >= 8"
+abort_if: "any_regressed(invariants) OR over_budget OR over_iterations OR work_time >= 28800"
 # claude only — add the dollar ceiling:
-abort_if: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR wall_hours >= 8"
+abort_if: "any_regressed(invariants) OR over_cost OR over_budget OR over_iterations OR work_time >= 28800"
 ```
 
 Do **not** fold a ceiling into `done_if` — putting `over_budget` there would report a blown budget as
 *success*. **Never leave an autonomous loop with no ceiling at all.** `any_judge_error` is `true` when
 a judge that ran this step crashed / timed out / emitted garbage — an `error` is never a regression
 and never satisfies `done_if`; wiring `abort_if: … OR any_judge_error` is the explicit policy.
+
+## The clock — three terms, all in seconds
+
+`wall_time`, `human_wait_time` and `work_time` are condition terms *and* `limits:` keys. All three are
+**seconds**, all three are computed by agg from its own state (so a worker cannot forge them), and
+`wall_time` is **end-to-end across resumes** — it is read from a persisted start epoch, not from
+process uptime.
+
+| term | meaning | use it as |
+|---|---|---|
+| `wall_time` | now − run start, human waiting **included** | a **deadline** |
+| `human_wait_time` | time accumulated inside blocking human calls | observability |
+| `work_time` | `wall_time − human_wait_time` | an **effort ceiling** |
+
+```yaml
+abort_if: "wall_time >= 86400"   # DEADLINE — 24h; a sleeping human counts against it
+abort_if: "work_time >= 28800"   # EFFORT   — 8h of actual looping; a slow human costs nothing
+```
+
+All three exist as separate terms because the [condition grammar](#the-condition-grammar) has
+comparisons but **no arithmetic**: `wall_time - human_wait_time >= 28800` cannot be written, so the
+difference has to be its own term. Which one you want is a real choice, and agg does not make it for
+you: a run that must ship by tomorrow wants `wall_time`; a run that must not burn more than eight
+hours of *agent* effort wants `work_time`, because ceilings keep firing while a
+[human call](#asking-a-human-hil) is blocked and an overnight question would otherwise consume the
+whole allowance.
+
+> ⚠ **`wall_hours` was removed, not renamed.** The unit changed by 3600×, so a compatibility alias
+> would let `wall_hours: 8` become `wall_time: 8` — an eight-**second** ceiling. agg hard-errors on
+> the old key and prints the converted value. It also **warns** when a clock term is compared against
+> anything under 60, because a fresh config has no old key to catch and `work_time >= 8` is almost
+> always somebody thinking in hours.
+
+## Asking a human (`hil`)
+
+> **The default is that there is no human.** A project with no `hil_*` call in its driver and no
+> opt-in paragraph in its `AGG.md` behaves exactly as it did before this feature existed: fully
+> unattended, start to finish. Nothing below is on unless you turn it on, and that is the point —
+> agg exists because a raw coding agent stops every few minutes to ask.
+
+HiL is opt-in **twice over**, once per channel:
+
+| channel | how it is turned on | can it stop the loop? |
+|---|---|---|
+| a **driver** `hil_*` call | by existing — a Rust author writes the call site | **yes**, it blocks there |
+| the **worker**'s `agg hil` | by the project adding the paragraph [below](#letting-the-worker-ask) to its `AGG.md` | **no**, ever — it records and the session ends |
+| `agg.yaml` | ⛔ not at all — there is no `hil` key | — |
+
+Note the asymmetry in the last column, because it is the whole safety argument: the only thing that
+can make the loop *wait* is a line of Rust a human wrote. A worker with the channel turned on can
+page you, but it cannot stop the run, so the worst case is an unwanted notification and not a loop
+that sits idle.
+
+### Letting the worker ask
+
+**Nothing tells the worker this exists.** The scaffolded `AGG.md` says *"There is NO human to answer
+questions"* and leaves it there, deliberately: a worker shown an escape hatch in every session's brief
+will reach for it, and a loop that asks instead of working is the failure this whole design is
+against. Exactly like the [`blocked` judge](#blocked--the-workers-self-report-a-hint-not-a-fact), the
+channel is real but unadvertised until **you** add it to your project's `AGG.md`:
+
+```markdown
+- If you hit something ONLY a human can resolve — a missing credential, a decision you are not
+  allowed to make, a real-world action (provision an account, open a firewall, sign something) —
+  ask through agg and END YOUR SESSION IMMEDIATELY: `agg hil bool "…"` / `agg hil choose "…"
+  --option a --option b` / `agg hil input "…"`. It records and exits at once; the answer is at the
+  top of your next brief. Do NOT guess, fabricate, or poll for it. This is a LAST RESORT — if you
+  can make progress on anything else, do that instead.
+- Never ask for a secret's VALUE. Ask for the credential to be PLACED (environment, keychain,
+  `.env`) and confirm with `agg hil bool`.
+```
+
+Add it when your project genuinely has human-only steps in it (credentials, a real-world action, an
+irreversible decision). Leave it out otherwise. Under `isolation: sandbox` the CLI still works — it
+writes to `agg/state/asks/`, which is the worker's own directory.
+
+Two guards apply, because a worker re-reads the same unresolved situation every session and *will*
+ask again: a repeat of a question that is **already open** is dropped rather than paging you twice,
+and at most **five** worker asks may be open at once. Neither is a permission boundary — a worker
+cannot stop the loop whatever it does — they just stop the channel becoming a pager loop. An answered
+question may be asked again, because the situation can genuinely recur.
+
+### The worker: `agg hil` records and exits
+
+A worker that hits something only a person can resolve runs one of:
+
+```bash
+agg hil bool   "Request firewall piercing for :443. Done?"
+agg hil choose "Which store?" --option postgres --option sqlite
+agg hil input  "Which instance is prod?"
+```
+
+These **never wait.** They record the question, print an id, and exit — a worker session is a paid
+subprocess holding a git branch, so a worker that waited on a human would be the exact failure agg
+exists to replace. The worker ends its session; agg pages you; the answer arrives in the **next**
+session's brief, scoped to that id. There is deliberately no `--wait` flag.
+
+⛔ **Never `agg hil input` for a secret.** The answer is written to the ask ledger and to the next
+session's instructions, both files on disk. Ask for it to be placed where credentials go and confirm
+with `agg hil bool`: *an answer may NAME a secret, never CONTAIN one.*
+
+### The driver: `hil_*` blocks until answered
+
+This is the channel that can stop the loop, which is why it is reachable **only** from Rust, only at a
+call site a human wrote, and never from `agg.yaml` (there is no `hil` key — the YAML path never
+blocks). A driver with no `hil_*` call runs unattended, exactly like every driver written before this
+existed:
+
+```rust
+let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize
+let v  = agg.hil_input("Which instance is prod?")?;                  // -> String
+let ok = agg.hil_bool("Deploy to prod?")?;                           // -> bool
+```
+
+They block until a human answers. **No timeout, no default, no ending the run** — an idle agg process
+spends no tokens, and waiting is cheaper than the machinery that avoids waiting. Two things make that
+safe: `agg stop` and Ctrl-C interrupt a wait (the bus is drained on every poll), and `work_time` does
+not count the waiting. Full detail in [docs/RUST_API.md](RUST_API.md).
+
+### Answering
+
+```bash
+agg status                        # lists every open ask, its age, and the command to answer it
+agg send answer  <id> "value"     # any ask. For a choice: an option, or its 1-based number
+agg send approve <id>             # sugar for a yes/no ask
+agg send deny    <id>
+```
+
+An answer to a `choose`/`bool` ask must be **on the recorded list** — anything else is refused at the
+CLI with the options re-printed, and the ask stays open. That closed answer set is why `hil_choose`
+exists next to `hil_input`, which is open and should be paired with a judge instead. The first answer
+wins: a second one is refused rather than silently rewriting a decision the run may already have
+acted on.
+
+Answers travel on the [operator bus](#state-and-memory), which is carved out of the worker's writable
+set under `isolation: sandbox`/`container`. **That channel is the point:** the *request* may be
+worker-authored and is untrusted text, but the *answer* provably came from outside the worker — which
+is what makes "a human approved the prod deploy" mean anything. `agg send` works with no loop running,
+so an answer can be queued before the next `agg run`.
+
+> ⚠ **A forgotten ask waits forever.** That is the accepted cost of having no timeout. `notify.cmd`
+> fires when an ask opens, `agg status` shows it with its age, and `agg stop` ends a run nobody
+> intends to answer. A worker-opened ask cannot hang anything — it never blocks the loop.
+
+### What a human's answer does NOT do
+
+A human's answer unblocks the **step**; a **judge** still owns the **verdict**. Never let a "done"
+satisfy a goal directly — re-run the check that looks at the world:
+
+```rust
+while !agg.judge(&dns_ok).met() {
+    agg.hil_bool("Create the A record for billing.prod. Done?")?;
+}
+```
+
+A human sign-off that *binds* `done_if` — a verdict row rather than a branch — is not built. See
+`internal/HUMAN_LOOP.md` §7.3 for why it needs two extra rules first.
 
 ## Stuck detection and notification
 
@@ -370,7 +529,7 @@ sequence:
     - reconsider                        # STAGE 1b — reached only when 3 tries stayed stalled:
                                         #            recovery, different vendor, no human involved
   done_if:   "all_tests_pass AND coverage.value >= 80"
-  abort_if:  "over_budget OR wall_hours >= 8"    # STAGE 3 — stop, on ceilings the worker can't reach
+  abort_if:  "over_budget OR work_time >= 28800"  # STAGE 3 — stop, on ceilings the worker can't reach
   notify_if: "stuck.value >= 85"                 # STAGE 2 — notify, KEEP RUNNING. STRICTER than the
                                                  # `stalled` repeat above, so it fires only after it failed
   notify:
@@ -436,8 +595,8 @@ substitution is a **single pass**, so a value that happens to contain `{{project
 | fired by | `{{reason}}` is |
 |---|---|
 | `notify_if` | the `rationale` of **one judge named in the expression**: judges reporting `met` are preferred over the rest, the highest `value` wins inside that group, and a tie goes to the **first** in run-set order. An empty rationale is skipped. So `stuck.value >= 85 OR blocked` reports the firing 0–1 `blocked` rather than a quiet 0–100 `stuck`. |
-| `notify_if`, no usable rationale | the **`notify_if` expression text** — when every named judge's rationale is empty, or the expression names only run-scalars (`over_iterations`, `wall_hours`). |
-| an `abort_if` halt | the **`abort_if` expression text**, plus that same winning rationale when the expression names a judge: `blocked OR over_iterations — BLOCKED: need the prod deploy key`. A ceiling-only expression (`over_budget OR wall_hours >= 8`) names no judge, so it arrives as just the expression. |
+| `notify_if`, no usable rationale | the **`notify_if` expression text** — when every named judge's rationale is empty, or the expression names only run-scalars (`over_iterations`, `work_time`). |
+| an `abort_if` halt | the **`abort_if` expression text**, plus that same winning rationale when the expression names a judge: `blocked OR over_iterations — BLOCKED: need the prod deploy key`. A ceiling-only expression (`over_budget OR work_time >= 28800`) names no judge, so it arrives as just the expression. |
 
 **It is a heuristic, not an attribution.** agg does not evaluate *which subterm* made the expression
 true — `met`-first is a proxy for "this detector has something to say". A judge whose own `met`
@@ -497,7 +656,7 @@ it is never "the agent ended the run."
 
 | tier | example terms | what stops the worker |
 |---|---|---|
-| **process-internal** | `over_budget`, `over_cost`, `over_iterations`, `wall_hours`, `any_regressed(invariants)` | agg computes them from its own in-memory run state. Nothing on disk. **Genuinely unfakeable** — these are what termination should stand on. |
+| **process-internal** | `over_budget`, `over_cost`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_regressed(invariants)` | agg computes them from its own in-memory run state. Nothing on disk. **Genuinely unfakeable** — these are what termination should stand on. |
 | **agg-owned file** | `stalled`, `stuck` — both read `agg/private/verdicts.jsonl` | **depends on the isolation tier.** Under `sandbox`/`container` this is a real **permission** boundary: the ledger lives in `agg/private/`, which is carved out of the worker's writable set, so a write is refused by the kernel. Under the default `isolation: none` it is only a **protocol** boundary — agg writes that ledger and a worker has no sanctioned reason to touch it, so appending is unambiguously tampering, but nothing stops it and the ledger carries no integrity check. Forging three flat `merged` rows makes `stalled` report met. |
 | **worker-authored** | `blocked` over `agg/state/BLOCKED.md` | nothing, on any tier. `agg/state/` is the worker's own directory — the worker is *supposed* to write this file. |
 

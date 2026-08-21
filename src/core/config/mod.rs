@@ -475,21 +475,26 @@ pub struct Limits {
     /// A non-zero `--max-sessions <n>` flag overrides it when passed (§4.1).
     #[serde(default)]
     pub sessions: Option<u32>,
-    /// wall-clock ceiling in hours, measured from the run's start. null = unlimited.
+    /// END-TO-END wall ceiling in **SECONDS**, human waiting INCLUDED. null = unlimited. A DEADLINE.
     ///
-    /// ADDITIVE (BUILD.md §2.2): every config written before this key existed still parses, because
-    /// it is `#[serde(default)]` like its three siblings. It COEXISTS with the `wall_hours`
-    /// CONDITION term (`core::stop`) rather than replacing it — both read the same clock, but
-    /// `wall_hours >= 8 OR stalled` is not expressible as a limit, so the term stays.
+    /// ⚠ Replaces `wall_hours`, and the unit changed by 3600×. The old key is a HARD ERROR at
+    /// startup rather than an alias, because the dangerous migration is the mechanical one:
+    /// `wall_hours: 8` rewritten as `wall_time: 8` is a run that aborts after eight seconds.
+    /// See [`super::reject_removed_keys`].
     ///
-    /// ⚠ Enforced only where a driver calls `Agg::check_limits()`. The YAML path keeps using the
-    /// `wall_hours` term in `abort_if`.
-    ///
-    /// ⚠ Known ceiling: the run clock is an `Instant`, so a RESUMED run restarts it and gets the
-    /// full allowance again.
-    /// `ponytail:` upgrade path — seed the clock from `RunRecord.started_at_epoch` (Phase 4).
+    /// It COEXISTS with the `wall_time` CONDITION term rather than replacing it —
+    /// `wall_time >= 28800 OR stalled` is not expressible as a limit, so the term stays.
     #[serde(default)]
-    pub wall_hours: Option<f64>,
+    pub wall_time: Option<f64>,
+    /// EFFORT ceiling in **SECONDS**: `wall_time` minus time spent blocked on a human.
+    /// null = unlimited.
+    ///
+    /// This is the ceiling a run with humans in it actually wants. Ceilings keep firing while a
+    /// `hil_*` call is blocked (verified on the wire), so a question asked at 23:00 and answered at
+    /// 08:00 burns nine hours of a `wall_time` that was meant to measure the agent's effort — and a
+    /// healthy run dies because a person slept. See `internal/HUMAN_LOOP.md` §7.4.
+    #[serde(default)]
+    pub work_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

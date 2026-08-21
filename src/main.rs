@@ -120,6 +120,9 @@ enum Cmd {
     /// Send a steering command to a running loop's bus (applied at the next session boundary).
     #[command(subcommand)]
     Send(SendCmd),
+    /// Ask a human for something — for the WORKER to invoke. Records the ask and exits immediately.
+    #[command(subcommand)]
+    Hil(HilCmd),
     /// Install the `/agg:*` setup skills where your agent will actually find them.
     #[command(subcommand)]
     Skills(SkillsCmd),
@@ -171,6 +174,55 @@ enum SendCmd {
     Note {
         text: String,
     },
+    /// Answer an open human ask (`agg status` lists the ids).
+    ///
+    /// For a `hil_choose`/`hil_bool` ask the value must be ON THE LIST — agg refuses anything else
+    /// and re-prints the options, so a driver can never be handed a value it did not offer.
+    Answer {
+        /// the ask id, as printed by `agg status` or by the loop
+        id: String,
+        /// the answer. For a choose/bool ask: one of the options (or its 1-based number).
+        value: String,
+        /// who answered (recorded in the ledger for the audit trail)
+        #[arg(long, default_value = "operator")]
+        by: String,
+    },
+    /// Answer a yes/no ask with `yes`. Sugar for `send answer <id> yes`.
+    Approve {
+        id: String,
+        #[arg(long, default_value = "operator")]
+        by: String,
+    },
+    /// Answer a yes/no ask with `no`. Sugar for `send answer <id> no`.
+    Deny {
+        id: String,
+        #[arg(long, default_value = "operator")]
+        by: String,
+    },
+}
+
+/// The WORKER's ask front-end (`internal/HUMAN_LOOP.md` §4.8).
+///
+/// ⛔ These RECORD AND EXIT. They never wait, and there is deliberately no `--wait`: a worker session
+/// is a paid subprocess holding a git branch, so a worker that waits on a human is the exact failure
+/// agg exists to replace. Only a driver author — in Rust, at a call site they wrote — can make the
+/// loop block. Ask, end your session, and the answer arrives in the NEXT session's brief.
+#[derive(Subcommand)]
+enum HilCmd {
+    /// Ask a yes/no question.
+    Bool { question: String },
+    /// Ask the human to pick one of `--option`.
+    Choose {
+        question: String,
+        #[arg(long = "option", required = true)]
+        options: Vec<String>,
+    },
+    /// Ask for a value.
+    ///
+    /// ⛔ NEVER for a secret. The answer is written to the ask ledger and to the next session's
+    /// brief, both files on disk. Ask the human to put the credential where credentials go and
+    /// confirm with `agg hil bool` instead: an answer may NAME a secret, never CONTAIN one.
+    Input { question: String },
 }
 
 struct Paths {
@@ -356,9 +408,13 @@ fn run_cli() -> Result<ExitCode> {
                 SendCmd::Resume => bus::Command::Resume,
                 SendCmd::Stop { reason } => bus::Command::Stop { reason: reason.clone() },
                 SendCmd::Note { text } => bus::Command::Note { text: text.clone() },
+                SendCmd::Answer { id, value, by } => answer_command(&p.dir, id, value, by)?,
+                SendCmd::Approve { id, by } => answer_command(&p.dir, id, "yes", by)?,
+                SendCmd::Deny { id, by } => answer_command(&p.dir, id, "no", by)?,
             };
             send_to_bus(&p.dir, cmd)
         }
+        Cmd::Hil(hil) => worker_ask(&p.dir, hil),
         Cmd::Skills(SkillsCmd::Install { agent, user }) => {
             // Resolving the agent is the whole correctness of this command: install for the wrong
             // one and the files land in a directory that agent never reads, so the user sees no
@@ -421,6 +477,110 @@ fn ruler_for(config: &std::path::Path) -> Result<&'static dyn agg::backend::Agen
 
 /// Queue one steering command onto a running loop's bus. Shared by `agg send …` and
 /// the `agg stop` convenience alias.
+/// Validate an answer against the ask, then build the bus command that carries it.
+///
+/// Validation lives HERE, at the boundary, and not in the driver: the CLI is the one place that can
+/// print the options back to whoever got it wrong. A `hil_choose` ask has a CLOSED answer set, so
+/// anything off the list is refused and never queued — the ask stays open rather than resolving to
+/// garbage, and the driver cannot be handed a value it did not offer.
+fn answer_command(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<bus::Command> {
+    use agg::core::asks::{self, AskCase};
+
+    let ask = asks::get(dir, id).with_context(|| {
+        let open = asks::open(dir);
+        if open.is_empty() {
+            format!("no ask `{id}` in this project, and nothing is waiting for an answer.\n  \
+                     `agg status` lists open asks while a run is waiting.")
+        } else {
+            format!(
+                "no ask `{id}`. Open right now:\n{}",
+                open.iter()
+                    .map(|a| format!("  {}  {}", a.id, asks::one_line(&a.question, 80)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        }
+    })?;
+
+    if let Some(prev) = &ask.answer {
+        // Not an error the caller can fix, and NOT silently re-answered: the driver may already have
+        // acted on the first answer, so pretending this one landed would be a lie.
+        anyhow::bail!(
+            "ask `{id}` was already answered {prev:?}{}. The first answer wins — a second one would \
+             rewrite a decision the run may already have acted on.",
+            ask.by.as_deref().map(|b| format!(" by {b}")).unwrap_or_default()
+        );
+    }
+
+    let value = match (&ask.case, &ask.options) {
+        (AskCase::Input, _) => value.to_string(),
+        (_, Some(opts)) => {
+            // A 1-based number is accepted as well as the text: an operator answering from a phone
+            // should not have to retype `postgres-rds` exactly.
+            let picked = value
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n >= 1 && *n <= opts.len())
+                .map(|n| opts[n - 1].clone())
+                .or_else(|| opts.iter().find(|o| o.eq_ignore_ascii_case(value)).cloned());
+            match picked {
+                Some(v) => v,
+                None => anyhow::bail!(
+                    "{value:?} is not one of the options for ask `{id}`.\n  {}\n  \
+                     Answer with the text or its number. The ask stays OPEN.",
+                    opts.iter()
+                        .enumerate()
+                        .map(|(i, o)| format!("{}. {o}", i + 1))
+                        .collect::<Vec<_>>()
+                        .join("   ")
+                ),
+            }
+        }
+        // A closed-set ask with no options recorded is a corrupt ledger, not something to guess at.
+        (_, None) => anyhow::bail!("ask `{id}` is a choice but records no options — ledger is corrupt"),
+    };
+
+    eprintln!("answering `{id}`: {}", asks::one_line(&ask.question, 100));
+    Ok(bus::Command::Answer { id: id.to_string(), text: value, by: by.to_string() })
+}
+
+/// `agg hil …` — the worker's ask front-end. Writes a REQUEST and returns immediately.
+///
+/// The request lands in `agg/state/asks/` (worker-writable, so it survives `isolation: sandbox`);
+/// agg promotes it into the private ledger at the next session boundary and pages the human. The
+/// request is untrusted either way — only the answer's channel decides trust.
+fn worker_ask(dir: &std::path::Path, hil: &HilCmd) -> Result<()> {
+    use agg::core::asks::AskCase;
+
+    let (case, question, options) = match hil {
+        HilCmd::Bool { question } => (AskCase::Bool, question, Some(vec!["yes".to_string(), "no".to_string()])),
+        HilCmd::Choose { question, options } => {
+            if options.len() < 2 {
+                anyhow::bail!("`hil choose` needs at least two --option values (got {})", options.len());
+            }
+            (AskCase::Choose, question, Some(options.clone()))
+        }
+        HilCmd::Input { question } => (AskCase::Input, question, None),
+    };
+
+    let req = agg::core::asks::WorkerRequest {
+        case,
+        question: question.clone(),
+        options,
+        ts: agg::util::now_epoch(),
+    };
+    let path = agg::core::asks::write_worker_request(dir, &req)?;
+
+    // What the worker is told to do next is the whole contract: it must NOT wait.
+    println!(
+        "ask recorded ({}).\n\
+         Do NOT wait for it — end your session now. The answer will be in your next session's \
+         instructions.",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("?")
+    );
+    Ok(())
+}
+
 fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
     let live = agg::os::detach::live_pid(dir).is_some();
     let path = agg::bus::queue_command(dir, &cmd)?;

@@ -49,18 +49,66 @@ fn ev_run(expr: &str, goals: &[Judge], tokens: u64, budget: Option<u64>, hours: 
     let ctx = StopContext {
         tokens_spent: tokens,
         budget_total: budget,
-        wall_hours: hours,
+        wall_secs: hours * 3600.0,
+        human_wait_secs: 0.0,
         ..StopContext::from_judges(goals)
     };
     evaluate(expr, &ctx).unwrap()
 }
 
+/// The three clock terms, and the reason all three exist: the grammar has comparisons but NO
+/// arithmetic, so `wall_time - human_wait_time >= N` cannot be written and `work_time` must be its
+/// own term. A run blocked overnight on a human has to be able to survive an EFFORT ceiling while
+/// still failing a DEADLINE.
+#[test]
+fn work_time_excludes_human_wait_so_a_slow_human_does_not_blow_an_effort_ceiling() {
+    let goals = [g("a", false, false)];
+    let ctx = |wall: f64, waited: f64| StopContext {
+        wall_secs: wall,
+        human_wait_secs: waited,
+        ..StopContext::from_judges(&goals)
+    };
+
+    // 10h e2e, 9h of it waiting for a person to wake up.
+    let overnight = ctx(10.0 * 3600.0, 9.0 * 3600.0);
+    assert!(evaluate("wall_time >= 28800", &overnight).unwrap(), "a DEADLINE counts the waiting");
+    assert!(
+        !evaluate("work_time >= 28800", &overnight).unwrap(),
+        "an EFFORT ceiling must NOT be consumed by a human who was asleep — this is the whole \
+         reason an indefinite hil_* block is survivable"
+    );
+    assert!(evaluate("human_wait_time >= 32400", &overnight).unwrap());
+
+    // Same wall time, no waiting: now the effort ceiling is genuinely blown.
+    assert!(evaluate("work_time >= 28800", &ctx(10.0 * 3600.0, 0.0)).unwrap());
+
+    // work_time can never go negative, however the clock behaves.
+    assert!(!evaluate("work_time > 0", &ctx(100.0, 9_999.0)).unwrap());
+}
+
+/// `wall_hours` is REMOVED, not aliased. It must fail the parser as an unknown judge name rather
+/// than silently resolving to a number in the wrong unit — a 3600x mistake is worse than an error.
+#[test]
+fn the_removed_wall_hours_term_is_not_a_silent_alias() {
+    let goals = [g("a", false, false)];
+    let ctx = StopContext::from_judges(&goals);
+    // It is now an ordinary identifier, so it resolves as a JUDGE name — and there is no such judge.
+    assert!(
+        evaluate("wall_hours >= 8", &ctx).is_err(),
+        "`wall_hours` must not evaluate to anything; the unit changed and a silent read is a trap"
+    );
+    assert!(
+        crate::core::stop::judge_names("wall_hours >= 8").unwrap().contains(&"wall_hours".to_string()),
+        "it is reported as an unknown JUDGE name, which is what makes agg hard-error at startup"
+    );
+}
+
 #[test]
 fn nan_comparison_is_an_error_not_a_silent_invert() {
     // wall_hours = NaN: `wall_hours >= 8` must ERROR, not silently return false/true.
-    let ctx = StopContext { wall_hours: f64::NAN, ..StopContext::from_judges(&[]) };
-    assert!(evaluate("wall_hours >= 8", &ctx).is_err());
-    assert!(evaluate("wall_hours != 0", &ctx).is_err()); // the dangerous `!=` case
+    let ctx = StopContext { wall_secs: f64::NAN, ..StopContext::from_judges(&[]) };
+    assert!(evaluate("wall_time >= 28800", &ctx).is_err());
+    assert!(evaluate("wall_time != 0", &ctx).is_err()); // the dangerous `!=` case
     // infinity is well-defined for ordering and must NOT error
     let ctx2 = StopContext { tokens_spent: 5, ..StopContext::from_judges(&[]) };
     assert!(!ev_run_ctx(&ctx2, "tokens_spent > budget_total")); // budget_total = inf when unset
@@ -80,7 +128,7 @@ fn budget_and_wall_guards() {
     assert!(!ev_run("over_budget", &goals, 1_000_000, None, 0.0));
     // explicit comparisons
     assert!(ev_run("tokens_spent > 500", &goals, 600, Some(500), 0.0));
-    assert!(ev_run("wall_hours >= 8", &goals, 0, None, 8.5));
+    assert!(ev_run("wall_time >= 28800", &goals, 0, None, 8.5));   // SECONDS now: 8h = 28800
     // compound halt guard: goals not met but budget blown
     assert!(ev_run("all_goals OR over_budget", &goals, 600, Some(500), 0.0));
 }
