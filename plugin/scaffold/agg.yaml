@@ -32,7 +32,7 @@ sequence:
   gate_regressions: true           # roll a session back if a previously-met judge regresses
   invariants: []                   # judge names that must STAY met
   done_if: "tests_pass"            # your Definition of Done — judge names, all_goals, count_met, …
-  abort_if: "over_budget{{OVER_COST}} OR over_iterations OR wall_hours >= 4"
+  abort_if: "over_budget{{OVER_COST}} OR over_iterations OR work_time >= 14400"
   # OPTIONAL — the NON-TERMINAL twin of abort_if: when it fires agg runs `notify.cmd` and the loop
   # KEEPS RUNNING (a human is a side-channel, never a gate). STAYS COMMENTED: `stuck` is a judge YOU
   # author, and naming a judge that resolves to no file is a HARD startup error — this file must run

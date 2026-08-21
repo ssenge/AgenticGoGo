@@ -11,6 +11,7 @@ fn demo_state() -> DashboardState {
     per_agent.insert("claude".to_string(), AgentUsage { tokens: 1_500_000, cost: Some(1.10) });
     per_agent.insert("codex".to_string(), AgentUsage { tokens: 600_000, cost: Some(0.15) });
     DashboardState {
+        asks: Vec::new(),
         project: "myproject".into(),
         model: "claude-opus-4-8".into(),
         step: "worker".into(),

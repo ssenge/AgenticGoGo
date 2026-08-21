@@ -16,6 +16,14 @@ impl Handler for BusDrain {
             Some(bus) => bus.drain(),
             None => Vec::new(),
         };
+        // Promote the worker's own ask requests BEFORE draining, so an answer that arrives in the
+        // same batch as the request it answers still lands on a ledger row that exists.
+        for a in crate::core::asks::promote_worker_requests(&ctx.dir, ctx.session, crate::util::now_epoch()) {
+            eprintln!("  [ask {}] the WORKER is asking: {}", a.id, crate::core::asks::one_line(&a.question, 160));
+            // Paged like any other request for help, and NON-TERMINAL: a worker ask never blocks the
+            // loop. It records, the session ends, and the answer reaches the next session's brief.
+            crate::features::notify::driver_ping(ctx, "ask", &format!("[{}] {}", a.id, a.question));
+        }
         for cmd in cmds {
             match cmd {
                 Command::InjectInstruction { text } => {
@@ -43,6 +51,17 @@ impl Handler for BusDrain {
                 Command::Resume => ctx.ext.get::<AGGState>().operator.resumed = true,
                 Command::Stop { reason } => return Ok(Flow::Stop(ctx.stopped_via_bus(reason))),
                 Command::Note { text } => eprintln!("  [bus] note: {text}"),
+                Command::Answer { id, text, by } => {
+                    // Recorded in the ledger, not in `ctx`: the ask ledger is the single place both
+                    // the driver's wait loop and the next session's brief read from, so the two
+                    // entry points cannot disagree about whether a question was answered.
+                    match crate::core::asks::answer(&ctx.dir, &id, &text, &by, crate::util::now_epoch()) {
+                        Ok(()) => eprintln!("  [bus] answer {id} ← {}", crate::core::asks::one_line(&text, 120)),
+                        // Never fatal. A run that cannot record an answer keeps waiting, which is
+                        // visible and recoverable; killing the run over it is neither.
+                        Err(e) => eprintln!("  ⚠ could not record answer {id}: {e}"),
+                    }
+                }
             }
         }
         Ok(Flow::Continue)
@@ -88,7 +107,8 @@ impl Handler for PickStep {
                     cost_limit: rs.cost_limit,
                     sessions_done: rs.sessions_done,
                     max_sessions: rs.max_sessions,
-                    wall_hours: rs.wall_hours,
+                    wall_secs: rs.wall_secs,
+                    human_wait_secs: rs.human_wait_secs,
                 };
                 stop::evaluate(cond, &sc)
             });
@@ -218,6 +238,27 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
         s.push_str(&format!(
             "\n## ⚠ HIGH-PRIORITY OPERATOR INSTRUCTION — do this FIRST (it overrides the default plan)\n{instr}\n"
         ));
+    }
+    // ── answers to the questions THIS WORKER asked, scoped to the ask id it was given ──
+    //    A worker's `agg hil` call recorded and exited; this is where the answer comes back. Note
+    //    what is NOT here: the answer is presented as a HUMAN's answer, quoted, and never as an
+    //    instruction — a worker that asked "should I delete prod?" must not get "yes" laundered into
+    //    its orders as though agg said it.
+    let answered = crate::core::asks::answers_for_worker(&ctx.dir, 0);
+    if !answered.is_empty() {
+        s.push_str("\n## Answers to your questions\n");
+        for a in &answered {
+            s.push_str(&format!(
+                "- **[{}]** you asked: {}\n  a human answered: **{}**\n",
+                a.id,
+                crate::core::asks::one_line(&a.question, 300),
+                crate::core::asks::one_line(a.answer.as_deref().unwrap_or(""), 300),
+            ));
+        }
+        s.push_str(
+            "\nIf an answer resolves what blocked you, act on it. If it does not, ask again with \
+             `agg hil …` and END your session — do not wait.\n",
+        );
     }
     if let Some(status) = crate::os::spawns::summary_for_prompt(&ctx.dir) {
         s.push_str(&format!("\n{status}\n"));

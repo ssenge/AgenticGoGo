@@ -25,16 +25,17 @@
 #
 #     let agg = Agg::open(".")?
 #         .limits(Limits { tokens: Some(40_000_000), cost: None,
-#                          sessions: Some(400), wall_hours: Some(12.0) })
+#                          sessions: Some(400), wall_time: Some(12.0 * 3600.0), work_time: None })
 #         .on_regression(OnRegression::Annotate);
 #
 # (Corrected in rev 6, two ways. There is NO `.abort_if()` on the Rust path — a driver has judges
 # and `if`, and writing the same logic twice, once in Rust and once in a mini-language, is what that
 # path exists to delete; the ceilings are `.limits(..)` plus an explicit `agg.check_limits()?`. And
-# `Limits` has FOUR fields: `wall_hours` was added for exactly this, so a driver has somewhere to
-# put it. That field is shared with YAML — `limits: { wall_hours: 12 }` is legal here too — and it
-# COEXISTS with the `wall_hours` CONDITION term used in this file's `abort_if:` below, because
-# `wall_hours >= 8 OR stalled` is not expressible as a limit. The Rust builder fills the very struct
+# `Limits` has FIVE fields: `wall_time` and `work_time` are both SECONDS, and both are shared with
+# YAML — `limits: { wall_time: 43200 }` is legal here too. They COEXIST with the matching CONDITION
+# terms used in this file's `abort_if:` below, because `work_time >= 28800 OR stalled` is not
+# expressible as a limit. (`wall_hours` was REMOVED: the unit changed by 3600x, so an alias would
+# turn an 8-hour ceiling into an 8-second one. agg hard-errors on the old key.) The builder fills
 # this YAML deserializes into: one struct, two constructors.)
 #
 # So every knob below — `limits:`, `gate_regressions:`, `abort_if:`, `notify:`, `defaults:` — has a
@@ -273,7 +274,7 @@ sequence:
 
   # Also YAML-only in spelling, though the effect is shared: on the Rust path these surface as
   # `Err(Fatal::Ended)` and unwind through every `?`.
-  abort_if: over_budget OR wall_hours >= 12 OR any_regressed(invariants)
+  abort_if: over_budget OR work_time >= 43200 OR any_regressed(invariants)
 
   limits:     { tokens: 40000000, sessions: 400 }
   invariants: [builds]              # scopes `any_regressed(invariants)` to the DoD-set subset

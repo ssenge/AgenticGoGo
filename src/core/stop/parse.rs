@@ -216,7 +216,14 @@ impl<'a> Parser<'a> {
             // and stay available for custom comparisons (e.g. `cost_spent > 3.5`).
             "tokens_spent" => Val::Num(c.tokens_spent as f64),
             "budget_total" => Val::Num(c.budget_total.map(|t| t as f64).unwrap_or(f64::INFINITY)),
-            "wall_hours" => Val::Num(c.wall_hours),
+            // THREE clock terms, all in SECONDS (`internal/HUMAN_LOOP.md` §7.4). All three exist
+            // because the grammar has comparisons but NO arithmetic: `wall_time - human_wait_time
+            // >= 28800` is not expressible, so the difference has to be its own term.
+            //   wall_time        a DEADLINE — a sleeping human counts against it
+            //   work_time        an EFFORT ceiling — a slow human costs the run nothing
+            "wall_time" => Val::Num(c.wall_secs),
+            "human_wait_time" => Val::Num(c.human_wait_secs),
+            "work_time" => Val::Num((c.wall_secs - c.human_wait_secs).max(0.0)),
             "over_budget" => Val::Bool(match c.budget_total {
                 Some(t) => c.tokens_spent > t,
                 None => false, // no budget set => never over

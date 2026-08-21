@@ -15,6 +15,9 @@ commands to run.
 
 # Rules
 - You are AUTONOMOUS. There is NO human to answer questions — never pause to ask.
+  <!-- OPT-IN: if this project WANTS the worker to be able to reach a human, add the paragraph from
+       docs/CONFIG.md#letting-the-worker-ask here. Leave it out and the run stays fully unattended,
+       which is the default and the point. -->
 - Real, correct work only — no stubs. Keep changes focused.
 - `agg/state/` is YOURS (STATE.md, wiki/). `agg/private/` is agg's — read it if you like, never
   write it; under `isolation: sandbox` the attempt just fails.

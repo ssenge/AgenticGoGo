@@ -212,11 +212,59 @@ pub struct DashboardState {
     /// but "it is asking for you, and has been since session N".
     pub notify_session: Option<u32>,
     pub notify_reason: String,
+    /// OPEN HUMAN ASKS — questions a human still owes an answer to, oldest first.
+    ///
+    /// With no timeout on a `hil_*` call, a forgotten ask hangs the run indefinitely. That is the
+    /// accepted cost of the design, and this field is most of the mitigation: `agg status` and the
+    /// web reader must show the question and how long it has been waiting, prominently, so "blocked
+    /// on a human" is never a silent state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asks: Vec<AskView>,
     /// monotonically increasing; lets the dashboard detect updates
     pub seq: u64,
     /// terminal flag — dashboard shows the final banner and can exit
     pub finished: bool,
     pub finish_reason: String,
+}
+
+/// One open ask, flattened for the readers. Mirrors [`crate::core::asks::Ask`] minus what a reader
+/// has no use for, and carries `age_secs` pre-computed so every reader agrees on the number.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AskView {
+    pub id: String,
+    /// `bool` | `choose` | `input` — what a UI should render.
+    pub case: String,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
+    /// `driver` | `worker` — a worker asking every session is visible here.
+    pub origin: String,
+    pub session: u32,
+    pub age_secs: u64,
+}
+
+impl AskView {
+    pub fn of(a: &crate::core::asks::Ask, now_epoch: u64) -> Self {
+        use crate::core::asks::{AskCase, Origin};
+        AskView {
+            id: a.id.clone(),
+            case: match a.case {
+                AskCase::Bool => "bool",
+                AskCase::Choose => "choose",
+                AskCase::Input => "input",
+            }
+            .into(),
+            question: crate::core::asks::one_line(&a.question, 300),
+            options: a.options.clone(),
+            origin: match a.origin {
+                Origin::Driver => "driver",
+                Origin::Worker => "worker",
+            }
+            .into(),
+            session: a.session,
+            age_secs: a.age_secs(now_epoch),
+        }
+    }
 }
 
 impl DashboardState {

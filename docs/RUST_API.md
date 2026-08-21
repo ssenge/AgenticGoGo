@@ -54,8 +54,9 @@ use agg::driver::{Agg, Judge, Limits, OnRegression, Step, Verdict};
 
 fn main() -> Result<(), agg::driver::Fatal> {
     let agg = Agg::open(".")?
-        .limits(Limits { tokens: Some(40_000_000), cost: None,
-                         sessions: Some(300), wall_hours: Some(10.0) })
+        // SECONDS. `work_time` excludes time blocked on a human — see "Asking a human" below.
+        .limits(Limits { tokens: Some(40_000_000), cost: None, sessions: Some(300),
+                         wall_time: Some(10.0 * 3600.0), work_time: None })
         .on_regression(OnRegression::Rollback);
 
     let implement = Step::new("implement").prompt("Make the failing tests pass.");
@@ -86,8 +87,10 @@ fn main() -> Result<(), agg::driver::Fatal> {
 | `agg.gate()` | close the span: merge everything staged since the last gate, or discard it per policy |
 | `agg.check_limits()` | enforce ceilings, drain the operator bus, honour Ctrl-C |
 | `agg.pos(label, max)` | an RAII breadcrumb — `cycle 3/20 › attempt 2/3` — published to `state.json` |
-| `agg.ask()` `agg.info()` `agg.log()` | the three notification levels |
-| `agg.block(q)` | wait for a human on the operator bus (ceilings keep firing while it waits) |
+| `agg.ask()` `agg.info()` `agg.log()` | the three notification levels — non-blocking, and still the default |
+| `agg.hil_bool(q)` `hil_choose(q,&[..])` `hil_input(q)` | **ask a human and get the value back.** BLOCKS until answered |
+| `agg.open_asks()` | the asks a human still owes an answer to — including ones the WORKER opened |
+| `agg.block(q)` | the old doorbell: waits for `agg send resume`, returns nothing. Prefer `hil_bool` |
 
 ### Judges
 
@@ -132,6 +135,54 @@ its own writable cwd.
 
 ---
 
+## Asking a human
+
+Three calls, one behaviour: **block until a human answers.** No timeout, no default, no ending the
+run — an idle process spends no tokens, and waiting is cheaper than the machinery that avoids waiting.
+
+```rust
+let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize  (closed set)
+let v  = agg.hil_input("Which instance is prod?")?;                  // -> String (open set)
+let ok = agg.hil_bool("Deploy to prod?")?;                           // -> bool
+```
+
+A human answers with `agg send answer <id> …` (`agg status` lists open asks and their ids). For a
+`choose`/`bool` ask the value must be on the recorded list, so the CLI refuses anything else and this
+call cannot hand you a value you did not offer — that is why `hil_choose` exists next to `hil_input`.
+
+⛔ **`agg.yaml` has no `hil` key and the worker cannot reach these.** `agg hil` records an ask and
+exits; only a driver author, at a call site they wrote, can make the loop wait. With no bound on the
+wait, that asymmetry is the only thing standing between this and the interactive agent agg replaces.
+
+Four rules, and they are the whole design:
+
+1. **A human's answer unblocks the STEP; a judge still owns the VERDICT.** Never let a "done" satisfy
+   a goal — `while !agg.judge(&dns_ok).met() { agg.hil_bool("created the record?")?; }`.
+2. **An answer may NAME a secret, never CONTAIN one.** `hil_input` writes to the ask ledger and the
+   next session's brief. Ask for the credential to be *placed*, and confirm with `hil_bool`.
+3. **`gate()` before you block for a human who will touch the tree.** `step()` only stages, so a
+   human editing an open span collides with staged work. agg warns; it cannot fix it for you.
+4. **Set `work_time`, not just `wall_time`.** Ceilings keep firing while blocked, so an overnight
+   question would otherwise consume a ceiling meant to measure the agent's effort. `work_time`
+   excludes human wait; `wall_time` is a genuine end-to-end deadline.
+
+`agg stop` and Ctrl-C interrupt a wait — the bus is drained on every poll — which is why no timeout is
+needed to escape a question nobody will answer.
+
+### Exit codes
+
+`fn main() -> Result<(), Fatal>` collapses **every** ending to exit 1: Rust's `Termination` impl
+prints `Error: {:?}` and returns `FAILURE`, so `agg stop`, a blown ceiling and a genuine panic all
+look identical to a wrapper. Use `agg::driver::run`:
+
+```rust
+fn main() -> std::process::ExitCode { agg::driver::run(real_main) }
+fn real_main() -> Result<(), Fatal> { /* … */ }
+```
+
+It maps the ending to the same codes `agg run` uses: **0** goals met · **3** `abort_if` · **4**
+max-sessions · **5** stopped by an operator · **1** a real fault.
+
 ## Resuming a crashed run
 
 An overnight driver that dies at hour six should not start again at hour zero.
@@ -156,8 +207,9 @@ Three consequences worth designing around:
 - **Side effects outside `agg.*` re-execute.** A `println!`, a file write or an HTTP POST in your
   loop body happens again during replay. Put once-only effects behind an `agg.*` call (`log`, `info`,
   `ask`, `block` are all recorded) or make them idempotent.
-- **An answered `block()` after the last kept gate will ask again**, and the original answer is not
-  recoverable. Gate before you block if that matters.
+- **An answered `hil_*`/`block()` after the last kept gate will ask again**, and the original answer
+  is not recoverable — the one resume cost paid by a person rather than by tokens. Gate before you ask
+  if that matters; agg prints exactly which human calls it dropped.
 - **Don't branch on the clock, `rand`, or an env var.** Anything derived from a `Verdict` or a
   `StepOutcome` is safe by construction; anything else can send the replay down a different path,
   and agg will refuse rather than guess — a call that does not match the record aborts the resume

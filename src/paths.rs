@@ -124,6 +124,35 @@ pub fn calls_jsonl(dir: &Path) -> PathBuf {
     private_dir(dir).join("calls.jsonl")
 }
 
+/// The append-only human-ask ledger: `<dir>/agg/private/asks.jsonl`.
+///
+/// AGG-OWNED, like `verdicts.jsonl` and for the same reason: an ask's *request* may be
+/// worker-authored, but its **answer** must not be. The answer arrives on the operator bus, which
+/// is carved out of the worker's writable set under a confining tier, so a worker cannot approve
+/// its own deploy. See `internal/HUMAN_LOOP.md` §4.1.
+pub fn asks_jsonl(dir: &Path) -> PathBuf {
+    private_dir(dir).join("asks.jsonl")
+}
+
+/// Where the WORKER drops ask requests: `<dir>/agg/state/asks/`.
+///
+/// Worker-writable on purpose — `agg hil` runs inside the worker's own confinement, so it cannot
+/// write `private/`. agg promotes these into [`asks_jsonl`] at the next session boundary. The
+/// request is untrusted either way; only the answer's channel decides trust.
+pub fn worker_asks_dir(dir: &Path) -> PathBuf {
+    agg_dir(dir).join("asks")
+}
+
+/// The run clock: `<dir>/agg/private/clock.json`.
+///
+/// Holds the run's `started_at_epoch` and accumulated `human_wait_secs`. It exists because
+/// `wall_time` is defined as END-TO-END (`internal/HUMAN_LOOP.md` §7.4) and a resumed run is a new
+/// process: an `Instant` restarts and would hand the run a fresh allowance every time a human
+/// answered. Epoch-on-disk is what makes the number mean what its name says.
+pub fn clock_json(dir: &Path) -> PathBuf {
+    private_dir(dir).join("clock.json")
+}
+
 /// Long-task registry: `agg/state/spawns.json`. WORKER-WRITABLE — `agg spawn` is documented as
 /// "used by the worker, not to start the loop", so confining this would break the feature. Its
 /// blast radius is bounded: it records what to reap and what to tell the next session, nothing

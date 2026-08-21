@@ -30,12 +30,28 @@ cost. So:
    the current step + its agent, tokens, latest summary). Same content as `/agg:status` — reuse
    that judgment.
 
-2. **Watch for trouble.** Flag: a regressed invariant (the gate rolls that session back; the run
+2. **Answer the loop's questions — this is the job that has a deadline.** If `state.json` has a
+   non-empty `asks`, a human has been asked something. A `driver`-origin ask means the loop is
+   **blocked right now and will wait forever**; a `worker`-origin one means the worker ended its
+   session and its next one is stuck without the answer. Either way, nothing progresses until
+   someone replies.
+   ```bash
+   agg send answer <id> "db-prod-eu1"   # a choice: the option name, or its 1-based number
+   agg send approve <id>                # yes/no sugar        agg send deny <id>
+   ```
+   ⛔ **You are not the human.** Relay the question to the operator and answer with *their*
+   decision. Approving a prod deploy or picking a datastore because it seems reasonable defeats the
+   entire point: the answer's value comes from arriving through a channel the agent cannot reach.
+   Answer yourself only for something the operator has already told you, in this conversation, how
+   to decide. And never supply a secret's value — tell the operator to place the credential and
+   answer the `bool` once they have.
+
+3. **Watch for trouble.** Flag: a regressed invariant (the gate rolls that session back; the run
    may have aborted), a long idle (possible stall the watchdog should catch), approaching budget,
    or a `stalled`-triggered `reconsider` step firing repeatedly (the loop keeps hitting the same
    wall — worth a steering nudge).
 
-3. **Steer via the command bus** (`agg send`). The operator can't interrupt a running
+4. **Steer via the command bus** (`agg send`). The operator can't interrupt a running
    headless worker mid-session — no agent exposes a mid-session input channel in headless mode.
    Steering is therefore **session-granular**: you queue a structured command that the loop drains
    at the next session boundary. Use the CLI:
@@ -46,6 +62,7 @@ cost. So:
    agg send resume                # continue a paused loop
    agg send stop "operator done"  # graceful stop at the next boundary
    agg send note "fyi: ignore the flaky perf judge today"
+   agg send answer 4f2a "postgres"   # answer an open ask (see 2) — or `approve`/`deny` for yes/no
    ```
    Each is applied at the next boundary (inject prepends to the next worker's prompt as a
    HIGH-PRIORITY OPERATOR INSTRUCTION). The bus is `agg/private/bus/` (in/ out/ log.jsonl) — you can
@@ -53,7 +70,7 @@ cost. So:
    it is *your* channel: a worker able to write it could raise its own budget or steer itself. As the
    supervisor you are on the outside, so `agg send` and reading the log both just work.
 
-4. **Answer the operator's questions** about the work using the summaries + state, escalating
+5. **Answer the operator's questions** about the work using the summaries + state, escalating
    to a brief targeted read only when genuinely needed — then summarize back, don't dump.
 
 ## Tone
