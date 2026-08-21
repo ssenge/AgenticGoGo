@@ -281,7 +281,9 @@ waitfor 30 "agg send resume continues the loop" grep -q "resume → continuing" 
 agg_do "$S" stop "e2e-stop-reason" > /dev/null 2>&1
 waitfor 40 "agg stop ends the loop" bash -c "! kill -0 $LOOP 2>/dev/null"
 wait $LOOP; RC=$?
-is  "…exit 0 (an operator stop is a clean end)" "$RC" "0"
+# ⚠ 5, not 0. A stop is a CLEAN end but not a MET GOAL, and it used to share exit 0 with
+# `done_if` — so `if agg run; then ship; fi` shipped on `agg stop`.
+is  "…exit 5 (a stop is clean, but it is not success)" "$RC" "5"
 # the reason is LOGGED as `[bus] stop → …` and STORED as dash.finish_reason (state.json);
 # "stopped via bus: …" is never printed to the log.
 has "…the loop logs the bus stop"      "$S/run.log" "[bus] stop → e2e-stop-reason"
@@ -656,7 +658,7 @@ has "…and a windowed summary"                           "$LJ/run.log" "WINDOWE
 is  "…and the summary is published to state.json" "$(snap "$LJ" summary_cumulative)" "CUMULATIVE_SUMMARY_X"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9f. worker_args · numeric judges · over_iterations · wall_hours"
+sec "9f. worker_args · numeric judges · over_iterations · the clock (work_time)"
 
 # ── worker_args: extra flags agg must hand the worker, in the right POSITION ──────────────
 # `worker_args` lives under `defaults:` now (§4.1 — inheritable, the sandbox constraint). There is
@@ -775,9 +777,11 @@ is    "over_iterations HALTS the loop (exit 3, a guard — not the exit-4 cap)" 
 has   "…and names the guard"                 "$OI/run.log" "over_iterations"
 hasnt "…the max-sessions cap never fired"    "$OI/run.log" "reached max_sessions"
 
-# ── wall_hours: a raw counter usable in any abort expression (stop.rs) ────────────────────
+# ── the clock: `wall_time` / `work_time`, raw counters in SECONDS (stop.rs) ───────────────
 WH="$(mkproj wallhours)"; : > "$WH/NO_WORK"; echo 4 > "$WH/WORKER_SLEEP"
-# baseline sits at ~0.00001h; one 4s session puts wall_hours at ~0.0012h.
+# One 4s session puts the clock past 2s. `work_time` is `wall_time` minus time blocked on a human,
+# and this run blocks on nobody, so the two are equal here — which is what makes it a fair check
+# that the EFFORT ceiling fires at all.
 cat > "$WH/agg/agg.yaml" <<'EOF'
 project: wallhours
 defaults: { model: fake }
@@ -785,12 +789,12 @@ steps: { worker: {} }
 sequence:
   steps: [worker]
   done_if: "worked"
-  abort_if: "wall_hours >= 0.0005"
+  abort_if: "work_time >= 2"
 summary: { enabled: false }
 EOF
 agg_do "$WH" run --max-sessions 5 > "$WH/run.log" 2>&1
-is    "a wall_hours ceiling HALTS the loop (exit 3)" "$?" "3"
-has   "…and names the expression"                    "$WH/run.log" "wall_hours"
+is    "a work_time ceiling HALTS the loop (exit 3)" "$?" "3"
+has   "…and names the expression"                    "$WH/run.log" "work_time"
 hasnt "…it did not simply run out of sessions"       "$WH/run.log" "reached max_sessions"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1496,7 +1500,7 @@ agg_do "$SN" send budget 999999 > /dev/null 2>&1
 waitfor 30 "agg send budget is applied" grep -q "set-budget" "$SN/run.log"
 agg_do "$SN" send stop "via send" > /dev/null 2>&1
 waitfor 40 "agg send stop ends the loop" bash -c "! kill -0 $SNL 2>/dev/null"
-wait $SNL; is "…exit 0" "$?" "0"
+wait $SNL; is "…exit 5 (an operator stop)" "$?" "5"
 is "…with the reason that send stop gave" "$(finish_reason "$SN")" "stopped via bus: via send"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1901,7 +1905,7 @@ is "POST /api/send with bad JSON → 400" "$C" "400"
 C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/api/send" -d '{"cmd":"stop","reason":"from-api"}')
 is "POST /api/send stop → 200" "$C" "200"
 waitfor 40 "…the loop actually stops" bash -c "! kill -0 $SLOOP 2>/dev/null"
-wait $SLOOP; is "…with exit 0" "$?" "0"
+wait $SLOOP; is "…with exit 5 (a stop via the API is still an operator stop)" "$?" "5"
 is "…for the reason the API gave" "$(finish_reason "$SV")" "stopped via bus: from-api"
 kill $SRV 2>/dev/null; wait $SRV 2>/dev/null
 
@@ -2085,7 +2089,7 @@ assert d['phase'] in ('inject','run','verify','gate'), d['phase']" \
 
   # the browser test ends by clicking Stop, so the loop must be gone
   waitfor 40 "…the loop really stopped after the browser clicked ⏹ Stop" bash -c "! kill -0 $WLOOP 2>/dev/null"
-  wait $WLOOP; is "…exit 0" "$?" "0"
+  wait $WLOOP; is "…exit 5 (the browser clicked Stop — an operator stop)" "$?" "5"
   is "…with the reason the browser sent" "$(finish_reason "$W")" "stopped via bus: stopped from web"
 
   waitfor 20 "BFF /api/health → running:false after the stop" bash -c "curl -sf http://127.0.0.1:$WPORT/api/health | grep -q '\"running\":false'"
