@@ -37,11 +37,25 @@ export async function aggGet(path) {
 
 /** POST a bus command. Returns { status, body }. */
 export async function aggSend(cmd) {
+  return aggPost('/api/send', cmd);
+}
+
+/**
+ * POST an answer to an open human ask. A SEPARATE agg endpoint from /api/send, because an answer is
+ * not a steering message: it is recorded in the ask ledger and works whether or not a workflow is
+ * running, while every send requires one.
+ */
+export async function aggAnswer(payload) {
+  return aggPost('/api/answer', payload);
+}
+
+/** POST to an agg endpoint, returning { status, body }. */
+async function aggPost(path, payload) {
   try {
-    const res = await fetch(`${BASE}/api/send`, {
+    const res = await fetch(`${BASE}${path}`, {
       method: 'POST',
       headers: headers({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(cmd)
+      body: JSON.stringify(payload)
     });
     const text = await res.text();
     let body = null;

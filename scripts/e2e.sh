@@ -2280,6 +2280,22 @@ assert d.get('api_offline') is True or d.get('running') is False, d" \
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ── the web UI's REPLY channel, in a real browser ────────────────────────────────────────────
+# Its own project, ports and servers (scripts/web_ask.py), so it cannot perturb the fixtures above.
+# This is the only check that exercises the browser path for answering a human ask — the Svelte
+# component, the BFF route and agg's /api/answer endpoint together.
+if [ "$WEB" = "0" ]; then
+  skip "web ask panel" "--no-web"
+elif ! command -v node >/dev/null 2>&1 || [ ! -d "$ROOT/src/web/node_modules" ]; then
+  skip "web ask panel" "node/node_modules missing"
+else
+  if python3 "$ROOT/scripts/web_ask.py" --root "$ROOT" > "$WS/web_ask.log" 2>&1; then
+    ok "a human can ANSWER an ask from the web UI (real browser)"
+  else
+    bad "a human can ANSWER an ask from the web UI (real browser)" "$(tail -3 "$WS/web_ask.log")"
+  fi
+fi
+
 sec "13. agg skills install — the /agg:* skills reach all three agents"
 # The skills used to be a Claude-only plugin. Two things have to hold now, and they are
 # different claims:
