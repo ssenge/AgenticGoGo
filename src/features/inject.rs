@@ -52,17 +52,6 @@ impl Handler for BusDrain {
                 Command::Resume => ctx.ext.get::<AGGState>().operator.resumed = true,
                 Command::Stop { reason } => return Ok(Flow::Stop(ctx.stopped_via_bus(reason))),
                 Command::Note { text } => eprintln!("  [bus] note: {text}"),
-                Command::Answer { id, text, by } => {
-                    // Recorded in the ledger, not in `ctx`: the ask ledger is the single place both
-                    // the driver's wait loop and the next session's brief read from, so the two
-                    // entry points cannot disagree about whether a question was answered.
-                    match crate::core::asks::answer(&ctx.dir, &id, &text, &by, crate::util::now_epoch()) {
-                        Ok(()) => eprintln!("  [bus] answer {id} ← {}", crate::core::asks::one_line(&text, 120)),
-                        // Never fatal. A run that cannot record an answer keeps waiting, which is
-                        // visible and recoverable; killing the run over it is neither.
-                        Err(e) => eprintln!("  ⚠ could not record answer {id}: {e}"),
-                    }
-                }
             }
         }
         Ok(Flow::Continue)

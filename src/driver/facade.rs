@@ -266,6 +266,12 @@ impl Agg {
         }
         let stop_hooks = StopHooks { handlers: std::mem::take(&mut lifecycle.on_stop) };
 
+        // Same rule as the YAML path: a queue only exists while a workflow runs (see `bus::purge`).
+        match crate::bus::purge(&dir) {
+            0 => {}
+            n => eprintln!("  [bus] purged {n} stale command(s) queued to a previous run"),
+        }
+
         let loop_start = std::time::Instant::now();
         // ⚠ `fresh = !resume` is the load-bearing half of the e2e definition: a resumed run must
         // inherit the original `started_at_epoch` and the human wait already banked, or every

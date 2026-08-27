@@ -36,8 +36,8 @@ cost. So:
    session and its next one is stuck without the answer. Either way, nothing progresses until
    someone replies.
    ```bash
-   agg send answer <id> "db-prod-eu1"   # a choice: the option name, or its 1-based number
-   agg send approve <id>                # yes/no sugar        agg send deny <id>
+   agg answer <id> "db-prod-eu1"        # a choice: the option name, or its 1-based number
+   agg answer <id> yes                  # a yes/no ask (or 1/2)
    ```
    ⛔ **You are not the human.** Relay the question to the operator and answer with *their*
    decision. Approving a prod deploy or picking a datastore because it seems reasonable defeats the
@@ -62,7 +62,7 @@ cost. So:
    agg send resume                # continue a paused loop
    agg send stop "operator done"  # graceful stop at the next boundary
    agg send note "fyi: ignore the flaky perf judge today"
-   agg send answer 4f2a "postgres"   # answer an open ask (see 2) — or `approve`/`deny` for yes/no
+   # (answering is `agg answer`, NOT `agg send` — see 2. It is not a steering message.)
    ```
    Each is applied at the next boundary (inject prepends to the next worker's prompt as a
    HIGH-PRIORITY OPERATOR INSTRUCTION). The bus is `agg/private/bus/` (in/ out/ log.jsonl) — you can

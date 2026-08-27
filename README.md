@@ -247,11 +247,12 @@ let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize
 let ok = agg.hil_bool("Deploy v2.3 to prod?")?;                      // -> bool
 ```
 
-Answer from anywhere with a shell — `agg status` lists open asks with their age:
+Answer from anywhere with a shell, **whether or not a workflow is running** — an ask outlives the
+run that raised it. `agg status` lists open asks with their age:
 
 ```bash
-agg send answer 4f2a 2      # a choice, by name or number; anything off the list is refused
-agg send approve 4f2a       # yes/no sugar
+agg answer 4f2a 2           # a choice, by name or number; anything off the list is refused
+agg answer 4f2a yes         # a yes/no ask
 ```
 
 No timeout, no default: an idle process spends no tokens, and `agg stop` interrupts a wait. Two
@@ -276,7 +277,8 @@ Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
 | `agg doctor` | Check the chosen agent is installed and the config is valid for it |
 | `agg judge <name>` | Run one judge and print its verdict, for authoring and debugging |
 | `agg history` | Run history and lifetime totals |
-| `agg send` | Steer a running loop: `inject`, `pause`, `resume`, `budget`, `stop`, `note`, and `answer`/`approve`/`deny` an open ask |
+| `agg send` | Steer a **running** workflow: `inject`, `pause`, `resume`, `budget`, `stop`, `note`. Refused if none is running |
+| `agg answer <id> <val>` | Answer an open human ask. Works with no workflow running — an ask outlives the run that raised it |
 | `agg hil` | **For the worker:** ask a human `bool`/`choose`/`input`. Records and exits — it never waits |
 | `agg stop` | Graceful stop, an alias of `agg send stop`. Exits **5** — a stop is not a met goal |
 | `agg spawn` | Start a long task that outlives one worker session |

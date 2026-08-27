@@ -146,7 +146,7 @@ let v  = agg.hil_input("Which instance is prod?")?;                  // -> Strin
 let ok = agg.hil_bool("Deploy to prod?")?;                           // -> bool
 ```
 
-A human answers with `agg send answer <id> …` (`agg status` lists open asks and their ids). For a
+A human answers with `agg answer <id> …` (`agg status` lists open asks and their ids). For a
 `choose`/`bool` ask the value must be on the recorded list, so the CLI refuses anything else and this
 call cannot hand you a value you did not offer — that is why `hil_choose` exists next to `hil_input`.
 

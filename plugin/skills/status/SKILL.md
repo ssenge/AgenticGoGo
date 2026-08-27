@@ -38,8 +38,8 @@ Summarize from the state JSON:
   scoreboard: report the question, how long it has been waiting (`age_secs`), whether the `driver`
   or the `worker` asked, and the exact command to unblock it:
   ```bash
-  agg send answer <id> "<value>"   # a choice takes an option name or its 1-based number
-  agg send approve <id>            # yes/no sugar          agg send deny <id>
+  agg answer <id> "<value>"        # a choice takes an option name or its 1-based number
+  agg answer <id> yes              # a yes/no ask (or 1/2)
   ```
   A `worker`-origin ask does NOT block the loop (the worker asked and ended its session); a
   `driver`-origin one does. Say which. If an ask is hours old, lead with that — a forgotten ask is

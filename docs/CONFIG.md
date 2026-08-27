@@ -426,9 +426,8 @@ not count the waiting. Full detail in [docs/RUST_API.md](RUST_API.md).
 
 ```bash
 agg status                        # lists every open ask, its age, and the command to answer it
-agg send answer  <id> "value"     # any ask. For a choice: an option, or its 1-based number
-agg send approve <id>             # sugar for a yes/no ask
-agg send deny    <id>
+agg answer <id> "value"           # any ask. For a choice: an option, or its 1-based number
+agg answer <id> yes               # a yes/no ask takes yes/no (or 1/2)
 ```
 
 An answer to a `choose`/`bool` ask must be **on the recorded list** — anything else is refused at the

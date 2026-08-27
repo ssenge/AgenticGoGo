@@ -37,22 +37,38 @@ pub enum Command {
     Stop { reason: String },
     /// A free-form note (logged, shown once; no behavior change).
     Note { text: String },
-    /// The answer to an open human ask (`internal/HUMAN_LOOP.md` §4.3).
-    ///
-    /// This is the ONE command whose delivery channel is load-bearing rather than convenient: the
-    /// bus is carved out of the worker's writable set under `sandbox`/`container`, so an answer that
-    /// arrives here provably came from outside the worker. A worker able to answer its own question
-    /// would make "a human approved the deploy" meaningless.
-    ///
-    /// `id` correlates it with the ask; an answer for an unknown or already-answered id is inert.
-    Answer { id: String, text: String, by: String },
+    //
+    // ⛔ There is deliberately NO `Answer` here. An answer to a human ask is a DURABLE FACT, not a
+    // steering message: it belongs in `agg/private/asks.jsonl`, which outlives the workflow that
+    // raised the question, and a blocked driver polls that ledger rather than this queue. Routing it
+    // through the bus made it the one command that had to be exempted from the liveness rule below,
+    // which is what exposed the confusion. See `core::asks` and `agg answer`.
 }
 
-/// Queue a steering command onto a project's bus with a send-ordered filename. Shared by the CLI
-/// (`agg send`) and the web API (`POST /api/send`) so both write the bus identically (atomically,
-/// same filename scheme). Returns the queued file path. Does NOT check loop liveness — the caller
-/// decides what to do when no loop is running (the CLI warns; the API returns 409).
+/// Queue a steering command onto a project's bus with a send-ordered filename.
+///
+/// Shared by every channel — the CLI (`agg send`) and the web API (`POST /api/send`) — so they
+/// cannot disagree about what sending means. **The liveness rule lives HERE**, not in the callers:
+/// it used to be decided independently in two files, and they decided differently (the CLI queued
+/// with a warning, the API refused with 409), which is how the same command came to behave
+/// differently depending on which channel you used.
+///
+/// # A queue only exists while a workflow runs
+///
+/// These are files, so they *can* sit on disk with nothing listening — but a steering message with
+/// no workflow to steer is not a queued message, it is a landmine: a `stop` written now would fire
+/// at the startup of whatever runs next, hours later, with nobody connecting the two. So sending
+/// with no workflow running is an ERROR naming the missing prerequisite, and [`purge`] clears
+/// anything stale when a workflow starts.
 pub fn queue_command(dir: &Path, cmd: &Command) -> std::io::Result<PathBuf> {
+    if crate::os::detach::live_pid(dir).is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "no workflow is running in this project, so there is no queue to append to — \
+             start one with `agg run` and send again. (A human ask is different: it outlives its \
+             workflow, so answer it any time with `agg answer <id> <value>`.)",
+        ));
+    }
     let b = Bus::open(dir)?;
     // monotonic-ish millis stamp for send-order filenames.
     let stamp = std::time::SystemTime::now()
@@ -60,6 +76,28 @@ pub fn queue_command(dir: &Path, cmd: &Command) -> std::io::Result<PathBuf> {
         .map(|d| format!("{:013}", d.as_millis()))
         .unwrap_or_else(|_| "0000000000000".into());
     b.send(cmd, &stamp)
+}
+
+/// Drop every pending inbound command. Called when a workflow STARTS.
+///
+/// Without this a queue outlives the workflow it was meant for: a message sent while the last run
+/// was alive, and never drained because the run ended first, would be applied by an unrelated run
+/// days later. Only `in/` is cleared — `out/` is the operator's own record of what the workflow
+/// said, and the durable facts (asks and their answers) live in the ledger, not here.
+pub fn purge(dir: &Path) -> usize {
+    let Ok(b) = Bus::open(dir) else { return 0 };
+    let mut n = 0;
+    if let Ok(rd) = std::fs::read_dir(&b.inbox) {
+        for p in rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
+            if let Ok(text) = std::fs::read_to_string(&p) {
+                b.append_log("purged-stale", &text);
+            }
+            if std::fs::remove_file(&p).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// Resolve the bus directories under a project dir, creating them if needed.

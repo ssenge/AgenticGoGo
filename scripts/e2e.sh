@@ -254,11 +254,13 @@ sec "0. build"
 # a real pty TUI, the browser, and the observable end-to-end shape of the sequence entries.
 sec "5. steering a LIVE loop over the bus  (inject · note · pause/resume · budget · stop)"
 
-# a queued command with no loop running is accepted but warns
+# ⚠ CHANGED: "pre-arming" is gone. A steering message with no workflow to steer is not queued —
+# it is a landmine that fires at the startup of whatever runs next. `agg send` now refuses, and the
+# rule lives in `bus::queue_command` so every channel enforces it identically (§9o covers the rest).
 Q="$(mkproj prearm)"
 agg_do "$Q" send inject "pre-armed" > "$Q/q.log" 2>&1
-is  "agg send inject with no loop exits 0 (pre-arming is legal)" "$?" "0"
-has "…but warns that no loop is running" "$Q/q.log" "NO loop is running"
+is  "agg send inject with no workflow running is REFUSED" "$?" "1"
+has "…naming the missing prerequisite" "$Q/q.log" "no workflow is running"
 
 # --- a slow loop we can steer while it runs
 S="$(mkproj steer)"; : > "$S/NO_WORK"; echo 2 > "$S/WORKER_SLEEP"
@@ -1862,14 +1864,14 @@ ASK_ID="$(sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p' "$HL/agg/private/asks.jsonl" 
 # ── a CLOSED answer set is enforced at the boundary ─────────────────────────────────────────
 # The options are recorded WITH the ask, so a value that was never offered is refused before it is
 # queued — the ask stays open rather than resolving to something the caller cannot interpret.
-ERR="$(agg_do "$HL" send answer "$ASK_ID" mysql 2>&1)"; RC=$?
+ERR="$(agg_do "$HL" answer "$ASK_ID" mysql 2>&1)"; RC=$?
 is "an answer off the option list is REFUSED" "$RC" "1"
 case "$ERR" in *postgres*sqlite*) ok "…re-printing what it would accept" ;;
                *) bad "…re-printing what it would accept" "got: $ERR" ;; esac
 hasnt "…and the ask stays OPEN"  "$HL/agg/private/asks.jsonl" '"state":"answered"'
 
 # ── answering by NUMBER, and the answer reaching the worker ─────────────────────────────────
-agg_do "$HL" send answer "$ASK_ID" 2 > /dev/null 2>&1
+agg_do "$HL" answer "$ASK_ID" 2 > /dev/null 2>&1
 is "an answer by 1-based number is accepted" "$?" "0"
 agg_do "$HL" run --max-sessions 1 > "$HL/run2.log" 2>&1
 has "…the loop records it against the ask"   "$HL/agg/private/asks.jsonl" '"answer":"sqlite"'
@@ -1880,7 +1882,7 @@ hasnt "…and the ask is no longer waiting"     "$HL/status2.txt" "WAITING ON A 
 
 # ── the first answer wins ───────────────────────────────────────────────────────────────────
 # The run may already have acted on it, so a second answer is refused rather than rewriting history.
-agg_do "$HL" send answer "$ASK_ID" postgres > /dev/null 2>&1
+agg_do "$HL" answer "$ASK_ID" postgres > /dev/null 2>&1
 is "a SECOND answer is refused — the first one wins" "$?" "1"
 hasnt "…and the recorded answer is unchanged" "$HL/agg/private/asks.jsonl" '"answer":"postgres"'
 
@@ -1891,6 +1893,43 @@ agg_do "$HL" run --max-sessions 1 > "$HL/run3.log" 2>&1
 hasnt "an answer already delivered is NOT repeated in the next brief" \
       "$HL/prompt_latest.txt" "Answers to your questions"
 has   "…and the ledger records the delivery" "$HL/agg/private/asks.jsonl" '"state":"delivered"'
+
+sec "9o. the bus — a queue only exists while a workflow runs"
+
+# `agg send` is steering for a RUNNING workflow. The files can sit on disk with nothing listening,
+# but a steering message with nothing to steer is not "queued", it is a landmine: a `stop` written
+# now would fire at the startup of whatever runs next, hours later, with nobody connecting the two.
+# So sending without a workflow is an ERROR naming the missing prerequisite, and anything stale is
+# purged when a workflow starts.
+#
+# The rule lives in `bus::queue_command`, which every channel goes through — it used to be decided
+# independently by the CLI (queue + warn) and the web API (refuse), for the same command.
+BQ="$(mkproj busq)"
+ERR="$(agg_do "$BQ" send pause 2>&1)"; RC=$?
+is "agg send with NO workflow running is an ERROR, not a silent queue" "$RC" "1"
+case "$ERR" in *"no workflow is running"*) ok "…naming the missing prerequisite" ;;
+               *) bad "…naming the missing prerequisite" "got: $ERR" ;; esac
+[ -z "$(ls "$BQ/agg/private/bus/in" 2>/dev/null)" ] \
+  && ok "…and nothing was appended" \
+  || bad "…and nothing was appended" "the inbox is not empty"
+
+# An ANSWER is not a steering message: it is a durable fact that outlives its workflow, so it does
+# NOT require one — which is why it is `agg answer`, not `agg send answer`.
+agg_do "$BQ" hil bool "Is the queue rule coherent?" > /dev/null 2>&1
+agg_do "$BQ" run --max-sessions 1 > "$BQ/promote.log" 2>&1
+BQ_ID="$(sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p' "$BQ/agg/private/asks.jsonl" | head -1)"
+agg_do "$BQ" answer "$BQ_ID" yes > /dev/null 2>&1
+is  "agg answer works with NO workflow running (an ask outlives its workflow)" "$?" "0"
+has "…recording it in the ledger, not on the bus" "$BQ/agg/private/asks.jsonl" '"answer":"yes"'
+[ -z "$(ls "$BQ/agg/private/bus/in" 2>/dev/null)" ] \
+  && ok "…and the bus stays empty — an answer is not a message" \
+  || bad "…and the bus stays empty — an answer is not a message" "the inbox is not empty"
+
+# A stale command from a workflow that has ended must never be applied by the NEXT one.
+printf '{"cmd":"stop","reason":"stale from a dead run"}\n' > "$BQ/agg/private/bus/in/0000000000000-x-000000.json"
+agg_do "$BQ" run --max-sessions 1 > "$BQ/purge.log" 2>&1
+has   "a workflow PURGES commands queued to a previous run"  "$BQ/purge.log" "purged 1 stale command"
+hasnt "…so the stale stop never fires"                       "$BQ/purge.log" "stale from a dead run"
 
 sec "9j. the docs describe the tool that actually exists"
 # A hand-written CLI table rots the moment a subcommand is added. Assert every clap subcommand
@@ -2037,21 +2076,21 @@ agg_do "$AV" run --max-sessions 1 > "$AV/promote.log" 2>&1   # the loop mints th
 API_ID="$(sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p' "$AV/agg/private/asks.jsonl" | head -1)"
 [ -n "$API_ID" ] && ok "an ask is available to answer over the API" || bad "an ask is available to answer over the API" "no id"
 
-C=$(curl -s -o "$AV/ans_bad.json" -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/send" \
-      -d "{\"cmd\":\"answer\",\"id\":\"$API_ID\",\"value\":\"mysql\"}")
-is  "POST /api/send answer with a value off the option list → 400" "$C" "400"
+C=$(curl -s -o "$AV/ans_bad.json" -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/answer" \
+      -d "{\"id\":\"$API_ID\",\"value\":\"mysql\"}")
+is  "POST /api/answer with a value off the option list → 400" "$C" "400"
 has "…and the error names what it would accept" "$AV/ans_bad.json" "sqlite"
 hasnt "…leaving the ask OPEN" "$AV/agg/private/asks.jsonl" '"state":"answered"'
 
-C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/send" \
-      -d "{\"cmd\":\"answer\",\"id\":\"$API_ID\",\"value\":\"2\"}")
-is  "POST /api/send answer → 200 even with NO loop running (an ask outlives its run)" "$C" "200"
+C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/answer" \
+      -d "{\"id\":\"$API_ID\",\"value\":\"2\"}")
+is  "POST /api/answer → 200 even with NO loop running (an ask outlives its run)" "$C" "200"
 has "…and the answer is recorded against the ask" "$AV/agg/private/asks.jsonl" '"answer":"sqlite"'
 has "…attributed to the web, not to an operator shell" "$AV/agg/private/asks.jsonl" '"by":"web"'
 
-C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/send" \
-      -d '{"cmd":"answer","id":"nope","value":"x"}')
-is "POST /api/send answer for an unknown id → 400" "$C" "400"
+C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/answer" \
+      -d '{"id":"nope","value":"x"}')
+is "POST /api/answer for an unknown id → 400" "$C" "400"
 
 sec "11. the TUI (driven on a real, sized pty)"
 if [ "$TUI" = "0" ]; then

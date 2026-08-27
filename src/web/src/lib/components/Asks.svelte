@@ -30,7 +30,7 @@
     if (!value || busy[id]) return;
     busy = { ...busy, [id]: true };
     error = { ...error, [id]: '' };
-    const r = await loop.send({ cmd: 'answer', id, value, by: 'web' });
+    const r = await loop.answer({ id, value, by: 'web' });
     if (!r.ok) {
       // The server refuses a value that is not on the recorded option list and leaves the ask OPEN,
       // so surfacing the message verbatim is what tells the operator what it WOULD accept.
