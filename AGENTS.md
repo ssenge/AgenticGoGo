@@ -34,6 +34,12 @@ change violates one, it is the CHANGE that is wrong:
   are committed, so a tampered judge is restored by a rollback. ⚠ NOT "Agents as Code" — the agents
   stay agents; it is the WORKFLOW around them that becomes code.
 
+**The bus.** `agg send` steers a RUNNING workflow; with none running it is an ERROR, and stale
+commands are purged at start — a queue does not outlive the workflow it was meant for. The rule lives
+in `bus::queue_command`, which every channel goes through; it used to be decided separately by the
+CLI and the web API, and they disagreed. An ANSWER is not a send: it is a durable fact written to
+`agg/private/asks.jsonl` (`agg answer` / `POST /api/answer`), so it works with nothing running.
+
 ## CLI (run from the project root)
 - `agg init [--agent claude|codex|copilot] [--force]` — scaffold `agg.yaml` + `AGG.md` + `state/STATE.md` + a starter judge.
 - `agg plan` — dry run: evaluate every judge once, print the starting scoreboard.
