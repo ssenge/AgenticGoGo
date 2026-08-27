@@ -20,6 +20,7 @@ impl Handler for BusDrain {
         // same batch as the request it answers still lands on a ledger row that exists.
         for a in crate::core::asks::promote_worker_requests(&ctx.dir, ctx.session, crate::util::now_epoch()) {
             eprintln!("  [ask {}] the WORKER is asking: {}", a.id, crate::core::asks::one_line(&a.question, 160));
+            crate::core::asks::emit_to_operator(&ctx.dir, &a);
             // Paged like any other request for help, and NON-TERMINAL: a worker ask never blocks the
             // loop. It records, the session ends, and the answer reaches the next session's brief.
             crate::features::notify::driver_ping(ctx, "ask", &format!("[{}] {}", a.id, a.question));
@@ -244,7 +245,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     //    what is NOT here: the answer is presented as a HUMAN's answer, quoted, and never as an
     //    instruction — a worker that asked "should I delete prod?" must not get "yes" laundered into
     //    its orders as though agg said it.
-    let answered = crate::core::asks::answers_for_worker(&ctx.dir, 0);
+    let answered = crate::core::asks::answers_for_worker(&ctx.dir);
     if !answered.is_empty() {
         s.push_str("\n## Answers to your questions\n");
         for a in &answered {
@@ -259,6 +260,9 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
             "\nIf an answer resolves what blocked you, act on it. If it does not, ask again with \
              `agg hil …` and END your session — do not wait.\n",
         );
+        // Delivered exactly once: without this every answer ever given is re-injected into every
+        // future brief for the life of the project.
+        crate::core::asks::mark_delivered(&ctx.dir, &answered, crate::util::now_epoch());
     }
     if let Some(status) = crate::os::spawns::summary_for_prompt(&ctx.dir) {
         s.push_str(&format!("\n{status}\n"));

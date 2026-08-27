@@ -1085,6 +1085,12 @@ impl Agg {
             },
         )?;
 
+        // The question goes on the OPERATOR'S QUEUE. This is the primary channel — `notify.cmd`
+        // below is an optional push adapter on top of it, not the mechanism.
+        if let Some(a) = crate::core::asks::get(&self.dir, &id) {
+            crate::core::asks::emit_to_operator(&self.dir, &a);
+        }
+
         // ⚠ THE ONE PLACEMENT RULE. `step()` only STAGES — work sits on a session branch until a
         // gate lands it — so a human who edits the tree while a span is open collides with staged
         // work. agg knows when that is, so it warns; it does not refuse, because most asks (a

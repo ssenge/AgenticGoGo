@@ -72,12 +72,19 @@ pub enum Row {
         by: String,
         ts: u64,
     },
+    /// The answer has been handed to the worker in a session brief.
+    ///
+    /// Exists so an answer is delivered EXACTLY ONCE. Without it every answer ever given is
+    /// re-injected into every future brief for the life of the project — the brief grows without
+    /// bound and a worker re-reads decisions it acted on twenty sessions ago. A row rather than a
+    /// mutation, because the ledger is append-only and "when was the worker told" is worth auditing.
+    Delivered { id: String, ts: u64 },
 }
 
 impl Row {
     pub fn id(&self) -> &str {
         match self {
-            Row::Open { id, .. } | Row::Answered { id, .. } => id,
+            Row::Open { id, .. } | Row::Answered { id, .. } | Row::Delivered { id, .. } => id,
         }
     }
 }
@@ -97,6 +104,9 @@ pub struct Ask {
     pub answer: Option<String>,
     pub answered_at_epoch: Option<u64>,
     pub by: Option<String>,
+    /// the worker has been shown this answer in a brief
+    #[serde(default)]
+    pub delivered: bool,
 }
 
 impl Ask {
@@ -154,6 +164,7 @@ pub fn all(dir: &Path) -> Vec<Ask> {
                         answer: None,
                         answered_at_epoch: None,
                         by: None,
+                        delivered: false,
                     });
                 }
             }
@@ -167,6 +178,11 @@ pub fn all(dir: &Path) -> Vec<Ask> {
                         a.answered_at_epoch = Some(ts);
                         a.by = Some(by);
                     }
+                }
+            }
+            Ok(Row::Delivered { id, .. }) => {
+                if let Some(a) = out.iter_mut().find(|a| a.id == id) {
+                    a.delivered = true;
                 }
             }
             Err(_) => continue,
@@ -327,16 +343,98 @@ pub fn promote_worker_requests(dir: &Path, session: u32, now_epoch: u64) -> Vec<
     minted
 }
 
-/// The answered worker asks a session has not yet been told about, and the marker to advance.
+/// The answered worker asks this session must be told about: answered, and not yet delivered.
 ///
-/// "Not yet told" is decided by `since_epoch` rather than by mutating the ledger: the ledger is
-/// append-only, and a read-model that needs no write cannot corrupt it.
-pub fn answers_for_worker(dir: &Path, since_epoch: u64) -> Vec<Ask> {
+/// Only WORKER-origin asks. A driver's ask was answered to the driver's own code — putting it in the
+/// worker's brief would tell the worker about a decision that was never addressed to it.
+pub fn answers_for_worker(dir: &Path) -> Vec<Ask> {
     all(dir)
         .into_iter()
         .filter(|a| matches!(a.origin, Origin::Worker))
-        .filter(|a| a.answered_at_epoch.is_some_and(|t| t >= since_epoch))
+        .filter(|a| a.answer.is_some() && !a.delivered)
         .collect()
+}
+
+/// Mark answers as handed to the worker. Called once the brief carrying them is composed.
+pub fn mark_delivered(dir: &Path, asks: &[Ask], now_epoch: u64) {
+    for a in asks {
+        if let Err(e) = append(dir, &Row::Delivered { id: a.id.clone(), ts: now_epoch }) {
+            // Worst case on failure is telling the worker the same answer twice, which is annoying
+            // rather than wrong — never a reason to kill the run.
+            eprintln!("  ⚠ could not mark ask {} delivered: {e}", a.id);
+        }
+    }
+}
+
+/// Validate an answer against the ask it claims to answer, resolving it to a canonical value.
+///
+/// ONE validator, shared by every inbound channel (`agg send answer`, `POST /api/send`, and whatever
+/// comes next), for the same reason `queue_command` is shared: two validators that disagreed about
+/// what "postgres" means would be a bug nobody could see from either side.
+///
+/// A `choose`/`bool` ask has a CLOSED answer set, so anything off the list is refused here rather
+/// than handed to a driver that never offered it. A 1-based number is accepted too — an operator
+/// answering from a phone should not have to retype an option exactly.
+pub fn validate_answer(dir: &Path, id: &str, value: &str) -> Result<String, String> {
+    let Some(ask) = get(dir, id) else {
+        let open = open(dir);
+        return Err(if open.is_empty() {
+            format!("no ask `{id}`, and nothing is waiting for an answer")
+        } else {
+            format!(
+                "no ask `{id}`. Open right now: {}",
+                open.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(", ")
+            )
+        });
+    };
+    if let Some(prev) = &ask.answer {
+        // The run may already have acted on the first answer, so a second is refused rather than
+        // silently rewriting a decision.
+        return Err(format!("ask `{id}` was already answered {prev:?} — the first answer wins"));
+    }
+    match (&ask.case, &ask.options) {
+        (AskCase::Input, _) => Ok(value.to_string()),
+        (_, Some(opts)) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1 && *n <= opts.len())
+            .map(|n| opts[n - 1].clone())
+            .or_else(|| opts.iter().find(|o| o.eq_ignore_ascii_case(value)).cloned())
+            .ok_or_else(|| {
+                format!(
+                    "{value:?} is not one of the options for ask `{id}`: {}. Answer with the text or \
+                     its number; the ask stays open.",
+                    opts.iter()
+                        .enumerate()
+                        .map(|(i, o)| format!("{}. {o}", i + 1))
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                )
+            }),
+        (_, None) => Err(format!("ask `{id}` is a choice but records no options — ledger is corrupt")),
+    }
+}
+
+/// Put a newly-opened ask on the OPERATOR'S OUTBOUND QUEUE (`agg/private/bus/out/`).
+///
+/// A question is a message to the operator, which is what [`crate::bus::Bus::emit`] was built for —
+/// the in/out pair is symmetric: the ask goes out on `bus/out/`, the answer comes back on `bus/in/`
+/// via `agg send answer`. Readers (the TUI, `agg status`, the web UI) consume it through the
+/// `asks` field agg publishes to `state.json`; a push transport can be layered on later without
+/// changing anything here.
+///
+/// `notify.cmd` is an OPTIONAL adapter on top of this, not the mechanism: a run with no notify
+/// configured still queues every question, and nothing is lost if no adapter is wired.
+///
+/// Best-effort: a queue write that fails must not kill the run, because the ask is already durable
+/// in `asks.jsonl` and every reader works off that.
+pub fn emit_to_operator(dir: &Path, ask: &Ask) {
+    let Ok(bus) = crate::bus::Bus::open(dir) else { return };
+    let body = serde_json::to_string_pretty(ask).unwrap_or_else(|_| ask.question.clone());
+    let stamp = format!("{:013}", ask.opened_at_epoch);
+    if let Err(e) = bus.emit("ask", &body, &stamp) {
+        eprintln!("  ⚠ could not queue ask {} for the operator: {e}", ask.id);
+    }
 }
 
 /// Mint an id: short, sortable-ish, and unique per process even inside one second.

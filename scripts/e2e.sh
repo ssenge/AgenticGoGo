@@ -1797,6 +1797,101 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9n. human-in-the-loop — a person can ANSWER the loop (HUMAN_LOOP.md)"
+
+# The channel is a QUEUE, not a callback: an ask is written to the agg-owned ledger, emitted on the
+# operator's OUTBOUND bus, and published into state.json for every reader. `notify.cmd` is an
+# optional push adapter layered on top — everything below works with no notifier configured at all,
+# which is exactly what this section proves.
+#
+# Two halves that must NOT behave alike, and the reason this section exists:
+#   · the WORKER asks and its session ENDS — the loop never waits for a human;
+#   · a DRIVER may block, but only at a call site a human wrote (covered in tests/driver_api.rs,
+#     which can hold a blocking call open; a shell script cannot without racing the loop).
+
+HL="$(mkproj hil)"
+# A DoD that never closes, so every `run --max-sessions 1` below executes exactly ONE session and
+# stops on the cap. Forcing a session by deleting the worker's output instead would leave a TRACKED
+# file missing, and agg refuses to start on a dirty tree ("session isolation is mandatory") — which
+# is exactly how the first draft of this section silently tested nothing.
+cat > "$HL/agg/judges/never.sh" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"met":false,"rationale":"this run is here for the brief, not the goal"}'
+EOF
+chmod +x "$HL/agg/judges/never.sh"
+cat > "$HL/agg/agg.yaml" <<'EOF'
+project: hil
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "never"
+summary: { enabled: false }
+EOF
+
+# ── the worker's front-end RECORDS AND EXITS ────────────────────────────────────────────────
+# `agg hil` is what a confined worker can reach: it writes to agg/state/ (its OWN directory), so it
+# keeps working under `isolation: sandbox` where agg/private/ is not writable.
+OUT="$(agg_do "$HL" hil choose "Which store?" --option postgres --option sqlite 2>&1)"
+is    "agg hil returns immediately (exit 0 — it must NEVER wait)" "$?" "0"
+case "$OUT" in *"Do NOT wait"*) ok "…and tells the worker to end its session" ;;
+               *) bad "…and tells the worker to end its session" "got: $OUT" ;; esac
+[ -n "$(ls "$HL/agg/state/asks" 2>/dev/null)" ] \
+  && ok "…leaving a request in the WORKER-writable agg/state/asks/" \
+  || bad "…leaving a request in the WORKER-writable agg/state/asks/" "nothing there"
+absent "…and NOT in the agg-owned ledger yet (agg mints the id, not the worker)" "$HL/agg/private/asks.jsonl"
+
+# ── the loop promotes it, queues it for the operator, and publishes it ──────────────────────
+agg_do "$HL" run --max-sessions 1 > "$HL/run.log" 2>&1
+has "the loop promotes the request into an ask"        "$HL/run.log" "the WORKER is asking"
+has "…recorded in the agg-owned ledger"                "$HL/agg/private/asks.jsonl" "Which store?"
+[ -n "$(ls "$HL/agg/private/bus/out" 2>/dev/null)" ] \
+  && ok "…and EMITTED on the operator's outbound queue (no notify.cmd configured)" \
+  || bad "…and EMITTED on the operator's outbound queue (no notify.cmd configured)" "bus/out is empty"
+has "…and published to state.json, so every reader sees it" "$HL/agg/private/state.json" '"asks"'
+
+# `agg status` is what an operator on a phone actually reads: the question, its age, and the exact
+# command that unblocks it.
+agg_do "$HL" status > "$HL/status.txt" 2>&1
+has "agg status leads with the open ask"   "$HL/status.txt" "WAITING ON A HUMAN"
+has "…naming the command that answers it"  "$HL/status.txt" "agg send answer"
+
+ASK_ID="$(sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p' "$HL/agg/private/asks.jsonl" | head -1)"
+[ -n "$ASK_ID" ] && ok "…and an id an operator can retype" || bad "…and an id an operator can retype" "no id parsed"
+
+# ── a CLOSED answer set is enforced at the boundary ─────────────────────────────────────────
+# The options are recorded WITH the ask, so a value that was never offered is refused before it is
+# queued — the ask stays open rather than resolving to something the caller cannot interpret.
+ERR="$(agg_do "$HL" send answer "$ASK_ID" mysql 2>&1)"; RC=$?
+is "an answer off the option list is REFUSED" "$RC" "1"
+case "$ERR" in *postgres*sqlite*) ok "…re-printing what it would accept" ;;
+               *) bad "…re-printing what it would accept" "got: $ERR" ;; esac
+hasnt "…and the ask stays OPEN"  "$HL/agg/private/asks.jsonl" '"state":"answered"'
+
+# ── answering by NUMBER, and the answer reaching the worker ─────────────────────────────────
+agg_do "$HL" send answer "$ASK_ID" 2 > /dev/null 2>&1
+is "an answer by 1-based number is accepted" "$?" "0"
+agg_do "$HL" run --max-sessions 1 > "$HL/run2.log" 2>&1
+has "…the loop records it against the ask"   "$HL/agg/private/asks.jsonl" '"answer":"sqlite"'
+has "…and it reaches the WORKER's next brief" "$HL/prompt_latest.txt" "Answers to your questions"
+has "…as the value the human chose"           "$HL/prompt_latest.txt" "sqlite"
+agg_do "$HL" status > "$HL/status2.txt" 2>&1
+hasnt "…and the ask is no longer waiting"     "$HL/status2.txt" "WAITING ON A HUMAN"
+
+# ── the first answer wins ───────────────────────────────────────────────────────────────────
+# The run may already have acted on it, so a second answer is refused rather than rewriting history.
+agg_do "$HL" send answer "$ASK_ID" postgres > /dev/null 2>&1
+is "a SECOND answer is refused — the first one wins" "$?" "1"
+hasnt "…and the recorded answer is unchanged" "$HL/agg/private/asks.jsonl" '"answer":"postgres"'
+
+# ── an answer is delivered EXACTLY ONCE ─────────────────────────────────────────────────────
+# Otherwise every answer ever given is re-injected into every future brief for the life of the
+# project, and the worker re-reads decisions it acted on twenty sessions ago.
+agg_do "$HL" run --max-sessions 1 > "$HL/run3.log" 2>&1
+hasnt "an answer already delivered is NOT repeated in the next brief" \
+      "$HL/prompt_latest.txt" "Answers to your questions"
+has   "…and the ledger records the delivery" "$HL/agg/private/asks.jsonl" '"state":"delivered"'
+
 sec "9j. the docs describe the tool that actually exists"
 # A hand-written CLI table rots the moment a subcommand is added. Assert every clap subcommand
 # appears in the README, and that every relative link in the README resolves to a real file.
@@ -1849,6 +1944,7 @@ C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/api/s
 is "POST /api/send → 409 when no loop is running" "$C" "409"
 C=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/nope")
 is "GET /api/nope → 404" "$C" "404"
+
 CORS=$(curl -s -D- -o /dev/null "http://127.0.0.1:$PORT/api/health" | tr -d '\r' | sed -n 's/^Access-Control-Allow-Origin: //Ip')
 is "…CORS is locked to the configured origin" "$CORS" "http://localhost:5173"
 
@@ -1922,6 +2018,41 @@ is "…wrong bearer token → 401" "$C" "401"
 kill $SRV2 2>/dev/null; wait $SRV2 2>/dev/null
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ── answering a human ask over HTTP — the web UI's reply channel ─────────────────────────────
+# Its OWN project and server. Sharing the fixture above polluted that loop's trace.txt and
+# state.json, and its `waitfor` then matched a stale trace — the assertions passed against a run
+# that had already finished.
+#
+# Not merely "the endpoint accepts a body": an ANSWER is exempt from the 409 liveness guard on
+# purpose, because a worker-opened ask routinely outlives the run that raised it. Refusing to answer
+# because the loop is between runs would strand the exact case the queue exists for — so this runs
+# with NO loop live, which is precisely when a 409 would otherwise fire.
+APORT=$(free_port)
+AV="$(mkproj apiask)"
+agg_bg ASRV "$AV" serve.log serve --port "$APORT"
+waitfor 20 "agg serve binds for the ask test" bash -c "curl -sf http://127.0.0.1:$APORT/api/health >/dev/null"
+
+agg_do "$AV" hil choose "API: which store?" --option postgres --option sqlite > /dev/null 2>&1
+agg_do "$AV" run --max-sessions 1 > "$AV/promote.log" 2>&1   # the loop mints the id and queues it
+API_ID="$(sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p' "$AV/agg/private/asks.jsonl" | head -1)"
+[ -n "$API_ID" ] && ok "an ask is available to answer over the API" || bad "an ask is available to answer over the API" "no id"
+
+C=$(curl -s -o "$AV/ans_bad.json" -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/send" \
+      -d "{\"cmd\":\"answer\",\"id\":\"$API_ID\",\"value\":\"mysql\"}")
+is  "POST /api/send answer with a value off the option list → 400" "$C" "400"
+has "…and the error names what it would accept" "$AV/ans_bad.json" "sqlite"
+hasnt "…leaving the ask OPEN" "$AV/agg/private/asks.jsonl" '"state":"answered"'
+
+C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/send" \
+      -d "{\"cmd\":\"answer\",\"id\":\"$API_ID\",\"value\":\"2\"}")
+is  "POST /api/send answer → 200 even with NO loop running (an ask outlives its run)" "$C" "200"
+has "…and the answer is recorded against the ask" "$AV/agg/private/asks.jsonl" '"answer":"sqlite"'
+has "…attributed to the web, not to an operator shell" "$AV/agg/private/asks.jsonl" '"by":"web"'
+
+C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$APORT/api/send" \
+      -d '{"cmd":"answer","id":"nope","value":"x"}')
+is "POST /api/send answer for an unknown id → 400" "$C" "400"
+
 sec "11. the TUI (driven on a real, sized pty)"
 if [ "$TUI" = "0" ]; then
   skip "interactive TUI" "--no-tui"

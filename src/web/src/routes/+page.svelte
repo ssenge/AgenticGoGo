@@ -8,6 +8,7 @@
   import PerAgent from '$lib/components/PerAgent.svelte';
   import Activity from '$lib/components/Activity.svelte';
   import Controls from '$lib/components/Controls.svelte';
+  import Asks from '$lib/components/Asks.svelte';
 
   onMount(() => loop.start(1000));
   onDestroy(() => loop.stop());
@@ -35,6 +36,8 @@
   {/if}
 
   {#if hasState}
+    <!-- FIRST: a loop waiting on a human cannot progress, so it outranks every metric below it. -->
+    <Asks state={s} />
     <Stats state={s} />
     <Step state={s} />
     <div class="grid">
