@@ -484,63 +484,24 @@ fn ruler_for(config: &std::path::Path) -> Result<&'static dyn agg::backend::Agen
 /// anything off the list is refused and never queued — the ask stays open rather than resolving to
 /// garbage, and the driver cannot be handed a value it did not offer.
 fn answer_command(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<bus::Command> {
-    use agg::core::asks::{self, AskCase};
+    use agg::core::asks;
 
-    let ask = asks::get(dir, id).with_context(|| {
-        let open = asks::open(dir);
-        if open.is_empty() {
-            format!("no ask `{id}` in this project, and nothing is waiting for an answer.\n  \
-                     `agg status` lists open asks while a run is waiting.")
-        } else {
-            format!(
-                "no ask `{id}`. Open right now:\n{}",
-                open.iter()
-                    .map(|a| format!("  {}  {}", a.id, asks::one_line(&a.question, 80)))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        }
-    })?;
-
-    if let Some(prev) = &ask.answer {
-        // Not an error the caller can fix, and NOT silently re-answered: the driver may already have
-        // acted on the first answer, so pretending this one landed would be a lie.
-        anyhow::bail!(
-            "ask `{id}` was already answered {prev:?}{}. The first answer wins — a second one would \
-             rewrite a decision the run may already have acted on.",
-            ask.by.as_deref().map(|b| format!(" by {b}")).unwrap_or_default()
-        );
+    // ONE validator, shared with `POST /api/send` — see `asks::validate_answer`.
+    let value = asks::validate_answer(dir, id, value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let Some(ask) = asks::get(dir, id) {
+        eprintln!("answering `{id}`: {}", asks::one_line(&ask.question, 100));
     }
 
-    let value = match (&ask.case, &ask.options) {
-        (AskCase::Input, _) => value.to_string(),
-        (_, Some(opts)) => {
-            // A 1-based number is accepted as well as the text: an operator answering from a phone
-            // should not have to retype `postgres-rds` exactly.
-            let picked = value
-                .parse::<usize>()
-                .ok()
-                .filter(|n| *n >= 1 && *n <= opts.len())
-                .map(|n| opts[n - 1].clone())
-                .or_else(|| opts.iter().find(|o| o.eq_ignore_ascii_case(value)).cloned());
-            match picked {
-                Some(v) => v,
-                None => anyhow::bail!(
-                    "{value:?} is not one of the options for ask `{id}`.\n  {}\n  \
-                     Answer with the text or its number. The ask stays OPEN.",
-                    opts.iter()
-                        .enumerate()
-                        .map(|(i, o)| format!("{}. {o}", i + 1))
-                        .collect::<Vec<_>>()
-                        .join("   ")
-                ),
-            }
-        }
-        // A closed-set ask with no options recorded is a corrupt ledger, not something to guess at.
-        (_, None) => anyhow::bail!("ask `{id}` is a choice but records no options — ledger is corrupt"),
-    };
-
-    eprintln!("answering `{id}`: {}", asks::one_line(&ask.question, 100));
+    // RECORD IT NOW, not only on the bus. The bus is drained by a RUNNING loop, and a worker's ask
+    // routinely outlives the run that raised it — the worker asked, the session ended, the loop
+    // reached its goal and exited. Queue-only meant the operator was told "queued" while the ask
+    // stayed open forever and `agg status` kept showing the question. Caught by the e2e, not by a
+    // unit test, because only an end-to-end run has a loop that finishes.
+    //
+    // Writing here is not a hole in the moat: `agg send` is the OPERATOR's command, run outside the
+    // worker's jail. A confined worker invoking it is refused by the kernel exactly as before —
+    // `agg/private/` is carved out of its writable set.
+    asks::answer(dir, id, &value, by, agg::util::now_epoch())?;
     Ok(bus::Command::Answer { id: id.to_string(), text: value, by: by.to_string() })
 }
 

@@ -124,9 +124,31 @@ fn handle_send(
         Ok(c) => c,
         Err(e) => return json_resp(400, &err_json(&e), origin),
     };
+    // ANSWERS validate against the ask ledger before they are queued — one validator shared with
+    // `agg send answer`, so a value off a closed option list is refused identically from both sides
+    // and the ask stays open instead of resolving to something the driver never offered.
+    let cmd = match cmd {
+        Command::Answer { id, text, by } => match crate::core::asks::validate_answer(dir, &id, &text) {
+            Ok(value) => {
+                // Recorded immediately, like the CLI path: an ask outlives the run that raised it,
+                // and a queue-only answer leaves it open forever. The bus command still goes out so
+                // a LIVE loop reacts at once and the action lands in the operator audit log.
+                if let Err(e) = crate::core::asks::answer(dir, &id, &value, &by, crate::util::now_epoch()) {
+                    return json_resp(500, &err_json(&format!("could not record answer: {e}")), origin);
+                }
+                Command::Answer { id, text: value, by }
+            }
+            Err(e) => return json_resp(400, &err_json(&e), origin),
+        },
+        other => other,
+    };
     // Liveness guard: refuse (409) when no loop is running, so the UI never silently queues a
     // control action to a dead loop (a stop would then fire at the next run's startup).
-    if crate::os::detach::live_pid(dir).is_none() {
+    //
+    // ⚠ An ANSWER is exempt. A run blocked on a human is alive by definition, but a WORKER-opened
+    // ask outlives the session that asked it — refusing to answer a question just because the loop
+    // has ended between sessions would strand the very case the queue exists for.
+    if !matches!(cmd, Command::Answer { .. }) && crate::os::detach::live_pid(dir).is_none() {
         return json_resp(409, &err_json("no loop is running in this project"), origin);
     }
     match bus::queue_command(dir, &cmd) {
@@ -174,7 +196,24 @@ fn parse_send(body: &str) -> std::result::Result<Command, String> {
             let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
             Ok(Command::Note { text })
         }
-        other => Err(format!("unknown cmd `{other}` (expected pause/resume/stop/inject/budget/note)")),
+        // ANSWER an open human ask. The web UI polls `asks` out of /api/state and posts back here,
+        // which is what makes a browser (or a phone) a first-class reply channel rather than the CLI
+        // being the only one. Validation is deliberately NOT done here — it needs the ask ledger, so
+        // the caller runs `asks::validate_answer` where `dir` is in scope, sharing one validator with
+        // `agg send answer`.
+        "answer" => {
+            let id = v.get("id").and_then(|t| t.as_str()).ok_or("`answer` requires `id`")?.to_string();
+            let text = v
+                .get("value")
+                .and_then(|t| t.as_str())
+                .ok_or("`answer` requires `value`")?
+                .to_string();
+            let by = v.get("by").and_then(|t| t.as_str()).unwrap_or("web").to_string();
+            Ok(Command::Answer { id, text, by })
+        }
+        other => Err(format!(
+            "unknown cmd `{other}` (expected pause/resume/stop/inject/budget/note/answer)"
+        )),
     }
 }
 
