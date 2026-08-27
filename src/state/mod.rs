@@ -376,9 +376,22 @@ impl DashboardState {
     }
 
     /// Read the latest state, or None if missing/unparseable.
+    /// Read the published snapshot — with the OPEN ASKS refreshed from the ledger.
+    ///
+    /// Everything else here is a snapshot the workflow published as it ran, and a stale snapshot of
+    /// a finished run is the honest thing to show. Asks are different: they are DURABLE FACTS in
+    /// `asks.jsonl` that outlive the workflow, and they can be answered while nothing is running —
+    /// so the snapshot's copy goes stale the moment someone answers, and every reader would keep
+    /// showing a question that has already been dealt with, indefinitely.
+    ///
+    /// Refreshed HERE so `agg status`, `agg status --json`, `agg serve` and the TUI cannot disagree
+    /// about what is still waiting on a human.
     pub fn read(dir: &Path) -> Option<DashboardState> {
         let text = std::fs::read_to_string(Self::path(dir)).ok()?;
-        serde_json::from_str(&text).ok()
+        let mut s: DashboardState = serde_json::from_str(&text).ok()?;
+        let now = crate::util::now_epoch();
+        s.asks = crate::core::asks::open(dir).iter().map(|a| AskView::of(a, now)).collect();
+        Some(s)
     }
 }
 
