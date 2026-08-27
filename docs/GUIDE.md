@@ -279,6 +279,11 @@ agg send pause                 # …and `agg send resume`
 agg stop "done for today"      # graceful stop at the next GATE
 ```
 
+⚠ **Every `agg send` needs a workflow running** — it is refused otherwise, naming the prerequisite.
+A steering message with nothing to steer is not queued, it is a landmine that fires at the startup of
+whatever runs next. Stale commands are purged when a workflow starts. (Answering a human ask is
+different and needs no running workflow — it is `agg answer`, not a `send`.)
+
 Or skip the exact commands: tell your `/agg:supervise` session in plain English — *"inject: focus on
 the auth module", "raise the budget to 8M", "pause for now"* — and it runs the right `agg send` for
 you.
@@ -313,7 +318,12 @@ site a human wrote — `agg.yaml` has no `hil` key, so the YAML path never block
 let ok = agg.hil_bool("Deploy v2.3 to prod?")?;      // blocks until answered
 ```
 
-**Answering**, from anywhere with a shell — no loop need be running:
+**Answering.** No workflow need be running — an ask outlives the run that raised it. Three channels,
+one validator behind all of them, so a value off a closed option list is refused identically:
+
+- the **CLI** below;
+- the **web UI** — `agg serve` renders open asks above the scoreboard, with a button per option;
+- `POST /api/answer` `{"id":…,"value":…}` for anything else that can speak HTTP.
 
 ```bash
 agg status                    # lists open asks: id, question, how long it has waited
@@ -322,8 +332,10 @@ agg answer 4f2a yes           # a yes/no ask
 ```
 
 An answer off the recorded option list is refused with the options re-printed, and the ask stays
-open. The first answer wins. Answers travel the operator bus, which a confined worker cannot write —
-that channel is what makes "a human approved this" mean something.
+open. The first answer wins. An answer is written to `agg/private/asks.jsonl`, which a confined
+worker cannot write — **that** is what makes "a human approved this" mean something. It is not put on
+the steering bus: an answer is a durable fact, not a message to a running workflow, which is why it
+is `agg answer` and not `agg send answer`.
 
 There is **no timeout**: an idle process spends no tokens, and `agg stop` interrupts a wait. Two
 rules keep that safe:
@@ -657,10 +669,11 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no judges) | `--json` |
 | `agg history` | This project's run history, newest first, plus lifetime totals | `--json` |
 | `agg dashboard` | Live TUI | `--once` one-shot text snapshot |
-| `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `POST /api/send` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` |
+| `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `POST /api/send`, `POST /api/answer` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` |
 | `agg spawn` | *(used by the worker, not to start the loop)* track a long child task so the reaper spares it and the next session polls it | `--name <n>` · `--reason <why>` · `-- <cmd…>` |
 | `agg stop [reason]` | Graceful stop at the next session boundary (the one top-level steering alias) | |
-| `agg send <cmd>` | All steering, applied at the next session boundary | `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` · `answer <id> <value>` · `approve <id>` · `deny <id>` |
+| `agg send <cmd>` | Steering for a **running** workflow, applied at the next session boundary. Refused if none is running | `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` · `answer <id> <value>` · `approve <id>` · `deny <id>` |
+| `agg answer <id> <value>` | Answer an open human ask. Needs NO running workflow — an ask outlives the run that raised it |
 | `agg hil <kind>` | *(used by the worker, not the operator)* ask a human. **Records and exits — it never waits** | `bool <q>` · `choose <q> --option … --option …` · `input <q>` |
 
 `agg run` exit codes, so automation can branch on the outcome: **0** `done_if` met · **1** hard

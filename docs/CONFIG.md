@@ -436,11 +436,27 @@ exists next to `hil_input`, which is open and should be paired with a judge inst
 wins: a second one is refused rather than silently rewriting a decision the run may already have
 acted on.
 
-Answers travel on the [operator bus](#state-and-memory), which is carved out of the worker's writable
-set under `isolation: sandbox`/`container`. **That channel is the point:** the *request* may be
-worker-authored and is untrusted text, but the *answer* provably came from outside the worker — which
-is what makes "a human approved the prod deploy" mean anything. `agg send` works with no loop running,
-so an answer can be queued before the next `agg run`.
+An answer is recorded in `agg/private/asks.jsonl` — [agg-owned](#state-and-memory), carved out of
+the worker's writable set under `isolation: sandbox`/`container`. **That asymmetry is the point:** the
+*request* may be worker-authored and is untrusted text, but the *answer* provably came from outside
+the worker, which is what makes "a human approved the prod deploy" mean anything.
+
+It is deliberately **not** put on the steering bus. An answer is a durable fact that outlives the
+workflow that asked — a worker asks, its session ends, the workflow may reach its goal and exit while
+the question is still open — so it must not depend on something running to be recorded. That is why
+it is `agg answer`, a peer of `agg send` rather than a member of it, and why answering needs no
+running workflow while [every `send` does](#the-bus-only-exists-while-a-workflow-runs).
+
+### The bus only exists while a workflow runs
+
+`agg send` steers a **running** workflow. Sending with none running is an **error** naming the missing
+prerequisite, not a silent enqueue — the files can sit on disk with nothing listening, but a steering
+message with nothing to steer is a landmine: a `stop` written now would fire at the startup of
+whatever runs next, hours later, with nobody connecting the two. Anything stale is **purged** when a
+workflow starts (archived to `bus/log.jsonl` first, so it is visible rather than silent).
+
+The rule lives in one place that every channel goes through, so the CLI and `POST /api/send` cannot
+disagree about it. Answering is exempt only because it is not a `send` at all — see above.
 
 > ⚠ **A forgotten ask waits forever.** That is the accepted cost of having no timeout. `notify.cmd`
 > fires when an ask opens, `agg status` shows it with its age, and `agg stop` ends a run nobody

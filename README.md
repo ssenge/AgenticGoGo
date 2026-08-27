@@ -247,8 +247,8 @@ let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize
 let ok = agg.hil_bool("Deploy v2.3 to prod?")?;                      // -> bool
 ```
 
-Answer from anywhere with a shell, **whether or not a workflow is running** — an ask outlives the
-run that raised it. `agg status` lists open asks with their age:
+Answer **whether or not a workflow is running** — an ask outlives the run that raised it — from a
+shell, or by clicking the ask panel in `agg serve`'s web UI. `agg status` lists open asks with age:
 
 ```bash
 agg answer 4f2a 2           # a choice, by name or number; anything off the list is refused
