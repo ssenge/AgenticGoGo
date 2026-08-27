@@ -317,8 +317,8 @@ let ok = agg.hil_bool("Deploy v2.3 to prod?")?;      // blocks until answered
 
 ```bash
 agg status                    # lists open asks: id, question, how long it has waited
-agg send answer 4f2a 2        # a choice: the option name, or its 1-based number
-agg send approve 4f2a         # yes/no sugar          agg send deny 4f2a
+agg answer 4f2a 2             # a choice: the option name, or its 1-based number
+agg answer 4f2a yes           # a yes/no ask
 ```
 
 An answer off the recorded option list is refused with the options re-printed, and the ask stays

@@ -38,12 +38,23 @@ class LoopStore {
   }
 
   /** Send a control command via the BFF. Returns { ok, status, error }. */
+  /// Answer an open human ask. A SEPARATE endpoint from `send`, because an answer is not a
+  /// steering message: it is recorded in the ask ledger and works whether or not a workflow is
+  /// running, while every `send` requires one.
+  async answer(payload) {
+    return this.#post('/api/answer', payload);
+  }
+
   async send(cmd) {
+    return this.#post('/api/send', cmd);
+  }
+
+  async #post(path, payload) {
     try {
-      const res = await fetch('/api/send', {
+      const res = await fetch(path, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cmd)
+        body: JSON.stringify(payload)
       });
       const body = await res.json().catch(() => ({}));
       // refresh immediately so the UI reflects the new state fast.

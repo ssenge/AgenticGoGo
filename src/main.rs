@@ -117,9 +117,28 @@ enum Cmd {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
-    /// Send a steering command to a running loop's bus (applied at the next session boundary).
+    /// Send a steering command to a RUNNING workflow's bus (applied at the next session boundary).
+    ///
+    /// Every `send` requires a workflow to be running — a steering message with nothing to steer is
+    /// not queued, it is a landmine that fires at some unrelated future startup.
     #[command(subcommand)]
     Send(SendCmd),
+    /// Answer an open human ask (`agg status` lists the ids).
+    ///
+    /// NOT under `send`, deliberately: an answer is not a steering message. It is a durable fact
+    /// recorded in the ask ledger, it outlives the workflow that asked, and it therefore works
+    /// whether or not one is running. For a `choose`/`bool` ask the value must be ON THE LIST —
+    /// anything else is refused and the options re-printed, so a driver can never be handed a value
+    /// it did not offer. A yes/no ask takes `yes`/`no` (or `1`/`2`).
+    Answer {
+        /// the ask id, as printed by `agg status` or by the workflow
+        id: String,
+        /// the answer: a value, an option name, or the option's 1-based number
+        value: String,
+        /// who answered (recorded in the ledger for the audit trail)
+        #[arg(long, default_value = "operator")]
+        by: String,
+    },
     /// Ask a human for something — for the WORKER to invoke. Records the ask and exits immediately.
     #[command(subcommand)]
     Hil(HilCmd),
@@ -173,31 +192,6 @@ enum SendCmd {
     /// Send a free-form note (logged; no behavior change).
     Note {
         text: String,
-    },
-    /// Answer an open human ask (`agg status` lists the ids).
-    ///
-    /// For a `hil_choose`/`hil_bool` ask the value must be ON THE LIST — agg refuses anything else
-    /// and re-prints the options, so a driver can never be handed a value it did not offer.
-    Answer {
-        /// the ask id, as printed by `agg status` or by the loop
-        id: String,
-        /// the answer. For a choose/bool ask: one of the options (or its 1-based number).
-        value: String,
-        /// who answered (recorded in the ledger for the audit trail)
-        #[arg(long, default_value = "operator")]
-        by: String,
-    },
-    /// Answer a yes/no ask with `yes`. Sugar for `send answer <id> yes`.
-    Approve {
-        id: String,
-        #[arg(long, default_value = "operator")]
-        by: String,
-    },
-    /// Answer a yes/no ask with `no`. Sugar for `send answer <id> no`.
-    Deny {
-        id: String,
-        #[arg(long, default_value = "operator")]
-        by: String,
     },
 }
 
@@ -408,12 +402,10 @@ fn run_cli() -> Result<ExitCode> {
                 SendCmd::Resume => bus::Command::Resume,
                 SendCmd::Stop { reason } => bus::Command::Stop { reason: reason.clone() },
                 SendCmd::Note { text } => bus::Command::Note { text: text.clone() },
-                SendCmd::Answer { id, value, by } => answer_command(&p.dir, id, value, by)?,
-                SendCmd::Approve { id, by } => answer_command(&p.dir, id, "yes", by)?,
-                SendCmd::Deny { id, by } => answer_command(&p.dir, id, "no", by)?,
             };
             send_to_bus(&p.dir, cmd)
         }
+        Cmd::Answer { id, value, by } => answer_ask(&p.dir, id, value, by),
         Cmd::Hil(hil) => worker_ask(&p.dir, hil),
         Cmd::Skills(SkillsCmd::Install { agent, user }) => {
             // Resolving the agent is the whole correctness of this command: install for the wrong
@@ -477,32 +469,29 @@ fn ruler_for(config: &std::path::Path) -> Result<&'static dyn agg::backend::Agen
 
 /// Queue one steering command onto a running loop's bus. Shared by `agg send …` and
 /// the `agg stop` convenience alias.
-/// Validate an answer against the ask, then build the bus command that carries it.
+/// `agg answer <id> <value>` — record a human's answer to an open ask.
 ///
-/// Validation lives HERE, at the boundary, and not in the driver: the CLI is the one place that can
-/// print the options back to whoever got it wrong. A `hil_choose` ask has a CLOSED answer set, so
-/// anything off the list is refused and never queued — the ask stays open rather than resolving to
-/// garbage, and the driver cannot be handed a value it did not offer.
-fn answer_command(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<bus::Command> {
+/// Writes the ask ledger DIRECTLY; nothing goes on the bus. An answer is a durable fact, not a
+/// steering message: it outlives the workflow that raised the question (a worker asks, its session
+/// ends, the workflow may reach its goal and exit while the question is still open), and a blocked
+/// driver polls the ledger rather than the queue. Routing it through the bus is what previously made
+/// it the one command needing an exemption from the liveness rule.
+///
+/// Not a hole in the moat: this is the OPERATOR's command, run outside the worker's jail. A confined
+/// worker invoking it is refused by the kernel exactly as before — `agg/private/` is carved out of
+/// its writable set.
+fn answer_ask(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<()> {
     use agg::core::asks;
 
-    // ONE validator, shared with `POST /api/send` — see `asks::validate_answer`.
-    let value = asks::validate_answer(dir, id, value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // ONE validator, shared with `POST /api/answer`, so a value off a closed option list is refused
+    // identically whichever channel it arrives on.
+    let canonical = asks::validate_answer(dir, id, value).map_err(|e| anyhow::anyhow!("{e}"))?;
     if let Some(ask) = asks::get(dir, id) {
         eprintln!("answering `{id}`: {}", asks::one_line(&ask.question, 100));
     }
-
-    // RECORD IT NOW, not only on the bus. The bus is drained by a RUNNING loop, and a worker's ask
-    // routinely outlives the run that raised it — the worker asked, the session ended, the loop
-    // reached its goal and exited. Queue-only meant the operator was told "queued" while the ask
-    // stayed open forever and `agg status` kept showing the question. Caught by the e2e, not by a
-    // unit test, because only an end-to-end run has a loop that finishes.
-    //
-    // Writing here is not a hole in the moat: `agg send` is the OPERATOR's command, run outside the
-    // worker's jail. A confined worker invoking it is refused by the kernel exactly as before —
-    // `agg/private/` is carved out of its writable set.
-    asks::answer(dir, id, &value, by, agg::util::now_epoch())?;
-    Ok(bus::Command::Answer { id: id.to_string(), text: value, by: by.to_string() })
+    asks::answer(dir, id, &canonical, by, agg::util::now_epoch())?;
+    println!("recorded: {canonical}");
+    Ok(())
 }
 
 /// `agg hil …` — the worker's ask front-end. Writes a REQUEST and returns immediately.
@@ -543,20 +532,11 @@ fn worker_ask(dir: &std::path::Path, hil: &HilCmd) -> Result<()> {
 }
 
 fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
-    let live = agg::os::detach::live_pid(dir).is_some();
+    // The "is a workflow running" rule lives in `bus::queue_command`, so this channel and the web
+    // API cannot disagree about it — they used to, and did: the CLI queued with a warning while the
+    // API refused, for the very same command.
     let path = agg::bus::queue_command(dir, &cmd)?;
-    if live {
-        eprintln!("queued → {} (the loop applies it at the next session boundary)", path.display());
-    } else {
-        // Liveness guard: no loop is running here. Still queue (pre-arming before `agg run` is a
-        // legitimate use), but say so — a `stop` queued now would fire at the NEXT run's startup.
-        eprintln!(
-            "queued → {} — but NO loop is running in this dir right now.\n  \
-             it will apply when one starts (a queued `stop` fires immediately at the next `agg run`;\n  \
-             delete agg/private/bus/in/*.json to cancel).",
-            path.display()
-        );
-    }
+    eprintln!("queued → {} (applied at the next session boundary)", path.display());
     Ok(())
 }
 

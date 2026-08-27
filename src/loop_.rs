@@ -219,6 +219,15 @@ pub fn run_with(
     // on_stop moves into the Drop guard so it fires on any exit incl. panic (its dispatcher).
     let _stop_hooks = StopHooks { handlers: std::mem::take(&mut lifecycle.on_stop) };
 
+    // A queue does not outlive the workflow it was meant for. Anything left in `in/` was sent to a
+    // run that has already ended and would otherwise be applied here, by an unrelated workflow,
+    // possibly days later — a queued `stop` being the worst of them. Archived to the bus log first,
+    // so purging is visible rather than silent.
+    match crate::bus::purge(dir) {
+        0 => {}
+        n => eprintln!("  [bus] purged {n} stale command(s) queued to a previous run"),
+    }
+
     let loop_start = Instant::now();
     // The YAML path has no resume opt-in, so its clock always starts fresh. It is still persisted:
     // `human_wait_time`/`work_time` must read the same file the driver path writes, or the two entry

@@ -74,6 +74,7 @@ pub fn run(cfg: ServeConfig) -> Result<()> {
             (Method::Get, "/api/history") => handle_history(&cfg.dir, &origin),
             (Method::Get, "/api/health") => handle_health(&cfg.dir, &origin),
             (Method::Post, "/api/send") => handle_send(&mut req, &cfg.dir, &origin),
+            (Method::Post, "/api/answer") => handle_answer(&mut req, &cfg.dir, &origin),
             _ => json_resp(404, r#"{"error":"not found"}"#, &origin),
         };
         let _ = req.respond(resp);
@@ -127,33 +128,47 @@ fn handle_send(
     // ANSWERS validate against the ask ledger before they are queued — one validator shared with
     // `agg send answer`, so a value off a closed option list is refused identically from both sides
     // and the ask stays open instead of resolving to something the driver never offered.
-    let cmd = match cmd {
-        Command::Answer { id, text, by } => match crate::core::asks::validate_answer(dir, &id, &text) {
-            Ok(value) => {
-                // Recorded immediately, like the CLI path: an ask outlives the run that raised it,
-                // and a queue-only answer leaves it open forever. The bus command still goes out so
-                // a LIVE loop reacts at once and the action lands in the operator audit log.
-                if let Err(e) = crate::core::asks::answer(dir, &id, &value, &by, crate::util::now_epoch()) {
-                    return json_resp(500, &err_json(&format!("could not record answer: {e}")), origin);
-                }
-                Command::Answer { id, text: value, by }
-            }
-            Err(e) => return json_resp(400, &err_json(&e), origin),
-        },
-        other => other,
-    };
-    // Liveness guard: refuse (409) when no loop is running, so the UI never silently queues a
-    // control action to a dead loop (a stop would then fire at the next run's startup).
-    //
-    // ⚠ An ANSWER is exempt. A run blocked on a human is alive by definition, but a WORKER-opened
-    // ask outlives the session that asked it — refusing to answer a question just because the loop
-    // has ended between sessions would strand the very case the queue exists for.
-    if !matches!(cmd, Command::Answer { .. }) && crate::os::detach::live_pid(dir).is_none() {
-        return json_resp(409, &err_json("no loop is running in this project"), origin);
-    }
+    // NO liveness check here any more, and no per-command exemption: `bus::queue_command` owns that
+    // rule for every channel. `NotConnected` is its "no workflow is running" — the 409 the UI has
+    // always shown, now decided in one place instead of two that disagreed.
     match bus::queue_command(dir, &cmd) {
         Ok(_) => json_resp(200, r#"{"ok":true}"#, origin),
+        Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {
+            json_resp(409, &err_json(&e.to_string()), origin)
+        }
         Err(e) => json_resp(500, &err_json(&e.to_string()), origin),
+    }
+}
+
+/// `POST /api/answer` — answer an open human ask. The web UI's reply channel.
+///
+/// A SEPARATE endpoint from `/api/send`, because an answer is not a steering message: it is a
+/// durable fact recorded in the ask ledger, it outlives the workflow that asked, and it therefore
+/// does not require one to be running. Same validator as `agg answer`, so a value off a closed
+/// option list is refused identically whichever channel you use.
+fn handle_answer(req: &mut tiny_http::Request, dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut body = String::new();
+    if std::io::Read::read_to_string(req.as_reader(), &mut body).is_err() {
+        return json_resp(400, &err_json("could not read request body"), origin);
+    }
+    let body = body.as_str();
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return json_resp(400, &err_json(&format!("invalid JSON body: {e}")), origin),
+    };
+    let (Some(id), Some(value)) = (
+        v.get("id").and_then(|x| x.as_str()),
+        v.get("value").and_then(|x| x.as_str()),
+    ) else {
+        return json_resp(400, &err_json("`answer` requires `id` and `value`"), origin);
+    };
+    let by = v.get("by").and_then(|x| x.as_str()).unwrap_or("web");
+    match crate::core::asks::validate_answer(dir, id, value) {
+        Ok(canonical) => match crate::core::asks::answer(dir, id, &canonical, by, crate::util::now_epoch()) {
+            Ok(()) => json_resp(200, r#"{"ok":true}"#, origin),
+            Err(e) => json_resp(500, &err_json(&format!("could not record answer: {e}")), origin),
+        },
+        Err(e) => json_resp(400, &err_json(&e), origin),
     }
 }
 
@@ -196,23 +211,10 @@ fn parse_send(body: &str) -> std::result::Result<Command, String> {
             let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
             Ok(Command::Note { text })
         }
-        // ANSWER an open human ask. The web UI polls `asks` out of /api/state and posts back here,
-        // which is what makes a browser (or a phone) a first-class reply channel rather than the CLI
-        // being the only one. Validation is deliberately NOT done here — it needs the ask ledger, so
-        // the caller runs `asks::validate_answer` where `dir` is in scope, sharing one validator with
-        // `agg send answer`.
-        "answer" => {
-            let id = v.get("id").and_then(|t| t.as_str()).ok_or("`answer` requires `id`")?.to_string();
-            let text = v
-                .get("value")
-                .and_then(|t| t.as_str())
-                .ok_or("`answer` requires `value`")?
-                .to_string();
-            let by = v.get("by").and_then(|t| t.as_str()).unwrap_or("web").to_string();
-            Ok(Command::Answer { id, text, by })
-        }
+        // ⛔ `answer` is NOT here. It is not a steering message — see `POST /api/answer`.
         other => Err(format!(
-            "unknown cmd `{other}` (expected pause/resume/stop/inject/budget/note/answer)"
+            "unknown cmd `{other}` (expected pause/resume/stop/inject/budget/note; \
+             to answer a human ask use POST /api/answer)"
         )),
     }
 }

@@ -1085,11 +1085,10 @@ fn answer_from_outside(dir: &Path, want_case: &str, value: &str) -> std::thread:
                     },
                     want_case
                 );
-                agg::bus::queue_command(
-                    &dir,
-                    &agg::bus::Command::Answer { id: id.clone(), text: value, by: "test".into() },
-                )
-                .unwrap();
+                // Straight to the ledger, which is what `agg answer` and `POST /api/answer` both
+                // do. An answer is a durable fact, not a bus message — the driver's wait loop polls
+                // the ledger, so there is nothing for a queue to carry.
+                agg::core::asks::answer(&dir, &id, &value, "test", agg::util::now_epoch()).unwrap();
                 return id;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1201,26 +1200,27 @@ fn an_answer_off_the_recorded_option_list_is_refused_and_the_ask_stays_open() {
             .unwrap()
     };
 
-    let out = run(&["send", "answer", "z1", "mysql"]);
+    let out = run(&["answer", "z1", "mysql"]);
     assert!(!out.status.success(), "an unlisted answer must be refused");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("postgres") && err.contains("sqlite"), "it re-prints the options: {err}");
-    assert!(agg::core::asks::get(dir, "z1").unwrap().is_open(), "a refused answer is not queued");
+    assert!(agg::core::asks::get(dir, "z1").unwrap().is_open(), "a refused answer is not recorded");
 
     // A 1-based number is accepted too — an operator answering from a phone should not have to
     // retype an exact option string.
-    assert!(run(&["send", "answer", "z1", "2"]).status.success());
-    // The bus carries the RESOLVED option, not the number the operator typed.
-    let queued = std::fs::read_dir(agg::paths::bus_dir(dir).join("in"))
-        .unwrap()
-        .flatten()
-        .map(|e| std::fs::read_to_string(e.path()).unwrap())
-        .collect::<String>();
+    assert!(run(&["answer", "z1", "2"]).status.success());
+    // The LEDGER carries the resolved option, not the number the operator typed — and the bus
+    // carries nothing at all, because an answer is a durable fact rather than a steering message.
+    let queued = std::fs::read_to_string(agg::paths::asks_jsonl(dir)).unwrap();
+    // A MISSING inbox is the strongest form of the assertion: answering never even opened the bus.
+    let queued_files = std::fs::read_dir(agg::paths::bus_dir(dir).join("in"))
+        .map(|rd| rd.flatten().count())
+        .unwrap_or(0);
+    assert_eq!(queued_files, 0, "answering must not queue a bus command");
     assert!(queued.contains("sqlite"), "the number resolves to the option: {queued}");
 
     // And a second answer is refused rather than silently overwriting a decision already acted on.
-    agg::core::asks::answer(dir, "z1", "sqlite", "op", 200).unwrap();
-    let out = run(&["send", "answer", "z1", "postgres"]);
+    let out = run(&["answer", "z1", "postgres"]);
     assert!(!out.status.success(), "the first answer wins");
     assert!(String::from_utf8_lossy(&out.stderr).contains("already answered"));
 }
@@ -1342,11 +1342,7 @@ fn time_spent_blocked_is_banked_as_human_wait_not_as_work() {
         for _ in 0..600 {
             if let Some(a) = agg::core::asks::open(&dir).into_iter().next() {
                 std::thread::sleep(std::time::Duration::from_millis(5_200));
-                agg::bus::queue_command(
-                    &dir,
-                    &agg::bus::Command::Answer { id: a.id, text: "yes".into(), by: "test".into() },
-                )
-                .unwrap();
+                agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
