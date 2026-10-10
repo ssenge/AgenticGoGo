@@ -23,10 +23,11 @@ use crate::loop_::{Bootstrap, PreStart};
 ///    is then taken from the current branch — so the next run would base on the DEAD session branch,
 ///    cut every session off it, merge every gate into it, return `Kept`, write `Merged` to
 ///    `verdicts.jsonl`, and never touch `main`, with nothing warning because the span *was* gated.
-/// 2. **On the resume path, DISCARD a dirty tree loudly** instead of refusing. A power cut
-///    mid-worker leaves uncommitted tracked changes by construction (agg commits a session's work
+/// 2. **On the resume path, SAVE a dirty tree to a partial ref and reset it** instead of refusing. A
+///    power cut mid-worker leaves uncommitted changes by construction (agg commits a session's work
 ///    only after it ends), so refusing makes the one scenario resume exists for the one scenario
-///    that cannot start.
+///    that cannot start — and discarding them (what this did before A-18) threw the operator's
+///    work away. They land on `refs/agg/partial/<run>/<session>`, never judged.
 /// 3. **Do not eat the previous run's span.** Session numbering restarts per run and
 ///    `create_branch` opens with `git branch -D`, so a fresh run's session-1..N would delete the
 ///    previous run's same-named branches — including the tip the run-end warning just told the
@@ -47,9 +48,9 @@ impl PreStart for GitSetup {
                  fix:  git init && git add -A && git commit -m 'agg baseline'"
             );
         }
-        // ── rule 2: a dirty tree ends the run — UNLESS this is a resume, which discards it ──
-        // The discard runs FIRST, while HEAD is still where the crash left it: those edits belong to
-        // the dead session, and carrying them across the checkout below would launder a half-finished
+        // ── rule 2: a dirty tree ends the run — UNLESS this is a resume, which saves it aside ──
+        // This runs FIRST, while HEAD is still where the crash left it: those edits belong to the
+        // dead session, and carrying them across the checkout below would launder a half-finished
         // session's work into the new run's baseline.
         if !crate::git::is_clean(dir) {
             if !boot.resume {
@@ -58,12 +59,7 @@ impl PreStart for GitSetup {
                      fix:  commit or stash your changes first  (git status shows them)"
                 );
             }
-            eprintln!(
-                "  ⚠ [iso] RESUME with a dirty work tree — DISCARDING the uncommitted tracked changes.\n\
-                 \x20       They are a crashed session's half-finished edits (agg commits a session's work\n\
-                 \x20       only AFTER it ends), and that session re-executes from the top anyway."
-            );
-            crate::git::discard_uncommitted_tracked(dir);
+            save_crashed_session(dir)?;
         }
 
         // ── rule 1: resolve the isolation base, and never from a session branch ──
@@ -118,7 +114,8 @@ impl PreStart for GitSetup {
         // of a fresh project — a session branch is the first thing that ever commits it — so checking
         // base out DELETES it from the work tree, and the next worker's own `git add -A` would then
         // commit `agg/private/` (agg's own ledger, state.json, LOG.md) onto a session branch and
-        // wedge every subsequent checkout.
+        // wedge every subsequent checkout. A ROLLBACK deletes it the same way mid-run, which is why
+        // the entries also go to `info/exclude` (`git::ensure_agg_excluded`), where nothing can.
         crate::git::ensure_agg_gitignored(dir);
 
         // ── rule 3: park a previous run's surviving span before `create_branch` can delete it ──
@@ -128,6 +125,27 @@ impl PreStart for GitSetup {
         boot.iso_base = Some(iso_base);
         Ok(())
     }
+}
+
+/// Save a crashed session's uncommitted work to its partial ref, then restore the tracked files.
+///
+/// Untracked files stay where they are (they are in the ref too): after a crash agg no longer knows
+/// which of them the session created. A save that fails REFUSES the resume rather than discarding.
+fn save_crashed_session(dir: &Path) -> Result<()> {
+    let run = crate::core::clock::Clock::recorded_run_id(dir).unwrap_or_else(|| "unknown".into());
+    let session = crate::state::DashboardState::read(dir).map(|d| d.session).unwrap_or(0);
+    let Some(r) = crate::git::save_partial(dir, &run, session, false, None) else {
+        anyhow::bail!(
+            "--resume: the work tree has uncommitted changes from the interrupted session, and agg \
+             could not save them to refs/agg/partial/.\n  fix:  commit or stash them, then resume again"
+        );
+    };
+    eprintln!(
+        "  ⚠ [iso] RESUME with a dirty work tree — session #{session}'s unfinished work is saved under\n\
+         \x20       {r} (NOT judged) and the tracked files are reset; that session's step re-executes."
+    );
+    crate::git::reset_work_tree(dir, None);
+    Ok(())
 }
 
 /// The base branch the LAST run recorded in `state.json`, if any. An empty value counts as absent —

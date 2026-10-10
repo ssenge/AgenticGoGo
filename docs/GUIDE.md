@@ -249,7 +249,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 **Guardrails for unattended runs**
 - **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. On both tiers `agg/private/` is carved back **out** of the writable set, so a confined worker cannot forge the verdict ledger that decides when its own run ends. ⚠ **A JUDGE is confined more tightly than the worker**: the project tree is **read-only** to it — a judge able to write what it grades can edit its way to a pass — and its writes are *relocated* to `$AGG_JUDGE_SCRATCH` plus a persistent toolchain cache (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, …), so a well-behaved judge needs no change ([details](CONFIG.md)). Refused at startup if the mechanism is missing, never a silent downgrade ([details](CONFIG.md)). *macOS verified; Linux experimental.*
 - **Protected paths** *(`write_deny`, in `defaults` and per step)* — globs the worker may **read but never change**: oracles, golden files, rule files, gate config. An agent that cannot pass a test will edit the test; this is what stops it. Enforced on **every** tier, `none` included, by a content-hash check at the gate over every covered file — tracked, untracked and gitignored: a session that changed one is **rolled back**, the files are restored from agg's own copies before any judge runs, and a `protected_path_violation` row with the paths lands in `agg/private/violations.jsonl`. Under `sandbox`/`container` the kernel also denies the write itself. A step's list is added to the default, never subtracted from. Tested against a fake agent that tries direct writes, symlinks, hard links, renames, `chmod`, `git checkout`, case variants and more ([details + platform matrix](CONFIG.md#protected-paths--write_deny-readonly-writable)).
-- **Rate-limit backoff** *(Claude + Codex)* — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
+- **Rate-limit wait** *(Claude + Codex)* — detects a usage/429 limit, saves the incomplete session's work under `refs/agg/partial/<run>/<session>` (never judged), waits for the reset and retries fresh. The wait shows in `agg status` (`waiting: {reason, agent, until}`), `agg send wake` ends it early, it never counts against `work_time`, and `agg run --resume` continues an interrupted run ([details](CONFIG.md#rate-limits--wait-wake-resume)).
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
 - **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `agg` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just judges — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](CONFIG.md)).
 - **No orphaned compute** — process-group reaping sweeps stragglers when a session or the loop ends.
@@ -264,7 +264,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 **Control & observability**
 - **Live TUI + standalone web UI** — same state, two views ([Interfaces](#interfaces)).
 - **Chat supervisor** (`/agg:supervise` · `/agg-supervise` · `$agg-supervise`) — status and steering by chat in a second agent session; from your phone via Claude Code's mobile app.
-- **Session-granular steering** — `agg send inject / budget / pause / resume / stop`.
+- **Session-granular steering** — `agg send inject / budget / pause / resume / wake / stop`.
 - **Automation-friendly** — `--json` output and meaningful exit codes.
 
 **Works with your setup**
@@ -280,8 +280,15 @@ You can't interrupt a headless agent mid-thought (a platform limit), so steering
 agg send inject "focus on the auth module; it's the blocker"
 agg send budget 8000000        # change the token ceiling mid-run
 agg send pause                 # …and `agg send resume`
+agg send wake                  # end a rate-limit wait now (≥ 60 s after the limited attempt)
 agg stop "done for today"      # graceful stop at the next GATE
 ```
+
+A **rate-limit wait** is the one place a command acts between sessions: the waiting loop polls the
+bus every second, so `wake` (or `resume`) starts the next attempt and `stop` ends the run (exit 5) right
+away. If the agent is still limited, agg notices and waits again. An interrupted run — Ctrl-C, `agg
+stop`, a crash — continues with `agg run --resume`: same run id, the next session number, back to its
+last kept gate; the cut-off session's work waits on `refs/agg/partial/<run>/<session>`.
 
 ⚠ **Every `agg send` needs a workflow running** — it is refused otherwise, naming the prerequisite.
 A steering message with nothing to steer is not queued, it is a landmine that fires at the startup of
@@ -713,7 +720,7 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg schema` | Print the JSON Schema of `agg.yaml`, generated from the config types | |
 | `agg skills install` | Install the `agg-*` skills where your agent looks (`.claude/skills/` for Claude, `.agents/skills/` for Codex + Copilot) | `--agent <a>` (default: agg.yaml's `agent:`) · `--user` install under `$HOME` |
 | `agg plan` | Run every run-set judge once and print the starting scoreboard (a dry run) | |
-| `agg run` | Drive the loop until `done_if` is met (or a guard fires). Writes `agg/private/report.json` on every ending | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` · `--report-json` logs to `agg/private/run.log`, prints only the report · `--base-branch <ref>` overrides `session_isolation.base_branch` |
+| `agg run` | Drive the loop until `done_if` is met (or a guard fires). Writes `agg/private/report.json` on every ending | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` · `--report-json` logs to `agg/private/run.log`, prints only the report · `--base-branch <ref>` overrides `session_isolation.base_branch` · `--resume` continues the last interrupted run (same run id, next session, back to its last kept gate) |
 | `agg judge <name>` | Resolve **one** judge by name and print its raw verdict — for authoring judges | |
 | `agg status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no judges) | `--json` |
 | `agg history` | This project's run history, newest first, plus lifetime totals | `--json` |
@@ -721,7 +728,7 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `POST /api/send`, `POST /api/answer` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` |
 | `agg spawn` | *(used by the worker, not to start the loop)* track a long child task so the reaper spares it and the next session polls it | `--name <n>` · `--reason <why>` · `-- <cmd…>` |
 | `agg stop [reason]` | Graceful stop at the next session boundary (the one top-level steering alias) | |
-| `agg send <cmd>` | Steering for a **running** workflow, applied at the next session boundary. Refused if none is running | `inject <text>` · `budget [total]` · `pause` · `resume` · `stop [reason]` · `note <text>` · `answer <id> <value>` · `approve <id>` · `deny <id>` |
+| `agg send <cmd>` | Steering for a **running** workflow, applied at the next session boundary. Refused if none is running | `inject <text>` · `budget [total]` · `pause` · `resume` · `wake` (end a rate-limit wait now) · `stop [reason]` · `note <text>` · `answer <id> <value>` · `approve <id>` · `deny <id>` |
 | `agg answer <id> <value>` | Answer an open human ask. Needs NO running workflow — an ask outlives the run that raised it |
 | `agg hil <kind>` | *(used by the worker, not the operator)* ask a human. **Records and exits — it never waits** | `bool <q>` · `choose <q> --option … --option …` · `input <q>` |
 

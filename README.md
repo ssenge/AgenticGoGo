@@ -279,7 +279,7 @@ Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
 | `agg schema` | Print the JSON Schema of `agg.yaml` |
 | `agg judge <name>` | Run one judge and print its verdict, for authoring and debugging |
 | `agg history` | Run history and lifetime totals |
-| `agg send` | Steer a **running** workflow: `inject`, `pause`, `resume`, `budget`, `stop`, `note`. Refused if none is running |
+| `agg send` | Steer a **running** workflow: `inject`, `pause`, `resume`, `wake` (end a rate-limit wait), `budget`, `stop`, `note`. Refused if none is running |
 | `agg answer <id> <val>` | Answer an open human ask. Works with no workflow running — an ask outlives the run that raised it |
 | `agg hil` | **For the worker:** ask a human `bool`/`choose`/`input`. Records and exits — it never waits |
 | `agg stop` | Graceful stop, an alias of `agg send stop`. Exits **5** — a stop is not a met goal |

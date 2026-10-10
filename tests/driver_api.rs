@@ -593,14 +593,15 @@ fn a_run_that_never_gates_names_the_branch_and_the_merge_that_lands_it() {
     assert_eq!(work_on(dir, &tip), 3, "…and all three sessions really are on the branch it named");
 }
 
-/// ⛔ THE RESUME PATH DISCARDS A DIRTY TREE; A FRESH START STILL REFUSES.
+/// ⛔ THE RESUME PATH SAVES A DIRTY TREE ASIDE AND RESETS IT; A FRESH START STILL REFUSES.
 ///
 /// A power cut mid-worker leaves uncommitted tracked changes by construction — agg commits a session's
 /// work only after it ends — so a resume that refused to start would make the flagship resume scenario
 /// the one scenario that cannot start. Both directions, because the refusal is the moat for everyone
-/// who is NOT resuming: a dirty tree there means the operator's own uncommitted work.
+/// who is NOT resuming: a dirty tree there means the operator's own uncommitted work. And the edit is
+/// not thrown away (A-18.3): it is on a `refs/agg/partial/…` ref, never judged.
 #[test]
-fn a_dirty_tree_refuses_a_fresh_start_and_is_discarded_on_a_resume() {
+fn a_dirty_tree_refuses_a_fresh_start_and_is_set_aside_on_a_resume() {
     let tmp = project();
     let dir = tmp.path();
     std::fs::write(dir.join("seed.txt"), "committed\n").unwrap();
@@ -620,8 +621,17 @@ fn a_dirty_tree_refuses_a_fresh_start_and_is_discarded_on_a_resume() {
     assert_eq!(
         std::fs::read_to_string(dir.join("seed.txt")).unwrap(),
         "committed\n",
-        "the dead session's edit was discarded, not carried into the new run's baseline"
+        "the dead session's edit was reset, not carried into the new run's baseline"
     );
+    let refs = std::process::Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", "refs/agg/partial/"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let refs = String::from_utf8_lossy(&refs.stdout).to_string();
+    let saved = refs.lines().next().unwrap_or_else(|| panic!("no partial ref was written: {refs:?}"));
+    let show = std::process::Command::new("git").args(["show", &format!("{saved}:seed.txt")]).current_dir(dir).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&show.stdout), "a crashed worker's half-finished edit\n", "…and saved, not lost");
 }
 
 // ── the sample driver, actually RUN (BUILD.md §5 — "the samples work as expected") ────────────

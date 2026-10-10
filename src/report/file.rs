@@ -39,8 +39,14 @@ pub struct RunHandle {
 /// run's. Deleting first is the "no stale reports" rule — a consumer that finds a report after
 /// this point is reading this run's, or none.
 pub fn begin(dir: &Path) -> RunHandle {
+    begin_as(dir, None)
+}
+
+/// [`begin`] for a run that CONTINUES an earlier one (`agg run --resume`): it reports under the
+/// earlier run's id, so both halves of one run carry one `run_id`. `None` mints a fresh one.
+pub fn begin_as(dir: &Path, run_id: Option<String>) -> RunHandle {
     clear(dir);
-    let run_id = mint_run_id();
+    let run_id = run_id.unwrap_or_else(mint_run_id);
     log_line(dir, &format!("agg run {run_id} started (pid {})", std::process::id()));
     RunHandle { dir: dir.to_path_buf(), run_id, started_at: crate::util::now_epoch(), written: Cell::new(false) }
 }
