@@ -100,6 +100,9 @@ pub struct AGGScratch {
     pub staged: Option<(String, crate::git::StagedSession)>,
     /// `GateKeepRollback` (on_gate) → `RefineFold`'s "session ROLLED BACK" prefix. Staged-!keep only.
     pub rolled_back: bool,
+    /// `GateKeepRollback` → `RefineFold`: the discard was `merge_requires_improvement`, not a
+    /// regression (`rolled_back` is set too — the work is not on base either way).
+    pub no_improvement: bool,
     /// `Summarize` (on_session_end) → `RefineFold`'s mechanical+summary source choice.
     pub summarized_this_cycle: bool,
     /// `protect::before_worker` → `protect::after_worker`: the protected entries as they were the

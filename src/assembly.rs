@@ -120,6 +120,21 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
     let gate = crate::core::ratchet::Gate::new(cfg.sequence.ratchet.clone(), cfg.sequence.oscillation_window);
     let groups = groups_for(cfg, done_if.as_deref());
 
+    // `merge_requires_improvement` with nothing that COULD improve — no DoD-set judge, no ratchet —
+    // would never merge a session. Refused like the all-`skip_judges` sequence, for the same reason.
+    if !driver
+        && cfg.sequence.merge_requires_improvement
+        && cfg.sequence.ratchet.is_empty()
+        && !named.iter().any(|n| n.in_dod)
+    {
+        problems.push(Problem::new(
+            "sequence.merge_requires_improvement",
+            "sequence.merge_requires_improvement is true but there is no DoD-set judge and no ratchet — \
+             nothing could ever improve, so no session would ever merge. Name a judge in done_if or \
+             invariants, add a ratchet, or drop the key.",
+        ));
+    }
+
     for (path, expr) in [
         ("sequence.done_if", done_if.as_ref()),
         ("sequence.abort_if", cfg.sequence.abort_if.as_ref()),
@@ -661,5 +676,20 @@ mod tests {
         cfg.sequence.done_if = "count_met(q) >= 3".into();
         assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.done_if"]);
         assert!(assemble_err(&cfg, tmp.path()).contains("can never hold"));
+    }
+
+    /// `merge_requires_improvement` with nothing that could ever improve is refused; with a DoD judge
+    /// or a ratchet it assembles, and a driver project is never refused (it has no DoD by design).
+    #[test]
+    fn merge_requires_improvement_needs_something_that_can_improve() {
+        let tmp = base_with_judges(&["goal", "cc"]);
+        let mut cfg = cfg_with("  merge_requires_improvement: true\n");
+        cfg.sequence.done_if = "over_iterations".into();
+        assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.merge_requires_improvement"]);
+        cfg.sequence.ratchet.insert("cc".into(), crate::core::ratchet::Ratchet::down(0.0));
+        assemble(&cfg, tmp.path()).expect("a ratchet can improve");
+        assemble(&cfg_with("  merge_requires_improvement: true\n"), tmp.path()).expect("a DoD judge can improve");
+        let driver: AggConfig = serde_yaml::from_str("project: p\nsequence: { merge_requires_improvement: true }\n").unwrap();
+        assemble(&driver, tmp.path()).expect("a driver project declares no DoD");
     }
 }

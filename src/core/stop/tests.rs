@@ -598,3 +598,18 @@ fn a_group_in_subset_position_is_not_a_judge_name() {
     assert_eq!(judge_names("(build) AND NOT (lint)").unwrap(), vec!["build".to_string(), "lint".to_string()]);
     assert!(subsets("(build)").unwrap().is_empty());
 }
+
+/// `no_improvements` / `consecutive_no_improvements` read the gate like `rollbacks`, have no
+/// accessor, and never join the run-set.
+#[test]
+fn the_no_improvement_terms_read_the_gate_state() {
+    let goals = [g("a", false, false)];
+    let mut gate = gate_with(0, 0, &[], false);
+    gate.state.no_improvements = 3;
+    gate.state.consecutive_no_improvements = 2;
+    assert!(ev_gate("no_improvements == 3 AND consecutive_no_improvements >= 2 AND rollbacks == 0", &goals, &gate));
+    assert!(ev("no_improvements == 0 AND consecutive_no_improvements == 0", &goals), "no gate ⇒ none");
+    let err = format!("{:#}", validate("consecutive_no_improvements.value >= 2", &[]).unwrap_err());
+    assert!(err.contains("`consecutive_no_improvements >= 2`"), "{err}");
+    assert!(judge_names("no_improvements >= 1 OR consecutive_no_improvements >= 1").unwrap().is_empty());
+}

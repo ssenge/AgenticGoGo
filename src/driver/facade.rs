@@ -189,6 +189,16 @@ impl Agg {
         self
     }
 
+    /// Merge a span at [`Agg::gate`] only if something IMPROVED — a judge asked since the last gate
+    /// went unmet→met (a group asked through [`Agg::group`]: gained ground net), or a ratcheted value
+    /// moved the good way beyond its tolerance. Otherwise the span is discarded as
+    /// [`GateOutcome::NoImprovement`]: not a regression, so it never counts for `rollbacks`. The
+    /// driver's spelling of `sequence.merge_requires_improvement`; off by default.
+    pub fn merge_requires_improvement(mut self, on: bool) -> Agg {
+        self.cfg.sequence.merge_requires_improvement = on;
+        self
+    }
+
     /// The standing project-instructions file the worker's brief POINTS AT, relative to the project
     /// dir. Default `agg/AGG.md`.
     ///
@@ -619,9 +629,11 @@ impl Agg {
         // 6/7/8 — the policy, the merge, the `verdicts.jsonl` row and the span teardown, all in the
         // body the YAML path's `GateKeepRollback` runs. One decision, two call sites.
         let pre_goals = std::mem::take(&mut *self.span_goals.borrow_mut());
+        let improved = progress.improved || !st.eng.gate.improved(&fresh).is_empty();
         let judged = crate::features::gate::Judged {
             fresh: &fresh,
             regressed: progress.regressed || !ratchet.is_empty(),
+            improved,
             ratchet,
             signature,
         };
@@ -629,6 +641,7 @@ impl Agg {
 
         let outcome = match (&staged, gated) {
             (StagedSession::Staged, crate::features::gate::Gated::Merged) => GateOutcome::Kept,
+            (StagedSession::Staged, crate::features::gate::Gated::NoImprovement) => GateOutcome::NoImprovement,
             (StagedSession::Staged, _) => GateOutcome::RolledBack,
             // the worker vetoed: git already deleted the tip and the span is closed.
             (StagedSession::Vetoed, _) => GateOutcome::Failed(GateFailure::Vetoed),
