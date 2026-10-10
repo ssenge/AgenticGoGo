@@ -76,6 +76,11 @@ pub fn run(f: impl FnOnce() -> Result<(), Fatal>) -> std::process::ExitCode {
             // fault nobody has reported yet.
             if !matches!(e, Fatal::Ended(_)) {
                 eprintln!("error: {e}");
+                // `Drop for Agg` wrote the report before this `Err` surfaced, and `Drop` cannot see
+                // it — so the report says `done` for a run that failed. Correct it to the truth.
+                if let Err(w) = crate::report::amend_to_error(&format!("{e}")) {
+                    eprintln!("error: cannot correct the run report: {w}");
+                }
             }
             std::process::ExitCode::from(e.exit_code())
         }

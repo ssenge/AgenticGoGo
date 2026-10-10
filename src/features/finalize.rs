@@ -62,8 +62,24 @@ impl Handler for RefineFold {
 pub struct CheckRunStop;
 impl Handler for CheckRunStop {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        use crate::report::Outcome;
         let res = ctx.scratch.get::<AGGScratch>().res.take().expect("an on_verify handler set scratch.res");
-        if res.halt {
+        // Everything that holds at this session end, decided by ONE rule (`report::decide`): a stop
+        // beats done beats aborted. A signal or a queued `agg stop` that arrived mid-session is
+        // honoured HERE rather than a session later — or a run its operator stopped could still be
+        // reported as `done`/`aborted`.
+        let interrupted = crate::os::signals::interrupted();
+        let bus_stop = if interrupted { None } else { ctx.bus.as_ref().and_then(|b| b.take_stop()) };
+        let decided = crate::report::decide(interrupted || bus_stop.is_some(), res.stop, res.halt);
+        if decided == Some(Outcome::Stopped) {
+            let outcome = match bus_stop {
+                Some(reason) => ctx.stopped_via_bus(reason),
+                None => ctx.finish_interrupted(),
+            };
+            report_stranded_span(ctx);
+            return Ok(Flow::Stop(outcome));
+        }
+        if decided == Some(Outcome::Aborted) {
             let reason = res.halt_reason.unwrap_or_default();
             eprintln!("\n⚠ ABORT — abort_if true: {reason}\n  stopping the loop (a ceiling / guard, not success).");
             report_stranded_span(ctx);
@@ -73,7 +89,7 @@ impl Handler for CheckRunStop {
             });
             return Ok(Flow::Stop(RunOutcome::Halt));
         }
-        if res.stop {
+        if decided == Some(Outcome::Done) {
             let (mt, tt) = ctx.eng.tally();
             eprintln!("\n✔ done_if satisfied — {mt}/{tt} goals met. Done after {} session(s).", ctx.session);
             ctx.emit(LifecycleEvent::Finished {

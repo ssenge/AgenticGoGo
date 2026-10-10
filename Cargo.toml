@@ -28,7 +28,7 @@ ratatui = "0.29"          # the live TUI dashboard
 crossterm = "0.28"        # terminal backend for ratatui
 tiny_http = "0.12"        # `agg serve` — the thin JSON API for the standalone web UI (sync, no tokio)
 jiff = "0.2.32"
-nix = { version = "0.31.3", features = ["signal", "process"] }
+nix = { version = "0.31.3", features = ["signal", "process", "fs"] }  # fs: dup/dup2 for `--report-json`
 signal-hook = "0.4.4"
 serde_path_to_error = "0.1"  # `agg check`: the dotted config path of a parse error
 schemars = "1"            # `agg schema`: the agg.yaml JSON Schema, DERIVED from the config types so it cannot drift
