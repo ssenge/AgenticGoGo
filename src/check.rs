@@ -40,6 +40,8 @@ pub struct Validation {
     pub assembly: Option<Assembly>,
     pub problems: Vec<Problem>,
     pub warnings: Vec<Problem>,
+    /// the container images the run uses, as the startup probe found them.
+    pub images: Vec<crate::isolation::probe::ImageFacts>,
 }
 
 impl Validation {
@@ -79,9 +81,11 @@ pub fn validate(config_base: &Path, config: &Path) -> Validation {
     v.problems.extend(a.unknown_agents);
     v.problems.extend(a.problems);
     v.warnings = a.warnings;
+    v.images = a.images;
 
-    // `agg run`'s last startup check: every agent the config names is on PATH.
-    for (path, name) in agent_sites(&cfg) {
+    // `agg run`'s last startup check: every agent that runs on the HOST is on PATH (a container
+    // step's agent is checked in its image, by the probe above).
+    for (path, name) in crate::capability::host_agents(&cfg, &judges) {
         if let Ok(b) = crate::backend::for_name(&name) {
             if let Err(e) = b.preflight() {
                 problem::push_unique(&mut v.problems, Problem::new(path, format!("{e:#}")));

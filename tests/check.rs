@@ -219,10 +219,27 @@ fn doctor_json_flags_a_missing_state_file_and_a_missing_config() {
 #[test]
 fn doctor_json_names_a_running_container_engine() {
     let (tmp, path) = project(&GOOD.replace("steps: { worker: {} }", "steps: { worker: { isolation: \"container\" } }"));
-    write(tmp.path(), "bin/docker", "#!/bin/sh\nexit 0\n");
+    // the fake engine answers `docker version` and the startup probe (the image has the CLI).
+    write(tmp.path(), "bin/docker", "#!/bin/sh\ncase \"$*\" in *\"command -v claude\"*) echo 'BIN claude fake-claude 9.9.9';; esac\nexit 0\n");
     let out = agg(tmp.path(), &path, &["doctor", "--json"]);
     let v = json(&out);
     assert_eq!(out.status.code(), Some(0), "{v:#}");
     assert_eq!(v["container_engine"], "docker");
     assert_eq!(v["isolation"]["container"], serde_json::json!({ "available": true, "mechanism": "docker", "requested": true }));
+    // the image the step runs in is probed for the CLI the step needs
+    assert_eq!(v["container_images"][0]["image"], "alpine:3.20", "{v:#}");
+    assert_eq!(v["container_images"][0]["clis"]["claude"], "fake-claude 9.9.9", "{v:#}");
+}
+
+/// An image without the agent's CLI is refused at the key that chose it — the session would die at
+/// spawn, every time — and `doctor --json` says which CLI is missing.
+#[test]
+fn a_container_image_without_the_agents_cli_is_refused() {
+    let (tmp, path) = project(&GOOD.replace("steps: { worker: {} }", "steps: { worker: { isolation: \"container\", image: \"plain:1\" } }"));
+    write(tmp.path(), "bin/docker", "#!/bin/sh\ncase \"$*\" in *\"command -v claude\"*) echo 'NOBIN claude';; esac\nexit 0\n");
+    let v = json(&agg(tmp.path(), &path, &["check", "--json"]));
+    assert!(problem_paths(&v).contains(&"steps.worker.image".to_string()), "{v:#}");
+    let d = json(&agg(tmp.path(), &path, &["doctor", "--json"]));
+    assert!(d["container_images"][0]["clis"]["claude"].is_null(), "{d:#}");
+    assert_eq!(d["ok"], false);
 }

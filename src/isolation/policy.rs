@@ -54,10 +54,27 @@ impl ContextMount {
 pub const CONTEXT_ROOT: &str = "/context";
 
 /// Everything one run's confined processes get beyond their tier.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RunPolicy {
     /// read-only context directories, in config order.
     pub contexts: Vec<ContextMount>,
+    /// env var names every container of the run receives by name (`isolation_policy.pass_env`).
+    pub pass_env: Vec<String>,
+    /// canonical host paths every container of the run mounts read-only (`isolation_policy.credentials`).
+    pub credentials: Vec<PathBuf>,
+    /// the image judges run in when the run's tier is `container` (`judge.image`, resolved).
+    pub judge_image: String,
+}
+
+impl Default for RunPolicy {
+    fn default() -> Self {
+        RunPolicy {
+            contexts: Vec::new(),
+            pass_env: Vec::new(),
+            credentials: Vec::new(),
+            judge_image: super::DEFAULT_IMAGE.to_string(),
+        }
+    }
 }
 
 impl RunPolicy {
@@ -125,7 +142,7 @@ mod tests {
         let link = tmp.path().join("link");
         std::fs::create_dir(tmp.path().join("real")).unwrap();
         std::os::unix::fs::symlink(tmp.path().join("real"), &link).unwrap();
-        let guard = register(&link, RunPolicy { contexts: vec![ctx("brain", "/b")] });
+        let guard = register(&link, RunPolicy { contexts: vec![ctx("brain", "/b")], ..RunPolicy::default() });
         assert_eq!(for_dir(&tmp.path().join("real")).contexts.len(), 1, "the canonical spelling");
         assert_eq!(for_dir(&link).contexts.len(), 1, "the symlinked spelling");
         drop(guard);
@@ -138,7 +155,7 @@ mod tests {
         assert_eq!(c.seen_on(super::super::Isolation::Container), Path::new("/context/my-brain"));
         assert_eq!(c.seen_on(super::super::Isolation::Sandbox), Path::new("/home/u/brain"));
         assert_eq!(c.env_key(), "AGG_CONTEXT_MY_BRAIN");
-        let p = RunPolicy { contexts: vec![c] };
+        let p = RunPolicy { contexts: vec![c], ..RunPolicy::default() };
         assert_eq!(p.context_env(super::super::Isolation::Container), [("AGG_CONTEXT_MY_BRAIN".to_string(), PathBuf::from("/context/my-brain"))]);
     }
 }

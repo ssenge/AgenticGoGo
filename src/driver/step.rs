@@ -5,7 +5,7 @@
 //!
 //! | field | rule |
 //! |---|---|
-//! | `agent` `model` `effort` `isolation` `prompt` `state` | **OVERRIDE** — the derived step wins |
+//! | `agent` `model` `effort` `isolation` `image` `prompt` `state` | **OVERRIDE** — the derived step wins |
 //! | `prompt` / `prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other |
 //! | `readonly` | **ACCUMULATES** — a derived step cannot silently lose a deny its template set |
 //! | `writable` | **SUBTRACTS** from what accumulated — re-grant exactly one deny, not the rest |
@@ -41,6 +41,9 @@ pub struct Step {
     /// list is delivered by the OS wrapper and the wrapper only runs under `sandbox`/`container`.
     /// agg warns when it sees a list on an unconfined step; it does not silently pretend.
     pub isolation: Isolation,
+    /// the image this step runs in under [`Isolation::Container`]. `None` = the run's
+    /// ([`crate::driver::Agg::image`], else the base image). Inert on every other tier.
+    pub image: Option<String>,
     /// paths this step may read but not write, normalised and accumulated. See [`Step::readonly`].
     pub readonly: Vec<String>,
     /// paths subtracted from [`Self::readonly`]. See [`Step::writable`].
@@ -97,6 +100,12 @@ impl Step {
     }
     pub fn isolation(mut self, i: Isolation) -> Step {
         self.isolation = i;
+        self
+    }
+    /// The image this step runs in under [`Isolation::Container`] — one with the step's agent CLI
+    /// in it (the image contract, `docs/CONFIG.md`). The twin of YAML's `image:`.
+    pub fn image(mut self, image: impl Into<String>) -> Step {
+        self.image = Some(image.into());
         self
     }
     /// The step's task text. Replaces a [`Step::prompt_file`] the template set.

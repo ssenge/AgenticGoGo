@@ -28,6 +28,11 @@ pub struct DoctorReport {
     pub isolation: Tiers,
     /// `docker` or `podman` when one answers, else null.
     pub container_engine: Option<&'static str>,
+    /// every image an `isolation: container` run of this config starts — the steps' and the
+    /// judges' — with the agent CLIs it needs and whether it has them (`clis.<bin>`: the version
+    /// line, or null when missing), plus any mounted path the engine cannot see. Empty without a
+    /// container tier or an engine.
+    pub container_images: Vec<crate::isolation::probe::ImageFacts>,
     pub problems: Vec<Problem>,
     pub warnings: Vec<Problem>,
 }
@@ -104,6 +109,7 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
         backends,
         isolation: tiers(&v, container_engine),
         container_engine,
+        container_images: v.images.clone(),
         problems,
         warnings: v.warnings,
     }
@@ -181,7 +187,7 @@ mod tests {
     fn the_report_shape_is_stable() {
         let tmp = tempfile::tempdir().unwrap();
         let r = serde_json::to_value(report(tmp.path(), &tmp.path().join("agg.yaml"))).unwrap();
-        for key in ["schema_version", "agg_version", "ok", "config", "backends", "isolation", "container_engine", "problems", "warnings"] {
+        for key in ["schema_version", "agg_version", "ok", "config", "backends", "isolation", "container_engine", "container_images", "problems", "warnings"] {
             assert!(r.get(key).is_some(), "missing `{key}`");
         }
         assert_eq!(r["ok"], false, "no config is not ok");

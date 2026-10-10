@@ -526,8 +526,9 @@ fn prepare_run(p: &Paths, base_branch: Option<&str>) -> Result<(config::AggConfi
     let asm = loop_::assemble(&agg_cfg, &p.config_base)?;
     // …then REFUSE anything the config asks for that the chosen agent(s) cannot do.
     agg::capability::check(&agg_cfg, &asm.engine.judges, &p.dir)?;
-    // EVERY agent the sequence names must be on PATH (§7.3), before launching the loop.
-    for name in agg_cfg.agent_names() {
+    // EVERY agent that runs on the host must be on PATH (§7.3), before launching the loop — a
+    // container step's agent was checked in its image by `capability::check`.
+    for (_, name) in agg::capability::host_agents(&agg_cfg, &asm.engine.judges) {
         agg::backend::for_name(&name)?.preflight()?;
     }
     Ok((agg_cfg, asm))

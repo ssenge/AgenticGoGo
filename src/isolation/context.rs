@@ -84,7 +84,7 @@ fn host_dir(raw: &str, project: &Path) -> Result<PathBuf, String> {
 }
 
 /// `~/x` → `$HOME/x`; a relative path → against the project; an absolute one as written.
-fn expand(raw: &str, project: &Path) -> PathBuf {
+pub(super) fn expand(raw: &str, project: &Path) -> PathBuf {
     if let (Some(rest), Some(home)) = (raw.strip_prefix("~/"), std::env::var_os("HOME")) {
         return Path::new(&home).join(rest);
     }

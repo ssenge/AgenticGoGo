@@ -39,6 +39,9 @@ pub struct Assessment {
     pub problems: Vec<Problem>,
     /// guards that are inert on an agent which still caps itself: loud, not fatal (§7.3).
     pub warnings: Vec<Problem>,
+    /// what the startup probe learned about each container image the run uses (empty without a
+    /// container tier or an engine) — `agg doctor --json` reports it.
+    pub images: Vec<crate::isolation::probe::ImageFacts>,
 }
 
 /// Check the config + resolved run-set against EVERY agent the sequence names (§7.3). The
@@ -77,8 +80,8 @@ pub fn check(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Result<()> {
 /// dir, which relative `context:` paths resolve against.
 pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Assessment {
     let mut a = Assessment::default();
-    // ── the run-level confinement policy: the read-only context dirs ──
-    a.problems.extend(crate::isolation::context::resolve(&cfg.context, dir).1);
+    // ── the run-level confinement policy: context dirs, credentials, the judges' image ──
+    a.problems.extend(crate::isolation::run::resolve(cfg, dir).1);
     // ── one-shot demands land on the RULER (§7.3) ──
     match cfg.ruler_backend() {
         Ok(ruler) => {
@@ -102,7 +105,32 @@ pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Assessment {
     for step_name in cfg.steps.keys() {
         step_demands(cfg, step_name, &mut a);
     }
+    // ── the container images: each has the CLI it must run, and the engine sees what is mounted ──
+    let (images, found) = crate::isolation::probe::assess(cfg, judges, dir);
+    a.images = images;
+    for p in found {
+        problem::push_unique(&mut a.problems, p);
+    }
     a
+}
+
+/// The agents whose CLI must be on the HOST's PATH, each at the first key that names it: every
+/// agent of a step that does not run in a container, and the ruler when anything it runs stays on
+/// the host (the summarizer always does; LLM judges do unless the run's judges are containerized).
+/// A container step's agent is the image's business instead ([`crate::isolation::probe`]).
+pub fn host_agents(cfg: &AggConfig, judges: &[Judge]) -> Vec<(String, String)> {
+    use crate::isolation::Isolation::Container;
+    let llm = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
+    let ruler_on_host = cfg.summary.enabled || (llm && cfg.run_isolation() != Container);
+    let step_on_host = |name: &str| {
+        // a project with no steps (a Rust driver's): the defaults are what it runs.
+        cfg.steps.is_empty() && cfg.defaults.agent == name
+            || cfg.steps.keys().filter_map(|s| cfg.resolve_step(s).ok()).any(|s| s.agent == name && s.isolation != Container)
+    };
+    crate::check::agent_sites(cfg)
+        .into_iter()
+        .filter(|(_, name)| step_on_host(name) || (ruler_on_host && &cfg.judge.agent == name))
+        .collect()
 }
 
 /// The demands ONE step makes of its worker agent.

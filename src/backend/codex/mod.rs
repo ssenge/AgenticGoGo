@@ -105,6 +105,17 @@ impl AgentBackend for Codex {
         true
     }
 
+    /// `CODEX_API_KEY` (what `codex exec` reads), `OPENAI_API_KEY`, and a custom endpoint.
+    fn container_env(&self) -> &'static [&'static str] {
+        &["CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"]
+    }
+
+    /// A ChatGPT login lives in `~/.codex/auth.json`. Read-only: a refreshed token is not written
+    /// back — prefer an API key for unattended runs.
+    fn container_credential_files(&self) -> &'static [&'static str] {
+        &[".codex/auth.json"]
+    }
+
     /// `~/.codex` — REQUIRED as of §2.4, and it was not before.
     ///
     /// While Codex was exempt from the OS wrapper this was correctly empty: nothing confined the

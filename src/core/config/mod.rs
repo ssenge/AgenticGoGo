@@ -92,6 +92,28 @@ pub struct AggConfig {
     /// names a context and has an unconfined step is refused at startup ([`crate::isolation::context`]).
     #[serde(default)]
     pub context: Vec<ContextDir>,
+    /// what crosses into a confined run beyond its tier: the credentials a container receives
+    /// (`pass_env`, `credentials`). Run-level — every container of the run, judges included.
+    #[serde(default)]
+    pub isolation_policy: IsolationPolicy,
+}
+
+/// The run-level confinement policy (`isolation_policy:`).
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationPolicy {
+    /// environment variables passed INTO every container by NAME, when set in agg's environment
+    /// (a token a judge's tooling needs, a proxy setting). The value never appears on a command
+    /// line, in a log, a ledger or the report. Each agent's own credential variables
+    /// (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, …) are passed without being listed here.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+    /// host files or directories mounted READ-ONLY into every container — under the container's
+    /// `HOME` at their `~`-relative path when they live under `~`, else at the same absolute path.
+    /// Each must exist. Each agent's own credential file (`~/.codex/auth.json`, Claude's
+    /// `~/.claude/.credentials.json` on Linux) is mounted without being listed here.
+    #[serde(default)]
+    pub credentials: Vec<String>,
 }
 
 /// One read-only context directory (`context:` entry).
@@ -204,6 +226,12 @@ pub struct JudgeCfg {
     /// not a run limit: a file that does not fit is skipped and recorded, and the run goes on.
     #[serde(default = "default_evidence_max_mb")]
     pub evidence_max_mb: u64,
+    /// the image every judge runs in when the run's strongest tier is `container` — script judges
+    /// and the ruler's LLM judges alike. `None` = `defaults.image`, else the one image the container
+    /// steps share; several different ones with neither key set is refused (agg will not guess
+    /// which toolchain your judges need).
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 impl Default for JudgeCfg {
@@ -213,6 +241,7 @@ impl Default for JudgeCfg {
             model: None,
             timeout: default_judge_timeout(),
             evidence_max_mb: default_evidence_max_mb(),
+            image: None,
         }
     }
 }
@@ -483,6 +512,7 @@ impl Default for AggConfig {
             session_isolation: SessionIsolation::default(),
             instructions: default_instructions(),
             context: vec![],
+            isolation_policy: IsolationPolicy::default(),
         }
     }
 }
