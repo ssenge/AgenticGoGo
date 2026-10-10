@@ -1,7 +1,7 @@
 //! AgenticGoGo (`agg`) — the CLI entry point.
 //!
 //! A thin clap front-end over the `agg` library: it parses subcommands (init/doctor/plan/
-//! status/run/dashboard/stop/spawn/send), resolves the project paths, and dispatches into the
+//! status/run/dashboard/stop/spawn/send/wiki), resolves the project paths, and dispatches into the
 //! harness. The orchestration itself lives in the library crate.
 
 // The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
@@ -178,6 +178,26 @@ enum Cmd {
     /// Install the `/agg:*` setup skills where your agent will actually find them.
     #[command(subcommand)]
     Skills(SkillsCmd),
+    /// Check a knowledge wiki (default: the worker's `agg/state/wiki/`) against OKF v0.2. Read-only.
+    #[command(subcommand)]
+    Wiki(WikiCmd),
+}
+
+/// The worker's knowledge wiki (`agg/state/wiki/`, an Open Knowledge Format bundle).
+#[derive(Subcommand)]
+enum WikiCmd {
+    /// Check OKF v0.2 conformance: every concept has frontmatter with a non-empty `type`; `index.md`
+    /// lists entries under headings; `log.md` is `## YYYY-MM-DD` groups, newest first. Writes
+    /// nothing. Exits 1 on any violation (warnings do not count).
+    Lint {
+        /// the wiki directory to check (default: the project's `agg/state/wiki/`; a missing default
+        /// wiki has nothing to violate, a missing PATH is an error)
+        path: Option<PathBuf>,
+        /// emit `{schema_version, ok, wiki, exists, files, concepts, problems, warnings}`
+        /// (docs/schemas/wiki_lint.v1.json)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Managing the `/agg:*` skills (`/agg:new`, `/agg:status`, `/agg:supervise`).
@@ -300,6 +320,10 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Check { json } => {
             let ok = agg::check::run(&p.config_base, &p.config, *json)?;
+            return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
+        }
+        Cmd::Wiki(WikiCmd::Lint { path, json }) => {
+            let ok = agg::wiki::run(&p.dir, path.as_deref(), *json)?;
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
         Cmd::Schema => {
