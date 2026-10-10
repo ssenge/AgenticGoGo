@@ -144,6 +144,7 @@ pub(crate) fn keep_or_rollback(
             crate::git::finalize_session(&ctx.dir, br, ctx.session, keep);
             let tag = if keep { Outcome::Merged } else { Outcome::RolledBack };
             crate::core::verdicts::append(&ctx.dir, Some(ctx.session), &step_name, fresh, tag)?;
+            crate::report::record_gate(ctx, keep, Some(br));
             // the whole span merged with this branch (it descends from every other one), or was
             // discarded with it. Either way the span is closed.
             clear_span(ctx, Some(br));
@@ -186,6 +187,7 @@ pub(crate) fn keep_or_rollback(
             // tree that base is not, so record them rolled_back and restore base truth, or the next
             // step is gated against a phantom.
             ctx.eng.restore_goal_state(pre_goals);
+            crate::report::record_gate(ctx, false, staged.map(|(br, _)| br.as_str()));
             clear_span(ctx, staged.map(|(br, _)| br.as_str()));
             crate::core::verdicts::append(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack)?;
             Gated::NotStaged

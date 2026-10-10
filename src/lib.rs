@@ -46,6 +46,7 @@ pub mod paths;
 pub mod plugin;
 pub mod project;
 pub mod registry;
+pub mod report;
 pub mod skills;
 pub mod state;
 pub mod summary;
