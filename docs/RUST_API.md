@@ -82,6 +82,7 @@ fn main() -> Result<(), agg::driver::Fatal> {
 |---|---|
 | `Agg::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
 | `.limits()` `.on_regression()` `.ratchet()` `.merge_requires_improvement()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
+| `.context(path, name)` `.network(Network::Allow(..))` `.image()` `.judge_image()` `.pass_env([..])` `.credentials([..])` | the run's confinement: read-only context dirs, the egress allow-list, the container images and what crosses into a container — YAML's `context:` / `isolation_policy:` / `image:` / `judge.image` ([CONFIG](CONFIG.md#network-egress--isolation_policynetwork)) |
 | `agg.step(&s)` | run one session. Commits on a session branch — **stages**, never merges |
 | `agg.judge(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
 | `agg.group(&g)` | every member of a `Group`'s verdict, through `judge()`'s memoized cache — count over it: `.at_least(2)`, `.all()`, `.any()` |
@@ -141,6 +142,12 @@ its caller.
 ```rust
 let build = Step::new("implement").isolation(Isolation::Sandbox);   // ← this confines the JUDGES too
 ```
+
+A context dir or a network allow-list needs EVERY step confined: `agg.step()` refuses an
+`Isolation::None` step when the run has either, and refuses a step whose agent's endpoint is not on
+the allow-list (a driver's steps never reach the YAML startup check, so the rule runs per step).
+`Step::image("…")` picks a container step's image; under `Isolation::Container` the judges run in
+`.judge_image()` (else `.image()`, else the base image), with the project read-only.
 
 A driver that declares no tier anywhere runs its judges unconfined, exactly as it runs its workers
 unconfined. That is the default and it is the honest one — but if you sandbox the worker and not the

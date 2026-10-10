@@ -43,7 +43,7 @@ defaults:
   worker_args: []                  # extra flags passed VERBATIM to the worker (the sandbox constraint)
   state: "state/STATE.md"          # the forward-advice file under agg/ (gitignored)
   isolation: none                  # none (default) | sandbox | container — the blast-radius jail
-  image: "alpine:3.20"             # the base image an `isolation: container` step runs in
+  image: "agg-claude"              # the image an `isolation: container` step runs IN (agent CLI inside)
   write_deny: ["tests/oracles/**"] # PROTECTED paths: readable, never changed — on EVERY tier (below)
 
 # THE RULER — runs LLM judges + the summarizer. Run-level and IMMUTABLE: naming any of these keys
@@ -119,7 +119,7 @@ isolation_policy:                  # run-level confinement beyond the tier
 | `role_prompt` | none | generic **role** framing composed *above* a step's `prompt:`. Inheritable; a step body may override it. |
 | `role_prompt_file` | none | `role_prompt` read from a **file** ([Prompts from files](#prompts-from-files--prompt_file-role_prompt_file)). An alternative to `role_prompt` — set one. |
 | `isolation` | `none` | `none` \| `sandbox` \| `container` — blast-radius jail (below). Inheritable; a step may override. |
-| `image` | `alpine:3.20` | the base image an `isolation: container` step runs in. Inert on every other tier. |
+| `image` | `alpine:3.20` | the image an `isolation: container` step runs in — the step's agent CLI runs inside it, so it must follow the [image contract](#the-container-tier-runs-the-agent) (reference images: `docker/claude`, `docker/codex`). Inert on every other tier. |
 | `write_deny` | `[]` | **protected paths** — globs every step may read but never change. Enforced on **every** tier by the gate's content-hash check, and by the kernel under `sandbox`/`container` ([below](#protected-paths--write_deny-readonly-writable)). A step's own list is ADDED to this one. |
 
 ## `judge` — THE RULER
@@ -179,7 +179,7 @@ Each NAME maps to a body of overrides. **The complete legal key list** (anything
 | `prompt_file` | none | `prompt` read from a **file** (below). An alternative to `prompt` — set one. |
 | `skip_judges` | `false` | `true` ⇒ no judges run after this step, so nothing merges — the work **stages** (below). |
 | `isolation` | `defaults.isolation` | `none` \| `sandbox` \| `container` — the blast-radius jail for this step (below). |
-| `image` | `defaults.image` | the base image for this step under `isolation: container`. |
+| `image` | `defaults.image` | the image this step runs in under `isolation: container` (the [image contract](#the-container-tier-runs-the-agent)). |
 | `readonly` | `[]` | project paths this step may read but not write — **kernel only**: inert under `isolation: none` (agg warns). No `defaults.readonly`. ([below](#protected-paths--write_deny-readonly-writable)) |
 | `writable` | `[]` | paths subtracted from this step's `readonly` (exact match). Never touches `write_deny`. |
 | `write_deny` | `[]` | MORE protected paths for this step, **unioned** with `defaults.write_deny`. Nothing subtracts from it. |

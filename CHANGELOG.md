@@ -50,5 +50,10 @@ Notable changes to agg. Newest first; each entry names the config keys and inter
   mounted read-only (scratch and toolchain cache under `agg/private/container/judge/`). They used to
   run on the host, unconfined, so a container worker could rewrite a judge script into a host escape.
   A container run's judges therefore need their toolchain in `judge.image`. Hooks stay host tooling.
+- `isolation: container` runs every container as the owner of the project dir (`--user uid:gid`),
+  no longer as root — files it writes into the project are the operator's (they were root-owned on a
+  Linux host). An image must therefore work for a non-root uid (the image contract).
 - `isolation: container` no longer mounts the host's agent state (`~/.claude`, `~/.codex`) into the
   container; the agent gets its own `HOME` instead.
+- `agg run` / `agg check` require on the host's `PATH` only the agent CLIs that run on the host; a
+  container step's agent is checked inside its image instead.

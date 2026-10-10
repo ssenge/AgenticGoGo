@@ -30,6 +30,16 @@ pub fn build(cfg: &AggConfig, dir: &Path) -> Result<RunPolicy> {
 /// The policy `cfg` asks for, plus every problem with it, each at its config key.
 pub fn resolve(cfg: &AggConfig, dir: &Path) -> (RunPolicy, Vec<Problem>) {
     let (contexts, mut problems) = super::context::resolve(&cfg.context, dir);
+    // a container mounts each context with `-v host:/context/<as>:ro`, which a `:` in the path splits
+    let containerized = cfg.steps.keys().filter_map(|s| cfg.resolve_step(s).ok()).any(|s| s.isolation == super::Isolation::Container);
+    if containerized {
+        for (i, c) in contexts.iter().enumerate().filter(|(_, c)| c.host.to_string_lossy().contains(':')) {
+            problems.push(Problem::new(
+                format!("context[{i}].path"),
+                format!("`{}` contains a `:`, which the container engine's `-v host:container` mount cannot carry", c.host.display()),
+            ));
+        }
+    }
     let ip = &cfg.isolation_policy;
     let mut pass_env = Vec::new();
     for (i, n) in ip.pass_env.iter().enumerate() {
