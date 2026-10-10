@@ -27,6 +27,8 @@
 //!       run.pid             the live loop's pid (double-run guard + `agg stop` target)
 //!       run.log             the run log: run ids, `--detach`/`--report-json` output
 //!       report.json         the end-of-run report — the stable interface for embedders
+//!       violations.jsonl    append-only record of `protected_path_violation` rollbacks (write_deny)
+//!       protected/<sha256>  agg's own copies of every `write_deny` file, to restore a violation from
 //! ```
 //!
 //! # Why the split exists
@@ -187,6 +189,23 @@ pub fn bus_dir(dir: &Path) -> PathBuf {
     private_dir(dir).join("bus")
 }
 
+/// The `write_deny` violation ledger: `agg/private/violations.jsonl` ([`crate::protect`]).
+///
+/// Private because it is what agg believes happened: a worker able to delete a row would erase the
+/// record that its session was rolled back for changing an oracle.
+pub fn violations_jsonl(dir: &Path) -> PathBuf {
+    private_dir(dir).join("violations.jsonl")
+}
+
+/// The content-addressed copies of every protected file: `agg/private/protected/<sha256>`.
+///
+/// Private so a confined worker cannot plant the bytes a restore would write back. Under
+/// `isolation: none` it can, which is why a restore checks every copy against the hash agg holds
+/// in memory before using it.
+pub fn protected_store(dir: &Path) -> PathBuf {
+    private_dir(dir).join("protected")
+}
+
 /// The live loop's pidfile: `agg/private/run.pid` (double-run guard + `agg stop` target).
 pub fn run_pid(dir: &Path) -> PathBuf {
     private_dir(dir).join("run.pid")
@@ -241,10 +260,15 @@ mod tests {
         assert_eq!(run_log(d), Path::new("/proj/agg/private/run.log"));
         // what an embedder ACTS on — a forged `done` would ship unfinished work.
         assert_eq!(report_json(d), Path::new("/proj/agg/private/report.json"));
+        // a worker deleting a row erases the record of its own rollback; planting a copy would
+        // make the restore write the worker's bytes back over the oracle.
+        assert_eq!(violations_jsonl(d), Path::new("/proj/agg/private/violations.jsonl"));
+        assert_eq!(protected_store(d), Path::new("/proj/agg/private/protected"));
 
         // and the carve-out must actually CONTAIN the private files, or the sandbox deny (which is
         // one subpath rule) would confine nothing.
-        for p in [verdicts_jsonl(d), calls_jsonl(d), gate_json(d), bus_dir(d), state_json(d), run_pid(d), report_json(d)] {
+        for p in [verdicts_jsonl(d), calls_jsonl(d), gate_json(d), bus_dir(d), state_json(d), run_pid(d), report_json(d),
+                  violations_jsonl(d), protected_store(d)] {
             assert!(p.starts_with(private_dir(d)), "{} must live under the carve-out", p.display());
         }
     }

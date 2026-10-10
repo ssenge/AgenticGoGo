@@ -248,6 +248,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 
 **Guardrails for unattended runs**
 - **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail. On both tiers `agg/private/` is carved back **out** of the writable set, so a confined worker cannot forge the verdict ledger that decides when its own run ends. ⚠ **A JUDGE is confined more tightly than the worker**: the project tree is **read-only** to it — a judge able to write what it grades can edit its way to a pass — and its writes are *relocated* to `$AGG_JUDGE_SCRATCH` plus a persistent toolchain cache (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, …), so a well-behaved judge needs no change ([details](CONFIG.md)). Refused at startup if the mechanism is missing, never a silent downgrade ([details](CONFIG.md)). *macOS verified; Linux experimental.*
+- **Protected paths** *(`write_deny`, in `defaults` and per step)* — globs the worker may **read but never change**: oracles, golden files, rule files, gate config. An agent that cannot pass a test will edit the test; this is what stops it. Enforced on **every** tier, `none` included, by a content-hash check at the gate over every covered file — tracked, untracked and gitignored: a session that changed one is **rolled back**, the files are restored from agg's own copies before any judge runs, and a `protected_path_violation` row with the paths lands in `agg/private/violations.jsonl`. Under `sandbox`/`container` the kernel also denies the write itself. A step's list is added to the default, never subtracted from. Tested against a fake agent that tries direct writes, symlinks, hard links, renames, `chmod`, `git checkout`, case variants and more ([details + platform matrix](CONFIG.md#protected-paths--write_deny-readonly-writable)).
 - **Rate-limit backoff** *(Claude + Codex)* — detects a usage/429 limit, discards the incomplete session, waits, and retries fresh.
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
 - **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `agg` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just judges — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](CONFIG.md)).
@@ -553,6 +554,11 @@ for c in 1..=20 {
 }
 ```
 
+Protected paths work the same way on this path: `Step::template().write_deny(["tests/oracles/"])`
+accumulates down the template chain like `readonly`, but nothing — not `.writable()` — subtracts from
+it. A step that changed a protected path makes the next `gate()` return `RolledBack`, whatever the
+judges and `on_regression` say.
+
 Eleven calls in total. **`step()` stages, `gate()` lands** — a driver that never gates loses nothing
 (every session is committed on its own branch) but never advances the base branch either. Judges are
 **lazy and memoized per step**, which is what makes `&&` a real cost gate rather than a style choice.
@@ -620,6 +626,11 @@ are refused by the kernel — otherwise a confined worker could append forged `m
 are untouched**: the worker still reads its brief and judges still read the ledger. Under the default
 `isolation: none` the worker has your whole filesystem and no directory layout changes that — see
 [isolation](CONFIG.md#isolation--blast-radius-jail-a-different-axis-from-session-isolation).
+
+**Protected paths are checked, not just carved out.** `agg/private/` is protected by the kernel
+alone, so under `none` it is a protocol boundary. The paths you list in `write_deny` get more: agg
+snapshots them before every worker and compares after it, on every tier, and rolls back a session
+that changed one — see [protected paths](CONFIG.md#protected-paths--write_deny-readonly-writable).
 
 > **Upgrading an existing project?** The private files used to live in `agg/state/`. Nothing there is
 > tracked, so the migration is a `mv` — see

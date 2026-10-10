@@ -192,6 +192,15 @@ fn step_demands(cfg: &AggConfig, step_name: &str, a: &mut Assessment) {
              `isolation: sandbox` / `isolation: none`."
         )));
     }
+    // Protected paths (`write_deny`): a pattern this tier cannot enforce in the kernel is
+    // REFUSED here rather than silently left to the gate alone; under `none` it is a warning,
+    // because there the gate check is the whole mechanism and says so.
+    let deny_at = at("write_deny", !body.write_deny.is_empty(), !cfg.defaults.write_deny.is_empty());
+    match crate::protect::check_step(step_name, step.isolation, &step.write_deny) {
+        Err(found) => a.problems.extend(found.into_iter().map(|m| Problem::new(deny_at.clone(), m))),
+        Ok(Some(w)) => a.warnings.push(Problem::new(deny_at, w)),
+        Ok(None) => {}
+    }
 }
 
 /// Where a step's `key` comes from: its own body, else `defaults`, else (a backend default) the

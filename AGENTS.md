@@ -74,11 +74,13 @@ defaults:                        # inherited by every step; a step may override 
   effort: "max"                  # low|medium|high|xhigh|max. DEFAULTS: claude max, codex high, copilot none.
                                  # codex clamps xhigh/max -> high; copilot cannot combine effort with model:"auto".
   state: "state/STATE.md"        # worker-curated forward-advice file (under gitignored agg/state/)
+  write_deny: ["tests/oracles/**"]  # PROTECTED: readable, never changed — gate-checked on EVERY tier
 judge:                           # THE RULER — runs .md judges + the summarizer. Immutable across a run.
   agent: "claude"
   model: "haiku"
   timeout: 300
 steps:                           # palette. legal keys: agent model effort worker_args state role_prompt prompt skip_judges
+                                 #   isolation image readonly writable write_deny
   worker: {}
 sequence:
   steps: ["worker"]              # entries; e.g. { step: worker, times: 4 } / { step: w, until: X, max: 4 }
@@ -171,12 +173,24 @@ agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of
   LOG.md                       durable institutional memory (worker's input arrives sanitized via sessions/)
   verdicts.jsonl  gate.json  state.json  project.json  bus/  run.{pid,log}
   report.json                  the end-of-run report — the STABLE interface for embedders (src/report/)
+  violations.jsonl  protected/   write_deny: the rollback record + agg's copies to restore from
 ```
 **The split rule:** if the worker writing it could change *when the loop ends, what it may spend, or what
 agg believes happened*, it is private. `verdicts.jsonl` is why: forged `merged` rows make `stalled` report
 met, so a project with `abort_if: "stalled"` has its worker end its own run. `src/paths.rs` is the
 authority — the classification IS a test there. Binds only under `isolation: sandbox`/`container`; under
 the default `none` the worker has the whole filesystem and no layout changes that.
+
+**Protected paths (`write_deny`)** — `defaults.write_deny` ∪ each step's own; globs `*` `?` `**`,
+project-relative. UNION ONLY: `writable:` never subtracts from it. Two layers, and the SECOND is the
+guarantee: (1) the kernel denies the write under `sandbox` (Seatbelt regex on macOS; bwrap `--ro-bind`
+on Linux) and `container` (`:ro` mounts); (2) on EVERY tier, `none` included, `features/protect.rs`
+hashes every covered entry (tracked, untracked AND gitignored) right before the worker and compares the
+moment it exits — a difference is restored before judging, recorded as `protected_path_violation` in
+`agg/private/violations.jsonl`, and the gate rolls the span back regardless of verdicts or
+`gate_regressions`. A bind tier (Linux sandbox, container) REFUSES any pattern but a literal path or
+`dir/**` at startup; `none` warns that only the gate applies. Platform matrix: `docs/CONFIG.md`.
+Code: `src/protect/` (glob, snapshot, sha256, the matrix), `src/features/protect.rs` (the bracket).
 
 ## The two ways to drive the loop (`src/` map)
 One engine, two front ends. `agg.step()` and the YAML walk dispatch through the **same** primitive —

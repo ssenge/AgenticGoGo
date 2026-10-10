@@ -323,6 +323,7 @@ mod tests {
                 image: crate::isolation::DEFAULT_IMAGE.into(),
                 readonly: vec![],
                 writable: vec![],
+                write_deny: vec![],
                 custom: None,
             }),
             live: crate::state::LiveState::new(dir, loop_start, dash.clone()),
