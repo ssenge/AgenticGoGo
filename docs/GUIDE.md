@@ -75,7 +75,8 @@ The **check** column is the one that matters: `agg` only ever drives the agent *
 version number or a login status proves nothing. If that one-shot prompt answers, `agg` can drive it.
 
 `agg doctor` verifies the agent is on your PATH **and** that it can do what your config asks —
-run it before your first loop. See [Choosing an agent](#choosing-an-agent) for what each one
+run it before your first loop. `agg check` validates the config alone and lists every problem at
+once; both take `--json` for scripts. See [Choosing an agent](#choosing-an-agent) for what each one
 can't do.
 
 **2 — Let the agent set up the loop.** Invoke the skill: **`/agg:new`** (Claude Code), **`/agg-new`**
@@ -683,7 +684,9 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | Command | What it does | Flags |
 |---|---|---|
 | `agg init` | Scaffold **placeholder** config you must then edit — a blank-slate fallback. Prefer `/agg:new`, which fills it in from your project. Writes `agg/agg.yaml` + `agg/AGG.md` + a starter judge. | `--agent <a>` shape it for that agent · `--force` overwrite |
-| `agg doctor` | Diagnose the setup: **every agent the sequence names** is on PATH, config parses, conditions valid, judges resolve, **the agents can do what the config asks**, skills installed | |
+| `agg doctor` | Diagnose the setup: **every agent the sequence names** is on PATH, config parses, conditions valid, judges resolve, **the agents can do what the config asks**, skills installed | `--json` versioned report: every backend (installed, path, version, capability flags), the isolation tiers this host offers, every problem with its config path |
+| `agg check` | Validate `agg/agg.yaml` + its judges exactly as `agg run` would at startup, listing **every** problem at once (each with a dotted config path). Runs no judge, no agent. Exit 1 on any problem | `--json` |
+| `agg schema` | Print the JSON Schema of `agg.yaml`, generated from the config types | |
 | `agg skills install` | Install the `agg-*` skills where your agent looks (`.claude/skills/` for Claude, `.agents/skills/` for Codex + Copilot) | `--agent <a>` (default: agg.yaml's `agent:`) · `--user` install under `$HOME` |
 | `agg plan` | Run every run-set judge once and print the starting scoreboard (a dry run) | |
 | `agg run` | Drive the loop until `done_if` is met (or a guard fires) | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` |
@@ -707,6 +710,23 @@ error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions` · **5**
 >
 > A **Rust driver** needs `fn main() -> ExitCode { agg::driver::run(real_main) }` to get these codes
 > at all: `-> Result<(), Fatal>` collapses every ending to 1. See [docs/RUST_API.md](RUST_API.md).
+
+## Stable interfaces
+
+What a script or an outer orchestrator may rely on across agg releases. A breaking change to a JSON
+document bumps its `schema_version`; a new field is not a breaking change, so ignore unknown fields.
+
+| Interface | Contract |
+|---|---|
+| `agg check --json` | `{schema_version, ok, config, problems: [{path, message}], warnings: [{path, message}]}`. `path` is dotted (`steps.worker.isolation`, `sequence.steps[1].until`; `""` = the whole file). Exit 0 valid · 1 any problem. Runs nothing. |
+| `agg doctor --json` | `{schema_version, agg_version, ok, config: {path, found, valid, judges}, backends: [{name, bin, used, installed, path, version, self_sandboxes, capabilities: {reports_output_tokens, reports_cost_usd, supports_resume, supports_effort, detects_rate_limits, supports_one_shot}}], isolation: {none, sandbox, container: {available, mechanism, requested}}, container_engine, problems, warnings}`. Exit 0 ok · 1 otherwise. |
+| `agg schema` | The JSON Schema (draft 2020-12) of `agg.yaml`, generated from the parser's own types; `$comment` names the agg version. |
+| The judge verdict JSON | One line on stdout: `{"met", "value", "max", "target", "rationale"}` — see [Building judges](#building-judges). |
+| `agg run` exit codes | 0 · 1 · 3 · 4 · 5, as listed under [CLI reference](#cli-reference). |
+
+**Not** interfaces — internals that change without notice: the rows of `agg/private/verdicts.jsonl`
+and `calls.jsonl`, everything else under `agg/private/` and `agg/state/`, and the human-readable
+text of every command.
 
 ## Configuration
 

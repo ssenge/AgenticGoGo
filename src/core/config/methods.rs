@@ -115,9 +115,15 @@ impl AggConfig {
         // breaks. Checked on the RAW text so it catches the key AND the condition term in one pass.
         Self::reject_removed_keys(path)?;
         let mut cfg: AggConfig = crate::util::load_yaml(path)?;
-        cfg.apply_env_overrides();
-        cfg.warn_suspicious_clock_bounds();
+        cfg.finish_load();
         Ok(cfg)
+    }
+
+    /// What [`Self::load`] does after serde: the env overrides, then the clock-unit warning. Shared
+    /// with `agg check`, which parses the text itself so it can collect every problem.
+    pub(crate) fn finish_load(&mut self) {
+        self.apply_env_overrides();
+        self.warn_suspicious_clock_bounds();
     }
 
     /// A hard error naming the replacement AND doing the arithmetic.
@@ -127,7 +133,7 @@ impl AggConfig {
     /// exactly the wrong repair, and it cannot see `abort_if: "wall_hours >= 8"` at all because that
     /// is a string. Both surfaces are caught here, in the raw YAML, and the message converts the
     /// value for the reader. See `internal/HUMAN_LOOP.md` §7.4.1.
-    fn reject_removed_keys(path: &Path) -> Result<()> {
+    pub(crate) fn reject_removed_keys(path: &Path) -> Result<()> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(_) => return Ok(()), // a missing/unreadable file is `load_yaml`'s error to report

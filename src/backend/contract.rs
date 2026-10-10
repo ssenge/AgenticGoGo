@@ -11,8 +11,9 @@ use std::path::Path;
 /// agent lacks it — this is not speculative generality.
 ///
 /// A `false` is not a defect to be worked around silently. It is a constraint the loop must
-/// enforce at startup (see [`crate::capability::check`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// enforce at startup (see [`crate::capability::check`]). Serialized as-is into `agg doctor --json`,
+/// so a field name here is a stable interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Capabilities {
     /// Reports output-token usage on its terminal event. Required by `budget.total` / `over_budget`.
     pub reports_output_tokens: bool,

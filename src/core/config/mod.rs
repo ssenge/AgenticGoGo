@@ -13,6 +13,7 @@
 
 use crate::backend::{for_name, AgentBackend};
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use std::sync::Arc;
 mod methods;
 
 /// Harness configuration (`agg.yaml`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AggConfig {
     pub project: String,
@@ -81,7 +82,7 @@ pub struct AggConfig {
 }
 
 /// Values inherited by every step (§4). A step body overrides any of them.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
     /// the WORKER default agent.
@@ -133,7 +134,7 @@ impl Default for Defaults {
 }
 
 /// THE RULER (§4): the backend that runs LLM judges and the summarizer. Run-level and immutable.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeCfg {
     #[serde(default = "default_agent")]
@@ -160,7 +161,7 @@ impl Default for JudgeCfg {
 /// e2e suite) simply DIES without it, and no amount of "use the Rust path" makes that a design
 /// choice rather than a hole. Only judges needing non-default config appear here; the rest are never
 /// listed, which is why the map is `#[serde(default)]` and usually absent.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeOverride {
     /// seconds. `None` = the run-level [`JudgeCfg::timeout`].
@@ -178,7 +179,7 @@ pub struct JudgeOverride {
 ///
 /// Any other key is a HARD ERROR (deny_unknown), which is what makes naming a `judge_*` key in a
 /// step fail loudly instead of being silently ignored.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StepBody {
     #[serde(default)]
@@ -251,7 +252,7 @@ pub struct SeqStep {
 /// The mapping form, and the ONLY place the field names live — [`SeqStep`]'s hand-written
 /// `Deserialize` delegates to it so `deny_unknown_fields` still names a typo'd key precisely (an
 /// `#[serde(untagged)]` enum would report the useless "data did not match any variant" instead).
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SeqStepBody {
     step: String,
@@ -288,10 +289,26 @@ impl<'de> Deserialize<'de> for SeqStep {
     }
 }
 
+/// The schema twin of the hand-written `Deserialize` above: a step NAME, or the mapping form. The
+/// mapping half IS [`SeqStepBody`]'s derived schema, so the field list (and its
+/// `additionalProperties: false`) has one source here too.
+impl JsonSchema for SeqStep {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SeqStep".into()
+    }
+    fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let body = g.subschema_for::<SeqStepBody>();
+        schemars::json_schema!({
+            "description": "A step name (shorthand for `{ step: NAME }`), or `{ step: NAME, times: N }` / `{ step: NAME, until: EXPR, max: N }`.",
+            "anyOf": [{ "type": "string" }, body]
+        })
+    }
+}
+
 /// The sequence: a repeating step list + the run-level ceilings and Definition of Done. The
 /// three ceilings (tokens, cost, sessions) are UNIFIED under one `limits:` block (§4.1) — previously
 /// separate `budget:`/`cost:`/`max_sessions:` keys.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Sequence {
     /// the entries, walked top to bottom and wrapped forever. EMPTY is legal and meaningful: it
@@ -380,7 +397,7 @@ impl Default for AggConfig {
 }
 
 /// Delivery for `notify_if` / an `abort_if` halt (STUCK_NOTIFY §5).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NotifyCfg {
     /// shell commands, run exactly like a hook — best-effort, non-fatal, in the step's jail. Each
@@ -396,7 +413,7 @@ pub struct NotifyCfg {
 
 /// Per-session git isolation — MANDATORY, no master switch. The keep/rollback decision moved to
 /// `sequence.gate_regressions`; only these three keys survive here (§4.1).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionIsolation {
     #[serde(default = "default_branch_prefix")]
@@ -417,7 +434,7 @@ impl Default for SessionIsolation {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Hooks {
     #[serde(default)]
@@ -433,7 +450,7 @@ pub struct Hooks {
 }
 
 /// LLM-summary settings. `model` is dropped (§4.1) — the summarizer runs on the RULER.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Summary {
     #[serde(default = "default_true")]
@@ -448,7 +465,7 @@ impl Default for Summary {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Watchdog {
     #[serde(default = "default_wd_idle")]
@@ -472,7 +489,7 @@ impl Default for Watchdog {
 /// Rust driver hands the same value to `Agg::limits(..)`. That is why [`Limits::wall_hours`] is a
 /// valid `agg.yaml` key even though only the driver path enforces it — a second, driver-only limits
 /// struct would have to be kept in sync with this one forever, for no gain.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     /// output-token ceiling — WORKER *and* JUDGE spend (§5.6). null = unlimited. Backs `over_budget`.
@@ -507,7 +524,7 @@ pub struct Limits {
     pub work_time: Option<f64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Memory {
     #[serde(default = "default_true")]
