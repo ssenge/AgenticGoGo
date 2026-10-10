@@ -183,6 +183,12 @@ fn real_main() -> Result<(), Fatal> { /* … */ }
 It maps the ending to the same codes `agg run` uses: **0** goals met · **3** `abort_if` · **4**
 max-sessions · **5** stopped by an operator · **1** a real fault.
 
+A driver run writes the same `agg/private/report.json` as `agg run` (see
+[CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson)), when the `Agg` drops. `Drop` cannot see
+whether `main` returned `Err`, so a driver's own error reads as `done` there — `agg::driver::run`
+corrects it to `outcome: error`, which is one more reason to use it. A driver that panics leaves no
+report; a consumer reads a missing report as `error`.
+
 ## Resuming a crashed run
 
 An overnight driver that dies at hour six should not start again at hour zero.
