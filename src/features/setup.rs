@@ -57,7 +57,16 @@ impl Handler for Baseline {
         // it — unconfined, before any jail exists — forging `merged` rows straight into the ledger.
         // `stalled` then reports met and an `abort_if: "stalled"` project has its worker end its own
         // run. Clean-and-committed is not the same as untampered.
-        let pre = ctx.eng.run_step(&ctx.dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false, ctx.cfg.run_isolation());
+        let mut pre = ctx.eng.run_step(&ctx.dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false, ctx.cfg.run_isolation());
+        // The RATCHET's references: a seed wins, else this pass measures them. A ratcheted judge
+        // with no number — or one that errored with no seed — REFUSES the run here, before session
+        // 1: a ratchet with nothing to compare against would silently pass every session. Then the
+        // conditions are re-read, so a `<judge>.ref` term sees the reference it was just given.
+        for w in ctx.eng.gate.seed(&pre.fresh_verdicts)? {
+            eprintln!("  ⚠ {w}");
+        }
+        crate::core::ratchet::save(&ctx.dir, &ctx.eng.gate.state)?;
+        ctx.eng.reevaluate(&rs, &mut pre);
         ctx.tokens_spent += pre.judge_tokens;
         if let Some(c) = pre.judge_cost {
             ctx.cost_spent += c;
