@@ -655,8 +655,8 @@ cd src/web && npm install && npm run dev   # the web UI on :5173
 
 ## CLI reference
 
-Global flags, valid on every subcommand: `--dir <path>` (project root, default `.`),
-`--config <file>` (default `<dir>/agg/agg.yaml`).
+Global flags, valid on every subcommand: `--dir <path>` (project root, default `.`; `--project
+<path>` is the same flag), `--config <file>` (default `<dir>/agg/agg.yaml`).
 
 | Command | What it does | Flags |
 |---|---|---|
@@ -664,7 +664,7 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg doctor` | Diagnose the setup: **every agent the sequence names** is on PATH, config parses, conditions valid, judges resolve, **the agents can do what the config asks**, skills installed | |
 | `agg skills install` | Install the `agg-*` skills where your agent looks (`.claude/skills/` for Claude, `.agents/skills/` for Codex + Copilot) | `--agent <a>` (default: agg.yaml's `agent:`) · `--user` install under `$HOME` |
 | `agg plan` | Run every run-set judge once and print the starting scoreboard (a dry run) | |
-| `agg run` | Drive the loop until `done_if` is met (or a guard fires) | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` |
+| `agg run` | Drive the loop until `done_if` is met (or a guard fires). Writes `agg/private/report.json` on every ending | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` · `--report-json` logs to `agg/private/run.log`, prints only the report · `--base-branch <ref>` overrides `session_isolation.base_branch` |
 | `agg judge <name>` | Resolve **one** judge by name and print its raw verdict — for authoring judges | |
 | `agg status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no judges) | `--json` |
 | `agg history` | This project's run history, newest first, plus lifetime totals | `--json` |
@@ -677,7 +677,9 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg hil <kind>` | *(used by the worker, not the operator)* ask a human. **Records and exits — it never waits** | `bool <q>` · `choose <q> --option … --option …` · `input <q>` |
 
 `agg run` exit codes, so automation can branch on the outcome: **0** `done_if` met · **1** hard
-error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions` · **5** an operator stopped it.
+error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions` · **5** an operator stopped it
+(`agg stop`, SIGTERM, SIGINT). The run report's `outcome` says the same thing and is authoritative —
+see [Embedding agg](#embedding-agg).
 
 > ⚠ **5 is new, and it changed.** An operator stop used to report **0**, sharing it with a met goal —
 > so `if agg run; then ship; fi` shipped on `agg stop`. A stop is not success. A wrapper that wants
@@ -685,6 +687,35 @@ error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions` · **5**
 >
 > A **Rust driver** needs `fn main() -> ExitCode { agg::driver::run(real_main) }` to get these codes
 > at all: `-> Result<(), Fatal>` collapses every ending to 1. See [docs/RUST_API.md](RUST_API.md).
+
+## Embedding agg
+
+A program that drives agg — a CI job, an orchestrator running many projects — should depend only on
+these interfaces. They are versioned and documented; a change to them is a breaking change.
+
+| interface | what it gives you |
+|---|---|
+| **`agg/private/report.json`** | how the run ended: `outcome` (`done` · `aborted` · `stopped` · `error`), the reason, session counts, clock, every judge's last and baseline verdict, the result commit, open asks. Schema: [`docs/schemas/report.v1.json`](schemas/report.v1.json). Field reference: [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson). |
+| **exit codes** | 0 done · 3 `abort_if` · 4 session cap · 5 stopped · 1 error. The report's `outcome` is authoritative. |
+| **the judge verdict JSON** | `{"met", "value", "max", "target", "rationale", "error"}` on a judge's stdout — [Building judges](#building-judges). |
+
+```bash
+agg --project ./svc run --report-json --base-branch release > report.json
+case "$(jq -r .outcome report.json)" in
+  done) ship ;; aborted|stopped) escalate ;; *) page ;;
+esac
+```
+
+**Headless runs.** `agg run` never prompts and never starts the TUI; it needs no TTY. With
+`--report-json`, everything agg and its children print goes to `agg/private/run.log`, and stdout
+carries only the report. SIGTERM is treated like `agg stop`: the worker is killed, the session ends,
+the report says `stopped`, and the exit code is 5. `agg stop --project <dir>` stops a run from another
+process. Runs in different project directories share nothing — pid file, scratch directories and the
+report are all per project.
+
+**Do not rely on** `state.json`, `verdicts.jsonl` rows, `project.json`, `calls.jsonl`, the bus files
+or the console output. They are internal and change between versions. A report that is **missing**
+(SIGKILL, OOM, power loss) must be read as `outcome: error`.
 
 ## Configuration
 

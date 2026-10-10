@@ -43,7 +43,11 @@ CLI and the web API, and they disagreed. An ANSWER is not a send: it is a durabl
 ## CLI (run from the project root)
 - `agg init [--agent claude|codex|copilot] [--force]` — scaffold `agg.yaml` + `AGG.md` + `state/STATE.md` + a starter judge.
 - `agg plan` — dry run: evaluate every judge once, print the starting scoreboard.
-- `agg run [--max-sessions N] [--detach]` — run the loop until `done_if`/`abort_if`.
+- `agg run [--max-sessions N] [--detach] [--report-json] [--base-branch <ref>]` — run the loop until `done_if`/`abort_if`.
+  Every ending writes `agg/private/report.json` (`outcome` done|aborted|stopped|error — authoritative;
+  schema `docs/schemas/report.v1.json`). `--report-json`: logs → `agg/private/run.log`, stdout = the report only.
+  Exit codes: 0 done · 3 abort_if · 4 max-sessions · 5 stopped (agg stop / SIGTERM / SIGINT) · 1 error.
+  Precedence at one session end: error > stopped > done > aborted. `--project <dir>` = `--dir <dir>` (global).
 - `agg status [--json]` — live scoreboard (reads `state.json`; cheap, does NOT re-judge).
 - `agg dashboard [--once]` — live TUI (or one-shot snapshot).
 - `agg doctor` — check the chosen agent is installed and the config is valid for it.
@@ -149,6 +153,7 @@ agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of
   INSTRUCTIONS.md              the worker's whole `-p` (agg REGENERATES it every session; the worker's ORDERS)
   LOG.md                       durable institutional memory (worker's input arrives sanitized via sessions/)
   verdicts.jsonl  state.json  project.json  bus/  run.{pid,log}
+  report.json                  the end-of-run report — the STABLE interface for embedders (src/report/)
 ```
 **The split rule:** if the worker writing it could change *when the loop ends, what it may spend, or what
 agg believes happened*, it is private. `verdicts.jsonl` is why: forged `merged` rows make `stalled` report
