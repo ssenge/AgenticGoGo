@@ -353,19 +353,18 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
 
 /// The wiki's page names (up to a handful), sorted, for the INSTRUCTIONS "start with …" hint. A pure
 /// listing — an empty/absent dir yields no names and the hint is dropped. Caps at 5 so a large wiki
-/// can't bloat the pointer; the worker sees the rest by opening the dir.
+/// can't bloat the pointer; the worker sees the rest by opening the dir. The OKF `index.md` leads when
+/// there is one: it is the listing written to be read first.
 fn wiki_pages(wiki: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(wiki) else { return Vec::new() };
     let mut names: Vec<String> = entries
         .flatten()
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().into_owned();
-            n.ends_with(".md").then(|| format!("`wiki/{n}`"))
-        })
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".md"))
         .collect();
-    names.sort();
+    names.sort_by_key(|n| (n != "index.md", n.clone()));
     names.truncate(5);
-    names
+    names.into_iter().map(|n| format!("`wiki/{n}`")).collect()
 }
 
 /// The branch a JUDGED step's regression check reads / the branch a session is cut off. Base is the
@@ -386,5 +385,14 @@ mod tests {
         std::fs::write(tmp.path().join("notes.txt"), "x").unwrap();
         let pages = wiki_pages(tmp.path());
         assert_eq!(pages, ["`wiki/plan.md`"]);
+    }
+
+    #[test]
+    fn wiki_pages_lead_with_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        for n in ["a.md", "index.md", "log.md"] {
+            std::fs::write(tmp.path().join(n), "x").unwrap();
+        }
+        assert_eq!(wiki_pages(tmp.path()), ["`wiki/index.md`", "`wiki/a.md`", "`wiki/log.md`"]);
     }
 }
