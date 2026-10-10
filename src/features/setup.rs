@@ -75,7 +75,17 @@ impl Handler for Baseline {
         ctx.charge(&ruler_agent, pre.judge_tokens, pre.judge_cost);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
         ctx.publish();
-        crate::core::verdicts::append(&ctx.dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
+        crate::features::evidence::keep(ctx, None, &pre.fresh_verdicts);
+        let kept = crate::features::evidence::for_ledger(ctx, &pre.fresh_verdicts);
+        crate::core::verdicts::append_full(
+            &ctx.dir,
+            None,
+            "baseline",
+            &pre.fresh_verdicts,
+            crate::core::verdicts::Outcome::Baseline,
+            &[],
+            &kept,
+        )?;
         crate::report::record_baseline(ctx, &pre.fresh_verdicts);
         // `!pre.stop`: done beats aborted when both already hold (`report::decide`).
         if pre.halt && !pre.stop {

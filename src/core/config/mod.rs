@@ -107,6 +107,11 @@ pub struct Defaults {
     /// no Rust (this replaced the hardcoded `enum Role` red-team arm). `None` = no role section.
     #[serde(default)]
     pub role_prompt: Option<String>,
+    /// [`Self::role_prompt`], read from a FILE at every session start (relative to `agg/`, or
+    /// absolute) — so an edit applies from the next session, and its hash lands in
+    /// `agg/private/prompts.jsonl`. An alternative to `role_prompt`: setting both is a startup error.
+    #[serde(default)]
+    pub role_prompt_file: Option<String>,
     /// blast-radius isolation (`none` | `sandbox` | `container`) — the jail around the worker
     /// (DIFFERENT from `session_isolation`, which protects the git history). Inheritable; a step
     /// may override. `None` here = fall through to the [`crate::isolation::Isolation`] default (none).
@@ -136,6 +141,7 @@ impl Default for Defaults {
             worker_args: vec![],
             state: default_state(),
             role_prompt: None,
+            role_prompt_file: None,
             isolation: None,
             image: None,
             write_deny: vec![],
@@ -155,11 +161,20 @@ pub struct JudgeCfg {
     /// EVERY judge's timeout, script and LLM alike (seconds).
     #[serde(default = "default_judge_timeout")]
     pub timeout: u64,
+    /// the most evidence (MiB) agg copies into `agg/private/evidence/` in ONE run. A disk bound,
+    /// not a run limit: a file that does not fit is skipped and recorded, and the run goes on.
+    #[serde(default = "default_evidence_max_mb")]
+    pub evidence_max_mb: u64,
 }
 
 impl Default for JudgeCfg {
     fn default() -> Self {
-        JudgeCfg { agent: default_agent(), model: None, timeout: default_judge_timeout() }
+        JudgeCfg {
+            agent: default_agent(),
+            model: None,
+            timeout: default_judge_timeout(),
+            evidence_max_mb: default_evidence_max_mb(),
+        }
     }
 }
 
@@ -183,8 +198,8 @@ pub struct JudgeOverride {
 /// per-step isolation lists. The COMPLETE legal key list is:
 ///
 /// ```text
-/// agent · model · effort · worker_args · state · role_prompt · prompt · skip_judges
-/// isolation · image · readonly · writable · write_deny
+/// agent · model · effort · worker_args · state · role_prompt · role_prompt_file · prompt
+/// prompt_file · skip_judges · isolation · image · readonly · writable · write_deny
 /// ```
 ///
 /// Any other key is a HARD ERROR (deny_unknown), which is what makes naming a `judge_*` key in a
@@ -206,9 +221,17 @@ pub struct StepBody {
     /// `defaults.role_prompt`; `None` inherits it.
     #[serde(default)]
     pub role_prompt: Option<String>,
+    /// `role_prompt` from a file — see [`Defaults::role_prompt_file`]. Setting either of the pair on
+    /// a step overrides BOTH of the defaults' (a step's file replaces the defaults' inline text).
+    #[serde(default)]
+    pub role_prompt_file: Option<String>,
     /// ADDITIVE to the composed prompt (§5.6), never replacing.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// `prompt` from a file (relative to `agg/`, or absolute), read at every session start. An
+    /// alternative to `prompt`: setting both is a startup error.
+    #[serde(default)]
+    pub prompt_file: Option<String>,
     /// no DoD judges run after this step ⇒ nothing merges; the work STAGES (§5.7).
     #[serde(default)]
     pub skip_judges: bool,
@@ -602,6 +625,9 @@ fn default_true() -> bool {
 fn default_judge_timeout() -> u64 {
     300
 }
+fn default_evidence_max_mb() -> u64 {
+    crate::core::evidence::DEFAULT_MAX_MB
+}
 fn default_summary_interval() -> u64 {
     300
 }
@@ -640,6 +666,10 @@ pub struct ResolvedStep {
     pub state: String,
     pub role_prompt: Option<String>,
     pub prompt: Option<String>,
+    /// the file `role_prompt` is read from at session start (`core::prompts`), as written.
+    pub role_prompt_file: Option<String>,
+    /// the file `prompt` is read from at session start, as written.
+    pub prompt_file: Option<String>,
     pub skip_judges: bool,
     /// resolved blast-radius isolation (step over defaults, default none) — [`crate::isolation`].
     pub isolation: crate::isolation::Isolation,

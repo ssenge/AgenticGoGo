@@ -138,9 +138,15 @@ fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
 /// after the fact. Upgrade path when it bites: sweep this project's `agg-judges-<key>-*` on run end
 /// (`Agg::drop` / the loop's finalize), keeping the newest few.
 fn scratch_dir(cwd: &Path, session: Option<u32>) -> std::io::Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join(format!("agg-judges-{}-{}", project_key(cwd), session.unwrap_or(0)));
+    let dir = scratch_path(cwd, session);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Where [`scratch_dir`] puts a session's judge scratch, without creating it — what evidence
+/// persistence resolves a verdict's relative `evidence` paths against (`core::evidence`).
+pub fn scratch_path(cwd: &Path, session: Option<u32>) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("agg-judges-{}-{}", project_key(cwd), session.unwrap_or(0)))
 }
 
 /// The judges' TOOLCHAIN CACHE — per project, and deliberately **not** per session.

@@ -1,6 +1,6 @@
 //! What the loop records for the report as it runs, and the `LoopState` → [`Report`] assembly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use super::{JudgeEntry, OpenAsk, Outcome, Paths, Report, RunHandle, RunResult, Sessions, Time, VerdictView};
@@ -39,10 +39,21 @@ pub fn record_gate(ctx: &mut LoopState, kept: bool, branch: Option<&str>) {
 
 /// Record the baseline pass's verdicts — the "before" column of the report's judge table.
 pub fn record_baseline(ctx: &mut LoopState, fresh: &[(String, Verdict)]) {
-    let t = ctx.ext.get::<Tally>();
     for (name, v) in fresh {
-        t.baseline.insert(name.clone(), v.into());
+        let mut view = VerdictView::from(v);
+        view.evidence = absolute(crate::features::evidence::saved_for(ctx, name, v));
+        ctx.ext.get::<Tally>().baseline.insert(name.clone(), view);
     }
+}
+
+/// Paths as a consumer can open them from any cwd.
+fn absolute(paths: impl IntoIterator<Item = std::path::PathBuf>) -> Vec<String> {
+    paths.into_iter().map(abs).collect()
+}
+
+fn abs(p: std::path::PathBuf) -> String {
+    let p = if p.is_absolute() { p } else { std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p) };
+    p.to_string_lossy().into_owned()
 }
 
 /// Build the report for a run that ended with `res`, from the live loop state.
@@ -55,6 +66,8 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
         (git.iso_base.clone(), git.span_tip.clone(), git.span_branches.len() as u32)
     };
     let tally = std::mem::take(st.ext.get::<Tally>());
+    let kept = crate::features::evidence::all_saved(st);
+    let evidence_dir = crate::features::evidence::run_dir_if_used(st).map(abs);
     let base_branch = Some(iso_base).filter(|b| !b.is_empty());
     let final_commit = base_branch.as_deref().and_then(|b| crate::git::rev_parse(&st.dir, b));
     Report {
@@ -64,9 +77,10 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
             work_time_s: st.clock.work_secs(now),
             human_wait_time_s: st.clock.human_wait_secs,
         },
-        judges: judges(&st.dash.judges, tally.baseline),
+        judges: judges(&st.dash.judges, tally.baseline, &kept),
         result: RunResult { base_branch, final_commit, staged_branch: span_tip },
         open_asks: open_asks(&st.dir, now),
+        paths: Paths { evidence_dir, ..paths(&st.dir) },
         ..skeleton(&st.dir, &st.cfg.project, run.run_id(), run.started_at(), res, &st.dash.finish_reason)
     }
 }
@@ -113,16 +127,30 @@ fn skeleton(
 
 /// Every judge the run consulted: its last verdict (the published scoreboard, which both entry
 /// points fill) joined with its baseline. A judge that never produced a verdict has `last: null`.
-fn judges(board: &[crate::state::JudgeView], mut baseline: BTreeMap<String, VerdictView>) -> BTreeMap<String, JudgeEntry> {
+///
+/// `kept` is each judge's last kept verdict and its evidence copies: they are listed on `last` only
+/// when `last` IS that verdict — after a rollback restored an older one, they describe another.
+fn judges(
+    board: &[crate::state::JudgeView],
+    mut baseline: BTreeMap<String, VerdictView>,
+    kept: &HashMap<String, (Verdict, Vec<std::path::PathBuf>)>,
+) -> BTreeMap<String, JudgeEntry> {
     let mut out = BTreeMap::new();
     for j in board {
-        let last = (j.state != "pending").then(|| VerdictView {
-            met: j.met,
-            value: j.value,
-            max: j.max,
-            target: j.target,
-            rationale: j.rationale.clone(),
-            error: j.error.clone(),
+        let last = (j.state != "pending").then(|| {
+            let mut view = VerdictView {
+                met: j.met,
+                value: j.value,
+                max: j.max,
+                target: j.target,
+                rationale: j.rationale.clone(),
+                error: j.error.clone(),
+                evidence: Vec::new(),
+            };
+            if let Some((_, saved)) = kept.get(&j.name).filter(|(v, _)| VerdictView::from(v) == view) {
+                view.evidence = absolute(saved.iter().cloned());
+            }
+            view
         });
         out.insert(j.name.clone(), JudgeEntry { last, baseline: baseline.remove(&j.name) });
     }
@@ -144,10 +172,6 @@ fn open_asks(dir: &Path, now: u64) -> Vec<OpenAsk> {
 
 /// Absolute paths, so a consumer can open them from any cwd.
 fn paths(dir: &Path) -> Paths {
-    let abs = |p: std::path::PathBuf| {
-        let p = if p.is_absolute() { p } else { std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p) };
-        p.to_string_lossy().into_owned()
-    };
     Paths {
         report: abs(crate::paths::report_json(dir)),
         ledger: abs(crate::paths::verdicts_jsonl(dir)),
@@ -196,10 +220,34 @@ mod tests {
             JudgeView { name: "a".into(), state: "met".into(), met: true, ..Default::default() },
             JudgeView { name: "p".into(), state: "pending".into(), ..Default::default() },
         ];
-        let out = judges(&dash, b);
+        let out = judges(&dash, b, &HashMap::new());
         assert!(out["a"].last.as_ref().is_some_and(|v| v.met));
         assert!(out["a"].baseline.as_ref().is_some_and(|v| !v.met));
         assert!(out["p"].last.is_none(), "a pending judge has no verdict yet");
         assert!(out["gone"].last.is_none() && out["gone"].baseline.is_some());
+    }
+
+    /// Kept evidence is listed on `last` only when `last` is the verdict it was kept for — after a
+    /// rollback restored an older verdict, the copies describe one the report does not show.
+    #[test]
+    fn evidence_is_listed_only_on_the_verdict_it_was_kept_for() {
+        use crate::state::JudgeView;
+        let kept_v = Verdict { met: true, value: Some(1.0), max: Some(1.0), target: 1.0, rationale: "r".into(), evidence: vec!["cc.sarif".into()], error: None };
+        let mut kept = HashMap::new();
+        kept.insert("a".to_string(), (kept_v.clone(), vec![std::path::PathBuf::from("/p/agg/private/evidence/r/1/a/cc.sarif")]));
+        kept.insert("b".to_string(), (kept_v, vec![std::path::PathBuf::from("/p/x")]));
+        let view = |name: &str, met: bool| JudgeView {
+            name: name.into(),
+            state: "met".into(),
+            met,
+            value: Some(1.0),
+            max: Some(1.0),
+            target: 1.0,
+            rationale: "r".into(),
+            ..Default::default()
+        };
+        let out = judges(&[view("a", true), view("b", false)], BTreeMap::new(), &kept);
+        assert_eq!(out["a"].last.as_ref().unwrap().evidence, ["/p/agg/private/evidence/r/1/a/cc.sarif"]);
+        assert!(out["b"].last.as_ref().unwrap().evidence.is_empty(), "b shows a restored verdict, not the kept one");
     }
 }

@@ -318,6 +318,8 @@ mod tests {
                 state: "agg/state/STATE.md".into(),
                 role_prompt: None,
                 prompt: None,
+                role_prompt_file: None,
+                prompt_file: None,
                 skip_judges: false,
                 isolation: tier,
                 image: crate::isolation::DEFAULT_IMAGE.into(),

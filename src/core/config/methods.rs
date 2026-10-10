@@ -31,6 +31,11 @@ impl AggConfig {
             let names: Vec<&str> = self.steps.keys().map(String::as_str).collect();
             anyhow!("unknown step `{name}` — not a key in `steps:`. defined: {}", names.join(", "))
         })?;
+        let role = if body.role_prompt.is_some() || body.role_prompt_file.is_some() {
+            (&body.role_prompt, &body.role_prompt_file)
+        } else {
+            (&self.defaults.role_prompt, &self.defaults.role_prompt_file)
+        };
         Ok(ResolvedStep {
             name: name.to_string(),
             agent: body.agent.clone().unwrap_or_else(|| self.defaults.agent.clone()),
@@ -38,8 +43,11 @@ impl AggConfig {
             effort: body.effort.clone().or_else(|| self.defaults.effort.clone()),
             worker_args: body.worker_args.clone().unwrap_or_else(|| self.defaults.worker_args.clone()),
             state: body.state.clone().unwrap_or_else(|| self.defaults.state.clone()),
-            role_prompt: body.role_prompt.clone().or_else(|| self.defaults.role_prompt.clone()),
+            // the pair inherits AS A PAIR: a step naming either form replaces both of the defaults'.
+            role_prompt: role.0.clone(),
+            role_prompt_file: role.1.clone(),
             prompt: body.prompt.clone(),
+            prompt_file: body.prompt_file.clone(),
             skip_judges: body.skip_judges,
             // Copy type → no clone. step overrides defaults; both absent ⇒ Isolation::None.
             isolation: body.isolation.or(self.defaults.isolation).unwrap_or_default(),

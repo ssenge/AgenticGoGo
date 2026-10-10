@@ -38,7 +38,7 @@ impl Lifecycle {
 
 /// Uniform judge output — the judge contract. Every judge (script or LLM) prints
 /// exactly this JSON to stdout.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Verdict {
     pub met: bool,
     /// numeric measure the judge emitted: a count, a percent, or 0/1. `None` = the judge emitted NO

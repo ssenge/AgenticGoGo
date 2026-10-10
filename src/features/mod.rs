@@ -5,6 +5,7 @@
 //! what any of them do — proving "agg is just the built-in plugin" (LOOPSTATE_REDESIGN §3.1 /
 //! HOOK_REDESIGN §1) in the layout itself.
 
+pub mod evidence;
 pub mod finalize;
 pub mod gate;
 pub mod gitsetup;

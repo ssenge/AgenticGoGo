@@ -182,6 +182,14 @@ impl Agg {
         self
     }
 
+    /// The most judge evidence (MiB) this run copies into `agg/private/evidence/` — the twin of
+    /// YAML's `judge.evidence_max_mb` (default 100). A disk bound, not a run limit: a file that does
+    /// not fit is skipped and recorded on its verdict's ledger row, and the run goes on.
+    pub fn evidence_max_mb(mut self, mb: u64) -> Agg {
+        self.cfg.judge.evidence_max_mb = mb;
+        self
+    }
+
     /// The standing project-instructions file the worker's brief POINTS AT, relative to the project
     /// dir. Default `agg/AGG.md`.
     ///
@@ -361,6 +369,7 @@ impl Agg {
             scratch: crate::plugin::Extensions::default(),
         };
         st.ext.get::<AGGState>().git.iso_base = iso_base;
+        crate::features::evidence::begin(&mut st, report.run_id());
         st.publish();
         st.dash.lifetime_session = lifetime_base;
         // the first span opens here, against the engine's launch truth.
@@ -464,6 +473,23 @@ impl Agg {
                  `template.create(\"implement\")`"
             )));
         };
+        // a driver's steps never reach `assembly`, so the prompt-file refusals happen HERE: one form
+        // per step, and a file that can be read now (it is read again at every session start).
+        let config_base = crate::paths::config_base(&self.dir);
+        let at = format!("step `{name}`");
+        let mut problems =
+            crate::core::prompts::pair_problems(&at, "prompt", step.prompt.as_deref(), step.prompt_file.as_deref(), &config_base);
+        let d = &self.cfg.defaults;
+        problems.extend(crate::core::prompts::pair_problems(
+            "defaults",
+            "role_prompt",
+            d.role_prompt.as_deref(),
+            d.role_prompt_file.as_deref(),
+            &config_base,
+        ));
+        if !problems.is_empty() {
+            return Err(Fatal::Other(anyhow::anyhow!("{}", crate::problem::render(&problems))));
+        }
         let write_deny = crate::protect::union(&self.cfg.defaults.write_deny, &step.write_deny);
         // The driver's steps are built in code, so `capability::check` never sees them: the
         // write_deny refusal for this tier happens HERE, before the step can run unprotected.
@@ -481,6 +507,8 @@ impl Agg {
             state: step.state.clone().unwrap_or_else(|| self.cfg.defaults.state.clone()),
             role_prompt: self.cfg.defaults.role_prompt.clone(),
             prompt: step.prompt.clone(),
+            role_prompt_file: self.cfg.defaults.role_prompt_file.clone(),
+            prompt_file: step.prompt_file.clone(),
             // ⛔ ALWAYS. `step()` STAGES and `gate()` decides, so the driver path takes today's
             // `skip_judges` route unconditionally: `StageSpan` keeps the branch and extends the
             // span, while `StageMerge`/`RunJudges`/`GateKeepRollback` become no-ops. There is no
@@ -773,6 +801,8 @@ impl Agg {
             // its judges ran. `publish()` leaves `dash.judges` alone when the engine has none, so
             // this upsert is what the TUI, the web BFF and Progress actually render.
             Self::publish_verdict(&mut st.dash.judges, &j.name, &kind, &verdict);
+            // judged in THIS session's scratch, so the evidence is kept now, not at the gate.
+            crate::features::evidence::keep(&mut st, Some(session), &[(j.name.clone(), verdict.clone())]);
             st.dash.pos = self.label_path();
             st.publish();
         }

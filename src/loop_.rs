@@ -352,6 +352,7 @@ fn run_reported(
         scratch: Extensions::default(),
     };
     st.ext.get::<AGGState>().git.iso_base = iso_base; // resolved base branch (was a named field)
+    crate::features::evidence::begin(&mut st, run.run_id());
     st.publish();
     st.dash.lifetime_session = lifetime_base;
 
