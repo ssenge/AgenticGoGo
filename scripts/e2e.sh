@@ -1989,7 +1989,7 @@ def render(rows):
     return "\n".join(lines)
 EOF
   sed 's/Report A/Report B/' "$SM/report_a.py" > "$SM/report_b.py"
-  # the worker makes the WORST function worse: a 12-branch function lands in calc.py.
+  # the worker makes the WORST function worse: a 12-decision function (cyclomatic 13) lands in calc.py.
   cat > "$SM/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
@@ -2031,7 +2031,7 @@ rows = [json.loads(l) for l in open(sys.argv[1])]
 print([r for r in rows if r['judge'] == sys.argv[2]][0].get('value'))" "$SM/agg/private/verdicts.jsonl" "$1"; }
   is  "the fixture's known complexity: cyclomatic max 5" "$(first_value cc_max)" "5.0"
   is  "the fixture's known duplication: one clone"        "$(first_value clones)" "1.0"
-  has "a worse max complexity is rolled back by the ratchet" "$SM/run.log" "ratchet \`cc_max\`: 5 → 12"
+  has "a worse max complexity is rolled back by the ratchet" "$SM/run.log" "ratchet \`cc_max\`: 5 → 13"
   exists "the incumbent's report is kept under agg/private/" "$SM/agg/private/metrics/incumbent/target.json"
   ls "$SM"/agg/private/evidence/*/1/secrets/swe-metrics/target/details/gitleaks.sarif >/dev/null 2>&1 \
     && ok "the secrets judge's SARIF is kept as evidence" || bad "the secrets judge's SARIF is kept as evidence"
