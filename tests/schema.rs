@@ -82,6 +82,7 @@ fn a_misspelled_key_fails_both_the_schema_and_the_parser() {
         "project: \"p\"\nsequence: { limits: { token: 5 } }\n",
         "project: \"p\"\ncontext: [{ path: \"/kb\", as: \"kb\", mod: \"ro\" }]\n",
         "project: \"p\"\nisolation_policy: { pass_envs: [\"X\"] }\n",
+        "project: \"p\"\nisolation_policy: { network: { alow: [\"x.com\"] } }\n",
     ] {
         assert!(!errors(&v, bad).is_empty(), "the schema must reject:\n{bad}");
         let tmp = tempfile::tempdir().unwrap();
@@ -104,8 +105,10 @@ fn the_confinement_keys_validate() {
     let v = validator();
     let doc = "project: \"p\"\ncontext:\n  - { path: \"~/kb\", as: \"brain\", mode: \"ro\" }\n  - { path: \"../docs\", as: \"docs\" }\n\
                judge: { image: \"agg-claude\" }\n\
-               isolation_policy: { pass_env: [\"NPM_TOKEN\"], credentials: [\"~/.config/gh\"] }\n";
+               isolation_policy: { network: { allow: [\"api.anthropic.com\", \"*.npmjs.org:443\"] }, pass_env: [\"NPM_TOKEN\"], credentials: [\"~/.config/gh\"] }\n";
     let errs = errors(&v, doc);
     assert!(errs.is_empty(), "{}", errs.join("\n"));
     assert!(!errors(&v, "project: \"p\"\ncontext: [{ path: \"/kb\", as: \"kb\", mode: \"rw\" }]\n").is_empty(), "only `ro`");
+    assert!(errors(&v, "project: \"p\"\nisolation_policy: { network: \"open\" }\n").is_empty(), "`open` is the other form");
+    assert!(!errors(&v, "project: \"p\"\nisolation_policy: { network: \"closed\" }\n").is_empty());
 }

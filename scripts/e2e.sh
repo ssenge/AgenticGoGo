@@ -1900,6 +1900,74 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9r. network egress allow-list (A-7): only the listed hosts, through agg's proxy"
+# The acceptance case: under `allow: [api.anthropic.com]`, `curl example.com` from the worker FAILS
+# and the agent still works (its session completes and is judged). Real mechanisms only — Seatbelt
+# on macOS, an --internal network in a container — and no internet needed: every attempt is refused
+# before a packet leaves.
+if [ "$(uname -s)" = Darwin ] && sandbox-exec -p '(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow mach*)' /usr/bin/true 2>/dev/null; then
+  EG="$(mkproj egress)"
+  cat > "$EG/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
+if curl -s -m 5 -o /dev/null https://example.com/; then echo EGRESS_OPEN; else echo EGRESS_BLOCKED; fi > egress.log
+[ -n "$HTTPS_PROXY" ] && echo PROXY_SET >> egress.log
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+  chmod +x "$EG/bin/claude"
+  cat > "$EG/agg/agg.yaml" <<'EOF'
+project: egress
+defaults: { model: fake, isolation: sandbox }
+steps: { worker: {} }
+sequence: { steps: [worker], done_if: "worked" }
+summary: { enabled: false }
+isolation_policy: { network: { allow: ["api.anthropic.com"] } }
+EOF
+  agg_do "$EG" run --max-sessions 1 > "$EG/run.log" 2>&1
+  is   "egress (sandbox): the agent still works behind the allow-list (exit 0)" "$?" "0"
+  has  "…while curl example.com from the worker FAILED"                         "$EG/egress.log" "EGRESS_BLOCKED"
+  has  "…and the worker was pointed at agg's proxy"                             "$EG/egress.log" "PROXY_SET"
+  has  "…which logged the refusal"                                              "$EG/run.log" "[egress] DENIED CONNECT example.com:443"
+  # an allow-list that does not hold the agent's own endpoint is refused at startup
+  sed -i.bak 's/"api.anthropic.com"/"registry.npmjs.org"/' "$EG/agg/agg.yaml"
+  agg_do "$EG" check > "$EG/check.log" 2>&1
+  is   "egress: an allow-list without the agent's endpoint is refused (exit 1)" "$?" "1"
+  has  "…naming the endpoint it needs"                                          "$EG/check.log" "api.anthropic.com"
+else
+  skip "egress: allow-list under the real macOS sandbox" "no restricting kernel sandbox usable here"
+fi
+ENGINE_BIN="$(command -v docker || command -v podman || true)"
+if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
+  EC="$ROOT/target/agg-e2e-egress.$$"; rm -rf "$EC"; mkdir -p "$EC/proj/agg/judges" "$EC/proj/agg/state"
+  "$ENGINE_BIN" build -q -t agg-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$EC/build.log" 2>&1
+  cat > "$EC/proj/agg/judges/done.sh" <<'EOF'
+#!/bin/sh
+[ -f src/work.txt ] && echo '{"met":true,"value":1,"max":1,"target":1}' || echo '{"met":false,"value":0,"max":1,"target":1}'
+EOF
+  chmod +x "$EC/proj/agg/judges/done.sh"
+  echo work > "$EC/proj/agg/state/STATE.md"
+  printf 'agg/state/\nagg/private/\n' > "$EC/proj/.gitignore"
+  cat > "$EC/proj/agg/agg.yaml" <<'EOF'
+project: egressctr
+defaults: { model: fake, isolation: container, image: "agg-test-fake-agent:1" }
+steps: { worker: {} }
+sequence: { steps: [worker], done_if: "done" }
+summary: { enabled: false }
+isolation_policy: { pass_env: ["AGG_TEST_EGRESS"], network: { allow: ["api.anthropic.com"] } }
+EOF
+  ( cd "$EC/proj" && git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init )
+  ( cd "$EC/proj" && AGG_TEST_EGRESS=1 "$AGG" run --max-sessions 1 > "$EC/run.log" 2>&1 )
+  is   "egress (container): the agent still works behind the allow-list (exit 0)" "$?" "0"
+  has  "…while example.com from the worker FAILED"                                "$EC/proj/src/worker.log" "EGRESS_BLOCKED"
+  is   "…and the run removed its egress network and relay" \
+       "$("$ENGINE_BIN" ps -aq --filter label=agg.egress; "$ENGINE_BIN" network ls -q --filter label=agg.egress)" ""
+  [ -n "${KEEP:-}" ] || rm -rf "$EC"
+else
+  skip "egress: allow-list in a container" "no running container engine"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "9n. human-in-the-loop — a person can ANSWER the loop (HUMAN_LOOP.md)"
 
 # The channel is a QUEUE, not a callback: an ask is written to the agg-owned ledger, emitted on the

@@ -63,7 +63,19 @@ pub fn resolve(cfg: &AggConfig, dir: &Path) -> (RunPolicy, Vec<Problem>) {
             super::DEFAULT_IMAGE.to_string()
         }
     };
-    (RunPolicy { contexts, pass_env, credentials, judge_image }, problems)
+    let egress = match &ip.network {
+        super::egress::Network::Open => None,
+        super::egress::Network::Allow(entries) => match super::egress::allow::AllowList::parse(entries) {
+            Ok(list) => Some(super::egress::Egress::new(list, dir)),
+            Err(bad) => {
+                for (i, why) in bad {
+                    problems.push(Problem::new(format!("isolation_policy.network.allow[{i}]"), why));
+                }
+                None
+            }
+        },
+    };
+    (RunPolicy { contexts, pass_env, credentials, judge_image, egress }, problems)
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*` — what `-e NAME` can carry without being read as `NAME=value`.
@@ -84,7 +96,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _g = register(&cfg("project: p\n"), tmp.path()).unwrap();
         let p = policy::for_dir(tmp.path());
-        assert!(p.contexts.is_empty() && p.pass_env.is_empty() && p.credentials.is_empty());
+        assert!(p.contexts.is_empty() && p.pass_env.is_empty() && p.credentials.is_empty() && p.egress.is_none());
         assert_eq!(p.judge_image, super::super::DEFAULT_IMAGE);
     }
 
@@ -116,6 +128,17 @@ mod tests {
         assert_eq!(at, ["isolation_policy.pass_env[1]", "isolation_policy.credentials[1]"]);
         assert_eq!(p.pass_env, ["NPM_TOKEN", "_OK"]);
         assert_eq!(p.credentials, [std::fs::canonicalize(cred.path()).unwrap()]);
+    }
+
+    /// A malformed allow-list entry is refused at its index; a good list arms the egress policy.
+    #[test]
+    fn an_allow_list_is_parsed_and_each_bad_entry_located() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (p, problems) = resolve(&cfg("project: p\nisolation_policy: { network: { allow: [\"api.x.com\", \"https://bad\"] } }\n"), tmp.path());
+        assert_eq!(problems.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["isolation_policy.network.allow[1]"]);
+        assert!(p.egress.is_none());
+        let (p, problems) = resolve(&cfg("project: p\nisolation_policy: { network: { allow: [\"api.x.com\"] } }\n"), tmp.path());
+        assert!(problems.is_empty() && p.egress.is_some_and(|e| e.allow.allows_host("api.x.com")));
     }
 
     /// Judges in a container need ONE image; two container steps on different images with no

@@ -96,6 +96,11 @@ const REVIEWED: &str = "---\ninputs: []\n---\nDecide whether the work is done.\n
 /// A container-tier project: the worker and both judges in `img`, a read-only context, a
 /// `write_deny` oracle, one `pass_env` name and one `credentials` dir. Returns (project, kb, home).
 fn project(r: &Root, img: &str, extra_pass: &str) -> (PathBuf, PathBuf, PathBuf) {
+    project_with(r, img, extra_pass, "")
+}
+
+/// [`project`] with more `isolation_policy` keys (`network: …`).
+fn project_with(r: &Root, img: &str, extra_pass: &str, extra_policy: &str) -> (PathBuf, PathBuf, PathBuf) {
     let d = r.0.join("proj");
     let kb = r.0.join("kb");
     let home = r.0.join("home");
@@ -117,7 +122,7 @@ fn project(r: &Root, img: &str, extra_pass: &str) -> (PathBuf, PathBuf, PathBuf)
              sequence: {{ steps: [\"worker\"], done_if: \"done AND reviewed\" }}\n\
              summary: {{ enabled: false }}\n\
              context: [{{ path: \"{kb}\", as: \"kb\" }}]\n\
-             isolation_policy: {{ pass_env: [\"AGG_TEST_PASSED\"{extra_pass}], credentials: [\"~/.agg-test-cred\"] }}\n",
+             isolation_policy: {{ pass_env: [\"AGG_TEST_PASSED\"{extra_pass}], credentials: [\"~/.agg-test-cred\"]{extra_policy} }}\n",
             kb = kb.display()
         ),
     );
@@ -241,4 +246,29 @@ fn a_rewritten_judge_cannot_reach_the_host() {
     let (_, log) = run(&d, &home, &[("AGG_TEST_TAMPER", escape.to_str().unwrap())]);
     assert!(read(&d.join("src/worker.log")).contains("WORKER_IN_CONTAINER"), "{log}");
     assert!(!escape.exists(), "the rewritten judge ran on the host and wrote {}:\n{log}", escape.display());
+}
+
+/// A-7's acceptance on the reference tier: under `allow: [api.anthropic.com]` the worker cannot
+/// reach anything else — and the agent still works (its session, both judges and the LLM judge's
+/// one-shot all run behind the list), and nothing of the egress network is left behind.
+#[test]
+fn behind_an_allow_list_the_worker_cannot_reach_out_and_the_run_still_completes() {
+    let Some(img) = image() else {
+        eprintln!("SKIPPED: no container engine");
+        return;
+    };
+    let r = root("egress");
+    let (d, _kb, home) = project_with(&r, img, ", \"AGG_TEST_EGRESS\"", ", network: { allow: [\"api.anthropic.com\"] }");
+    let (code, log) = run(&d, &home, &[("AGG_TEST_EGRESS", "1")]);
+    assert_eq!(code, Some(0), "the agent still works behind the list:\n{log}");
+    let w = read(&d.join("src/worker.log"));
+    assert!(w.contains("EGRESS_BLOCKED") && !w.contains("EGRESS_OPEN"), "example.com must be unreachable:\n{w}");
+    assert!(w.contains("PROXY_SET"), "the worker is pointed at the proxy:\n{w}");
+    // the run removed its relay and its internal network on the way out (the only egress user in
+    // this test binary, and cargo runs test binaries one at a time)
+    let engine = agg::isolation::container_engine().unwrap();
+    for what in [&["ps", "-aq"][..], &["network", "ls", "-q"][..]] {
+        let out = Command::new(engine).args(what).args(["--filter", "label=agg.egress"]).output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).trim().is_empty(), "left behind ({what:?}): {}", String::from_utf8_lossy(&out.stdout));
+    }
 }

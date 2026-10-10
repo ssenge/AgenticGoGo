@@ -64,6 +64,8 @@ pub struct RunPolicy {
     pub credentials: Vec<PathBuf>,
     /// the image judges run in when the run's tier is `container` (`judge.image`, resolved).
     pub judge_image: String,
+    /// the network allow-list and its enforcement; `None` = `network: open`.
+    pub egress: Option<super::egress::Egress>,
 }
 
 impl Default for RunPolicy {
@@ -73,6 +75,7 @@ impl Default for RunPolicy {
             pass_env: Vec::new(),
             credentials: Vec::new(),
             judge_image: super::DEFAULT_IMAGE.to_string(),
+            egress: None,
         }
     }
 }

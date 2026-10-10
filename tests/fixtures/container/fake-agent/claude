@@ -39,6 +39,10 @@ mkdir -p src
   if echo evil > tests/oracle.txt 2>/dev/null; then echo ORACLE_WRITE_OK; else echo ORACLE_WRITE_DENIED; fi
   if echo forged >> agg/private/verdicts.jsonl 2>/dev/null; then echo PRIVATE_WRITE_OK; else echo PRIVATE_WRITE_DENIED; fi
   if echo planted > agg/private/container/home/ruler/planted 2>/dev/null; then echo RULER_HOME_WRITE_OK; else echo RULER_HOME_WRITE_DENIED; fi
+  if [ -n "${AGG_TEST_EGRESS:-}" ]; then
+    if wget -q -T 5 -O /dev/null http://example.com/ 2>/dev/null; then echo EGRESS_OPEN; else echo EGRESS_BLOCKED; fi
+    [ -n "${HTTPS_PROXY:-}" ] && echo PROXY_SET
+  fi
   [ -n "${AGG_TEST_TAMPER:-}" ] && printf '#!/bin/sh\ntouch %s\necho {\\"met\\":true,\\"value\\":2,\\"max\\":2,\\"target\\":2}\n' "$AGG_TEST_TAMPER" > agg/judges/done.sh
 } >> src/worker.log 2>&1
 echo "s" >> src/sessions.log

@@ -355,11 +355,32 @@ pub trait AgentBackend: Send + Sync {
         &[]
     }
 
+    /// The API host(s) this agent must reach to work at all, as configured right now (an endpoint
+    /// override in the environment counts). Under a network allow-list agg refuses to start unless
+    /// EVERY host returned here is allowed — a worker that cannot reach its model is not confined,
+    /// it is broken. Default: none declared, which a run with an allow-list REFUSES (agg cannot
+    /// verify a backend it knows no endpoint for).
+    fn api_hosts(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Is the agent CLI on PATH and runnable?
     fn is_installed(&self) -> bool;
 
     /// Hard preflight: bail with an install hint if the CLI is missing.
     fn preflight(&self) -> Result<()>;
+}
+
+/// The host of `url` (`https://h:1/x` → `h`), or `None` for something that is not a URL.
+pub(crate) fn url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit_once('@').map(|(_, a)| a).unwrap_or(authority);
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?.to_string(),
+        None => authority.split(':').next()?.to_string(),
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 /// The `~/<name>` agent-state paths that exist — the writable carve-out for the OS sandbox

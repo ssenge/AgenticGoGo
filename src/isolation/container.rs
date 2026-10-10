@@ -11,7 +11,8 @@
 //! docker run --rm --network host -v <cwd>:<cwd> -w <cwd> [-v <w>:<w> …] [-e K=V …] <image> <prog> <args…>
 //! ```
 //! * `--rm` — no leaked containers, ever; a session is ephemeral by construction.
-//! * `--network host` — full internet (the owner's constraint; there is no egress policy).
+//! * `--network host` — full internet, unless the run has an egress allow-list: then an
+//!   `--internal` network whose only way out is agg's proxy ([`super::egress::bridge`]).
 //! * mounts are CANONICALIZED first: a symlinked source silently mis-mounts, the same defect class
 //!   that silently denied every write under Seatbelt (§11 BUG 1). A source that is still relative
 //!   after that is a LOUD error — `docker` requires an absolute source, and a container that fails
@@ -127,7 +128,21 @@ pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Comman
     let cwd_resolved = canonical(cwd);
     let run = super::policy::for_dir(&cwd_resolved);
     let mut out = Command::new(engine().unwrap_or(ENGINES[0]));
-    out.arg("run").arg("--rm").arg("--network").arg("host");
+    out.arg("run").arg("--rm");
+    // The network: the host's (open), or — under an allow-list — an `--internal` network whose only
+    // reachable address is the relay to agg's proxy ([`super::egress::bridge`]). NET_RAW goes too:
+    // a raw socket has nowhere to go there anyway, and nothing an agent does needs one.
+    let proxy_url = match &run.egress {
+        None => {
+            out.arg("--network").arg("host");
+            None
+        }
+        Some(e) => {
+            let (network, url) = e.container().map_err(anyhow::Error::msg)?;
+            out.arg("--network").arg(network).arg("--cap-drop").arg("NET_RAW");
+            Some(url)
+        }
+    };
     if let Some(owner) = owner(&cwd_resolved) {
         out.arg("--user").arg(owner);
     }
@@ -190,6 +205,11 @@ pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Comman
     }
     for (k, v) in run.context_env(super::Isolation::Container) {
         out.arg("-e").arg(format!("{k}={}", v.display()));
+    }
+    if let Some(url) = &proxy_url {
+        for (k, v) in super::egress::proxy_env(url) {
+            out.arg("-e").arg(format!("{k}={v}"));
+        }
     }
     // the image, then the ORIGINAL command — nothing may come between them or after them.
     out.arg(spec.image).arg(prog);

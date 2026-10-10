@@ -91,8 +91,9 @@ defaults:                        # inherited by every step; a step may override 
   write_deny: ["tests/oracles/**"]  # PROTECTED: readable, never changed — gate-checked on EVERY tier
 context:                         # READ-ONLY dirs from OUTSIDE the project; every step must be sandbox/container
   - { path: "~/kb/brain", as: "brain", mode: "ro" }   # container: /context/brain · env AGG_CONTEXT_BRAIN
-isolation_policy:                # what crosses INTO a container (agents' own keys pass automatically, by name)
-  pass_env: ["NPM_TOKEN"]        # env NAMES, never values · credentials: ["~/.config/x"] = read-only mounts
+isolation_policy:                # run-level confinement beyond the tier
+  network: { allow: ["api.anthropic.com"] }   # egress allow-list (default "open"); the agent's endpoint MUST be listed
+  pass_env: ["NPM_TOKEN"]        # env NAMES into a container, never values · credentials: ["~/.config/x"] = ro mounts
 judge:                           # THE RULER — runs .md judges + the summarizer. Immutable across a run.
   agent: "claude"
   model: "haiku"
@@ -226,6 +227,10 @@ agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of
 mount — never on argv, never in a ledger. Judges run in `judge.image` (the strongest tier, NO opt-out)
 on a read-only project; hooks stay host tooling. Startup probes each image for its CLI and refuses a
 mounted path the engine cannot see (colima shares only `$HOME`). Code: `src/isolation/{runtime,probe}.rs`.
+**`isolation_policy.network: { allow: [...] }`** — ONE enforcement point, agg's own proxy
+(`src/isolation/egress/`): container = `--internal` network + a relay to the proxy (the reference);
+macOS sandbox = Seatbelt outbound only to the proxy port, no DNS; Linux sandbox / podman / `none` are
+REFUSED at startup, never silently open. Each agent's `api_hosts()` must be on the list.
 **The split rule:** if the worker writing it could change *when the loop ends, what it may spend, or what
 agg believes happened*, it is private. `verdicts.jsonl` is why: forged `merged` rows make `stalled` report
 met, so a project with `abort_if: "stalled"` has its worker end its own run. `src/paths.rs` is the
