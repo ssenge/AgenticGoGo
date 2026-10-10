@@ -41,6 +41,9 @@ pub struct GitIso {
     pub span_tip: Option<String>,
     /// staged span branches accumulated by `skip_judges` steps (for reporting on abort).
     pub span_branches: Vec<String>,
+    /// the untracked files present right before this session's worker started — what a partial
+    /// save's reset must leave in place (`features::partial`). `None` outside a session.
+    pub untracked_before: Option<Vec<String>>,
 }
 /// the LLM summarizer's rolling window (was `cumulative`/`last_summary`).
 #[derive(Default)]

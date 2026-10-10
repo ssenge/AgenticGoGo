@@ -220,10 +220,11 @@ impl<'a> Parser<'a> {
             // because the grammar has comparisons but NO arithmetic: `wall_time - human_wait_time
             // >= 28800` is not expressible, so the difference has to be its own term.
             //   wall_time        a DEADLINE — a sleeping human counts against it
-            //   work_time        an EFFORT ceiling — a slow human costs the run nothing
+            //   work_time        an EFFORT ceiling — a slow human costs the run nothing, and
+            //                    neither does waiting out an agent's rate limit (A-18.5)
             "wall_time" => Val::Num(c.wall_secs),
             "human_wait_time" => Val::Num(c.human_wait_secs),
-            "work_time" => Val::Num((c.wall_secs - c.human_wait_secs).max(0.0)),
+            "work_time" => Val::Num((c.wall_secs - c.human_wait_secs - c.rate_limit_wait_secs).max(0.0)),
             "over_budget" => Val::Bool(match c.budget_total {
                 Some(t) => c.tokens_spent > t,
                 None => false, // no budget set => never over

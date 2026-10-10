@@ -62,6 +62,9 @@ pub struct StopContext<'a> {
     /// seconds spent blocked inside a `hil_*` call, accumulated across resumes (backs
     /// `human_wait_time`).
     pub human_wait_secs: f64,
+    /// seconds spent waiting out an agent's rate limit, accumulated across resumes (A-18). Not a
+    /// term of its own: it only keeps `work_time` from counting a provider's quota window as effort.
+    pub rate_limit_wait_secs: f64,
     /// the gate's ratchet config and history (backs `rollbacks`, `consecutive_rollbacks`,
     /// `oscillating`, `ratchet_regressed`, `<judge>.ref`). `None` = a context with no gate behind
     /// it, which reads as a run that has gated nothing — and `.ref` on it is an error.
@@ -82,6 +85,7 @@ impl<'a> StopContext<'a> {
             max_sessions: None,
             wall_secs: 0.0,
             human_wait_secs: 0.0,
+            rate_limit_wait_secs: 0.0,
             gate: None,
         }
     }

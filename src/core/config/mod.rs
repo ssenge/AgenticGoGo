@@ -59,6 +59,11 @@ pub struct AggConfig {
     pub watchdog: Watchdog,
     #[serde(default = "default_backoff")]
     pub ratelimit_backoff_secs: u64,
+    /// The least time between a rate-limited attempt and the next one, in seconds (A-18.2). An
+    /// early `agg send wake` waits this out instead of hammering the provider. A robustness
+    /// interval, not a limit: nothing about the run ends because of it.
+    #[serde(default = "default_min_gap")]
+    pub ratelimit_min_gap_secs: u64,
     #[serde(default)]
     pub memory: Memory,
     #[serde(default)]
@@ -400,6 +405,7 @@ impl Default for AggConfig {
             heartbeat_secs: default_heartbeat(),
             watchdog: Watchdog::default(),
             ratelimit_backoff_secs: default_backoff(),
+            ratelimit_min_gap_secs: default_min_gap(),
             memory: Memory::default(),
             hooks: Hooks::default(),
             prompt_includes: vec![],
@@ -580,6 +586,9 @@ fn default_heartbeat() -> u64 {
 }
 fn default_backoff() -> u64 {
     1800
+}
+fn default_min_gap() -> u64 {
+    60
 }
 fn default_wd_idle() -> u64 {
     900

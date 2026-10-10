@@ -159,15 +159,31 @@ impl Drop for RunPidGuard {
 
 
 
+/// How `agg run` was asked to run. A bare `u32` converts into it (the session cap, not resuming),
+/// so a host that only ever passed a cap keeps compiling.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunOpts {
+    /// the `--max-sessions` flag: 0 = take `limits.sessions` from the config.
+    pub max_sessions: u32,
+    /// `--resume`: continue the project's last interrupted run (`features::resume`).
+    pub resume: bool,
+}
+
+impl From<u32> for RunOpts {
+    fn from(max_sessions: u32) -> Self {
+        RunOpts { max_sessions, resume: false }
+    }
+}
+
 /// Drive the loop with agg's default plugin pipeline. The common entry point.
 pub fn run(
     cfg: AggConfig,
     assembly: Assembly,
     dir: &Path,
     config_base: &Path,
-    max_sessions_flag: u32,
+    opts: impl Into<RunOpts>,
 ) -> Result<RunOutcome> {
-    run_with(cfg, assembly, dir, config_base, max_sessions_flag, |_| {})
+    run_with(cfg, assembly, dir, config_base, opts, |_| {})
 }
 
 /// Drive the loop with a chance to register EXTRA plugins on top of agg's own (HOOK_REDESIGN §5:
@@ -179,9 +195,10 @@ pub fn run_with(
     assembly: Assembly,
     dir: &Path,
     config_base: &Path,
-    max_sessions_flag: u32,
+    opts: impl Into<RunOpts>,
     register: impl FnOnce(&mut Lifecycle),
 ) -> Result<RunOutcome> {
+    let opts = opts.into();
     // ── double-run guard ──
     if let Some(pid) = crate::os::detach::live_pid(dir) {
         if pid != std::process::id() {
@@ -199,10 +216,12 @@ pub fn run_with(
     // From here on EVERY ending leaves a report (A-1): the run deletes its predecessor's now, and a
     // fault before the loop state exists still gets one — under THIS run's id, so the id in run.log
     // and the id in the report agree.
-    let run = crate::report::begin(dir);
+    // A resumed run reports under the id it started with (A-18.3).
+    let prior = if opts.resume { crate::core::clock::Clock::recorded_run_id(dir) } else { None };
+    let run = crate::report::begin_as(dir, prior);
     let project = cfg.project.clone();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_reported(cfg, assembly, dir, config_base, max_sessions_flag, register, &run)
+        run_reported(cfg, assembly, dir, config_base, opts, register, &run)
     }));
     let fallback = |msg: &str| {
         if !run.written() {
@@ -231,11 +250,14 @@ fn run_reported(
     assembly: Assembly,
     dir: &Path,
     config_base: &Path,
-    max_sessions_flag: u32,
+    opts: RunOpts,
     register: impl FnOnce(&mut Lifecycle),
     run: &crate::report::RunHandle,
 ) -> Result<RunOutcome> {
     let Assembly { engine: eng, steps: seq_steps } = assembly;
+    // FIRST, before anything below writes state.json, project.json or the ledger it reads.
+    let resume = if opts.resume { Some(crate::features::resume::load(dir)?) } else { None };
+    let max_sessions_flag = opts.max_sessions;
     let ruler = cfg.ruler_backend()?;
     let judge_model = cfg.judge_model(ruler);
     let judge_timeout = cfg.judge.timeout;
@@ -248,8 +270,8 @@ fn run_reported(
     // ── session isolation (MANDATORY): the git preconditions run as `pre_start` hooks — recover a
     //    stranded merge, require a clean git repo, ensure `agg/{state,private}` gitignored, resolve the base
     //    branch. Any bail is a hard error out of run(), exactly as the old inline block. ──
-    // `resume: false` — the YAML path has no resume, so a dirty tree still ends the run here.
-    let mut boot = Bootstrap { dir, cfg: &cfg, resume: false, iso_base: None };
+    // A dirty tree ends a fresh run here; a resume saves it to a partial ref instead (A-18.3).
+    let mut boot = Bootstrap { dir, cfg: &cfg, resume: opts.resume, iso_base: None };
     run_pre_start(&lifecycle.pre_start, &mut boot)?;
     let iso_base = boot.iso_base.expect("ResolveIsoBase set iso_base");
 
@@ -271,10 +293,15 @@ fn run_reported(
     }
 
     let loop_start = Instant::now();
-    // The YAML path has no resume opt-in, so its clock always starts fresh. It is still persisted:
-    // `human_wait_time`/`work_time` must read the same file the driver path writes, or the two entry
-    // points would disagree about what a ceiling means.
-    let clock = crate::core::clock::Clock::open(dir, now_epoch(), true);
+    // A fresh run starts its clock; a resume keeps the start and the banked waits, so `wall_time` and
+    // `work_time` stay end-to-end. The run id rides on the clock — it is what `--resume` reports under.
+    let mut clock = crate::core::clock::Clock::open(dir, now_epoch(), resume.is_none());
+    clock.run_id = run.run_id().to_string();
+    clock.save(dir);
+    // The call ledger is what a resume replays; a fresh run must not inherit another run's.
+    if resume.is_none() {
+        crate::core::calls::truncate(dir)?;
+    }
     let (m, t) = eng.tally();
     eprintln!(
         "════════════════════════════════════════════════════════════\n\
@@ -354,10 +381,13 @@ fn run_reported(
     st.ext.get::<AGGState>().git.iso_base = iso_base; // resolved base branch (was a named field)
     st.publish();
     st.dash.lifetime_session = lifetime_base;
+    if let Some(r) = &resume {
+        crate::features::resume::restore_counters(&mut st, r);
+    }
 
     // The report is written from the state the run ended in, BEFORE the `on_stop` hooks fire (they
     // drop with this frame) — so a hook that ships `report.json` somewhere finds it.
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drive(&mut st, &lifecycle)));
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drive(&mut st, &lifecycle, resume.as_ref())));
     match res {
         Ok(res) => {
             let report = crate::report::from_state(&mut st, run, &res);
@@ -375,13 +405,16 @@ fn run_reported(
 }
 
 /// Everything from the run-start hooks to the run's end.
-fn drive(st: &mut LoopState, lifecycle: &Lifecycle) -> Result<RunOutcome> {
+fn drive(st: &mut LoopState, lifecycle: &Lifecycle, resume: Option<&crate::features::resume::Resume>) -> Result<RunOutcome> {
     // ── run-start hooks: spawn the user's background watchers, then the baseline pass (§5.5.1) —
     //    both are registry handlers now (the `background` / `on_run_start` hooks). Baseline's two
     //    launch-time early exits come back as End::Stop and finish the run. ──
     run_hook(&lifecycle.background, st)?;
     if let Some(End::Stop(outcome)) = run_hook(&lifecycle.on_run_start, st)? {
         return Ok(outcome);
+    }
+    if let Some(r) = resume {
+        crate::features::resume::restore_position(st, r)?;
     }
 
     // (summary clock, memory scratch, and the operator bus were opened by the `Setup` feature on
@@ -400,7 +433,12 @@ fn drive(st: &mut LoopState, lifecycle: &Lifecycle) -> Result<RunOutcome> {
         if let Some(outcome) = st.over_max_sessions() {
             return Ok(outcome);
         }
-        match step_once(st, lifecycle)?.end {
+        let step = step_once(st, lifecycle)?;
+        // every finished session goes on the call ledger — what `agg run --resume` replays.
+        if let Some(o) = &step.outcome {
+            crate::features::resume::record(st, o)?;
+        }
+        match step.end {
             Some(End::Stop(outcome)) => return Ok(outcome),
             Some(End::NextSession) => continue,
             None => {}

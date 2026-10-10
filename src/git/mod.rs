@@ -27,7 +27,9 @@ fn git(dir: &Path, args: &[&str]) -> (bool, String, String) {
 }
 
 /// Is `dir` inside a git work tree?
+mod partial;
 mod session;
+pub use partial::*;
 pub use session::*;
 
 pub fn is_repo(dir: &Path) -> bool {

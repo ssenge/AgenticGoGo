@@ -83,6 +83,17 @@
         "log": { "type": "string" },
         "evidence_dir": { "type": ["string", "null"] }
       }
+    },
+    "waiting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "agent", "until"],
+      "description": "present only when the run ended while waiting: the wait it was in",
+      "properties": {
+        "reason": { "enum": ["rate_limit"] },
+        "agent": { "type": "string", "description": "the agent whose limit it was" },
+        "until": { "type": "integer", "minimum": 0, "description": "epoch seconds the wait would have ended on its own" }
+      }
     }
   },
   "$defs": {

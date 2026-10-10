@@ -381,3 +381,62 @@ fn ensure_agg_excluded_appends_once_and_keeps_existing_entries() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A-18.3: an interrupted session's work — tracked edits AND new files — lands on its partial ref,
+/// without moving the branch or the index; the reset then restores HEAD, removes the session's new
+/// files, and leaves the untracked files that were there before the session.
+#[test]
+fn save_partial_keeps_the_work_on_a_ref_and_the_reset_restores_the_tree() {
+    let d = repo_with_session_branch("partial");
+    std::fs::write(d.join("operator-notes.txt"), "mine, untracked, before the session\n").unwrap();
+    let before = untracked_files(&d);
+    git_t(&d, &["checkout", "-q", "agg/p/session-1"]);
+    let head = rev_parse(&d, "HEAD").unwrap();
+    std::fs::write(d.join("f.txt"), "half-finished edit\n").unwrap();
+    std::fs::write(d.join("new.rs"), "fn wip() {}\n").unwrap();
+    std::fs::create_dir_all(d.join("agg/private")).unwrap();
+    std::fs::write(d.join("agg/private/state.json"), "{}").unwrap();
+
+    assert!(has_uncommitted_work(&d, Some(&before)), "a tracked edit and a new file are the session's work");
+    let r = save_partial(&d, "run-7", 3, false, Some(&before)).expect("dirty tree ⇒ a ref");
+    assert_eq!(r, "refs/agg/partial/run-7/3");
+    assert_eq!(rev_parse(&d, "HEAD").unwrap(), head, "the branch does not move");
+    let show = |spec: &str| {
+        let o = Command::new("git").args(["show", spec]).current_dir(&d).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).to_string()
+    };
+    assert_eq!(show(&format!("{r}:f.txt")), "half-finished edit\n");
+    assert_eq!(show(&format!("{r}:new.rs")), "fn wip() {}\n");
+    assert!(show(&format!("{r}:agg/private/state.json")).is_empty(), "agg's runtime state is not the work");
+
+    reset_work_tree(&d, Some(&before));
+    assert_eq!(untracked_files(&d), before, "only the pre-session untracked files remain");
+    assert_eq!(std::fs::read_to_string(d.join("f.txt")).unwrap(), "base\nsession-work\n", "tracked edit reverted");
+    assert!(!d.join("new.rs").exists(), "the session's new file is gone from the tree (it is on the ref)");
+    assert!(d.join("operator-notes.txt").exists(), "an untracked file from BEFORE the session survives");
+    assert!(d.join("agg/private/state.json").exists(), "agg's runtime state is never reset");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Nothing uncommitted and no session commits ⇒ no ref; a session that only COMMITTED gets HEAD saved.
+#[test]
+fn save_partial_saves_nothing_from_a_clean_tree_unless_head_is_the_work() {
+    let d = repo_with_session_branch("partial-clean");
+    assert_eq!(save_partial(&d, "r", 1, false, None), None);
+    // an untracked file from BEFORE the session is not the session's work…
+    std::fs::write(d.join("notes.txt"), "x").unwrap();
+    let before = untracked_files(&d);
+    assert!(!has_uncommitted_work(&d, Some(&before)));
+    assert_eq!(save_partial(&d, "r", 1, false, Some(&before)), None);
+    // …but after a crash agg cannot tell, so it counts.
+    assert!(has_uncommitted_work(&d, None));
+    std::fs::remove_file(d.join("notes.txt")).unwrap();
+    git_t(&d, &["checkout", "-q", "agg/p/session-1"]);
+    let r = save_partial(&d, "r", 2, true, None).expect("the session's own commit is work");
+    assert_eq!(rev_parse(&d, &r), rev_parse(&d, "HEAD"));
+    // crash path: no knowledge of the pre-session files ⇒ untracked files are left alone.
+    std::fs::write(d.join("stray.txt"), "x").unwrap();
+    reset_work_tree(&d, None);
+    assert!(d.join("stray.txt").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}

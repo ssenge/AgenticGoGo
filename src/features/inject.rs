@@ -50,6 +50,9 @@ impl Handler for BusDrain {
                     }
                 }
                 Command::Resume => ctx.ext.get::<AGGState>().operator.resumed = true,
+                // a wake is consumed by a rate-limit WAIT (`features::backoff`); at a session
+                // boundary there is none, and the next session starts anyway.
+                Command::Wake => eprintln!("  [bus] wake → the loop is not waiting; nothing to end"),
                 Command::Stop { reason } => return Ok(Flow::Stop(ctx.stopped_via_bus(reason))),
                 Command::Note { text } => eprintln!("  [bus] note: {text}"),
             }
@@ -99,6 +102,7 @@ impl Handler for PickStep {
                     max_sessions: rs.max_sessions,
                     wall_secs: rs.wall_secs,
                     human_wait_secs: rs.human_wait_secs,
+                    rate_limit_wait_secs: rs.rate_limit_wait_secs,
                     gate: Some(&eng.gate),
                 };
                 stop::evaluate(cond, &sc)

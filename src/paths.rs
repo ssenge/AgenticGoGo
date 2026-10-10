@@ -28,6 +28,7 @@
 //!       run.log             the run log: run ids, `--detach`/`--report-json` output
 //!       report.json         the end-of-run report — the stable interface for embedders
 //!       violations.jsonl    append-only record of `protected_path_violation` rollbacks (write_deny)
+//!       waits.jsonl         append-only record of every rate-limit wait: its start and how it ended
 //!       protected/<sha256>  agg's own copies of every `write_deny` file, to restore a violation from
 //! ```
 //!
@@ -197,6 +198,15 @@ pub fn violations_jsonl(dir: &Path) -> PathBuf {
     private_dir(dir).join("violations.jsonl")
 }
 
+/// The wait ledger: `agg/private/waits.jsonl` — one row when a rate-limit wait starts, one when it
+/// ends and how (A-18.1).
+///
+/// Private because it is what agg believes happened: it is the record that a stopped run was waiting
+/// on a provider, not working, and where the interrupted session's work was saved.
+pub fn waits_jsonl(dir: &Path) -> PathBuf {
+    private_dir(dir).join("waits.jsonl")
+}
+
 /// The content-addressed copies of every protected file: `agg/private/protected/<sha256>`.
 ///
 /// Private so a confined worker cannot plant the bytes a restore would write back. Under
@@ -264,11 +274,13 @@ mod tests {
         // make the restore write the worker's bytes back over the oracle.
         assert_eq!(violations_jsonl(d), Path::new("/proj/agg/private/violations.jsonl"));
         assert_eq!(protected_store(d), Path::new("/proj/agg/private/protected"));
+        // a worker deleting a row would hide that a stop came while the run was waiting.
+        assert_eq!(waits_jsonl(d), Path::new("/proj/agg/private/waits.jsonl"));
 
         // and the carve-out must actually CONTAIN the private files, or the sandbox deny (which is
         // one subpath rule) would confine nothing.
         for p in [verdicts_jsonl(d), calls_jsonl(d), gate_json(d), bus_dir(d), state_json(d), run_pid(d), report_json(d),
-                  violations_jsonl(d), protected_store(d)] {
+                  violations_jsonl(d), protected_store(d), waits_jsonl(d)] {
             assert!(p.starts_with(private_dir(d)), "{} must live under the carve-out", p.display());
         }
     }
