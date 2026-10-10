@@ -49,6 +49,13 @@ enum Cmd {
     Plan,
     /// Print the JSON Schema of agg.yaml, generated from the config types agg parses into.
     Schema,
+    /// Validate agg.yaml and its judges exactly as `agg run` does at startup, listing EVERY
+    /// problem at once. Runs no judge and no agent. Exits 1 if there is any problem.
+    Check {
+        /// emit `{schema_version, ok, config, problems: [{path, message}], warnings}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
     /// re-run judges; reads agg/private/state.json, same as the /agg:status skill).
     Status {
@@ -261,6 +268,10 @@ fn run_cli() -> Result<ExitCode> {
     match &cli.cmd {
         Cmd::Init { agent, force } => init::run(&p.dir, *force, agent.as_deref()),
         Cmd::Doctor => doctor::run(&p.dir, &p.config_base, &p.config),
+        Cmd::Check { json } => {
+            let ok = agg::check::run(&p.config_base, &p.config, *json)?;
+            return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
+        }
         Cmd::Schema => {
             println!("{}", serde_json::to_string_pretty(&agg::schema::config_schema())?);
             Ok(())

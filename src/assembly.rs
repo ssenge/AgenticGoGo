@@ -4,7 +4,9 @@ use std::path::Path;
 use anyhow::Result;
 use crate::core::config::{AggConfig, SeqStep};
 use crate::core::engine::Engine;
+use crate::core::model::Judge;
 use crate::core::stop;
+use crate::problem::{self, Problem};
 
 /// The engine + the sequence entries, assembled from config. Built once, before the loop (and by
 /// `agg plan`).
@@ -13,9 +15,19 @@ pub struct Assembly {
     pub steps: Vec<SeqStep>,
 }
 
+/// A refused [`build`]: EVERY problem found, plus the judges that did resolve — so `agg check` can
+/// still run the capability checks over them and report those problems in the same pass.
+pub struct Refused {
+    pub problems: Vec<Problem>,
+    pub judges: Vec<Judge>,
+}
+
 /// Build the run-set engine + validate the sequence from `cfg` (§5.3/§5.4). Refuses at startup:
 /// an unknown step name, an all-`skip_judges` sequence (nothing could ever merge), an unbounded or
 /// zero repetition, a judge name that resolves to no file, or a ratchet that cannot mean anything.
+///
+/// The startup face of [`build`]: every problem in ONE error (a lone problem reads exactly as it
+/// did when the first error won).
 ///
 /// # The DRIVER variant (BUILD.md §3.6)
 ///
@@ -27,8 +39,14 @@ pub struct Assembly {
 /// `notify_if`, no `invariants`), which is correct rather than a gap — driver judges are LAZY and
 /// the driver asks for them by hand.
 pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
+    build(cfg, config_base).map_err(|r| anyhow::anyhow!(problem::render(&r.problems)))
+}
+
+/// [`assemble`], collecting EVERY problem (each with its config path) instead of stopping at the
+/// first. The one validation both `agg run` and `agg check` go through.
+pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembly, Refused> {
     use crate::core::judges;
-    use crate::core::model::{Judge, Lifecycle};
+    use crate::core::model::Lifecycle;
 
     // the standard library must exist before we resolve names against it (§6.1).
     if let Err(e) = judges::ensure_library() {
@@ -37,121 +55,47 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
 
     let entries = &cfg.sequence.steps;
     let driver = entries.is_empty();
+    let mut problems: Vec<Problem> = Vec::new();
 
-    for e in entries {
-        // every referenced step name must be a key in `steps:` (§5.4).
-        if !cfg.steps.contains_key(&e.step) {
-            let defined: Vec<&str> = cfg.steps.keys().map(String::as_str).collect();
-            anyhow::bail!(
-                "sequence references unknown step `{}` — defined steps: {}",
-                e.step,
-                defined.join(", ")
-            );
-        }
-        // the repetition must be BOUNDED and non-zero, or the walk either spins forever on one
-        // entry or dispatches nothing at all. `max` is required with `until` (§11.1): an unbounded
-        // `until` in a config file is a run that cannot be reasoned about, and `limits:` is a
-        // RUN-level ceiling, not a per-entry one.
-        if e.times.is_some() && e.until.is_some() {
-            anyhow::bail!(
-                "step `{}`: `times:` and `until:`+`max:` are alternatives — a fixed count and a \
-                 condition cannot both bound one entry.",
-                e.step
-            );
-        }
-        if e.until.is_some() && e.max.is_none() {
-            anyhow::bail!("step `{}`: `until:` requires `max:` — an unbounded repetition is not expressible in YAML.", e.step);
-        }
-        if e.max.is_some() && e.until.is_none() {
-            anyhow::bail!("step `{}`: `max:` without `until:` bounds nothing — use `times:` for a fixed count.", e.step);
-        }
-        for (key, n) in [("times", e.times), ("max", e.max)] {
-            if n == Some(0) {
-                anyhow::bail!("step `{}`: `{key}: 0` dispatches nothing — it must be >= 1.", e.step);
-            }
-        }
+    for (i, e) in entries.iter().enumerate() {
+        problems.extend(entry_problems(cfg, i, e));
     }
     // an all-`skip_judges` sequence never merges, so `done_if` can never fire (§5.7) — refuse.
     let has_judged = entries
         .iter()
         .any(|e| cfg.steps.get(&e.step).map(|b| !b.skip_judges).unwrap_or(false));
     if !driver && !has_judged {
-        anyhow::bail!(
+        problems.push(Problem::new(
+            "sequence.steps",
             "every step in the sequence is skip_judges — nothing can ever merge and done_if can \
-             never fire (§5.7). At least one judged step is required."
-        );
+             never fire (§5.7). At least one judged step is required.",
+        ));
     }
 
-    // DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ every if-condition (§5.3).
-    // On the driver path there is no DoD at all — agg is never told what "done" means, so it must
-    // not claim success. `Sequence::done_if` still carries its YAML default; it is simply not read.
-    let done_if = (!driver).then(|| cfg.sequence.done_if.clone());
-    let mut dod: Vec<String> = match &done_if {
-        Some(d) => stop::judge_names(d)?,
-        None => Vec::new(),
-    };
-    for inv in &cfg.sequence.invariants {
-        push_unique(&mut dod, inv);
-    }
-    let mut run_set = dod.clone();
-    if let Some(a) = &cfg.sequence.abort_if {
-        for n in stop::judge_names(a)? {
-            push_unique(&mut run_set, &n);
-        }
-    }
-    // `notify_if` joins the RUN-SET on exactly the same terms as `abort_if` (STUCK_NOTIFY §12.1):
-    // its detectors must EXECUTE each step, but they are machinery, not goals — never in the DoD-set,
-    // so `all_goals` can't be blocked by `stuck` and the regression gate (scoped to `in_dod`) can't
-    // roll a session back because a detector flipped. Without this the judge resolves to no file and
-    // `stop::validate` below rejects the expression as an unknown identifier at startup.
-    if let Some(n) = &cfg.sequence.notify_if {
-        for name in stop::judge_names(n)? {
-            push_unique(&mut run_set, &name);
-        }
-    }
-    // an `until:` expression joins the RUN-SET on the same terms the old `if` condition did: its
-    // judges must EXECUTE every step or the condition could never become true — and, like a
-    // detector, they stay OUT of the DoD-set (converging a loop is machinery, not a goal).
-    for e in entries {
-        if let Some(c) = &e.until {
-            for n in stop::judge_names(c)? {
-                push_unique(&mut run_set, &n);
+    let named = run_set(cfg, driver, &mut problems);
+
+    // resolve every run-set name to a judge FILE (§5.1) — a name with no file is a startup error,
+    // reported at the key that NAMED it.
+    let mut judges_vec: Vec<Judge> = Vec::with_capacity(named.len());
+    let mut unresolved: Vec<&str> = Vec::new();
+    for n in &named {
+        match judges::resolve(&n.name, config_base) {
+            Ok(kind) => judges_vec.push(Judge {
+                name: n.name.clone(),
+                kind,
+                invariant: cfg.sequence.invariants.contains(&n.name),
+                in_dod: n.in_dod,
+                // the `judges:` block's only key; absent ⇒ the run-level `judge.timeout` (300s).
+                timeout: cfg.judges.get(&n.name).and_then(|j| j.timeout),
+                state: Lifecycle::Pending,
+                last_verdict: None,
+                ever_met: false,
+            }),
+            Err(e) => {
+                unresolved.push(&n.name);
+                problems.push(Problem::new(n.path.clone(), format!("{e:#}")));
             }
         }
-    }
-
-    // A RATCHETED judge joins the run-set on the same terms as an `until:` judge: it must EXECUTE
-    // every judged step or there is no value to hold to its reference — and it stays OUT of the
-    // DoD-set, because the ratchet is a gate rule, not a goal. On the driver path judges are lazy
-    // and named by the driver, so the ratchet is kept but nothing joins a run-set.
-    for (name, spec) in &cfg.sequence.ratchet {
-        spec.validate(name)?;
-        if !driver {
-            push_unique(&mut run_set, name);
-        }
-    }
-    if cfg.sequence.oscillation_window < 2 {
-        anyhow::bail!(
-            "sequence.oscillation_window must be >= 2 — an A→B→A repeat needs two earlier sessions to look back over, got {}",
-            cfg.sequence.oscillation_window
-        );
-    }
-
-    // resolve every run-set name to a judge FILE (§5.1) — a name with no file is a startup error.
-    let mut judges_vec: Vec<Judge> = Vec::with_capacity(run_set.len());
-    for name in &run_set {
-        let kind = judges::resolve(name, config_base)?;
-        judges_vec.push(Judge {
-            name: name.clone(),
-            kind,
-            invariant: cfg.sequence.invariants.iter().any(|i| i == name),
-            in_dod: dod.iter().any(|d| d == name),
-            // the `judges:` block's only key; absent ⇒ the run-level `judge.timeout` (300s).
-            timeout: cfg.judges.get(name).and_then(|j| j.timeout),
-            state: Lifecycle::Pending,
-            last_verdict: None,
-            ever_met: false,
-        });
     }
 
     // `notify_if` with nothing to deliver is a silent no-op — the loop would detect and tell nobody.
@@ -159,28 +103,170 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
     if cfg.sequence.notify_if.is_some()
         && cfg.sequence.notify.as_ref().map(|n| n.cmd.is_empty()).unwrap_or(true)
     {
-        anyhow::bail!(
+        problems.push(Problem::new(
+            "sequence.notify_if",
             // the suggested command is BOUNDED: delivery is foreground and untimed, and this string is
             // read at exactly the moment the user is about to write their first notify.cmd.
             "sequence.notify_if is set but sequence.notify.cmd is empty — nothing would fire. Add a \
-             delivery command (e.g. notify: {{ cmd: [\"curl -s --max-time 10 -d {{{{reason}}}} \
-             ntfy.sh/my-topic\"] }}) or remove notify_if."
-        );
+             delivery command (e.g. notify: { cmd: [\"curl -s --max-time 10 -d {{reason}} \
+             ntfy.sh/my-topic\"] }) or remove notify_if.",
+        ));
     }
 
-    let engine = Engine::with_gate(
-        judges_vec,
-        done_if,
-        cfg.sequence.abort_if.clone(),
-        cfg.sequence.notify_if.clone(),
-        crate::core::ratchet::Gate::new(cfg.sequence.ratchet.clone(), cfg.sequence.oscillation_window),
-    )?;
-    Ok(Assembly { engine, steps: cfg.sequence.steps.clone() })
+    // The expressions themselves — the checks `Engine::new` makes, one per key so each problem is
+    // located. An expression naming an unresolved judge is skipped: its one real problem (the
+    // missing file) is already listed, and "unknown identifier" would only repeat it.
+    let done_if = (!driver).then(|| cfg.sequence.done_if.clone());
+    let gate = crate::core::ratchet::Gate::new(cfg.sequence.ratchet.clone(), cfg.sequence.oscillation_window);
+    for (path, expr) in [
+        ("sequence.done_if", done_if.as_ref()),
+        ("sequence.abort_if", cfg.sequence.abort_if.as_ref()),
+        ("sequence.notify_if", cfg.sequence.notify_if.as_ref()),
+    ] {
+        let Some(expr) = expr else { continue };
+        let names = stop::judge_names(expr).unwrap_or_default();
+        if names.iter().any(|n| unresolved.contains(&n.as_str())) {
+            continue;
+        }
+        if let Err(e) = stop::validate_with(expr, &judges_vec, Some(&gate)) {
+            problem::push_unique(&mut problems, Problem::new(path, format!("{e:#}")));
+        }
+    }
+
+    if !problems.is_empty() {
+        return Err(Refused { problems, judges: judges_vec });
+    }
+    match Engine::with_gate(judges_vec, done_if, cfg.sequence.abort_if.clone(), cfg.sequence.notify_if.clone(), gate) {
+        Ok(engine) => Ok(Assembly { engine, steps: cfg.sequence.steps.clone() }),
+        Err(e) => Err(Refused { problems: vec![Problem::new("sequence", format!("{e:#}"))], judges: vec![] }),
+    }
 }
 
-fn push_unique(v: &mut Vec<String>, s: &str) {
-    if !v.iter().any(|x| x == s) {
-        v.push(s.to_string());
+/// The refusals for ONE `sequence.steps` entry: an unknown step name, and a repetition that is
+/// unbounded, zero, or bounded twice.
+fn entry_problems(cfg: &AggConfig, i: usize, e: &SeqStep) -> Vec<Problem> {
+    let at = format!("sequence.steps[{i}]");
+    let mut out = Vec::new();
+    // every referenced step name must be a key in `steps:` (§5.4).
+    if !cfg.steps.contains_key(&e.step) {
+        let defined: Vec<&str> = cfg.steps.keys().map(String::as_str).collect();
+        out.push(Problem::new(
+            at.clone(),
+            format!("sequence references unknown step `{}` — defined steps: {}", e.step, defined.join(", ")),
+        ));
+    }
+    // the repetition must be BOUNDED and non-zero, or the walk either spins forever on one
+    // entry or dispatches nothing at all. `max` is required with `until` (§11.1): an unbounded
+    // `until` in a config file is a run that cannot be reasoned about, and `limits:` is a
+    // RUN-level ceiling, not a per-entry one.
+    if e.times.is_some() && e.until.is_some() {
+        out.push(Problem::new(
+            at.clone(),
+            format!(
+                "step `{}`: `times:` and `until:`+`max:` are alternatives — a fixed count and a \
+                 condition cannot both bound one entry.",
+                e.step
+            ),
+        ));
+    }
+    if e.until.is_some() && e.max.is_none() {
+        out.push(Problem::new(
+            format!("{at}.until"),
+            format!("step `{}`: `until:` requires `max:` — an unbounded repetition is not expressible in YAML.", e.step),
+        ));
+    }
+    if e.max.is_some() && e.until.is_none() {
+        out.push(Problem::new(
+            format!("{at}.max"),
+            format!("step `{}`: `max:` without `until:` bounds nothing — use `times:` for a fixed count.", e.step),
+        ));
+    }
+    for (key, n) in [("times", e.times), ("max", e.max)] {
+        if n == Some(0) {
+            out.push(Problem::new(
+                format!("{at}.{key}"),
+                format!("step `{}`: `{key}: 0` dispatches nothing — it must be >= 1.", e.step),
+            ));
+        }
+    }
+    out
+}
+
+/// One run-set member: the judge NAME, the config key that first named it, and DoD membership.
+struct Named {
+    name: String,
+    path: String,
+    in_dod: bool,
+}
+
+/// The run-set, in run-set order, each name with the key that first named it.
+///
+/// DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ notify_if ∪ every `until:` (§5.3).
+/// On the driver path there is no DoD at all — agg is never told what "done" means, so it must
+/// not claim success. `Sequence::done_if` still carries its YAML default; it is simply not read.
+///
+/// `notify_if` joins the RUN-SET on exactly the same terms as `abort_if` (STUCK_NOTIFY §12.1): its
+/// detectors must EXECUTE each step, but they are machinery, not goals — never in the DoD-set, so
+/// `all_goals` can't be blocked by `stuck` and the regression gate (scoped to `in_dod`) can't roll
+/// a session back because a detector flipped. An `until:` expression joins on the same terms: its
+/// judges must execute every step or the condition could never become true.
+fn run_set(cfg: &AggConfig, driver: bool, problems: &mut Vec<Problem>) -> Vec<Named> {
+    let seq = &cfg.sequence;
+    let mut out: Vec<Named> = Vec::new();
+    if !driver {
+        add_names(&mut out, problems, "sequence.done_if".into(), &seq.done_if, true);
+    }
+    for (i, inv) in seq.invariants.iter().enumerate() {
+        add_name(&mut out, inv, format!("sequence.invariants[{i}]"), true);
+    }
+    if let Some(a) = &seq.abort_if {
+        add_names(&mut out, problems, "sequence.abort_if".into(), a, false);
+    }
+    if let Some(n) = &seq.notify_if {
+        add_names(&mut out, problems, "sequence.notify_if".into(), n, false);
+    }
+    for (i, e) in seq.steps.iter().enumerate() {
+        if let Some(c) = &e.until {
+            add_names(&mut out, problems, format!("sequence.steps[{i}].until"), c, false);
+        }
+    }
+    // A RATCHETED judge joins the run-set on the same terms as an `until:` judge: it must EXECUTE
+    // every judged step or there is no value to hold to its reference — and it stays OUT of the
+    // DoD-set, because the ratchet is a gate rule, not a goal. On the driver path judges are lazy
+    // and named by the driver, so the ratchet is kept but nothing joins a run-set.
+    for (name, spec) in &seq.ratchet {
+        if let Err(e) = spec.validate(name) {
+            problems.push(Problem::new(format!("sequence.ratchet.{name}"), format!("{e:#}")));
+        }
+        if !driver {
+            add_name(&mut out, name, format!("sequence.ratchet.{name}"), false);
+        }
+    }
+    if seq.oscillation_window < 2 {
+        problems.push(Problem::new(
+            "sequence.oscillation_window",
+            format!(
+                "sequence.oscillation_window must be >= 2 — an A→B→A repeat needs two earlier sessions to look back over, got {}",
+                seq.oscillation_window
+            ),
+        ));
+    }
+    out
+}
+
+/// Add every judge an expression names; an expression that does not even tokenize is a problem.
+fn add_names(out: &mut Vec<Named>, problems: &mut Vec<Problem>, path: String, expr: &str, dod: bool) {
+    match stop::judge_names(expr) {
+        Ok(names) => names.iter().for_each(|n| add_name(out, n, path.clone(), dod)),
+        Err(e) => problems.push(Problem::new(path, format!("{e:#}"))),
+    }
+}
+
+/// Add one name, keeping the FIRST key that named it; DoD membership accumulates.
+fn add_name(out: &mut Vec<Named>, name: &str, path: String, dod: bool) {
+    match out.iter_mut().find(|x| x.name == name) {
+        Some(x) => x.in_dod |= dod,
+        None => out.push(Named { name: name.to_string(), path, in_dod: dod }),
     }
 }
 
@@ -422,5 +508,58 @@ mod tests {
 
         // row 4 — neither key: today's pure autonomy, untouched by the feature.
         assemble(&cfg_with(""), base).expect("row 4: a config naming neither key must be unaffected");
+    }
+
+    /// The paths of a REFUSED build — hand-rolled for the same reason as `assemble_err`.
+    fn refused_paths(cfg: &AggConfig, base: &Path) -> Vec<String> {
+        match build(cfg, base) {
+            Ok(_) => panic!("build was expected to REFUSE this config"),
+            Err(r) => r.problems.into_iter().map(|p| p.path).collect(),
+        }
+    }
+
+    /// `build` no longer stops at the first problem: every entry, every unresolved judge and the
+    /// notify pair are all reported, each at the key an operator would edit.
+    #[test]
+    fn build_collects_every_problem_with_its_path() {
+        let tmp = base_with_judges(&["goal"]);
+        let body = "project: p\nsteps: { worker: {} }\nsequence:\n  steps: [ghost, { step: worker, times: 0 }, \
+                    { step: worker, max: 2 }]\n  done_if: \"goal AND missing\"\n  invariants: [lost]\n  \
+                    abort_if: \"(\"\n  notify_if: \"goal\"\n";
+        let cfg: AggConfig = serde_yaml::from_str(body).expect("the fixture must parse");
+        assert_eq!(
+            refused_paths(&cfg, tmp.path()),
+            [
+                "sequence.steps[0]",
+                "sequence.steps[1].times",
+                "sequence.steps[2].max",
+                "sequence.done_if",
+                "sequence.invariants[0]",
+                "sequence.notify_if",
+                "sequence.abort_if",
+            ]
+        );
+    }
+
+    /// Several problems render as one numbered startup error; the judges that DID resolve survive
+    /// the refusal so the capability check can still look at them.
+    #[test]
+    fn a_refusal_keeps_the_resolved_judges_and_renders_every_problem() {
+        let tmp = base_with_judges(&["goal"]);
+        let cfg = cfg_with_steps("[ghost, { step: worker, times: 0 }]");
+        match build(&cfg, tmp.path()) {
+            Ok(_) => panic!("must refuse"),
+            Err(r) => assert_eq!(r.judges.iter().map(|j| j.name.as_str()).collect::<Vec<_>>(), ["goal"]),
+        }
+        let err = assemble_err(&cfg, tmp.path());
+        assert!(err.starts_with("2 problems") && err.contains("ghost") && err.contains(">= 1"), "{err}");
+    }
+
+    /// A bad EXPRESSION over resolved judges is located at its key (`Engine::new`'s check, split).
+    #[test]
+    fn an_invalid_condition_is_located_at_its_key() {
+        let tmp = base_with_judges(&["goal"]);
+        let cfg = cfg_with("  abort_if: \"goal >= \"\n");
+        assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.abort_if"]);
     }
 }
