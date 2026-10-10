@@ -25,7 +25,7 @@ mod file;
 pub mod headless;
 
 pub use build::{from_state, record_baseline, record_gate, Tally};
-pub use file::{amend_to_error, begin, clear, last_written_on_this_thread, read_text, write, write_fallback, RunHandle};
+pub use file::{amend_to_error, begin, begin_as, clear, last_written_on_this_thread, read_text, write, write_fallback, RunHandle};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -130,6 +130,10 @@ pub struct Report {
     pub result: RunResult,
     pub open_asks: Vec<OpenAsk>,
     pub paths: Paths,
+    /// the wait the run was in when it ended (A-18.1) — absent unless it ended waiting, so a run
+    /// that never waited writes exactly the shape it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<crate::state::Waiting>,
 }
 
 /// Worker sessions THIS run launched, by what became of their work.

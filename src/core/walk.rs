@@ -92,6 +92,33 @@ impl Walk {
             return Ok(e.step.clone());
         }
     }
+
+    /// Where the walk stands after its last dispatch: `(entry index, dispatches of it so far)`.
+    /// `agg run --resume` records it on every step of the call ledger.
+    pub fn position(&self) -> (usize, u32) {
+        (self.idx, self.reps)
+    }
+
+    /// Put the walk back where a previous process left it, right after it dispatched `step`.
+    ///
+    /// Restoring the position is exact where replaying the dispatches is not: which way an
+    /// `until:` went is not on record, and both answers can yield the same next step with different
+    /// repetition counts. ⛔ A position that does not name `step` means `sequence.steps` changed
+    /// since the ledger was written — refused, like the driver's `resume DIVERGED`.
+    pub fn seek(&mut self, idx: usize, reps: u32, step: &str) -> Result<()> {
+        match self.entries.get(idx) {
+            Some(e) if e.step == step && reps >= 1 => {
+                (self.idx, self.reps) = (idx, reps);
+                Ok(())
+            }
+            _ => bail!(
+                "resume DIVERGED: the ledger recorded step `{step}` at sequence entry {idx}, but \
+                 `sequence.steps` has {} there — the sequence changed since the run was interrupted.\n  \
+                 Re-run WITHOUT --resume to start fresh, or restore the agg.yaml that wrote it.",
+                self.entries.get(idx).map(|e| format!("`{}`", e.step)).unwrap_or_else(|| "nothing".into())
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +191,26 @@ mod tests {
         w.next_step(&mut |_| Ok(false)).unwrap();
         let err = w.next_step(&mut |_| anyhow::bail!("bad expression")).unwrap_err().to_string();
         assert!(err.contains("bad expression"), "got: {err}");
+    }
+
+    /// `seek` restores the exact position a previous process recorded — the repetition count
+    /// included, which decides when `max` runs out — and refuses one the sequence cannot have made.
+    #[test]
+    fn seek_restores_a_recorded_position_and_refuses_a_changed_sequence() {
+        let entries = vec![entry("fix", None, Some("green"), Some(3)), entry("ship", None, None, None)];
+        let mut first = Walk::new(entries.clone());
+        plain(&mut first, 2);
+        let (idx, reps) = first.position();
+        assert_eq!((idx, reps), (0, 2));
+
+        let mut resumed = Walk::new(entries.clone());
+        resumed.seek(idx, reps, "fix").unwrap();
+        assert_eq!(plain(&mut resumed, 1), vec!["fix"], "the third and last `fix`");
+        assert!(resumed.next_step(&mut |_| Ok(false)).is_err(), "…after which `max: 3` is spent, as in the original");
+
+        let err = Walk::new(entries.clone()).seek(0, 2, "ship").unwrap_err().to_string();
+        assert!(err.contains("DIVERGED") && err.contains("`fix`"), "{err}");
+        assert!(Walk::new(entries).seek(7, 1, "fix").is_err(), "an entry that no longer exists");
     }
 
     /// A driver project never reaches the walk; if it somehow does, it must bail, not panic.

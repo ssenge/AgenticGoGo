@@ -114,7 +114,7 @@ impl Lifecycle {
             "Verify",
             vec![
                 Box::new(crate::features::verify::FloorFold),
-                Box::new(crate::features::verify::RateLimitBackoff),
+                Box::new(crate::features::backoff::RateLimitBackoff),
                 Box::new(crate::features::verify::GitAutoCommit),
                 Box::new(crate::features::verify::SnapshotGoals),
                 Box::new(crate::features::verify::StageSpan),

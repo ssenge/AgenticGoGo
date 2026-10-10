@@ -1,7 +1,5 @@
 //! The verify feature group: the decomposed VERIFY-stage handlers (on_verify).
 
-use std::time::Duration;
-
 use anyhow::Result;
 use crate::backend::worker::SessionOutcome;
 use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LifecycleEvent, LoopState, indent};
@@ -20,72 +18,7 @@ impl Handler for FloorFold {
     }
 }
 
-/// The rate-limit exit: a rate-limited session is INCOMPLETE. Plain rate-limit → `SkipSession` (skip
-/// gate + session_end, loop on). A ceiling tripped DURING backoff → `Stop(Halt)` (abort_now emits
-/// Finished first). Ceilings are checked even here so an all-night spin still trips the guard (§5.5).
-pub struct RateLimitBackoff;
-impl Handler for RateLimitBackoff {
-    fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        // Copy the flags out first so the immutable scratch borrow ends before the mutable ctx calls
-        // (abort_now / emit) below.
-        let (rate_limited, reset) = ctx
-            .scratch
-            .get::<AGGScratch>()
-            .outcome
-            .as_ref()
-            .map(|o| (o.rate_limited, o.rate_limit_reset))
-            .unwrap_or((false, None));
-        if !rate_limited {
-            return Ok(Flow::Continue);
-        }
-        // Wait until the reported reset (+ a small buffer to clear the boundary) if we know it —
-        // this is what lets a SUBSCRIPTION limit ("resets 12:50pm") resume promptly instead of
-        // blind fixed retries. Unknown reset ⇒ the fixed `ratelimit_backoff_secs`. See stream.rs.
-        const BUFFER_SECS: u64 = 90;
-        let secs = match reset {
-            Some(r) => r.saturating_sub(crate::util::now_epoch()).saturating_add(BUFFER_SECS),
-            None => ctx.cfg.ratelimit_backoff_secs,
-        };
-        match reset {
-            Some(_) => eprintln!("  rate limit detected — waiting {}m{:02}s until it resets", secs / 60, secs % 60),
-            None => eprintln!("  rate limit detected — backing off {secs}s (no reset time reported)"),
-        }
-        if ctx.cfg.memory.enabled {
-            crate::core::memory::clear_scratch(&ctx.dir, ctx.session);
-        }
-        ctx.emit(LifecycleEvent::Backoff);
-
-        // Sleep in short steps so a long wait (a subscription reset can be hours out) stays
-        // responsive: it can be Ctrl-C'd, and §5.5 item 6's ceilings (`wall_hours`/`over_budget`)
-        // are re-checked as it waits — an all-night rate-limit wait must still be able to abort.
-        let mut slept = 0u64;
-        while slept < secs {
-            if crate::os::signals::interrupted() {
-                return Ok(Flow::Stop(ctx.finish_interrupted()));
-            }
-            let rs = ctx.run_state();
-            let ceil = ctx.eng.conditions_only(&rs);
-            if ceil.halt {
-                // ponytail: aborts without firing `notify.cmd` — this path leaves the session
-                // before on_gate, so `NotifyOnStuck` never sees it (STUCK_NOTIFY §12.6). Accepted:
-                // reaching here means a ceiling tripped while ALREADY blocked on a rate limit, so
-                // the operator's next question is about quota, not about the loop being stuck.
-                // Upgrade path: `notify::halt_ping(ctx, ceil.halt_reason.as_deref())` before
-                // `abort_now`, which is where the baseline path now calls it from.
-                eprintln!("  ⚠ ceiling tripped during backoff — aborting");
-                let outcome = ctx.abort_now(&format!("abort_if: {}", ceil.halt_reason.unwrap_or_default()));
-                return Ok(Flow::Stop(outcome));
-            }
-            let chunk = (secs - slept).min(5);
-            std::thread::sleep(Duration::from_secs(chunk));
-            slept += chunk;
-        }
-        Ok(Flow::SkipSession)
-    }
-    fn name(&self) -> &'static str {
-        "RateLimitBackoff"
-    }
-}
+// The rate-limit exit (`RateLimitBackoff`) lives in `features::backoff` (A-18).
 
 /// Snapshot the pre-step (base) judge truth so a GATE rollback can restore it (W5). Runs only past
 /// the rate-limit exit — exactly like the old `pre_cycle_goals` snapshot after the rate-limit return.

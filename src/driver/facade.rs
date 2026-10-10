@@ -31,9 +31,9 @@ use crate::loop_::{
     run_hook, AGGState, End, Flow, Handler, Lifecycle, LoopState, RunPidGuard, RunOutcome, StopHooks,
 };
 
-/// How long `block()` naps between re-evaluating the ceilings. The same 5s chunk
-/// `RateLimitBackoff` uses, for the same reason: a long wait must stay interruptible and must not
-/// outlive the run's own ceilings.
+/// How long `block()` naps between re-evaluating the ceilings. Short for the reason
+/// `RateLimitBackoff` polls: a long wait must stay interruptible and must not outlive the run's own
+/// ceilings.
 const BLOCK_CHUNK_SECS: u64 = 5;
 
 /// The Rust driver's handle on a run.
@@ -249,7 +249,9 @@ impl Agg {
         let pid_guard = RunPidGuard { dir: dir.clone() };
         crate::os::signals::install();
         // behind the guard, like the YAML path: it deletes the previous run's report.
-        let report = crate::report::begin(&dir);
+        // a resume reports under the id the run started with (A-18.3).
+        let prior = if self.resume { crate::core::clock::Clock::recorded_run_id(&dir) } else { None };
+        let report = crate::report::begin_as(&dir, prior);
 
         // THE LEDGER, decided here and nowhere else — and deliberately AFTER the double-run guard
         // above, because both branches WRITE. A resume truncates to the last KEPT gate and replays
@@ -293,7 +295,10 @@ impl Agg {
         // ⚠ `fresh = !resume` is the load-bearing half of the e2e definition: a resumed run must
         // inherit the original `started_at_epoch` and the human wait already banked, or every
         // answered question would hand the run a fresh full allowance.
-        let clock = crate::core::clock::Clock::open(&dir, crate::util::now_epoch(), !self.resume);
+        let mut clock = crate::core::clock::Clock::open(&dir, crate::util::now_epoch(), !self.resume);
+        // what an interrupted session's partial ref is named after (A-18.3).
+        clock.run_id = report.run_id().to_string();
+        clock.save(&dir);
         eprintln!(
             "════════════════════════════════════════════════════════════\n\
              AgenticGoGo — project {} (rust driver)\n\
@@ -1199,8 +1204,7 @@ impl Agg {
 
         let wait_from = crate::util::now_epoch();
         let answer = loop {
-            // Ceilings + Ctrl-C + the bus drain that records the answer. Every 5s, the same chunking
-            // `RateLimitBackoff` uses.
+            // Ceilings + Ctrl-C + the bus drain that records the answer, every `BLOCK_CHUNK_SECS`.
             self.check_limits()?;
             if let Some(a) = crate::core::asks::get(&self.dir, &id).and_then(|a| a.answer) {
                 break a;
@@ -1242,9 +1246,9 @@ impl Agg {
     /// ⛔ **The worker cannot reach this.** The opt-in is the driver author's, in source, at one
     /// call site — which is what makes stop-and-wait legitimate here and never a mechanism.
     ///
-    /// Ceilings keep firing while it waits: the loop below re-evaluates them every 5 seconds, the
-    /// same chunking `RateLimitBackoff` uses, so `wall_hours`/`over_budget` END the run rather than
-    /// hanging until morning.
+    /// Ceilings keep firing while it waits: the loop below re-evaluates them every 5 seconds, as
+    /// the rate-limit wait does, so `wall_time`/`over_budget` END the run rather than hanging until
+    /// morning.
     pub fn block(&self, msg: &str) -> Result<(), Fatal> {
         let started = self.ready()?;
         // A recorded block replays as a no-op — it was already answered. ⚠ This is only reachable

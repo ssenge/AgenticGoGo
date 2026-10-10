@@ -151,6 +151,9 @@ pub struct RunLedger {
     idx: usize,
     proj: Project,
     finished: bool,
+    /// sessions/tokens a resumed run inherited from the record before it — subtracted from this
+    /// record, so the lifetime sums count each session once (`agg run --resume`).
+    inherited: (u32, u64),
 }
 
 impl RunLedger {
@@ -175,7 +178,7 @@ impl RunLedger {
         });
         let idx = proj.runs.len() - 1;
         proj.save(dir);
-        Self { dir: dir.to_path_buf(), idx, proj, finished: false }
+        Self { dir: dir.to_path_buf(), idx, proj, finished: false, inherited: (0, 0) }
     }
 
     /// Lifetime session total INCLUDING runs before this one (this run starts at 0).
@@ -189,12 +192,18 @@ impl RunLedger {
             .sum()
     }
 
+    /// This run continues one that had already counted `sessions` and `tokens`: record only what is
+    /// spent from here on, so `agg history` does not count the inherited sessions twice.
+    pub fn inherit(&mut self, sessions: u32, tokens: u64) {
+        self.inherited = (sessions, tokens);
+    }
+
     /// Update the in-flight record's running counters and persist. Cheap enough
     /// to call once per session boundary.
     pub fn update(&mut self, sessions: u32, tokens: u64, goals_met: usize, goals_total: usize) {
         if let Some(rec) = self.proj.runs.get_mut(self.idx) {
-            rec.sessions = sessions;
-            rec.tokens = tokens;
+            rec.sessions = sessions.saturating_sub(self.inherited.0);
+            rec.tokens = tokens.saturating_sub(self.inherited.1);
             rec.goals_met = goals_met;
             rec.goals_total = goals_total;
         }

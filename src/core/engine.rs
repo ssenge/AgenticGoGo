@@ -123,6 +123,8 @@ pub struct RunState {
     pub max_sessions: Option<u32>,
     pub wall_secs: f64,
     pub human_wait_secs: f64,
+    /// seconds spent waiting out rate limits (A-18) — excluded from `work_time` like human wait.
+    pub rate_limit_wait_secs: f64,
 }
 
 pub struct Engine {
@@ -394,6 +396,7 @@ impl Engine {
             max_sessions: run.max_sessions,
             wall_secs: run.wall_secs,
             human_wait_secs: run.human_wait_secs,
+            rate_limit_wait_secs: run.rate_limit_wait_secs,
             gate: Some(&self.gate),
         };
         // No `done_if` ⇒ never a DoD stop. That is the driver path: agg is not told what "done"

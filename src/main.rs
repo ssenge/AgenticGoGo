@@ -85,6 +85,11 @@ enum Cmd {
         /// `session_isolation.base_branch`. Must name an existing commit.
         #[arg(long)]
         base_branch: Option<String>,
+        /// continue the project's last interrupted run: same run id, session counter, ratchet state
+        /// and call ledger (sound back to its last kept gate). The interrupted session's work is on
+        /// `refs/agg/partial/<run>/<session>`, not judged.
+        #[arg(long)]
+        resume: bool,
     },
     /// Run ONE judge once (resolved by NAME from disk) and print its raw verdict JSON + a human
     /// line — for authoring or debugging a single judge without running the whole `plan`.
@@ -204,8 +209,10 @@ enum SendCmd {
     },
     /// Pause the loop before the next session.
     Pause,
-    /// Resume a paused loop.
+    /// Resume a paused loop (or, while it waits out a rate limit, end the wait like `wake`).
     Resume,
+    /// End a rate-limit wait now and start the next session (still limited ⇒ it waits again).
+    Wake,
     /// Stop the loop gracefully after the current session boundary.
     Stop {
         /// reason (recorded in the finish banner)
@@ -388,14 +395,15 @@ fn run_cli() -> Result<ExitCode> {
             );
             Ok(())
         }
-        Cmd::Run { max_sessions, detach, report_json, base_branch } => {
+        Cmd::Run { max_sessions, detach, report_json, base_branch, resume } => {
             if *detach {
                 // validated in the FOREGROUND — a typo fails loudly here, not inside a detached child
                 // the user can't see.
                 prepare_run(&p, base_branch.as_deref())?;
                 return detach::spawn_detached(&p.dir).map(|_| ExitCode::SUCCESS);
             }
-            return Ok(ExitCode::from(run_reported(&p, *max_sessions, *report_json, base_branch.as_deref())));
+            let opts = loop_::RunOpts { max_sessions: *max_sessions, resume: *resume };
+            return Ok(ExitCode::from(run_reported(&p, opts, *report_json, base_branch.as_deref())));
         }
         Cmd::Serve { port, cors_origin, token } => {
             agg::ui::serve::run(agg::ui::serve::ServeConfig {
@@ -423,6 +431,7 @@ fn run_cli() -> Result<ExitCode> {
                 SendCmd::Budget { total } => bus::Command::SetBudget { total: *total },
                 SendCmd::Pause => bus::Command::Pause,
                 SendCmd::Resume => bus::Command::Resume,
+                SendCmd::Wake => bus::Command::Wake,
                 SendCmd::Stop { reason } => bus::Command::Stop { reason: reason.clone() },
                 SendCmd::Note { text } => bus::Command::Note { text: text.clone() },
             };
@@ -509,7 +518,7 @@ fn prepare_run(p: &Paths, base_branch: Option<&str>) -> Result<(config::AggConfi
 
 /// A foreground `agg run`, under the report contract: whatever happens — a refused config, a fault,
 /// a panic inside agg — it ends with `agg/private/report.json` and the exit code that report states.
-fn run_reported(p: &Paths, max_sessions: u32, report_json: bool, base_branch: Option<&str>) -> u8 {
+fn run_reported(p: &Paths, opts: loop_::RunOpts, report_json: bool, base_branch: Option<&str>) -> u8 {
     use agg::report::headless::{conclude, Headless};
     // only once `agg/` exists: a directory that is not a project has nowhere to put a log.
     let headless = if report_json && p.config_base.is_dir() {
@@ -534,7 +543,7 @@ fn run_reported(p: &Paths, max_sessions: u32, report_json: bool, base_branch: Op
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (cfg, asm) = prepare_run(p, base_branch)?;
         project = cfg.project.clone();
-        loop_::run(cfg, asm, &p.dir, &p.config_base, max_sessions)
+        loop_::run(cfg, asm, &p.dir, &p.config_base, opts)
     }))
     .unwrap_or_else(|panic| Err(anyhow::anyhow!("panic inside agg: {}", agg::report::panic_message(&*panic))));
     // `--report-json` outside a project still answers on stdout, through a printer on the real fds.

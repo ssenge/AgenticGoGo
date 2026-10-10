@@ -83,6 +83,19 @@ fn render_state(s: &DashboardState) -> String {
         out.push_str(&format!("⚑ FLAGGED for help since session #{sess} — {}\n", s.notify_reason));
         out.push_str("  (the loop is still running; it never blocks on a human)\n");
     }
+    // WAITING — a rate-limited run is alive but idle; say on whose limit, until when, and how to
+    // end it early (A-18.1). The same field `status --json` carries.
+    if let Some(w) = &s.waiting {
+        let left = crate::util::fmt_dur(w.until.saturating_sub(crate::util::now_epoch()));
+        out.push_str(&format!(
+            "⏸ WAITING — {} for `{}` until {} (in {left})
+  (`agg send wake` tries again now; `agg stop` ends the run)
+",
+            w.reason,
+            w.agent,
+            crate::util::human_time(w.until)
+        ));
+    }
     // OPEN ASKS — a blocked run must never be a silent state. With no timeout on a `hil_*` call,
     // this block plus `notify.cmd` is the whole mitigation for "somebody forgot to answer", so it
     // goes ABOVE the scoreboard and carries the exact command that unblocks the run.
@@ -373,6 +386,21 @@ mod tests {
         assert!(out.contains("run-set (not counted toward done)"));
         assert!(out.contains("✔ stalled"));
         assert!(out.contains("no state-file change"));
+    }
+
+    /// A-18.1: a waiting run says so — whose limit, and the command that ends the wait early.
+    #[test]
+    fn a_waiting_run_shows_the_wait_and_how_to_end_it() {
+        let mut s = sample();
+        assert!(!render_state(&s).contains("WAITING —"), "no wait, no line");
+        s.waiting = Some(crate::state::Waiting {
+            reason: crate::state::RATE_LIMIT.into(),
+            agent: "claude".into(),
+            until: crate::util::now_epoch() + 3_600,
+        });
+        let out = render_state(&s);
+        assert!(out.contains("WAITING — rate_limit for `claude`"), "{out}");
+        assert!(out.contains("agg send wake"), "{out}");
     }
 
     /// The §7.4 per-agent breakdown: one row per agent + a total; a non-reporting agent shows "—".

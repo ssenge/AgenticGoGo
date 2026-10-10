@@ -31,8 +31,12 @@ pub enum Command {
     SetBudget { total: Option<u64> },
     /// Pause the loop before the next session until a `resume`/`stop` arrives.
     Pause,
-    /// Resume a paused loop.
+    /// Resume a paused loop. While the loop waits out a rate limit it also ends the wait, like
+    /// [`Command::Wake`].
     Resume,
+    /// End a rate-limit wait now and try the next session (A-18.2). Still limited ⇒ agg detects it
+    /// and waits again; `ratelimit_min_gap_secs` keeps two attempts apart. A no-op while not waiting.
+    Wake,
     /// Stop the loop gracefully after the current session boundary.
     Stop { reason: String },
     /// A free-form note (logged, shown once; no behavior change).

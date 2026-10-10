@@ -67,6 +67,7 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
         judges: judges(&st.dash.judges, tally.baseline),
         result: RunResult { base_branch, final_commit, staged_branch: span_tip },
         open_asks: open_asks(&st.dir, now),
+        waiting: st.dash.waiting.clone(),
         ..skeleton(&st.dir, &st.cfg.project, run.run_id(), run.started_at(), res, &st.dash.finish_reason)
     }
 }
@@ -108,6 +109,7 @@ fn skeleton(
         result: RunResult::default(),
         open_asks: Vec::new(),
         paths: paths(dir),
+        waiting: None,
     }
 }
 
