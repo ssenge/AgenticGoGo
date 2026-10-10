@@ -189,19 +189,33 @@ fn usage_is_an_increment_so_report_once_and_report_per_message_both_work() {
     let b = claude();
     // Claude's shape: usage rides the terminal `result` event, once.
     let result_line = r#"{"type":"result","usage":{"output_tokens":100,"cache_creation_input_tokens":5},"total_cost_usd":0.25,"session_id":"s1"}"#;
-    assert_eq!(b.parse_usage(result_line), Some(105), "output + cache-creation are both output-priced");
+    let t = b.parse_usage(result_line).expect("a result with usage");
+    assert_eq!(t.output, Some(100), "a cache WRITE is input, never folded into output");
+    assert_eq!((t.cache_write, t.input, t.cache_read), (Some(5), None, None), "unreported kinds stay None");
 
-    // A line with no usage contributes NOTHING — and `None` is not `Some(0)`. That distinction
+    // A line with no usage contributes NOTHING — and `None` is not zero. That distinction
     // is what keeps "the agent didn't report" from masquerading as "the agent reported zero".
     assert_eq!(b.parse_usage(r#"{"type":"assistant","message":{}}"#), None);
     assert_eq!(b.parse_usage(r#"{"type":"result","session_id":"s1"}"#), None, "result with no usage object");
+}
 
-    // Summing the stream is the worker's job; here we prove the pieces add up.
-    let total: u64 = [result_line, r#"{"type":"assistant"}"#]
-        .iter()
-        .filter_map(|l| b.parse_usage(l))
-        .sum();
-    assert_eq!(total, 105);
+/// The REAL Claude stream: four token kinds off the result, the model off `system`/`init`, the
+/// price off `total_cost_usd` — and the one-shot JSON a judge gets back, which has no init and names
+/// the model in `modelUsage` instead.
+#[test]
+fn the_captured_claude_stream_yields_the_split_tokens_the_model_and_the_price() {
+    const STREAM: &str = include_str!("../../tests/fixtures/agent-streams/claude-2.1.296.jsonl");
+    const ONE_SHOT: &str = include_str!("../../tests/fixtures/agent-streams/claude-2.1.296-oneshot.json");
+    let b = claude();
+    let t = STREAM.lines().find_map(|l| b.parse_usage(l)).expect("the result carries usage");
+    assert_eq!(t, crate::usage::Tokens { input: Some(2), output: Some(4), cache_write: Some(23888), cache_read: Some(10585) });
+    assert_eq!(STREAM.lines().filter(|l| b.parse_usage(l).is_some()).count(), 1, "reported once, on the result");
+    assert_eq!(STREAM.lines().find_map(|l| b.parse_model(l)).as_deref(), Some("claude-haiku-5-5"));
+
+    let u = b.tally_one_shot(ONE_SHOT.as_bytes());
+    assert_eq!(u.model.as_deref(), Some("claude-haiku-5-5"), "the one-shot names the model in modelUsage");
+    assert_eq!(u.tokens.output, Some(4));
+    assert_eq!(u.cost_usd, Some(0.00392047));
 }
 
 /// The terminal event still owns the CUMULATIVE facts (id, cost, rate-limit) — those are SET,

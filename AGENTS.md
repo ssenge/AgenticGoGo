@@ -51,10 +51,15 @@ other command is re-queued for the next boundary. `wake` outside a wait is a no-
   `--resume` continues the last interrupted run: same `run_id`, session counter (next session = n+1),
   ratchet state and call ledger — truncated back to the last KEPT gate (`features/resume.rs`).
   Every ending writes `agg/private/report.json` (`outcome` done|aborted|stopped|error — authoritative;
-  schema `docs/schemas/report.v1.json`). `--report-json`: logs → `agg/private/run.log`, stdout = the report only.
+  schema `docs/schemas/report.v2.json`; v1 superseded). `--report-json`: logs → `agg/private/run.log`, stdout = the report only.
+  The report carries usage per session (`session_log`: worker and ruler apart, the model the agent REPORTED,
+  tokens `input`/`output`/`cache_write`/`cache_read`, `cost_usd` + `cost_source` reported|partial|unknown) and totals.
   Exit codes: 0 done · 3 abort_if · 4 max-sessions · 5 stopped (agg stop / SIGTERM / SIGINT) · 1 error.
   Precedence at one session end: error > stopped > done > aborted. `--project <dir>` = `--dir <dir>` (global).
-- `agg status [--json]` — live scoreboard (reads `state.json`; cheap, does NOT re-judge).
+- `agg status [--json]` — live scoreboard (reads `state.json`; cheap, does NOT re-judge). `--json` = the STABLE
+  live document (`docs/schemas/status.v1.json`, `src/report/status.rs`): `running`, `current_step`, `session`,
+  judges' `last` + `ratchet`, `detectors`, `open_asks`, `usage`, `waiting` — field names match the report.
+  ⚠ `state.json` itself is INTERNAL; a new live field goes into `DashboardState` AND the status document + schema.
 - `agg dashboard [--once]` — live TUI (or one-shot snapshot).
 - `agg doctor [--json]` — check the chosen agent is installed and the config is valid for it. `--json`: a
   versioned report (every backend's path/version/capability flags, isolation tiers available, problems).
@@ -62,9 +67,11 @@ other command is re-queued for the next boundary. `wake` outside a wait is a no-
   each with a dotted config path (`steps.w.isolation`). Runs no judge/agent. Exit 1 on any problem.
 - `agg schema` — print the agg.yaml JSON Schema (generated from the config types; cannot drift).
 - `agg judge <name>` — run ONE judge and print its verdict (author/debug a judge).
-- `agg history [--json]` — run history + lifetime totals.
+- `agg history [--json]` — run history + lifetime totals (`--json`: each run with its `usage` totals).
 - `agg send inject "<text>" | pause | resume | wake | budget <n> | stop | note "<text>"` — steer a RUNNING loop.
   `wake` ends a rate-limit wait now (`resume` does too while waiting).
+- `agg answer <id> <value> [--json]` — answer an open ask (works with nothing running). `--json`:
+  `{schema_version, accepted, reason, id, answer}` (`docs/schemas/answer.v1.json`); refused ⇒ exit 1.
 - `agg stop` — graceful stop (alias of `send stop`).
 - `agg spawn --name <n> --reason "<why>" -- <cmd…>` — a long task that outlives one worker session.
 - `agg skills install [--agent <a>] [--user]` — install the `/agg:*` skills where the agent finds them.
@@ -242,6 +249,10 @@ src/core/ratchet.rs   the numeric ratchet + the gate's own history (rollbacks, o
                       state (`eng.gate`), moved ONLY in `features::gate::keep_or_rollback` — the body
                       both front ends share — and persisted to `agg/private/gate.json` + driver
                       `Gate` call records (what `--resume` restores).
+src/usage.rs          what every agent call REPORTED (model, 4 token kinds, cost) → `usage::Ledger` per session.
+                      Charge through `LoopState::charge_usage`/`charge_ruler` ONLY — they feed the ceilings,
+                      the per-agent tally and the report's `session_log` together. A kind an agent does not
+                      report stays `None`; never fold one kind into another (cache writes are NOT output).
 src/core/calls.rs     `agg/private/calls.jsonl` — the CALL ledger that makes `--resume` work (the driver's
                       calls; on the YAML path one `step` row per session + one `gate` row per judged one,
                       the step's label carrying the walk position — `features/resume.rs`).

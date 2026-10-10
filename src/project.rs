@@ -37,6 +37,10 @@ pub struct RunRecord {
     /// goals met / total at the moment the run ended.
     pub goals_met: usize,
     pub goals_total: usize,
+    /// the run's usage totals — `total`, `worker`, `ruler`, each `{tokens: {input, output,
+    /// cache_write, cache_read}, cost_usd, cost_source}` — the same shape as the report's `usage`.
+    /// Empty for a run recorded before usage was.
+    pub usage: crate::usage::Summary,
     /// how the run ended: "goals-met" | "driver-returned" | "halt:<reason>" | "stopped" |
     /// "max-sessions" | "error" | "crashed" (in-flight record never finalized).
     ///
@@ -174,6 +178,7 @@ impl RunLedger {
             tokens: 0,
             goals_met: 0,
             goals_total: 0,
+            usage: crate::usage::Summary::default(),
             end_reason: "crashed".into(), // pessimistic until finish() overrides
         });
         let idx = proj.runs.len() - 1;
@@ -208,6 +213,13 @@ impl RunLedger {
             rec.goals_total = goals_total;
         }
         self.proj.save(&self.dir);
+    }
+
+    /// Record the run's usage totals so far; persisted by the next [`Self::update`] / [`Self::finish`].
+    pub fn set_usage(&mut self, usage: crate::usage::Summary) {
+        if let Some(rec) = self.proj.runs.get_mut(self.idx) {
+            rec.usage = usage;
+        }
     }
 
     /// Stamp the real end reason + end time. Called on a clean exit; Drop then
@@ -300,6 +312,7 @@ mod tests {
         p.runs.push(RunRecord {
             run: 1, started_at_epoch: 1, ended_at_epoch: 2, pid: 1,
             sessions: 3, tokens: 30, goals_met: 1, goals_total: 2, end_reason: "stopped".into(),
+            ..Default::default()
         });
         p.save(&dir);
         // destination exists and parses back to the same content.

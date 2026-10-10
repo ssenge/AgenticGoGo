@@ -65,7 +65,8 @@ enum Cmd {
     /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
     /// re-run judges; reads agg/private/state.json, same as the /agg:status skill).
     Status {
-        /// emit the raw snapshot as JSON (the full DashboardState) for scripting/piping.
+        /// emit the live status document (docs/schemas/status.v1.json) — the stable interface for a
+        /// program watching a run.
         #[arg(long)]
         json: bool,
     },
@@ -99,7 +100,7 @@ enum Cmd {
     },
     /// Show this project's run history (every `agg run`, newest first) + lifetime totals.
     History {
-        /// emit the raw history ledger as JSON (the full Project record) for scripting/piping.
+        /// emit the history ledger as JSON (the full Project record, with each run's usage totals).
         #[arg(long)]
         json: bool,
     },
@@ -166,6 +167,10 @@ enum Cmd {
         /// who answered (recorded in the ledger for the audit trail)
         #[arg(long, default_value = "operator")]
         by: String,
+        /// print `{schema_version, accepted, reason, id, answer}` (docs/schemas/answer.v1.json) on
+        /// stdout; a refused answer still exits 1.
+        #[arg(long)]
+        json: bool,
     },
     /// Ask a human for something — for the WORKER to invoke. Records the ask and exits immediately.
     #[command(subcommand)]
@@ -437,7 +442,11 @@ fn run_cli() -> Result<ExitCode> {
             };
             send_to_bus(&p.dir, cmd)
         }
-        Cmd::Answer { id, value, by } => answer_ask(&p.dir, id, value, by),
+        Cmd::Answer { id, value, by, json: false } => answer_ask(&p.dir, id, value, by),
+        Cmd::Answer { id, value, by, json: true } => {
+            let accepted = answer_ask_json(&p.dir, id, value, by)?;
+            return Ok(if accepted { ExitCode::SUCCESS } else { ExitCode::from(1) });
+        }
         Cmd::Hil(hil) => worker_ask(&p.dir, hil),
         Cmd::Skills(SkillsCmd::Install { agent, user }) => {
             // Resolving the agent is the whole correctness of this command: install for the wrong
@@ -575,16 +584,37 @@ fn ruler_for(config: &std::path::Path) -> Result<&'static dyn agg::backend::Agen
 /// its writable set.
 fn answer_ask(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<()> {
     use agg::core::asks;
+    let canonical = record_answer(dir, id, value, by)?;
+    if let Some(ask) = asks::get(dir, id) {
+        eprintln!("answered `{id}`: {}", asks::one_line(&ask.question, 100));
+    }
+    println!("recorded: {canonical}");
+    Ok(())
+}
 
+/// `agg answer … --json`: the result as `docs/schemas/answer.v1.json`, printed whether or not the
+/// answer was accepted — the caller reads `accepted`, and the exit code (1 when refused) says it too.
+fn answer_ask_json(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<bool> {
+    let recorded = record_answer(dir, id, value, by);
+    let (answer, reason) = match &recorded {
+        Ok(a) => (Some(a.clone()), None),
+        Err(e) => (None, Some(format!("{e:#}"))),
+    };
+    let doc = serde_json::json!({
+        "schema_version": 1, "accepted": recorded.is_ok(), "reason": reason, "id": id, "answer": answer,
+    });
+    println!("{}", serde_json::to_string_pretty(&doc)?);
+    Ok(recorded.is_ok())
+}
+
+/// Validate and record one answer; the canonical value recorded, or why it was refused.
+fn record_answer(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<String> {
+    use agg::core::asks;
     // ONE validator, shared with `POST /api/answer`, so a value off a closed option list is refused
     // identically whichever channel it arrives on.
     let canonical = asks::validate_answer(dir, id, value).map_err(|e| anyhow::anyhow!("{e}"))?;
-    if let Some(ask) = asks::get(dir, id) {
-        eprintln!("answering `{id}`: {}", asks::one_line(&ask.question, 100));
-    }
     asks::answer(dir, id, &canonical, by, agg::util::now_epoch())?;
-    println!("recorded: {canonical}");
-    Ok(())
+    Ok(canonical)
 }
 
 /// `agg hil …` — the worker's ask front-end. Writes a REQUEST and returns immediately.

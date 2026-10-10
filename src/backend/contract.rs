@@ -1,6 +1,6 @@
 //! The data contract between the loop and a backend: what a worker session is GIVEN
 //! ([`SessionSpec`]) and what a run REPORTS back ([`Capabilities`], [`SessionReport`],
-//! [`OneShot`], [`Spend`]). These are pure data types; the behavioural contract
+//! [`OneShot`]). These are pure data types; the behavioural contract
 //! ([`super::AgentBackend`]) and agent selection stay in the parent module.
 
 use std::path::Path;
@@ -81,27 +81,10 @@ pub struct OneShot {
     pub body: String,
     pub stderr: Vec<u8>,
     pub success: bool,
-    /// output tokens this call reported (summed per line; 0 if the agent reports none).
-    pub output_tokens: u64,
-    /// dollars this call reported. `None` = the agent cannot price itself — a hole to surface, not a
-    /// silent 0 (same discipline as [`SessionReport::cost_usd`]).
-    pub cost_usd: Option<f64>,
-}
-
-/// Token + dollar spend of a single ruler call (LLM judge / summarizer), so the ceilings can sum
-/// worker + judge + summarizer across agents (§5.6). `cost_usd` is `None` when the agent cannot
-/// price itself — a hole to surface, never a silent 0.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Spend {
-    pub tokens: u64,
-    pub cost_usd: Option<f64>,
-}
-
-impl Spend {
-    /// From a completed one-shot's reported usage.
-    pub fn from_one_shot(o: &OneShot) -> Self {
-        Spend { tokens: o.output_tokens, cost_usd: o.cost_usd }
-    }
+    /// what this call reported: the model that ran, its tokens, its price. A kind the agent does not
+    /// report is `None` — a hole to surface, never a silent 0 (same discipline as
+    /// [`SessionReport::cost_usd`]).
+    pub usage: crate::usage::Usage,
 }
 
 /// Everything a backend needs to build one worker invocation. Agent-agnostic by construction — a

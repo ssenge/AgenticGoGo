@@ -1,0 +1,570 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/status.v1.json",
+  "title": "agg live status, schema_version 1",
+  "description": "`agg status --json`: where a run stands, read from another process while it runs. Cheap: it reads the snapshot the loop publishes and never re-runs a judge. Field names match the run report (report.v2.json) wherever the two say the same thing. Any change to this shape bumps schema_version and ships a new file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "agg_version",
+    "run_id",
+    "project",
+    "running",
+    "finished",
+    "stop_reason",
+    "phase",
+    "current_step",
+    "session",
+    "lifetime_session",
+    "time",
+    "sessions",
+    "judges",
+    "detectors",
+    "open_asks",
+    "usage",
+    "waiting",
+    "paths"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "agg_version": {
+      "type": "string",
+      "description": "the agg version that read the snapshot"
+    },
+    "run_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "the run's id, as in its report and run.log; null for a snapshot written before run ids existed"
+    },
+    "project": {
+      "type": "string"
+    },
+    "running": {
+      "type": "boolean",
+      "description": "a loop process is alive for this project right now"
+    },
+    "finished": {
+      "type": "boolean",
+      "description": "the run published its ending. Neither running nor finished = it was killed"
+    },
+    "stop_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "why the run ended, once it has; null while it runs"
+    },
+    "phase": {
+      "type": "string",
+      "description": "where the loop is: starting, inject, run, verify, gate, backoff, staging, done"
+    },
+    "current_step": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "agent",
+            "model"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "agent": {
+              "type": "string"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "the model agg asked for; null = the agent's default. What actually ran is in the report's session_log"
+            }
+          }
+        }
+      ],
+      "description": "the step being run; null before the first"
+    },
+    "session": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "the session number within this run"
+    },
+    "lifetime_session": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "sessions across every run of this project"
+    },
+    "time": {
+      "$ref": "#/$defs/time"
+    },
+    "sessions": {
+      "$ref": "#/$defs/sessions"
+    },
+    "judges": {
+      "type": "object",
+      "description": "every judge the run consulted, keyed by name",
+      "additionalProperties": {
+        "$ref": "#/$defs/judge"
+      }
+    },
+    "detectors": {
+      "$ref": "#/$defs/detectors"
+    },
+    "open_asks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/open_ask"
+      }
+    },
+    "usage": {
+      "$ref": "#/$defs/usage_summary"
+    },
+    "waiting": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/waiting"
+        }
+      ],
+      "description": "set while the loop waits before its next session (an agent rate limit); null otherwise"
+    },
+    "paths": {
+      "$ref": "#/$defs/paths"
+    }
+  },
+  "$defs": {
+    "cost_source": {
+      "enum": [
+        "reported",
+        "partial",
+        "unknown"
+      ],
+      "description": "reported: every call priced itself. partial: some did, cost_usd is their sum (a lower bound). unknown: none did, cost_usd is null"
+    },
+    "detectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stalled",
+        "oscillating",
+        "rollbacks",
+        "consecutive_rollbacks",
+        "ratchet_regressed"
+      ],
+      "properties": {
+        "stalled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "the last verdict of a judge named `stalled`, if the run-set has one and it has run; else null"
+        },
+        "oscillating": {
+          "type": "boolean",
+          "description": "A→B→A over the unmet DoD-set within sequence.oscillation_window"
+        },
+        "rollbacks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions the regression policy rolled back, this run"
+        },
+        "consecutive_rollbacks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "rollbacks since the last kept gate"
+        },
+        "ratchet_regressed": {
+          "type": "boolean",
+          "description": "the most recent judged gate regressed a ratchet"
+        }
+      },
+      "description": "the stop detectors as they stand"
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "last",
+        "in_dod",
+        "ratchet"
+      ],
+      "properties": {
+        "last": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/verdict"
+            }
+          ],
+          "description": "its latest verdict; null until it has run"
+        },
+        "in_dod": {
+          "type": "boolean",
+          "description": "counted toward done_if, as opposed to a control judge like stalled"
+        },
+        "ratchet": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ratchet"
+            }
+          ],
+          "description": "null for a judge that is not ratcheted"
+        }
+      }
+    },
+    "open_ask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "question",
+        "options",
+        "age_s"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "bool",
+            "choose",
+            "input"
+          ]
+        },
+        "question": {
+          "type": "string"
+        },
+        "options": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "the allowed answers of a bool/choose ask; null for input"
+        },
+        "age_s": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report",
+        "ledger",
+        "log",
+        "evidence_dir"
+      ],
+      "properties": {
+        "report": {
+          "type": "string"
+        },
+        "ledger": {
+          "type": "string",
+          "description": "the verdict ledger; its row format is internal"
+        },
+        "log": {
+          "type": "string"
+        },
+        "evidence_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ratchet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "direction",
+        "tolerance",
+        "tolerance_pct"
+      ],
+      "properties": {
+        "reference": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "the value at the last KEPT gate (or the seed / baseline before the first keep); null until one exists"
+        },
+        "direction": {
+          "enum": [
+            "up",
+            "down"
+          ],
+          "description": "which way is better"
+        },
+        "tolerance": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tolerance_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "description": "a ratcheted judge's ratchet: the reference it is held to and the rule"
+    },
+    "sessions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "merged",
+        "rolled_back",
+        "no_improvement",
+        "staged_unmerged"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "worker sessions this run launched"
+        },
+        "merged": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions whose work a gate merged onto the base branch"
+        },
+        "rolled_back": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions whose work a gate discarded as a regression, a veto or a conflict"
+        },
+        "no_improvement": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions a gate did not merge because nothing improved (sequence.merge_requires_improvement)"
+        },
+        "staged_unmerged": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions staged on a span no gate decided (see result.staged_branch)"
+        }
+      }
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_time_s",
+        "work_time_s",
+        "human_wait_time_s"
+      ],
+      "properties": {
+        "wall_time_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "work_time_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "human_wait_time_s": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "output",
+        "cache_write",
+        "cache_read"
+      ],
+      "properties": {
+        "input": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "uncached input tokens"
+        },
+        "output": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "output tokens"
+        },
+        "cache_write": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "input tokens written to the prompt cache"
+        },
+        "cache_read": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "input tokens served from the prompt cache"
+        }
+      },
+      "description": "tokens split by kind; the kinds do not overlap. null = the agent does not report that kind (never a fabricated 0)"
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tokens",
+        "cost_usd",
+        "cost_source"
+      ],
+      "properties": {
+        "tokens": {
+          "$ref": "#/$defs/tokens"
+        },
+        "cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "dollars as the agents reported them (API-equivalent price, not a bill)"
+        },
+        "cost_source": {
+          "$ref": "#/$defs/cost_source"
+        }
+      }
+    },
+    "usage_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "worker",
+        "ruler"
+      ],
+      "properties": {
+        "total": {
+          "$ref": "#/$defs/totals"
+        },
+        "worker": {
+          "$ref": "#/$defs/totals"
+        },
+        "ruler": {
+          "$ref": "#/$defs/totals"
+        }
+      },
+      "description": "usage totals: all of it, the worker part (the sessions' agents), the ruler part (LLM judges and the summarizer)"
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "met",
+        "value",
+        "max",
+        "target",
+        "rationale",
+        "error"
+      ],
+      "properties": {
+        "met": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "null when the judge emitted no number"
+        },
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "target": {
+          "type": "number"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "set when the judge could not grade at all"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "absolute paths of the evidence files agg kept for this verdict, under paths.evidence_dir; omitted when none were kept"
+        }
+      }
+    },
+    "waiting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "agent",
+        "until"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "why the loop waits: `rate_limit`"
+        },
+        "agent": {
+          "type": "string",
+          "description": "the agent that is limited"
+        },
+        "until": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "epoch seconds the wait ends, if known"
+        }
+      },
+      "description": "the loop is waiting before its next session"
+    }
+  }
+}

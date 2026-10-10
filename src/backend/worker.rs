@@ -31,11 +31,10 @@ pub struct SessionOutcome {
     /// the watchdog SIGKILLed this session (stream-idle + cpu-flat) — surfaced on the
     /// session-exit log line so a hung worker is visible, not silently swallowed.
     pub killed_by_watchdog: bool,
-    /// output-side tokens this session reported on its result event (for the budget)
-    pub output_tokens: u64,
-    /// dollar cost this session reported on its result event (`total_cost_usd`, for the
-    /// `cost.total` ceiling). Claude prices it; we just read the final cumulative value.
-    pub cost_usd: f64,
+    /// what this session reported: the model that ran, its tokens (output feeds the budget), and
+    /// its dollar cost (`total_cost_usd`, for the `limits.cost` ceiling — Claude prices it, the
+    /// others report `None`).
+    pub usage: crate::usage::Usage,
     /// the worker's `💬` thoughts this session (raw material for the LLM summarizer)
     pub thoughts: Vec<String>,
     /// this session's claude session_id (for optional `--resume` continuity)
@@ -51,8 +50,7 @@ impl SessionOutcome {
             rate_limited: false,
             rate_limit_reset: None,
             killed_by_watchdog: false,
-            output_tokens: 0,
-            cost_usd: 0.0,
+            usage: crate::usage::Usage::default(),
             thoughts: vec![],
             session_id: None,
         }
@@ -229,9 +227,9 @@ pub fn run_session(
         eprintln!("  reaped {reaped} straggler process(es) from the worker group");
     }
 
-    // copy the cost out of the guard into a plain f64 before building the outcome (the
-    // MutexGuard temporary can't outlive the returned struct).
-    let cost = *sh.cost_usd.lock().unwrap_or_else(|e| e.into_inner());
+    // copy the usage out of the guard before building the outcome (the MutexGuard temporary can't
+    // outlive the returned struct).
+    let usage = sh.usage.lock().unwrap_or_else(|e| e.into_inner()).clone();
     SessionOutcome {
         exit_code: status.and_then(|s| s.code()),
         duration_secs: start.elapsed().as_secs(),
@@ -244,8 +242,7 @@ pub fn run_session(
             r => Some(r),
         },
         killed_by_watchdog: sh.killed.load(Ordering::Relaxed),
-        output_tokens: sh.output_tokens.load(Ordering::Relaxed),
-        cost_usd: cost,
+        usage,
         thoughts,
         session_id,
     }
@@ -268,10 +265,9 @@ struct Shared {
     /// reset epoch (secs) from the terminal event, 0 = unreported. AtomicU64 so the reader thread
     /// can publish it lock-free alongside `rate_limited`.
     rate_limit_reset: AtomicU64,
-    output_tokens: AtomicU64,
-    /// a result event carries the FINAL cumulative cost for the session, so this is SET, not
-    /// accumulated. f64 has no atomic, hence a tiny Mutex.
-    cost_usd: std::sync::Mutex<f64>,
+    /// tokens ADD per line; the first model reported sticks; the cost is SET (a result event
+    /// carries the FINAL cumulative cost for the session).
+    usage: std::sync::Mutex<crate::usage::Usage>,
     /// the session is over — every helper thread's loop exits on this.
     done: AtomicBool,
     /// the watchdog SIGKILLed the worker.
@@ -292,8 +288,7 @@ impl Shared {
             last_thought: std::sync::Mutex::new(String::from("session start")),
             rate_limited: AtomicBool::new(false),
             rate_limit_reset: AtomicU64::new(0),
-            output_tokens: AtomicU64::new(0),
-            cost_usd: std::sync::Mutex::new(0.0),
+            usage: std::sync::Mutex::new(crate::usage::Usage::default()),
             done: AtomicBool::new(false),
             killed: AtomicBool::new(false),
             reaping: AtomicBool::new(false),
@@ -349,9 +344,7 @@ fn spawn_reader(
             // about where it lives. Claude reports it ONCE (on its result); Copilot reports it on
             // EVERY assistant message and puts no token count on its terminal event at all.
             // Summing handles both shapes. See AgentBackend::parse_usage.
-            if let Some(toks) = agent.parse_usage(&line) {
-                sh.output_tokens.fetch_add(toks, Ordering::Relaxed);
-            }
+            note_usage(&sh, agent, &line);
             // The TERMINAL event carries the rest. Each field is an Option: `None` = THIS AGENT
             // DOES NOT REPORT IT, which is not the same as zero. We fold in only what was actually
             // reported; a config that *needs* a number the agent can't produce was already refused
@@ -371,13 +364,29 @@ fn spawn_reader(
                 }
                 // cost is CUMULATIVE on the terminal event, so SET it, don't add.
                 if let Some(c) = report.cost_usd {
-                    *sh.cost_usd.lock().unwrap_or_else(|e| e.into_inner()) = c;
+                    sh.usage.lock().unwrap_or_else(|e| e.into_inner()).cost_usd = Some(c);
                 }
             }
         }
         let _ = tx.send((tracker.thoughts, session_id)); // ok if the receiver timed out
     });
     rx
+}
+
+/// Fold one stream line's usage into the session's: tokens add, the first model reported sticks.
+fn note_usage(sh: &Shared, agent: &'static dyn backend::AgentBackend, line: &str) {
+    let tokens = agent.parse_usage(line);
+    let model = agent.parse_model(line);
+    if tokens.is_none() && model.is_none() {
+        return;
+    }
+    let mut u = sh.usage.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = tokens {
+        u.tokens.add(&t);
+    }
+    if u.model.is_none() {
+        u.model = model;
+    }
 }
 
 /// Heartbeat thread: a status line at least every `interval` secs, so a long quiet stretch is

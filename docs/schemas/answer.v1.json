@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/answer.v1.json",
+  "title": "agg answer result, schema_version 1",
+  "description": "`agg answer <id> <value> --json`. Exit 0 when accepted, 1 when refused (unknown id, already answered, a value off a bool/choose ask's options). An accepted answer reaches the worker's next brief, or the driver blocked on it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "accepted",
+    "reason",
+    "id",
+    "answer"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "accepted": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "why it was refused; null when accepted"
+    },
+    "id": {
+      "type": "string",
+      "description": "the ask id as given"
+    },
+    "answer": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "the answer as recorded (an option number resolved to its text); null when refused"
+    }
+  }
+}

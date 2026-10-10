@@ -319,21 +319,45 @@ pub fn session_id_from_result(line: &str) -> Option<String> {
     v.get("session_id")?.as_str().map(str::to_string)
 }
 
-/// Output-token usage reported on a terminal `result` event.
+/// Token usage reported on a terminal `result` event.
 ///
-/// `claude --output-format stream-json` reports a `usage` object ONCE, on the result — so this
-/// fires exactly once per session. `None` = this line carries no usage (not a result, or no
-/// `usage` object), which is deliberately distinct from `Some(0)`: "did not report" is not
-/// "reported zero", and conflating them is what silently disarms the token budget.
-pub fn output_tokens_from_result(line: &str) -> Option<u64> {
+/// `claude --output-format stream-json` reports a cumulative `usage` object ONCE, on the result — so
+/// this fires exactly once per session. `None` = this line carries no usage (not a result, or no
+/// `usage` object), which is deliberately distinct from zeroes: "did not report" is not "reported
+/// zero", and conflating them is what silently disarms the token budget.
+///
+/// The four kinds map one to one (captured on the wire: `tests/fixtures/agent-streams/claude-*`).
+/// `cache_creation_input_tokens` is INPUT written to the cache — it was once added to output here,
+/// which made a session that wrote 4 tokens report 23 892.
+pub fn tokens_from_result(line: &str) -> Option<crate::usage::Tokens> {
     let v: Value = serde_json::from_str(line).ok()?;
     if v.get("type")?.as_str()? != "result" {
         return None;
     }
     let usage = v.get("usage")?;
-    let get = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-    // output tokens + cache-creation (also output-priced); ignore input/read.
-    Some(get("output_tokens") + get("cache_creation_input_tokens"))
+    let get = |k: &str| usage.get(k).and_then(|x| x.as_u64());
+    Some(crate::usage::Tokens {
+        input: get("input_tokens"),
+        output: get("output_tokens"),
+        cache_write: get("cache_creation_input_tokens"),
+        cache_read: get("cache_read_input_tokens"),
+    })
+}
+
+/// The model Claude says it ran: `model` on the `system`/`init` event that opens a stream, or — for
+/// the single-object `--output-format json` of a one-shot, which has no init — the `modelUsage` key
+/// with the most output tokens on the result.
+pub fn model_from_line(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    match (v.get("type")?.as_str()?, v.get("subtype").and_then(|s| s.as_str())) {
+        ("system", Some("init")) => v.get("model")?.as_str().map(str::to_string),
+        ("result", _) => {
+            let by_model = v.get("modelUsage")?.as_object()?;
+            let out = |u: &Value| u.get("outputTokens").and_then(|x| x.as_u64()).unwrap_or(0);
+            by_model.iter().max_by_key(|(_, u)| out(u)).map(|(m, _)| m.clone())
+        }
+        _ => None,
+    }
 }
 
 /// Extract the session's dollar cost from a terminal `result` event, if present.

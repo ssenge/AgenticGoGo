@@ -142,6 +142,8 @@ fn announce(ctx: &mut LoopState, step: ResolvedStep) {
     ctx.dash.session = ctx.session;
     ctx.dash.lifetime_session = ctx.lifetime_base + ctx.session;
     let (gm, gt) = ctx.eng.tally();
+    let usage = ctx.ext.get::<crate::usage::Ledger>().summary();
+    ctx.ledger.set_usage(usage);
     ctx.ledger.update(ctx.session, ctx.tokens_spent, gm, gt);
     let up = ctx.loop_start.elapsed().as_secs();
     eprintln!(
