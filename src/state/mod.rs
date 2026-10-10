@@ -64,6 +64,9 @@ pub struct GoalView {
 #[serde(default)]
 pub struct JudgeView {
     pub name: String,
+    /// the judge has produced a verdict (an error included). `state` cannot say this: an unmet
+    /// judge measuring 0 stays `pending` in the lifecycle although it has run.
+    pub judged: bool,
     pub kind: String, // "script" | "llm"
     pub in_dod: bool,
     pub invariant: bool,
@@ -87,6 +90,7 @@ impl JudgeView {
         let numeric = g.goal_type != "binary";
         JudgeView {
             name: g.id.clone(),
+            judged: g.state != "pending",
             kind: g.judge_kind.clone(),
             in_dod: true, // the legacy `goals` set was DoD-only (state.rs filtered to `in_dod`).
             invariant: g.invariant,
@@ -220,6 +224,21 @@ pub struct DashboardState {
     /// on a human" is never a silent state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asks: Vec<AskView>,
+    /// The parts of the run report a live reader needs too (A-17), published so `agg status --json`
+    /// can state them mid-run without re-judging: the run's id, its clock, session fates, the stop
+    /// detectors, the ratchet references, usage totals and any wait.
+    pub run_id: String,
+    /// epoch secs the RUN clock started — unlike `started_at_epoch` (this process), it survives a
+    /// resume, and it is what `wall_time` counts from.
+    pub clock_started_at: u64,
+    /// the run clock as of the last publish.
+    pub time: crate::report::Time,
+    pub sessions: crate::report::Sessions,
+    pub detectors: crate::report::Detectors,
+    pub ratchet: BTreeMap<String, crate::report::RatchetView>,
+    pub usage: crate::usage::Summary,
+    /// the loop is waiting before its next session (an agent rate limit); `None` when it is not.
+    pub waiting: Option<crate::report::Waiting>,
     /// monotonically increasing; lets the dashboard detect updates
     pub seq: u64,
     /// terminal flag — dashboard shows the final banner and can exit
@@ -319,6 +338,7 @@ impl DashboardState {
                 };
                 JudgeView {
                     name: g.name.clone(),
+                    judged: v.is_some(),
                     kind: g.kind.tag().to_string(),
                     in_dod: g.in_dod,
                     invariant: g.invariant,

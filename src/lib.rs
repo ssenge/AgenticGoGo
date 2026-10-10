@@ -54,6 +54,7 @@ pub mod schema;
 pub mod skills;
 pub mod state;
 pub mod summary;
+pub mod usage;
 pub mod util;
 
 /// Everything a Rust driver needs from one `use agg::prelude::*;`.

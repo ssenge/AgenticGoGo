@@ -77,10 +77,9 @@ pub struct CycleResult {
     /// the verdicts a judge actually PRODUCED this step (name + verdict), in judge order. The GATE
     /// stamps and appends these to `verdicts.jsonl` (§5.8); a `skip_judges` step produces none.
     pub fresh_verdicts: Vec<(String, Verdict)>,
-    /// ruler tokens the LLM judges spent this step (§5.6) — added to the run ceiling by the loop.
-    pub judge_tokens: u64,
-    /// ruler dollars the LLM judges spent this step, if the ruler prices itself.
-    pub judge_cost: Option<f64>,
+    /// what each ruler call the LLM judges made this step reported (§5.6) — charged by the loop to
+    /// the run ceilings and the usage record. Script and native judges make no call.
+    pub judge_usage: Vec<crate::usage::Usage>,
 }
 
 /// What changed for one judge across a step. The summarizer turns these into prose.
@@ -267,15 +266,11 @@ impl Engine {
 
         let mut judge_errors: Vec<String> = Vec::new();
         let mut fresh: Vec<(String, Verdict)> = Vec::new();
-        let mut judge_tokens = 0u64;
-        let mut judge_cost: Option<f64> = None;
+        let mut judge_usage = Vec::new();
         if !skip_judges {
             let verdicts = self.run_judges(cwd, ruler, judge_model, timeout, session, step, isolation);
-            for (judge, (v, spend)) in self.judges.iter_mut().zip(verdicts) {
-                judge_tokens += spend.tokens;
-                if let Some(c) = spend.cost_usd {
-                    judge_cost = Some(judge_cost.unwrap_or(0.0) + c);
-                }
+            for (judge, (v, usage)) in self.judges.iter_mut().zip(verdicts) {
+                judge_usage.extend(usage);
                 if v.error.is_some() {
                     judge_errors.push(judge.name.clone());
                 }
@@ -300,8 +295,7 @@ impl Engine {
 
         let mut result = self.conditions_with_deltas(run, deltas, &judge_errors);
         result.fresh_verdicts = fresh;
-        result.judge_tokens = judge_tokens;
-        result.judge_cost = judge_cost;
+        result.judge_usage = judge_usage;
         result
     }
 
@@ -323,7 +317,7 @@ impl Engine {
         session: Option<u32>,
         step: &str,
         isolation: crate::isolation::Isolation,
-    ) -> Vec<(Verdict, crate::backend::Spend)> {
+    ) -> Vec<(Verdict, Option<crate::usage::Usage>)> {
         let src = LastVerdicts(&self.judges);
         self.judges
             .iter()
@@ -420,8 +414,7 @@ impl Engine {
             notify,
             deltas,
             fresh_verdicts: Vec::new(),
-            judge_tokens: 0,
-            judge_cost: None,
+            judge_usage: Vec::new(),
         }
     }
 

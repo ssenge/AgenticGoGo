@@ -2,7 +2,7 @@
 //! PATH, a real git repo — as in `tests/cli.rs`.
 //!
 //! Every report a test produces is validated against the PUBLISHED schema
-//! (`docs/schemas/report.v1.json`), with a small validator below that covers exactly the keywords
+//! (`docs/schemas/report.v2.json`), with a small validator below that covers exactly the keywords
 //! the schema uses — and refuses a schema that uses any other, so the check cannot quietly go blind.
 
 #![cfg(unix)]
@@ -107,7 +107,7 @@ fn wait_for(p: &Path) {
 // ── the schema check ─────────────────────────────────────────────────────────────────────────────
 
 fn schema() -> Value {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/report.v1.json");
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/report.v2.json");
     serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap()
 }
 
@@ -115,7 +115,7 @@ fn assert_valid(v: &Value) {
     let s = schema();
     let mut errs = Vec::new();
     validate(&s, &s, v, "$", &mut errs);
-    assert!(errs.is_empty(), "report violates docs/schemas/report.v1.json:\n{}\n{v:#}", errs.join("\n"));
+    assert!(errs.is_empty(), "report violates docs/schemas/report.v2.json:\n{}\n{v:#}", errs.join("\n"));
 }
 
 /// The keywords [`validate`] implements. Annotations are listed so they are not mistaken for gaps.
@@ -469,4 +469,76 @@ fn report_json_outside_a_project_prints_an_error_report() {
     assert_valid(&v);
     assert_eq!(v["outcome"], "error");
     assert!(!tmp.path().join("agg").exists(), "agg must not scaffold state into a non-project");
+}
+
+// ── usage per session (A-19) ─────────────────────────────────────────────────────────────────────
+
+/// A fake `claude` that reports KNOWN usage and a model name other than the configured one: as a
+/// worker (stream-json) it reports model `reported-worker` and fixed tokens; as the ruler (a one-shot,
+/// `--output-format json`) it grades `{"met":true}` and reports model `reported-ruler`. The second
+/// worker session does the work.
+const USAGE_FAKE: &str = r#"#!/bin/sh
+oneshot=0
+for a in "$@"; do
+  [ "$a" = --version ] && { echo fake-claude 0.0.0; exit 0; }
+  [ "$a" = json ] && oneshot=1
+done
+if [ "$oneshot" = 1 ]; then
+  printf '%s\n' '{"type":"result","subtype":"success","result":"{\"met\":true,\"value\":1,\"max\":1,\"rationale\":\"fine\"}","usage":{"input_tokens":3,"output_tokens":7,"cache_creation_input_tokens":11,"cache_read_input_tokens":13},"total_cost_usd":0.125,"modelUsage":{"reported-ruler":{"outputTokens":7}}}'
+  exit 0
+fi
+printf '%s\n' '{"type":"system","subtype":"init","model":"reported-worker","session_id":"s"}'
+echo x >> tally
+if [ "$(wc -l < tally)" -ge 2 ]; then : > did_work; git add did_work >/dev/null 2>&1; git commit -qm w >/dev/null 2>&1; fi
+printf '%s\n' '{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":1000,"cache_read_input_tokens":2000},"total_cost_usd":0.5}'
+"#;
+
+/// Per session and in total, the report states exactly what the agent reported — split four ways,
+/// worker and ruler apart, the price `reported` — and names the model the agent REPORTED, not the
+/// configured one. `agg history --json` carries the same totals.
+#[test]
+fn usage_per_session_matches_what_the_agents_reported() {
+    let (tmp, path) = project("", "  done_if: \"worked AND rubric\"\n");
+    let dir = tmp.path();
+    write(&dir.join("bin/claude"), USAGE_FAKE);
+    chmod_x(&dir.join("bin/claude"));
+    write(&dir.join("agg/judges/rubric.md"), "Grade the work.\n");
+    let cfg = fs::read_to_string(dir.join("agg/agg.yaml")).unwrap();
+    write(&dir.join("agg/agg.yaml"), &format!("{cfg}judge: {{ agent: \"claude\", model: \"configured-ruler\" }}\n"));
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-qm", "judges"]);
+
+    let out = agg(dir, &path).arg("run").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let r = report(dir);
+    assert_eq!(r["schema_version"], 2);
+
+    let tokens = |i, o, w, rd| serde_json::json!({"input": i, "output": o, "cache_write": w, "cache_read": rd});
+    let worker = serde_json::json!({
+        "role": "worker", "agent": "claude", "model": "reported-worker",
+        "tokens": tokens(100, 50, 1000, 2000), "cost_usd": 0.5, "cost_source": "reported"
+    });
+    let ruler = serde_json::json!({
+        "role": "ruler", "agent": "claude", "model": "reported-ruler",
+        "tokens": tokens(3, 7, 11, 13), "cost_usd": 0.125, "cost_source": "reported"
+    });
+    let log = r["session_log"].as_array().unwrap();
+    assert_eq!(log.len(), 3, "the baseline pass (session 0) and two sessions: {r:#}");
+    assert_eq!(log[0], serde_json::json!({"session": 0, "step": "", "usage": [ruler]}), "the baseline used the ruler only");
+    for (i, s) in log[1..].iter().enumerate() {
+        assert_eq!(s["session"], i + 1);
+        assert_eq!(s["step"], "worker");
+        assert_eq!(s["usage"], serde_json::json!([worker, ruler]), "session {}: worker and ruler apart", i + 1);
+    }
+
+    let totals = |t, c: f64| serde_json::json!({"tokens": t, "cost_usd": c, "cost_source": "reported"});
+    assert_eq!(r["usage"]["worker"], totals(tokens(200, 100, 2000, 4000), 1.0));
+    assert_eq!(r["usage"]["ruler"], totals(tokens(9, 21, 33, 39), 0.375));
+    assert_eq!(r["usage"]["total"], totals(tokens(209, 121, 2033, 4039), 1.375));
+    let text = r.to_string();
+    assert!(!text.contains("configured-ruler") && !text.contains("\"fake\""), "only reported models are named: {r:#}");
+
+    let hist = agg(dir, &path).args(["history", "--json"]).output().unwrap();
+    let h: Value = serde_json::from_slice(&hist.stdout).unwrap();
+    assert_eq!(h["runs"][0]["usage"], r["usage"], "history carries the run's totals");
 }

@@ -35,12 +35,7 @@ impl Handler for Summarize {
             ctx.ext.get::<AGGState>().summary.last_summary = Some(Instant::now());
             ctx.scratch.get::<AGGScratch>().summarized_this_cycle = true;
             // §5.6: summarizer spend counts too — the summarizer runs on the ruler.
-            ctx.tokens_spent += spend.tokens;
-            if let Some(c) = spend.cost_usd {
-                ctx.cost_spent += c;
-            }
-            let ruler_agent = ctx.cfg.judge.agent.clone();
-            ctx.charge(&ruler_agent, spend.tokens, spend.cost_usd);
+            ctx.charge_ruler(std::slice::from_ref(&spend));
             ctx.publish();
         }
         Ok(Flow::Continue)

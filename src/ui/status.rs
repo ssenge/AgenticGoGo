@@ -268,6 +268,7 @@ mod tests {
             judges: vec![
                 JudgeView {
                     name: "build_passes".into(),
+                    judged: true,
                     kind: "script".into(),
                     in_dod: true,
                     invariant: true,
@@ -282,6 +283,7 @@ mod tests {
                 },
                 JudgeView {
                     name: "coverage".into(),
+                    judged: true,
                     kind: "llm".into(),
                     in_dod: true,
                     invariant: false,
@@ -296,6 +298,7 @@ mod tests {
                 },
                 JudgeView {
                     name: "no_todos".into(),
+                    judged: true,
                     kind: "script".into(),
                     in_dod: true,
                     invariant: false,
@@ -310,6 +313,7 @@ mod tests {
                 },
                 JudgeView {
                     name: "stalled".into(),
+                    judged: true,
                     kind: "script".into(),
                     in_dod: false,
                     invariant: false,

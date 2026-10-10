@@ -199,12 +199,7 @@ impl Handler for RunJudges {
         // — which names exactly the paths a judge most needs to execute — in with it.
         let res = ctx.eng.run_step(&ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), false, ctx.cfg.run_isolation());
         // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
-        ctx.tokens_spent += res.judge_tokens;
-        if let Some(c) = res.judge_cost {
-            ctx.cost_spent += c;
-        }
-        let ruler_agent = ctx.cfg.judge.agent.clone();
-        ctx.charge(&ruler_agent, res.judge_tokens, res.judge_cost);
+        ctx.charge_ruler(&res.judge_usage);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
         ctx.scratch.get::<AGGScratch>().res = Some(res);
         ctx.publish();

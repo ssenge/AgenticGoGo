@@ -107,8 +107,7 @@ impl Handler for GateKeepRollback {
                 notify: recomputed.notify,
                 deltas: Vec::new(),
                 fresh_verdicts: Vec::new(),
-                judge_tokens: 0,
-                judge_cost: None,
+                judge_usage: Vec::new(),
             };
         }
         ctx.scratch.get::<AGGScratch>().res = Some(res);

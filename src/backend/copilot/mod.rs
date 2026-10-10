@@ -229,12 +229,24 @@ impl AgentBackend for Copilot {
     /// `result` event carries NO token count at all (its `usage` holds `premiumRequests` and
     /// durations), so a terminal-only reader would report ZERO tokens for every Copilot session and
     /// silently disarm the budget guard. The worker SUMS these. See [`AgentBackend::parse_usage`].
-    fn parse_usage(&self, line: &str) -> Option<u64> {
+    fn parse_usage(&self, line: &str) -> Option<crate::usage::Tokens> {
         let v: Value = serde_json::from_str(line).ok()?;
         if v.get("type")?.as_str()? != "assistant.message" {
             return None;
         }
-        v.get("data")?.get("outputTokens")?.as_u64()
+        let output = v.get("data")?.get("outputTokens")?.as_u64();
+        // output is the ONLY kind Copilot reports — input and cache stay `None`, never 0.
+        Some(crate::usage::Tokens { output, ..Default::default() })
+    }
+
+    /// `data.model` on the `assistant.*` events — the model `auto` mode actually resolved to, which
+    /// is why it is read off the stream and not from the config.
+    fn parse_model(&self, line: &str) -> Option<String> {
+        let v: Value = serde_json::from_str(line).ok()?;
+        if !v.get("type")?.as_str()?.starts_with("assistant.") {
+            return None;
+        }
+        v.get("data")?.get("model")?.as_str().map(str::to_string)
     }
 
     /// Copilot's terminal event is `result`, and its fields are TOP-LEVEL (no `data` wrapper) —
@@ -334,14 +346,8 @@ impl AgentBackend for Copilot {
         // (0, None), a LOUD hole the ceilings must treat as "unknown", not "free". The visible
         // capability warning belongs in `capability::check` for a Copilot ruler; not re-emitted per
         // call here to avoid spamming the log every judge. REPORTED as a judgement call.
-        let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
-        Ok(OneShot {
-            body: last_assistant_message(&out.stdout),
-            stderr: out.stderr,
-            success: out.success,
-            output_tokens,
-            cost_usd,
-        })
+        let usage = self.tally_one_shot(&out.stdout);
+        Ok(OneShot { body: last_assistant_message(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
 
     /// Copilot writes session state under `~/.copilot` — add it to the sandbox's writable set so a

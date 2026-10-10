@@ -269,6 +269,7 @@ pub fn sample_state() -> DashboardState {
         judges: vec![
             JudgeView {
                 name: "build_passes".into(),
+                judged: true,
                 kind: "script".into(),
                 in_dod: true,
                 invariant: true,
@@ -283,6 +284,7 @@ pub fn sample_state() -> DashboardState {
             },
             JudgeView {
                 name: "coverage".into(),
+                judged: true,
                 kind: "llm".into(),
                 in_dod: true,
                 invariant: false,
@@ -297,6 +299,7 @@ pub fn sample_state() -> DashboardState {
             },
             JudgeView {
                 name: "no_todos".into(),
+                judged: true,
                 kind: "script".into(),
                 in_dod: true,
                 invariant: false,
@@ -311,6 +314,7 @@ pub fn sample_state() -> DashboardState {
             },
             JudgeView {
                 name: "stalled".into(),
+                judged: true,
                 kind: "script".into(),
                 in_dod: false,
                 invariant: false,
@@ -344,6 +348,7 @@ pub fn sample_state() -> DashboardState {
         finished: false,
         finish_reason: String::new(),
         asks: Vec::new(),
+        ..Default::default()
     }
 }
 
