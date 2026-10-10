@@ -445,3 +445,76 @@ fn non_ascii_input_errors_instead_of_panicking() {
         );
     }
 }
+
+// ---------------- the gate's own terms (`core::ratchet`) ----------------
+
+/// A gate with `cc` ratcheted (down, reference 10) and the given history.
+fn gate_with(rollbacks: u32, consecutive: u32, signatures: &[&[&str]], regressed: bool) -> crate::core::ratchet::Gate {
+    use crate::core::ratchet::{Gate, Ratchet, RatchetRegression};
+    let mut gate = Gate::new([("cc".to_string(), Ratchet::down(0.5).baseline(10.0))].into(), 4);
+    gate.state.rollbacks = rollbacks;
+    gate.state.consecutive_rollbacks = consecutive;
+    gate.state.signatures = signatures.iter().map(|s| s.iter().map(|n| n.to_string()).collect()).collect();
+    if regressed {
+        gate.state.last_ratchet = vec![RatchetRegression { judge: "cc".into(), from: Some(10.0), to: Some(12.0) }];
+    }
+    gate
+}
+
+fn ev_gate(expr: &str, goals: &[Judge], gate: &crate::core::ratchet::Gate) -> bool {
+    evaluate(expr, &StopContext { gate: Some(gate), ..StopContext::from_judges(goals) }).unwrap()
+}
+
+/// `rollbacks` / `consecutive_rollbacks` are NUMBERS and `oscillating` / `ratchet_regressed` are
+/// BOOLS, read from the gate — the same shapes `iterations` and `over_iterations` have.
+#[test]
+fn the_gate_terms_read_the_gate_state() {
+    let goals = [g("a", false, false), g("cc", true, false)];
+    let quiet = gate_with(0, 0, &[&["a"], &["a"]], false);
+    assert!(ev_gate("rollbacks == 0 AND consecutive_rollbacks == 0", &goals, &quiet));
+    assert!(!ev_gate("oscillating OR ratchet_regressed", &goals, &quiet));
+
+    let busy = gate_with(3, 2, &[&["a"], &["b"], &["a"]], true);
+    assert!(ev_gate("rollbacks >= 2", &goals, &busy));
+    assert!(ev_gate("consecutive_rollbacks >= 2 AND NOT (consecutive_rollbacks >= 3)", &goals, &busy));
+    assert!(ev_gate("oscillating", &goals, &busy));
+    assert!(ev_gate("ratchet_regressed", &goals, &busy));
+
+    // with no gate behind the context: a run that has gated nothing.
+    assert!(ev("rollbacks == 0 AND NOT oscillating AND NOT ratchet_regressed", &goals));
+}
+
+/// `<judge>.ref` is the ratchet reference — a number, comparable like `.value`, and refused on a
+/// judge that has no ratchet, at validate time.
+#[test]
+fn dot_ref_reads_the_ratchet_reference_and_only_on_a_ratcheted_judge() {
+    let goals = [g("a", false, false), g("cc", true, false)];
+    let gate = gate_with(0, 0, &[], false);
+    assert!(ev_gate("cc.ref == 10", &goals, &gate));
+    assert!(ev_gate("cc.ref <= 10.5", &goals, &gate));
+    assert!(validate_with("cc.ref > 1", &goals, Some(&gate)).is_ok());
+
+    let err = format!("{:#}", validate_with("a.ref > 1", &goals, Some(&gate)).unwrap_err());
+    assert!(err.contains("has no ratchet"), "{err}");
+    assert!(validate("cc.ref > 1", &goals).is_err(), "no gate ⇒ no ratchet ⇒ refused");
+
+    // ratcheted but no reference yet ⇒ Missing ⇒ every comparison false, never an error.
+    let mut unset = gate_with(0, 0, &[], false);
+    unset.state.refs.clear();
+    assert!(!ev_gate("cc.ref >= 0", &goals, &unset));
+    assert!(!ev_gate("cc.ref < 0", &goals, &unset));
+}
+
+/// The requirement's `rollbacks.value >= 2` spelling is REFUSED with the one that works — a built-in
+/// number has no accessor, and an alias would be a second way to write the same thing.
+#[test]
+fn a_gate_number_has_no_accessor_and_says_how_to_write_it() {
+    let err = format!("{:#}", validate("rollbacks.value >= 2", &[]).unwrap_err());
+    assert!(err.contains("`rollbacks >= 2`"), "{err}");
+    assert!(validate("consecutive_rollbacks.value >= 2", &[]).is_err());
+    // …and the terms are not judge names: they never join the run-set.
+    assert_eq!(
+        judge_names("rollbacks >= 2 OR consecutive_rollbacks >= 1 OR oscillating OR ratchet_regressed OR cc.ref > 1").unwrap(),
+        vec!["cc".to_string()]
+    );
+}

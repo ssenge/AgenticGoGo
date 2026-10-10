@@ -13,6 +13,7 @@
 //! write nothing: they are not the loop.
 
 use crate::core::model::Verdict;
+use crate::core::ratchet::RatchetRegression;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -62,8 +63,20 @@ pub struct VerdictRecord {
     #[serde(default)]
     pub evidence: Vec<String>,
     pub outcome: Outcome,
+    /// set when the GATE held this judge to its ratchet and it regressed: the reference it was held
+    /// to (`from`) and what it measured (`to`, absent when it errored or emitted no number). Absent
+    /// on every other row, so a ledger written before the ratchet existed reads unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ratchet: Option<RatchetMark>,
     /// real wall-clock epoch seconds (this is the loop process — clocks are fine here).
     pub ts: u64,
+}
+
+/// A ratchet regression on one row — see [`VerdictRecord::ratchet`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RatchetMark {
+    pub from: Option<f64>,
+    pub to: Option<f64>,
 }
 
 /// The gate's durable "was met" (§5.7): for each judge, whether its most recent LANDED, GRADED
@@ -138,6 +151,19 @@ pub fn append(
     verdicts: &[(String, Verdict)],
     outcome: Outcome,
 ) -> Result<()> {
+    append_marked(dir, session, step, verdicts, outcome, &[])
+}
+
+/// [`append`], stamping each row whose judge is in `ratchet` with its [`RatchetMark`] — the gate's
+/// record that the judge regressed its ratchet, naming the old and the new value.
+pub fn append_marked(
+    dir: &Path,
+    session: Option<u32>,
+    step: &str,
+    verdicts: &[(String, Verdict)],
+    outcome: Outcome,
+    ratchet: &[RatchetRegression],
+) -> Result<()> {
     use std::io::Write;
     if verdicts.is_empty() {
         return Ok(());
@@ -165,6 +191,10 @@ pub fn append(
             rationale: v.rationale.clone(),
             evidence: v.evidence.clone(),
             outcome,
+            ratchet: ratchet
+                .iter()
+                .find(|r| &r.judge == judge)
+                .map(|r| RatchetMark { from: r.from, to: r.to }),
             ts,
         };
         let line = serde_json::to_string(&rec).context("serializing verdict record")?;
@@ -284,6 +314,26 @@ mod tests {
         let d = tmpdir("empty");
         append(&d, None, "baseline", &[], Outcome::Baseline).unwrap();
         assert!(!crate::paths::verdicts_jsonl(&d).exists(), "no verdicts → no file created");
+    }
+
+    /// A ratchet regression is RECORDED on the row of the judge that regressed — judge, old value
+    /// and new value — and on no other row; an unmarked row reads back exactly as before.
+    #[test]
+    fn a_ratchet_regression_is_recorded_with_its_old_and_new_value() {
+        let d = tmpdir("ratchet");
+        let regs = [
+            RatchetRegression { judge: "cc".into(), from: Some(10.0), to: Some(12.5) },
+            RatchetRegression { judge: "mut".into(), from: Some(71.0), to: None },
+        ];
+        let rows = [("cc".to_string(), v(true)), ("mut".to_string(), Verdict::failed("boom")), ("ok".to_string(), v(true))];
+        append_marked(&d, Some(3), "worker", &rows, Outcome::RolledBack, &regs).unwrap();
+        let cc = rows_for(&d, "cc", false);
+        assert_eq!(cc[0].ratchet, Some(RatchetMark { from: Some(10.0), to: Some(12.5) }));
+        assert_eq!(cc[0].outcome, Outcome::RolledBack);
+        assert_eq!(rows_for(&d, "mut", false)[0].ratchet, Some(RatchetMark { from: Some(71.0), to: None }));
+        assert_eq!(rows_for(&d, "ok", false)[0].ratchet, None);
+        let text = std::fs::read_to_string(crate::paths::verdicts_jsonl(&d)).unwrap();
+        assert_eq!(text.matches("\"ratchet\"").count(), 2, "only the regressed rows carry a mark: {text}");
     }
 
     #[test]

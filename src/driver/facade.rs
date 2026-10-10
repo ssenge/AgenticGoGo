@@ -167,6 +167,19 @@ impl Agg {
         self
     }
 
+    /// Hold `judge`'s `value` to a numeric RATCHET at every [`Agg::gate`]: it may not get worse than
+    /// at the last kept gate by more than the tolerance, or the gate counts a regression (and, under
+    /// [`OnRegression::Rollback`], discards the span).
+    ///
+    /// The reference before the first keep is the [`Ratchet::baseline`] seed, else the first value
+    /// the driver asks for BEFORE its first `step()` — the driver's baseline pass. Like the boolean
+    /// rule, it applies to the judges asked since the last gate; a ratcheted judge that errored or
+    /// emitted no number never passes.
+    pub fn ratchet(mut self, judge: impl Into<String>, spec: crate::core::ratchet::Ratchet) -> Agg {
+        self.cfg.sequence.ratchet.insert(judge.into(), spec);
+        self
+    }
+
     /// The standing project-instructions file the worker's brief POINTS AT, relative to the project
     /// dir. Default `agg/AGG.md`.
     ///
@@ -511,7 +524,12 @@ impl Agg {
         //    a recorded gate must not re-execute, because re-running it would perform a real merge
         //    against a base that already has it.
         let started = self.ready()?;
-        if let Some(CallRecord::Gate { outcome, .. }) = self.replayed(started, "gate")? {
+        if let Some(CallRecord::Gate { outcome, gate, .. }) = self.replayed(started, "gate")? {
+            // the gate's own state AS OF that gate — the ratchet references and the rollback count
+            // survive the restart instead of starting clean.
+            if let Some(state) = gate {
+                started.st.borrow_mut().eng.gate.state = state;
+            }
             // the span this gate closed is behind us; the next one opens against today's tree.
             *self.span_goals.borrow_mut() = started.st.borrow().eng.snapshot_goal_state();
             self.span.borrow_mut().clear();
@@ -547,8 +565,9 @@ impl Agg {
         if let Some(f) = failure {
             let outcome = GateOutcome::Failed(f);
             let label = self.label_path();
+            let gate = Some(st.eng.gate.state.clone());
             drop(st);
-            self.record(CallRecord::Gate { ord: self.ord.get(), label, outcome, ts: crate::util::now_epoch() })?;
+            self.record(CallRecord::Gate { ord: self.ord.get(), label, outcome, gate, ts: crate::util::now_epoch() })?;
             return Ok(outcome);
         }
 
@@ -562,17 +581,22 @@ impl Agg {
         let regressed = fresh
             .iter()
             .any(|(id, v)| v.error.is_none() && !v.met && landed.get(id).copied().unwrap_or(false));
+        // …and the numeric half: every ratcheted judge asked since the last gate, held to its
+        // reference. Same scope as the boolean rule — the driver decides what it asks.
+        let ratchet =
+            if matches!(staged, StagedSession::Staged) { st.eng.gate.check(&fresh) } else { Vec::new() };
+        let signature = crate::core::ratchet::signature(&fresh, |_| true, &ratchet);
 
         // 6/7/8 — the policy, the merge, the `verdicts.jsonl` row and the span teardown, all in the
         // body the YAML path's `GateKeepRollback` runs. One decision, two call sites.
         let pre_goals = std::mem::take(&mut *self.span_goals.borrow_mut());
-        let gated = crate::features::gate::keep_or_rollback(
-            &mut st,
-            Some(&(tip, staged.clone())),
-            &fresh,
-            regressed,
-            &pre_goals,
-        )?;
+        let judged = crate::features::gate::Judged {
+            fresh: &fresh,
+            regressed: regressed || !ratchet.is_empty(),
+            ratchet,
+            signature,
+        };
+        let gated = crate::features::gate::keep_or_rollback(&mut st, Some(&(tip, staged.clone())), judged, &pre_goals)?;
 
         let outcome = match (&staged, gated) {
             (StagedSession::Staged, crate::features::gate::Gated::Merged) => GateOutcome::Kept,
@@ -585,6 +609,7 @@ impl Agg {
 
         // 9. the next span opens now, and it opens against the tree this gate just decided on.
         *self.span_goals.borrow_mut() = st.eng.snapshot_goal_state();
+        let gate = Some(st.eng.gate.state.clone());
         drop(st);
         self.span.borrow_mut().clear();
         // ⚠ and the PER-STEP cache too. A gate is a state discontinuity inside a step window: after
@@ -598,9 +623,37 @@ impl Agg {
             ord: self.ord.get(),
             label: self.label_path(),
             outcome,
+            gate,
             ts: crate::util::now_epoch(),
         })?;
         Ok(outcome)
+    }
+
+    /// The gate's own state: the ratchet references, the rollback counts and the oscillation
+    /// history — the driver's reading of what `ratchet_regressed`, `<judge>.ref`, `rollbacks`,
+    /// `consecutive_rollbacks` and `oscillating` mean on the YAML path. Branch on it in Rust:
+    /// `if agg.gate_state().consecutive_rollbacks >= 2 { … }`, `agg.gate_state().oscillating(4)`.
+    ///
+    /// Before the run has started it is the configured seeds and nothing else.
+    pub fn gate_state(&self) -> crate::core::ratchet::GateState {
+        match self.started.get() {
+            Some(s) => s.st.borrow().eng.gate.state.clone(),
+            None => crate::core::ratchet::Gate::new(self.cfg.sequence.ratchet.clone(), 0).state,
+        }
+    }
+
+    /// The driver's baseline pass: a ratcheted judge asked before the first `step()` sets its
+    /// reference (or is checked against its seed). Replayed asks take the same path, so a resume
+    /// re-derives the same reference.
+    fn observe_pre_step(&self, name: &str, v: &Verdict) {
+        let Some(started) = self.started.get() else { return };
+        let mut st = started.st.borrow_mut();
+        if st.session != 0 {
+            return;
+        }
+        if let Some(w) = st.eng.gate.observe_pre_step(name, v) {
+            eprintln!("  ⚠ {w}");
+        }
     }
 }
 
@@ -805,6 +858,7 @@ impl JudgeSource for Lazy<'_> {
         self.asking.borrow_mut().push(j.name.clone());
         let verdict = self.agg.run_judge(j, self);
         self.asking.borrow_mut().pop();
+        self.agg.observe_pre_step(&j.name, &verdict);
         // ⚠ THE CACHE IS POPULATED WHETHER THE VERDICT WAS RUN OR REPLAYED. A ledger hit that skipped
         // the cache would let a second ask in the same step reach the ledger AGAIN and consume a
         // second ordinal — every later call would then answer from the wrong record, silently, by

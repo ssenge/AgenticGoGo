@@ -12,7 +12,7 @@
 //!   and    := cmp (("AND"|"&&") cmp)*
 //!   cmp    := atom (("=="|"!="|">="|"<="|">"|"<") atom)?
 //!   atom   := NUMBER | ident | "(" expr ")" | "NOT" atom
-//!   ident  := goal-id | goal-id "." ("value"|"max") | aggregate | aggregate "(" subset ")"
+//!   ident  := goal-id | goal-id "." ("value"|"max"|"ref") | aggregate | aggregate "(" subset ")"
 //!
 //! Aggregates: count_met, total, met_fraction, any_regressed, count_regressed. The `(invariants)`
 //! subset restricts an aggregate to invariant judges. **The aggregates range over the DoD-set**
@@ -62,6 +62,10 @@ pub struct StopContext<'a> {
     /// seconds spent blocked inside a `hil_*` call, accumulated across resumes (backs
     /// `human_wait_time`).
     pub human_wait_secs: f64,
+    /// the gate's ratchet config and history (backs `rollbacks`, `consecutive_rollbacks`,
+    /// `oscillating`, `ratchet_regressed`, `<judge>.ref`). `None` = a context with no gate behind
+    /// it, which reads as a run that has gated nothing — and `.ref` on it is an error.
+    pub gate: Option<&'a crate::core::ratchet::Gate>,
 }
 
 impl<'a> StopContext<'a> {
@@ -78,6 +82,7 @@ impl<'a> StopContext<'a> {
             max_sessions: None,
             wall_secs: 0.0,
             human_wait_secs: 0.0,
+            gate: None,
         }
     }
 }
@@ -136,7 +141,13 @@ pub fn evaluate(expr: &str, ctx: &StopContext) -> Result<bool> {
 /// silently-always-false `1.0 >= 80.0` — is caught. The type error lives in [`Parser::parse_cmp`],
 /// so it fires here at STARTUP rather than 3 sessions into a run.
 pub fn validate(expr: &str, judges: &[Judge]) -> Result<()> {
-    let ctx = StopContext::from_judges(judges);
+    validate_with(expr, judges, None)
+}
+
+/// [`validate`] against a gate, so `<judge>.ref` on a ratcheted judge is accepted and on any other
+/// judge is refused — at startup, not three sessions in.
+pub fn validate_with(expr: &str, judges: &[Judge], gate: Option<&crate::core::ratchet::Gate>) -> Result<()> {
+    let ctx = StopContext { gate, ..StopContext::from_judges(judges) };
     evaluate(expr, &ctx).map(|_| ()).with_context(|| format!("invalid condition `{expr}`"))
 }
 
@@ -149,7 +160,7 @@ pub fn judge_names(expr: &str) -> Result<Vec<String>> {
         "tokens_spent", "budget_total", "wall_time", "human_wait_time", "work_time",
         "over_budget", "cost_spent", "cost_limit",
         "over_cost", "iterations", "max_iterations", "over_iterations", "any_judge_error",
-        "invariants",
+        "invariants", "rollbacks", "consecutive_rollbacks", "oscillating", "ratchet_regressed",
     ];
     let mut out: Vec<String> = Vec::new();
     for t in tokenize(expr)? {

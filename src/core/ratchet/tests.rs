@@ -1,0 +1,228 @@
+//! The ratchet's rules and the gate history, pinned without a loop, a worker or a file.
+
+use super::*;
+
+fn val(v: f64) -> Verdict {
+    Verdict::binary(true).with_value(v)
+}
+
+fn fresh(rows: &[(&str, Verdict)]) -> Vec<(String, Verdict)> {
+    rows.iter().map(|(n, v)| (n.to_string(), v.clone())).collect()
+}
+
+fn gate(specs: &[(&str, Ratchet)]) -> Gate {
+    Gate::new(specs.iter().map(|(n, s)| (n.to_string(), s.clone())).collect(), DEFAULT_OSCILLATION_WINDOW)
+}
+
+fn sig(names: &[&str]) -> Vec<String> {
+    names.iter().map(|s| s.to_string()).collect()
+}
+
+/// The three acceptance rows, against one reference: worse beyond tolerance regresses, worse
+/// within it does not, better does not — in both directions.
+#[test]
+fn worse_beyond_tolerance_regresses_within_it_does_not() {
+    let down = Ratchet::down(0.5);
+    assert!(down.regressed(10.0, 10.6), "lower is better: +0.6 is beyond 0.5");
+    assert!(!down.regressed(10.0, 10.5), "exactly the tolerance is accepted");
+    assert!(!down.regressed(10.0, 9.0), "an improvement never regresses");
+
+    let up = Ratchet::up(1.0);
+    assert!(up.regressed(71.0, 69.9));
+    assert!(!up.regressed(71.0, 70.0));
+    assert!(!up.regressed(71.0, 80.0));
+
+    // zero tolerance still survives float noise.
+    assert!(!Ratchet::down(0.0).regressed(0.3, 0.1 + 0.2));
+}
+
+/// `tolerance_pct` is relative to the reference, and the LARGER allowance applies.
+#[test]
+fn the_larger_of_the_absolute_and_relative_allowance_applies() {
+    let r = Ratchet::down(0.5).tolerance_pct(10.0);
+    assert_eq!(r.allowance(100.0), 10.0, "10% of 100 beats 0.5");
+    assert_eq!(r.allowance(2.0), 0.5, "0.5 beats 10% of 2");
+    assert!(!r.regressed(100.0, 109.0));
+    assert!(r.regressed(100.0, 111.0));
+}
+
+#[test]
+fn a_ratchet_that_cannot_mean_anything_is_refused() {
+    assert!(Ratchet::down(-1.0).validate("x").is_err());
+    assert!(Ratchet::down(f64::NAN).validate("x").is_err());
+    assert!(Ratchet::up(0.0).tolerance_pct(-5.0).validate("x").is_err());
+    assert!(Ratchet::up(0.0).baseline(f64::INFINITY).validate("x").is_err());
+    assert!(Ratchet::up(0.0).baseline(-3.0).validate("x").is_ok(), "a negative seed is a real number");
+}
+
+/// The seed is the reference from the first moment, and wins over the measurement; drift beyond
+/// tolerance is reported, not silently accepted.
+#[test]
+fn a_seed_wins_over_the_baseline_pass_and_drift_is_warned() {
+    let mut g = gate(&[("mutation", Ratchet::up(1.0).baseline(71.0))]);
+    assert_eq!(g.state.reference("mutation"), Some(71.0), "seeded before any judge ran");
+
+    let quiet = g.seed(&fresh(&[("mutation", val(71.5))])).unwrap();
+    assert!(quiet.is_empty(), "within tolerance is not drift: {quiet:?}");
+    let drift = g.seed(&fresh(&[("mutation", val(60.0))])).unwrap();
+    assert_eq!(drift.len(), 1);
+    assert!(drift[0].contains("drift"), "{drift:?}");
+    assert_eq!(g.state.reference("mutation"), Some(71.0), "the seed stays the reference");
+
+    let errored = g.seed(&fresh(&[("mutation", Verdict::failed("boom"))])).unwrap();
+    assert!(errored[0].contains("using the seed"), "{errored:?}");
+}
+
+/// Without a seed, the baseline pass measures the reference — and a judge that cannot be measured
+/// refuses the run instead of leaving the ratchet inert.
+#[test]
+fn without_a_seed_the_baseline_pass_sets_the_reference_or_refuses() {
+    let mut g = gate(&[("cc", Ratchet::down(0.0))]);
+    assert_eq!(g.state.reference("cc"), None);
+    g.seed(&fresh(&[("cc", val(12.0))])).unwrap();
+    assert_eq!(g.state.reference("cc"), Some(12.0));
+
+    let mut g = gate(&[("cc", Ratchet::down(0.0))]);
+    let err = g.seed(&fresh(&[("cc", Verdict::binary(true))])).unwrap_err().to_string();
+    assert!(err.contains("no `value`"), "{err}");
+
+    let mut g = gate(&[("cc", Ratchet::down(0.0))]);
+    let err = g.seed(&fresh(&[("cc", Verdict::failed("timeout"))])).unwrap_err().to_string();
+    assert!(err.contains("no `baseline:` seed"), "{err}");
+
+    // a numberless judge is refused even WITH a seed: no gate could ever hold it.
+    let mut g = gate(&[("cc", Ratchet::down(0.0).baseline(3.0))]);
+    assert!(g.seed(&fresh(&[("cc", Verdict::binary(true))])).is_err());
+
+    // a judge absent from the pass (the driver has none) is left alone.
+    let mut g = gate(&[("cc", Ratchet::down(0.0))]);
+    assert!(g.seed(&[]).unwrap().is_empty());
+    assert_eq!(g.state.reference("cc"), None);
+}
+
+/// The driver's baseline: a pre-step ask sets the reference once; a seed is checked, not replaced.
+#[test]
+fn a_pre_step_ask_is_the_driver_baseline() {
+    let mut g = gate(&[("cc", Ratchet::down(0.0))]);
+    assert!(g.observe_pre_step("cc", &val(5.0)).is_none());
+    assert!(g.observe_pre_step("cc", &val(9.0)).is_none());
+    assert_eq!(g.state.reference("cc"), Some(5.0), "the FIRST pre-step value is the baseline");
+    assert!(g.observe_pre_step("other", &val(1.0)).is_none(), "an unratcheted judge is ignored");
+
+    let mut g = gate(&[("cc", Ratchet::down(0.0).baseline(5.0))]);
+    assert!(g.observe_pre_step("cc", &val(8.0)).unwrap().contains("drift"));
+    assert_eq!(g.state.reference("cc"), Some(5.0));
+
+    let mut g = gate(&[("cc", Ratchet::down(0.0))]);
+    let w = g.observe_pre_step("cc", &Verdict::binary(true)).unwrap();
+    assert!(w.contains("no `value`") && w.contains("ratchet regression"), "{w}");
+}
+
+/// `check` names the judge with its old and new value; an errored or numberless ratcheted judge
+/// never passes; an unratcheted judge or one with no reference yet is never a ratchet regression.
+#[test]
+fn check_reports_judge_old_and_new_and_never_passes_an_unmeasured_value() {
+    let g = gate(&[("cc", Ratchet::down(0.5).baseline(10.0)), ("cov", Ratchet::up(0.0))]);
+    let regs = g.check(&fresh(&[("cc", val(11.0)), ("cov", val(1.0)), ("other", val(99.0))]));
+    assert_eq!(regs, vec![RatchetRegression { judge: "cc".into(), from: Some(10.0), to: Some(11.0) }]);
+
+    assert!(g.check(&fresh(&[("cc", val(10.4))])).is_empty(), "within tolerance");
+
+    for unmeasured in [Verdict::failed("boom"), Verdict::binary(true), val(f64::NAN)] {
+        let regs = g.check(&fresh(&[("cc", unmeasured.clone()), ("cov", unmeasured)]));
+        assert_eq!(regs.len(), 2, "an unmeasured ratcheted judge never passes, reference or not");
+        assert!(regs.iter().all(|r| r.to.is_none()));
+    }
+    assert_eq!(describe(&regs_of(&g)), vec!["ratchet `cc`: 10 → 12".to_string()]);
+}
+
+fn regs_of(g: &Gate) -> Vec<RatchetRegression> {
+    g.check(&fresh(&[("cc", val(12.0))]))
+}
+
+/// The reference moves only on a KEEP, and only to a measured value.
+#[test]
+fn improving_moves_the_reference_and_a_rollback_does_not() {
+    let mut g = gate(&[("cc", Ratchet::down(0.5).baseline(10.0))]);
+    g.record(GateDecision::RolledBack, &fresh(&[("cc", val(12.0))]), &regs_of(&g), sig(&["cc"]));
+    assert_eq!(g.state.reference("cc"), Some(10.0), "a rolled-back value never becomes the reference");
+    assert!(g.state.ratchet_regressed());
+
+    g.record(GateDecision::Kept, &fresh(&[("cc", val(8.0))]), &[], sig(&[]));
+    assert_eq!(g.state.reference("cc"), Some(8.0), "the kept improvement is the new reference");
+    assert!(!g.state.ratchet_regressed(), "the latest gate regressed nothing");
+
+    g.record(GateDecision::Kept, &fresh(&[("cc", Verdict::failed("x"))]), &[], sig(&[]));
+    assert_eq!(g.state.reference("cc"), Some(8.0), "an unmeasured keep leaves the reference alone");
+}
+
+#[test]
+fn rollbacks_count_and_consecutive_resets_on_a_keep() {
+    let mut g = Gate::default();
+    let f = fresh(&[("a", Verdict::binary(false))]);
+    g.record(GateDecision::RolledBack, &f, &[], sig(&["a"]));
+    g.record(GateDecision::Nothing, &f, &[], sig(&["a"]));
+    g.record(GateDecision::RolledBack, &f, &[], sig(&["a"]));
+    assert_eq!((g.state.rollbacks, g.state.consecutive_rollbacks), (2, 2), "a no-change gate neither breaks nor extends the streak");
+    g.record(GateDecision::Kept, &f, &[], sig(&["a"]));
+    assert_eq!((g.state.rollbacks, g.state.consecutive_rollbacks), (2, 0));
+
+    // a gate with no verdicts still counts, but records no signature.
+    g.record(GateDecision::RolledBack, &[], &[], vec![]);
+    assert_eq!(g.state.rollbacks, 3);
+    assert_eq!(g.state.signatures.len(), 4);
+}
+
+fn history(sigs: &[&[&str]]) -> GateState {
+    GateState { signatures: sigs.iter().map(|s| sig(s)).collect(), ..GateState::default() }
+}
+
+/// A→B→A trips it; A→A→A does not (that is a stall, not an oscillation); a monotonically
+/// improving run never does; a repeat older than the window does not; all-green never counts.
+#[test]
+fn oscillating_is_a_b_a_within_the_window() {
+    assert!(history(&[&["a"], &["b"], &["a"]]).oscillating(4));
+    assert!(history(&[&["a", "b"], &["c"], &["c"], &["a", "b"]]).oscillating(4));
+    assert!(!history(&[&["a"], &["a"], &["a"]]).oscillating(4), "no different set in between");
+    assert!(!history(&[&["a", "b", "c"], &["b", "c"], &["c"], &[]]).oscillating(4), "monotone improvement");
+    assert!(!history(&[&[], &["a"], &[]]).oscillating(4), "returning to all-green is not oscillation");
+    assert!(!history(&[&["a"], &["b"]]).oscillating(4), "short history");
+    assert!(!history(&[]).oscillating(4));
+
+    let old = history(&[&["a"], &["b"], &["c"], &["d"], &["e"], &["a"]]);
+    assert!(!old.oscillating(4), "the earlier `a` is five gates back");
+    assert!(old.oscillating(5));
+}
+
+#[test]
+fn the_signature_is_failing_in_scope_judges_plus_ratchet_regressions() {
+    let f = fresh(&[
+        ("b", Verdict::binary(false)),
+        ("a", Verdict::failed("x")),
+        ("ok", Verdict::binary(true)),
+        ("detector", Verdict::binary(false)),
+    ]);
+    let reg = [RatchetRegression { judge: "cc".into(), from: Some(1.0), to: Some(2.0) }];
+    assert_eq!(signature(&f, |n| n != "detector", &reg), sig(&["a", "b", "cc"]));
+}
+
+#[test]
+fn the_history_is_bounded() {
+    let mut g = Gate::default();
+    let f = fresh(&[("a", Verdict::binary(false))]);
+    for _ in 0..(HISTORY_CAP + 10) {
+        g.record(GateDecision::Nothing, &f, &[], sig(&["a"]));
+    }
+    assert_eq!(g.state.signatures.len(), HISTORY_CAP);
+}
+
+#[test]
+fn the_state_round_trips_through_agg_private() {
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(load(tmp.path()).is_none(), "no file is no state, not a crash");
+    let mut g = gate(&[("cc", Ratchet::down(0.0).baseline(4.0))]);
+    g.record(GateDecision::RolledBack, &fresh(&[("cc", val(5.0))]), &regs_of(&g), sig(&["cc"]));
+    save(tmp.path(), &g.state).unwrap();
+    assert!(crate::paths::gate_json(tmp.path()).starts_with(crate::paths::private_dir(tmp.path())));
+    assert_eq!(load(tmp.path()), Some(g.state));
+}

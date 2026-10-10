@@ -65,6 +65,7 @@ pub mod util;
 pub mod prelude {
     pub use crate::core::config::Limits;
     pub use crate::core::model::{Judge, JudgeCtx, Verdict};
+    pub use crate::core::ratchet::{Direction, GateState, Ratchet};
     pub use crate::core::asks::Ask;
     pub use crate::driver::{
         run, Agg, Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts,
