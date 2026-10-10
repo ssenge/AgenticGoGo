@@ -493,13 +493,16 @@ fn status_and_history_json_are_machine_readable() {
     let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
     assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
 
-    // status --json: valid JSON, carries the project + the cost fields.
+    // status --json: the versioned live document (docs/schemas/status.v1.json; validated in
+    // tests/status.rs), carrying the project and the usage totals.
     let snap = agg(dir, &path).args(["status", "--json"]).output().unwrap();
     assert!(snap.status.success(), "status --json failed: {}", String::from_utf8_lossy(&snap.stderr));
     let v: serde_json::Value = serde_json::from_slice(&snap.stdout).expect("status --json must be valid JSON");
+    assert_eq!(v["schema_version"], 1);
     assert_eq!(v["project"], "jsonproj");
-    assert_eq!(v["cost_limit"], 5.0, "cost_limit should round-trip into the snapshot JSON");
-    assert!(v["cost_spent"].as_f64().unwrap() > 0.0, "cost_spent should reflect the stub's spend");
+    assert_eq!(v["running"], false, "the run has exited");
+    assert!(v["usage"]["total"]["cost_usd"].as_f64().unwrap() > 0.0, "the usage totals reflect the stub's spend");
+    assert_eq!(v["usage"]["worker"]["cost_source"], "reported");
 
     // a finished run publishes the terminal stage + the ledger's machine-readable end reason.
     assert_eq!(v["finished"], true, "a completed run must be marked finished");
@@ -515,6 +518,10 @@ fn status_and_history_json_are_machine_readable() {
     assert_eq!(
         runs.last().unwrap()["end_reason"], "goals-met",
         "the ledger records WHY the run ended, not just that it did"
+    );
+    assert_eq!(
+        runs.last().unwrap()["usage"], v["usage"],
+        "history carries each run's usage totals — the same figures the status and report state"
     );
 
     // The HUMAN renderers: `agg status` and the headless `agg dashboard --once` both read the same

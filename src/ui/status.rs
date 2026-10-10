@@ -20,17 +20,12 @@ pub fn render(dir: &Path) -> String {
     }
 }
 
-/// Render the current run snapshot as pretty JSON (the full `DashboardState`) for scripting.
-/// Errors with an actionable hint if no snapshot exists yet, so `agg status --json` in a
-/// fresh project fails loud rather than emitting misleading empty JSON.
+/// The live status document (`docs/schemas/status.v1.json`) as pretty JSON — the STABLE interface
+/// for a program watching a run, built by [`crate::report::status`]. Errors with an actionable hint
+/// if no snapshot exists yet, so `agg status --json` in a fresh project fails loud rather than
+/// emitting misleading empty JSON.
 pub fn render_json(dir: &Path) -> anyhow::Result<String> {
-    match DashboardState::read(dir) {
-        Some(s) => Ok(serde_json::to_string_pretty(&s)?),
-        None => anyhow::bail!(
-            "no run snapshot yet (agg/private/state.json not found) — run `agg run` first \
-             (it publishes state as it goes)."
-        ),
-    }
+    Ok(serde_json::to_string_pretty(&crate::report::status::document(dir)?)?)
 }
 
 /// Pure renderer over a snapshot — separated so it's unit-testable without touching disk.
