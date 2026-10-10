@@ -71,6 +71,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"d
 exit 0
 "#;
 
+/// One ledger row as the tests read it: `(session, outcome, value, met, error)`.
+type Row = (Option<u32>, Outcome, Option<f64>, bool, Option<String>);
+
 struct Project {
     _tmp: tempfile::TempDir,
     dir: PathBuf,
@@ -149,7 +152,7 @@ impl Project {
     }
 
     /// `(session, outcome, value, met, error)` per row of `judge`.
-    fn rows(&self, judge: &str) -> Vec<(Option<u32>, Outcome, Option<f64>, bool, Option<String>)> {
+    fn rows(&self, judge: &str) -> Vec<Row> {
         rows_for(&self.dir, judge, false).into_iter().map(|r| (r.session, r.outcome, r.value, r.met, r.error)).collect()
     }
 }

@@ -366,7 +366,7 @@ fn run_cli() -> Result<ExitCode> {
             let _ = agg::core::judges::ensure_library();
             let cfg = config::AggConfig::load(&p.config).ok();
             // a judge DECLARED in `judges:` (a `metric:`/`score:` block) first, else a file.
-            let kind = match cfg.as_ref().map(|c| agg::metrics::declare::declare(c, &[name.clone()], &p.config_base, true)) {
+            let kind = match cfg.as_ref().map(|c| agg::metrics::declare::declare(c, std::slice::from_ref(name), &p.config_base, true)) {
                 Some(d) if d.kinds.contains_key(name) => {
                     if !d.problems.is_empty() {
                         anyhow::bail!("{}", agg::problem::render(&d.problems));
