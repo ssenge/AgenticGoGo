@@ -1,0 +1,48 @@
+#!/bin/sh
+# FAKE swe-metrics, inside the judges' test image. `measure` reports ONE metric, `work.sessions` =
+# the lines of src/sessions.log (the fake worker appends one per session); `score` is 40 + 20 per
+# session. Every judge-time call logs to $AGG_JUDGE_SCRATCH/swe-metrics.log (probes have no scratch).
+incontainer() { [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; }
+log() { [ -n "${AGG_JUDGE_SCRATCH:-}" ] && echo "$*" >> "$AGG_JUDGE_SCRATCH/swe-metrics.log"; return 0; }
+where() {
+  incontainer && log "$1_IN_CONTAINER"
+  log "uid=$(id -u) home=$HOME"
+  if echo x > "$AGG_PROJECT_DIR/$1_probe" 2>/dev/null; then log "$1_PROJECT_WRITE_OK"; else log "$1_PROJECT_WRITE_DENIED"; fi
+  [ "${TRIVY_SKIP_DB_UPDATE:-}" = true ] && log TRIVY_NO_UPDATE
+  if [ -n "${TRIVY_CACHE_DIR:-}" ] && [ -f "$TRIVY_CACHE_DIR/db/trivy.db" ]; then
+    log TRIVY_DB_SEEN
+    if echo x >> "$TRIVY_CACHE_DIR/db/trivy.db" 2>/dev/null; then log TRIVY_DB_WRITE_OK; else log TRIVY_DB_WRITE_DENIED; fi
+  fi
+}
+value() { grep -o '"value": *[0-9.]*' "$1" | head -n 1 | sed 's/.*: *//'; }
+cmd=$1; [ $# -gt 0 ] && shift
+case "$cmd" in
+  --version) echo "fake-swe-metrics 1.0.0"; exit 0 ;;
+  schema) printf '{"$id": "swe-metrics/%s/v1"}\n' "${1:-report}"; exit 0 ;;
+  measure)
+    target=$1; shift; out=; det=
+    while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift ;; --details) det=$2; shift ;; esac; shift; done
+    log "measure $target"
+    where MEASURE
+    n=$(cat "$target/src/sessions.log" 2>/dev/null | wc -l | tr -d ' ')
+    mkdir -p "$det" && echo '{"runs":[]}' > "$det/work.sarif"
+    printf '%s\n' "{\"schema\":\"swe-metrics/report/v1\",\"subject\":{\"target\":\".\",\"kind\":\"repository\",\"commit\":null,\"changed_since\":null,\"files\":1,\"languages\":{}},\"analyzers\":[{\"id\":\"work\",\"tool\":\"fake\",\"status\":\"ran\",\"reason\":\"\",\"families\":[\"work\"]}],\"metrics\":[{\"id\":\"work.sessions\",\"tool\":\"fake\",\"unit\":\"sessions\",\"direction\":\"higher_better\",\"scope\":{\"level\":\"target\"},\"value\":${n:-0}}],\"details\":[{\"analyzer\":\"work\",\"format\":\"sarif\",\"path\":\"work.sarif\"}]}" > "$out"
+    exit 0 ;;
+  score)
+    report=$1; shift; out=; base=
+    while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift ;; --baseline) base=$2; shift ;; esac; shift; done
+    n=$(value "$report"); n=${n:-0}
+    worse=false
+    if [ -n "$base" ]; then
+      log "score baseline=$base"
+      if [ -r "$base" ]; then log BASELINE_READ; b=$(value "$base"); [ "${b:-0}" -gt "$n" ] && worse=true; else log BASELINE_UNREADABLE; fi
+    else
+      log "score baseline=none"
+    fi
+    [ -n "${AGG_JUDGE_SCRATCH:-}" ] && where SCORE
+    doc="{\"schema\":\"swe-metrics/score/v1\",\"definition\":{\"name\":\"swe-default\",\"version\":\"2\"},\"score\":$((40 + 20 * n)),\"gates\":[],\"components\":[],\"regressions\":[{\"metric\":\"work.sessions\",\"worse\":$worse}],\"notes\":[]}"
+    if [ -n "$out" ]; then printf '%s\n' "$doc" > "$out"; else printf '%s\n' "$doc"; fi
+    exit 0 ;;
+esac
+echo "fake swe-metrics: unknown command $cmd" >&2
+exit 2

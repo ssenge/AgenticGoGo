@@ -2,7 +2,8 @@
 //! two questions a container run cannot answer for itself until a session has already failed.
 //!
 //! 1. **Does the image have the CLI?** A worker step runs `claude`/`codex` inside its image, and the
-//!    judges' image runs the ruler's CLI for an LLM judge. Missing, every session dies at spawn.
+//!    judges' image runs the ruler's CLI for an LLM judge and `swe-metrics` for a metric or score
+//!    judge. Missing, every session dies at spawn.
 //! 2. **Can the engine see the paths agg mounts?** A VM-backed engine (colima, lima) shares only
 //!    some host directories with its VM, and a bind of one it cannot see is not an error — the
 //!    container gets an EMPTY directory there. A worker in an empty project, or a judge reading an
@@ -34,9 +35,10 @@ pub struct ImageFacts {
 
 /// One image the run needs, with what it needs it for.
 struct Need {
-    /// the config key that chose it — where its problems are reported.
+    /// the config key that chose it first — where a failure to start it is reported.
     at: String,
-    bins: Vec<String>,
+    /// each CLI it must have, with the key of what runs it there (a step's image, the judges').
+    bins: Vec<(String, String)>,
 }
 
 /// Probe every image `cfg` runs in and report each problem at its key. Runs nothing when the config
@@ -54,17 +56,14 @@ pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> (Vec<ImageFacts>
     for (i, (image, need)) in needs.iter().enumerate() {
         // the paths are the same for every image; one probe of them is enough.
         let probe_paths: &[(PathBuf, String)] = if i == 0 { &paths } else { &[] };
-        let f = probe(image, &need.bins, &probe_paths.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), user.as_deref());
+        let bins: Vec<String> = need.bins.iter().map(|(b, _)| b.clone()).collect();
+        let f = probe(image, &bins, &probe_paths.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), user.as_deref());
         if let Some(e) = &f.error {
             problems.push(Problem::new(need.at.clone(), format!("the container image `{image}` cannot be started: {e}")));
         }
-        for (bin, v) in &f.clis {
-            if v.is_none() && f.error.is_none() {
-                problems.push(Problem::new(need.at.clone(), format!(
-                    "the container image `{image}` has no `{bin}` on PATH — `{bin}` runs INSIDE it under \
-                     `isolation: container`. Use an image that follows the image contract (reference \
-                     Dockerfiles: `docker/{bin}/`), see docs/CONFIG.md → container tier"
-                )));
+        for (bin, at) in &need.bins {
+            if f.clis.get(bin).is_some_and(Option::is_none) && f.error.is_none() {
+                problems.push(missing_cli(at, image, bin));
             }
         }
         for p in &f.invisible {
@@ -81,14 +80,35 @@ pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> (Vec<ImageFacts>
     (facts, problems)
 }
 
+/// The refusal of an image that lacks a CLI the run runs inside it — ONE spelling, so the swe-metrics
+/// probe (`metrics::probe`) and this one report the same problem once.
+pub fn missing_cli(at: &str, image: &str, bin: &str) -> Problem {
+    Problem::new(at, format!(
+        "the container image `{image}` has no `{bin}` on PATH — `{bin}` runs INSIDE it under \
+         `isolation: container`. Use an image that follows the image contract (reference \
+         Dockerfiles: `docker/{bin}/`), see docs/CONFIG.md → container tier"
+    ))
+}
+
+/// The config key that chose the judges' image — where its problems are reported.
+pub fn judge_image_key(cfg: &AggConfig) -> &'static str {
+    if cfg.judge.image.is_some() {
+        "judge.image"
+    } else if cfg.defaults.image.is_some() {
+        "defaults.image"
+    } else {
+        "defaults.isolation"
+    }
+}
+
 /// Every image the run starts a container from, with the CLIs it must have.
 fn needs(cfg: &AggConfig, judges: &[Judge]) -> BTreeMap<String, Need> {
     use super::Isolation::Container;
     let mut out: BTreeMap<String, Need> = BTreeMap::new();
     let mut add = |image: String, at: String, bin: Option<&str>| {
-        let n = out.entry(image).or_insert(Need { at, bins: Vec::new() });
-        if let Some(b) = bin.filter(|b| !n.bins.iter().any(|x| x == b)) {
-            n.bins.push(b.to_string());
+        let n = out.entry(image).or_insert(Need { at: at.clone(), bins: Vec::new() });
+        if let Some(b) = bin.filter(|b| !n.bins.iter().any(|(x, _)| x == b)) {
+            n.bins.push((b.to_string(), at));
         }
     };
     for name in cfg.steps.keys() {
@@ -110,10 +130,12 @@ fn needs(cfg: &AggConfig, judges: &[Judge]) -> BTreeMap<String, Need> {
     }
     if cfg.run_isolation() == Container {
         if let Ok(image) = cfg.judge_image() {
-            let at = if cfg.judge.image.is_some() { "judge.image" } else if cfg.defaults.image.is_some() { "defaults.image" } else { "defaults.isolation" };
+            let at = judge_image_key(cfg);
             let llm = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
             let ruler = cfg.ruler_backend().ok().filter(|_| llm).map(|b| b.bin());
-            add(image, at.into(), ruler);
+            add(image.clone(), at.into(), ruler);
+            let measured = judges.iter().any(|j| matches!(j.kind, JudgeKind::Metric(_) | JudgeKind::Score(_)));
+            add(image, at.into(), measured.then_some(crate::metrics::measure::PROGRAM));
         }
     }
     out
@@ -205,7 +227,8 @@ mod tests {
         let c = cfg("project: p\nsteps:\n  a: { isolation: container, image: \"x:1\" }\n  b: { isolation: container, image: \"x:1\", agent: codex }\n  c: { isolation: sandbox }\njudge: { image: \"j:1\" }\n");
         let n = needs(&c, &[]);
         assert_eq!(n.keys().collect::<Vec<_>>(), ["j:1", "x:1"]);
-        assert_eq!(n["x:1"].bins, ["claude", "codex"]);
+        let bins = |n: &Need| n.bins.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>();
+        assert_eq!(bins(&n["x:1"]), ["claude", "codex"]);
         assert_eq!(n["x:1"].at, "steps.a.image");
         assert!(n["j:1"].bins.is_empty(), "no LLM judge ⇒ the judges' image needs no CLI");
         let llm = Judge {
@@ -218,8 +241,24 @@ mod tests {
             last_verdict: None,
             ever_met: false,
         };
-        assert_eq!(needs(&c, &[llm])["j:1"].bins, ["claude"]);
+        assert_eq!(bins(&needs(&c, &[llm])["j:1"]), ["claude"]);
         assert!(needs(&cfg("project: p\nsteps: { a: { isolation: sandbox } }\n"), &[]).is_empty());
+        let metric = Judge {
+            name: "cc".into(),
+            kind: JudgeKind::Metric(Box::new(crate::metrics::MetricJudge::new("complexity.cyclomatic").max(10.0))),
+            invariant: false,
+            in_dod: true,
+            timeout: None,
+            state: crate::core::model::Lifecycle::Pending,
+            last_verdict: None,
+            ever_met: false,
+        };
+        assert_eq!(needs(&c, std::slice::from_ref(&metric))["j:1"].bins, [("swe-metrics".to_string(), "judge.image".to_string())], "a metric judge ⇒ swe-metrics in the judges' image");
+        // one image for the worker and the judges: each CLI is reported at the key of what runs it
+        let shared = cfg("project: p\ndefaults: { isolation: container, image: \"x:1\" }\nsteps: { a: {} }\njudge: { image: \"x:1\" }\n");
+        let n = needs(&shared, &[metric]);
+        assert_eq!(n["x:1"].bins, [("claude".to_string(), "defaults.image".to_string()), ("swe-metrics".to_string(), "judge.image".to_string())]);
+        assert_eq!(judge_image_key(&c), "judge.image");
     }
 
     #[test]

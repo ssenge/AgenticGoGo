@@ -272,15 +272,43 @@ since the incumbent (one better, one worse) are **no improvement** for the ratch
 `mixed`, which `merge_requires_improvement` does not count, even if the reported value got better.
 
 **Optional dependency.** agg works without swe-metrics. A config that declares a metric or score
-judge in its run-set is **refused at startup** (`agg run`, `agg check`) when `swe-metrics` is not on
-`PATH`, when its report (or score) schema is not the one this agg reads (`swe-metrics/report/v1`,
-`swe-metrics/score/v1`), or when a score's definition/version differs from the configured one.
+judge in its run-set is **refused at startup** (`agg run`, `agg check`) when `swe-metrics` is missing
+**where it will run**, when its report (or score) schema is not the one this agg reads
+(`swe-metrics/report/v1`, `swe-metrics/score/v1`), or when a score's definition/version differs from
+the configured one. Where it runs is the run's judge tier: on a `none` or `sandbox` run, the host's
+`PATH` (refused at `judges.<first>`); on a `container` run, **`judge.image`** — agg asks the image, in
+short probe containers (no network, the project read-only, as the project owner), and refuses at the
+key that chose the image (`judge.image`, else `defaults.image`); the host then need not have
+swe-metrics at all. `agg doctor --json` lists it under `container_images[].clis`.
 
-**Confinement.** swe-metrics runs as a script judge does: from the project root, stdin closed, the
-`AGG_*` env, `TMPDIR` in the judge scratch, and under `isolation: sandbox` in the OS jail with the
-project read-only. Unlike a script judge its `XDG_CACHE_HOME` is not redirected — its tools keep
-machine-wide caches there (trivy's vulnerability database); under `sandbox` that cache must already
-exist, because the jail does not let the tool write it.
+**Confinement.** swe-metrics runs as a script judge does — from the project root, stdin closed, the
+`AGG_*` env — in the run's strongest tier:
+
+- **`sandbox`**: in the OS jail with the project read-only, `TMPDIR` in the judge scratch. Unlike a
+  script judge its `XDG_CACHE_HOME` is not redirected — its tools keep machine-wide caches there
+  (trivy's vulnerability database); that cache must already exist, because the jail does not let the
+  tool write it.
+- **`container`**: in `judge.image` (reference image: [`docker/swe-metrics`](#the-swe-metrics-judges-image)),
+  like every judge of a container run — the project read-only, the context dirs at `/context/<as>`,
+  `pass_env`, the run's network policy, as the project owner. It writes only the session's judge
+  scratch (`agg/private/container/judge/scratch-<n>/`: the report, the details, the score) and a
+  **fresh** `HOME` per call (`agg/private/container/home/metrics-*`); `TMPDIR` is the container's own
+  `/tmp`, and no cache survives the call (`PYTHONDONTWRITEBYTECODE=1`) — swe-metrics runs the measured
+  project's own tool configs, so nothing one session's measurement can write may reach the next one's.
+  The incumbent's report is read where it is kept (`agg/private/metrics/incumbent/`, inside the
+  read-only project); a scoring definition file outside the project is mounted read-only.
+  `agg judge` and `agg plan` measure in `judge.image` too on a container run.
+- **trivy's vulnerability database under `container`** is the **host's**, mounted read-only:
+  `$TRIVY_CACHE_DIR`, else trivy's default (`~/Library/Caches/trivy` on macOS, `$XDG_CACHE_HOME/trivy`
+  or `~/.cache/trivy` elsewhere), with updates off (`TRIVY_SKIP_DB_UPDATE`, `TRIVY_SKIP_JAVA_DB_UPDATE`).
+  The container downloads nothing, so an allow-list needs no entry for it. Seed and refresh it on the
+  host — `trivy image --download-db-only`, or with the image itself:
+  `docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v ~/.cache/trivy:/c agg-swe-metrics trivy
+  --cache-dir /c image --download-db-only` (use your platform's path; the directory must exist). Without one, startup warns, and every `dependencies.*` value — and a
+  score's vulnerability gate — **fails closed** (`trivy failed: … --skip-db-update cannot be specified
+  on the first run`). Keep it where the engine can see it (colima: under your home). Why not a cache
+  of agg's own: per project it is ~1.5 GB downloaded per project; shared and writable, one project's
+  measurement could rewrite the database another project's vulnerability gate trusts.
 
 **Shape refusals at startup**, each at its key: `metric:` and `score:` together; no threshold;
 `max < min`; a malformed `id`; `tool:` with `combine:`; an empty label; a `scope:` that is a glob
@@ -390,20 +418,20 @@ Under `isolation: container` the agent CLI runs **inside** the step's `image:` �
 other repositories and its agent logins are simply not there. agg builds every container the same
 way:
 
-| | worker | LLM judge (the ruler's one-shot) | script judge |
-|---|---|---|---|
-| image | the step's `image:` | `judge.image` | `judge.image` |
-| project | read-write, minus `agg/private/` and `write_deny` (`:ro`) | **read-only** | **read-only** |
-| `HOME` | a FRESH empty dir every session | its own (`agg/private/container/home/ruler`) | its own (`…/home/judge`) |
-| credentials | its agent's, + `isolation_policy` | the ruler's, + `isolation_policy` | `isolation_policy` only |
-| writes | the project, its `HOME`, the container's tmp | its `HOME` | `$AGG_JUDGE_SCRATCH` + the toolchain cache |
+| | worker | LLM judge (the ruler's one-shot) | script judge | metric / score judge (`swe-metrics`) |
+|---|---|---|---|---|
+| image | the step's `image:` | `judge.image` | `judge.image` | `judge.image` |
+| project | read-write, minus `agg/private/` and `write_deny` (`:ro`) | **read-only** | **read-only** | **read-only** |
+| `HOME` | a FRESH empty dir every session | its own (`agg/private/container/home/ruler`) | its own (`…/home/judge`) | a FRESH empty dir every call (`…/home/metrics-*`) |
+| credentials | its agent's, + `isolation_policy` | the ruler's, + `isolation_policy` | `isolation_policy` only | `isolation_policy` only |
+| writes | the project, its `HOME`, the container's tmp | its `HOME` | `$AGG_JUDGE_SCRATCH` + the toolchain cache | `$AGG_JUDGE_SCRATCH`, its `HOME`, the container's tmp |
 
 Every container runs as the **owner of the project dir** (`--user uid:gid`), never root: files it
 writes are yours, and Claude Code refuses auto-approval as root. Context dirs are mounted read-only at
-`/context/<as>` in all three.
+`/context/<as>` in all of them.
 
 **The image contract** — what an image must provide (reference images: [`docker/claude`](../docker/claude/Dockerfile),
-[`docker/codex`](../docker/codex/Dockerfile)):
+[`docker/codex`](../docker/codex/Dockerfile), and for metric and score judges [`docker/swe-metrics`](../docker/swe-metrics/Dockerfile)):
 
 - the agent CLI on `PATH` **for any uid** (installed system-wide, not under `/root`), and `/bin/sh`;
 - everything the worker's tasks and your judges run — the judges run in `judge.image`, so a
@@ -417,6 +445,33 @@ docker build -t agg-claude docker/claude      # or docker/codex; add your toolch
 ```yaml
 defaults: { agent: "claude", isolation: "container", image: "agg-claude" }
 ```
+
+#### The swe-metrics judges' image
+
+Metric and score judges run `swe-metrics` in `judge.image`. The reference image
+[`docker/swe-metrics`](../docker/swe-metrics/Dockerfile) holds swe-metrics and every tool it runs,
+exactly as its `tools.lock` pins them (installed by its own `scripts/install-tools.sh`, checksums
+verified), for any uid. swe-metrics is installed **from a git checkout of it** — it is not published —
+by a build script that makes the context out of ONE commit (`git archive`: no uncommitted changes, no
+local venv), records it in the image label `org.opencontainers.image.revision`, and works with docker
+(BuildKit or not) and podman:
+
+```sh
+docker/swe-metrics/build.sh ~/src/swe-metrics                       # → agg-swe-metrics (~2 GB)
+SWE_METRICS_REF=<commit|tag> docker/swe-metrics/build.sh ~/src/swe-metrics my-judges:1
+```
+```yaml
+judge: { image: "agg-swe-metrics" }   # the steps keep their own `image:`
+```
+
+`judge.image` is the one image **every** judge of the run uses: when the run also has script judges,
+add their toolchain to that Dockerfile (or build your judges' image `FROM agg-swe-metrics`). Not in
+it: a JDK (`jdeps`, for Java class files — the analyzer then reports itself not installed), and trivy's
+database, which is the host's ([above](#judges-built-on-swe-metrics--metric-and-score)). The image
+turns off its tools' update checks and telemetry (a measurement must not depend on the network), and
+lets node tools run for a uid without a passwd entry. `scripts/e2e_metrics_container_real.sh` runs the
+real image against a fixture with known values, behind an allow-list, with a failing `swe-metrics`
+first on the host's `PATH`.
 
 **Credentials** cross at run time and are never written anywhere agg keeps:
 
@@ -448,7 +503,7 @@ this tier — they run on the host, unconfined, like the summarizer (which runs 
 
 **Refused at startup** (`agg check` lists each at its key, `agg doctor --json` reports
 `container_images`): an image that cannot be started, or that lacks the CLI a step (or the ruler, for
-an LLM judge) runs in it — agg runs a short probe container per image as the project owner; container
+an LLM judge, or `swe-metrics`, for a metric or score judge) runs in it — agg runs a short probe container per image as the project owner; container
 steps on several images with no `judge.image`; and a mounted path the engine cannot see. A VM-backed
 engine (colima, lima) shares only some host directories with its VM — colima only your home by
 default — and a bind of one it cannot see is not an error, it is an **empty directory** inside the
@@ -522,6 +577,13 @@ nothing the worker wrote.
 | the worker sets its own `HTTPS_PROXY` | refused (only agg's proxy is reachable) | no route |
 | an unlisted name through agg's proxy | `403` | `403` |
 | the host's own services | only `localhost` entries | unreachable |
+
+**Metric and score judges need no entry of their own.** swe-metrics in `judge.image` reads trivy's
+database from the host (read-only, never updated in there), and the reference image turns its tools'
+update checks off. What may still go out, per project: `terraform init` for an IaC project
+(`registry.terraform.io` and where it sends the provider download, e.g. `releases.hashicorp.com`), and
+trivy resolving a Maven `pom.xml`'s remote parents (`repo.maven.apache.org`). Refused, the analyzer
+fails and its judges fail closed; list those hosts, or keep the run open, if you measure such projects.
 
 **The agent's own endpoint must be listed** — a worker that cannot reach its model is not confined, it
 is broken. agg checks at startup (and the driver at `step()`) that every step's agent, and the ruler

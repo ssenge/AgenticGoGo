@@ -80,6 +80,25 @@ Notable changes to agg. Newest first; each entry names the config keys and inter
   - swe-metrics stays optional: a config declaring such a judge is refused at startup when
     `swe-metrics` is not on `PATH` or speaks another schema version.
   - Rust driver: `Judge::metric(name, MetricJudge::new(id)…)` and `Judge::score(name, ScoreJudge::new(def, version)…)`.
+- **Metric and score judges on the `container` tier** (A-11 × A-20). On a container run, `swe-metrics
+  measure` / `score` run in `judge.image` like every other judge: the project read-only, writing only the
+  session's judge scratch (`agg/private/container/judge/scratch-<n>/`) and a fresh `HOME` per call
+  (`agg/private/container/home/metrics-*`), `TMPDIR` the container's `/tmp`, no cache that outlives the
+  call; the run's network policy, context dirs and `pass_env` apply. They ran unconfined on the host
+  before. The incumbent's report is read from the read-only project; a scoring definition file outside
+  the project is mounted read-only; one measurement per session tree still holds. `agg judge` and
+  `agg plan` measure in `judge.image` too on a container run.
+  - Startup checks swe-metrics where it will run: on a container run, in `judge.image` (its presence,
+    `swe-metrics schema report|score` `$id`, the score definition), refused at `judge.image` (else
+    `defaults.image`) — the host no longer needs swe-metrics. `agg doctor --json` lists it under
+    `container_images[].clis`. An image lacking a CLI is now reported at the key of what runs it there
+    (a step's image vs `judge.image`) when both share one image.
+  - trivy's vulnerability database is the host's, mounted read-only with updates off
+    (`TRIVY_SKIP_DB_UPDATE`); the container downloads nothing. No database: a startup warning, and
+    `dependencies.*` judges fail closed.
+  - Reference judges' image `docker/swe-metrics/` (`build.sh <swe-metrics checkout>`): swe-metrics from
+    one git commit plus its `tools.lock`-pinned tools, for any uid, tool update checks off.
+    `scripts/e2e_metrics_container_real.sh` runs it end to end by hand.
 
 ### Changed
 

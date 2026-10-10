@@ -85,7 +85,7 @@ pub fn resolve(cfg: &AggConfig, dir: &Path) -> (RunPolicy, Vec<Problem>) {
             }
         },
     };
-    (RunPolicy { contexts, pass_env, credentials, judge_image, egress }, problems)
+    (RunPolicy { contexts, pass_env, credentials, judge_image, judge_tier: cfg.run_isolation(), egress }, problems)
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*` — what `-e NAME` can carry without being read as `NAME=value`.
