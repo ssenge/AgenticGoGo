@@ -104,6 +104,7 @@ impl Handler for PickStep {
                     human_wait_secs: rs.human_wait_secs,
                     rate_limit_wait_secs: rs.rate_limit_wait_secs,
                     gate: Some(&eng.gate),
+                    groups: &eng.groups,
                 };
                 stop::evaluate(cond, &sc)
             });

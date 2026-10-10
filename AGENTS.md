@@ -96,6 +96,8 @@ sequence:
   limits: { tokens: null, cost: null, sessions: null }   # null = unlimited
   invariants: []                 # judge names that must STAY met
   ratchet: {}                    # NUMERIC no-regression, e.g. { cc: { direction: "down", tolerance: 0.5, baseline: 12 } }
+  groups: {}                     # named judge lists, e.g. { quality: ["sonar", "lizard", "codescene"] } → count_met(quality) >= 2
+  merge_requires_improvement: false  # true ⇒ merge only if a DoD judge / done_if group / ratchet IMPROVED, else `no_improvement`
   done_if: "tests_pass"          # SUCCESS (exit 0)
   abort_if: "over_budget OR over_iterations OR work_time >= 14400"  # GIVE UP (exit 3). SECONDS.
   notify_if: "stalled"           # OPTIONAL, NON-TERMINAL: fire notify.cmd, KEEP RUNNING
@@ -105,8 +107,10 @@ sequence:
 ### `done_if` / `abort_if` / `notify_if` grammar
 Bare judge names combined with `AND` / `OR` / parens, plus these terms: `all_goals`, `count_met >= N`,
 `over_budget` (tokens), `over_cost` (**claude-only**), `over_iterations`, `stalled`,
-`any_regressed(invariants)`, `count_regressed >= N`, the gate's own history — `rollbacks >= N`,
-`consecutive_rollbacks >= N`, `oscillating` (A→B→A over the unmet DoD-set, window
+`any_regressed(invariants)`, `count_regressed >= N`, a GROUP subset on any aggregate —
+`count_met(<group>) >= k` (k of n), `all_goals(<group>)`, `any_regressed(<group>)` …, the gate's own
+history — `rollbacks >= N`, `consecutive_rollbacks >= N`, `no_improvements >= N`,
+`consecutive_no_improvements >= N`, `oscillating` (A→B→A over the unmet DoD-set, window
 `sequence.oscillation_window`, default 4), `ratchet_regressed`, `<judge>.ref` (a ratcheted judge's
 reference) — and the three clock terms — all **SECONDS**:
 `wall_time` (e2e, human waiting included — a deadline), `human_wait_time`, `work_time`
@@ -128,7 +132,8 @@ file) in `notify_if`, never `abort_if` — otherwise the agent can end its own r
 read agg's `verdicts.jsonl`, which is a PROTOCOL boundary, not a permission one — it sits in the
 worker's writable cwd on every isolation tier. Only the process-internal terms (`over_budget`,
 `over_cost`, `over_iterations`, `wall_time`/`human_wait_time`/`work_time`, `any_regressed(invariants)`,
-`rollbacks`, `consecutive_rollbacks`, `oscillating`, `ratchet_regressed`, `<judge>.ref`) are unfakeable —
+`rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `oscillating`,
+`ratchet_regressed`, `<judge>.ref`) are unfakeable —
 the gate's history is computed in agg's memory and only persisted (`agg/private/gate.json`) for resume.
 
 **The ratchet** (`sequence.ratchet.<judge>: { direction: up|down, tolerance, tolerance_pct?, baseline? }`):
@@ -137,6 +142,16 @@ session is a gate regression (rolled back). Reference before the first keep: the
 the baseline pass. A ratcheted judge with no `value` refuses at startup; one that errors never passes.
 It joins the run-set, never the DoD-set. Driver: `Agg::ratchet(name, Ratchet::down(0.5))`, read with
 `agg.gate_state()`.
+**Groups** (`sequence.groups.<name>: [judges]`): a NAME for a judge list, usable only as an aggregate
+subset. A group is its members — all join the run-set; a group in `done_if` puts them in the DoD-set.
+At the gate a judge held ONLY through a `done_if` group is judged with the group, NET (more members
+met→unmet than unmet→met = regression), so a swap inside k-of-n is not a rollback. Refused at startup:
+unknown member, empty group, duplicate member, reserved name, unknown group in a condition, literal k > n.
+Code: `src/core/groups.rs` (`assess` = the one rule both gates call). Driver: `Group::new` + `agg.group(&g)`.
+**`merge_requires_improvement: true`**: a staged session merges only if a DoD judge went unmet→met (a
+`done_if` group: net gain) or a ratchet improved beyond tolerance; else ledger outcome `no_improvement`
+— NOT a rollback (never `rollbacks`), counts for `stalled` and `consecutive_no_improvements`. Gate
+precedence: protected path > `red_file` > `skip_judges` > regression > improvement.
 Do NOT name the SAME detector in `notify_if` and an entry's `until:`: the `until:` is resolved at the
 start of the next session, so the human is paged before the recovery step runs.
 
@@ -232,7 +247,8 @@ src/core/calls.rs     `agg/private/calls.jsonl` — the CALL ledger that makes `
                       the step's label carrying the walk position — `features/resume.rs`).
                       Fast-forward is sound only back to the last KEPT gate (OD-12): everything after
                       it is parked on per-run span branches the ledger cannot carry.
-src/assembly.rs       builds the run-set: `done_if ∪ abort_if ∪ invariants ∪ every until: ∪ ratchet keys`.
+src/assembly.rs       builds the run-set: `done_if ∪ abort_if ∪ invariants ∪ every until: ∪ ratchet keys
+                      ∪ every group member` (a group named in `done_if` joins the DoD-set too).
                       A judge named by NO expression never runs, however many files sit in agg/judges/.
                       `build` COLLECTS every problem (a `Problem {path, message}`); `assemble` is
                       its startup face. `src/check.rs` (`agg check`) runs parse → build →

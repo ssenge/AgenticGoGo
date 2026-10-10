@@ -14,6 +14,7 @@ pub mod clock;
 pub mod config;
 pub mod engine;
 pub mod evidence;
+pub mod groups;
 pub mod judge;
 pub mod judges;
 pub mod memory;

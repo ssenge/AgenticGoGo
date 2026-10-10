@@ -145,6 +145,9 @@ pub struct Engine {
     /// the gate's ratchet config + history — the in-memory state behind `rollbacks`,
     /// `consecutive_rollbacks`, `oscillating`, `ratchet_regressed` and `<judge>.ref`.
     pub gate: crate::core::ratchet::Gate,
+    /// the judge groups (`sequence.groups`) the conditions' `(<group>)` subsets resolve against, and
+    /// which of them the gate judges as a unit ([`crate::core::groups`]).
+    pub groups: crate::core::groups::Groups,
 }
 
 /// The YAML path's verdict store for a native judge's [`crate::core::model::JudgeCtx`]: this step's
@@ -185,22 +188,24 @@ impl Engine {
         abort_if: Option<String>,
         notify_if: Option<String>,
     ) -> Result<Self> {
-        Self::with_gate(judges, done_if, abort_if, notify_if, crate::core::ratchet::Gate::default())
+        let groups = crate::core::groups::Groups::default();
+        Self::with_gate(judges, done_if, abort_if, notify_if, crate::core::ratchet::Gate::default(), groups)
     }
 
-    /// [`Engine::new`] with a ratchet configured — the expressions are validated against it, so a
-    /// `<judge>.ref` on an unratcheted judge fails at load.
+    /// [`Engine::new`] with a ratchet and judge groups configured — the expressions are validated
+    /// against both, so a `<judge>.ref` on an unratcheted judge or an unknown group fails at load.
     pub fn with_gate(
         judges: Vec<Judge>,
         done_if: Option<String>,
         abort_if: Option<String>,
         notify_if: Option<String>,
         gate: crate::core::ratchet::Gate,
+        groups: crate::core::groups::Groups,
     ) -> Result<Self> {
         for expr in [&done_if, &abort_if, &notify_if].into_iter().flatten() {
-            stop::validate_with(expr, &judges, Some(&gate))?;
+            stop::validate_with(expr, &judges, Some(&gate), &groups)?;
         }
-        Ok(Engine { judges, done_if, abort_if, notify_if, gate })
+        Ok(Engine { judges, done_if, abort_if, notify_if, gate, groups })
     }
 
     /// The one-line `{{reason}}` for a `notify_if` that just fired (STUCK_NOTIFY §5 / §12.3): the
@@ -398,6 +403,7 @@ impl Engine {
             human_wait_secs: run.human_wait_secs,
             rate_limit_wait_secs: run.rate_limit_wait_secs,
             gate: Some(&self.gate),
+            groups: &self.groups,
         };
         // No `done_if` ⇒ never a DoD stop. That is the driver path: agg is not told what "done"
         // means there, so it must never claim the run succeeded.

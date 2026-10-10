@@ -121,6 +121,23 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
     // missing file) is already listed, and "unknown identifier" would only repeat it.
     let done_if = (!driver).then(|| cfg.sequence.done_if.clone());
     let gate = crate::core::ratchet::Gate::new(cfg.sequence.ratchet.clone(), cfg.sequence.oscillation_window);
+    let groups = groups_for(cfg, done_if.as_deref());
+
+    // `merge_requires_improvement` with nothing that COULD improve — no DoD-set judge, no ratchet —
+    // would never merge a session. Refused like the all-`skip_judges` sequence, for the same reason.
+    if !driver
+        && cfg.sequence.merge_requires_improvement
+        && cfg.sequence.ratchet.is_empty()
+        && !named.iter().any(|n| n.in_dod)
+    {
+        problems.push(Problem::new(
+            "sequence.merge_requires_improvement",
+            "sequence.merge_requires_improvement is true but there is no DoD-set judge and no ratchet — \
+             nothing could ever improve, so no session would ever merge. Name a judge in done_if or \
+             invariants, add a ratchet, or drop the key.",
+        ));
+    }
+
     for (path, expr) in [
         ("sequence.done_if", done_if.as_ref()),
         ("sequence.abort_if", cfg.sequence.abort_if.as_ref()),
@@ -131,7 +148,7 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
         if names.iter().any(|n| unresolved.contains(&n.as_str())) {
             continue;
         }
-        if let Err(e) = stop::validate_with(expr, &judges_vec, Some(&gate)) {
+        if let Err(e) = stop::validate_with(expr, &judges_vec, Some(&gate), &groups) {
             problem::push_unique(&mut problems, Problem::new(path, format!("{e:#}")));
         }
     }
@@ -139,10 +156,22 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
     if !problems.is_empty() {
         return Err(Refused { problems, judges: judges_vec });
     }
-    match Engine::with_gate(judges_vec, done_if, cfg.sequence.abort_if.clone(), cfg.sequence.notify_if.clone(), gate) {
+    match Engine::with_gate(judges_vec, done_if, cfg.sequence.abort_if.clone(), cfg.sequence.notify_if.clone(), gate, groups) {
         Ok(engine) => Ok(Assembly { engine, steps: cfg.sequence.steps.clone() }),
         Err(e) => Err(Refused { problems: vec![Problem::new("sequence", format!("{e:#}"))], judges: vec![] }),
     }
+}
+
+/// The configured groups, with what the gate needs: the groups `done_if` names (judged as a unit)
+/// and the judges it holds one by one (named bare in `done_if`, or invariants).
+fn groups_for(cfg: &AggConfig, done_if: Option<&str>) -> crate::core::groups::Groups {
+    let mut g = crate::core::groups::Groups::from_map(cfg.sequence.groups.clone());
+    if let Some(d) = done_if {
+        g.gated = stop::subsets(d).unwrap_or_default().into_iter().filter(|s| g.map.contains_key(s)).collect();
+        g.direct = stop::judge_names(d).unwrap_or_default().into_iter().collect();
+    }
+    g.direct.extend(cfg.sequence.invariants.iter().cloned());
+    g
 }
 
 /// The refusals for ONE `sequence.steps` entry: an unknown step name, and a repetition that is
@@ -204,7 +233,9 @@ struct Named {
 
 /// The run-set, in run-set order, each name with the key that first named it.
 ///
-/// DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ notify_if ∪ every `until:` (§5.3).
+/// DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ notify_if ∪ every `until:` ∪ every
+/// ratchet key ∪ every group member (§5.3). A group an expression uses as a subset contributes its
+/// members on that expression's terms — so a group in `done_if` is in the DoD-set.
 /// On the driver path there is no DoD at all — agg is never told what "done" means, so it must
 /// not claim success. `Sequence::done_if` still carries its YAML default; it is simply not read.
 ///
@@ -217,20 +248,20 @@ fn run_set(cfg: &AggConfig, driver: bool, problems: &mut Vec<Problem>) -> Vec<Na
     let seq = &cfg.sequence;
     let mut out: Vec<Named> = Vec::new();
     if !driver {
-        add_names(&mut out, problems, "sequence.done_if".into(), &seq.done_if, true);
+        add_names(&mut out, problems, "sequence.done_if".into(), &seq.done_if, true, &seq.groups);
     }
     for (i, inv) in seq.invariants.iter().enumerate() {
         add_name(&mut out, inv, format!("sequence.invariants[{i}]"), true);
     }
     if let Some(a) = &seq.abort_if {
-        add_names(&mut out, problems, "sequence.abort_if".into(), a, false);
+        add_names(&mut out, problems, "sequence.abort_if".into(), a, false, &seq.groups);
     }
     if let Some(n) = &seq.notify_if {
-        add_names(&mut out, problems, "sequence.notify_if".into(), n, false);
+        add_names(&mut out, problems, "sequence.notify_if".into(), n, false, &seq.groups);
     }
     for (i, e) in seq.steps.iter().enumerate() {
         if let Some(c) = &e.until {
-            add_names(&mut out, problems, format!("sequence.steps[{i}].until"), c, false);
+            add_names(&mut out, problems, format!("sequence.steps[{i}].until"), c, false, &seq.groups);
         }
     }
     // A RATCHETED judge joins the run-set on the same terms as an `until:` judge: it must EXECUTE
@@ -245,6 +276,19 @@ fn run_set(cfg: &AggConfig, driver: bool, problems: &mut Vec<Problem>) -> Vec<Na
             add_name(&mut out, name, format!("sequence.ratchet.{name}"), false);
         }
     }
+    // Every member of every GROUP joins the run-set, named by a condition or not (a group in
+    // `done_if` already put its members in the DoD-set above). A group that cannot mean anything —
+    // a name the grammar cannot read, no members, a member twice — is refused at its own key.
+    for (g, members) in &seq.groups {
+        for (path, msg) in crate::core::groups::problems(g, members) {
+            problems.push(Problem::new(path, msg));
+        }
+        if !driver {
+            for (i, m) in members.iter().enumerate() {
+                add_name(&mut out, m, format!("sequence.groups.{g}[{i}]"), false);
+            }
+        }
+    }
     if seq.oscillation_window < 2 {
         problems.push(Problem::new(
             "sequence.oscillation_window",
@@ -257,11 +301,25 @@ fn run_set(cfg: &AggConfig, driver: bool, problems: &mut Vec<Problem>) -> Vec<Na
     out
 }
 
-/// Add every judge an expression names; an expression that does not even tokenize is a problem.
-fn add_names(out: &mut Vec<Named>, problems: &mut Vec<Problem>, path: String, expr: &str, dod: bool) {
+/// Add every judge an expression names — bare, or as a member of a group it uses as a subset (a
+/// group is its members) — on the expression's DoD terms. An expression that does not even tokenize
+/// is a problem; an unknown group is left to the expression check, which names the defined ones.
+fn add_names(
+    out: &mut Vec<Named>,
+    problems: &mut Vec<Problem>,
+    path: String,
+    expr: &str,
+    dod: bool,
+    groups: &std::collections::BTreeMap<String, Vec<String>>,
+) {
     match stop::judge_names(expr) {
         Ok(names) => names.iter().for_each(|n| add_name(out, n, path.clone(), dod)),
-        Err(e) => problems.push(Problem::new(path, format!("{e:#}"))),
+        Err(e) => return problems.push(Problem::new(path, format!("{e:#}"))),
+    }
+    for g in stop::subsets(expr).unwrap_or_default() {
+        for (i, m) in groups.get(&g).into_iter().flatten().enumerate() {
+            add_name(out, m, format!("sequence.groups.{g}[{i}]"), dod);
+        }
     }
 }
 
@@ -575,5 +633,68 @@ mod tests {
         assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.ratchet.cc", "sequence.oscillation_window"]);
         let cfg = cfg_with("  abort_if: \"goal.ref > 1\"\n");
         assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.abort_if"]);
+    }
+
+    /// A group is its members: a group named in `done_if` puts them in the DoD-set, one named only
+    /// in `abort_if` (or named nowhere) puts them in the run-set alone — and the gate learns which
+    /// groups to judge as a unit and which judges it holds one by one.
+    #[test]
+    fn group_members_join_the_run_set_and_the_dod_only_through_done_if() {
+        let tmp = base_with_judges(&["goal", "a", "b", "c", "d", "e"]);
+        let cfg = cfg_with(
+            "  groups: { qs: [a, b, c], ops: [d], spare: [e] }\n  invariants: [a]\n  abort_if: \"count_met(ops) == 0\"\n",
+        );
+        let mut cfg = cfg;
+        cfg.sequence.done_if = "goal AND count_met(qs) >= 2".into();
+        let asm = assemble(&cfg, tmp.path()).expect("groups must assemble");
+        let dod = |n: &str| asm.engine.judges.iter().find(|j| j.name == n).map(|j| j.in_dod);
+        assert_eq!([dod("a"), dod("b"), dod("c")], [Some(true); 3], "a done_if group is its members");
+        assert_eq!(dod("d"), Some(false), "an abort_if group is run-set only");
+        assert_eq!(dod("e"), Some(false), "a group named nowhere still runs");
+        let g = &asm.engine.groups;
+        assert_eq!(g.gated.iter().collect::<Vec<_>>(), ["qs"]);
+        assert!(g.group_only("b") && !g.group_only("a"), "a is an invariant — held on its own");
+        assert!(!g.group_only("goal") && !g.group_only("d"));
+    }
+
+    /// The refusals, each at the key to edit: an unknown member (listing the judges that exist), an
+    /// empty group, a bad name, an unknown group in a condition (listing the groups), k > n.
+    #[test]
+    fn group_problems_are_located() {
+        let tmp = base_with_judges(&["goal", "a", "b"]);
+        let cfg = cfg_with("  groups: { q: [a, ghost], empty: [], invariants: [a] }\n");
+        let r = match build(&cfg, tmp.path()) {
+            Ok(_) => panic!("must refuse"),
+            Err(r) => r.problems,
+        };
+        let at = |p: &str| r.iter().find(|x| x.path == p).map(|x| x.message.clone()).unwrap_or_else(|| panic!("no problem at {p}: {r:?}"));
+        assert!(at("sequence.groups.q[1]").contains("ghost") && at("sequence.groups.q[1]").contains("available judges"));
+        assert!(at("sequence.groups.empty").contains("empty"));
+        assert!(at("sequence.groups.invariants").contains("reserved"));
+
+        let cfg = cfg_with("  groups: { q: [a, b] }\n  abort_if: \"count_met(qq) >= 1\"\n");
+        let err = assemble_err(&cfg, tmp.path());
+        assert!(err.contains("unknown group `qq`") && err.contains("defined groups: q"), "{err}");
+        assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.abort_if"]);
+
+        let mut cfg = cfg_with("  groups: { q: [a, b] }\n");
+        cfg.sequence.done_if = "count_met(q) >= 3".into();
+        assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.done_if"]);
+        assert!(assemble_err(&cfg, tmp.path()).contains("can never hold"));
+    }
+
+    /// `merge_requires_improvement` with nothing that could ever improve is refused; with a DoD judge
+    /// or a ratchet it assembles, and a driver project is never refused (it has no DoD by design).
+    #[test]
+    fn merge_requires_improvement_needs_something_that_can_improve() {
+        let tmp = base_with_judges(&["goal", "cc"]);
+        let mut cfg = cfg_with("  merge_requires_improvement: true\n");
+        cfg.sequence.done_if = "over_iterations".into();
+        assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.merge_requires_improvement"]);
+        cfg.sequence.ratchet.insert("cc".into(), crate::core::ratchet::Ratchet::down(0.0));
+        assemble(&cfg, tmp.path()).expect("a ratchet can improve");
+        assemble(&cfg_with("  merge_requires_improvement: true\n"), tmp.path()).expect("a DoD judge can improve");
+        let driver: AggConfig = serde_yaml::from_str("project: p\nsequence: { merge_requires_improvement: true }\n").unwrap();
+        assemble(&driver, tmp.path()).expect("a driver project declares no DoD");
     }
 }
