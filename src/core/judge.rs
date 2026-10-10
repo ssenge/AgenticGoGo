@@ -82,13 +82,31 @@ pub fn run(
             (verdict, None)
         }
         // A metric/score judge measures through swe-metrics — ONE measurement per session tree,
-        // shared by every such judge (`metrics::measure`), confined exactly as a script judge is.
+        // shared by every such judge (`metrics::measure`), confined exactly as a script judge is:
+        // in the OS jail under `sandbox`, in the judges' image under `container`.
         // `iso_base` is what `scope: changed` measures against.
-        JudgeKind::Metric(m) => (crate::metrics::run_metric(m, &metrics_ctx(cwd, session, step, name, timeout_secs, isolation, iso_base)), None),
+        JudgeKind::Metric(m) => {
+            let (dir, tier) = metrics_site(cwd, isolation);
+            (crate::metrics::run_metric(m, &metrics_ctx(&dir, session, step, name, timeout_secs, tier, iso_base)), None)
+        }
         JudgeKind::Score(s) => {
-            (crate::metrics::run_score(name, s, &metrics_ctx(cwd, session, step, name, timeout_secs, isolation, iso_base)), None)
+            let (dir, tier) = metrics_site(cwd, isolation);
+            (crate::metrics::run_score(name, s, &metrics_ctx(&dir, session, step, name, timeout_secs, tier, iso_base)), None)
         }
     }
+}
+
+/// Where swe-metrics runs for a judge on `isolation`: that tier — except that a run whose judges
+/// are containerized measures in the judges' image even from an unconfined caller (`agg judge`,
+/// `agg plan`): startup checked swe-metrics THERE, and a container run need not have it on the host.
+/// In a container every path it is handed must be the one the bind mount shows, so the project dir
+/// is canonical there.
+fn metrics_site(cwd: &Path, isolation: crate::isolation::Isolation) -> (std::path::PathBuf, crate::isolation::Isolation) {
+    use crate::isolation::Isolation::Container;
+    if isolation == Container || crate::isolation::policy::for_dir(cwd).judge_tier == Container {
+        return (std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()), Container);
+    }
+    (cwd.to_path_buf(), isolation)
 }
 
 /// What a swe-metrics run needs to know about the judge that asked for it.

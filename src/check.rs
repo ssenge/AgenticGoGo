@@ -79,7 +79,10 @@ pub fn validate(config_base: &Path, config: &Path) -> Validation {
     let project = config_base.parent().unwrap_or(config_base);
     let a = crate::capability::assess(&cfg, &judges, project);
     v.problems.extend(a.unknown_agents);
-    v.problems.extend(a.problems);
+    // the swe-metrics probe (assembly) and the image probe (here) both report an image without it.
+    for p in a.problems {
+        problem::push_unique(&mut v.problems, p);
+    }
     v.warnings = a.warnings;
     v.images = a.images;
 

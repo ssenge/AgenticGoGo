@@ -1,6 +1,7 @@
 //! Startup: the `judges.<name>` entries that DECLARE a metric or score judge become runnable kinds,
 //! the ratchets that leave their `direction` to such a judge are resolved, the judges of one scope
-//! are given one shared `--only` set, and swe-metrics is probed — every problem located.
+//! are given one shared `--only` set, and swe-metrics is probed where the run will run it (the host,
+//! or the judges' image of a container run) — every problem located.
 
 use super::spec::{self, Declared as Shape, MetricJudge, Scope};
 use crate::core::config::AggConfig;
@@ -54,7 +55,11 @@ pub fn declare(cfg: &AggConfig, run_set: &[String], config_base: &Path, probe: b
         }
     }
     if probe {
-        d.problems.extend(probe_run_set(run_set, &d.kinds));
+        // where the run's swe-metrics will run: the host, or the judges' image of a container run.
+        let project = config_base.parent().unwrap_or(config_base);
+        if let Some(site) = super::probe::Site::of(cfg, project) {
+            d.problems.extend(probe_run_set(run_set, &d.kinds, &site));
+        }
     }
     d
 }
@@ -138,17 +143,25 @@ fn only_for(m: &MetricJudge, scored: bool, families: &BTreeMap<Scope, BTreeSet<S
     families.get(&m.scope).map(|f| f.iter().cloned().collect())
 }
 
-fn probe_run_set(run_set: &[String], kinds: &BTreeMap<String, JudgeKind>) -> Vec<Problem> {
+fn probe_run_set(run_set: &[String], kinds: &BTreeMap<String, JudgeKind>, site: &super::probe::Site) -> Vec<Problem> {
     let mut metric: Vec<&str> = Vec::new();
     let mut score: Vec<(&str, &spec::ScoreJudge)> = Vec::new();
+    // trivy measures the `dependencies` family, and a score reads every family.
+    let mut trivy = false;
     for (n, k) in kinds.iter().filter(|(n, _)| run_set.contains(n)) {
         match k {
-            JudgeKind::Metric(_) => metric.push(n),
-            JudgeKind::Score(s) => score.push((n, s)),
+            JudgeKind::Metric(m) => {
+                trivy |= m.family() == "dependencies";
+                metric.push(n)
+            }
+            JudgeKind::Score(s) => {
+                trivy = true;
+                score.push((n, s))
+            }
             _ => {}
         }
     }
-    super::probe::problems(&metric, &score)
+    super::probe::problems(&metric, &score, site, trivy)
 }
 
 #[cfg(test)]
