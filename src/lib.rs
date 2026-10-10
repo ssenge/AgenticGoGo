@@ -43,6 +43,7 @@ pub mod hooks;
 pub mod init;
 pub mod isolation;
 pub mod loop_;
+pub mod metrics;
 pub mod paths;
 pub mod plugin;
 pub mod problem;
@@ -78,5 +79,6 @@ pub mod prelude {
         OnRegression, Opts, PosFrame, Step, StepOutcome,
     };
     pub use crate::isolation::Isolation;
+    pub use crate::metrics::{Combine, MetricJudge, Scope, ScoreJudge, Stat};
     pub use crate::plugin::RunOutcome;
 }

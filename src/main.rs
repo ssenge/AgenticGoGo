@@ -364,12 +364,22 @@ fn run_cli() -> Result<ExitCode> {
             // resolve the judge by NAME from disk (§5.1) — no goals.yaml. Ensure the standard
             // library exists so a library judge name resolves.
             let _ = agg::core::judges::ensure_library();
-            let kind = agg::core::judges::resolve(name, &p.config_base)?;
+            let cfg = config::AggConfig::load(&p.config).ok();
+            // a judge DECLARED in `judges:` (a `metric:`/`score:` block) first, else a file.
+            let kind = match cfg.as_ref().map(|c| agg::metrics::declare::declare(c, &[name.clone()], &p.config_base, true)) {
+                Some(d) if d.kinds.contains_key(name) => {
+                    if !d.problems.is_empty() {
+                        anyhow::bail!("{}", agg::problem::render(&d.problems));
+                    }
+                    d.kinds[name].clone()
+                }
+                _ => agg::core::judges::resolve(name, &p.config_base)?,
+            };
             // run it exactly as the loop would (scripts from the project root, rubric on the RULER).
             let ruler = ruler_for(&p.config)?;
-            let (jm, timeout) = match config::AggConfig::load(&p.config) {
-                Ok(c) => (c.judge_model(ruler), c.judge.timeout),
-                Err(_) => (ruler.default_summary_model().to_string(), 300),
+            let (jm, timeout) = match &cfg {
+                Some(c) => (c.judge_model(ruler), c.judges.get(name).and_then(|j| j.timeout).unwrap_or(c.judge.timeout)),
+                None => (ruler.default_summary_model().to_string(), 300),
             };
             // Manual `agg judge` — no worker ran this session, so no confinement is needed.
             // No run-set here (this is one judge, by hand), so a native judge's ctx would have
