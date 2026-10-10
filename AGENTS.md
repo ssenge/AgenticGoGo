@@ -76,6 +76,7 @@ sequence:
   steps: ["worker"]              # entries; e.g. { step: worker, times: 4 } / { step: w, until: X, max: 4 }
   limits: { tokens: null, cost: null, sessions: null }   # null = unlimited
   invariants: []                 # judge names that must STAY met
+  ratchet: {}                    # NUMERIC no-regression, e.g. { cc: { direction: "down", tolerance: 0.5, baseline: 12 } }
   done_if: "tests_pass"          # SUCCESS (exit 0)
   abort_if: "over_budget OR over_iterations OR work_time >= 14400"  # GIVE UP (exit 3). SECONDS.
   notify_if: "stalled"           # OPTIONAL, NON-TERMINAL: fire notify.cmd, KEEP RUNNING
@@ -85,7 +86,10 @@ sequence:
 ### `done_if` / `abort_if` / `notify_if` grammar
 Bare judge names combined with `AND` / `OR` / parens, plus these terms: `all_goals`, `count_met >= N`,
 `over_budget` (tokens), `over_cost` (**claude-only**), `over_iterations`, `stalled`,
-`any_regressed(invariants)`, `count_regressed >= N`, and the three clock terms — all **SECONDS**:
+`any_regressed(invariants)`, `count_regressed >= N`, the gate's own history — `rollbacks >= N`,
+`consecutive_rollbacks >= N`, `oscillating` (A→B→A over the unmet DoD-set, window
+`sequence.oscillation_window`, default 4), `ratchet_regressed`, `<judge>.ref` (a ratcheted judge's
+reference) — and the three clock terms — all **SECONDS**:
 `wall_time` (e2e, human waiting included — a deadline), `human_wait_time`, `work_time`
 (`wall_time − human_wait_time` — an effort ceiling, and what a run with humans in it wants).
 ⚠ `wall_hours` was REMOVED, not renamed: the unit changed by 3600×, so agg hard-errors on the old key
@@ -104,7 +108,16 @@ with an empty `notify.cmd` is a hard startup error; `notify:` alone is valid and
 file) in `notify_if`, never `abort_if` — otherwise the agent can end its own run.** `stalled`/`stuck`
 read agg's `verdicts.jsonl`, which is a PROTOCOL boundary, not a permission one — it sits in the
 worker's writable cwd on every isolation tier. Only the process-internal terms (`over_budget`,
-`over_cost`, `over_iterations`, `wall_time`/`human_wait_time`/`work_time`, `any_regressed(invariants)`) are unfakeable.
+`over_cost`, `over_iterations`, `wall_time`/`human_wait_time`/`work_time`, `any_regressed(invariants)`,
+`rollbacks`, `consecutive_rollbacks`, `oscillating`, `ratchet_regressed`, `<judge>.ref`) are unfakeable —
+the gate's history is computed in agg's memory and only persisted (`agg/private/gate.json`) for resume.
+
+**The ratchet** (`sequence.ratchet.<judge>: { direction: up|down, tolerance, tolerance_pct?, baseline? }`):
+a ratcheted judge's `value` may not get worse than at the last KEPT gate beyond tolerance, else the
+session is a gate regression (rolled back). Reference before the first keep: the `baseline:` seed, else
+the baseline pass. A ratcheted judge with no `value` refuses at startup; one that errors never passes.
+It joins the run-set, never the DoD-set. Driver: `Agg::ratchet(name, Ratchet::down(0.5))`, read with
+`agg.gate_state()`.
 Do NOT name the SAME detector in `notify_if` and an entry's `until:`: the `until:` is resolved at the
 start of the next session, so the human is paged before the recovery step runs.
 
@@ -148,7 +161,7 @@ agg/state/                   GITIGNORED runtime state THE WORKER WRITES (agg rea
 agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of the sandbox's writable set
   INSTRUCTIONS.md              the worker's whole `-p` (agg REGENERATES it every session; the worker's ORDERS)
   LOG.md                       durable institutional memory (worker's input arrives sanitized via sessions/)
-  verdicts.jsonl  state.json  project.json  bus/  run.{pid,log}
+  verdicts.jsonl  gate.json  state.json  project.json  bus/  run.{pid,log}
 ```
 **The split rule:** if the worker writing it could change *when the loop ends, what it may spend, or what
 agg believes happened*, it is private. `verdicts.jsonl` is why: forged `merged` rows make `stalled` report
@@ -170,10 +183,14 @@ src/core/judge.rs     runs a judge (script/rubric/native) and confines it AS A J
                       Then: run-level tier,
                       project READ-ONLY, writes relocated to a shared per-session `$AGG_JUDGE_SCRATCH`.
 src/core/verdicts.rs  `agg/private/verdicts.jsonl` — one row per judge per GATE, never per step.
+src/core/ratchet.rs   the numeric ratchet + the gate's own history (rollbacks, oscillation). Engine
+                      state (`eng.gate`), moved ONLY in `features::gate::keep_or_rollback` — the body
+                      both front ends share — and persisted to `agg/private/gate.json` + driver
+                      `Gate` call records (what `--resume` restores).
 src/core/calls.rs     `agg/private/calls.jsonl` — the DRIVER CALL ledger that makes `--resume` work.
                       Fast-forward is sound only back to the last KEPT gate (OD-12): everything after
                       it is parked on per-run span branches the ledger cannot carry.
-src/assembly.rs       builds the run-set: `done_if ∪ abort_if ∪ invariants ∪ every until:`.
+src/assembly.rs       builds the run-set: `done_if ∪ abort_if ∪ invariants ∪ every until: ∪ ratchet keys`.
                       A judge named by NO expression never runs, however many files sit in agg/judges/.
 ```
 Driver-path traps: `Agg` boots **lazily** (a `cycles=0` driver publishes nothing and is invisible to
