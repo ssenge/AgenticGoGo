@@ -317,3 +317,67 @@ fn ensure_agg_gitignored_adds_the_missing_entries_to_an_already_migrated_project
     assert_eq!(gi2.matches("agg/private/").count(), 1, "must not append a duplicate agg/private/: {gi2:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// REGRESSION: agg's own ignore entries must survive a ROLLBACK on a project whose base branch has
+/// no committed `.gitignore`.
+///
+/// The mechanism, end to end: `ensure_agg_gitignored` writes an UNTRACKED `.gitignore`; session 1's
+/// auto-commit commits it on the session branch; checking base out for the gate and aborting the
+/// rolled-back merge then DELETE it from the work tree (it is tracked on the session branch and
+/// absent on base). From then on nothing ignored `agg/private/`, and the next worker's own
+/// `git add -A` committed agg's ledger onto its session branch. The entries live in the
+/// repository's `info/exclude` too, which no checkout, merge or reset ever touches.
+#[test]
+fn agg_ignore_entries_survive_a_rollback_on_a_base_without_a_gitignore() {
+    let d = std::env::temp_dir().join(format!("agg-git-{}-exclude", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    git_t(&d, &["init", "-q", "-b", "main"]);
+    git_t(&d, &["config", "user.email", "t@t"]);
+    git_t(&d, &["config", "user.name", "t"]);
+    git_t(&d, &["config", "commit.gpgsign", "false"]);
+    git_t(&d, &["config", "core.hooksPath", "/dev/null"]);
+    std::fs::write(d.join("f.txt"), "base\n").unwrap();
+    git_t(&d, &["add", "f.txt"]);
+    git_t(&d, &["commit", "-qm", "base — no .gitignore"]);
+
+    // run start: the ignore entries, then session 1 does work and agg auto-commits it.
+    ensure_agg_gitignored(&d);
+    assert!(create_branch(&d, "agg/p/session-1", "main"));
+    std::fs::create_dir_all(d.join("agg/private")).unwrap();
+    std::fs::write(d.join("agg/private/state.json"), "{}").unwrap();
+    std::fs::write(d.join("f.txt"), "base\nregressing work\n").unwrap();
+    assert!(auto_commit_tracked(&d, "agg: session 1"));
+    // …and the gate rolls it back.
+    assert_eq!(stage_session(&d, "main", "agg/p/session-1", ".agg_red"), StagedSession::Staged);
+    finalize_session(&d, "agg/p/session-1", 1, false);
+    assert!(!d.join(".gitignore").exists(), "precondition: the rollback took the untracked .gitignore with it");
+
+    // session 2's worker stages EVERYTHING it can see, as a worker running git would.
+    assert!(create_branch(&d, "agg/p/session-2", "main"));
+    git_t(&d, &["add", "-A"]);
+    let staged = Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(&d).output().unwrap();
+    let staged = String::from_utf8_lossy(&staged.stdout).to_string();
+    assert!(!staged.contains("agg/private"), "agg's private state must stay ignored after a rollback: {staged:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The `info/exclude` writer is idempotent and keeps whatever the repository already excluded.
+#[test]
+fn ensure_agg_excluded_appends_once_and_keeps_existing_entries() {
+    let d = std::env::temp_dir().join(format!("agg-git-{}-exclude-idem", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    git_t(&d, &["init", "-q", "-b", "main"]);
+    let exclude = d.join(".git/info/exclude");
+    std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    std::fs::write(&exclude, "*.swp\n").unwrap();
+    ensure_agg_excluded(&d);
+    ensure_agg_excluded(&d);
+    let text = std::fs::read_to_string(&exclude).unwrap();
+    assert!(text.lines().any(|l| l == "*.swp"), "existing entries survive: {text:?}");
+    for entry in AGG_IGNORED {
+        assert_eq!(text.lines().filter(|l| *l == entry).count(), 1, "{entry} exactly once: {text:?}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
