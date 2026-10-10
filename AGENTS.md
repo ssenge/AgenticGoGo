@@ -173,7 +173,9 @@ A judge lives at `agg/judges/<name>.{sh,md}` and is referenced by its **bare NAM
   quality: { score: { definition: "swe-default", version: "2" }, min: 80 } }`. No file. All such judges of a
   session share ONE `swe-metrics measure` (cache keyed on the tree, `metrics::measure`); a skipped/failed
   analyzer or absent metric ⇒ the judge ERRORS with the analyzer's reason (never met); several tools ⇒
-  `tool:` or `combine: strictest|all|majority`; `scope: changed` ⇒ `--changed-since <base>`. A score is
+  `tool:` or `combine: strictest|all|majority`; `scope: changed` ⇒ `--changed-since <base>`, and with
+  no changed file its analyzer applies to the judge is VACUOUSLY met (`vacuous: true`, no value — moves
+  nothing at the gate: `groups::assess` and `landed_met` skip it). A score is
   computed with the INCUMBENT's report (`agg/private/metrics/incumbent/`, replaced on every kept gate) as
   `--baseline`; definition/version mismatch refuses; `null` ⇒ error. Their ratchet may omit `direction`
   (`max:` ⇒ down, `min:` ⇒ up, score ⇒ up; checked against the report). Declared + a file of the same
@@ -190,6 +192,8 @@ Verdict contract (to stdout):
 ```
 Optional `"mixed": true` = the judge's own measurements moved in different directions — a ratchet does
 not count that verdict as an improvement (`merge_requires_improvement`).
+Optional `"vacuous": true` = met because there was nothing to measure — neither improvement nor
+regression, and not a "was met" reading for the next gate.
 `met` (bool) is the gate. `value`/`max`/`target` are numeric progress (used by `count_met`, deltas, the
 scoreboard). `rationale` is a short human string.
 

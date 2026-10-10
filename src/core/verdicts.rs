@@ -80,6 +80,11 @@ pub struct VerdictRecord {
     /// on every other row, so a ledger written before the ratchet existed reads unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ratchet: Option<RatchetMark>,
+    /// the verdict was met VACUOUSLY (nothing to measure). Such a row is not a reading: "was met"
+    /// skips it, so a vacuous pass neither becomes the reference a later session regresses from nor
+    /// hides one. Absent on every other row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vacuous: bool,
     /// real wall-clock epoch seconds (this is the loop process — clocks are fine here).
     pub ts: u64,
 }
@@ -106,7 +111,7 @@ pub fn landed_met(dir: &Path) -> HashMap<String, bool> {
     for line in text.lines() {
         let Ok(r) = serde_json::from_str::<VerdictRecord>(line) else { continue };
         // forward scan → the last matching row for a judge wins (the most recent).
-        if r.error.is_none() && matches!(r.outcome, Outcome::Merged | Outcome::Baseline) {
+        if r.error.is_none() && !r.vacuous && matches!(r.outcome, Outcome::Merged | Outcome::Baseline) {
             out.insert(r.judge, r.met);
         }
     }
@@ -125,6 +130,7 @@ impl VerdictRecord {
             evidence: self.evidence.clone(),
             error: self.error.clone(),
             mixed: false,
+            vacuous: self.vacuous,
         }
     }
 }
@@ -144,7 +150,7 @@ pub fn rows_for(dir: &Path, judge: &str, landed_only: bool) -> Vec<VerdictRecord
     text.lines()
         .filter_map(|l| serde_json::from_str::<VerdictRecord>(l).ok())
         .filter(|r| r.judge == judge)
-        .filter(|r| !landed_only || (r.error.is_none() && matches!(r.outcome, Outcome::Merged | Outcome::Baseline)))
+        .filter(|r| !landed_only || (r.error.is_none() && !r.vacuous && matches!(r.outcome, Outcome::Merged | Outcome::Baseline)))
         .collect()
 }
 
@@ -224,6 +230,7 @@ pub fn append_full(
                 .iter()
                 .find(|r| &r.judge == judge)
                 .map(|r| RatchetMark { from: r.from, to: r.to }),
+            vacuous: v.vacuous,
             ts,
         };
         let line = serde_json::to_string(&rec).context("serializing verdict record")?;
@@ -265,7 +272,7 @@ mod tests {
             rationale: "r".into(),
             evidence: vec![],
             error: None,
-            mixed: false,
+            mixed: false, vacuous: false,
         }
     }
 
@@ -395,7 +402,7 @@ mod tests {
             rationale: String::new(),
             evidence: vec![],
             error: None,
-            mixed: false,
+            mixed: false, vacuous: false,
         };
         append(&d, None, "baseline", &[("g".into(), numberless)], Outcome::Baseline).unwrap();
         let line = std::fs::read_to_string(crate::paths::verdicts_jsonl(&d)).unwrap();

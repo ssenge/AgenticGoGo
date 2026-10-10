@@ -65,6 +65,11 @@ pub struct Verdict {
     /// contract; absent = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mixed: bool,
+    /// met VACUOUSLY: there was nothing to measure (a `scope: changed` metric judge whose session
+    /// changed no file its analyzer applies to). It moves nothing at the gate — no improvement, no
+    /// regression, and it does not replace the judge's last landed reading. Absent = false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vacuous: bool,
 }
 
 fn one() -> f64 {
@@ -85,6 +90,7 @@ impl Verdict {
             evidence: vec![],
             error: Some(error),
             mixed: false,
+            vacuous: false,
         }
     }
 
@@ -101,6 +107,7 @@ impl Verdict {
             evidence: vec![],
             error: None,
             mixed: false,
+            vacuous: false,
         }
     }
 

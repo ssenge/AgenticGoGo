@@ -48,6 +48,11 @@ fn metric_verdict(j: &MetricJudge, c: &Ctx<'_>) -> Result<Verdict, (String, Vec<
     let m = measure::measure(c, &j.scope, j.only.as_deref()).map_err(|e| (e, vec![]))?;
     let evidence = evidence(&m, Some(j.family()), None);
     let sel = selector(j);
+    if j.scope == Scope::Changed {
+        if let Some(ids) = report::nothing_to_measure(&m.report, &sel) {
+            return Ok(vacuous(&sel, &ids, evidence));
+        }
+    }
     let fail = |e: String| (e, evidence.clone());
     let values = report::select(&m.report, &sel).map_err(fail)?;
     let incumbent = incumbent_values(j, c, &sel);
@@ -62,6 +67,15 @@ fn metric_verdict(j: &MetricJudge, c: &Ctx<'_>) -> Result<Verdict, (String, Vec<
     v.target = j.max.or(j.min).unwrap_or(1.0);
     v.mixed = d.mixed;
     Ok(v)
+}
+
+/// "New code must be clean" with no new code in scope is VACUOUSLY met: no number, and a verdict that
+/// moves nothing at the gate (`Verdict::vacuous`).
+fn vacuous(sel: &Selector, analyzers: &[String], evidence: Vec<String>) -> Verdict {
+    let why = format!("no changed files in scope for {} — `{}` is vacuously met", analyzers.join(", "), sel.describe());
+    let mut v = Verdict::binary(true).with_rationale(why).with_evidence(evidence);
+    v.vacuous = true;
+    v
 }
 
 /// The report's direction must agree with the ratchet's: `max:` (down) on a higher-is-better
