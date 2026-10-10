@@ -53,7 +53,7 @@ mod imp {
     pub fn available() -> bool {
         false
     }
-    pub fn build(_cwd: &Path, _writable: &[PathBuf], _denied: &[PathBuf], _prog: &std::ffi::OsStr, _args: &[std::ffi::OsString]) -> Result<Command> {
+    pub fn build(_cwd: &Path, _writable: &[PathBuf], _denied: &[PathBuf], _rules: &[String], _prog: &std::ffi::OsStr, _args: &[std::ffi::OsString]) -> Result<Command> {
         anyhow::bail!(
             "`isolation: sandbox` is not supported on this operating system — only Linux (bubblewrap) \
              and macOS (sandbox-exec) have an OS wrapper. Use `isolation: none`, or run on a supported OS."
@@ -132,6 +132,23 @@ pub fn available() -> bool {
 /// from `cwd` — a parameter is a thing a future call site can forget, and forgetting `agg/private/`
 /// is the one hole this module exists to keep shut (BUILD.md §3.8).
 pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf], denies: &[String]) -> Result<Command> {
+    wrap_protected(cmd, cwd, writable, denies, &[])
+}
+
+/// [`wrap`], plus the step's PROTECTED PATHS (`write_deny` globs, [`crate::protect`]).
+///
+/// How a glob reaches the kernel depends on the mechanism, which is why it is a separate argument
+/// rather than more `denies`: Seatbelt takes each pattern as a regex rule (any glob works, matched
+/// on the canonical path, case-folded on a case-insensitive volume); bwrap can only re-bind a
+/// concrete path read-only, so each pattern contributes the directory or file it names
+/// ([`crate::protect::bind_paths`]) — the shapes it cannot express were refused at startup.
+pub fn wrap_protected(
+    cmd: Command,
+    cwd: &Path,
+    writable: &[PathBuf],
+    denies: &[String],
+    protect: &[String],
+) -> Result<Command> {
     // get_program / get_args / get_envs are queryable; that is what lets us reshape a caller's
     // Command without the caller knowing about sandboxing.
     let prog = cmd.get_program().to_owned();
@@ -153,8 +170,9 @@ pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf], denies: &[String]) -
     let writable: Vec<PathBuf> =
         writable.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
 
+    let (denies, rules) = protect_channels(&cwd_resolved, denies, protect)?;
     let mut wrapped =
-        imp::build(&cwd_resolved, &writable, &deny_set(&cwd_resolved, denies), &prog, &args)?;
+        imp::build(&cwd_resolved, &writable, &deny_set(&cwd_resolved, &denies), &rules, &prog, &args)?;
     for (k, v) in envs {
         match v {
             Some(v) => wrapped.env(k, v),
@@ -167,6 +185,20 @@ pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf], denies: &[String]) -
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     Ok(wrapped)
+}
+
+/// Split `protect` into this platform's two deny channels: extra bind paths (appended to `denies`)
+/// and Seatbelt rules. Exactly one of the two is ever non-empty for a given OS.
+fn protect_channels(cwd: &Path, denies: &[String], protect: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+    let mut all = denies.to_vec();
+    if protect.is_empty() {
+        return Ok((all, Vec::new()));
+    }
+    if cfg!(target_os = "macos") {
+        return Ok((all, crate::protect::seatbelt_rules(cwd, protect)?));
+    }
+    all.extend(crate::protect::bind_paths(cwd, protect));
+    Ok((all, Vec::new()))
 }
 
 /// Normalise a per-step `readonly:`/`writable:` entry to ONE canonical spelling, or reject it.

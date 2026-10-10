@@ -45,6 +45,7 @@ pub mod loop_;
 pub mod paths;
 pub mod plugin;
 pub mod project;
+pub mod protect;
 pub mod registry;
 pub mod skills;
 pub mod state;

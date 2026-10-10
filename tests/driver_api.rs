@@ -48,6 +48,7 @@ for a in "$@"; do
   esac
 done
 if [ -n "$worker" ]; then
+  if [ -f attack.sh ]; then sh attack.sh; fi
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
   git commit -qm "worker: did work" >/dev/null 2>&1
@@ -393,6 +394,51 @@ fn gate_lands_the_whole_span_and_the_rollback_twin_clears_every_branch() {
     assert_eq!(left.len(), 1, "only the tip survives, for inspection: {left:?}");
     assert!(left[0].ends_with("session-2"), "…and it is the TIP, holding the whole span: {left:?}");
     assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing, "the span is CLOSED — nothing is left open");
+}
+
+/// A PROTECTED-PATH VIOLATION ROLLS THE WHOLE SPAN BACK. `write_deny` binds on the driver path
+/// exactly as on YAML's, under `Isolation::None`: the tampering session's change is put back the
+/// moment its worker exits, and the NEXT gate discards the span — the honest session in it too,
+/// because it is one span — whatever the judges and the regression policy say.
+#[test]
+fn a_protected_path_violation_rolls_the_whole_span_back() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("oracles")).unwrap();
+    std::fs::write(dir.join("oracles/x.json"), "orig").unwrap();
+    // committed, as in a real project: this fake agent `git add -A`s, so an ignore file agg
+    // created would ride the span and vanish with its rollback.
+    std::fs::write(dir.join(".gitignore"), "agg/state/\nagg/private/\n").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-qm", "oracle"]);
+
+    let agg = Agg::open(dir).unwrap().on_regression(OnRegression::Annotate);
+    let guarded = Step::template().model("fake").prompt("do a chunk").write_deny(["oracles/"]);
+    agg.step(&guarded.create("honest")).unwrap();
+    // the fake agent runs `attack.sh` if it finds one — the next session tampers.
+    std::fs::write(dir.join("attack.sh"), "echo evil > oracles/x.json\n").unwrap();
+    agg.step(&guarded.create("tamper")).unwrap();
+    assert_eq!(std::fs::read_to_string(dir.join("oracles/x.json")).unwrap(), "orig", "restored at once");
+
+    assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack, "even under `Annotate`");
+    assert_eq!(work_landed_on_main(dir), 0, "the whole span is discarded");
+    let rows = agg::protect::read(dir);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].step.as_str(), rows[0].paths.as_slice()), ("tamper", ["oracles/x.json".to_string()].as_slice()));
+    // the violation belonged to that span: the next one is gated on its own merits.
+    std::fs::remove_file(dir.join("attack.sh")).ok();
+    agg.step(&guarded.create("honest_again")).unwrap();
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+}
+
+/// A pattern the step's tier cannot enforce is refused when the step is RESOLVED — the driver path
+/// has no startup check to catch it earlier, because its steps are built in code.
+#[test]
+fn a_driver_step_with_an_unparseable_write_deny_is_refused() {
+    let tmp = project();
+    let agg = Agg::open(tmp.path()).unwrap();
+    let err = agg.step(&work().write_deny(["../outside"])).unwrap_err();
+    assert!(format!("{err:?}").contains(".."), "{err:?}");
 }
 
 /// `gate()` WITH NOTHING STAGED returns `Nothing` and touches no ref. A driver may call it at the

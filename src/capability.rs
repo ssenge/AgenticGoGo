@@ -102,6 +102,14 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
         if let Some(c) = b.config_conflict(&model, &effort) {
             problems.push(format!("step `{step_name}` (agent `{agent}`): model + effort — {c}"));
         }
+        // Protected paths (`write_deny`): a pattern this tier cannot enforce in the kernel is
+        // REFUSED here rather than silently left to the gate alone; under `none` it is a warning,
+        // because there the gate check is the whole mechanism and says so.
+        match crate::protect::check_step(step_name, step.isolation, &step.write_deny) {
+            Err(p) => problems.extend(p),
+            Ok(Some(w)) => warnings.push(w),
+            Ok(None) => {}
+        }
         // Blast-radius isolation: `sandbox` needs an OS wrapper (bwrap / sandbox-exec) for EVERY
         // agent — §2.4, agg never delegates its jail — so this is no longer gated on
         // `self_sandboxes()`. If no wrapper is available on this host, refuse at startup rather

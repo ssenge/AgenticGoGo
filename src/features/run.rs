@@ -39,6 +39,11 @@ impl Handler for LaunchWorker {
             eprintln!("{w}");
         }
         let denied = step.denied();
+        // ⛔ The protected-path bracket: snapshot IMMEDIATELY before the worker, check IMMEDIATELY
+        // after it — before the interrupt return below, so even a Ctrl-C'd session cannot leave a
+        // changed oracle on disk. Done here rather than as separate handlers because a `Flow::Stop`
+        // out of this handler would skip a handler registered after it.
+        crate::features::protect::before_worker(ctx, &step)?;
         let outcome = worker::run_session(
             &ctx.cfg,
             agent,
@@ -51,8 +56,10 @@ impl Handler for LaunchWorker {
             &ctx.live,
             isolation,
             &denied,
+            &step.write_deny,
             &step.image,
         );
+        crate::features::protect::after_worker(ctx, &step)?;
         ctx.tokens_spent += outcome.output_tokens;
         ctx.cost_spent += outcome.cost_usd;
         ctx.charge(&step.agent, outcome.output_tokens, Some(outcome.cost_usd));
