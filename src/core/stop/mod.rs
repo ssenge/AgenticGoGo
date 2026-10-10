@@ -13,16 +13,19 @@
 //!   cmp    := atom (("=="|"!="|">="|"<="|">"|"<") atom)?
 //!   atom   := NUMBER | ident | "(" expr ")" | "NOT" atom
 //!   ident  := goal-id | goal-id "." ("value"|"max"|"ref") | aggregate | aggregate "(" subset ")"
+//!   subset := "invariants" | group-name
 //!
-//! Aggregates: count_met, total, met_fraction, any_regressed, count_regressed. The `(invariants)`
-//! subset restricts an aggregate to invariant judges. **The aggregates range over the DoD-set**
-//! (`done_if` ∪ `invariants`) — NOT the whole run-set — so `done_if: all_goals` cannot mean "done
-//! when stuck" (§5.3). `weighted_fraction` is DROPPED.
+//! Aggregates: all_goals, count_met, total, met_fraction, any_regressed, count_regressed. **Bare,
+//! they range over the DoD-set** (`done_if` ∪ `invariants`) — NOT the whole run-set — so `done_if:
+//! all_goals` cannot mean "done when stuck" (§5.3). The `(invariants)` subset restricts one to the
+//! invariant judges; a `(<group>)` subset to that group's members (`sequence.groups`,
+//! [`crate::core::groups`]) — "k of n" is `count_met(group) >= k`. `weighted_fraction` is DROPPED.
 //!
 //! A bare judge id is its **`met` bool**, resolved over the WHOLE run-set (so `if stalled` reads
 //! `stalled`). To compare the NUMBER a judge emitted, use the dotted accessor — `coverage.value >=
 //! 80`, never `coverage >= 80` (the latter is a hard error: see [`Val::GoalBool`]).
 
+use crate::core::groups::Groups;
 use crate::core::model::Judge;
 use anyhow::{bail, Context, Result};
 
@@ -66,9 +69,12 @@ pub struct StopContext<'a> {
     /// term of its own: it only keeps `work_time` from counting a provider's quota window as effort.
     pub rate_limit_wait_secs: f64,
     /// the gate's ratchet config and history (backs `rollbacks`, `consecutive_rollbacks`,
-    /// `oscillating`, `ratchet_regressed`, `<judge>.ref`). `None` = a context with no gate behind
+    /// `no_improvements`, `consecutive_no_improvements`, `oscillating`, `ratchet_regressed`,
+    /// `<judge>.ref`). `None` = a context with no gate behind
     /// it, which reads as a run that has gated nothing — and `.ref` on it is an error.
     pub gate: Option<&'a crate::core::ratchet::Gate>,
+    /// the configured judge groups (`sequence.groups`) — what a `(<group>)` subset resolves against.
+    pub groups: &'a Groups,
 }
 
 impl<'a> StopContext<'a> {
@@ -87,36 +93,38 @@ impl<'a> StopContext<'a> {
             human_wait_secs: 0.0,
             rate_limit_wait_secs: 0.0,
             gate: None,
+            groups: Groups::none(),
         }
     }
 }
 
+/// What an aggregate ranges over: the DoD-set (bare), the invariants, or one group's members.
+#[derive(Clone, Copy)]
+pub(super) enum Subset<'s> {
+    Dod,
+    Invariants,
+    Group(&'s [String]),
+}
+
 impl<'a> StopContext<'a> {
-    /// The DoD-set filter the aggregates range over (§5.3): `in_dod` normally, `invariant` when the
-    /// `(invariants)` subset is named. Invariants are a subset of the DoD-set, so both are correct.
-    fn in_scope(g: &Judge, invariants_only: bool) -> bool {
-        if invariants_only {
-            g.invariant
-        } else {
-            g.in_dod
-        }
+    /// The judges an aggregate ranges over (§5.3): the DoD-set bare, the invariants under
+    /// `(invariants)` (a subset of the DoD-set), or a group's members — looked up over the WHOLE
+    /// run-set, since a group named only in `abort_if` puts its members in the run-set alone.
+    fn scope<'s>(&'s self, subset: Subset<'s>) -> impl Iterator<Item = &'s Judge> + 's {
+        self.judges.iter().filter(move |g| match subset {
+            Subset::Dod => g.in_dod,
+            Subset::Invariants => g.invariant,
+            Subset::Group(members) => members.iter().any(|m| m == &g.name),
+        })
     }
-    fn count_met(&self, invariants_only: bool) -> f64 {
-        self.judges
-            .iter()
-            .filter(|g| Self::in_scope(g, invariants_only))
-            .filter(|g| g.met())
-            .count() as f64
+    fn count_met(&self, subset: Subset) -> f64 {
+        self.scope(subset).filter(|g| g.met()).count() as f64
     }
-    fn count_regressed(&self, invariants_only: bool) -> f64 {
-        self.judges
-            .iter()
-            .filter(|g| Self::in_scope(g, invariants_only))
-            .filter(|g| g.regressed())
-            .count() as f64
+    fn count_regressed(&self, subset: Subset) -> f64 {
+        self.scope(subset).filter(|g| g.regressed()).count() as f64
     }
-    fn total(&self, invariants_only: bool) -> f64 {
-        self.judges.iter().filter(|g| Self::in_scope(g, invariants_only)).count() as f64
+    fn total(&self, subset: Subset) -> f64 {
+        self.scope(subset).count() as f64
     }
     /// Bare-name lookup ranges over the WHOLE run-set (an `if stalled` condition must read `stalled`,
     /// which is not in the DoD-set).
@@ -131,7 +139,7 @@ impl<'a> StopContext<'a> {
 /// Evaluate a stop expression against the current goals. Returns the bool result.
 pub fn evaluate(expr: &str, ctx: &StopContext) -> Result<bool> {
     let tokens = tokenize(expr)?;
-    let mut p = Parser { tokens: &tokens, pos: 0, ctx };
+    let mut p = Parser { tokens: &tokens, pos: 0, ctx, last_count: None };
     let v = p.parse_expr()?;
     if p.pos != p.tokens.len() {
         bail!("trailing tokens in stop condition: `{expr}`");
@@ -145,19 +153,37 @@ pub fn evaluate(expr: &str, ctx: &StopContext) -> Result<bool> {
 /// silently-always-false `1.0 >= 80.0` — is caught. The type error lives in [`Parser::parse_cmp`],
 /// so it fires here at STARTUP rather than 3 sessions into a run.
 pub fn validate(expr: &str, judges: &[Judge]) -> Result<()> {
-    validate_with(expr, judges, None)
+    validate_with(expr, judges, None, Groups::none())
 }
 
-/// [`validate`] against a gate, so `<judge>.ref` on a ratcheted judge is accepted and on any other
-/// judge is refused — at startup, not three sessions in.
-pub fn validate_with(expr: &str, judges: &[Judge], gate: Option<&crate::core::ratchet::Gate>) -> Result<()> {
-    let ctx = StopContext { gate, ..StopContext::from_judges(judges) };
+/// [`validate`] against a gate and the configured groups, so `<judge>.ref` on a ratcheted judge is
+/// accepted and on any other judge is refused, and `count_met(<group>)` resolves (or names the
+/// groups that exist) — at startup, not three sessions in.
+pub fn validate_with(
+    expr: &str,
+    judges: &[Judge],
+    gate: Option<&crate::core::ratchet::Gate>,
+    groups: &Groups,
+) -> Result<()> {
+    let ctx = StopContext { gate, groups, ..StopContext::from_judges(judges) };
     evaluate(expr, &ctx).map(|_| ()).with_context(|| format!("invalid condition `{expr}`"))
 }
 
+/// The aggregates — the identifiers that may take a `(subset)` argument.
+const AGGREGATES: &[&str] = &["all_goals", "count_met", "count_regressed", "total", "met_fraction", "any_regressed"];
+
+/// Is the identifier at `i` a SUBSET argument — `x` in `count_met(x)`? Then it names a group (or the
+/// invariants), never a judge.
+fn is_subset_arg(tokens: &[Tok], i: usize) -> bool {
+    i >= 2
+        && matches!(tokens[i - 1], Tok::LParen)
+        && matches!(&tokens[i - 2], Tok::Ident(a) if AGGREGATES.contains(&a.as_str()))
+}
+
 /// The judge NAMES an expression references — everything that is neither an aggregate, a run-level
-/// term, nor the `invariants` subset keyword. Used to compute the run-set / DoD-set (§5.3): resolve
-/// each returned name against the judge library. Dotted accessors (`coverage.value`) yield `coverage`.
+/// term, nor a subset argument (`invariants`, a group). Used to compute the run-set / DoD-set (§5.3):
+/// resolve each returned name against the judge library. Dotted accessors (`coverage.value`) yield
+/// `coverage`. A group's members are NOT returned here — see [`subsets`].
 pub fn judge_names(expr: &str) -> Result<Vec<String>> {
     const RESERVED: &[&str] = &[
         "all_goals", "count_met", "count_regressed", "total", "met_fraction", "any_regressed",
@@ -165,16 +191,33 @@ pub fn judge_names(expr: &str) -> Result<Vec<String>> {
         "over_budget", "cost_spent", "cost_limit",
         "over_cost", "iterations", "max_iterations", "over_iterations", "any_judge_error",
         "invariants", "rollbacks", "consecutive_rollbacks", "oscillating", "ratchet_regressed",
+        "no_improvements", "consecutive_no_improvements",
     ];
+    let tokens = tokenize(expr)?;
     let mut out: Vec<String> = Vec::new();
-    for t in tokenize(expr)? {
+    for (i, t) in tokens.iter().enumerate() {
         if let Tok::Ident(name) = t {
-            let base = name.split('.').next().unwrap_or(&name);
-            if RESERVED.contains(&base) {
+            let base = name.split('.').next().unwrap_or(name);
+            if RESERVED.contains(&base) || is_subset_arg(&tokens, i) {
                 continue;
             }
             if !out.iter().any(|n| n == base) {
                 out.push(base.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The GROUP names an expression uses as an aggregate subset (`quality` in `count_met(quality)`),
+/// in order, once each. `invariants` is not a group and is never returned.
+pub fn subsets(expr: &str) -> Result<Vec<String>> {
+    let tokens = tokenize(expr)?;
+    let mut out: Vec<String> = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if let Tok::Ident(name) = t {
+            if is_subset_arg(&tokens, i) && name != "invariants" && !out.contains(name) {
+                out.push(name.clone());
             }
         }
     }

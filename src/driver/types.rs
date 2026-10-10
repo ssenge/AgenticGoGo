@@ -184,6 +184,10 @@ pub enum GateOutcome {
     Kept,
     /// the span was discarded by the [`OnRegression`] policy; base is unchanged.
     RolledBack,
+    /// the span was discarded by `merge_requires_improvement`: nothing regressed, but nothing
+    /// improved either. Base is unchanged, and it is NOT a rollback — it never counts for
+    /// `rollbacks` / `consecutive_rollbacks`.
+    NoImprovement,
     /// there was nothing to gate — no open span, or a span with no commits. No ref was touched.
     Nothing,
     /// git could not stage the span. **Distinct from [`GateOutcome::RolledBack`]**: a merge conflict

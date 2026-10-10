@@ -31,10 +31,12 @@
 //! knob — but on this path they are populated in Rust and only in Rust.
 
 mod facade;
+mod group;
 mod step;
 mod types;
 
 pub use facade::{Agg, PosFrame};
+pub use group::{Group, GroupVerdict};
 pub use step::Step;
 pub use types::{
     run, Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, StepOutcome,

@@ -76,6 +76,9 @@ sequence:
   ratchet:                         # NUMERIC no-regression: a value may not get worse than at the
     cc_p95:   { direction: "down", tolerance: 0.5 }              # last kept gate (± tolerance)
     mutation: { direction: "up", tolerance: 1.0, baseline: 71.0 } # seeded reference for session 1
+  groups:                          # named judge lists the aggregates range over: count_met(static_quality) >= 2
+    static_quality: ["sonar", "codescene", "lizard"]
+  merge_requires_improvement: false  # true ⇒ merge a session only if a goal or a ratchet IMPROVED
   done_if: "correct_result AND all_tests_pass AND coverage.value >= 80"
   abort_if: "over_budget OR work_time >= 28800 OR any_regressed(invariants) OR any_judge_error OR consecutive_rollbacks >= 3 OR oscillating"
   notify_if: "stuck.value >= 85"   # NON-TERMINAL twin of abort_if: ping a human, KEEP RUNNING.
@@ -406,6 +409,8 @@ could never become true) but never the **DoD-set** — it is machinery, not a go
 | `gate_regressions` | `true` | roll a session back if a previously-met judge now fails. The rename of the old `rollback_on_regression`. |
 | `invariants` | `[]` | judge names that must STAY met. The gate protects them; `any_regressed(invariants)` gives up on them. |
 | `ratchet: { <judge>: { direction, tolerance, tolerance_pct, baseline } }` | none | the **numeric** no-regression rule — see [The ratchet](#the-ratchet--numeric-no-regression). `direction` (`up` = higher is better, `down` = lower is better) is required; `tolerance` (absolute, default `0`), `tolerance_pct` (% of the reference; the larger allowance wins) and `baseline` (the seeded reference) are optional. A ratcheted judge joins the run-set, never the DoD-set. |
+| `groups: { <name>: [<judge>, …] }` | none | named judge lists — see [Judge groups](#judge-groups--k-of-n). Every aggregate takes a group as a subset: `count_met(quality) >= 2` is "two of three". Every member joins the run-set; a group named in `done_if` puts its members in the DoD-set. Refused at startup: an unknown member, an empty group, a member listed twice, a name the grammar reserves. |
+| `merge_requires_improvement` | `false` | merge a judged session only if something **improved** — see [Merge only on improvement](#merge-only-on-improvement--merge_requires_improvement). A session that improved nothing is not merged and is recorded `no_improvement`: not a rollback, but it counts for `stalled`. |
 | `oscillation_window` | `4` | how many earlier judged sessions [`oscillating`](#rollbacks-and-oscillation--the-gates-own-detectors) looks back over for an A→B→A repeat. Must be `>= 2`. |
 | `done_if` | `all_goals` | the **Definition of Done** — success stop (exit 0). |
 | `abort_if` | none | the giving-up guard (exit 3). |
@@ -424,10 +429,10 @@ comparisons `== != >= <= > <`, and parentheses. Precedence: `or > and > cmp > at
 |---|---|
 | **judge (bare name)** | any judge name → its `met` **bool**. |
 | **judge accessor** | `name.value`, `name.max` → the number the judge emitted. (`.target` is NOT an accessor — it is presentational.) `name.ref` → a **ratcheted** judge's current reference ([the ratchet](#the-ratchet--numeric-no-regression)); on any other judge it is a startup error. |
-| **aggregates** | `all_goals`, `count_met`, `count_regressed`, `total`, `met_fraction`, `any_regressed` |
+| **aggregates** | `all_goals`, `count_met`, `count_regressed`, `total`, `met_fraction`, `any_regressed` — bare, over the DoD-set; with a subset argument, over that subset. |
 | **run scalars/ceilings** | `tokens_spent`, `budget_total`, `over_budget`, `cost_spent`, `cost_limit`, `over_cost`, `iterations`, `max_iterations`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_judge_error` |
-| **gate history** | `rollbacks`, `consecutive_rollbacks` (numbers), `oscillating`, `ratchet_regressed` (bools) — see [the gate's own detectors](#rollbacks-and-oscillation--the-gates-own-detectors). Process-internal, so they may sit in `abort_if`. |
-| **invariant subset** | `(invariants)` — an argument on exactly `count_met`, `count_regressed`, `total`, `met_fraction`, `any_regressed`, e.g. `any_regressed(invariants)`. |
+| **gate history** | `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements` (numbers), `oscillating`, `ratchet_regressed` (bools) — see [the gate's own detectors](#rollbacks-and-oscillation--the-gates-own-detectors). Process-internal, so they may sit in `abort_if`. |
+| **subsets** | `(invariants)` or `(<group>)` — an argument on exactly the six aggregates, e.g. `any_regressed(invariants)`, `count_met(quality) >= 2`, `all_goals(quality)`. A [group](#judge-groups--k-of-n) is a name from `sequence.groups`; an unknown one is a startup error listing the defined groups. |
 
 ### Numeric thresholds — use the accessor
 
@@ -443,12 +448,12 @@ it at startup** and tells you to use `coverage.value >= 80`. A threshold has one
 ### The two quantifiers — the DoD-set vs the run-set
 
 - **The RUN-SET** = every judge named in `done_if` ∪ `abort_if` ∪ `notify_if` ∪ `invariants:` ∪ every
-  entry's `until:` ∪ every `ratchet:` key. These are the judges that actually execute after each step. `any_judge_error` ranges
+  entry's `until:` ∪ every `ratchet:` key ∪ every member of every `groups:` entry. These are the judges that actually execute after each step. `any_judge_error` ranges
   over this set. (This is why a `stalled` judge used only in an `until:` — or a `stuck`
   detector used only in `notify_if` — runs, without being listed anywhere else.)
-- **The DoD-set** = judges named in `done_if` ∪ `invariants:` only. The aggregates (`all_goals`,
-  `count_met`, `total`, `met_fraction`, `any_regressed`) range over **this** set — and it is what the
-  scoreboard's `N/M` counts.
+- **The DoD-set** = judges named in `done_if` (bare, or as members of a group `done_if` uses) ∪
+  `invariants:` only. The bare aggregates (`all_goals`, `count_met`, `total`, `met_fraction`,
+  `any_regressed`) range over **this** set — and it is what the scoreboard's `N/M` counts.
 
 They differ deliberately: if `all_goals` ranged over the run-set, `done_if: all_goals` could not be
 true until `stalled` was met — i.e. the loop would "succeed" by getting stuck. **Never put a judge
@@ -517,6 +522,77 @@ sequence:
 The ratchet's state lives in agg's memory and is persisted to `agg/private/gate.json` (and, on the Rust
 driver path, on every `gate` record of the call ledger, which is what a `--resume` restores it from).
 It is never read back from `verdicts.jsonl`, so the worker cannot move its own reference.
+
+## Judge groups — k of n
+
+Several judges can measure one thing — three static-analysis tools, two security scanners — and they
+disagree. A **group** names them, so a condition can count over just them:
+
+```yaml
+sequence:
+  groups:
+    static_quality: ["sonar", "codescene", "lizard"]
+    security:       ["semgrep", "trivy"]
+  done_if: "tests_pass AND count_met(static_quality) >= 2 AND all_goals(security)"
+  abort_if: "any_regressed(security) OR over_budget"
+```
+
+- **Every aggregate takes a group**, the way it takes `(invariants)`: `count_met(g)`, `total(g)`,
+  `met_fraction(g)`, `all_goals(g)`, `any_regressed(g)`, `count_regressed(g)`. All of them is
+  `all_goals(g)`; any of them is `count_met(g) >= 1`; *k of n* is `count_met(g) >= k`. **The group carries
+  no threshold** — a threshold has one owner, the condition.
+- **A group is its members.** Every member joins the run-set, named by a condition or not. A group named
+  in `done_if` puts its members in the DoD-set (so they count toward `all_goals`, the `N/M` scoreboard and
+  the gate); one named only in `abort_if`, `notify_if` or an `until:` leaves them run-set only.
+- **The group itself is not a judge.** Its name appears only as a subset argument; a bare `quality` is
+  still a judge name. A member may sit in several groups.
+- **Refused at startup**, each at its config path: an unknown member (listing the judges that exist), an
+  empty group, a member listed twice, a group name that is not an identifier or is reserved by the
+  grammar (`invariants`, an aggregate, `and`/`or`/`not`), an unknown group in a condition (listing the
+  defined groups), and a literal threshold the group can never reach — `count_met(g) >= 3` on a
+  two-member group (k > n).
+
+**At the gate, a group is judged net.** The [regression gate](#session-isolation-mandatory-and-the-gate)
+holds each DoD-set judge to "met before ⇒ met now". A judge that is in the DoD-set **only** through a
+`done_if` group is judged with its group instead: the group regressed when more of its members went
+met→unmet than unmet→met since the last landed state. So the quirky tool that flips while another
+catches up is a swap, not a regression — which is what makes *k of n* worth having — while a group that
+lost ground net is rolled back like any other regression. A member that is **also** named on its own
+(bare in `done_if`, or in `invariants:`) stays under the per-judge rule as well. `any_regressed(g)` in a
+condition is the per-member view (`met` once this run, unmet now), independent of the gate.
+
+## Merge only on improvement — `merge_requires_improvement`
+
+By default the gate merges every session that did not regress. A session that changes nothing the
+judges care about (a reformat, a rename) still merges, and its diff costs review time without progress.
+With `merge_requires_improvement: true` a session merges only if **nothing regressed and something
+improved**:
+
+```yaml
+sequence:
+  done_if: "tests_pass AND count_met(static_quality) >= 2"
+  ratchet:
+    cc_p95: { direction: "down", tolerance: 0.5 }
+  merge_requires_improvement: true
+  abort_if: "consecutive_no_improvements >= 4 OR consecutive_rollbacks >= 3"
+```
+
+- **Improved** means: a DoD-set judge was unmet at the last landed state and is met now; a `done_if`
+  group gained ground net (more members unmet→met than met→unmet); or a ratcheted value moved the
+  **good** way by more than its tolerance (`max(tolerance, |ref| × tolerance_pct / 100)`) — noise inside
+  the tolerance is no more an improvement than it is a regression. An errored verdict improves nothing; a
+  ratcheted judge with no reference yet cannot improve. A numeric judge that is not ratcheted counts only
+  when its `met` flips — ratchet it to make its number count.
+- **A rejected session** is not merged (its branch is kept for inspection, like a rollback's) and its
+  rows in `verdicts.jsonl` say `"outcome": "no_improvement"`. It is **not a regression**: it never counts
+  for `rollbacks` / `consecutive_rollbacks`, and it neither extends nor breaks that streak. It **does**
+  count for [`stalled`](#stalled--the-shipped-stall-detector), as a step in which nothing moved. The gate
+  counts it in its own terms, `no_improvements` and `consecutive_no_improvements` (since the last kept
+  gate) — process-internal like `rollbacks`, so safe in `abort_if`.
+- **Refused at startup** when there is no DoD-set judge and no ratchet: nothing could ever improve, so
+  nothing would ever merge.
+- Where it sits among the other rules that can stop a merge: see the
+  [gate precedence](#session-isolation-mandatory-and-the-gate).
 
 ## The clock — three terms, all in seconds
 
@@ -965,6 +1041,8 @@ and breaks B, then fixes B and breaks A. agg answers both with **built-in terms*
 |---|---|---|
 | `rollbacks` | number | sessions the regression policy rolled back this run (boolean or ratchet regression). |
 | `consecutive_rollbacks` | number | rollbacks since the last kept gate. |
+| `no_improvements` | number | sessions [`merge_requires_improvement`](#merge-only-on-improvement--merge_requires_improvement) refused this run — never counted as rollbacks. |
+| `consecutive_no_improvements` | number | no_improvement sessions since the last kept gate; a rollback neither extends nor breaks it. |
 | `oscillating` | bool | the unmet set after a judged session repeats one seen within the last `oscillation_window` (default 4) judged sessions, with a **different** set in between: A→B→A. |
 | `ratchet_regressed` | bool | the most recent judged gate recorded a [ratchet](#the-ratchet--numeric-no-regression) regression. |
 
@@ -984,14 +1062,15 @@ The details that decide whether they fire when you expect:
 
 - **Which sessions count.** `rollbacks` counts sessions whose staged merge the regression policy
   discarded. A session with no changes, a `red_file` veto or a merge conflict is not a rollback; it
-  neither extends nor breaks the `consecutive_rollbacks` streak. A kept gate resets the streak.
+  neither extends nor breaks the `consecutive_rollbacks` streak; nor does a `no_improvement` session,
+  which counts for `no_improvements` instead. A kept gate resets both streaks.
   `skip_judges` steps are not gated, so they count for neither. With `gate_regressions: false` nothing is
   ever rolled back, so both stay `0`.
 - **The signature** `oscillating` compares is the sorted set of **DoD-set** judges that were unmet (or
   errored) after the session, plus every judge that regressed its ratchet. Run-set-only detectors
   (`stalled`, a `notify_if` judge) are not part of it — a detector flipping is not a state of the work.
-  Every judged session contributes one, **merged or rolled back** (a rolled-back session still showed
-  where the worker went).
+  Every judged session contributes one, **merged, rolled back or no_improvement** (a discarded session
+  still showed where the worker went).
 - **Short history.** Fewer than three judged sessions can never oscillate. An all-green signature never
   counts — returning to a good state is not oscillation — and A→A→A is a stall, not an oscillation.
   A monotonically improving run never trips it.
@@ -1151,7 +1230,13 @@ judge changed its `met` and no numeric judge changed its `value`. The details th
 fires when you expect:
 
 - **Only `merged` rows count.** A rolled-back step's churn was undone, so it must read as neither
-  progress nor stall.
+  progress nor stall. **Except `no_improvement` rows** ([`merge_requires_improvement`](#merge-only-on-improvement--merge_requires_improvement)):
+  the gate itself found that nothing improved, so such a step joins the window carrying the state of
+  the step before it — a step in which nothing moved.
+- **Like every discarded session, a `no_improvement` session's own verdicts — `stalled`'s included —
+  are reset to base truth after the gate**, so within an unbroken no_improvement streak `stalled` cannot
+  turn met; it fires on the next kept session. To bound a streak itself, use the gate's term:
+  `abort_if: "consecutive_no_improvements >= 3"`.
 - **`stalled` ignores its own rows** — it cannot stall on itself.
 - A judge with **fewer than two rows** in the window is ignored; it cannot have changed.
 - **Fewer than K qualifying merged steps ⇒ not met.** It refuses to call a stall on thin history, so it
@@ -1251,13 +1336,22 @@ Every session **always** branches off `base`, does its work, and is gated — th
 The gate rule: **auto-accept a session's work, UNLESS a judge that was previously met now fails, or a
 [ratcheted](#the-ratchet--numeric-no-regression) value got worse beyond its tolerance — then roll that
 session back** (`gate_regressions: true`). Four things can suppress a merge, in this
-precedence:
+precedence (plus a fifth, opt-in):
 
 0. **a protected-path violation** — the session changed a [`write_deny`](#protected-paths--write_deny-readonly-writable)
-   path ⇒ roll back, regardless of `gate_regressions` and of every verdict.
-1. **`red_file`** (`.agg_red` at the project root) — the worker's own veto. Present ⇒ do not merge.
-2. **`skip_judges`** — nothing was judged, so nothing merges; the work stages.
-3. **the regression gate** — a previously-met judge now fails, or a ratchet regressed ⇒ roll back.
+   path ⇒ roll back, regardless of `gate_regressions`, of `merge_requires_improvement` and of every
+   verdict. It counts as a rollback.
+1. **`red_file`** (`.agg_red` at the project root) — the worker's own veto. Present ⇒ do not merge. Not a
+   rollback and not a `no_improvement`: nothing was staged to decide about.
+2. **`skip_judges`** — nothing was judged, so nothing merges; the work stages. The next judged step's
+   gate decides the whole span, and that is where 3 and 4 look — a skip step's work can improve (or
+   regress) only as part of its span.
+3. **the regression gate** — a previously-met judge now fails (a `done_if` [group](#judge-groups--k-of-n):
+   lost ground net), or a ratchet regressed ⇒ roll back (`gate_regressions: true`). With
+   `gate_regressions: false` the regression is kept, and rule 4 still applies.
+4. **`merge_requires_improvement: true`** — nothing improved ⇒ do not merge, record `no_improvement`.
+   Applied only to a session no earlier rule stopped: a session that regressed AND improved nothing is a
+   **rollback** (rule 3 wins), so it counts for `rollbacks`, never for `no_improvements`.
 
 `session_isolation` surviving keys: `branch_prefix` (default `agg`), `base_branch` (default: the
 current branch), `red_file` (default `.agg_red`).

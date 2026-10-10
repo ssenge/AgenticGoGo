@@ -58,36 +58,47 @@ impl Handler for GateKeepRollback {
         let pre_cycle_goals = std::mem::take(&mut ctx.scratch.get::<AGGScratch>().pre_cycle_goals);
 
         // the regression gate: a DoD-set judge MET before (durable, §5.7) that now fails. Scope to
-        // the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs `in_scope` →
+        // the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs `scope` →
         // `g.in_dod`). A run-set-only control judge like `stalled` is DESIGNED to flip met→unmet —
         // that flip is the very signal that fired `reconsider` — so counting its flip as a
         // regression would roll back the work that escaped the stall (and, because rolled-back rows
         // never land, livelock the loop). §5.7 protects the DoD-set; a judge named only in an `if`
-        // condition is not in it.
+        // condition is not in it. A judge in the DoD-set only through a `done_if` GROUP is judged
+        // with its group, net (`core::groups`): a swap inside a k-of-n group is not a regression.
         //
         // ⚠ This is exactly the half the DRIVER path spells differently (BUILD.md §3.5 item 5:
         // every judge asked since the last gate, no DoD scope), which is why it lives HERE and not
         // in the shared body below.
         let is_staged = matches!(staged, Some((_, StagedSession::Staged)));
-        let regressed = is_staged && {
+        let progress = if is_staged {
             let landed = crate::core::verdicts::landed_met(&ctx.dir);
-            res.fresh_verdicts.iter().any(|(id, v)| {
-                ctx.eng.judges.iter().any(|g| g.in_dod && &g.name == id)
-                    && v.error.is_none()
-                    && !v.met
-                    && landed.get(id).copied().unwrap_or(false)
-            })
+            let eng = &ctx.eng;
+            crate::core::groups::assess(
+                &res.fresh_verdicts,
+                &landed,
+                |n| eng.judges.iter().any(|g| g.in_dod && g.name == n) && !eng.groups.group_only(n),
+                &eng.groups.gated_members(),
+            )
+        } else {
+            crate::core::groups::Progress::default()
         };
         // the numeric half: a ratcheted value that moved the wrong way beyond its tolerance. Only a
         // staged merge is held to it — a no-change session graded base itself.
         let ratchet = if is_staged { ctx.eng.gate.check(&res.fresh_verdicts) } else { Vec::new() };
+        let improved = progress.improved || !ctx.eng.gate.improved(&res.fresh_verdicts).is_empty();
         // the DoD-set, scoped exactly as the boolean rule above: a detector flipping is not a state.
         let signature = crate::core::ratchet::signature(
             &res.fresh_verdicts,
             |n| ctx.eng.judges.iter().any(|g| g.in_dod && g.name == n),
             &ratchet,
         );
-        let judged = Judged { fresh: &res.fresh_verdicts, regressed: regressed || !ratchet.is_empty(), ratchet, signature };
+        let judged = Judged {
+            fresh: &res.fresh_verdicts,
+            regressed: progress.regressed || !ratchet.is_empty(),
+            improved,
+            ratchet,
+            signature,
+        };
 
         let gated = keep_or_rollback(ctx, staged.as_ref(), judged, &pre_cycle_goals)?;
         let rs = ctx.run_state();
@@ -112,7 +123,8 @@ impl Handler for GateKeepRollback {
             };
         }
         ctx.scratch.get::<AGGScratch>().res = Some(res);
-        ctx.scratch.get::<AGGScratch>().rolled_back = gated == Gated::RolledBack;
+        ctx.scratch.get::<AGGScratch>().rolled_back = matches!(gated, Gated::RolledBack | Gated::NoImprovement);
+        ctx.scratch.get::<AGGScratch>().no_improvement = gated == Gated::NoImprovement;
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -128,6 +140,9 @@ pub(crate) struct Judged<'a> {
     pub fresh: &'a [(String, Verdict)],
     /// the span regressed — the boolean rule OR the ratchet.
     pub regressed: bool,
+    /// the span improved something — a goal went unmet→met (a group: net), or a ratcheted value
+    /// moved the good way beyond tolerance. Read only under `merge_requires_improvement`.
+    pub improved: bool,
     /// the ratchet regressions among `fresh` (marked on their ledger rows).
     pub ratchet: Vec<RatchetRegression>,
     /// this gate's judge-state signature, for `oscillating`.
@@ -141,6 +156,9 @@ pub(crate) enum Gated {
     Merged,
     /// the staged merge was ABORTED by the regression policy — a decision, and base is unchanged.
     RolledBack,
+    /// the staged merge was ABORTED by `merge_requires_improvement`: nothing regressed, nothing
+    /// improved. Base is unchanged; it is not a rollback.
+    NoImprovement,
     /// there was no staged merge to decide about (vetoed, no commits, a conflict, no branch).
     NotStaged,
 }
@@ -157,14 +175,15 @@ pub(crate) enum Gated {
 /// YAML path, every judge asked since the last gate on the driver path) is computed by the caller
 /// and passed in as `regressed`, and the YAML path's `scratch.res` rewrite happens on the way out.
 /// The `keep` DECISION is shared, because `ctx.gate_regressions` carries both paths' policy —
-/// `sequence.gate_regressions` from YAML, `OnRegression::Rollback` from the builder.
+/// `sequence.gate_regressions` from YAML, `OnRegression::Rollback` from the builder — and
+/// `cfg.sequence.merge_requires_improvement` the improvement rule, set by either.
 pub(crate) fn keep_or_rollback(
     ctx: &mut LoopState,
     staged: Option<&(String, StagedSession)>,
     judged: Judged<'_>,
     pre_goals: &[GoalRuntime],
 ) -> Result<Gated> {
-    let Judged { fresh, regressed, ratchet, signature } = judged;
+    let Judged { fresh, regressed, improved, ratchet, signature } = judged;
     let step_name = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
     // ⛔ A protected-path violation anywhere in the span vetoes the merge — before the regression
     // policy, and regardless of it: `gate_regressions: false` relaxes what a REGRESSION means, it
@@ -177,7 +196,17 @@ pub(crate) fn keep_or_rollback(
     // gate's "was met" reads this file, so a swallowed write would silently un-arm the next gate.
     let out = match staged {
         Some((br, StagedSession::Staged)) => {
-            let keep = violated.is_empty() && if ctx.gate_regressions { !regressed } else { true };
+            // THE PRECEDENCE: a protected-path violation, then a regression under
+            // `gate_regressions`, then `merge_requires_improvement`. A session that both regressed
+            // and improved nothing is a ROLLBACK (it counts for `rollbacks`), never a no_improvement.
+            let fate = if !violated.is_empty() || (ctx.gate_regressions && regressed) {
+                Gated::RolledBack
+            } else if ctx.cfg.sequence.merge_requires_improvement && !improved {
+                Gated::NoImprovement
+            } else {
+                Gated::Merged
+            };
+            let keep = fate == Gated::Merged;
             if !violated.is_empty() {
                 eprintln!(
                     "  [gate] ROLLED BACK — {}: {}",
@@ -185,24 +214,36 @@ pub(crate) fn keep_or_rollback(
                     violated.join(", ")
                 );
             }
+            if fate == Gated::NoImprovement {
+                eprintln!(
+                    "  [gate] NOT MERGED — no_improvement: no DoD-set judge and no ratchet improved \
+                     (sequence.merge_requires_improvement)"
+                );
+            }
             crate::git::finalize_session(&ctx.dir, br, ctx.session, keep);
-            let tag = if keep { Outcome::Merged } else { Outcome::RolledBack };
+            let tag = match fate {
+                Gated::Merged => Outcome::Merged,
+                Gated::NoImprovement => Outcome::NoImprovement,
+                _ => Outcome::RolledBack,
+            };
             crate::core::verdicts::append_full(&ctx.dir, Some(ctx.session), &step_name, fresh, tag, &ratchet, &kept)?;
             for line in crate::core::ratchet::describe(&ratchet) {
-                let what = if keep { "kept (gate_regressions: false)" } else { "rolling back" };
+                let what = match fate {
+                    Gated::Merged => "kept (gate_regressions: false)",
+                    Gated::NoImprovement => "not merged (no improvement)",
+                    _ => "rolling back",
+                };
                 eprintln!("  ⚠ {line} — beyond tolerance, {what}");
             }
             crate::report::record_gate(ctx, keep, Some(br));
             // the whole span merged with this branch (it descends from every other one), or was
             // discarded with it. Either way the span is closed.
             clear_span(ctx, Some(br));
-            if keep {
-                Gated::Merged
-            } else {
+            if !keep {
                 ctx.eng.restore_goal_state(pre_goals);
                 eprint!("{}", indent(&ctx.eng.scoreboard()));
-                Gated::RolledBack
             }
+            fate
         }
         // ⚠ `NoChanges` IS NOT A DISCARD. Nothing was committed because nothing GIT-VISIBLE changed,
         // so base is byte-for-byte the tree the judges just graded and their verdicts describe it
@@ -247,6 +288,7 @@ pub(crate) fn keep_or_rollback(
     let decision = match out {
         Gated::Merged => GateDecision::Kept,
         Gated::RolledBack => GateDecision::RolledBack,
+        Gated::NoImprovement => GateDecision::NoImprovement,
         Gated::NotStaged => GateDecision::Nothing,
     };
     ctx.eng.gate.record(decision, fresh, &ratchet, signature);

@@ -23,7 +23,12 @@ impl Handler for RefineFold {
             outcome.duration_secs, ended.saturating_sub(outcome.duration_secs), ended,
             &scoreboard, &deltas,
         );
-        if rolled_back {
+        if ctx.scratch.get::<AGGScratch>().no_improvement {
+            mech = format!(
+                "session NOT MERGED — no_improvement: nothing regressed, but no goal and no ratchet \
+                 improved either; the work below is NOT on the base branch.\n{mech}"
+            );
+        } else if rolled_back {
             mech = format!(
                 "session ROLLED BACK — a goal regressed on the staged merge; the work below is \
                  NOT on the base branch (kept on the session branch for inspection).\n{mech}"

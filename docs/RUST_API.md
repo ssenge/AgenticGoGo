@@ -81,11 +81,12 @@ fn main() -> Result<(), agg::driver::Fatal> {
 | call | what it does |
 |---|---|
 | `Agg::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
-| `.limits()` `.on_regression()` `.ratchet()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
+| `.limits()` `.on_regression()` `.ratchet()` `.merge_requires_improvement()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
 | `agg.step(&s)` | run one session. Commits on a session branch — **stages**, never merges |
 | `agg.judge(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
+| `agg.group(&g)` | every member of a `Group`'s verdict, through `judge()`'s memoized cache — count over it: `.at_least(2)`, `.all()`, `.any()` |
 | `agg.gate()` | close the span: merge everything staged since the last gate, or discard it per policy |
-| `agg.gate_state()` | the gate's own history: ratchet references, `rollbacks`, `consecutive_rollbacks`, `oscillating(k)` |
+| `agg.gate_state()` | the gate's own history: ratchet references, `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `oscillating(k)` |
 | `agg.check_limits()` | enforce ceilings, drain the operator bus, honour Ctrl-C |
 | `agg.pos(label, max)` | an RAII breadcrumb — `cycle 3/20 › attempt 2/3` — published to `state.json` |
 | `agg.ask()` `agg.info()` `agg.log()` | the three notification levels — non-blocking, and still the default |
@@ -179,6 +180,35 @@ for _ in 0..20 {
   last gate that was unmet, plus every ratchet regression.
 - **On resume** the state is restored from the last replayed `gate` record — i.e. as of the last kept
   gate — not from `agg/private/gate.json`, which may be ahead of it by gates that will re-execute.
+
+### Groups and the improvement rule
+
+A [`Group`](CONFIG.md#judge-groups--k-of-n) names judges that measure one thing; `agg.group(&g)` asks
+every member (each through the same memoized cache as `agg.judge()`) and returns a `GroupVerdict` to
+count over. The threshold lives where you branch, never on the group:
+
+```rust
+let quality = Group::new("quality", [sonar.clone(), codescene.clone(), lizard.clone()]);
+let agg = Agg::open(".")?.merge_requires_improvement(true);
+for _ in 0..20 {
+    agg.step(&implement)?;
+    if !agg.group(&quality).at_least(2) { continue; }    // two of three
+    let outcome = agg.gate()?;                            // Kept · RolledBack · NoImprovement · …
+    if outcome == GateOutcome::NoImprovement && agg.gate_state().consecutive_no_improvements >= 4 {
+        break;                                            // four sessions in a row that moved nothing
+    }
+}
+```
+
+- **At `gate()`, a judge asked ONLY through `group()` is judged with its group, net**: one member going
+  met→unmet while another goes unmet→met is not a regression; a net loss is. A judge the driver also
+  asked by name (`agg.judge`) is held to the per-judge rule. A driver that never asks a group sees no
+  change.
+- **`merge_requires_improvement(true)`** — `gate()` keeps a span only if a judge asked since the last
+  gate went unmet→met (a group: gained ground net) or a ratcheted judge moved the good way beyond its
+  tolerance; otherwise it returns `GateOutcome::NoImprovement` and discards the span. That is **not** a
+  rollback: `rollbacks` does not move, `no_improvements` / `consecutive_no_improvements` do. A regression
+  under `OnRegression::Rollback` wins over it (`RolledBack`).
 
 ## Asking a human
 
