@@ -111,8 +111,11 @@ pub fn restore_counters(st: &mut LoopState, r: &Resume) {
 /// tree, and a resumed run's references are the ones the last kept gate held, not a fresh measure.
 pub fn restore_position(st: &mut LoopState, r: &Resume) -> Result<()> {
     if let Some(gate) = &r.gate {
-        st.eng.gate.state = gate.clone();
-        crate::core::ratchet::save(&st.dir, gate)?;
+        // a reference taken under another scoring definition is reset, not restored.
+        for w in st.eng.gate.restore(gate.clone()) {
+            eprintln!("  ⚠ {w}");
+        }
+        crate::core::ratchet::save(&st.dir, &st.eng.gate.state)?;
     }
     if let Some((idx, reps, step)) = &r.walk {
         st.cursor.seek(*idx, *reps, step)?;

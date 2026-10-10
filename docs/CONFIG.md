@@ -53,6 +53,13 @@ judge:
   model: "claude-haiku-4-5-20251001"   # None ⇒ the ruler's cheap default. A cheap model grades.
   timeout: 300                         # seconds — EVERY judge, script and LLM alike
 
+# Per-judge config: a timeout override, or a judge DECLARED here instead of as a file — a metric or
+# score judge over swe-metrics (optional; needs `swe-metrics` on PATH only when one is declared).
+judges:
+  load_ok: { timeout: 2700 }
+  cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 10 }
+  quality: { score: { definition: "swe-default", version: "2" }, min: 80 }
+
 # The step palette. NAME → a body of OVERRIDES over `defaults:`. The name is your own label.
 steps:
   worker: {}                       # pure defaults
@@ -131,13 +138,16 @@ block precisely because it is immutable: a moving grader makes verdicts incompar
 If the ruler is rate-limited or unreachable, the run **parks in backoff and merges nothing** — it
 never fails over to another agent (that would move the ruler) and never fabricates a verdict.
 
-## `judges` — per-judge overrides
+## `judges` — per-judge config
 
-Plural `judges:` is not the ruler. It is a map of judge NAME → overrides, with **exactly one key**:
+Plural `judges:` is not the ruler. It is a map of judge NAME → per-judge config:
 
 | key | default | notes |
 |---|---|---|
-| `timeout` | `judge.timeout` (300) | seconds, for this judge alone. |
+| `timeout` | `judge.timeout` (300) | seconds, for this judge alone. For a metric/score judge it bounds the shared measurement it runs. |
+| `metric` | none | declares a **metric judge** — one number of the swe-metrics report ([below](#judges-built-on-swe-metrics--metric-and-score)). |
+| `score` | none | declares a **score judge** — swe-metrics' quality score ([below](#judges-built-on-swe-metrics--metric-and-score)). |
+| `max` / `min` | none | the threshold of a metric or score judge: met when the value is at most `max` / at least `min`. |
 
 ```yaml
 judges:
@@ -153,6 +163,121 @@ survived because it is not flow and not gating: a judge slower than 300s simply 
 step, so a 45-minute judge costs 45 minutes per step. Short-circuiting an expensive judge behind
 cheap ones is a Rust-path feature (`agg.judge(&tests).met() && agg.judge(&load).met()`); see
 `examples/workflow.yaml`, which spells out that trade in full.
+
+## Judges built on swe-metrics — `metric:` and `score:`
+
+[swe-metrics](https://github.com/ssenge/swe-metrics) is a separate, stateless measuring tool: it
+turns a file, directory or repository into a JSON report of metrics (complexity, duplication,
+vulnerabilities, secrets, IaC findings, documentation, …), tool-tagged, with the tools' SARIF as
+details, and it never judges them. agg does the judging. A judge DECLARED in `judges:` reads the
+report — no script to write, parse or keep consistent across projects:
+
+```yaml
+judges:
+  cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 10 }
+  dup_pct: { metric: { id: "duplication.percent" }, max: 3 }
+  vulns:   { metric: { id: "dependencies.vulnerabilities", labels: { severity: ["critical", "high"] } }, max: 0 }
+  cog_new: { metric: { id: "complexity.cognitive", stat: "p95", combine: "strictest", scope: "changed" }, max: 15 }
+  quality: { score: { definition: "swe-default", version: "2" }, min: 80 }   # or definition: "scoring.py"
+sequence:
+  done_if: "quality AND vulns"
+  invariants: ["cog_new"]
+  ratchet:
+    cc_p95:  { tolerance: 0.5 }    # no direction needed: the judge states it (see below)
+    quality: {}
+```
+
+A declared judge is referenced by its NAME like any other (`done_if`, `invariants`, `ratchet`,
+`groups`, `until:`, `.value`), runs from `agg judge <name>`, and is listed by `agg check`. A name may
+not be declared here AND be a file in `agg/judges/` (refused at startup).
+
+**`metric:` — the selector**
+
+| key | | |
+|---|---|---|
+| `id` | required | the metric ID, `family.name` (`complexity.cyclomatic`). `swe-metrics schema report` / its README list them. |
+| `tool` | none | read this tool's value only (`lizard`). |
+| `combine` | none | several tools report the metric: `strictest` (the value hardest to pass), `all` (every tool within the threshold) or `majority` (more than half). Without `tool`/`combine`, several tools is an **error** naming them. |
+| `stat` | none | the statistic of a distribution metric: `count` `sum` `mean` `p50` `p95` `max`. Required for a distribution, refused for a single value. |
+| `labels` | none | only rows with these labels; a value or a list of accepted values. The matching rows are **summed** (`severity: [critical, high]`). Without it, the unlabeled total. |
+| `scope` | `target` | what is measured: `target` (the project), `changed` (only the files changed since the base branch — `--changed-since`, for "new code must be clean"), or a project-relative sub-path (a directory or file, measured as its own target). |
+
+The judge's `value` is the selected number; `met` is the threshold (`max` and/or `min`, at least one
+required). Only target-level rows count. A labeled count with no matching row but a present total is a
+measured `0` (swe-metrics writes label rows only for labels that occurred). These rules are the ones
+swe-metrics' own score uses, so a metric judge and a score read the report the same way.
+
+**One measurement per session.** Every metric and score judge of a session shares ONE `swe-metrics
+measure` of the session's tree — five metric judges cost one measurement, not five. The measurement is
+keyed on the tree (HEAD, the diff against it, untracked files) and on its scope, so each scope
+(`target`, `changed`, a sub-path) is measured once; the judges of one scope pass one `--only` set (the
+union of their families; every family when a score judge is in the run). The report and the tools'
+details land in the session's judge scratch, and each verdict cites the report plus the SARIF of its
+metric's family as **evidence** — kept under `agg/private/evidence/` like any judge's.
+
+**Fail closed.** A value that is not there is an **error** carrying the report's reason — never met:
+the metric's analyzer was skipped (`trivy skipped: no applicable files`) or failed (`jscpd failed:
+jscpd is not installed`), or nothing reported the metric. One more rule, because the report does not
+say which analyzer measures which metric: when a judge names no `tool`, ANY failed analyzer of the
+metric's family errors the judge (it may be the one whose value is missing) — name the `tool:` to rely
+on that tool alone.
+
+**`scope: changed` with no changed code is vacuously met.** "New code must be clean" with no new code
+is not a measurement failure. When the session (or the baseline pass) changed no file the metric's
+analyzer applies to — nothing changed at all (`subject.files: 0`), or only files no analyzer of the
+family takes (a docs-only session: each one skipped with exactly swe-metrics' `no applicable files`) —
+the verdict is `met: true` with no `value`, `"vacuous": true`, and the rationale `no changed files in
+scope for lizard`. A vacuous pass **moves nothing at the gate**: it is no improvement (unmet → vacuous
+met does not satisfy `merge_requires_improvement`), no regression, and not a reading the next session
+is compared against. Fail closed stays for everything else in the changed scope: a failed analyzer, a
+missing tool, a skip for any other reason (a missing prerequisite), an analyzer that ran on changed
+files but reported no value. (swe-metrics has no skip reason CODE, so the docs-only case matches its
+reason text exactly; were it ever reworded, the judge would error again — closed, never open.) A
+ratchet on a `scope: changed` judge is refused: it would compare different files every session.
+
+**`score:` — swe-metrics' quality score.** `swe-metrics score` (0–100) of the session's shared report,
+by `definition` — `swe-default` (shipped with swe-metrics), a `.py` file (relative to `agg/`, or
+absolute — keep it under `agg/` and in `write_deny`, it is part of the grader) or `package.module:NAME`
+— at `version`:
+
+- **Against the incumbent.** agg keeps the report of the last KEPT state — the incumbent — at
+  `agg/private/metrics/incumbent/<scope>.json`, next to the ratchet state: the baseline pass measures
+  it, every kept gate replaces it. Every session is scored with it as `--baseline`, so a metric that got
+  worse costs points even when another improved. The baseline pass itself is scored without one.
+- `value` is the score. A score **capped by a failed gate** (a secret found, a critical vulnerability)
+  names the failed gates in the rationale: `score 40 (swe-default@2) misses ≥ 80; capped by failed
+  gates: secrets.findings = 2 (max 0, caps at 40)`.
+- **Comparability.** A score names its definition and version; one that differs from the configured
+  ones is **refused** — at startup (agg scores an empty report to ask) and on every run. A changed
+  `definition`/`version` **resets the ratchet reference** on `--resume` (scores of two definitions are
+  not comparable): the reference becomes what the resumed run's baseline pass measured.
+- A **`null` score** (incomplete — a required part unavailable, a tool missing) is an **error** with the
+  score's notes, never met.
+
+**The ratchet.** A metric or score judge works with the [ratchet](#the-ratchet--numeric-no-regression)
+unchanged, and may leave out `direction:` — the judge states its own: a score is higher-is-better; a
+metric judge's threshold says it (`max:` ⇒ `down`, `min:` ⇒ `up`), and the report's `direction` for
+the metric is checked against it on every run — a ratchet that would hold a `lower_better` metric
+`up` makes the judge **error**, never ratchet silently the wrong way. A metric judge with both `max`
+and `min` must state the direction. With `combine: all`, tools that moved in **different directions**
+since the incumbent (one better, one worse) are **no improvement** for the ratchet — the verdict is
+`mixed`, which `merge_requires_improvement` does not count, even if the reported value got better.
+
+**Optional dependency.** agg works without swe-metrics. A config that declares a metric or score
+judge in its run-set is **refused at startup** (`agg run`, `agg check`) when `swe-metrics` is not on
+`PATH`, when its report (or score) schema is not the one this agg reads (`swe-metrics/report/v1`,
+`swe-metrics/score/v1`), or when a score's definition/version differs from the configured one.
+
+**Confinement.** swe-metrics runs as a script judge does: from the project root, stdin closed, the
+`AGG_*` env, `TMPDIR` in the judge scratch, and under `isolation: sandbox` in the OS jail with the
+project read-only. Unlike a script judge its `XDG_CACHE_HOME` is not redirected — its tools keep
+machine-wide caches there (trivy's vulnerability database); under `sandbox` that cache must already
+exist, because the jail does not let the tool write it.
+
+**Shape refusals at startup**, each at its key: `metric:` and `score:` together; no threshold;
+`max < min`; a malformed `id`; `tool:` with `combine:`; an empty label; a `scope:` that is a glob
+(swe-metrics' statistics are per measured target — name the directory) or leaves the project; a missing
+definition file; an empty `version`; `max:`/`min:` on an entry that declares no judge.
 
 ## `steps` — the palette
 
@@ -512,7 +637,11 @@ sequence:
 - **Refused at startup:** a ratcheted judge that emits no `value` on the baseline pass (there is nothing
   to ratchet), one that **errors** on the baseline pass with no `baseline:` seed (nothing to compare
   session 1 against), a ratchet naming no judge file, a negative or non-finite tolerance, a missing
-  `direction`, an unknown key.
+  `direction` (only a [metric or score judge](#judges-built-on-swe-metrics--metric-and-score) may leave
+  it out — it states its own), an unknown key.
+- **No improvement when the measurement disagrees with itself.** A verdict with `"mixed": true` (its own
+  measurements moved in different directions — a metric judge with `combine: all`) never counts as a
+  ratchet improvement for `merge_requires_improvement`, however far its value moved.
 - **Run-set, not DoD-set.** A ratcheted judge executes every judged step (it has to, to be compared),
   but it is a gate rule, not a goal: it never counts toward `all_goals` or the `N/M` scoreboard. Name
   it in `done_if` too if you also want its `met` as a goal.
@@ -1087,7 +1216,7 @@ The details that decide whether they fire when you expect:
 ## Judges resolved by name
 
 A judge NAME in a condition resolves to a **file on disk** — there is no registry, no `kind:` tag, no
-`cmd:`:
+`cmd:` — unless `judges.<name>` DECLARES it ([a metric or score judge](#judges-built-on-swe-metrics--metric-and-score)):
 
 ```
 coverage
@@ -1108,7 +1237,11 @@ A judge prints a **verdict JSON** to stdout (agg reads the *last* JSON object, s
   "max":       100,         // optional — the denominator
   "target":    80,          // optional — presentational only
   "rationale": "one line",  // optional — shown on the dashboard
-  "evidence":  ["…"]        // optional — files the verdict cites; agg KEEPS a copy (see Evidence)
+  "evidence":  ["…"],       // optional — files the verdict cites; agg KEEPS a copy (see Evidence)
+  "mixed":     false,       // optional — true: the judge's own measurements moved in different
+                            //   directions, so a ratchet does not count this as an improvement
+  "vacuous":   false        // optional — true: met because there was nothing to measure; moves
+                            //   nothing at the gate (no improvement, no regression, not "was met")
 }
 ```
 

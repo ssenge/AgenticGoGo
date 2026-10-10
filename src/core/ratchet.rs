@@ -115,6 +115,57 @@ impl Ratchet {
     }
 }
 
+/// `sequence.ratchet.<judge>` AS WRITTEN: a [`Ratchet`] whose `direction` may be left out for a
+/// judge that states its own — a metric judge (its threshold: `max:` ⇒ down, `min:` ⇒ up, checked
+/// against the metric's direction in the report at every run) or a score judge (higher is better).
+/// Assembly resolves it into a [`Ratchet`]; any other judge without a `direction` is refused there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RatchetCfg {
+    /// which way is better. Required, except for a metric or score judge, which states its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<Direction>,
+    /// how much worse than the reference is still accepted, in the judge's own units. Default 0.
+    #[serde(default)]
+    pub tolerance: f64,
+    /// the same allowance as a percentage of the reference. With both set, the LARGER one applies.
+    #[serde(default)]
+    pub tolerance_pct: Option<f64>,
+    /// the seeded reference for session 1. Absent ⇒ the baseline pass measures it.
+    #[serde(default)]
+    pub baseline: Option<f64>,
+}
+
+impl From<Ratchet> for RatchetCfg {
+    fn from(r: Ratchet) -> Self {
+        RatchetCfg { direction: Some(r.direction), tolerance: r.tolerance, tolerance_pct: r.tolerance_pct, baseline: r.baseline }
+    }
+}
+
+impl RatchetCfg {
+    /// Refuse numbers that cannot mean anything — [`Ratchet::validate`], whatever the direction.
+    pub fn validate(&self, judge: &str) -> Result<()> {
+        self.resolve(Some(Direction::Up)).expect("a direction was given").validate(judge)
+    }
+
+    /// The [`Ratchet`] this entry means, with `implied` standing in for a missing `direction`
+    /// (`None` when the judge states none either — the caller refuses that).
+    pub fn resolve(&self, implied: Option<Direction>) -> Option<Ratchet> {
+        Some(Ratchet {
+            direction: self.direction.or(implied)?,
+            tolerance: self.tolerance,
+            tolerance_pct: self.tolerance_pct,
+            baseline: self.baseline,
+        })
+    }
+}
+
+/// The ratchets whose `direction` is written out — every one a driver declares (it constructs a
+/// [`Ratchet`]); a YAML entry that leaves it to its judge is resolved by assembly instead.
+pub fn resolve_explicit(cfg: &BTreeMap<String, RatchetCfg>) -> BTreeMap<String, Ratchet> {
+    cfg.iter().filter_map(|(n, c)| c.resolve(None).map(|r| (n.clone(), r))).collect()
+}
+
 /// One ratchet regression, as the gate recorded it: the judge, the reference it was held to, and
 /// what it measured. `to: None` = the judge errored or emitted no number — it could not show that it
 /// is no worse, and a ratchet never passes on an unmeasured value.
@@ -171,6 +222,11 @@ pub struct GateState {
     /// the ratchet regressions of the MOST RECENT judged gate (backs `ratchet_regressed`).
     #[serde(default)]
     pub last_ratchet: Vec<RatchetRegression>,
+    /// per ratcheted judge with a BASIS (a score judge's `definition@version`), the basis its
+    /// reference was taken under. Two scoring definitions' numbers are not comparable, so a
+    /// reference whose basis is not the configured one is reset ([`Gate::restore`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bases: BTreeMap<String, String>,
 }
 
 impl GateState {
@@ -207,6 +263,8 @@ pub struct Gate {
     pub specs: BTreeMap<String, Ratchet>,
     pub window: usize,
     pub state: GateState,
+    /// the configured basis of each ratcheted judge that has one (see [`GateState::bases`]).
+    pub bases: BTreeMap<String, String>,
 }
 
 impl Default for Gate {
@@ -219,7 +277,54 @@ impl Gate {
     /// A fresh gate; every seeded `baseline:` is the reference from the start.
     pub fn new(specs: BTreeMap<String, Ratchet>, window: usize) -> Gate {
         let refs = specs.iter().filter_map(|(n, s)| s.baseline.map(|b| (n.clone(), b))).collect();
-        Gate { specs, window, state: GateState { refs, ..GateState::default() } }
+        Gate { specs, window, state: GateState { refs, ..GateState::default() }, bases: BTreeMap::new() }
+    }
+
+    /// Give judges a BASIS — what their values are comparable under (a score judge's
+    /// `definition@version`). Every reference taken from now on is stamped with it.
+    pub fn with_bases(mut self, bases: BTreeMap<String, String>) -> Gate {
+        self.bases = bases;
+        self.stamp_all();
+        self
+    }
+
+    /// Stamp the basis of every reference the gate holds.
+    fn stamp_all(&mut self) {
+        let names: Vec<String> = self.state.refs.keys().cloned().collect();
+        for n in names {
+            self.stamp(&n);
+        }
+    }
+
+    fn stamp(&mut self, judge: &str) {
+        if let Some(b) = self.bases.get(judge) {
+            self.state.bases.insert(judge.to_string(), b.clone());
+        }
+    }
+
+    /// Adopt a persisted state (a resume). A reference taken under ANOTHER basis than the configured
+    /// one — the scoring definition changed between the runs — is not comparable, so it is RESET:
+    /// to the reference this gate already holds (the baseline pass just measured it under the new
+    /// basis), else to none (the next kept gate sets it). Returns one warning per reset.
+    pub fn restore(&mut self, persisted: GateState) -> Vec<String> {
+        let current = std::mem::replace(&mut self.state, persisted);
+        let mut warnings = Vec::new();
+        for (judge, basis) in &self.bases {
+            let was = self.state.bases.get(judge);
+            if !self.state.refs.contains_key(judge) || was == Some(basis) {
+                continue;
+            }
+            match current.refs.get(judge) {
+                Some(r) => self.state.refs.insert(judge.clone(), *r),
+                None => self.state.refs.remove(judge),
+            };
+            warnings.push(format!(
+                "ratchet `{judge}`: its reference was taken under {}, not {basis} — scores of two definitions are not comparable, so the reference is reset",
+                was.map(String::as_str).unwrap_or("an unrecorded definition")
+            ));
+        }
+        self.stamp_all();
+        warnings
     }
 
     pub fn is_ratcheted(&self, judge: &str) -> bool {
@@ -245,6 +350,7 @@ impl Gate {
                 warnings.push(w);
             }
         }
+        self.stamp_all();
         Ok(warnings)
     }
 
@@ -275,10 +381,12 @@ impl Gate {
         if spec.baseline.is_none() && self.state.refs.contains_key(name) {
             return None;
         }
-        match Self::seed_one(&mut self.state.refs, name, spec, v) {
+        let out = match Self::seed_one(&mut self.state.refs, name, spec, v) {
             Ok(w) => w,
             Err(e) => Some(format!("{e:#} — every gate will treat it as a ratchet regression")),
-        }
+        };
+        self.stamp(name);
+        out
     }
 
     /// The ratchet regressions among `fresh`. A ratcheted judge that errored or has no number is a
@@ -300,10 +408,13 @@ impl Gate {
     }
 
     /// The ratcheted judges among `fresh` that IMPROVED on their reference beyond tolerance. One with
-    /// no reference yet, an error or no number cannot show an improvement.
+    /// no reference yet, an error or no number cannot show an improvement — and neither can a
+    /// `mixed` verdict, whose own measurements moved in different directions (a metric judge with
+    /// `combine: all` whose tools disagree): the number moved, but it is not agreed to be better.
     pub fn improved(&self, fresh: &[(String, Verdict)]) -> Vec<String> {
         fresh
             .iter()
+            .filter(|(_, v)| !v.mixed)
             .filter(|(name, v)| {
                 let (Some(spec), Some(r)) = (self.specs.get(name), self.state.reference(name)) else { return false };
                 finite(v).filter(|_| v.error.is_none()).is_some_and(|now| spec.improved(r, now))
@@ -329,6 +440,9 @@ impl Gate {
                 for (name, v) in fresh.iter().filter(|(n, _)| self.specs.contains_key(n)) {
                     if let Some(now) = finite(v).filter(|_| v.error.is_none()) {
                         st.refs.insert(name.clone(), now);
+                        if let Some(b) = self.bases.get(name) {
+                            st.bases.insert(name.clone(), b.clone());
+                        }
                     }
                 }
             }

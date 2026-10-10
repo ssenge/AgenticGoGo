@@ -77,18 +77,28 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
 
     let named = run_set(cfg, driver, &mut problems);
 
-    // resolve every run-set name to a judge FILE (§5.1) — a name with no file is a startup error,
-    // reported at the key that NAMED it.
+    // the judges DECLARED in `judges:` (a `metric:`/`score:` block, `crate::metrics`) — and the
+    // ratchets whose direction such a judge states. swe-metrics is probed only if one is in the run.
+    let names: Vec<String> = named.iter().map(|n| n.name.clone()).collect();
+    let declared = crate::metrics::declare::declare(cfg, &names, config_base, true);
+    problems.extend(declared.problems);
+
+    // resolve every run-set name to a declared judge or a judge FILE (§5.1) — a name with neither
+    // is a startup error, reported at the key that NAMED it.
     let mut judges_vec: Vec<Judge> = Vec::with_capacity(named.len());
     let mut unresolved: Vec<&str> = Vec::new();
     for n in &named {
-        match judges::resolve(&n.name, config_base) {
+        let kind = match declared.kinds.get(&n.name) {
+            Some(k) => Ok(k.clone()),
+            None => judges::resolve(&n.name, config_base),
+        };
+        match kind {
             Ok(kind) => judges_vec.push(Judge {
                 name: n.name.clone(),
                 kind,
                 invariant: cfg.sequence.invariants.contains(&n.name),
                 in_dod: n.in_dod,
-                // the `judges:` block's only key; absent ⇒ the run-level `judge.timeout` (300s).
+                // the `judges:` block's `timeout:`; absent ⇒ the run-level `judge.timeout` (300s).
                 timeout: cfg.judges.get(&n.name).and_then(|j| j.timeout),
                 state: Lifecycle::Pending,
                 last_verdict: None,
@@ -120,7 +130,7 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
     // located. An expression naming an unresolved judge is skipped: its one real problem (the
     // missing file) is already listed, and "unknown identifier" would only repeat it.
     let done_if = (!driver).then(|| cfg.sequence.done_if.clone());
-    let gate = crate::core::ratchet::Gate::new(cfg.sequence.ratchet.clone(), cfg.sequence.oscillation_window);
+    let gate = crate::core::ratchet::Gate::new(declared.ratchets, cfg.sequence.oscillation_window).with_bases(declared.bases);
     let groups = groups_for(cfg, done_if.as_deref());
 
     // `merge_requires_improvement` with nothing that COULD improve — no DoD-set judge, no ratchet —
@@ -534,10 +544,14 @@ mod tests {
         assert!(err.contains("tolerance"), "{err}");
         let err = assemble_err(&cfg_with("  oscillation_window: 1\n"), tmp.path());
         assert!(err.contains("oscillation_window"), "{err}");
-        for bad in ["  ratchet: { cc: { tolerance: 1 } }\n", "  ratchet: { cc: { direction: up, best: true } }\n"] {
-            let body = format!("project: p\nsteps: {{ worker: {{}} }}\nsequence:\n  steps: [worker]\n  done_if: \"goal\"\n{bad}");
-            assert!(serde_yaml::from_str::<AggConfig>(&body).is_err(), "deny_unknown_fields / required direction: {bad}");
-        }
+        let bad = "  ratchet: { cc: { direction: up, best: true } }\n";
+        let body = format!("project: p\nsteps: {{ worker: {{}} }}\nsequence:\n  steps: [worker]\n  done_if: \"goal\"\n{bad}");
+        assert!(serde_yaml::from_str::<AggConfig>(&body).is_err(), "deny_unknown_fields: {bad}");
+        // a script judge states no direction of its own, so leaving it out is refused at startup —
+        // at the key to edit (only a metric or score judge may leave it to the judge).
+        let cfg = cfg_with("  ratchet: { cc: { tolerance: 1 } }\n");
+        assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.ratchet.cc.direction"]);
+        assert!(assemble_err(&cfg, tmp.path()).contains("`direction` (up | down) is required"));
     }
 
     /// The §12.7 validity matrix, all four cells. Row 3 is the trap: `notify:` ALONE is not a
@@ -691,7 +705,7 @@ mod tests {
         let mut cfg = cfg_with("  merge_requires_improvement: true\n");
         cfg.sequence.done_if = "over_iterations".into();
         assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.merge_requires_improvement"]);
-        cfg.sequence.ratchet.insert("cc".into(), crate::core::ratchet::Ratchet::down(0.0));
+        cfg.sequence.ratchet.insert("cc".into(), crate::core::ratchet::Ratchet::down(0.0).into());
         assemble(&cfg, tmp.path()).expect("a ratchet can improve");
         assemble(&cfg_with("  merge_requires_improvement: true\n"), tmp.path()).expect("a DoD judge can improve");
         let driver: AggConfig = serde_yaml::from_str("project: p\nsequence: { merge_requires_improvement: true }\n").unwrap();

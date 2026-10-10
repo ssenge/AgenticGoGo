@@ -36,8 +36,9 @@ pub struct AggConfig {
     #[serde(default)]
     pub judge: JudgeCfg,
 
-    /// PER-JUDGE overrides, keyed by judge NAME. One key only — `timeout:`. Singular `judge:` above
-    /// is the ruler; plural `judges:` is this. See [`JudgeOverride`].
+    /// PER-JUDGE config, keyed by judge NAME: a `timeout:` override, or a judge DECLARED here rather
+    /// than as a file — a `metric:` or `score:` judge over swe-metrics. Singular `judge:` above is
+    /// the ruler; plural `judges:` is this. See [`JudgeOverride`].
     #[serde(default)]
     pub judges: BTreeMap<String, JudgeOverride>,
 
@@ -183,20 +184,36 @@ impl Default for JudgeCfg {
     }
 }
 
-/// PER-JUDGE config: NAME → overrides. Exactly one key, `timeout:` — the YAML twin of
-/// [`Judge::timeout`](crate::core::model::Judge::timeout).
+/// PER-JUDGE config: NAME → `timeout:` (the YAML twin of
+/// [`Judge::timeout`](crate::core::model::Judge::timeout)), and — for a judge that is not a file —
+/// its DECLARATION: a `metric:` or a `score:` block with its `max:`/`min:` threshold
+/// ([`crate::metrics`]).
 ///
-/// It survived the 2026-08-04 owner simplification that cut the judge-level `gate:`/`when:` because
-/// it is neither flow nor gating: a judge that takes longer than the run-level 300s (a load test, an
-/// e2e suite) simply DIES without it, and no amount of "use the Rust path" makes that a design
-/// choice rather than a hole. Only judges needing non-default config appear here; the rest are never
-/// listed, which is why the map is `#[serde(default)]` and usually absent.
+/// `timeout` survived the 2026-08-04 owner simplification that cut the judge-level `gate:`/`when:`
+/// because it is neither flow nor gating: a judge that takes longer than the run-level 300s (a load
+/// test, an e2e suite) simply DIES without it. A metric/score judge is declared here because it has
+/// no script to put in `agg/judges/` — the measuring is agg's (one shared `swe-metrics measure` per
+/// session), and only the selector and the threshold are the project's. Only judges needing
+/// non-default config appear here, which is why the map is `#[serde(default)]` and usually absent.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeOverride {
-    /// seconds. `None` = the run-level [`JudgeCfg::timeout`].
+    /// seconds. `None` = the run-level [`JudgeCfg::timeout`]. For a metric/score judge it bounds
+    /// the shared measurement (and the scoring) the judge runs.
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// a METRIC judge: which number of the swe-metrics report it reads.
+    #[serde(default)]
+    pub metric: Option<crate::metrics::MetricSel>,
+    /// a SCORE judge: swe-metrics' quality score by this scoring definition.
+    #[serde(default)]
+    pub score: Option<crate::metrics::ScoreSel>,
+    /// met when the value is at most this (a metric or score judge only).
+    #[serde(default)]
+    pub max: Option<f64>,
+    /// met when the value is at least this (a metric or score judge only).
+    #[serde(default)]
+    pub min: Option<f64>,
 }
 
 /// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_judges` and the
@@ -386,7 +403,7 @@ pub struct Sequence {
     /// last kept gate by more than its tolerance ([`crate::core::ratchet`]). A ratcheted judge joins
     /// the run-set (never the DoD-set); a regression is a gate regression.
     #[serde(default)]
-    pub ratchet: BTreeMap<String, crate::core::ratchet::Ratchet>,
+    pub ratchet: BTreeMap<String, crate::core::ratchet::RatchetCfg>,
     /// how many earlier judged sessions `oscillating` looks back over for an A→B→A repeat.
     #[serde(default = "default_oscillation_window")]
     pub oscillation_window: usize,

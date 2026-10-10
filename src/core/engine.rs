@@ -147,6 +147,10 @@ pub struct Engine {
     /// the judge groups (`sequence.groups`) the conditions' `(<group>)` subsets resolve against, and
     /// which of them the gate judges as a unit ([`crate::core::groups`]).
     pub groups: crate::core::groups::Groups,
+    /// the base branch the judges grade against — what a `scope: changed` metric judge measures
+    /// since, and a native judge's diff is taken against. Set once the run resolved it; `None`
+    /// (`agg plan`, `agg judge`) = `HEAD`.
+    pub base: Option<String>,
 }
 
 /// The YAML path's verdict store for a native judge's [`crate::core::model::JudgeCtx`]: this step's
@@ -204,7 +208,7 @@ impl Engine {
         for expr in [&done_if, &abort_if, &notify_if].into_iter().flatten() {
             stop::validate_with(expr, &judges, Some(&gate), &groups)?;
         }
-        Ok(Engine { judges, done_if, abort_if, notify_if, gate, groups })
+        Ok(Engine { judges, done_if, abort_if, notify_if, gate, groups, base: None })
     }
 
     /// The one-line `{{reason}}` for a `notify_if` that just fired (STUCK_NOTIFY §5 / §12.3): the
@@ -332,7 +336,7 @@ impl Engine {
                 // `g.timeout` is the `judges:` block's per-judge override; `timeout` is the
                 // run-level `judge.timeout`. Without this the override would parse and do nothing.
                 let secs = g.timeout.unwrap_or(timeout);
-                judge::run(&g.kind, &g.name, cwd, ruler, judge_model, secs, session, step, isolation, &src, None)
+                judge::run(&g.kind, &g.name, cwd, ruler, judge_model, secs, session, step, isolation, &src, self.base.as_deref())
             })
             .collect()
     }
@@ -489,6 +493,7 @@ mod tests {
             rationale: String::new(),
             evidence: vec![],
             error: None,
+            mixed: false, vacuous: false,
         });
         j
     }
@@ -505,6 +510,7 @@ mod tests {
             rationale: rationale.into(),
             evidence: vec![],
             error: None,
+            mixed: false, vacuous: false,
         });
         j
     }
@@ -804,6 +810,7 @@ mod tests {
             rationale: rationale.into(),
             evidence: vec![],
             error: None,
+            mixed: false, vacuous: false,
         });
         j
     }

@@ -60,6 +60,16 @@ pub struct Verdict {
     /// set when the judge itself failed to run (vs. a clean "not met")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// the judge's own measurements moved in DIFFERENT directions (several tools, one says better,
+    /// one says worse), so a ratchet must not count this verdict as an improvement. Optional in the
+    /// contract; absent = false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mixed: bool,
+    /// met VACUOUSLY: there was nothing to measure (a `scope: changed` metric judge whose session
+    /// changed no file its analyzer applies to). It moves nothing at the gate — no improvement, no
+    /// regression, and it does not replace the judge's last landed reading. Absent = false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vacuous: bool,
 }
 
 fn one() -> f64 {
@@ -79,6 +89,8 @@ impl Verdict {
             rationale: format!("judge failed: {error}"),
             evidence: vec![],
             error: Some(error),
+            mixed: false,
+            vacuous: false,
         }
     }
 
@@ -94,6 +106,8 @@ impl Verdict {
             rationale: String::new(),
             evidence: vec![],
             error: None,
+            mixed: false,
+            vacuous: false,
         }
     }
 
@@ -333,6 +347,12 @@ pub enum JudgeKind {
     /// judge can be given context via env, so "compiled in, therefore unrewritable" is not a
     /// property `native` uniquely buys at the level that matters.
     Native { f: NativeFn },
+    /// one number read from the session's shared `swe-metrics measure` report, held to a threshold
+    /// ([`crate::metrics`]). YAML: a `judges.<name>.metric:` block, not a file.
+    Metric(Box<crate::metrics::MetricJudge>),
+    /// swe-metrics' quality score of the session's shared report, scored against the incumbent's
+    /// report ([`crate::metrics`]). YAML: a `judges.<name>.score:` block, not a file.
+    Score(Box<crate::metrics::ScoreJudge>),
 }
 
 impl std::fmt::Debug for JudgeKind {
@@ -343,6 +363,8 @@ impl std::fmt::Debug for JudgeKind {
                 f.debug_struct("Llm").field("path", path).field("inputs", inputs).finish()
             }
             JudgeKind::Native { .. } => f.debug_struct("Native").finish_non_exhaustive(),
+            JudgeKind::Metric(m) => f.debug_tuple("Metric").field(m).finish(),
+            JudgeKind::Score(s) => f.debug_tuple("Score").field(s).finish(),
         }
     }
 }
@@ -354,6 +376,8 @@ impl JudgeKind {
             JudgeKind::Script { .. } => "script",
             JudgeKind::Llm { .. } => "llm",
             JudgeKind::Native { .. } => "native",
+            JudgeKind::Metric(_) => "metric",
+            JudgeKind::Score(_) => "score",
         }
     }
 }
@@ -411,6 +435,19 @@ impl Judge {
         f: impl Fn(&JudgeCtx<'_>) -> Verdict + Send + Sync + 'static,
     ) -> Judge {
         Judge::declared(name, JudgeKind::Native { f: Arc::new(f) })
+    }
+
+    /// A METRIC judge: one number from the session's shared `swe-metrics measure` report, held to
+    /// the spec's threshold — `Judge::metric("cc_p95", MetricJudge::new("complexity.cyclomatic")
+    /// .stat(Stat::P95).tool("lizard").max(10.0))`. Needs `swe-metrics` on `PATH`.
+    pub fn metric(name: impl Into<String>, spec: crate::metrics::MetricJudge) -> Judge {
+        Judge::declared(name, JudgeKind::Metric(Box::new(spec)))
+    }
+
+    /// A SCORE judge: swe-metrics' quality score (0–100) of the session's shared report —
+    /// `Judge::score("quality", ScoreJudge::new("swe-default", "2").min(80.0))`.
+    pub fn score(name: impl Into<String>, spec: crate::metrics::ScoreJudge) -> Judge {
+        Judge::declared(name, JudgeKind::Score(Box::new(spec)))
     }
 
     /// Override the run-level `judge.timeout` for this judge alone — `.timeout(45 * 60)` for a load

@@ -1971,6 +1971,112 @@ agg_do "$WK" wiki lint --json > "$WK/lint2.json" 2>&1
 is  "a page without frontmatter fails the lint (exit 1)" "$?" "1"
 has "…naming the file and the rule" "$WK/lint2.json" '"rule": "frontmatter.missing"'
 
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9q. judges built on swe-metrics (A-20) — against the REAL swe-metrics"
+
+# The real tool, not a fake: a fixture with KNOWN complexity (classify: 4 decisions ⇒ cyclomatic 5)
+# and KNOWN duplication (report_b.py = report_a.py with one word changed ⇒ one clone). A counting
+# shim in front of the real binary proves the judges of a session share ONE measurement.
+REAL_SM="$(command -v swe-metrics 2>/dev/null)"
+if [ -z "$REAL_SM" ] || ! "$REAL_SM" schema report >/dev/null 2>&1; then
+  skip "swe-metrics judges" "swe-metrics is not on PATH (github.com/ssenge/swe-metrics)"
+else
+  SM="$(mkproj swemetrics)"
+  cat > "$SM/bin/swe-metrics" <<EOF
+#!/bin/sh
+echo "\$1" >> "$SM/sm-calls.txt"
+exec "$REAL_SM" "\$@"
+EOF
+  chmod +x "$SM/bin/swe-metrics"
+  echo "sm-calls.txt" >> "$SM/.gitignore"
+  cat > "$SM/calc.py" <<'EOF'
+"""A small calculator with one branchy function."""
+
+
+def classify(n):
+    """Classify a number."""
+    if n < 0:
+        return "negative"
+    if n == 0:
+        return "zero"
+    if n < 10:
+        return "small"
+    if n < 100:
+        return "medium"
+    return "large"
+
+
+def add(a, b):
+    """Add two numbers."""
+    return a + b
+EOF
+  cat > "$SM/report_a.py" <<'EOF'
+"""Report A."""
+
+
+def render(rows):
+    """Render rows as text."""
+    lines = []
+    for row in rows:
+        name = row.get("name", "")
+        value = row.get("value", 0)
+        unit = row.get("unit", "")
+        label = f"{name}: {value} {unit}".strip()
+        lines.append(label.upper())
+        lines.append("-" * len(label))
+    total = sum(r.get("value", 0) for r in rows)
+    lines.append(f"total: {total}")
+    return "\n".join(lines)
+EOF
+  sed 's/Report A/Report B/' "$SM/report_a.py" > "$SM/report_b.py"
+  # the worker makes the WORST function worse: a 12-decision function (cyclomatic 13) lands in calc.py.
+  cat > "$SM/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
+python3 -c "open('calc.py','a').write('\n\ndef worse(a, b):\n' + ''.join(f'    if a > {i}:\n        b += {i}\n' for i in range(12)) + '    return b\n')"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+  chmod +x "$SM/bin/claude"
+  cat > "$SM/agg/agg.yaml" <<'EOF'
+project: swemetrics
+defaults: { model: fake }
+judges:
+  cc_max:  { metric: { id: "complexity.cyclomatic", stat: "max", tool: "lizard" }, max: 10 }
+  cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 20 }
+  clones:  { metric: { id: "duplication.clones" }, max: 5 }
+  dup_pct: { metric: { id: "duplication.percent" }, max: 50 }
+  secrets: { metric: { id: "secrets.findings" }, max: 0 }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  invariants: [cc_p95, clones, dup_pct, secrets]
+  ratchet:
+    cc_max: { tolerance: 0 }
+summary: { enabled: false }
+EOF
+  gitbase "$SM"
+  agg_do "$SM" check > "$SM/check.log" 2>&1
+  is  "swe-metrics: a config with metric judges passes agg check" "$?" "0"
+  ( cd "$SM" && env PATH="$SM/bin/none:/usr/bin:/bin" HOME="$SM/.home" "$AGG" check ) > "$SM/nopath.log" 2>&1
+  is  "…without swe-metrics on PATH, agg check refuses" "$?" "1"
+  has "…and says why"                                  "$SM/nopath.log" "not on PATH"
+  : > "$SM/sm-calls.txt"
+  agg_do "$SM" run --max-sessions 1 > "$SM/run.log" 2>&1
+  is  "swe-metrics: the run goes to its session cap" "$?" "4"
+  is  "five metric judges, two judged trees ⇒ two measurements" "$(grep -c '^measure' "$SM/sm-calls.txt")" "2"
+  first_value() { python3 -c "
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+print([r for r in rows if r['judge'] == sys.argv[2]][0].get('value'))" "$SM/agg/private/verdicts.jsonl" "$1"; }
+  is  "the fixture's known complexity: cyclomatic max 5" "$(first_value cc_max)" "5.0"
+  is  "the fixture's known duplication: one clone"        "$(first_value clones)" "1.0"
+  has "a worse max complexity is rolled back by the ratchet" "$SM/run.log" "ratchet \`cc_max\`: 5 → 13"
+  exists "the incumbent's report is kept under agg/private/" "$SM/agg/private/metrics/incumbent/target.json"
+  ls "$SM"/agg/private/evidence/*/1/secrets/swe-metrics/target/details/gitleaks.sarif >/dev/null 2>&1 \
+    && ok "the secrets judge's SARIF is kept as evidence" || bad "the secrets judge's SARIF is kept as evidence"
+fi
+
 sec "9j. the docs describe the tool that actually exists"
 # A hand-written CLI table rots the moment a subcommand is added. Assert every clap subcommand
 # appears in the README, and that every relative link in the README resolves to a real file.

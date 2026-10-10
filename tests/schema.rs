@@ -41,7 +41,12 @@ fn the_schema_is_versioned_and_closed() {
 fn the_shipped_examples_validate() {
     let v = validator();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for rel in ["examples/workflow.yaml", "examples/hello-agg/agg/agg.yaml", "examples/p-vs-np/agg/agg.yaml"] {
+    for rel in [
+        "examples/workflow.yaml",
+        "examples/hello-agg/agg/agg.yaml",
+        "examples/p-vs-np/agg/agg.yaml",
+        "examples/quality-gates/agg/agg.yaml",
+    ] {
         let text = std::fs::read_to_string(root.join(rel)).unwrap();
         let errs = errors(&v, &text);
         assert!(errs.is_empty(), "{rel} must validate against `agg schema`:\n{}", errs.join("\n"));
@@ -80,6 +85,8 @@ fn a_misspelled_key_fails_both_the_schema_and_the_parser() {
         "project: \"p\"\nsteps: { w: { judge_model: \"x\" } }\n",
         "project: \"p\"\nsequence: { steps: [{ step: \"w\", tims: 2 }] }\n",
         "project: \"p\"\nsequence: { limits: { token: 5 } }\n",
+        "project: \"p\"\njudges: { cc: { metric: { idd: \"a.b\" }, max: 1 } }\n",
+        "project: \"p\"\njudges: { q: { score: { definition: \"swe-default\", version: \"2\", name: \"x\" } } }\n",
     ] {
         assert!(!errors(&v, bad).is_empty(), "the schema must reject:\n{bad}");
         let tmp = tempfile::tempdir().unwrap();

@@ -1,0 +1,32 @@
+# agg.yaml — quality gates without writing a judge script: metric and score judges over swe-metrics
+# (https://github.com/ssenge/swe-metrics — install it and put `swe-metrics` on PATH; agg refuses this
+# config at startup without it). A judge DECLARED under `judges:` needs no file in agg/judges/.
+project: "quality-gates"
+
+defaults:
+  agent: "claude"
+  model: "claude-haiku-4-5-20251001"
+
+judges:
+  # one number of the swe-metrics report, held to a threshold. All of these share ONE measurement
+  # per session; a metric whose analyzer was skipped or failed makes its judge ERROR, never pass.
+  cc_max:  { metric: { id: "complexity.cyclomatic", stat: "max", tool: "lizard" }, max: 5 }
+  cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 5 }
+  cog_p95: { metric: { id: "complexity.cognitive", stat: "p95", combine: "strictest" }, max: 8 }
+  dup:     { metric: { id: "duplication.percent" }, max: 3 }
+  secrets: { metric: { id: "secrets.findings" }, max: 0 }
+  # swe-metrics' 0–100 quality score, computed against the report of the last KEPT state.
+  quality: { score: { definition: "swe-default", version: "2" }, min: 70 }
+
+steps:
+  worker: {}
+
+sequence:
+  steps: ["worker"]
+  done_if: "cc_max AND cog_p95 AND dup AND quality"
+  invariants: ["secrets"]          # must STAY met — a session that leaks a secret is rolled back
+  ratchet:                         # no direction needed: `max:` says lower is better, a score up
+    cc_p95:  { tolerance: 0.5 }
+    quality: { tolerance: 1.0 }
+  abort_if: "over_iterations OR consecutive_rollbacks >= 3 OR work_time >= 3600"
+  limits: { sessions: 6 }
