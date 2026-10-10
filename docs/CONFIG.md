@@ -101,8 +101,9 @@ hooks: {}                          # on_start / on_session_start / on_session_en
 prompt_includes: []                # files prepended to every worker prompt
 context:                           # READ-ONLY dirs from outside the project (needs sandbox/container)
   - { path: "~/kb/brain", as: "brain", mode: "ro" }
-isolation_policy:                  # what crosses into a container beyond its tier
-  pass_env: ["NPM_TOKEN"]          # env vars passed BY NAME (agents' own keys need no listing)
+isolation_policy:                  # run-level confinement beyond the tier
+  network: { allow: ["api.anthropic.com", "registry.npmjs.org"] }   # egress allow-list (default: open)
+  pass_env: ["NPM_TOKEN"]          # env vars passed BY NAME into a container (agents' own keys need no listing)
   credentials: ["~/.config/gh"]    # host paths mounted READ-ONLY into the container's HOME
 ```
 
@@ -224,13 +225,14 @@ that, **per step**:
 | tier | what the worker may do |
 |---|---|
 | `none` *(default)* | no confinement — full host access, today's behaviour. |
-| `sandbox` | **write** = the project dir (+subfolders) **minus `agg/private/`** + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open. Kernel-enforced. Also confines this step's judges + hooks. |
-| `container` | the worker — the agent CLI itself — runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir **minus `agg/private/`** + a fresh `HOME` + the container's own tmp; **read** = only what is mounted; **network** = fully open. Its judges run in a container too. |
+| `sandbox` | **write** = the project dir (+subfolders) **minus `agg/private/`** + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open unless [`isolation_policy.network`](#network-egress--isolation_policynetwork) narrows it. Kernel-enforced. Also confines this step's judges + hooks. |
+| `container` | the worker — the agent CLI itself — runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir **minus `agg/private/`** + a fresh `HOME` + the container's own tmp; **read** = only what is mounted; **network** = fully open unless [`isolation_policy.network`](#network-egress--isolation_policynetwork) narrows it. Its judges run in a container too. |
 
 `sandbox` uses the OS jail — **`sandbox-exec` (Seatbelt) on macOS**, `bwrap` (bubblewrap) on Linux —
 except Codex, which has its own kernel sandbox agg drives with flags. It confines the **worker, its
 script + LLM judges, and its foreground hooks** in one jail, so nothing a confined worker can rewrite
-in the project dir becomes an escape. It does **not** restrict network (full internet by design).
+in the project dir becomes an escape. It does not restrict the network unless
+[`isolation_policy.network`](#network-egress--isolation_policynetwork) says so.
 
 **The one hole punched in "the project dir is writable" is `agg/private/`** — agg's own runtime state
 (the verdict ledger, the command bus, the pidfile, the worker's brief). It stays fully **readable**; only
@@ -333,6 +335,85 @@ installed on the host at all, and the ruler only when something it runs stays th
 
 A Rust driver sets these with `Agg::image`, `Step::image`, `Agg::judge_image`, `Agg::pass_env` and
 `Agg::credentials`.
+
+### Network egress — `isolation_policy.network`
+
+By default every tier leaves the network open (`network: open`). An allow-list closes it:
+
+```yaml
+defaults: { isolation: "container" }     # or "sandbox" on macOS — EVERY step must be one of the two
+isolation_policy:
+  network:
+    allow:
+      - "api.anthropic.com"              # the agent's own endpoint — REQUIRED (checked at startup)
+      - "registry.npmjs.org:443"         # a host on one port
+      - "*.pkg.example.com"              # every SUBdomain (not the apex)
+      - "10.20.0.5"                      # a literal address (only an IP entry admits an IP)
+      - "localhost:5432"                 # sandbox only: the worker may reach this loopback port directly
+```
+
+| entry | matches |
+|---|---|
+| `host` / `host:port` | that name (case-insensitive), any port / that port |
+| `*.domain` | every subdomain of `domain`, not `domain` itself |
+| `1.2.3.4[:port]`, `[v6][:port]` | that address — a name entry never admits a client that asks by address |
+| `localhost[:port]` | the sandboxed worker's own loopback, directly (a test server it starts); never via the proxy |
+
+No URLs, paths or CIDR ranges — such an entry is refused at startup, at its index.
+
+**How it is enforced.** One enforcement point: a small proxy inside the agg process. Every confined
+process gets `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (both cases) pointing at it, `NO_PROXY` for its own
+loopback, and `NODE_USE_ENV_PROXY=1`; the tier then makes the proxy the **only** way out, so a process
+that ignores or rewrites those variables gains nothing. The proxy checks the name the client asked for
+**before** resolving it (an unlisted name is never even looked up), resolves an allowed name itself,
+and refuses an answer that is loopback, link-local (the cloud metadata address) or unspecified — so a
+DNS-rebinding answer cannot turn an allowed name into a way to the host — and connects to the
+address it resolved. Refusals are logged: `[egress] DENIED CONNECT example.com:443 — not in the
+allow-list`.
+
+#### Platform matrix
+
+| tier · platform | enforced by | names or IPs | DNS inside the jail | covers |
+|---|---|---|---|---|
+| `container` · any Docker engine (**the reference**) | an `--internal` network with no route out; its one reachable address is a relay (busybox `nc` in the base image) to agg's proxy; `NET_RAW` dropped | names (the proxy resolves them); IPs only by IP entry | none — the engine's DNS answers no outside name there | worker, script judges, LLM judges |
+| `sandbox` · macOS | Seatbelt: outbound TCP only to the proxy's loopback port (+ granted `localhost` ports); UDP, raw sockets and unix sockets outside the project and `$TMPDIR` denied | names (the proxy resolves them); IPs only by IP entry | none — `mDNSResponder` is denied (`localhost` still resolves) | worker, script judges, LLM judges, hooks except `on_start`, `notify.cmd` |
+| `sandbox` · Linux | **refused at startup** — `bwrap` cannot narrow the host network to one port; use `container` | | | |
+| `container` · podman | **refused at startup** — the network is built on Docker's `--internal` networks | | | |
+| `none` | **refused at startup** — nothing would stop a direct connection | | | |
+
+**Not covered, and said so at startup (`agg check` warnings):** hooks on a `container` run (they are
+host tooling), `on_start` on any tier (it runs before any worker, unconfined), `background` hooks
+(never confined). The summarizer runs on the host too; it is agg's own tools-off call and executes
+nothing the worker wrote.
+
+**What each bypass meets** (measured; `tests/egress.rs`, `scripts/e2e.sh` §9r):
+
+| attempt | macOS `sandbox` | `container` |
+|---|---|---|
+| connect directly to an IP not on the list | refused by the kernel | no route |
+| DNS-over-HTTPS to an unlisted resolver | proxy `403` · direct: refused | proxy `403` · direct: no route |
+| a plain DNS lookup | fails (no resolver reachable) | fails (no outside name resolves) |
+| a raw socket / UDP, from a child process | refused | no route (`NET_RAW` dropped) |
+| the worker sets its own `HTTPS_PROXY` | refused (only agg's proxy is reachable) | no route |
+| an unlisted name through agg's proxy | `403` | `403` |
+| the host's own services | only `localhost` entries | unreachable |
+
+**The agent's own endpoint must be listed** — a worker that cannot reach its model is not confined, it
+is broken. agg checks at startup (and the driver at `step()`) that every step's agent, and the ruler
+when the run has LLM judges, can reach: Claude `api.anthropic.com` (or `ANTHROPIC_BASE_URL`'s host);
+Codex `api.openai.com` with an API key in the environment, `chatgpt.com` with a ChatGPT login (or
+`OPENAI_BASE_URL`'s host); Copilot `api.githubcopilot.com` and `api.github.com`. Missing ⇒ refused at
+`isolation_policy.network.allow`, naming the host. An agent's non-essential traffic (telemetry, update
+checks) is refused like anything else; Claude Code skips it with
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (add it to `pass_env` for a container).
+
+**Limits.** An allowed host is trusted with whatever the worker sends it — list your model endpoint
+and your mirrors, not a general-purpose host. The proxy decides on the `CONNECT` name; TLS inside the
+tunnel is opaque to it, so a CDN that serves an unlisted name from the same address as a listed one
+(domain fronting) is not distinguished.
+
+`agg doctor --json` reports `network: {mode, allow, sandbox, container}` — how this host would enforce
+the list on each tier. A Rust driver sets it with `Agg::network(Network::Allow(vec![…]))`.
 
 ### Protected paths — `write_deny`, `readonly`, `writable`
 
@@ -1107,7 +1188,9 @@ could rewrite.
 
 - **`sandbox`** — the delivery is confined too. A command agg **cannot** confine is **SKIPPED, loudly**,
   never run unconfined. Writes are limited to the project dir + `$TMPDIR`, so a notify command that
-  writes outside it (a log in `~`) fails. Network is fully open on this tier, so `curl` still works.
+  writes outside it (a log in `~`) fails. The network is open on this tier unless an
+  [allow-list](#network-egress--isolation_policynetwork) narrows it — then list your notification
+  host (`ntfy.sh`) too, or the `curl` is refused.
 - **`container`** — hooks are host tooling on this tier (see the isolation table above), so
   `notify.cmd` runs on the host, unconfined.
 

@@ -35,6 +35,8 @@ pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Comm
     let (cwd, writable, denied) = (jail.cwd, jail.writable, jail.denied);
     // Seatbelt rules are macOS's channel; on Linux the protected paths arrive as `denied` binds.
     debug_assert!(jail.rules.is_empty(), "Seatbelt rules reached the bwrap wrapper");
+    // `wrap_protected` refuses a network allow-list on this OS before building a jail.
+    debug_assert!(jail.net.is_none(), "a network rule reached the bwrap wrapper");
     let mut cmd = Command::new("bwrap");
     cmd.arg("--die-with-parent")
         // whole host read-only …

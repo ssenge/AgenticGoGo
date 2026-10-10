@@ -33,6 +33,8 @@ pub struct DoctorReport {
     /// line, or null when missing), plus any mounted path the engine cannot see. Empty without a
     /// container tier or an engine.
     pub container_images: Vec<crate::isolation::probe::ImageFacts>,
+    /// the network egress policy and how each tier would enforce it on this host.
+    pub network: NetworkFacts,
     pub problems: Vec<Problem>,
     pub warnings: Vec<Problem>,
 }
@@ -63,6 +65,18 @@ pub struct BackendFacts {
     /// the agent can additionally confine itself inside agg's jail (reporting only).
     pub self_sandboxes: bool,
     pub capabilities: Capabilities,
+}
+
+/// `isolation_policy.network` as this host would enforce it.
+#[derive(Debug, Serialize)]
+pub struct NetworkFacts {
+    /// `open` or `allow`.
+    pub mode: &'static str,
+    /// the allow-list as written (empty when open).
+    pub allow: Vec<String>,
+    /// per tier: the mechanism that enforces the list here, or why that tier refuses it.
+    pub sandbox: &'static str,
+    pub container: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,6 +124,7 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
         isolation: tiers(&v, container_engine),
         container_engine,
         container_images: v.images.clone(),
+        network: network_facts(v.cfg.as_ref(), container_engine),
         problems,
         warnings: v.warnings,
     }
@@ -138,6 +153,23 @@ fn tiers(v: &Validation, engine: Option<&'static str>) -> Tiers {
         none: Tier { available: true, mechanism: None, requested: requested(Isolation::None) },
         sandbox: Tier { available: wrapper, mechanism: wrapper.then_some(SANDBOX_WRAPPER).flatten(), requested: requested(Isolation::Sandbox) },
         container: Tier { available: engine.is_some(), mechanism: engine, requested: requested(Isolation::Container) },
+    }
+}
+
+fn network_facts(cfg: Option<&crate::core::config::AggConfig>, engine: Option<&'static str>) -> NetworkFacts {
+    let allow = match cfg.map(|c| &c.isolation_policy.network) {
+        Some(crate::isolation::egress::Network::Allow(a)) => a.clone(),
+        _ => return NetworkFacts { mode: "open", allow: vec![], sandbox: "open", container: "open" },
+    };
+    NetworkFacts {
+        mode: "allow",
+        allow,
+        sandbox: if cfg!(target_os = "macos") { "seatbelt: outbound only to agg's proxy" } else { "refused: bwrap cannot narrow the network" },
+        container: match engine {
+            Some("docker") => "internal network + relay to agg's proxy",
+            Some(_) => "refused: needs docker's --internal networks",
+            None => "unavailable: no engine",
+        },
     }
 }
 
@@ -187,7 +219,7 @@ mod tests {
     fn the_report_shape_is_stable() {
         let tmp = tempfile::tempdir().unwrap();
         let r = serde_json::to_value(report(tmp.path(), &tmp.path().join("agg.yaml"))).unwrap();
-        for key in ["schema_version", "agg_version", "ok", "config", "backends", "isolation", "container_engine", "container_images", "problems", "warnings"] {
+        for key in ["schema_version", "agg_version", "ok", "config", "backends", "isolation", "container_engine", "container_images", "network", "problems", "warnings"] {
             assert!(r.get(key).is_some(), "missing `{key}`");
         }
         assert_eq!(r["ok"], false, "no config is not ok");
@@ -196,5 +228,6 @@ mod tests {
         assert_eq!(names, KNOWN);
         assert!(r["backends"][0]["capabilities"]["supports_one_shot"].is_boolean());
         assert_eq!(r["isolation"]["none"]["available"], true);
+        assert_eq!(r["network"]["mode"], "open");
     }
 }

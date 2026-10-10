@@ -161,6 +161,12 @@ impl AgentBackend for Claude {
         Ok(OneShot { body: unwrap_envelope(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
 
+    /// `api.anthropic.com`, or the host of `ANTHROPIC_BASE_URL` when a gateway is configured.
+    fn api_hosts(&self) -> Vec<String> {
+        let base = std::env::var("ANTHROPIC_BASE_URL").ok().and_then(|u| super::url_host(&u));
+        vec![base.unwrap_or_else(|| "api.anthropic.com".to_string())]
+    }
+
     /// An API key (`ANTHROPIC_API_KEY`), a long-lived subscription token (`CLAUDE_CODE_OAUTH_TOKEN`,
     /// from `claude setup-token`) or a gateway's (`ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`).
     /// On macOS the interactive login lives in the Keychain, which no container can read — one of

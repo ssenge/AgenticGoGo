@@ -350,6 +350,11 @@ impl AgentBackend for Copilot {
         Ok(OneShot { body: last_assistant_message(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
 
+    /// Copilot's API, and GitHub's for the token exchange.
+    fn api_hosts(&self) -> Vec<String> {
+        vec!["api.githubcopilot.com".to_string(), "api.github.com".to_string()]
+    }
+
     /// Copilot authenticates from a GitHub token in the environment.
     fn container_env(&self) -> &'static [&'static str] {
         &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]

@@ -258,6 +258,15 @@ impl Agg {
         self
     }
 
+    /// The run's network EGRESS policy — YAML's `isolation_policy.network`. `Network::Allow(hosts)`
+    /// confines every confined process to those `host[:port]` destinations through agg's proxy;
+    /// every step must then run on a tier that enforces it, and its agent's endpoint must be listed
+    /// (`step()` refuses otherwise).
+    pub fn network(mut self, network: crate::isolation::egress::Network) -> Agg {
+        self.cfg.isolation_policy.network = network;
+        self
+    }
+
     /// A READ-ONLY context directory from outside the project, seen by every step and judge of the
     /// run — the driver's spelling of a YAML `context:` entry. `path` is absolute, `~/`-relative or
     /// relative to the project; `name` is the short `as:` (`/context/<name>` in a container,
@@ -585,6 +594,22 @@ impl Agg {
                  nothing would stop it from writing them. Confine it: `.isolation(Isolation::Sandbox)` \
                  or `Isolation::Container`"
             )));
+        }
+        // …and so does the network allow-list's: a tier that can enforce it, an agent that can
+        // still reach its model behind it.
+        if let crate::isolation::egress::Network::Allow(entries) = &self.cfg.isolation_policy.network {
+            let allow = crate::isolation::egress::allow::AllowList::parse(entries).map_err(|bad| {
+                let why: Vec<String> = bad.into_iter().map(|(i, w)| format!("allow[{i}]: {w}")).collect();
+                Fatal::Other(anyhow::anyhow!("the network allow-list is malformed: {}", why.join("; ")))
+            })?;
+            let agent: &dyn crate::backend::AgentBackend = match &step.agent {
+                Agent::Custom(b) => &**b,
+                a => crate::backend::for_name(a.name())?,
+            };
+            let (on_tier, on_endpoint) = crate::isolation::egress::step_problems(step.isolation, agent, &allow);
+            if let Some(m) = on_tier.into_iter().chain(on_endpoint).next() {
+                return Err(Fatal::Other(anyhow::anyhow!("step `{name}`: {m}")));
+            }
         }
         let write_deny = crate::protect::union(&self.cfg.defaults.write_deny, &step.write_deny);
         // The driver's steps are built in code, so `capability::check` never sees them: the

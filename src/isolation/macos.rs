@@ -60,7 +60,7 @@ pub fn available() -> bool {
 pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Command> {
     // `$TMPDIR` is always writable (falling back to `/tmp` if unset).
     let tmp = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    let mut profile = profile(jail.cwd, &tmp, jail.writable, jail.denied)?;
+    let mut profile = profile(jail.cwd, &tmp, jail.writable, jail.denied, jail.net.as_ref())?;
     // Seatbelt resolves the LAST matching rule, so the protected-path denies go at the very end:
     // after the cwd allow they take back, and after the network/mach allows they do not touch.
     for r in jail.rules {
@@ -114,7 +114,7 @@ fn canonical(p: &Path) -> PathBuf {
 /// and `/usr/bin/diff` hardcodes `/tmp/diff.XXXXXXXX` and ignores `$TMPDIR`. It costs no real blast
 /// radius — `/tmp` is world-writable to begin with — and it is exactly what Codex's own
 /// `workspace-write` policy grants.
-fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf], denied: &[PathBuf]) -> Result<String> {
+fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf], denied: &[PathBuf], net: Option<&super::NetRule>) -> Result<String> {
     let mut subpaths = vec![canonical(cwd), canonical(tmp), canonical(Path::new("/tmp"))];
     subpaths.extend(writable.iter().map(|p| canonical(p)));
 
@@ -171,8 +171,41 @@ fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf], denied: &[PathBuf]) -> 
          (allow file-write* {writes})\
          {DEV_WRITES}\
          {denies}\
-         (allow network*)(allow mach*)(allow sysctl-read)(allow system-sched)"
+         {network}(allow mach*)(allow sysctl-read)(allow system-sched)",
+        network = network_rules(net, cwd, tmp)
     ))
+}
+
+/// The network clause: everything (`network: open`), or — under an allow-list — OUTBOUND only to
+/// agg's proxy on loopback and the `localhost` ports the list grants.
+///
+/// What stays open is what is not egress: binding and accepting (a test server the worker starts),
+/// and unix-domain sockets under the project and `$TMPDIR` (a socket the worker's own tooling made).
+/// What goes: every other outbound TCP/UDP — a direct IP, a DoH resolver, a proxy the worker names
+/// itself — and every other unix socket, including `mDNSResponder` (so no DNS lookups: the proxy
+/// resolves names; `localhost` still resolves from `/etc/hosts`) and a container engine's socket
+/// (`docker run` would be an open-network side door). Raw sockets need root and are denied anyway.
+/// Each clause was measured on a real host.
+fn network_rules(net: Option<&super::NetRule>, cwd: &Path, tmp: &Path) -> String {
+    let Some(n) = net else { return "(allow network*)".to_string() };
+    let mut s = format!(
+        "(allow network-bind network-inbound)\
+         (allow network-outbound (remote tcp \"localhost:{}\"))\
+         (allow network-outbound (remote unix-socket (subpath \"{}\")) (remote unix-socket (subpath \"{}\")))",
+        n.proxy_port,
+        escape(&canonical(cwd).to_string_lossy()),
+        escape(&canonical(tmp).to_string_lossy()),
+    );
+    match &n.loopback {
+        crate::isolation::egress::allow::Loopback::None => {}
+        crate::isolation::egress::allow::Loopback::Any => s.push_str("(allow network-outbound (remote ip \"localhost:*\"))"),
+        crate::isolation::egress::allow::Loopback::Ports(ps) => {
+            for p in ps {
+                s.push_str(&format!("(allow network-outbound (remote ip \"localhost:{p}\"))"));
+            }
+        }
+    }
+    s
 }
 
 /// The rules that keep a directory OUTSIDE the project read-only (a run's context dirs): a
@@ -225,7 +258,7 @@ mod tests {
         // tmp is passed explicitly — no global env mutation, so this can't race parallel tests.
         // These paths do not exist, which also pins the `canonical` fallback: an unresolvable path
         // is emitted VERBATIM, never dropped (dropping would silently narrow the writable set).
-        let p = profile(Path::new("/repo/proj"), Path::new("/var/folders/xy"), &[PathBuf::from("/home/u/.claude")], &[]).unwrap();
+        let p = profile(Path::new("/repo/proj"), Path::new("/var/folders/xy"), &[PathBuf::from("/home/u/.claude")], &[], None).unwrap();
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow file-read*)"), "reads everything");
         assert!(p.contains("(subpath \"/repo/proj\")"), "cwd is writable");
@@ -239,6 +272,22 @@ mod tests {
         assert!(!p.contains("(allow signal)"), "never grant unfiltered signal: {p}");
     }
 
+    /// Under an allow-list the ONLY outbound TCP is the proxy's port (+ granted loopback ports);
+    /// binding/accepting and unix sockets in the project + tmp stay; `network*` is gone.
+    #[test]
+    fn an_allow_list_narrows_outbound_to_the_proxy() {
+        use crate::isolation::egress::allow::Loopback;
+        let rule = super::super::NetRule { proxy_port: 4321, loopback: Loopback::Ports(vec![5432]) };
+        let p = profile(Path::new("/repo/proj"), Path::new("/private/tmp/x"), &[], &[], Some(&rule)).unwrap();
+        assert!(!p.contains("(allow network*)"), "{p}");
+        assert!(p.contains("(allow network-outbound (remote tcp \"localhost:4321\"))"), "{p}");
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:5432\"))"), "{p}");
+        assert!(p.contains("(remote unix-socket (subpath \"/repo/proj\"))"), "{p}");
+        assert!(!p.contains("mDNSResponder"), "no DNS: the proxy resolves: {p}");
+        let open = profile(Path::new("/repo/proj"), Path::new("/private/tmp/x"), &[], &[], None).unwrap();
+        assert!(open.contains("(allow network*)"));
+    }
+
     /// BUG 2, and the trap inside it. The positive half is that `/dev/null` is writable at all; the
     /// NEGATIVE half is the half that matters — `(literal "/dev/stdout")`/`"/dev/stderr"` are dead
     /// clauses (symlinks to `/dev/fd/N`, and Seatbelt matches canonically), and `(subpath "/dev")`
@@ -246,7 +295,7 @@ mod tests {
     /// future edit reaches for, so both are pinned shut here.
     #[test]
     fn profile_grants_the_measured_dev_writes_and_nothing_wider() {
-        let p = profile(Path::new("/repo/proj"), Path::new("/private/tmp/x"), &[], &[]).unwrap();
+        let p = profile(Path::new("/repo/proj"), Path::new("/private/tmp/x"), &[], &[], None).unwrap();
         assert!(p.contains("(allow file-write-data (literal \"/dev/null\") (subpath \"/dev/fd\"))"), "{p}");
         assert!(!p.contains("(subpath \"/dev\")"), "all of /dev grants /dev/ttys* → terminal injection: {p}");
         assert!(!p.contains("/dev/stdout"), "dead clause — /dev/stdout is a symlink to /dev/fd/N: {p}");
@@ -257,7 +306,7 @@ mod tests {
     /// reported `isolation: sandbox` — the one failure mode this feature must never have. Refuse.
     #[test]
     fn profile_refuses_a_writable_path_that_resolves_to_root() {
-        let err = profile(Path::new("/"), Path::new("/private/tmp/x"), &[], &[]).unwrap_err().to_string();
+        let err = profile(Path::new("/"), Path::new("/private/tmp/x"), &[], &[], None).unwrap_err().to_string();
         assert!(err.contains("resolves to `/`"), "must refuse loudly: {err}");
     }
 
@@ -268,7 +317,7 @@ mod tests {
     #[test]
     fn profile_canonicalizes_symlinked_subpaths() {
         // `/tmp` really is a symlink to `/private/tmp` on every macOS host.
-        let p = profile(Path::new("/tmp"), Path::new("/tmp"), &[], &[]).unwrap();
+        let p = profile(Path::new("/tmp"), Path::new("/tmp"), &[], &[], None).unwrap();
         assert!(p.contains("(subpath \"/private/tmp\")"), "symlinked cwd/tmp resolved: {p}");
         assert!(!p.contains("(subpath \"/tmp\")"), "the unresolved path must not be what we emit: {p}");
     }
@@ -284,7 +333,7 @@ mod tests {
         let file = dir.join(".agent.json");
         std::fs::write(&file, "{}").unwrap();
 
-        let p = profile(&dir, Path::new("/private/tmp/x"), &[file.clone(), dir.clone()], &[]).unwrap();
+        let p = profile(&dir, Path::new("/private/tmp/x"), &[file.clone(), dir.clone()], &[], None).unwrap();
         let canon = std::fs::canonicalize(&file).unwrap();
         let esc = regex_escape(&canon.to_string_lossy());
         assert!(p.contains(&format!("(regex #\"^{esc}\")")), "the FILE gets a prefix regex: {p}");

@@ -86,6 +86,12 @@ pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Assessment {
     match cfg.ruler_backend() {
         Ok(ruler) => {
             let uses_llm_judge = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
+            // an LLM judge's one-shot is confined like the worker — behind the allow-list too
+            if let (true, Some(allow)) = (uses_llm_judge, allow_list(cfg)) {
+                if let Some(m) = crate::isolation::egress::endpoint_problem(ruler, &allow) {
+                    a.problems.push(Problem::new("isolation_policy.network.allow", format!("the ruler: {m}")));
+                }
+            }
             let uses_summarizer = cfg.summary.enabled;
             if (uses_llm_judge || uses_summarizer) && !ruler.capabilities().supports_one_shot {
                 a.problems.push(Problem::new(
@@ -105,6 +111,10 @@ pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Assessment {
     for step_name in cfg.steps.keys() {
         step_demands(cfg, step_name, &mut a);
     }
+    // ── what an allow-list does NOT cover is said out loud, never left to be discovered ──
+    if allow_list(cfg).is_some() {
+        uncovered_by_allow_list(cfg, &mut a.warnings);
+    }
     // ── the container images: each has the CLI it must run, and the engine sees what is mounted ──
     let (images, found) = crate::isolation::probe::assess(cfg, judges, dir);
     a.images = images;
@@ -112,6 +122,34 @@ pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Assessment {
         problem::push_unique(&mut a.problems, p);
     }
     a
+}
+
+/// The run's parsed allow-list, when it has a valid one (a malformed one is reported by
+/// `isolation::run::resolve`).
+fn allow_list(cfg: &AggConfig) -> Option<crate::isolation::egress::allow::AllowList> {
+    match &cfg.isolation_policy.network {
+        crate::isolation::egress::Network::Allow(e) => crate::isolation::egress::allow::AllowList::parse(e).ok(),
+        crate::isolation::egress::Network::Open => None,
+    }
+}
+
+/// Warnings for the processes an allow-list does not reach: hooks on a container run (host
+/// tooling, unconfined), and `background` hooks on every tier (never confined).
+fn uncovered_by_allow_list(cfg: &AggConfig, warnings: &mut Vec<Problem>) {
+    let h = &cfg.hooks;
+    let foreground = !(h.on_start.is_empty() && h.on_session_start.is_empty() && h.on_session_end.is_empty() && h.on_stop.is_empty())
+        || cfg.sequence.notify.as_ref().is_some_and(|n| !n.cmd.is_empty());
+    let container = cfg.steps.keys().filter_map(|s| cfg.resolve_step(s).ok()).any(|s| s.isolation == crate::isolation::Isolation::Container);
+    if foreground && (container || !h.on_start.is_empty()) {
+        warnings.push(Problem::new(
+            "hooks",
+            "the network allow-list does not cover hooks that run on the host — `on_start` always, and \
+             every hook and `notify.cmd` on a `container` run: they keep the host's open network",
+        ));
+    }
+    if !h.background.is_empty() {
+        warnings.push(Problem::new("hooks.background", "`background` hooks are never confined — the network allow-list does not cover them"));
+    }
 }
 
 /// The agents whose CLI must be on the HOST's PATH, each at the first key that names it: every
@@ -208,6 +246,17 @@ fn step_demands(cfg: &AggConfig, step_name: &str, a: &mut Assessment) {
              directories — nothing would stop this step from writing them.\n      \
              fix: `isolation: sandbox` or `isolation: container` on every step"
         )));
+    }
+    // A network allow-list needs a tier that can enforce it, and the step's agent must still be
+    // able to reach its own model behind it.
+    if let Some(allow) = allow_list(cfg) {
+        let (on_tier, on_endpoint) = crate::isolation::egress::step_problems(step.isolation, b, &allow);
+        for m in on_tier {
+            problems.push(Problem::new(iso_at.clone(), format!("step `{step_name}` (agent `{agent}`) {m}")));
+        }
+        for m in on_endpoint {
+            problem::push_unique(problems, Problem::new("isolation_policy.network.allow", m));
+        }
     }
     if step.isolation == crate::isolation::Isolation::Sandbox && !crate::isolation::available() {
         problems.push(Problem::new(iso_at.clone(), format!(

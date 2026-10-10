@@ -6,6 +6,20 @@ Notable changes to agg. Newest first; each entry names the config keys and inter
 
 ### Added
 
+- **Network egress allow-list — `isolation_policy.network: open | { allow: [host[:port], …] }`.**
+  `open` stays the default. `allow` confines the worker, its judges and the LLM judge's one-shot (and
+  on `sandbox` the hooks) to the listed destinations through ONE enforcement point, a small threaded
+  proxy in agg that checks the name a client asked for before resolving it, resolves allowed names
+  itself and refuses loopback/link-local answers (DNS rebinding, the metadata address). The
+  `container` tier is the reference: an `--internal` network whose only reachable address is a relay
+  to the proxy, `NET_RAW` dropped. macOS `sandbox`: Seatbelt allows outbound TCP only to the proxy's
+  loopback port (+ `localhost[:port]` entries), and no DNS. Linux `sandbox`, podman and `none` refuse
+  an allow-list at startup — never silently open. Startup also refuses a list that does not hold
+  each agent's own endpoint (`AgentBackend::api_hosts`: `api.anthropic.com`, `api.openai.com` /
+  `chatgpt.com`, …) and warns about what it cannot cover (hooks on a container run, `on_start`,
+  `background`). Adversarial tests on both tiers (direct IP, DoH, raw socket / UDP from a child, a
+  worker-set proxy, plain DNS). `agg doctor --json` reports `network`. Driver: `Agg::network`. See
+  `docs/CONFIG.md` → *Network egress* for the platform matrix.
 - **The container tier runs the agent.** Under `isolation: container` the agent CLI itself runs inside
   the step's `image:` — as the project owner (`--user uid:gid`, never root), with a fresh `HOME` every
   worker session, and its credentials passed **by name** (`-e NAME`: `ANTHROPIC_API_KEY`,

@@ -102,6 +102,12 @@ pub struct AggConfig {
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IsolationPolicy {
+    /// network EGRESS: `open` (the default — no policy) or `{ allow: [host[:port], …] }`, which
+    /// confines every confined process of the run to those destinations through agg's own proxy
+    /// ([`crate::isolation::egress`]). Needs a tier that can enforce it on every step (`container`
+    /// anywhere, `sandbox` on macOS), and the agents' own API endpoints in the list.
+    #[serde(default)]
+    pub network: crate::isolation::egress::Network,
     /// environment variables passed INTO every container by NAME, when set in agg's environment
     /// (a token a judge's tooling needs, a proxy setting). The value never appears on a command
     /// line, in a log, a ledger or the report. Each agent's own credential variables
