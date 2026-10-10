@@ -230,7 +230,9 @@ struct Named {
 
 /// The run-set, in run-set order, each name with the key that first named it.
 ///
-/// DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ notify_if ∪ every `until:` (§5.3).
+/// DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ notify_if ∪ every `until:` ∪ every
+/// ratchet key ∪ every group member (§5.3). A group an expression uses as a subset contributes its
+/// members on that expression's terms — so a group in `done_if` is in the DoD-set.
 /// On the driver path there is no DoD at all — agg is never told what "done" means, so it must
 /// not claim success. `Sequence::done_if` still carries its YAML default; it is simply not read.
 ///
