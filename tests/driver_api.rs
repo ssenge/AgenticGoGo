@@ -1360,3 +1360,42 @@ fn time_spent_blocked_is_banked_as_human_wait_not_as_work() {
         clock.human_wait_secs
     );
 }
+
+// ── the run report (A-1) ─────────────────────────────────────────────────────────────────────
+
+fn read_report(dir: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(agg::paths::report_json(dir)).unwrap()).unwrap()
+}
+
+/// A driver run leaves the same `report.json` `agg run` does, written when the `Agg` drops; and
+/// `driver::run` corrects it to `error` when the driver returns one, which `Drop` cannot see.
+#[test]
+fn a_driver_run_leaves_a_report_and_driver_run_corrects_an_err() {
+    let tmp = project();
+    let dir = tmp.path();
+    {
+        let agg = Agg::open(dir).unwrap();
+        agg.step(&work()).unwrap();
+        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+        agg.step(&work()).unwrap(); // staged, never gated
+    }
+    let r = read_report(dir);
+    assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("done"), Some(0)));
+    assert_eq!(r["sessions"]["total"], 2);
+    assert_eq!(r["sessions"]["merged"], 1);
+    assert_eq!(r["sessions"]["staged_unmerged"], 1);
+    assert!(r["result"]["staged_branch"].is_string(), "the ungated span is named: {r}");
+    let first = r["run_id"].clone();
+
+    let code = agg::driver::run(|| {
+        let agg = Agg::open(dir)?;
+        agg.step(&work())?;
+        Err(Fatal::Other(anyhow::anyhow!("driver bug")))
+    });
+    assert_eq!(code, std::process::ExitCode::from(1));
+    let r = read_report(dir);
+    assert_ne!(r["run_id"], first, "a fresh run, a fresh report");
+    assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("error"), Some(1)));
+    assert!(r["error"].as_str().unwrap().contains("driver bug"), "{r}");
+    assert_eq!(r["sessions"]["total"], 1, "the rest of what the run recorded is kept");
+}
