@@ -118,7 +118,8 @@ impl PreStart for GitSetup {
         // of a fresh project — a session branch is the first thing that ever commits it — so checking
         // base out DELETES it from the work tree, and the next worker's own `git add -A` would then
         // commit `agg/private/` (agg's own ledger, state.json, LOG.md) onto a session branch and
-        // wedge every subsequent checkout.
+        // wedge every subsequent checkout. A ROLLBACK deletes it the same way mid-run, which is why
+        // the entries also go to `info/exclude` (`git::ensure_agg_excluded`), where nothing can.
         crate::git::ensure_agg_gitignored(dir);
 
         // ── rule 3: park a previous run's surviving span before `create_branch` can delete it ──

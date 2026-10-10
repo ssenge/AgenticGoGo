@@ -283,6 +283,8 @@ pub fn remove_file(dir: &Path, path: &str) {
 /// lines. Only the two runtime-state dirs are ignored under `agg/`: the committed config + judges must stay tracked.
 /// Best-effort.
 pub fn ensure_agg_gitignored(dir: &Path) {
+    // FIRST, and unconditionally: the `.gitignore` below is a work-tree file a rollback can delete.
+    ensure_agg_excluded(dir);
     let gi = dir.join(".gitignore");
     let existing = std::fs::read_to_string(&gi).unwrap_or_default();
     let has = |opts: &[&str]| existing.lines().any(|l| opts.contains(&l.trim()));
@@ -323,6 +325,44 @@ pub fn ensure_agg_gitignored(dir: &Path) {
     // config + judge library, inverting the moat. (We do NOT untrack a `.obsidian/` a user chose to
     // commit — only ignore it going forward.)
     let _ = git(dir, &["rm", "-r", "--cached", "--quiet", "agg/state"]);
+}
+
+/// The entries agg itself needs ignored: the two runtime-state halves and an Obsidian vault config.
+pub const AGG_IGNORED: [&str; 3] = ["agg/state/", "agg/private/", ".obsidian/"];
+
+/// Write [`AGG_IGNORED`] into the repository's `info/exclude` as well — the copy no rollback can
+/// remove.
+///
+/// `.gitignore` is a WORK-TREE file, and on a project whose base branch never committed one, the
+/// first session commits it on its branch; a rollback then deletes it again (tracked there, absent on
+/// base), and with it every agg entry — so the next session committed `agg/private/`. `info/exclude`
+/// lives in the git directory: no checkout, merge, abort or reset touches it. `.gitignore` is still
+/// written, so a clone of the project keeps ignoring the same paths. Idempotent; best-effort.
+pub fn ensure_agg_excluded(dir: &Path) {
+    // `--git-path` resolves `info/` to the COMMON git dir, which is where a linked worktree reads it.
+    let (ok, rel, _) = git(dir, &["rev-parse", "--git-path", "info/exclude"]);
+    if !ok || rel.is_empty() {
+        return;
+    }
+    let path = dir.join(rel);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let missing: Vec<&str> =
+        AGG_IGNORED.iter().copied().filter(|e| !existing.lines().any(|l| l.trim() == *e)).collect();
+    if missing.is_empty() {
+        return;
+    }
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    for e in missing {
+        text.push_str(e);
+        text.push('\n');
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, text);
 }
 
 
