@@ -89,6 +89,8 @@ defaults:                        # inherited by every step; a step may override 
                                  # codex clamps xhigh/max -> high; copilot cannot combine effort with model:"auto".
   state: "state/STATE.md"        # worker-curated forward-advice file (under gitignored agg/state/)
   write_deny: ["tests/oracles/**"]  # PROTECTED: readable, never changed — gate-checked on EVERY tier
+context:                         # READ-ONLY dirs from OUTSIDE the project; every step must be sandbox/container
+  - { path: "~/kb/brain", as: "brain", mode: "ro" }   # container: /context/brain · env AGG_CONTEXT_BRAIN
 judge:                           # THE RULER — runs .md judges + the summarizer. Immutable across a run.
   agent: "claude"
   model: "haiku"

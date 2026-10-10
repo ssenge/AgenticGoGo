@@ -57,15 +57,16 @@ pub fn available() -> bool {
 /// Build the `sandbox-exec -p '<profile>' -- prog args…` wrapper.
 /// `rules` are extra, already-formed Seatbelt deny rules — the step's `write_deny` patterns
 /// ([`crate::protect::seatbelt_rules`]) — emitted after every allow so they win.
-pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], rules: &[String], prog: &OsStr, args: &[OsString]) -> Result<Command> {
+pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Command> {
     // `$TMPDIR` is always writable (falling back to `/tmp` if unset).
     let tmp = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    let mut profile = profile(cwd, &tmp, writable, denied)?;
+    let mut profile = profile(jail.cwd, &tmp, jail.writable, jail.denied)?;
     // Seatbelt resolves the LAST matching rule, so the protected-path denies go at the very end:
     // after the cwd allow they take back, and after the network/mach allows they do not touch.
-    for r in rules {
+    for r in jail.rules {
         profile.push_str(r);
     }
+    profile.push_str(&readonly_rules(jail.readonly));
     let mut cmd = Command::new("sandbox-exec");
     cmd.arg("-p").arg(profile).arg("--").arg(prog);
     for a in args {
@@ -174,6 +175,28 @@ fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf], denied: &[PathBuf]) -> 
     ))
 }
 
+/// The rules that keep a directory OUTSIDE the project read-only (a run's context dirs): a
+/// `file-write*` deny on the directory itself, and an unlink deny on each of its ancestors.
+///
+/// The ancestors matter when the directory sits somewhere the jail can otherwise write (under
+/// `/tmp`, `$TMPDIR`, an agent's state dir): renaming a parent away and creating a new one in its
+/// place would swap the context for one the worker wrote, without ever writing INSIDE the denied
+/// subpath. Seatbelt checks a rename as an unlink of the source, so denying that on every ancestor
+/// closes it; for an ancestor the jail could not write anyway, the rule costs nothing.
+fn readonly_rules(dirs: &[PathBuf]) -> String {
+    let mut out = String::new();
+    for d in dirs.iter().map(|d| canonical(d)).filter(|d| d.as_os_str() != "/" && !d.as_os_str().is_empty()) {
+        out.push_str(&format!("(deny file-write* (subpath \"{}\"))", escape(&d.to_string_lossy())));
+        for a in d.ancestors().skip(1).filter(|a| a.as_os_str() != "/") {
+            let rule = format!("(deny file-write-unlink (literal \"{}\"))", escape(&a.to_string_lossy()));
+            if !out.contains(&rule) {
+                out.push_str(&rule);
+            }
+        }
+    }
+    out
+}
+
 /// Escape a path for a double-quoted Seatbelt string literal: backslash and double-quote.
 fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -271,6 +294,17 @@ mod tests {
             "a DIRECTORY must not get one — it would match same-prefix siblings: {p}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A context dir is denied for writing, and so is renaming any of its ancestors away — the swap
+    /// that would replace it without ever writing inside it.
+    #[test]
+    fn a_readonly_dir_and_its_ancestors_are_denied() {
+        let r = readonly_rules(&[PathBuf::from("/kb/brain")]);
+        assert!(r.contains("(deny file-write* (subpath \"/kb/brain\"))"), "{r}");
+        assert!(r.contains("(deny file-write-unlink (literal \"/kb\"))"), "{r}");
+        assert!(!r.contains("(literal \"/\")"), "never the root: {r}");
+        assert_eq!(readonly_rules(&[]), "");
     }
 
     #[test]

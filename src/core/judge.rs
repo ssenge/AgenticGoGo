@@ -252,6 +252,13 @@ fn run_script(
         .env("AGG_JUDGE", name)
         .env("AGG_PROJECT_DIR", cwd);
     redirect_caches(&mut command, &scratch, &cache);
+    if isolation == crate::isolation::Isolation::None {
+        // a confining tier exports the run's context dirs itself (`wrap`/`containerize`); an
+        // unconfined judge (`agg judge`, a driver's baseline) still finds them by the same names.
+        for (k, v) in crate::isolation::policy::for_dir(cwd).context_env(isolation) {
+            command.env(k, v);
+        }
+    }
     if isolation == crate::isolation::Isolation::Sandbox {
         // `denies` = the whole project. Emitted AFTER the allow-list (`isolation/macos.rs`), so it
         // WINS over the `cwd` grant every wrapped command gets — which is the point: this judge may

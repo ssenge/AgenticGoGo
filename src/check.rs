@@ -74,7 +74,8 @@ pub fn validate(config_base: &Path, config: &Path) -> Validation {
         }
     };
 
-    let a = crate::capability::assess(&cfg, &judges);
+    let project = config_base.parent().unwrap_or(config_base);
+    let a = crate::capability::assess(&cfg, &judges, project);
     v.problems.extend(a.unknown_agents);
     v.problems.extend(a.problems);
     v.warnings = a.warnings;

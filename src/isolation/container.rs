@@ -117,6 +117,12 @@ pub fn containerize(
             );
         }
     }
+    // The run's context dirs, read-only at `/context/<as>` (derived from the project dir — see
+    // [`super::policy`] — so every surface that containerizes gets them).
+    let run = super::policy::for_dir(&cwd_resolved);
+    for c in &run.contexts {
+        mount_at(&mut out, &c.host, &c.container_path(), true)?;
+    }
     for (k, v) in envs {
         if let Some(v) = v {
             let mut kv = k;
@@ -124,6 +130,9 @@ pub fn containerize(
             kv.push(v);
             out.arg("-e").arg(kv);
         }
+    }
+    for (k, v) in run.context_env(super::Isolation::Container) {
+        out.arg("-e").arg(format!("{k}={}", v.display()));
     }
     // the image, then the ORIGINAL command — nothing may come between them or after them.
     out.arg(image).arg(prog);
@@ -170,6 +179,27 @@ fn canonical(p: &Path) -> PathBuf {
 /// reject the run outright, and a `:` in the path makes it split the spec in the wrong place and
 /// mount something else entirely — a "confined" session writing to a path nobody meant.
 fn mount(cmd: &mut Command, p: &Path, ro: bool) -> Result<()> {
+    mount_at(cmd, p, p, ro)
+}
+
+/// [`mount`] with a container path of its own — for a host directory that appears somewhere fixed
+/// inside (a context at `/context/<as>`). Same two refusals, on BOTH sides of the `:`.
+fn mount_at(cmd: &mut Command, p: &Path, at: &Path, ro: bool) -> Result<()> {
+    for side in [p, at] {
+        check_mountable(side)?;
+    }
+    let mut spec = p.as_os_str().to_owned();
+    spec.push(OsStr::new(":"));
+    spec.push(at.as_os_str());
+    if ro {
+        spec.push(OsStr::new(":ro"));
+    }
+    cmd.arg("-v").arg(spec);
+    Ok(())
+}
+
+/// A path the engine's `-v host:container` spec can carry: absolute, and with no `:` in it.
+fn check_mountable(p: &Path) -> Result<()> {
     if !p.is_absolute() {
         bail!(
             "`isolation: container` needs an absolute path to bind-mount, got `{}` — the container \
@@ -184,13 +214,6 @@ fn mount(cmd: &mut Command, p: &Path, ro: bool) -> Result<()> {
             p.display()
         );
     }
-    let mut spec = p.as_os_str().to_owned();
-    spec.push(OsStr::new(":"));
-    spec.push(p.as_os_str());
-    if ro {
-        spec.push(OsStr::new(":ro"));
-    }
-    cmd.arg("-v").arg(spec);
     Ok(())
 }
 
@@ -300,6 +323,24 @@ mod tests {
                 .to_string();
         assert!(err.contains("absolute"), "must say why: {err}");
         assert!(err.contains("relative/not-a-real-dir"), "must name the path: {err}");
+    }
+
+    /// The run's context dirs reach EVERY containerized process read-only at `/context/<as>`, with
+    /// their env var — derived from the project dir, so the caller passes nothing.
+    #[test]
+    fn containerize_mounts_the_runs_context_dirs_read_only() {
+        let proj = tempfile::tempdir().unwrap();
+        let kb = tempfile::tempdir().unwrap();
+        let host = canonical(kb.path());
+        let _g = super::super::policy::register(
+            proj.path(),
+            super::super::policy::RunPolicy {
+                contexts: vec![super::super::policy::ContextMount { name: "kb".into(), host: host.clone() }],
+            },
+        );
+        let args = argv(&containerize(Command::new("true"), proj.path(), &[], &[], DEFAULT_IMAGE).unwrap());
+        assert!(args.contains(&format!("{}:/context/kb:ro", host.display())), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "AGG_CONTEXT_KB=/context/kb"), "{args:?}");
     }
 
     #[test]

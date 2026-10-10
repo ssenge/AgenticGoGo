@@ -110,6 +110,9 @@ struct Started {
     /// the Drop guards live HERE, so dropping the `Agg` fires them on return, early return AND
     /// panic-unwind.
     _stop: StopHooks,
+    /// the run's confinement policy — AFTER `_stop`, so it is still registered while the `on_stop`
+    /// hooks fire (fields drop in declaration order).
+    _policy: crate::isolation::policy::PolicyGuard,
     _pid: RunPidGuard,
     /// this run's report handle (`run_id`, the write latch). `Drop for Agg` writes the report.
     report: crate::report::RunHandle,
@@ -216,6 +219,20 @@ impl Agg {
         self.cfg.instructions = rel.into();
         self
     }
+
+    /// A READ-ONLY context directory from outside the project, seen by every step and judge of the
+    /// run — the driver's spelling of a YAML `context:` entry. `path` is absolute, `~/`-relative or
+    /// relative to the project; `name` is the short `as:` (`/context/<name>` in a container,
+    /// `AGG_CONTEXT_<NAME>` everywhere). Validated when the run boots; every step must then be
+    /// confined (`Isolation::Sandbox` or `Container`), or `step()` refuses it.
+    pub fn context(mut self, path: impl Into<String>, name: impl Into<String>) -> Agg {
+        self.cfg.context.push(crate::core::config::ContextDir {
+            path: path.into(),
+            name: name.into(),
+            mode: crate::core::config::ContextMode::Ro,
+        });
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -256,7 +273,7 @@ impl Agg {
         // the driver variant: an empty `sequence.steps` means no entry list to validate, no
         // `done_if`, and an EMPTY run-set — judges are lazy and the driver asks.
         let asm = crate::assembly::assemble(&cfg, &config_base)?;
-        crate::capability::check(&cfg, &asm.engine.judges)?;
+        crate::capability::check(&cfg, &asm.engine.judges, &dir)?;
         for name in cfg.agent_names() {
             crate::backend::for_name(&name)?.preflight()?;
         }
@@ -272,6 +289,7 @@ impl Agg {
         }
         crate::os::detach::write_run_pid(&dir);
         let pid_guard = RunPidGuard { dir: dir.clone() };
+        let policy_guard = crate::isolation::run::register(&cfg, &dir)?;
         crate::os::signals::install();
         // behind the guard, like the YAML path: it deletes the previous run's report.
         // a resume reports under the id the run started with (A-18.3).
@@ -405,7 +423,15 @@ impl Agg {
             self.ended.set(Some(outcome));
         }
 
-        Ok(Started { st: RefCell::new(st), lc: lifecycle, replay, _stop: stop_hooks, _pid: pid_guard, report })
+        Ok(Started {
+            st: RefCell::new(st),
+            lc: lifecycle,
+            replay,
+            _stop: stop_hooks,
+            _policy: policy_guard,
+            _pid: pid_guard,
+            report,
+        })
     }
 }
 
@@ -512,6 +538,15 @@ impl Agg {
         ));
         if !problems.is_empty() {
             return Err(Fatal::Other(anyhow::anyhow!("{}", crate::problem::render(&problems))));
+        }
+        // The run's context dirs bind only on a confining tier; this is `capability::assess`'s rule,
+        // which a driver's code-built steps never reach.
+        if !self.cfg.context.is_empty() && step.isolation == crate::isolation::Isolation::None {
+            return Err(Fatal::Other(anyhow::anyhow!(
+                "step `{name}` runs under `Isolation::None`, but the run names context directories — \
+                 nothing would stop it from writing them. Confine it: `.isolation(Isolation::Sandbox)` \
+                 or `Isolation::Container`"
+            )));
         }
         let write_deny = crate::protect::union(&self.cfg.defaults.write_deny, &step.write_deny);
         // The driver's steps are built in code, so `capability::check` never sees them: the

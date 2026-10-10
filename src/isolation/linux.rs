@@ -14,7 +14,6 @@
 
 use anyhow::Result;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Is `bwrap` on PATH and runnable?
@@ -31,8 +30,11 @@ pub fn available() -> bool {
 /// Build the `bwrap` wrapper command around `prog args…`, writable = cwd + tmpfs /tmp + `writable`,
 /// minus `denied` (agg's own private state plus this step's `readonly` set — see
 /// [`super::deny_set`]), which lives inside cwd.
-/// `_rules` are Seatbelt rules — macOS only; bwrap's protected paths arrive in `denied` instead.
-pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], _rules: &[String], prog: &OsStr, args: &[OsString]) -> Result<Command> {
+/// `jail.rules` are Seatbelt rules — macOS only; bwrap's protected paths arrive in `denied` instead.
+pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Command> {
+    let (cwd, writable, denied) = (jail.cwd, jail.writable, jail.denied);
+    // Seatbelt rules are macOS's channel; on Linux the protected paths arrive as `denied` binds.
+    debug_assert!(jail.rules.is_empty(), "Seatbelt rules reached the bwrap wrapper");
     let mut cmd = Command::new("bwrap");
     cmd.arg("--die-with-parent")
         // whole host read-only …
@@ -71,8 +73,14 @@ pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], _rules: &[Str
     }
     cmd.arg("--tmpfs").arg("/tmp")
         .arg("--proc").arg("/proc")
-        .arg("--dev").arg("/dev")
-        .arg("--share-net")
+        .arg("--dev").arg("/dev");
+    // The run's context dirs, re-bound read-only AFTER the `/tmp` tmpfs: the host is already
+    // read-only under `--ro-bind / /`, but a directory under `/tmp` would otherwise be hidden by the
+    // tmpfs, and one under a writable bind (an agent's state dir) would be writable.
+    for r in jail.readonly {
+        cmd.arg("--ro-bind").arg(r).arg(r);
+    }
+    cmd.arg("--share-net")
         .arg("--chdir").arg(cwd)
         .arg("--");
     cmd.arg(prog);

@@ -321,6 +321,10 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
         ));
     }
 
+    // ── the read-only context dirs → POINTERS, where THIS step's tier shows them (never their bytes) ──
+    let run = crate::isolation::policy::for_dir(&ctx.dir);
+    s.push_str(&crate::isolation::context::brief_section(&run.contexts, step.isolation));
+
     // ── the LLM wiki — list its pages if any exist ──
     let wiki = crate::paths::wiki_dir(&ctx.dir);
     if wiki.exists() {
