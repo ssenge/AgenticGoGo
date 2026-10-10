@@ -286,6 +286,7 @@ Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
 | `agg spawn` | Start a long task that outlives one worker session |
 | `agg skills` | Install the `/agg:*` skills where your agent finds them |
 | `agg serve` | JSON HTTP API for the web UI |
+| `agg wiki lint` | Check the worker's knowledge wiki against OKF v0.2 (`--json`); read-only |
 
 ## Where to go next
 
@@ -294,6 +295,7 @@ Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
 | [**docs/GUIDE.md**](docs/GUIDE.md) | the full walkthrough — install, agents, judges, sequences, state and memory, interfaces, CLI |
 | [docs/CONFIG.md](docs/CONFIG.md) | every `agg.yaml` key, and what a judge may write |
 | [docs/RUST_API.md](docs/RUST_API.md) | the driver API, resume, and what a driver author must design around |
+| [docs/BACKENDS.md](docs/BACKENDS.md) | adding an agent backend: the contract, capability flags, fixtures, tests |
 | [docs/INSTALL.md](docs/INSTALL.md) | prebuilt binaries, from source, version pinning |
 | [examples/](examples/) | a full YAML workflow, three Rust drivers (incl. [`hil.rs`](examples/hil.rs)), and a research loop |
 | [AGENTS.md](AGENTS.md) | the condensed reference for an agent working **on** this repo |

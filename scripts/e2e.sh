@@ -1931,6 +1931,46 @@ agg_do "$BQ" run --max-sessions 1 > "$BQ/purge.log" 2>&1
 has   "a workflow PURGES commands queued to a previous run"  "$BQ/purge.log" "purged 1 stale command"
 hasnt "…so the stale stop never fires"                       "$BQ/purge.log" "stale from a dead run"
 
+sec "9p. agg wiki lint — the wiki the brief prescribes is OKF v0.2"
+# agg writes NOTHING into the worker's wiki (agg/state/ is the worker's, read as untrusted input):
+# no frontmatter, no `generated`, never `verified`. What agg does own is the brief's footer, which
+# tells the worker the shape to write. This worker follows it literally — it copies every example
+# page from its brief into the wiki — and the result must pass the lint. If the footer drifts from
+# OKF, this fails here, end to end, and in `wiki::tests` at the unit level.
+WK="$(mkproj wikilint)"
+cat > "$WK/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
+mkdir -p agg/state/wiki
+awk '
+  /^`agg\/state\/wiki\/.*`:$/ { f = $0; sub(/^`/, "", f); sub(/`:$/, "", f); next }
+  f != "" && /^```$/ { if (on) { close(f); on = 0; f = "" } else { on = 1; printf "" > f }; next }
+  on { print >> f }
+' agg/private/INSTRUCTIONS.md
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+exit 0
+EOF
+chmod +x "$WK/bin/claude"
+agg_do "$WK" wiki lint --json > "$WK/lint0.json" 2>&1
+is  "before any session there is no wiki — nothing to violate (exit 0)" "$?" "0"
+has "…and the report says the wiki does not exist yet" "$WK/lint0.json" '"exists": false'
+agg_do "$WK" run --max-sessions 1 > "$WK/run.log" 2>&1
+is  "a run whose worker copies the brief's wiki shapes reaches done" "$?" "0"
+exists "the worker wrote a concept page"  "$WK/agg/state/wiki/parser-approach.md"
+exists "…the reserved index"              "$WK/agg/state/wiki/index.md"
+exists "…and the reserved log"            "$WK/agg/state/wiki/log.md"
+agg_do "$WK" wiki lint > "$WK/lint1.txt" 2>&1
+is  "agg wiki lint: the prescribed wiki is OKF v0.2 conformant (exit 0)" "$?" "0"
+has "…and says so"                       "$WK/lint1.txt" "✔ conformant: 3 file(s), 1 concept(s), 0 warning(s)"
+hasnt "agg wrote no \`verified\` into the worker's wiki" "$WK/agg/state/wiki/parser-approach.md" "verified"
+[ "$(ls "$WK/agg/state/wiki" | tr '\n' ' ')" = "index.md log.md parser-approach.md " ] \
+  && ok "…nor any file of its own" || bad "…nor any file of its own" "$(ls "$WK/agg/state/wiki")"
+printf 'a note with no frontmatter\n' > "$WK/agg/state/wiki/loose-note.md"
+agg_do "$WK" wiki lint --json > "$WK/lint2.json" 2>&1
+is  "a page without frontmatter fails the lint (exit 1)" "$?" "1"
+has "…naming the file and the rule" "$WK/lint2.json" '"rule": "frontmatter.missing"'
+
 sec "9j. the docs describe the tool that actually exists"
 # A hand-written CLI table rots the moment a subcommand is added. Assert every clap subcommand
 # appears in the README, and that every relative link in the README resolves to a real file.

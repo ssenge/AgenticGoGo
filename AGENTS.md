@@ -76,6 +76,9 @@ other command is re-queued for the next boundary. `wake` outside a wait is a no-
 - `agg spawn --name <n> --reason "<why>" -- <cmd…>` — a long task that outlives one worker session.
 - `agg skills install [--agent <a>] [--user]` — install the `/agg:*` skills where the agent finds them.
 - `agg serve` — JSON HTTP API for the web UI.
+- `agg wiki lint [path] [--json]` — OKF v0.2 conformance of `agg/state/wiki/` (or `path`): frontmatter + non-empty
+  `type` on every concept, reserved `index.md` (§8) / `log.md` (§9). READ-ONLY — agg never writes the worker's wiki
+  (no frontmatter, never `verified`). Problems ⇒ exit 1; §5 family issues only warn. `docs/schemas/wiki_lint.v1.json`.
 
 ## Config: `agg.yaml` (one file — full reference in `docs/CONFIG.md`)
 **RULE: quote every string scalar** — `agent: "claude"`, never `agent: claude`. Bare bools/ints stay unquoted.
@@ -291,4 +294,6 @@ facade publishes its own into `dash.judges`. Tests: `tests/driver_api.rs`, `test
   and the report, and its seconds are excluded from `work_time`.
 - **agg owns ALL git; the worker NEVER runs git** — the worker just edits files. agg auto-commits its work on the session branch (a `GitAutoCommit` handler on `on_verify`), then merges/keeps or rolls back. The worker never adds/commits/merges/pushes. (GIT_REDESIGN.)
 - **Verify agent behavior on the WIRE** (`scripts/e2e_real.sh`), never from docs — agent CLIs differ (Codex's `-p` is `--profile`; only Claude reports dollar cost; etc.).
+- **Adding a backend:** `docs/BACKENDS.md` (contract, capability flags = refuse rather than degrade, recorded fixtures
+  in `tests/fixtures/agent-streams/`, required tests, checklist). Kiro: investigated, not implemented (`docs/backends/kiro.md`).
 - **Design specs live in `internal/`** (gitignored): `SEQUENCES.md`, `STATE_REDESIGN.md`.
