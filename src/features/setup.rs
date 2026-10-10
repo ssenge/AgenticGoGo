@@ -65,6 +65,11 @@ impl Handler for Baseline {
         for w in ctx.eng.gate.seed(&pre.fresh_verdicts)? {
             eprintln!("  ⚠ {w}");
         }
+        // the untouched tree IS the incumbent: its swe-metrics reports are what session 1 is scored
+        // against (a previous run's are replaced — base may have moved since).
+        for w in crate::metrics::measure::promote(&ctx.dir, None) {
+            eprintln!("  ⚠ could not keep the incumbent's swe-metrics report — {w}");
+        }
         crate::core::ratchet::save(&ctx.dir, &ctx.eng.gate.state)?;
         ctx.eng.reevaluate(&rs, &mut pre);
         ctx.charge_ruler(&pre.judge_usage);

@@ -81,7 +81,27 @@ pub fn run(
                 .unwrap_or_else(|_| Verdict::failed(format!("native judge `{name}` panicked")));
             (verdict, None)
         }
+        // A metric/score judge measures through swe-metrics — ONE measurement per session tree,
+        // shared by every such judge (`metrics::measure`), confined exactly as a script judge is.
+        // `iso_base` is what `scope: changed` measures against.
+        JudgeKind::Metric(m) => (crate::metrics::run_metric(m, &metrics_ctx(cwd, session, step, name, timeout_secs, isolation, iso_base)), None),
+        JudgeKind::Score(s) => {
+            (crate::metrics::run_score(name, s, &metrics_ctx(cwd, session, step, name, timeout_secs, isolation, iso_base)), None)
+        }
     }
+}
+
+/// What a swe-metrics run needs to know about the judge that asked for it.
+fn metrics_ctx<'a>(
+    cwd: &'a Path,
+    session: Option<u32>,
+    step: &'a str,
+    judge: &'a str,
+    timeout: u64,
+    isolation: crate::isolation::Isolation,
+    base: Option<&'a str>,
+) -> crate::metrics::measure::Ctx<'a> {
+    crate::metrics::measure::Ctx { cwd, session, step, judge, timeout, isolation, base: base.filter(|b| !b.is_empty()) }
 }
 
 /// A verdict store with nothing in it — for the call sites that judge ONE judge with no run-set
@@ -138,7 +158,7 @@ fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
 /// exactly where transient state belongs, and keeping them is what makes a failed judge debuggable
 /// after the fact. Upgrade path when it bites: sweep this project's `agg-judges-<key>-*` on run end
 /// (`Agg::drop` / the loop's finalize), keeping the newest few.
-fn scratch_dir(cwd: &Path, session: Option<u32>) -> std::io::Result<std::path::PathBuf> {
+pub(crate) fn scratch_dir(cwd: &Path, session: Option<u32>) -> std::io::Result<std::path::PathBuf> {
     let dir = scratch_path(cwd, session);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
@@ -163,7 +183,7 @@ pub fn scratch_path(cwd: &Path, session: Option<u32>) -> std::path::PathBuf {
 /// addressed and fingerprinted by the toolchain that owns it — staleness is the case cargo, go and
 /// npm are built to detect. A stale *measurement* (`bench.json`) is not detectable by anyone, which
 /// is exactly why that one is per-session and this one is not.
-fn cache_dir(cwd: &Path) -> std::io::Result<std::path::PathBuf> {
+pub(crate) fn cache_dir(cwd: &Path) -> std::io::Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join(format!("agg-judge-cache-{}", project_key(cwd)));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)

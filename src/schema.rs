@@ -154,7 +154,7 @@ mod tests {
     fn the_message_is_serdes_wording() {
         let p = &unknown_keys(&yaml("project: p\njudges: { t: { timeot: 1 } }\n"))[0];
         assert_eq!(p.path, "judges.t.timeot");
-        assert_eq!(p.message, "unknown field `timeot`, expected `timeout`");
+        assert_eq!(p.message, "unknown field `timeot`, expected one of `timeout`, `metric`, `score`, `max`, `min`");
         let p = &unknown_keys(&yaml("project: p\nwatchdog: { x: 1 }\n"))[0];
         assert!(p.message.starts_with("unknown field `x`, expected one of "), "{}", p.message);
     }
@@ -168,5 +168,7 @@ mod tests {
     #[test]
     fn unknown_field_wording_covers_every_arity() {
         assert_eq!(unknown_field("k", None), "unknown field `k`, there are no fields");
+        let one: serde_json::Map<String, Json> = [("timeout".to_string(), Json::Null)].into_iter().collect();
+        assert_eq!(unknown_field("k", Some(&one)), "unknown field `k`, expected `timeout`");
     }
 }

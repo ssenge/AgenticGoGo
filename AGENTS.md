@@ -171,6 +171,18 @@ A judge lives at `agg/judges/<name>.{sh,md}` and is referenced by its **bare NAM
 - **`.sh`** = SCRIPT judge — runs and prints ONE line of verdict JSON to stdout. Runs from the PROJECT
   ROOT (sees the worker's files). `chmod +x` it.
 - **`.md`** = LLM RUBRIC judge — agg sends it to the ruler as a READ-ONLY one-shot; it must return the same JSON.
+- **Declared in `judges:` — a METRIC or SCORE judge over swe-metrics** (optional external tool):
+  `judges: { cc_p95: { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 10 },
+  quality: { score: { definition: "swe-default", version: "2" }, min: 80 } }`. No file. All such judges of a
+  session share ONE `swe-metrics measure` (cache keyed on the tree, `metrics::measure`); a skipped/failed
+  analyzer or absent metric ⇒ the judge ERRORS with the analyzer's reason (never met); several tools ⇒
+  `tool:` or `combine: strictest|all|majority`; `scope: changed` ⇒ `--changed-since <base>`, and with
+  no changed file its analyzer applies to the judge is VACUOUSLY met (`vacuous: true`, no value — moves
+  nothing at the gate: `groups::assess` and `landed_met` skip it). A score is
+  computed with the INCUMBENT's report (`agg/private/metrics/incumbent/`, replaced on every kept gate) as
+  `--baseline`; definition/version mismatch refuses; `null` ⇒ error. Their ratchet may omit `direction`
+  (`max:` ⇒ down, `min:` ⇒ up, score ⇒ up; checked against the report). Declared + a file of the same
+  name, or no `swe-metrics` on PATH / wrong schema ⇒ startup refusal. Code: `src/metrics/`.
 - **Evidence:** files named in a verdict's `evidence` (relative → `$AGG_JUDGE_SCRATCH` first, then the
   project) are COPIED after judging to `agg/private/evidence/<run_id>/<session>/<judge>/`
   (`core::evidence`, `features::evidence`), recorded on the ledger row (`evidence_saved`/
@@ -181,6 +193,10 @@ Verdict contract (to stdout):
 ```json
 {"met": true, "value": 3, "max": 3, "target": 3, "rationale": "3/3 tests pass"}
 ```
+Optional `"mixed": true` = the judge's own measurements moved in different directions — a ratchet does
+not count that verdict as an improvement (`merge_requires_improvement`).
+Optional `"vacuous": true` = met because there was nothing to measure — neither improvement nor
+regression, and not a "was met" reading for the next gate.
 `met` (bool) is the gate. `value`/`max`/`target` are numeric progress (used by `count_met`, deltas, the
 scoreboard). `rationale` is a short human string.
 
@@ -248,6 +264,11 @@ src/core/judge.rs     runs a judge (script/rubric/native) and confines it AS A J
                       Then: run-level tier,
                       project READ-ONLY, writes relocated to a shared per-session `$AGG_JUDGE_SCRATCH`.
 src/core/verdicts.rs  `agg/private/verdicts.jsonl` — one row per judge per GATE, never per step.
+src/metrics/          metric/score judges over swe-metrics: `declare` (startup: kinds, ratchet directions,
+                      shared `--only` sets, the probe), `report`+`combine` (pure selection), `measure`
+                      (ONE measurement per session tree — a process cache; the incumbent, promoted on a
+                      kept gate and by the baseline pass), `score`. swe-metrics is OPTIONAL: nothing here
+                      runs unless a judge is declared with `metric:`/`score:`.
 src/core/ratchet.rs   the numeric ratchet + the gate's own history (rollbacks, oscillation). Engine
                       state (`eng.gate`), moved ONLY in `features::gate::keep_or_rollback` — the body
                       both front ends share — and persisted to `agg/private/gate.json` + driver

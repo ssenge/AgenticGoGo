@@ -272,3 +272,62 @@ fn a_no_improvement_gate_counts_for_no_rollback_and_moves_no_reference() {
     assert_eq!((g.state.no_improvements, g.state.consecutive_no_improvements, g.state.consecutive_rollbacks), (1, 0, 0));
     assert_eq!(g.state.signatures.len(), 4);
 }
+
+/// A `mixed` verdict — its own tools moved in different directions — is never an improvement,
+/// however far its number moved; it still regresses like any other.
+#[test]
+fn a_mixed_verdict_is_no_improvement_but_can_still_regress() {
+    let mut g = gate(&[("cc", Ratchet::down(0.0))]);
+    g.state.refs.insert("cc".into(), 10.0);
+    let mut better = val(5.0);
+    better.mixed = true;
+    assert!(g.improved(&fresh(&[("cc", better)])).is_empty(), "tools disagree: not an improvement");
+    let mut worse = val(12.0);
+    worse.mixed = true;
+    assert_eq!(g.check(&fresh(&[("cc", worse)])).len(), 1, "…but a regression is still one");
+}
+
+/// A YAML ratchet may leave its direction to its judge; a driver's always states one.
+#[test]
+fn a_ratchet_cfg_resolves_with_the_judges_direction() {
+    let cfg = RatchetCfg { direction: None, tolerance: 0.5, tolerance_pct: None, baseline: Some(3.0) };
+    assert_eq!(cfg.resolve(None), None, "nobody states a direction");
+    assert_eq!(cfg.resolve(Some(Direction::Down)), Some(Ratchet::down(0.5).baseline(3.0)));
+    let written: RatchetCfg = Ratchet::up(1.0).into();
+    assert_eq!(written.resolve(Some(Direction::Down)).map(|r| r.direction), Some(Direction::Up), "a written direction wins");
+    assert_eq!(resolve_explicit(&[("w".to_string(), written), ("n".to_string(), cfg.clone())].into()).len(), 1);
+    assert!(RatchetCfg { tolerance: -1.0, ..cfg }.validate("cc").is_err());
+}
+
+/// THE BASIS: a score's reference is stamped with its definition; a resumed state whose reference
+/// was taken under ANOTHER definition is reset — to what this gate already measured, else to none.
+#[test]
+fn a_reference_of_another_scoring_definition_is_reset_on_restore() {
+    let bases = |b: &str| [("q".to_string(), b.to_string())].into_iter().collect::<BTreeMap<_, _>>();
+    let mut old = gate(&[("q", Ratchet::up(0.0)), ("cc", Ratchet::down(0.0))]).with_bases(bases("swe-default@1"));
+    old.seed(&fresh(&[("q", val(70.0)), ("cc", val(9.0))])).unwrap();
+    old.record(GateDecision::Kept, &fresh(&[("q", val(75.0)), ("cc", val(8.0))]), &[], sig(&[]));
+    assert_eq!(old.state.bases["q"], "swe-default@1", "stamped when kept");
+    let persisted = old.state.clone();
+
+    // the same definition: restored as it was.
+    let mut same = gate(&[("q", Ratchet::up(0.0)), ("cc", Ratchet::down(0.0))]).with_bases(bases("swe-default@1"));
+    assert!(same.restore(persisted.clone()).is_empty());
+    assert_eq!(same.state.reference("q"), Some(75.0));
+
+    // a changed definition, after a baseline pass under it: that measurement is the reference.
+    let mut changed = gate(&[("q", Ratchet::up(0.0)), ("cc", Ratchet::down(0.0))]).with_bases(bases("swe-default@2"));
+    changed.seed(&fresh(&[("q", val(60.0)), ("cc", val(8.0))])).unwrap();
+    let warned = changed.restore(persisted.clone());
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].contains("swe-default@1") && warned[0].contains("swe-default@2"), "{warned:?}");
+    assert_eq!(changed.state.reference("q"), Some(60.0), "the incomparable 75 is gone");
+    assert_eq!(changed.state.reference("cc"), Some(8.0), "a judge without a basis is restored as is");
+    assert_eq!(changed.state.bases["q"], "swe-default@2");
+
+    // …and without a measurement of its own, no reference at all until the next keep.
+    let mut bare = gate(&[("q", Ratchet::up(0.0))]).with_bases(bases("swe-default@2"));
+    bare.restore(persisted);
+    assert_eq!(bare.state.reference("q"), None);
+    assert!(bare.check(&fresh(&[("q", val(1.0))])).is_empty(), "nothing to regress against");
+}

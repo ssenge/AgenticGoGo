@@ -115,7 +115,8 @@ pub struct Progress {
 /// The boolean half of the gate over `fresh`, against `landed` (each judge's last LANDED, graded
 /// `met`). `individual` says which judges are held one by one; `groups` are judged net, over the
 /// members that are NOT individual. An errored verdict counts for neither side — "could not grade"
-/// is not "not met", exactly as in the per-judge rule.
+/// is not "not met", exactly as in the per-judge rule — and neither does a VACUOUS one: met because
+/// there was nothing to measure is not progress (and cannot be a regression).
 pub fn assess(
     fresh: &[(String, Verdict)],
     landed: &HashMap<String, bool>,
@@ -123,9 +124,9 @@ pub fn assess(
     groups: &[&[String]],
 ) -> Progress {
     let was = |n: &str| landed.get(n).copied().unwrap_or(false);
-    let graded = |n: &str| fresh.iter().find(|(id, v)| id == n && v.error.is_none()).map(|(_, v)| v.met);
+    let graded = |n: &str| fresh.iter().find(|(id, v)| id == n && v.error.is_none() && !v.vacuous).map(|(_, v)| v.met);
     let mut p = Progress::default();
-    for (n, v) in fresh.iter().filter(|(n, v)| v.error.is_none() && individual(n)) {
+    for (n, v) in fresh.iter().filter(|(n, v)| v.error.is_none() && !v.vacuous && individual(n)) {
         p.regressed |= !v.met && was(n);
         p.improved |= v.met && !was(n);
     }
@@ -243,5 +244,19 @@ mod tests {
         assert_eq!(g.gated_members(), vec![&names(&["a", "b"])[..]]);
         assert_eq!(g.names(), vec!["q", "r"]);
         assert!(Groups::none().members("q").is_none());
+    }
+
+    /// A VACUOUS met (nothing to measure) moves nothing: unmet → vacuous met is no improvement, in a
+    /// group no gain either.
+    #[test]
+    fn a_vacuous_met_is_neither_an_improvement_nor_a_gain() {
+        let mut vac = Verdict::binary(true);
+        vac.vacuous = true;
+        let fresh = vec![("new_cc".to_string(), vac)];
+        let p = assess(&fresh, &landed(&[("new_cc", false)]), |_| true, &[]);
+        assert!(!p.improved && !p.regressed);
+        let group = names(&["new_cc"]);
+        let p = assess(&fresh, &landed(&[]), |_| false, &[&group]);
+        assert!(!p.improved && !p.regressed);
     }
 }

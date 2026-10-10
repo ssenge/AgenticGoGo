@@ -181,6 +181,26 @@ for _ in 0..20 {
 - **On resume** the state is restored from the last replayed `gate` record — i.e. as of the last kept
   gate — not from `agg/private/gate.json`, which may be ahead of it by gates that will re-execute.
 
+### Metric and score judges (swe-metrics)
+
+The YAML `judges.<name>.metric` / `.score` declarations
+([CONFIG](CONFIG.md#judges-built-on-swe-metrics--metric-and-score)) are two more judge constructors —
+the same engine, so judges asked in one span share ONE `swe-metrics measure` of the tree:
+
+```rust
+use agg::prelude::*;
+let cc = Judge::metric("cc_p95", MetricJudge::new("complexity.cyclomatic").stat(Stat::P95).tool("lizard").max(10.0));
+let vulns = Judge::metric("vulns", MetricJudge::new("dependencies.vulnerabilities").label("severity", &["critical", "high"]).max(0.0));
+let quality = Judge::score("quality", ScoreJudge::new("swe-default", "2").min(80.0));
+let agg = Agg::open(".")?.ratchet("cc_p95", Ratchet::down(0.5));   // the driver states the direction
+```
+
+`MetricJudge` also takes `.combine(Combine::All)`, `.scope(Scope::Changed)` and `.min(..)`; a relative
+`ScoreJudge` definition file is resolved against the project dir. A missing value fails closed exactly
+as on the YAML path. Two differences: a driver has no startup, so a missing or incompatible
+`swe-metrics` shows as an ERRORED verdict, not a refusal; and a driver run has no incumbent until its
+first kept gate — a score asked before that is computed without `--baseline`.
+
 ### Groups and the improvement rule
 
 A [`Group`](CONFIG.md#judge-groups--k-of-n) names judges that measure one thing; `agg.group(&g)` asks
