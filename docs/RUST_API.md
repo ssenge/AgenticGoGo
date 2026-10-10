@@ -81,10 +81,11 @@ fn main() -> Result<(), agg::driver::Fatal> {
 | call | what it does |
 |---|---|
 | `Agg::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
-| `.limits()` `.on_regression()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
+| `.limits()` `.on_regression()` `.ratchet()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
 | `agg.step(&s)` | run one session. Commits on a session branch — **stages**, never merges |
 | `agg.judge(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
 | `agg.gate()` | close the span: merge everything staged since the last gate, or discard it per policy |
+| `agg.gate_state()` | the gate's own history: ratchet references, `rollbacks`, `consecutive_rollbacks`, `oscillating(k)` |
 | `agg.check_limits()` | enforce ceilings, drain the operator bus, honour Ctrl-C |
 | `agg.pos(label, max)` | an RAII breadcrumb — `cycle 3/20 › attempt 2/3` — published to `state.json` |
 | `agg.ask()` `agg.info()` `agg.log()` | the three notification levels — non-blocking, and still the default |
@@ -134,6 +135,38 @@ judges, the judge script is the way out, because a confined worker can rewrite `
 its own writable cwd.
 
 ---
+
+### The ratchet and the gate's history
+
+`gate()`'s boolean rule protects `met`. A ratchet protects a NUMBER: a ratcheted judge's `value` may not
+get worse than at the last kept gate by more than its tolerance, or the gate counts a regression and,
+under `OnRegression::Rollback`, discards the span. Same engine, same body as the YAML
+[`sequence.ratchet`](CONFIG.md#the-ratchet--numeric-no-regression):
+
+```rust
+let agg = Agg::open(".")?
+    .ratchet("cc_p95", Ratchet::down(0.5))                        // lower is better, ±0.5
+    .ratchet("mutation", Ratchet::up(1.0).baseline(71.0));        // higher is better, seeded
+
+agg.judge(&cc_p95);              // asked BEFORE the first step() = the driver's baseline pass
+for _ in 0..20 {
+    agg.step(&implement)?;
+    agg.judge(&cc_p95);          // the ratchet applies to the judges ASKED since the last gate
+    agg.judge(&mutation);
+    agg.gate()?;                 // a regression beyond tolerance ⇒ GateOutcome::RolledBack
+    let g = agg.gate_state();
+    if g.consecutive_rollbacks >= 3 || g.oscillating(4) { break; }   // YAML's abort_if terms, in Rust
+}
+```
+
+- **The reference** before the first keep is the seed, else the first value asked before the first
+  `step()`; without either, the first kept gate sets it. A kept gate moves it; a rollback never does.
+- **A ratcheted judge that errored or emitted no number never passes** — it rolls the span back.
+- **`gate_state()`** is what `ratchet_regressed`, `<judge>.ref`, `rollbacks`, `consecutive_rollbacks` and
+  `oscillating` read on the YAML path. The signature `oscillating` compares is every judge asked since the
+  last gate that was unmet, plus every ratchet regression.
+- **On resume** the state is restored from the last replayed `gate` record — i.e. as of the last kept
+  gate — not from `agg/private/gate.json`, which may be ahead of it by gates that will re-execute.
 
 ## Asking a human
 
