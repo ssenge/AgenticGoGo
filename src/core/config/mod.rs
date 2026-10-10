@@ -85,6 +85,68 @@ pub struct AggConfig {
     /// ADDITIVE, like `limits.wall_hours`: a config written before this key existed still parses.
     #[serde(default = "default_instructions")]
     pub instructions: String,
+    /// READ-ONLY context directories from outside the project — a knowledge base, reference
+    /// material, another repository's docs. Each is readable and never writable by the worker and
+    /// its judges; the brief lists them. agg does not interpret their contents.
+    ///
+    /// Needs a confining tier on EVERY step: under `none` nothing stops a write, so a run that
+    /// names a context and has an unconfined step is refused at startup ([`crate::isolation::context`]).
+    #[serde(default)]
+    pub context: Vec<ContextDir>,
+    /// what crosses into a confined run beyond its tier: the credentials a container receives
+    /// (`pass_env`, `credentials`). Run-level — every container of the run, judges included.
+    #[serde(default)]
+    pub isolation_policy: IsolationPolicy,
+}
+
+/// The run-level confinement policy (`isolation_policy:`).
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationPolicy {
+    /// network EGRESS: `open` (the default — no policy) or `{ allow: [host[:port], …] }`, which
+    /// confines every confined process of the run to those destinations through agg's own proxy
+    /// ([`crate::isolation::egress`]). Needs a tier that can enforce it on every step (`container`
+    /// anywhere, `sandbox` on macOS), and the agents' own API endpoints in the list.
+    #[serde(default)]
+    pub network: crate::isolation::egress::Network,
+    /// environment variables passed INTO every container by NAME, when set in agg's environment
+    /// (a token a judge's tooling needs, a proxy setting). The value never appears on a command
+    /// line, in a log, a ledger or the report. Each agent's own credential variables
+    /// (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, …) are passed without being listed here.
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+    /// host files or directories mounted READ-ONLY into every container — under the container's
+    /// `HOME` at their `~`-relative path when they live under `~`, else at the same absolute path.
+    /// Each must exist. Each agent's own credential file (`~/.codex/auth.json`, Claude's
+    /// `~/.claude/.credentials.json` on Linux) is mounted without being listed here.
+    #[serde(default)]
+    pub credentials: Vec<String>,
+}
+
+/// One read-only context directory (`context:` entry).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDir {
+    /// the directory: absolute, `~/`-relative, or relative to the PROJECT dir. It must exist, and it
+    /// may not overlap the project (which also covers `agg/private/`).
+    pub path: String,
+    /// a short name — `[a-z0-9][a-z0-9_-]*`, unique. Under `isolation: container` the directory is
+    /// mounted read-only at `/context/<as>`; every confined process also gets `AGG_CONTEXT_<AS>`.
+    #[serde(rename = "as")]
+    pub name: String,
+    /// only `ro` exists: a context is never writable. Spelled out so a config that says so is
+    /// explicit, and so anything else is refused rather than read as "ro" anyway.
+    #[serde(default)]
+    pub mode: ContextMode,
+}
+
+/// How a context directory is mounted. Read-only is the only mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextMode {
+    /// readable, never writable.
+    #[default]
+    Ro,
 }
 
 /// Values inherited by every step (§4). A step body overrides any of them.
@@ -171,6 +233,12 @@ pub struct JudgeCfg {
     /// not a run limit: a file that does not fit is skipped and recorded, and the run goes on.
     #[serde(default = "default_evidence_max_mb")]
     pub evidence_max_mb: u64,
+    /// the image every judge runs in when the run's strongest tier is `container` — script judges
+    /// and the ruler's LLM judges alike. `None` = `defaults.image`, else the one image the container
+    /// steps share; several different ones with neither key set is refused (agg will not guess
+    /// which toolchain your judges need).
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 impl Default for JudgeCfg {
@@ -180,6 +248,7 @@ impl Default for JudgeCfg {
             model: None,
             timeout: default_judge_timeout(),
             evidence_max_mb: default_evidence_max_mb(),
+            image: None,
         }
     }
 }
@@ -465,6 +534,8 @@ impl Default for AggConfig {
             summary: Summary::default(),
             session_isolation: SessionIsolation::default(),
             instructions: default_instructions(),
+            context: vec![],
+            isolation_policy: IsolationPolicy::default(),
         }
     }
 }

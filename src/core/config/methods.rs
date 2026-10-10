@@ -71,24 +71,50 @@ impl AggConfig {
         })
     }
 
-    /// The RUN-LEVEL blast-radius tier — `Sandbox` if the run could confine ANY worker (defaults or
-    /// some step names `sandbox`), else `None`. Used to confine the run-level teardown hook
-    /// (`on_stop`), which fires once, after all workers, with no single step's context (ISOLATION.md
-    /// §13). Over-approximates deliberately: confining a best-effort teardown hook that maybe didn't
-    /// need it is harmless; leaving it unconfined when a sandboxed worker ran is the escape.
+    /// The RUN-LEVEL blast-radius tier — the STRONGEST tier the defaults or any step names. The
+    /// tier judges run in (§2.5, "judges take the run tier") and the run-level teardown hook
+    /// (`on_stop`) fires in. Over-approximates deliberately: a step that overrides the defaults'
+    /// tier downward does not lower it — confining a judge that maybe didn't need it is harmless;
+    /// leaving it unconfined when a confined worker ran is the escape.
     ///
-    /// `container` is deliberately NOT folded in here: judges and hooks are host tooling (agg's own
-    /// DoD judges run `cargo`), so re-hosting them in the worker's base image would break them, and
-    /// jailing them in the OS sandbox instead is a different policy than the step asked for. The
-    /// residual — a container worker can still rewrite a judge/hook script in its bind-mounted cwd —
-    /// is documented in `internal/ISOLATION.md` §15, not silently papered over.
+    /// `container` counts. It used not to — judges and hooks were host tooling while the container
+    /// tier could not run an agent, and the residual (a container worker rewrites a judge script
+    /// that then runs on the host) was documented rather than closed. With an agent image in the
+    /// container (the image contract), the image that runs the agent runs the judges too
+    /// ([`Self::judge_image`]), and the residual is closed. Hooks stay host tooling
+    /// ([`crate::hooks::run`]).
     pub fn run_isolation(&self) -> crate::isolation::Isolation {
-        use crate::isolation::Isolation;
-        let any_step = self.steps.values().any(|b| b.isolation == Some(Isolation::Sandbox));
-        if self.defaults.isolation == Some(Isolation::Sandbox) || any_step {
-            Isolation::Sandbox
-        } else {
-            Isolation::None
+        let base = self.defaults.isolation.unwrap_or_default();
+        self.steps.values().filter_map(|b| b.isolation).fold(base, |t, s| t.strongest(s))
+    }
+
+    /// The image judges run in when [`Self::run_isolation`] is `container`: `judge.image`, else
+    /// `defaults.image`, else the ONE image every container step resolves to, else the default
+    /// base image. `Err` (the problem, for `judge.image`) when container steps name several
+    /// different images and neither key says which one the judges' toolchain is in.
+    pub fn judge_image(&self) -> Result<String, String> {
+        if let Some(i) = self.judge.image.as_ref().or(self.defaults.image.as_ref()) {
+            return Ok(i.clone());
+        }
+        let mut images: Vec<String> = self
+            .steps
+            .keys()
+            .filter_map(|n| self.resolve_step(n).ok())
+            .filter(|s| s.isolation == crate::isolation::Isolation::Container)
+            .map(|s| s.image)
+            .collect();
+        images.sort();
+        images.dedup();
+        match images.as_slice() {
+            [] => Ok(crate::isolation::DEFAULT_IMAGE.to_string()),
+            [one] => Ok(one.clone()),
+            many => Err(format!(
+                "the container steps run in {} different images ({}) and neither `judge.image` nor \
+                 `defaults.image` says which one the judges run in — set `judge.image` to the image \
+                 with your judges' toolchain",
+                many.len(),
+                many.join(", ")
+            )),
         }
     }
 

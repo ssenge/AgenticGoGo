@@ -110,6 +110,9 @@ struct Started {
     /// the Drop guards live HERE, so dropping the `Agg` fires them on return, early return AND
     /// panic-unwind.
     _stop: StopHooks,
+    /// the run's confinement policy — AFTER `_stop`, so it is still registered while the `on_stop`
+    /// hooks fire (fields drop in declaration order).
+    _policy: crate::isolation::policy::PolicyGuard,
     _pid: RunPidGuard,
     /// this run's report handle (`run_id`, the write latch). `Drop for Agg` writes the report.
     report: crate::report::RunHandle,
@@ -216,6 +219,67 @@ impl Agg {
         self.cfg.instructions = rel.into();
         self
     }
+
+    /// The image every [`Isolation::Container`](crate::isolation::Isolation::Container) step runs in
+    /// unless it names its own ([`Step::image`]) — YAML's `defaults.image`. It must follow the
+    /// image contract (`docs/CONFIG.md`): the step's agent CLI on PATH for any uid, `/bin/sh`.
+    pub fn image(mut self, image: impl Into<String>) -> Agg {
+        self.cfg.defaults.image = Some(image.into());
+        self
+    }
+
+    /// The image judges run in when a step of the run is containerized — YAML's `judge.image`.
+    /// `None` set = [`Agg::image`], else the base image.
+    pub fn judge_image(mut self, image: impl Into<String>) -> Agg {
+        self.cfg.judge.image = Some(image.into());
+        self
+    }
+
+    /// Environment variables passed INTO every container of the run by NAME — YAML's
+    /// `isolation_policy.pass_env`. The values come from this process's environment and never
+    /// appear on a command line. Each agent's own credential variables need not be listed.
+    pub fn pass_env<I, S>(mut self, names: I) -> Agg
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.cfg.isolation_policy.pass_env.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Host files or directories mounted READ-ONLY into every container of the run — YAML's
+    /// `isolation_policy.credentials` (under the container's `HOME` when they live under `~`).
+    pub fn credentials<I, S>(mut self, paths: I) -> Agg
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.cfg.isolation_policy.credentials.extend(paths.into_iter().map(Into::into));
+        self
+    }
+
+    /// The run's network EGRESS policy — YAML's `isolation_policy.network`. `Network::Allow(hosts)`
+    /// confines every confined process to those `host[:port]` destinations through agg's proxy;
+    /// every step must then run on a tier that enforces it, and its agent's endpoint must be listed
+    /// (`step()` refuses otherwise).
+    pub fn network(mut self, network: crate::isolation::egress::Network) -> Agg {
+        self.cfg.isolation_policy.network = network;
+        self
+    }
+
+    /// A READ-ONLY context directory from outside the project, seen by every step and judge of the
+    /// run — the driver's spelling of a YAML `context:` entry. `path` is absolute, `~/`-relative or
+    /// relative to the project; `name` is the short `as:` (`/context/<name>` in a container,
+    /// `AGG_CONTEXT_<NAME>` everywhere). Validated when the run boots; every step must then be
+    /// confined (`Isolation::Sandbox` or `Container`), or `step()` refuses it.
+    pub fn context(mut self, path: impl Into<String>, name: impl Into<String>) -> Agg {
+        self.cfg.context.push(crate::core::config::ContextDir {
+            path: path.into(),
+            name: name.into(),
+            mode: crate::core::config::ContextMode::Ro,
+        });
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -256,7 +320,7 @@ impl Agg {
         // the driver variant: an empty `sequence.steps` means no entry list to validate, no
         // `done_if`, and an EMPTY run-set — judges are lazy and the driver asks.
         let asm = crate::assembly::assemble(&cfg, &config_base)?;
-        crate::capability::check(&cfg, &asm.engine.judges)?;
+        crate::capability::check(&cfg, &asm.engine.judges, &dir)?;
         for name in cfg.agent_names() {
             crate::backend::for_name(&name)?.preflight()?;
         }
@@ -272,6 +336,7 @@ impl Agg {
         }
         crate::os::detach::write_run_pid(&dir);
         let pid_guard = RunPidGuard { dir: dir.clone() };
+        let policy_guard = crate::isolation::run::register(&cfg, &dir)?;
         crate::os::signals::install();
         // behind the guard, like the YAML path: it deletes the previous run's report.
         // a resume reports under the id the run started with (A-18.3).
@@ -408,7 +473,15 @@ impl Agg {
             self.ended.set(Some(outcome));
         }
 
-        Ok(Started { st: RefCell::new(st), lc: lifecycle, replay, _stop: stop_hooks, _pid: pid_guard, report })
+        Ok(Started {
+            st: RefCell::new(st),
+            lc: lifecycle,
+            replay,
+            _stop: stop_hooks,
+            _policy: policy_guard,
+            _pid: pid_guard,
+            report,
+        })
     }
 }
 
@@ -516,6 +589,31 @@ impl Agg {
         if !problems.is_empty() {
             return Err(Fatal::Other(anyhow::anyhow!("{}", crate::problem::render(&problems))));
         }
+        // The run's context dirs bind only on a confining tier; this is `capability::assess`'s rule,
+        // which a driver's code-built steps never reach.
+        if !self.cfg.context.is_empty() && step.isolation == crate::isolation::Isolation::None {
+            return Err(Fatal::Other(anyhow::anyhow!(
+                "step `{name}` runs under `Isolation::None`, but the run names context directories — \
+                 nothing would stop it from writing them. Confine it: `.isolation(Isolation::Sandbox)` \
+                 or `Isolation::Container`"
+            )));
+        }
+        // …and so does the network allow-list's: a tier that can enforce it, an agent that can
+        // still reach its model behind it.
+        if let crate::isolation::egress::Network::Allow(entries) = &self.cfg.isolation_policy.network {
+            let allow = crate::isolation::egress::allow::AllowList::parse(entries).map_err(|bad| {
+                let why: Vec<String> = bad.into_iter().map(|(i, w)| format!("allow[{i}]: {w}")).collect();
+                Fatal::Other(anyhow::anyhow!("the network allow-list is malformed: {}", why.join("; ")))
+            })?;
+            let agent: &dyn crate::backend::AgentBackend = match &step.agent {
+                Agent::Custom(b) => &**b,
+                a => crate::backend::for_name(a.name())?,
+            };
+            let (on_tier, on_endpoint) = crate::isolation::egress::step_problems(step.isolation, agent, &allow);
+            if let Some(m) = on_tier.into_iter().chain(on_endpoint).next() {
+                return Err(Fatal::Other(anyhow::anyhow!("step `{name}`: {m}")));
+            }
+        }
         let write_deny = crate::protect::union(&self.cfg.defaults.write_deny, &step.write_deny);
         // The driver's steps are built in code, so `capability::check` never sees them: the
         // write_deny refusal for this tier happens HERE, before the step can run unprotected.
@@ -541,11 +639,10 @@ impl Agg {
             // run-set to run here — judges are lazy and the driver asks.
             skip_judges: true,
             isolation: step.isolation,
-            image: self
-                .cfg
-                .defaults
+            image: step
                 .image
                 .clone()
+                .or_else(|| self.cfg.defaults.image.clone())
                 .unwrap_or_else(|| crate::isolation::DEFAULT_IMAGE.to_string()),
             readonly: step.readonly.clone(),
             writable: step.writable.clone(),
@@ -865,7 +962,7 @@ impl Agg {
             // this upsert is what the TUI, the web BFF and Progress actually render.
             Self::publish_verdict(&mut st.dash.judges, &j.name, &kind, &verdict);
             // judged in THIS session's scratch, so the evidence is kept now, not at the gate.
-            crate::features::evidence::keep(&mut st, Some(session), &[(j.name.clone(), verdict.clone())]);
+            crate::features::evidence::keep(&mut st, Some(session), &[(j.name.clone(), verdict.clone())], isolation);
             st.dash.pos = self.label_path();
             st.publish();
         }

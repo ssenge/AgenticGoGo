@@ -11,7 +11,8 @@
 //! docker run --rm --network host -v <cwd>:<cwd> -w <cwd> [-v <w>:<w> …] [-e K=V …] <image> <prog> <args…>
 //! ```
 //! * `--rm` — no leaked containers, ever; a session is ephemeral by construction.
-//! * `--network host` — full internet (the owner's constraint; there is no egress policy).
+//! * `--network host` — full internet, unless the run has an egress allow-list: then an
+//!   `--internal` network whose only way out is agg's proxy ([`super::egress::bridge`]).
 //! * mounts are CANONICALIZED first: a symlinked source silently mis-mounts, the same defect class
 //!   that silently denied every write under Seatbelt (§11 BUG 1). A source that is still relative
 //!   after that is a LOUD error — `docker` requires an absolute source, and a container that fails
@@ -19,11 +20,11 @@
 //! * the mount target equals the host path, so every path in a log / in the agent's own output
 //!   still means what the operator thinks it means.
 //!
-//! # Scope (deliberate)
-//! This confines the worker against a plain BASE image. Running the real agent CLI *inside* the
-//! container with its auth (the "container problem", §2 constraint 3) needs an image with node +
-//! the CLI + a mounted credential store, and is a documented follow-up — see `internal/ISOLATION.md`
-//! §15, not this module.
+//! # The agent runtime
+//! [`containerize`] confines a command against any image. Running the AGENT CLI in there — the
+//! image contract, a fresh `HOME`, credentials by name or read-only mount, the project owner's uid,
+//! judges on a read-only project — is [`containerize_spec`] driven by [`super::runtime`], and the
+//! startup check that each image has its CLI is [`super::probe`].
 
 use anyhow::{bail, Result};
 use std::ffi::{OsStr, OsString};
@@ -80,18 +81,78 @@ pub fn containerize(
     denies: &[String],
     image: &str,
 ) -> Result<Command> {
+    containerize_spec(cmd, cwd, &Spec { image, writable, denies, ..Spec::default() })
+}
+
+/// One container agg starts: the image, what it may write, and what crosses into it. The plain
+/// [`containerize`] is the `Spec` with only the first three set; the agent runtime adds the rest.
+#[derive(Debug, Default)]
+pub struct Spec<'a> {
+    pub image: &'a str,
+    /// extra host paths mounted read-write at the same path.
+    pub writable: &'a [PathBuf],
+    /// extra host paths mounted READ-ONLY at the same path (a library judge's directory).
+    pub readonly: &'a [PathBuf],
+    /// this step's `readonly` minus `writable` — added to the derived `agg/private/` carve-out.
+    pub denies: &'a [String],
+    /// mount the project READ-ONLY (a judge grades the tree, it never changes it).
+    pub project_ro: bool,
+    /// the container's `HOME`: a host dir mounted read-write at the same path. The agent's own
+    /// state lives here, not in the host's `~` — which is not in the container at all.
+    pub home: Option<&'a Path>,
+    /// env var NAMES passed by name when set in agg's environment (an agent's credentials). Added
+    /// to the run's `isolation_policy.pass_env`.
+    pub env_names: &'a [&'a str],
+    /// `~`-relative host files mounted read-only at the same place under `home` when they exist (an
+    /// agent's credential file). Added to the run's `isolation_policy.credentials`.
+    pub credential_files: &'a [&'a str],
+}
+
+/// [`containerize`] for a full [`Spec`].
+///
+/// Beyond the plain recipe, every container runs as the OWNER of the project dir (`--user
+/// uid:gid`): files it writes into the bind mount belong to the operator rather than to root (the
+/// Linux ownership problem), and an agent CLI that refuses to run with auto-approval as root
+/// (Claude Code) runs. The image must therefore work for an arbitrary non-root uid — the image
+/// contract (`docs/CONFIG.md`).
+///
+/// Credentials cross by NAME: `-e NAME` makes the engine client read the value from ITS
+/// environment, which is agg's — so the secret is never on a command line (`ps`), and agg never
+/// prints the argv. Files cross as read-only mounts. Neither is ever copied or baked into an image.
+pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Command> {
     let prog = cmd.get_program().to_owned();
     let args: Vec<OsString> = cmd.get_args().map(|a| a.to_owned()).collect();
     let envs: Vec<(OsString, Option<OsString>)> =
         cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
 
     let cwd_resolved = canonical(cwd);
+    let run = super::policy::for_dir(&cwd_resolved);
     let mut out = Command::new(engine().unwrap_or(ENGINES[0]));
-    out.arg("run").arg("--rm").arg("--network").arg("host");
-    mount(&mut out, &cwd_resolved, false)?;
+    out.arg("run").arg("--rm");
+    // The network: the host's (open), or — under an allow-list — an `--internal` network whose only
+    // reachable address is the relay to agg's proxy ([`super::egress::bridge`]). NET_RAW goes too:
+    // a raw socket has nowhere to go there anyway, and nothing an agent does needs one.
+    let proxy_url = match &run.egress {
+        None => {
+            out.arg("--network").arg("host");
+            None
+        }
+        Some(e) => {
+            let (network, url) = e.container().map_err(anyhow::Error::msg)?;
+            out.arg("--network").arg(network).arg("--cap-drop").arg("NET_RAW");
+            Some(url)
+        }
+    };
+    if let Some(owner) = owner(&cwd_resolved) {
+        out.arg("--user").arg(owner);
+    }
+    mount(&mut out, &cwd_resolved, spec.project_ro)?;
     out.arg("-w").arg(&cwd_resolved);
-    for w in writable {
+    for w in spec.writable {
         mount(&mut out, &canonical(w), false)?;
+    }
+    for r in spec.readonly {
+        mount(&mut out, &canonical(r), true)?;
     }
     // The DENIES: agg's private state and this step's `readonly` minus `writable` all sit inside the
     // mounted cwd, so re-mount each of them READ-ONLY on top. The engine applies the more specific
@@ -106,7 +167,7 @@ pub fn containerize(
     // skipping was a silent hole (the step could create the directory it named and then write it),
     // and creating it ourselves also avoids the root-owned stray dir `docker run` leaves behind when
     // it invents a missing bind source.
-    for d in super::deny_set(&cwd_resolved, denies) {
+    for d in super::deny_set(&cwd_resolved, spec.denies) {
         if super::materialize_deny(&d) {
             mount(&mut out, &d, true)?;
         } else {
@@ -117,6 +178,20 @@ pub fn containerize(
             );
         }
     }
+    // The run's context dirs, read-only at `/context/<as>` (derived from the project dir — see
+    // [`super::policy`] — so every surface that containerizes gets them).
+    for c in &run.contexts {
+        mount_at(&mut out, &c.host, &c.container_path(), true)?;
+    }
+    if let Some(home) = spec.home {
+        // mounted AFTER the read-only `agg/private/` it lives in: the engine mounts a deeper target
+        // over a shallower one, so the home is writable while the rest of `private/` is not.
+        mount(&mut out, home, false)?;
+        out.arg("-e").arg(format!("HOME={}", home.display()));
+        for (host, at) in credential_mounts(home, spec.credential_files, &run.credentials) {
+            mount_at(&mut out, &host, &at, true)?;
+        }
+    }
     for (k, v) in envs {
         if let Some(v) = v {
             let mut kv = k;
@@ -125,13 +200,77 @@ pub fn containerize(
             out.arg("-e").arg(kv);
         }
     }
+    for name in pass_names(spec.env_names, &run.pass_env) {
+        out.arg("-e").arg(name);
+    }
+    for (k, v) in run.context_env(super::Isolation::Container) {
+        out.arg("-e").arg(format!("{k}={}", v.display()));
+    }
+    if let Some(url) = &proxy_url {
+        for (k, v) in super::egress::proxy_env(url) {
+            out.arg("-e").arg(format!("{k}={v}"));
+        }
+    }
     // the image, then the ORIGINAL command — nothing may come between them or after them.
-    out.arg(image).arg(prog);
+    out.arg(spec.image).arg(prog);
     for a in args {
         out.arg(a);
     }
     out.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     Ok(out)
+}
+
+/// `uid:gid` of the project dir's owner — who the container runs as. `None` off unix.
+pub(crate) fn owner(dir: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(dir).ok().map(|m| format!("{}:{}", m.uid(), m.gid()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+/// The env var names to pass by name: the spec's and the run's, deduplicated, and only those SET in
+/// agg's environment — `-e NAME` for an unset one would hand the container an empty value that an
+/// agent may read as "authenticated with nothing".
+fn pass_names(spec: &[&str], run: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in spec.iter().map(|s| s.to_string()).chain(run.iter().cloned()) {
+        if std::env::var_os(&n).is_some() && !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Where each credential goes: an agent's `~`-relative files that exist on the host, and the run's
+/// `isolation_policy.credentials` — under `home` at their `~`-relative path when they live under
+/// the host's `~`, else at their own absolute path.
+fn credential_mounts(home: &Path, agent_files: &[&str], run: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    let host_home = std::env::var_os("HOME").map(PathBuf::from).map(|h| canonical(&h));
+    let mut out: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if let Some(hh) = &host_home {
+        for rel in agent_files {
+            let host = hh.join(rel);
+            if host.exists() {
+                out.push((canonical(&host), home.join(rel)));
+            }
+        }
+    }
+    for p in run {
+        let at = match host_home.as_ref().and_then(|hh| p.strip_prefix(hh).ok()) {
+            Some(rel) => home.join(rel),
+            None => p.clone(),
+        };
+        if !out.iter().any(|(_, a)| a == &at) {
+            out.push((p.clone(), at));
+        }
+    }
+    out
 }
 
 /// The engine binary to use: `docker` if it runs, else `podman`. `None` = neither.
@@ -170,6 +309,27 @@ fn canonical(p: &Path) -> PathBuf {
 /// reject the run outright, and a `:` in the path makes it split the spec in the wrong place and
 /// mount something else entirely — a "confined" session writing to a path nobody meant.
 fn mount(cmd: &mut Command, p: &Path, ro: bool) -> Result<()> {
+    mount_at(cmd, p, p, ro)
+}
+
+/// [`mount`] with a container path of its own — for a host directory that appears somewhere fixed
+/// inside (a context at `/context/<as>`). Same two refusals, on BOTH sides of the `:`.
+fn mount_at(cmd: &mut Command, p: &Path, at: &Path, ro: bool) -> Result<()> {
+    for side in [p, at] {
+        check_mountable(side)?;
+    }
+    let mut spec = p.as_os_str().to_owned();
+    spec.push(OsStr::new(":"));
+    spec.push(at.as_os_str());
+    if ro {
+        spec.push(OsStr::new(":ro"));
+    }
+    cmd.arg("-v").arg(spec);
+    Ok(())
+}
+
+/// A path the engine's `-v host:container` spec can carry: absolute, and with no `:` in it.
+fn check_mountable(p: &Path) -> Result<()> {
     if !p.is_absolute() {
         bail!(
             "`isolation: container` needs an absolute path to bind-mount, got `{}` — the container \
@@ -184,13 +344,6 @@ fn mount(cmd: &mut Command, p: &Path, ro: bool) -> Result<()> {
             p.display()
         );
     }
-    let mut spec = p.as_os_str().to_owned();
-    spec.push(OsStr::new(":"));
-    spec.push(p.as_os_str());
-    if ro {
-        spec.push(OsStr::new(":ro"));
-    }
-    cmd.arg("-v").arg(spec);
     Ok(())
 }
 
@@ -300,6 +453,25 @@ mod tests {
                 .to_string();
         assert!(err.contains("absolute"), "must say why: {err}");
         assert!(err.contains("relative/not-a-real-dir"), "must name the path: {err}");
+    }
+
+    /// The run's context dirs reach EVERY containerized process read-only at `/context/<as>`, with
+    /// their env var — derived from the project dir, so the caller passes nothing.
+    #[test]
+    fn containerize_mounts_the_runs_context_dirs_read_only() {
+        let proj = tempfile::tempdir().unwrap();
+        let kb = tempfile::tempdir().unwrap();
+        let host = canonical(kb.path());
+        let _g = super::super::policy::register(
+            proj.path(),
+            super::super::policy::RunPolicy {
+                contexts: vec![super::super::policy::ContextMount { name: "kb".into(), host: host.clone() }],
+                ..Default::default()
+            },
+        );
+        let args = argv(&containerize(Command::new("true"), proj.path(), &[], &[], DEFAULT_IMAGE).unwrap());
+        assert!(args.contains(&format!("{}:/context/kb:ro", host.display())), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "AGG_CONTEXT_KB=/context/kb"), "{args:?}");
     }
 
     #[test]

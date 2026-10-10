@@ -132,7 +132,10 @@ pub fn run_session(
             // the concrete paths they name (shapes a mount cannot express were refused at startup).
             let mut d = denied.to_vec();
             d.extend(crate::protect::bind_paths(dir, write_deny));
-            crate::isolation::containerize(command, dir, &agent.writable_state_paths(), &d, image)
+            // The agent runs IN the container (the image contract): a fresh home of its own each
+            // session, its credentials by name — never the host's `~/.claude` & co., which the
+            // container is there to keep out of reach.
+            crate::isolation::runtime::worker(command, dir, &d, image, agent.container_env(), agent.container_credential_files())
         }
         _ => Ok(command),
     };

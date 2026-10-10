@@ -134,7 +134,8 @@ impl Handler for RunJudges {
         // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
         ctx.charge_ruler(&res.judge_usage);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
-        crate::features::evidence::keep(ctx, Some(ctx.session), &res.fresh_verdicts);
+        let tier = ctx.cfg.run_isolation();
+        crate::features::evidence::keep(ctx, Some(ctx.session), &res.fresh_verdicts, tier);
         ctx.scratch.get::<AGGScratch>().res = Some(res);
         ctx.publish();
         Ok(Flow::Continue)
