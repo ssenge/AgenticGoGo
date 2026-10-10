@@ -242,6 +242,8 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Per-step agents + sequences** — a repeating list of steps, each with its own agent/model, so a stall can step back on a *different vendor* ([Steps and sequences](#steps-and-sequences)). Making that step-back **conditional** ("only when stalled") is the [Rust driver API](#when-yaml-is-not-enough-the-rust-driver-api) — YAML has no `if:`.
 - **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
 - **Numeric ratchet** *(`sequence.ratchet`)* — a tracked number (complexity, coverage, latency) may not get worse than at the last kept gate beyond a tolerance, so the agent cannot trade one metric for another; seed the first reference or let the baseline pass measure it ([details](CONFIG.md#the-ratchet--numeric-no-regression)).
+- **Judge groups, k of n** *(`sequence.groups`)* — name several judges that measure one thing (three static-analysis tools that disagree) and count over just them: `count_met(static_quality) >= 2`, `all_goals(security)`. At the gate a `done_if` group is judged net, so one tool flipping while another catches up is not a regression ([details](CONFIG.md#judge-groups--k-of-n)).
+- **Merge only on improvement** *(`sequence.merge_requires_improvement`, opt-in)* — a session that regressed nothing but improved nothing either (a reformat) is not merged and is recorded `no_improvement`; not a rollback, but it counts for `stalled` and `consecutive_no_improvements` ([details](CONFIG.md#merge-only-on-improvement--merge_requires_improvement)).
 - **Damage and oscillation stops** — `rollbacks`, `consecutive_rollbacks` and `oscillating` (fix A, break B, fix B, break A) are built-in condition terms computed by the gate itself, so they are unfakeable and safe in `abort_if` ([details](CONFIG.md#rollbacks-and-oscillation--the-gates-own-detectors)).
 - **A Rust driver API, when the flow is a program** — `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, for control flow `agg.yaml` cannot express: branch on a verdict's number, step back only when stalled, or short-circuit a 40-minute judge behind three cheap ones with `&&`. Same engine, same judges — heavier, and Rust-only, so **use YAML unless you need it** ([when YAML is not enough](#when-yaml-is-not-enough-the-rust-driver-api)).
 - **Crash-resumable driver runs** — every completed `agg.*` call is recorded, so a driver that dies at hour six replays its finished work in seconds and spends nothing on it. Your loop is never serialized: it runs from the top and its own `if`/`for` walk it back. Fast-forward reaches back to the last gate that landed on base — never past it, because staged work lives on a branch the ledger cannot describe ([details](#when-yaml-is-not-enough-the-rust-driver-api)).
@@ -449,6 +451,23 @@ breaks B, then fixes B and breaks A) are counted by the gate itself, in agg's me
 file the worker could touch — so unlike `stalled` they are safe in `abort_if` on every isolation tier.
 The full rules (references, drift warnings, which sessions count) are in
 [`docs/CONFIG.md`](CONFIG.md#the-ratchet--numeric-no-regression).
+
+**Several tools for one question: groups.** When three tools measure the same thing and disagree, name
+them once and count over just them — *k of n* is a threshold in the condition, never on the group:
+
+```yaml
+sequence:
+  groups:
+    static_quality: ["sonar", "codescene", "lizard"]
+  done_if: "tests_pass AND count_met(static_quality) >= 2"   # two of three; all of them: all_goals(static_quality)
+  merge_requires_improvement: true                         # optional: merge only sessions that improved something
+```
+
+A group named in `done_if` is part of your DoD, and the gate judges it **net**: a session in which one
+tool flips to unmet while another flips to met is not a regression; one that loses ground is rolled back.
+With `merge_requires_improvement`, a session that regressed nothing but also moved no goal and no ratchet
+(a pure reformat) is not merged — recorded `no_improvement`, which is not a rollback. Details in
+[`docs/CONFIG.md`](CONFIG.md#judge-groups--k-of-n).
 
 The rule that makes it a moat: **`agg` runs the judges, never the agent.** So make the judges check
 the resulting artifacts — tests, a compiler, a proof checker — not the agent's claim about it — the agent will often enough hallucinate that a job is done.
