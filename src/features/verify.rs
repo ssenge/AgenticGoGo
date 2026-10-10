@@ -206,6 +206,7 @@ impl Handler for RunJudges {
         let ruler_agent = ctx.cfg.judge.agent.clone();
         ctx.charge(&ruler_agent, res.judge_tokens, res.judge_cost);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
+        crate::features::evidence::keep(ctx, Some(ctx.session), &res.fresh_verdicts);
         ctx.scratch.get::<AGGScratch>().res = Some(res);
         ctx.publish();
         Ok(Flow::Continue)

@@ -121,6 +121,7 @@ block precisely because it is immutable: a moving grader makes verdicts incompar
 | `agent` | `claude` | usually the same as `defaults.agent`, but need not be — a Codex worker with a Claude ruler is valid. |
 | `model` | none | none ⇒ the ruler's cheap-model default. |
 | `timeout` | `300` | seconds, enforced for **every** judge (script and LLM) with a process-group kill. |
+| `evidence_max_mb` | `100` | the most judge evidence (MiB) one run copies into `agg/private/evidence/` ([below](#evidence--what-agg-keeps)). A disk bound, not a run limit: a file that does not fit is skipped and recorded, and the run goes on. |
 
 If the ruler is rate-limited or unreachable, the run **parks in backoff and merges nothing** — it
 never fails over to another agent (that would move the ruler) and never fabricates a verdict.
@@ -936,7 +937,7 @@ A judge prints a **verdict JSON** to stdout (agg reads the *last* JSON object, s
   "max":       100,         // optional — the denominator
   "target":    80,          // optional — presentational only
   "rationale": "one line",  // optional — shown on the dashboard
-  "evidence":  ["…"]        // optional — the judge's citations, persisted
+  "evidence":  ["…"]        // optional — files the verdict cites; agg KEEPS a copy (see Evidence)
 }
 ```
 
@@ -986,6 +987,38 @@ Two consequences worth knowing:
 
 Under `isolation: none` nothing is confined and the variables are still set, so a judge written for
 the sandbox works identically either way.
+
+#### Evidence — what agg keeps
+
+The scratch does not last, so a file a verdict cites there would be gone by the time someone asks
+why the gate passed. After every judging pass (the baseline, each judged session, each driver
+`agg.judge()`), agg **copies** each file in a verdict's `evidence` list to
+
+```
+agg/private/evidence/<run_id>/<session>/<judge>/<path>      # <session> is `baseline` for the baseline pass
+```
+
+```bash
+# agg/judges/complexity.sh — measure into the scratch, cite the file
+lizard src --xml > "$AGG_JUDGE_SCRATCH/cc.xml"
+printf '{"met":true,"value":%s,"rationale":"…","evidence":["cc.xml"]}\n' "$n"
+```
+
+- **Resolution.** A relative path is looked up in the judge's scratch first, then the project root;
+  an absolute path is taken as is. It is kept under its path relative to whichever of the two roots
+  holds it.
+- **Confinement.** The path — with every symlink resolved — must lie inside the scratch or the
+  project, and be a regular file. `../../.ssh/id_rsa`, `/etc/hosts`, or a scratch symlink pointing out
+  of both roots is **refused**, never copied: a judge reads worker-written content, and its verdict
+  must not turn into a copy agg makes of something outside the work.
+- **The cap.** `judge.evidence_max_mb` (default 100) bounds what one run copies. A file that does not
+  fit is skipped with a warning; the run goes on.
+- **Where it is recorded.** Each `verdicts.jsonl` row carries `evidence_saved` (the kept copies,
+  project-relative) and `evidence_skipped` (`<declared>: <reason>` for each entry not kept). The run
+  report lists the kept copies on each verdict (`judges.<name>.last.evidence`, `…baseline.evidence`,
+  absolute) and names the run's directory in `paths.evidence_dir`.
+
+agg never deletes kept evidence; clear `agg/private/evidence/` yourself when it is no longer needed.
 
 **Which tier applies to a judge?** The RUN's, never the tier of whichever step invoked it — a judge is
 an evaluator, and the paths a worker must not change are exactly the ones a judge needs to read and
@@ -1194,7 +1227,7 @@ gitignored, auto-created directories — and the split is by **who may write the
 | directory | written by | contents |
 |---|---|---|
 | **`agg/state/`** | the **worker** (agg reads it as untrusted input) | `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/`, `BLOCKED.md` |
-| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `gate.json`, `violations.jsonl`, `protected/`, `bus/`, `run.pid`, `run.log`, `report.json` |
+| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `gate.json`, `violations.jsonl`, `protected/`, `evidence/`, `bus/`, `run.pid`, `run.log`, `report.json` |
 
 **The one rule that decides which is which:** *if the worker writing it could change when the loop ends,
 what it may spend, or what agg believes happened, it is private.* Everything the worker is **supposed** to
@@ -1222,6 +1255,9 @@ author lives in `agg/state/`.
   exactly that sanitizing.
 - **`agg/private/state.json`** — the live scoreboard snapshot (the TUI, `agg serve`, `/agg:status` read it).
 - **`agg/private/verdicts.jsonl`** — the append-only, safety-critical GATE record.
+- **`agg/private/evidence/`** — the files each verdict cited, kept after its judge ran
+  ([Evidence](#evidence--what-agg-keeps)). Private because a verdict CITES them: a worker able to swap
+  a kept file would rewrite why a gate passed.
 - **`agg/private/project.json`** — the run-history ledger (`agg history`): lifetime sessions/tokens.
 - **`agg/private/run.pid` · `run.log`** — the loop's liveness, and its log: every run stamps its
   `run_id` here, and `--detach` / `--report-json` send the whole process output here.
@@ -1301,10 +1337,10 @@ agg run --report-json | jq -r .outcome      # logs go to agg/private/run.log; st
 | `started_at` · `finished_at` | epoch seconds. |
 | `sessions` | `total`, `merged`, `rolled_back`, `staged_unmerged` (staged on a span no gate decided). |
 | `time` | `wall_time_s`, `work_time_s`, `human_wait_time_s` — the [clock](#the-clock--three-terms-all-in-seconds). |
-| `judges` | by name: `last` and `baseline` verdicts (`met`, `value`, `max`, `target`, `rationale`, `error`); `null` where there is none. The driver path has no baseline. |
+| `judges` | by name: `last` and `baseline` verdicts (`met`, `value`, `max`, `target`, `rationale`, `error`, and `evidence` — the absolute paths of the [kept](#evidence--what-agg-keeps) evidence copies, omitted when none); `null` where there is none. The driver path has no baseline. |
 | `result` | `base_branch`, `final_commit` (the base's tip after the last gate), `staged_branch` (an ungated span's tip — `git merge` it to land that work). |
 | `open_asks` | questions still waiting on a human: `id`, `kind`, `question`, `age_s`. |
-| `paths` | absolute paths of `report`, `ledger` (`verdicts.jsonl`), `log`, `evidence_dir` (`null` for now). |
+| `paths` | absolute paths of `report`, `ledger` (`verdicts.jsonl`), `log`, `evidence_dir` (this run's `agg/private/evidence/<run_id>`; `null` when no evidence was kept). |
 
 **Outcome precedence** — when several hold at the end of one session: `error` > `stopped` > `done` >
 `aborted`.

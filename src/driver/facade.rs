@@ -182,6 +182,14 @@ impl Agg {
         self
     }
 
+    /// The most judge evidence (MiB) this run copies into `agg/private/evidence/` — the twin of
+    /// YAML's `judge.evidence_max_mb` (default 100). A disk bound, not a run limit: a file that does
+    /// not fit is skipped and recorded on its verdict's ledger row, and the run goes on.
+    pub fn evidence_max_mb(mut self, mb: u64) -> Agg {
+        self.cfg.judge.evidence_max_mb = mb;
+        self
+    }
+
     /// The standing project-instructions file the worker's brief POINTS AT, relative to the project
     /// dir. Default `agg/AGG.md`.
     ///
@@ -361,6 +369,7 @@ impl Agg {
             scratch: crate::plugin::Extensions::default(),
         };
         st.ext.get::<AGGState>().git.iso_base = iso_base;
+        crate::features::evidence::begin(&mut st, report.run_id());
         st.publish();
         st.dash.lifetime_session = lifetime_base;
         // the first span opens here, against the engine's launch truth.
@@ -773,6 +782,8 @@ impl Agg {
             // its judges ran. `publish()` leaves `dash.judges` alone when the engine has none, so
             // this upsert is what the TUI, the web BFF and Progress actually render.
             Self::publish_verdict(&mut st.dash.judges, &j.name, &kind, &verdict);
+            // judged in THIS session's scratch, so the evidence is kept now, not at the gate.
+            crate::features::evidence::keep(&mut st, Some(session), &[(j.name.clone(), verdict.clone())]);
             st.dash.pos = self.label_path();
             st.publish();
         }

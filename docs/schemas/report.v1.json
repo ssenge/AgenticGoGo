@@ -81,7 +81,7 @@
         "report": { "type": "string" },
         "ledger": { "type": "string", "description": "the verdict ledger; its row format is internal" },
         "log": { "type": "string" },
-        "evidence_dir": { "type": ["string", "null"] }
+        "evidence_dir": { "type": ["string", "null"], "description": "this run's kept judge evidence, agg/private/evidence/<run_id>; null when none was kept" }
       }
     }
   },
@@ -105,7 +105,12 @@
         "max": { "type": ["number", "null"] },
         "target": { "type": "number" },
         "rationale": { "type": "string" },
-        "error": { "type": ["string", "null"], "description": "set when the judge could not grade at all" }
+        "error": { "type": ["string", "null"], "description": "set when the judge could not grade at all" },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "absolute paths of the evidence files agg kept for this verdict, under paths.evidence_dir; omitted when none were kept"
+        }
       }
     }
   }
