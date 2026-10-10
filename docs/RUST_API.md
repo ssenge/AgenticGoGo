@@ -93,6 +93,12 @@ fn main() -> Result<(), agg::driver::Fatal> {
 | `agg.open_asks()` | the asks a human still owes an answer to — including ones the WORKER opened |
 | `agg.block(q)` | the old doorbell: waits for `agg send resume`, returns nothing. Prefer `hil_bool` |
 
+A step's task can live in a file: `Step::new("implement").prompt_file("steps/implement.md")` (relative
+to `agg/`, or absolute) is read at every session start and hashed into `agg/private/prompts.jsonl`,
+exactly like YAML's `prompt_file:`. `.prompt()` and `.prompt_file()` replace each other — a derived
+step overrides its template's choice — and `agg.step()` refuses a step carrying both, or naming a
+file it cannot read.
+
 ### Judges
 
 Three kinds, one type:
@@ -119,6 +125,12 @@ pass, so under a confining tier the project tree is read-only to it and writes a
 `$AGG_JUDGE_SCRATCH` for working files, a persistent per-project dir for toolchain caches
 (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, `GOCACHE`, …). Full table in
 [docs/CONFIG.md](CONFIG.md#-a-judge-may-not-write-the-project-tree).
+
+A verdict's `.with_evidence([...])` paths are KEPT: when the driver asks a judge, agg copies each
+named file (relative paths resolve in `c.scratch()` first, then the project) to
+`agg/private/evidence/<run_id>/<session>/<judge>/` — under the session it was JUDGED in, since a later
+`gate()` sees another scratch — and names the copies on the gate's ledger row and in the report.
+`Agg::evidence_max_mb(n)` bounds one run's copies (default 100, the twin of `judge.evidence_max_mb`).
 
 ⚠ **What confines a driver's judges is `.isolation()` on its STEPS.** There is no separate knob: the
 run's tier is the strongest tier any step has declared, and judges take that — never the tier of

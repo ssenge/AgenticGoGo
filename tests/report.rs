@@ -470,3 +470,44 @@ fn report_json_outside_a_project_prints_an_error_report() {
     assert_eq!(v["outcome"], "error");
     assert!(!tmp.path().join("agg").exists(), "agg must not scaffold state into a non-project");
 }
+
+/// A judge that writes `cc.sarif` in its scratch and cites it as evidence has the file KEPT under
+/// `agg/private/evidence/<run>/<session>/<judge>/`, named on its ledger row and in the report (for
+/// the baseline verdict and the last one) — while a path outside the scratch and the project, and a
+/// scratch symlink pointing out of them, are refused and recorded rather than copied.
+#[test]
+fn a_judge_evidence_file_is_kept_and_referenced() {
+    let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
+    let dir = tmp.path();
+    let judge = dir.join("agg/judges/worked.sh");
+    write(
+        &judge,
+        "#!/bin/sh\necho '<sarif/>' > \"$AGG_JUDGE_SCRATCH/cc.sarif\"\nln -sf /etc/hosts \"$AGG_JUDGE_SCRATCH/link\"\n\
+         if [ -f did_work ]; then m=true; else m=false; fi\n\
+         echo \"{\\\"met\\\":$m,\\\"value\\\":1,\\\"max\\\":1,\\\"rationale\\\":\\\"r\\\",\\\"evidence\\\":[\\\"cc.sarif\\\",\\\"/etc/hosts\\\",\\\"link\\\"]}\"\n",
+    );
+    chmod_x(&judge);
+    let out = agg(dir, &path).arg("run").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+
+    let r = report(dir);
+    let run = r["run_id"].as_str().unwrap();
+    let ev_dir = r["paths"]["evidence_dir"].as_str().expect("evidence was kept, so the dir is named");
+    assert!(ev_dir.ends_with(&format!("agg/private/evidence/{run}")), "{ev_dir}");
+    let last = r["judges"]["worked"]["last"]["evidence"].as_array().expect("the last verdict lists its evidence");
+    assert_eq!(last.len(), 1, "only the scratch file is kept: {last:?}");
+    let kept = last[0].as_str().unwrap();
+    assert!(kept.ends_with(&format!("{run}/1/worked/cc.sarif")), "{kept}");
+    assert_eq!(fs::read_to_string(kept).unwrap(), "<sarif/>\n");
+    let base = r["judges"]["worked"]["baseline"]["evidence"][0].as_str().unwrap();
+    assert!(base.ends_with(&format!("{run}/baseline/worked/cc.sarif")), "{base}");
+
+    let ledger = fs::read_to_string(agg::paths::verdicts_jsonl(dir)).unwrap();
+    let row: Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
+    assert_eq!(row["evidence_saved"][0], format!("agg/private/evidence/{run}/1/worked/cc.sarif"));
+    let skipped: Vec<&str> = row["evidence_skipped"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert!(skipped.iter().all(|s| s.contains("refused")), "{skipped:?}");
+    let copied = fs::read_dir(Path::new(ev_dir).join("1/worked")).unwrap().count();
+    assert_eq!(copied, 1, "neither /etc/hosts nor the symlink's target was copied");
+}

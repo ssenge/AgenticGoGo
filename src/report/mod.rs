@@ -160,7 +160,8 @@ pub struct JudgeEntry {
     pub baseline: Option<VerdictView>,
 }
 
-/// A verdict as the report states it: the judge contract minus `evidence`.
+/// A verdict as the report states it: the judge contract, with `evidence` naming agg's KEPT copies
+/// rather than the paths the judge declared (those pointed into a scratch that does not last).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VerdictView {
     pub met: bool,
@@ -171,6 +172,10 @@ pub struct VerdictView {
     pub rationale: String,
     /// set when the judge could not grade at all, as distinct from "not met".
     pub error: Option<String>,
+    /// absolute paths of the evidence files agg kept for this verdict, under `paths.evidence_dir`.
+    /// Omitted when none were kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
 }
 
 impl From<&crate::core::model::Verdict> for VerdictView {
@@ -182,6 +187,7 @@ impl From<&crate::core::model::Verdict> for VerdictView {
             target: v.target,
             rationale: v.rationale.clone(),
             error: v.error.clone(),
+            evidence: Vec::new(),
         }
     }
 }
@@ -214,7 +220,7 @@ pub struct Paths {
     /// the per-gate verdict ledger. Its ROW FORMAT is internal; the path is given for auditing.
     pub ledger: String,
     pub log: String,
-    /// `null` until judges persist evidence.
+    /// this run's kept judge evidence (`agg/private/evidence/<run_id>`); `null` when none was kept.
     pub evidence_dir: Option<String>,
 }
 

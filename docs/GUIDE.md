@@ -367,7 +367,7 @@ are optional:
   "max":       <number>,       // optional — the denominator for value
   "target":    <number>,       // optional — the value that counts as "done"
   "rationale": "<one line>",   // optional — shown on the dashboard
-  "evidence":  ["<line>", ...] // optional
+  "evidence":  ["<file>", ...] // optional — files the verdict cites; agg keeps a copy
 }
 ```
 
@@ -376,6 +376,14 @@ So a **binary** judge can print just `{"met": true}`; a numeric one might print,
 ```json
 {"met": false, "value": 18, "max": 28, "target": 28, "rationale": "18/28 tests pass"}
 ```
+
+**Evidence survives the judge.** A judge writes its working files (a SARIF report, a benchmark, a
+diff) to `$AGG_JUDGE_SCRATCH`, which is per session and transient. Name a file in `evidence` and agg
+copies it to `agg/private/evidence/<run_id>/<session>/<judge>/` after judging, records the copy on the
+verdict's ledger row, and lists it in the run report — so a pull request can show *why* a gate
+passed or failed. Only regular files inside the scratch or the project are kept; anything else is
+refused and recorded. One run copies at most `judge.evidence_max_mb` (default 100)
+([details](CONFIG.md#evidence--what-agg-keeps)).
 
 `agg` uses the last JSON object on stdout, so a judge can log freely and print its verdict last. There
 is no `type:` field — a judge that emits a `value` shows partial progress; one that emits only `met`
@@ -477,6 +485,11 @@ sequence:
     - { step: worker, until: "NOT stalled", max: 4 }  # repeat while stalled, at most 4 sessions
     - reconsider                   # step back on a different vendor — runs EVERY lap, see below
 ```
+
+A long prompt does not have to live in `agg.yaml`: `prompt_file: "steps/reconsider.md"` (and
+`role_prompt_file:`) reads it from a file under `agg/` instead — re-read at every session start, so an
+edit applies from the next session, with each version's hash recorded in `agg/private/prompts.jsonl`
+([details](CONFIG.md#prompts-from-files--prompt_file-role_prompt_file)).
 
 An entry is tiny: a bare `NAME`, or `{ step: NAME, times: N }`, or `{ step: NAME, until: <expr>,
 max: N }` (the `<expr>` is the same `done_if` grammar, checked after each dispatch). Both bounds are
@@ -732,7 +745,7 @@ breaking change, so ignore unknown fields.
 
 | Interface | Contract |
 |---|---|
-| **`agg/private/report.json`** | How the run ended: `outcome` (`done` · `aborted` · `stopped` · `error`), the reason, session counts, clock, every judge's last and baseline verdict, the result commit, open asks. Schema: [`docs/schemas/report.v1.json`](schemas/report.v1.json). Field reference: [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson). `agg run --report-json` prints it on stdout. |
+| **`agg/private/report.json`** | How the run ended: `outcome` (`done` · `aborted` · `stopped` · `error`), the reason, session counts, clock, every judge's last and baseline verdict (with the paths of its kept evidence), the result commit, open asks. Schema: [`docs/schemas/report.v1.json`](schemas/report.v1.json). Field reference: [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson). `agg run --report-json` prints it on stdout. |
 | **`agg run` exit codes** | 0 done · 3 `abort_if` · 4 session cap · 5 stopped · 1 error. The report's `outcome` is authoritative. |
 | `agg check --json` | `{schema_version, ok, config, problems: [{path, message}], warnings: [{path, message}]}`. `path` is dotted (`steps.worker.isolation`, `sequence.steps[1].until`; `""` = the whole file). Exit 0 valid · 1 any problem. Runs nothing. |
 | `agg doctor --json` | `{schema_version, agg_version, ok, config: {path, found, valid, judges}, backends: [{name, bin, used, installed, path, version, self_sandboxes, capabilities: {reports_output_tokens, reports_cost_usd, supports_resume, supports_effort, detects_rate_limits, supports_one_shot}}], isolation: {none, sandbox, container: {available, mechanism, requested}}, container_engine, problems, warnings}`. Exit 0 ok · 1 otherwise. |

@@ -1445,3 +1445,57 @@ fn a_driver_run_leaves_a_report_and_driver_run_corrects_an_err() {
     assert!(r["error"].as_str().unwrap().contains("driver bug"), "{r}");
     assert_eq!(r["sessions"]["total"], 1, "the rest of what the run recorded is kept");
 }
+
+/// Evidence on the DRIVER path: a native judge writes `bench.json` into its scratch and cites it;
+/// the copy is kept the moment it is judged — under the session it was judged in — and named on the
+/// ledger row the gate writes, however much later that gate is.
+#[test]
+fn a_driver_judge_evidence_is_kept_when_judged_and_named_at_the_gate() {
+    let tmp = project();
+    let dir = tmp.path();
+    let bench = Judge::native("bench", |c| {
+        std::fs::write(c.scratch().join("bench.json"), "{\"p99\":12}").unwrap();
+        Verdict::binary(true).with_evidence(["bench.json"])
+    });
+    let agg = Agg::open(dir).unwrap();
+    agg.step(&work()).unwrap();
+    assert!(agg.judge(&bench).met());
+    agg.step(&work()).unwrap();
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    drop(agg);
+
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(agg::paths::report_json(dir)).unwrap()).unwrap();
+    let ev_dir = PathBuf::from(report["paths"]["evidence_dir"].as_str().expect("evidence was kept"));
+    assert_eq!(std::fs::read_to_string(ev_dir.join("1/bench/bench.json")).unwrap(), "{\"p99\":12}");
+    let ledger = std::fs::read_to_string(agg::paths::verdicts_jsonl(dir)).unwrap();
+    let row: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
+    let saved = row["evidence_saved"][0].as_str().unwrap();
+    assert!(saved.starts_with("agg/private/evidence/run-") && saved.ends_with("/1/bench/bench.json"), "{saved}");
+    assert_eq!(row["session"], 2, "the row is the gate's, the copy the judging session's");
+}
+
+/// `Step::prompt_file` on the driver path: the file's text reaches the brief and its hash the prompt
+/// ledger; a step carrying both forms, or a file that does not exist, is refused before it runs.
+#[test]
+fn a_driver_step_prompt_file_is_read_hashed_and_checked() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("agg/steps")).unwrap();
+    std::fs::write(dir.join("agg/steps/impl.md"), "Implement the parser from the file.\n").unwrap();
+    let agg = Agg::open(dir).unwrap();
+
+    let mut both = Step::new("implement").model("fake").prompt_file("steps/impl.md");
+    both.prompt = Some("inline too".into());
+    let err = agg.step(&both).unwrap_err().to_string();
+    assert!(err.contains("are alternatives"), "{err}");
+    let missing = Step::new("implement").model("fake").prompt_file("steps/gone.md");
+    assert!(agg.step(&missing).unwrap_err().to_string().contains("cannot read"));
+
+    agg.step(&Step::new("implement").model("fake").prompt_file("steps/impl.md")).unwrap();
+    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
+    assert!(brief.contains("Implement the parser from the file."), "{brief}");
+    let rows = agg::core::prompts::read_ledger(dir);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].session, rows[0].step.as_str()), (1, "implement"));
+}
