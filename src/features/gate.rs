@@ -220,6 +220,13 @@ pub(crate) fn keep_or_rollback(
                 );
             }
             crate::git::finalize_session(&ctx.dir, br, ctx.session, keep);
+            if keep {
+                // the merged tree is the new incumbent: its swe-metrics reports become the baseline
+                // the next session is scored against.
+                for w in crate::metrics::measure::promote(&ctx.dir, Some(ctx.session)) {
+                    eprintln!("  ⚠ could not keep the incumbent's swe-metrics report — {w}");
+                }
+            }
             let tag = match fate {
                 Gated::Merged => Outcome::Merged,
                 Gated::NoImprovement => Outcome::NoImprovement,

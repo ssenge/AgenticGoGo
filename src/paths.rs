@@ -32,6 +32,7 @@
 //!       protected/<sha256>  agg's own copies of every `write_deny` file, to restore a violation from
 //!       evidence/<run>/<session>/<judge>/  the files each verdict cited, kept after its judge ran
 //!       prompts.jsonl       per session, the hash of every prompt file its brief was read from
+//!       metrics/incumbent/<scope>.json  the swe-metrics report of the last KEPT state (a score's baseline)
 //! ```
 //!
 //! # Why the split exists
@@ -235,6 +236,15 @@ pub fn prompts_jsonl(dir: &Path) -> PathBuf {
     private_dir(dir).join("prompts.jsonl")
 }
 
+/// The incumbent's swe-metrics reports: `agg/private/metrics/incumbent/<scope>.json`
+/// (`metrics::measure`) — the report of the last kept state, kept next to the ratchet state.
+///
+/// Private because a score judge scores AGAINST it (`--baseline`): a worker able to swap it could
+/// hand its own session a flattering baseline, so that a metric that got worse costs no points.
+pub fn metrics_incumbent_dir(dir: &Path) -> PathBuf {
+    private_dir(dir).join("metrics").join("incumbent")
+}
+
 /// The live loop's pidfile: `agg/private/run.pid` (double-run guard + `agg stop` target).
 pub fn run_pid(dir: &Path) -> PathBuf {
     private_dir(dir).join("run.pid")
@@ -299,11 +309,13 @@ mod tests {
         assert_eq!(protected_store(d), Path::new("/proj/agg/private/protected"));
         // a worker deleting a row would hide that a stop came while the run was waiting.
         assert_eq!(waits_jsonl(d), Path::new("/proj/agg/private/waits.jsonl"));
+        // a score judge's baseline — a swapped one would make a worse metric cost nothing.
+        assert_eq!(metrics_incumbent_dir(d), Path::new("/proj/agg/private/metrics/incumbent"));
 
         // and the carve-out must actually CONTAIN the private files, or the sandbox deny (which is
         // one subpath rule) would confine nothing.
         for p in [verdicts_jsonl(d), calls_jsonl(d), gate_json(d), bus_dir(d), state_json(d), run_pid(d), report_json(d),
-                  violations_jsonl(d), protected_store(d), waits_jsonl(d)] {
+                  violations_jsonl(d), protected_store(d), waits_jsonl(d), metrics_incumbent_dir(d)] {
             assert!(p.starts_with(private_dir(d)), "{} must live under the carve-out", p.display());
         }
     }

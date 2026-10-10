@@ -254,7 +254,7 @@ fn run_reported(
     register: impl FnOnce(&mut Lifecycle),
     run: &crate::report::RunHandle,
 ) -> Result<RunOutcome> {
-    let Assembly { engine: eng, steps: seq_steps } = assembly;
+    let Assembly { engine: mut eng, steps: seq_steps } = assembly;
     // FIRST, before anything below writes state.json, project.json or the ledger it reads.
     let resume = if opts.resume { Some(crate::features::resume::load(dir)?) } else { None };
     let max_sessions_flag = opts.max_sessions;
@@ -274,6 +274,8 @@ fn run_reported(
     let mut boot = Bootstrap { dir, cfg: &cfg, resume: opts.resume, iso_base: None };
     run_pre_start(&lifecycle.pre_start, &mut boot)?;
     let iso_base = boot.iso_base.expect("ResolveIsoBase set iso_base");
+    // what the judges grade against: a `scope: changed` metric judge measures the changes since it.
+    eng.base = Some(iso_base.clone());
 
     #[cfg(not(unix))]
     eprintln!("  ⚠ Windows: unix-first build — the CPU-flat watchdog and process-group spawn protection are NOT active here.");

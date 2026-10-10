@@ -185,7 +185,7 @@ impl Agg {
     /// rule, it applies to the judges asked since the last gate; a ratcheted judge that errored or
     /// emitted no number never passes.
     pub fn ratchet(mut self, judge: impl Into<String>, spec: crate::core::ratchet::Ratchet) -> Agg {
-        self.cfg.sequence.ratchet.insert(judge.into(), spec);
+        self.cfg.sequence.ratchet.insert(judge.into(), spec.into());
         self
     }
 
@@ -290,6 +290,9 @@ impl Agg {
             recs
         } else {
             crate::core::calls::truncate(&dir).map_err(Fatal::Other)?;
+            // …and a fresh run has no incumbent until its first kept gate: a previous run's swe-metrics
+            // report describes a tree this run never kept.
+            crate::metrics::measure::forget_incumbent(&dir);
             Vec::new()
         };
 
@@ -592,7 +595,9 @@ impl Agg {
             // the gate's own state AS OF that gate — the ratchet references and the rollback count
             // survive the restart instead of starting clean.
             if let Some(state) = gate {
-                started.st.borrow_mut().eng.gate.state = state;
+                for w in started.st.borrow_mut().eng.gate.restore(state) {
+                    eprintln!("  ⚠ {w}");
+                }
             }
             // the span this gate closed is behind us; the next one opens against today's tree.
             *self.span_goals.borrow_mut() = started.st.borrow().eng.snapshot_goal_state();
@@ -714,7 +719,7 @@ impl Agg {
     pub fn gate_state(&self) -> crate::core::ratchet::GateState {
         match self.started.get() {
             Some(s) => s.st.borrow().eng.gate.state.clone(),
-            None => crate::core::ratchet::Gate::new(self.cfg.sequence.ratchet.clone(), 0).state,
+            None => crate::core::ratchet::Gate::new(crate::core::ratchet::resolve_explicit(&self.cfg.sequence.ratchet), 0).state,
         }
     }
 
@@ -933,6 +938,14 @@ impl Agg {
             JudgeKind::Script { path } => JudgeKind::Script { path: self.dir.join(path) },
             JudgeKind::Llm { path, .. } => crate::core::judges::kind_for(&self.dir.join(path)),
             JudgeKind::Native { f } => JudgeKind::Native { f: f.clone() },
+            // a driver's scoring definition FILE is relative to the project dir, like its scripts.
+            JudgeKind::Score(s) => match &s.definition {
+                crate::metrics::spec::Definition::File(p) if p.is_relative() => JudgeKind::Score(Box::new(
+                    crate::metrics::ScoreJudge { definition: crate::metrics::spec::Definition::File(self.dir.join(p)), ..(**s).clone() },
+                )),
+                _ => kind.clone(),
+            },
+            JudgeKind::Metric(_) => kind.clone(),
         }
     }
 }

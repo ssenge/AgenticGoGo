@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn evidence_is_listed_only_on_the_verdict_it_was_kept_for() {
         use crate::state::JudgeView;
-        let kept_v = Verdict { met: true, value: Some(1.0), max: Some(1.0), target: 1.0, rationale: "r".into(), evidence: vec!["cc.sarif".into()], error: None };
+        let kept_v = Verdict { met: true, value: Some(1.0), max: Some(1.0), target: 1.0, rationale: "r".into(), evidence: vec!["cc.sarif".into()], error: None, mixed: false };
         let mut kept = HashMap::new();
         kept.insert("a".to_string(), (kept_v.clone(), vec![std::path::PathBuf::from("/p/agg/private/evidence/r/1/a/cc.sarif")]));
         kept.insert("b".to_string(), (kept_v, vec![std::path::PathBuf::from("/p/x")]));

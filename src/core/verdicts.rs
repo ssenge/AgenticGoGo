@@ -124,6 +124,7 @@ impl VerdictRecord {
             rationale: self.rationale.clone(),
             evidence: self.evidence.clone(),
             error: self.error.clone(),
+            mixed: false,
         }
     }
 }
@@ -264,6 +265,7 @@ mod tests {
             rationale: "r".into(),
             evidence: vec![],
             error: None,
+            mixed: false,
         }
     }
 
@@ -393,6 +395,7 @@ mod tests {
             rationale: String::new(),
             evidence: vec![],
             error: None,
+            mixed: false,
         };
         append(&d, None, "baseline", &[("g".into(), numberless)], Outcome::Baseline).unwrap();
         let line = std::fs::read_to_string(crate::paths::verdicts_jsonl(&d)).unwrap();

@@ -507,6 +507,7 @@ mod tests {
             rationale: "KEPT — base truth is flat".into(),
             evidence: vec![],
             error: None,
+            mixed: false,
         });
         let eng = Engine::new(vec![stuck], Some("iterations > 999999".into()), None, Some("stuck.value >= 85".into())).unwrap();
         let mut st = state(&cfg, tmp.path(), eng, Isolation::None);
