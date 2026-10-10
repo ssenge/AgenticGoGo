@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/report.v1.json",
-  "title": "agg run report, schema_version 1",
+  "title": "agg run report, schema_version 1 (superseded by report.v2.json)",
   "description": "agg/private/report.json, written atomically when `agg run` (or a Rust driver) ends for any reason. `outcome` is authoritative. A missing report means the process was killed (SIGKILL, OOM, power loss): treat it as outcome `error`. Any change to this shape bumps schema_version and ships a new file.",
   "type": "object",
   "additionalProperties": false,
