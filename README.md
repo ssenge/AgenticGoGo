@@ -272,15 +272,15 @@ Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
 | `agg init` | Scaffold `agg.yaml`, `AGG.md`, state and a starter judge |
 | `agg plan` | Dry run: evaluate every judge once, print the starting scoreboard |
 | `agg run` | Run the loop until `done_if` or `abort_if` |
-| `agg status` | Live scoreboard, read from state; cheap, does not re-judge |
+| `agg status` | Live scoreboard, read from state; cheap, does not re-judge. `--json`: the versioned live status for programs |
 | `agg dashboard` | Live TUI, or a one-shot snapshot with `--once` |
 | `agg doctor` | Check the chosen agent is installed and the config is valid for it |
 | `agg check` | Validate the config as `agg run` startup would, listing every problem at once (`--json`) |
 | `agg schema` | Print the JSON Schema of `agg.yaml` |
 | `agg judge <name>` | Run one judge and print its verdict, for authoring and debugging |
-| `agg history` | Run history and lifetime totals |
+| `agg history` | Run history and lifetime totals, with each run's token and cost usage |
 | `agg send` | Steer a **running** workflow: `inject`, `pause`, `resume`, `budget`, `stop`, `note`. Refused if none is running |
-| `agg answer <id> <val>` | Answer an open human ask. Works with no workflow running — an ask outlives the run that raised it |
+| `agg answer <id> <val>` | Answer an open human ask. Works with no workflow running — an ask outlives the run that raised it. `--json`: `{accepted, reason, …}` |
 | `agg hil` | **For the worker:** ask a human `bool`/`choose`/`input`. Records and exits — it never waits |
 | `agg stop` | Graceful stop, an alias of `agg send stop`. Exits **5** — a stop is not a met goal |
 | `agg spawn` | Start a long task that outlives one worker session |
