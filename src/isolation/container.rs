@@ -46,6 +46,12 @@ pub fn container_available() -> bool {
     engine().is_some()
 }
 
+/// The container engine `isolation: container` would use (`docker`, else `podman`), if one runs.
+/// Reported by `agg doctor --json`.
+pub fn container_engine() -> Option<&'static str> {
+    engine()
+}
+
 /// Reshape a built [`Command`] into `<engine> run …` that runs it inside `image`, with `cwd`
 /// bind-mounted read-write and set as the workdir, plus a mount per `writable` path and a `:ro`
 /// re-mount per denied one.

@@ -43,7 +43,7 @@ mod imp;
 // The container tier is NOT cfg-split: one `docker run` argv works on every host that has an
 // engine (macOS reaches a Linux VM, which is the engine's problem, not ours).
 pub mod container;
-pub use container::{container_available, containerize, DEFAULT_IMAGE};
+pub use container::{container_available, container_engine, containerize, DEFAULT_IMAGE};
 
 // Any OS that is neither Linux nor macOS has no wrapper. Both entry points fail LOUD — the whole
 // point of this feature is that an unavailable mechanism is refused, never silently ignored.
@@ -64,7 +64,7 @@ mod imp {
 /// The per-step blast-radius isolation tier. `none` = direct subprocess (today); `sandbox` =
 /// kernel-enforced FS confinement; `container` = the command runs inside a container.
 /// Deserialized from the lowercase tier name in agg.yaml.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Isolation {
     /// Direct subprocess, no confinement — full host blast radius (today's behaviour).
