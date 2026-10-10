@@ -62,6 +62,14 @@ pub struct VerdictRecord {
     pub rationale: String,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// the copies agg kept of `evidence`, project-relative
+    /// (`agg/private/evidence/<run>/<session>/<judge>/…`). Absent when nothing was kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_saved: Vec<String>,
+    /// `<declared>: <reason>` for each `evidence` entry agg did not keep — refused (outside the
+    /// judge scratch and the project), missing, or over the size cap. Absent when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_skipped: Vec<String>,
     pub outcome: Outcome,
     /// set when the GATE held this judge to its ratchet and it regressed: the reference it was held
     /// to (`from`) and what it measured (`to`, absent when it errored or emitted no number). Absent
@@ -164,6 +172,20 @@ pub fn append_marked(
     outcome: Outcome,
     ratchet: &[RatchetRegression],
 ) -> Result<()> {
+    append_full(dir, session, step, verdicts, outcome, ratchet, &HashMap::new())
+}
+
+/// [`append_marked`], also stamping each row with the evidence agg kept for that verdict — `kept`
+/// maps a judge to its `(saved, skipped)` lists, as [`VerdictRecord::evidence_saved`] states them.
+pub fn append_full(
+    dir: &Path,
+    session: Option<u32>,
+    step: &str,
+    verdicts: &[(String, Verdict)],
+    outcome: Outcome,
+    ratchet: &[RatchetRegression],
+    kept: &HashMap<String, (Vec<String>, Vec<String>)>,
+) -> Result<()> {
     use std::io::Write;
     if verdicts.is_empty() {
         return Ok(());
@@ -190,6 +212,8 @@ pub fn append_marked(
             error: v.error.clone(),
             rationale: v.rationale.clone(),
             evidence: v.evidence.clone(),
+            evidence_saved: kept.get(judge).map(|k| k.0.clone()).unwrap_or_default(),
+            evidence_skipped: kept.get(judge).map(|k| k.1.clone()).unwrap_or_default(),
             outcome,
             ratchet: ratchet
                 .iter()
@@ -334,6 +358,22 @@ mod tests {
         assert_eq!(rows_for(&d, "ok", false)[0].ratchet, None);
         let text = std::fs::read_to_string(crate::paths::verdicts_jsonl(&d)).unwrap();
         assert_eq!(text.matches("\"ratchet\"").count(), 2, "only the regressed rows carry a mark: {text}");
+    }
+
+    /// The kept evidence is stamped on the row of the judge it was kept for, and on no other row —
+    /// a row with nothing kept carries neither key, so an old ledger reads unchanged.
+    #[test]
+    fn kept_evidence_is_stamped_on_its_own_row_only() {
+        let d = tmpdir("evidence");
+        let mut kept = HashMap::new();
+        kept.insert("lint".to_string(), (vec!["agg/private/evidence/r/2/lint/cc.sarif".to_string()], vec!["x: refused".to_string()]));
+        let rows = [("lint".to_string(), v(true)), ("ok".to_string(), v(true))];
+        append_full(&d, Some(2), "worker", &rows, Outcome::Merged, &[], &kept).unwrap();
+        let lint = &rows_for(&d, "lint", false)[0];
+        assert_eq!(lint.evidence_saved, ["agg/private/evidence/r/2/lint/cc.sarif"]);
+        assert_eq!(lint.evidence_skipped, ["x: refused"]);
+        let text = std::fs::read_to_string(crate::paths::verdicts_jsonl(&d)).unwrap();
+        assert_eq!(text.matches("evidence_saved").count(), 1, "only the lint row carries it: {text}");
     }
 
     #[test]

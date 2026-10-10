@@ -29,6 +29,7 @@
 //!       report.json         the end-of-run report — the stable interface for embedders
 //!       violations.jsonl    append-only record of `protected_path_violation` rollbacks (write_deny)
 //!       protected/<sha256>  agg's own copies of every `write_deny` file, to restore a violation from
+//!       evidence/<run>/<session>/<judge>/  the files each verdict cited, kept after its judge ran
 //! ```
 //!
 //! # Why the split exists
@@ -206,6 +207,14 @@ pub fn protected_store(dir: &Path) -> PathBuf {
     private_dir(dir).join("protected")
 }
 
+/// The kept judge evidence: `agg/private/evidence/<run>/<session>/<judge>/` (`core::evidence`).
+///
+/// Private because it is what a verdict CITES: a worker able to write here could swap the SARIF
+/// file a passing gate points at for one that tells a different story, after the fact.
+pub fn evidence_dir(dir: &Path) -> PathBuf {
+    private_dir(dir).join("evidence")
+}
+
 /// The live loop's pidfile: `agg/private/run.pid` (double-run guard + `agg stop` target).
 pub fn run_pid(dir: &Path) -> PathBuf {
     private_dir(dir).join("run.pid")
@@ -257,6 +266,8 @@ mod tests {
         assert_eq!(project_json(d), Path::new("/proj/agg/private/project.json"));
         assert_eq!(instructions_md(d), Path::new("/proj/agg/private/INSTRUCTIONS.md"));
         assert_eq!(run_pid(d), Path::new("/proj/agg/private/run.pid"));
+        // what a verdict cites — swapping a kept file rewrites why a gate passed.
+        assert_eq!(evidence_dir(d), Path::new("/proj/agg/private/evidence"));
         assert_eq!(run_log(d), Path::new("/proj/agg/private/run.log"));
         // what an embedder ACTS on — a forged `done` would ship unfinished work.
         assert_eq!(report_json(d), Path::new("/proj/agg/private/report.json"));

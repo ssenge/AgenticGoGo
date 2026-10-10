@@ -137,6 +137,11 @@ A judge lives at `agg/judges/<name>.{sh,md}` and is referenced by its **bare NAM
 - **`.sh`** = SCRIPT judge — runs and prints ONE line of verdict JSON to stdout. Runs from the PROJECT
   ROOT (sees the worker's files). `chmod +x` it.
 - **`.md`** = LLM RUBRIC judge — agg sends it to the ruler as a READ-ONLY one-shot; it must return the same JSON.
+- **Evidence:** files named in a verdict's `evidence` (relative → `$AGG_JUDGE_SCRATCH` first, then the
+  project) are COPIED after judging to `agg/private/evidence/<run_id>/<session>/<judge>/`
+  (`core::evidence`, `features::evidence`), recorded on the ledger row (`evidence_saved`/
+  `evidence_skipped`) and in the report. A path that resolves (symlinks included) outside the scratch
+  and the project is REFUSED. Run-wide cap: `judge.evidence_max_mb` (default 100) — skip + record, never abort.
 
 Verdict contract (to stdout):
 ```json
@@ -174,6 +179,7 @@ agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of
   verdicts.jsonl  gate.json  state.json  project.json  bus/  run.{pid,log}
   report.json                  the end-of-run report — the STABLE interface for embedders (src/report/)
   violations.jsonl  protected/   write_deny: the rollback record + agg's copies to restore from
+  evidence/<run>/<session>/<judge>/  the files each verdict cited, kept after its judge ran
 ```
 **The split rule:** if the worker writing it could change *when the loop ends, what it may spend, or what
 agg believes happened*, it is private. `verdicts.jsonl` is why: forged `merged` rows make `stalled` report

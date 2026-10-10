@@ -155,11 +155,20 @@ pub struct JudgeCfg {
     /// EVERY judge's timeout, script and LLM alike (seconds).
     #[serde(default = "default_judge_timeout")]
     pub timeout: u64,
+    /// the most evidence (MiB) agg copies into `agg/private/evidence/` in ONE run. A disk bound,
+    /// not a run limit: a file that does not fit is skipped and recorded, and the run goes on.
+    #[serde(default = "default_evidence_max_mb")]
+    pub evidence_max_mb: u64,
 }
 
 impl Default for JudgeCfg {
     fn default() -> Self {
-        JudgeCfg { agent: default_agent(), model: None, timeout: default_judge_timeout() }
+        JudgeCfg {
+            agent: default_agent(),
+            model: None,
+            timeout: default_judge_timeout(),
+            evidence_max_mb: default_evidence_max_mb(),
+        }
     }
 }
 
@@ -601,6 +610,9 @@ fn default_true() -> bool {
 }
 fn default_judge_timeout() -> u64 {
     300
+}
+fn default_evidence_max_mb() -> u64 {
+    crate::core::evidence::DEFAULT_MAX_MB
 }
 fn default_summary_interval() -> u64 {
     300

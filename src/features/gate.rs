@@ -171,6 +171,8 @@ pub(crate) fn keep_or_rollback(
     // does not license a session that rewrote an oracle. Taken (cleared) on every arm, because
     // every arm closes the span.
     let violated = std::mem::take(&mut ctx.ext.get::<AGGState>().protect.span_violation);
+    // the copies agg kept of each verdict's evidence, stamped on its ledger row.
+    let kept = crate::features::evidence::for_ledger(ctx, fresh);
     // The `verdicts::append` `?` below is a HARD disk Err that bubbles out to the caller (R7) — the
     // gate's "was met" reads this file, so a swallowed write would silently un-arm the next gate.
     let out = match staged {
@@ -185,7 +187,7 @@ pub(crate) fn keep_or_rollback(
             }
             crate::git::finalize_session(&ctx.dir, br, ctx.session, keep);
             let tag = if keep { Outcome::Merged } else { Outcome::RolledBack };
-            crate::core::verdicts::append_marked(&ctx.dir, Some(ctx.session), &step_name, fresh, tag, &ratchet)?;
+            crate::core::verdicts::append_full(&ctx.dir, Some(ctx.session), &step_name, fresh, tag, &ratchet, &kept)?;
             for line in crate::core::ratchet::describe(&ratchet) {
                 let what = if keep { "kept (gate_regressions: false)" } else { "rolling back" };
                 eprintln!("  ⚠ {line} — beyond tolerance, {what}");
@@ -224,7 +226,7 @@ pub(crate) fn keep_or_rollback(
             // git. What changes is only the ENGINE's live judge state, which is a reading of the
             // filesystem rather than a claim about what merged.
             clear_span(ctx, staged.map(|(br, _)| br.as_str()));
-            crate::core::verdicts::append(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack)?;
+            crate::core::verdicts::append_full(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack, &[], &kept)?;
             Gated::NotStaged
         }
         _ => {
@@ -235,7 +237,7 @@ pub(crate) fn keep_or_rollback(
             ctx.eng.restore_goal_state(pre_goals);
             crate::report::record_gate(ctx, false, staged.map(|(br, _)| br.as_str()));
             clear_span(ctx, staged.map(|(br, _)| br.as_str()));
-            crate::core::verdicts::append(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack)?;
+            crate::core::verdicts::append_full(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack, &[], &kept)?;
             Gated::NotStaged
         }
     };
