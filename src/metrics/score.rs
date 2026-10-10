@@ -139,7 +139,12 @@ pub fn run(c: &Ctx<'_>, j: &ScoreJudge, report: &Path, baseline: Option<&Path>, 
     }
     args.extend(j.definition.args());
     args.extend(["--out".into(), out.display().to_string()]);
-    measure::run_tool(c, &args).map_err(|e| format!("`swe-metrics score` failed: {e}"))?;
+    // a definition FILE outside the project is mounted for a container (inside, it is the project's).
+    let outside: Vec<std::path::PathBuf> = match &j.definition {
+        super::spec::Definition::File(p) => super::contained::outside_project(c.cwd, p).into_iter().collect(),
+        _ => vec![],
+    };
+    measure::run_tool(c, &args, &outside).map_err(|e| format!("`swe-metrics score` failed: {e}"))?;
     let text = std::fs::read_to_string(out).map_err(|e| format!("swe-metrics wrote no score: {e}"))?;
     ScoreDoc::parse(&text)
 }

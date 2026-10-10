@@ -15,12 +15,15 @@
 //! - [`combine`] several tools for one metric: `strictest` · `all` · `majority`
 //! - [`measure`] ONE `swe-metrics measure` per session tree, shared; the incumbent's report
 //! - [`score`]   `swe-metrics score` against the incumbent, and its verdict
-//! - [`probe`]   the startup refusal when swe-metrics is missing or incompatible
+//! - [`probe`]   the startup refusal when swe-metrics is missing or incompatible — on the host, or
+//!   in the judges' image when the run's judges are containerized
+//! - [`contained`] swe-metrics in the judges' image under `isolation: container`
 //! - [`declare`] startup: `judges.*` entries → kinds, ratchet directions, shared `--only` sets
 //!
 //! swe-metrics is OPTIONAL: nothing here runs unless a judge is declared with `metric:`/`score:`.
 
 pub mod combine;
+pub mod contained;
 pub mod declare;
 pub mod measure;
 pub mod probe;
