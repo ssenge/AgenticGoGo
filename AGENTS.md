@@ -46,7 +46,11 @@ CLI and the web API, and they disagreed. An ANSWER is not a send: it is a durabl
 - `agg run [--max-sessions N] [--detach]` — run the loop until `done_if`/`abort_if`.
 - `agg status [--json]` — live scoreboard (reads `state.json`; cheap, does NOT re-judge).
 - `agg dashboard [--once]` — live TUI (or one-shot snapshot).
-- `agg doctor` — check the chosen agent is installed and the config is valid for it.
+- `agg doctor [--json]` — check the chosen agent is installed and the config is valid for it. `--json`: a
+  versioned report (every backend's path/version/capability flags, isolation tiers available, problems).
+- `agg check [--json]` — validate the config EXACTLY as `agg run` startup does, listing ALL problems at once,
+  each with a dotted config path (`steps.w.isolation`). Runs no judge/agent. Exit 1 on any problem.
+- `agg schema` — print the agg.yaml JSON Schema (generated from the config types; cannot drift).
 - `agg judge <name>` — run ONE judge and print its verdict (author/debug a judge).
 - `agg history [--json]` — run history + lifetime totals.
 - `agg send inject "<text>" | pause | resume | budget <n> | stop | note "<text>"` — steer a RUNNING loop.
@@ -192,6 +196,14 @@ src/core/calls.rs     `agg/private/calls.jsonl` — the DRIVER CALL ledger that 
                       it is parked on per-run span branches the ledger cannot carry.
 src/assembly.rs       builds the run-set: `done_if ∪ abort_if ∪ invariants ∪ every until: ∪ ratchet keys`.
                       A judge named by NO expression never runs, however many files sit in agg/judges/.
+                      `build` COLLECTS every problem (a `Problem {path, message}`); `assemble` is
+                      its startup face. `src/check.rs` (`agg check`) runs parse → build →
+                      `capability::assess` → agent preflight with the same functions — add a new
+                      startup refusal THERE (as a located `Problem`), never as a bare `bail!`, or
+                      `agg check` stops seeing it.
+src/schema.rs         `agg schema` = schemars over the config types. A new config struct needs
+                      `JsonSchema` beside `Deserialize`; `tests/schema.rs` validates every shipped
+                      example + the scaffold against it with an independent validator.
 ```
 Driver-path traps: `Agg` boots **lazily** (a `cycles=0` driver publishes nothing and is invisible to
 both readers); `eng.judges` is **empty** on that path, so anything reading it sees no judges — the

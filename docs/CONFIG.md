@@ -7,7 +7,30 @@ misspelled or misplaced key is a **hard error at startup**, never a silent no-op
 makes a stray top-level `budget:` — the three ceilings now live unified under `sequence.limits:` — fail
 loudly instead of becoming a decorative spend ceiling.)
 
-The only required keys are `project` and `sequence`. Everything else has a default.
+The only required key is `project`. Everything else has a default (a file with no `sequence:` is a
+Rust-driver project — see [`docs/RUST_API.md`](RUST_API.md)).
+
+### Validating a config without running it — `agg check` · `agg schema`
+
+- **`agg check [--json]`** runs EVERY startup check `agg run` makes — parse, step and judge
+  resolution, the condition grammar, what the agents can do, the isolation tier's availability, each
+  agent CLI on PATH — and lists **all** problems at once instead of stopping at the first. It runs no
+  judge and no agent. Each problem carries a dotted path into this file (`steps.worker.isolation`,
+  `sequence.steps[1].until`; `""` = the file as a whole) and the message startup would print. Exit
+  **0** valid · **1** any problem. `--json`:
+  ```json
+  {"schema_version": 1, "ok": false, "config": "agg/agg.yaml",
+   "problems": [{"path": "defaults.agnet", "message": "unknown field `agnet`, expected one of `agent`, …"},
+                {"path": "sequence.done_if", "message": "no judge named `ghost` …"}],
+   "warnings": []}
+  ```
+  `warnings` are non-fatal (a dollar guard inert on an agent that caps itself).
+- **`agg schema`** prints the JSON Schema (draft 2020-12) of this file. It is generated from the very
+  types agg parses into, so it cannot drift: every `deny_unknown_fields` struct is
+  `additionalProperties: false`, and `$comment` names the agg version that produced it. Point an
+  editor's YAML language server at it, or validate a generated config before handing it to agg.
+  The schema checks structure and types; `agg check` additionally checks what only agg can know
+  (judge files exist, the agents and tiers are available on this host).
 
 ```yaml
 project: "my-project"
