@@ -473,6 +473,23 @@ impl Agg {
                  `template.create(\"implement\")`"
             )));
         };
+        // a driver's steps never reach `assembly`, so the prompt-file refusals happen HERE: one form
+        // per step, and a file that can be read now (it is read again at every session start).
+        let config_base = crate::paths::config_base(&self.dir);
+        let at = format!("step `{name}`");
+        let mut problems =
+            crate::core::prompts::pair_problems(&at, "prompt", step.prompt.as_deref(), step.prompt_file.as_deref(), &config_base);
+        let d = &self.cfg.defaults;
+        problems.extend(crate::core::prompts::pair_problems(
+            "defaults",
+            "role_prompt",
+            d.role_prompt.as_deref(),
+            d.role_prompt_file.as_deref(),
+            &config_base,
+        ));
+        if !problems.is_empty() {
+            return Err(Fatal::Other(anyhow::anyhow!("{}", crate::problem::render(&problems))));
+        }
         let write_deny = crate::protect::union(&self.cfg.defaults.write_deny, &step.write_deny);
         // The driver's steps are built in code, so `capability::check` never sees them: the
         // write_deny refusal for this tier happens HERE, before the step can run unprotected.
@@ -490,6 +507,8 @@ impl Agg {
             state: step.state.clone().unwrap_or_else(|| self.cfg.defaults.state.clone()),
             role_prompt: self.cfg.defaults.role_prompt.clone(),
             prompt: step.prompt.clone(),
+            role_prompt_file: self.cfg.defaults.role_prompt_file.clone(),
+            prompt_file: step.prompt_file.clone(),
             // ⛔ ALWAYS. `step()` STAGES and `gate()` decides, so the driver path takes today's
             // `skip_judges` route unconditionally: `StageSpan` keeps the branch and extends the
             // span, while `StageMerge`/`RunJudges`/`GateKeepRollback` become no-ops. There is no

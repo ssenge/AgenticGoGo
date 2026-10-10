@@ -186,6 +186,16 @@ impl Handler for WriteInstructions {
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         let state_path = ctx.config_base.join(&step.state);
         ctx.ext.get::<AGGState>().inject.state_before = std::fs::read_to_string(&state_path).ok();
+        // prompt files are read NOW, every session — an edit applies from the next one — and each
+        // read is hashed into the prompt ledger. A file gone mid-run fails the run: a brief without
+        // its task would send the worker off on the wrong work.
+        let (step, files) = crate::core::prompts::load(&ctx.config_base, &step)?;
+        for f in &files {
+            eprintln!("  [prompt] {} {} (sha256 {})", f.key, f.path, &f.sha256[..12]);
+        }
+        if let Err(e) = crate::core::prompts::record(&ctx.dir, ctx.session, &step.name, &files) {
+            eprintln!("  ⚠ could not record the prompt files' hashes: {e:#}");
+        }
         let prompt = compose_prompt(ctx, &step);
         ctx.scratch.get::<AGGScratch>().prompt = Some(prompt);
         Ok(Flow::Continue)

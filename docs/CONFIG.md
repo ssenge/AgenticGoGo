@@ -106,6 +106,7 @@ prompt_includes: []                # files prepended to every worker prompt
 | `worker_args` | `[]` | extra flags passed **verbatim** to the worker CLI — the sandbox constraint. Inheritable so you set it once. |
 | `state` | `state/STATE.md` | the forward-advice file (see [State](#state-and-memory)) — under `agg/state/` (gitignored), resolved against `agg/`. |
 | `role_prompt` | none | generic **role** framing composed *above* a step's `prompt:`. Inheritable; a step body may override it. |
+| `role_prompt_file` | none | `role_prompt` read from a **file** ([Prompts from files](#prompts-from-files--prompt_file-role_prompt_file)). An alternative to `role_prompt` — set one. |
 | `isolation` | `none` | `none` \| `sandbox` \| `container` — blast-radius jail (below). Inheritable; a step may override. |
 | `image` | `alpine:3.20` | the base image an `isolation: container` step runs in. Inert on every other tier. |
 | `write_deny` | `[]` | **protected paths** — globs every step may read but never change. Enforced on **every** tier by the gate's content-hash check, and by the kernel under `sandbox`/`container` ([below](#protected-paths--write_deny-readonly-writable)). A step's own list is ADDED to this one. |
@@ -161,13 +162,42 @@ Each NAME maps to a body of overrides. **The complete legal key list** (anything
 | `worker_args` | `defaults.worker_args` | |
 | `state` | `defaults.state` | |
 | `role_prompt` | `defaults.role_prompt` | generic **role** framing composed **above** the step's `prompt:` (e.g. `reconsider`'s "step back — assume the current approach is wrong"). Replaced the old hardcoded `Role` enum. |
+| `role_prompt_file` | `defaults.role_prompt_file` | `role_prompt` from a file. The role pair inherits **as a pair**: a step naming either key replaces both of the defaults'. |
 | `prompt` | none | **ADDITIVE** to the composed prompt, never replacing it. |
+| `prompt_file` | none | `prompt` read from a **file** (below). An alternative to `prompt` — set one. |
 | `skip_judges` | `false` | `true` ⇒ no judges run after this step, so nothing merges — the work **stages** (below). |
 | `isolation` | `defaults.isolation` | `none` \| `sandbox` \| `container` — the blast-radius jail for this step (below). |
 | `image` | `defaults.image` | the base image for this step under `isolation: container`. |
 | `readonly` | `[]` | project paths this step may read but not write — **kernel only**: inert under `isolation: none` (agg warns). No `defaults.readonly`. ([below](#protected-paths--write_deny-readonly-writable)) |
 | `writable` | `[]` | paths subtracted from this step's `readonly` (exact match). Never touches `write_deny`. |
 | `write_deny` | `[]` | MORE protected paths for this step, **unioned** with `defaults.write_deny`. Nothing subtracts from it. |
+
+### Prompts from files — `prompt_file`, `role_prompt_file`
+
+A prompt kept in its own file is reviewed and diffed as a document, and can be shared with other
+tooling, instead of living as a YAML string:
+
+```yaml
+defaults:
+  role_prompt_file: "roles/worker.md"          # relative to agg/ — or an absolute path
+steps:
+  implement: { prompt_file: "steps/implement.md" }
+  review:    { role_prompt_file: "roles/reviewer.md", prompt: "Review the last change." }
+```
+
+- **One form per key.** Naming `prompt` and `prompt_file` (or `role_prompt` and `role_prompt_file`)
+  in the same block is a startup error, located at the `…_file` key, and so is a file that cannot be
+  read. `agg check` lists both.
+- **Read at every session start.** The text is read when the session's brief is composed, so an edit
+  applies from the next session — no restart. A file that has gone missing mid-run ends the run with
+  an `error`: a brief without its task would send the worker off on the wrong work.
+- **Hashed per session.** Each file read is recorded in `agg/private/prompts.jsonl` — one row per
+  session: `{session, step, files: [{key, path, sha256}], ts}` — so a run shows which version of a
+  prompt each session was given. Inline prompts are in `agg.yaml` itself and record nothing.
+- The brief is **the same** as with the inline keys: the file's text is used exactly as an inline
+  string would be.
+
+A Rust driver has the same for a step's task: `Step::new("implement").prompt_file("steps/implement.md")`.
 
 **`skip_judges` steps stage.** Nothing was judged, so nothing merges; the work stays on the session
 branch and the **next judged step gates the whole span** — pass ⇒ the span merges, a regression ⇒ the
@@ -1227,7 +1257,7 @@ gitignored, auto-created directories — and the split is by **who may write the
 | directory | written by | contents |
 |---|---|---|
 | **`agg/state/`** | the **worker** (agg reads it as untrusted input) | `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/`, `BLOCKED.md` |
-| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `gate.json`, `violations.jsonl`, `protected/`, `evidence/`, `bus/`, `run.pid`, `run.log`, `report.json` |
+| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `gate.json`, `violations.jsonl`, `protected/`, `evidence/`, `prompts.jsonl`, `bus/`, `run.pid`, `run.log`, `report.json` |
 
 **The one rule that decides which is which:** *if the worker writing it could change when the loop ends,
 what it may spend, or what agg believes happened, it is private.* Everything the worker is **supposed** to
@@ -1255,6 +1285,8 @@ author lives in `agg/state/`.
   exactly that sanitizing.
 - **`agg/private/state.json`** — the live scoreboard snapshot (the TUI, `agg serve`, `/agg:status` read it).
 - **`agg/private/verdicts.jsonl`** — the append-only, safety-critical GATE record.
+- **`agg/private/prompts.jsonl`** — per session, the SHA-256 of every [prompt file](#prompts-from-files--prompt_file-role_prompt_file)
+  its brief was read from. Private because it is the audit trail of what the worker was told.
 - **`agg/private/evidence/`** — the files each verdict cited, kept after its judge ran
   ([Evidence](#evidence--what-agg-keeps)). Private because a verdict CITES them: a worker able to swap
   a kept file would rewrite why a gate passed.

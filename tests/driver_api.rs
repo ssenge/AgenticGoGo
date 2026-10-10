@@ -1474,3 +1474,28 @@ fn a_driver_judge_evidence_is_kept_when_judged_and_named_at_the_gate() {
     assert!(saved.starts_with("agg/private/evidence/run-") && saved.ends_with("/1/bench/bench.json"), "{saved}");
     assert_eq!(row["session"], 2, "the row is the gate's, the copy the judging session's");
 }
+
+/// `Step::prompt_file` on the driver path: the file's text reaches the brief and its hash the prompt
+/// ledger; a step carrying both forms, or a file that does not exist, is refused before it runs.
+#[test]
+fn a_driver_step_prompt_file_is_read_hashed_and_checked() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("agg/steps")).unwrap();
+    std::fs::write(dir.join("agg/steps/impl.md"), "Implement the parser from the file.\n").unwrap();
+    let agg = Agg::open(dir).unwrap();
+
+    let mut both = Step::new("implement").model("fake").prompt_file("steps/impl.md");
+    both.prompt = Some("inline too".into());
+    let err = agg.step(&both).unwrap_err().to_string();
+    assert!(err.contains("are alternatives"), "{err}");
+    let missing = Step::new("implement").model("fake").prompt_file("steps/gone.md");
+    assert!(agg.step(&missing).unwrap_err().to_string().contains("cannot read"));
+
+    agg.step(&Step::new("implement").model("fake").prompt_file("steps/impl.md")).unwrap();
+    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
+    assert!(brief.contains("Implement the parser from the file."), "{brief}");
+    let rows = agg::core::prompts::read_ledger(dir);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].session, rows[0].step.as_str()), (1, "implement"));
+}

@@ -72,6 +72,9 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
         ));
     }
 
+    // `prompt_file` / `role_prompt_file`: one form per key, and a file that can be read.
+    problems.extend(crate::core::prompts::problems(cfg, config_base));
+
     let named = run_set(cfg, driver, &mut problems);
 
     // resolve every run-set name to a judge FILE (§5.1) — a name with no file is a startup error,

@@ -80,7 +80,9 @@ judge:                           # THE RULER — runs .md judges + the summarize
   model: "haiku"
   timeout: 300
 steps:                           # palette. legal keys: agent model effort worker_args state role_prompt prompt skip_judges
-                                 #   isolation image readonly writable write_deny
+                                 #   isolation image readonly writable write_deny role_prompt_file prompt_file
+                                 # *_file = the inline key read from a file (rel. to agg/ or absolute) at EVERY
+                                 # session start; both forms in one block = startup error; hash → private/prompts.jsonl
   worker: {}
 sequence:
   steps: ["worker"]              # entries; e.g. { step: worker, times: 4 } / { step: w, until: X, max: 4 }
@@ -180,6 +182,7 @@ agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of
   report.json                  the end-of-run report — the STABLE interface for embedders (src/report/)
   violations.jsonl  protected/   write_deny: the rollback record + agg's copies to restore from
   evidence/<run>/<session>/<judge>/  the files each verdict cited, kept after its judge ran
+  prompts.jsonl                per session: sha256 of every prompt_file/role_prompt_file its brief read
 ```
 **The split rule:** if the worker writing it could change *when the loop ends, what it may spend, or what
 agg believes happened*, it is private. `verdicts.jsonl` is why: forged `merged` rows make `stalled` report
