@@ -36,6 +36,8 @@
 //! | auto-approve | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | `--allow-all-tools` |
 //! | event stream | `--output-format stream-json` | `--json` | `--output-format json` |
 //! | output tokens | `usage.output_tokens` on the TERMINAL event | `turn.completed.usage.output_tokens` | `assistant.message.data.outputTokens` — **per message, NOT on the terminal event** |
+//! | input / cache tokens | `input_tokens`, `cache_creation_input_tokens` (write), `cache_read_input_tokens` | `input_tokens` INCLUDES `cached_input_tokens` (read); no cache-write figure | ❌ none |
+//! | model that ran | `model` on `system`/`init`; `modelUsage` keys on the result | ❌ none on the stream | `data.model` on `assistant.*` |
 //! | **dollar cost** | ✅ `total_cost_usd` | ❌ **NONE** (source-confirmed) | ❌ **NONE** — terminal `usage` holds `premiumRequests` + durations only |
 //! | read-only one-shot | ✅ `--strict-mcp-config` + `--setting-sources user` | ✅ `--sandbox read-only` | ✅ withhold `--allow-all-tools` (tools are offered, but every write is denied) |
 //! | resume | `--resume <id>` | **subcommand** `codex exec resume <ID>` | `-r/--resume=<id>`; id = `result.sessionId` |
@@ -129,7 +131,9 @@ pub trait AgentBackend: Send + Sync {
     /// that carries nothing to show.
     fn parse_event(&self, line: &str) -> Option<stream::Event>;
 
-    /// Output tokens observed on THIS line, to be **added** to the session's running total.
+    /// Tokens observed on THIS line, to be **added** to the session's running total — split into
+    /// uncached input, output, cache writes and cache reads, each `None` where the agent does not
+    /// report that kind ([`crate::usage::Tokens`]).
     ///
     /// # Why this is per-line and not part of [`Self::parse_result`]
     /// Because agents do not agree on where usage lives, and assuming they do produces a
@@ -146,7 +150,18 @@ pub trait AgentBackend: Send + Sync {
     /// reports per-message contributes many times. So this returns an INCREMENT, never a total.
     /// Return `None` for a line that carries no usage (and for an agent that never reports usage,
     /// which must also declare `reports_output_tokens: false`).
-    fn parse_usage(&self, line: &str) -> Option<u64>;
+    ///
+    /// ⚠ Never fold one kind into another. Claude's cache WRITES used to be added to output here
+    /// ("both output-priced") — they are input written to the cache, and folding them made every
+    /// Claude session look like it wrote tens of thousands of tokens it never wrote.
+    fn parse_usage(&self, line: &str) -> Option<crate::usage::Tokens>;
+
+    /// The model that ACTUALLY ran, if THIS line names it — as the agent reports it, which is not
+    /// always what was configured (an alias resolves, an `auto` mode picks). The worker keeps the
+    /// FIRST one seen. Default `None`: an agent whose stream never names its model (Codex).
+    fn parse_model(&self, _line: &str) -> Option<String> {
+        None
+    }
 
     /// The resume handle, if THIS line carries it. The worker keeps the last one seen.
     ///
@@ -225,32 +240,34 @@ pub trait AgentBackend: Send + Sync {
     }
 
     /// Tally a one-shot's usage from its RAW stdout by re-using this backend's own per-line parsers
-    /// ([`Self::parse_usage`] / [`Self::parse_result`]) — so `OneShot` carries token/cost spend
-    /// (§5.6) without every backend hand-rolling it. Claude emits ONE JSON object (parse the blob);
-    /// Codex/Copilot stream one per line (sum them). Returns `(output_tokens, cost_usd)`.
-    fn tally_one_shot(&self, raw_stdout: &[u8]) -> (u64, Option<f64>) {
+    /// ([`Self::parse_usage`] / [`Self::parse_model`] / [`Self::parse_result`]) — so `OneShot`
+    /// carries the call's usage (§5.6) without every backend hand-rolling it. Claude emits ONE JSON
+    /// object (parse the blob); Codex/Copilot stream one per line (sum them).
+    fn tally_one_shot(&self, raw_stdout: &[u8]) -> crate::usage::Usage {
         let text = String::from_utf8_lossy(raw_stdout);
         let whole = text.trim();
         // single-object shape (Claude's `--output-format json`): read the blob, don't also sum lines.
         if self.parse_usage(whole).is_some() || self.parse_result(whole).is_some() {
-            let tokens = self.parse_usage(whole).unwrap_or(0);
-            let cost = self.parse_result(whole).and_then(|r| r.cost_usd);
-            return (tokens, cost);
+            return crate::usage::Usage {
+                model: self.parse_model(whole),
+                tokens: self.parse_usage(whole).unwrap_or_default(),
+                cost_usd: self.parse_result(whole).and_then(|r| r.cost_usd),
+            };
         }
-        // streamed shape (Codex/Copilot): sum per line, last cost wins.
-        let mut tokens = 0u64;
-        let mut cost = None;
+        // streamed shape (Codex/Copilot): sum per line, first model and last cost win.
+        let mut usage = crate::usage::Usage::default();
         for line in text.lines() {
             if let Some(t) = self.parse_usage(line) {
-                tokens += t;
+                usage.tokens.add(&t);
             }
-            if let Some(r) = self.parse_result(line) {
-                if let Some(c) = r.cost_usd {
-                    cost = Some(c);
-                }
+            if usage.model.is_none() {
+                usage.model = self.parse_model(line);
+            }
+            if let Some(c) = self.parse_result(line).and_then(|r| r.cost_usd) {
+                usage.cost_usd = Some(c);
             }
         }
-        (tokens, cost)
+        usage
     }
 
     /// Two config keys that are each individually LEGAL, but that this agent cannot accept

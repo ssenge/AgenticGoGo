@@ -46,6 +46,7 @@ fn demo_state() -> DashboardState {
         judges: vec![
             JudgeView {
                 name: "tests_pass".into(),
+                judged: true,
                 kind: "script".into(),
                 in_dod: true,
                 invariant: false,
@@ -62,6 +63,7 @@ fn demo_state() -> DashboardState {
             },
             JudgeView {
                 name: "no_regressions".into(),
+                judged: true,
                 kind: "script".into(),
                 in_dod: true,
                 invariant: true,
@@ -76,6 +78,7 @@ fn demo_state() -> DashboardState {
             },
             JudgeView {
                 name: "stalled".into(),
+                judged: true,
                 kind: "script".into(),
                 in_dod: false,
                 invariant: false,
@@ -101,6 +104,7 @@ fn demo_state() -> DashboardState {
         seq: 5,
         finished: false,
         finish_reason: String::new(),
+        ..Default::default()
     }
 }
 

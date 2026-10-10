@@ -741,14 +741,14 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg plan` | Run every run-set judge once and print the starting scoreboard (a dry run) | |
 | `agg run` | Drive the loop until `done_if` is met (or a guard fires). Writes `agg/private/report.json` on every ending | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` · `--report-json` logs to `agg/private/run.log`, prints only the report · `--base-branch <ref>` overrides `session_isolation.base_branch` · `--resume` continues the last interrupted run (same run id, next session, back to its last kept gate) |
 | `agg judge <name>` | Resolve **one** judge by name and print its raw verdict — for authoring judges | |
-| `agg status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no judges) | `--json` |
-| `agg history` | This project's run history, newest first, plus lifetime totals | `--json` |
+| `agg status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no judges) | `--json` the versioned live status (`docs/schemas/status.v1.json`) |
+| `agg history` | This project's run history, newest first, plus lifetime totals | `--json` (each run with its usage totals) |
 | `agg dashboard` | Live TUI | `--once` one-shot text snapshot |
 | `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `POST /api/send`, `POST /api/answer` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` |
 | `agg spawn` | *(used by the worker, not to start the loop)* track a long child task so the reaper spares it and the next session polls it | `--name <n>` · `--reason <why>` · `-- <cmd…>` |
 | `agg stop [reason]` | Graceful stop at the next session boundary (the one top-level steering alias) | |
 | `agg send <cmd>` | Steering for a **running** workflow, applied at the next session boundary. Refused if none is running | `inject <text>` · `budget [total]` · `pause` · `resume` · `wake` (end a rate-limit wait now) · `stop [reason]` · `note <text>` · `answer <id> <value>` · `approve <id>` · `deny <id>` |
-| `agg answer <id> <value>` | Answer an open human ask. Needs NO running workflow — an ask outlives the run that raised it |
+| `agg answer <id> <value>` | Answer an open human ask. Needs NO running workflow — an ask outlives the run that raised it. A value off a `choose`/`bool` ask's options is refused (exit 1) | `--json` `{schema_version, accepted, reason, id, answer}` |
 | `agg hil <kind>` | *(used by the worker, not the operator)* ask a human. **Records and exits — it never waits** | `bool <q>` · `choose <q> --option … --option …` · `input <q>` |
 
 `agg run` exit codes, so automation can branch on the outcome: **0** `done_if` met · **1** hard
@@ -771,8 +771,10 @@ breaking change, so ignore unknown fields.
 
 | Interface | Contract |
 |---|---|
-| **`agg/private/report.json`** | How the run ended: `outcome` (`done` · `aborted` · `stopped` · `error`), the reason, session counts, clock, every judge's last and baseline verdict (with the paths of its kept evidence), the result commit, open asks. Schema: [`docs/schemas/report.v1.json`](schemas/report.v1.json). Field reference: [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson). `agg run --report-json` prints it on stdout. |
+| **`agg/private/report.json`** | How the run ended: `outcome` (`done` · `aborted` · `stopped` · `error`), the reason, session counts, clock, every judge's last and baseline verdict (with the paths of its kept evidence) and ratchet, the stop detectors, the result commit, open asks, and usage — per session (`session_log`: worker and ruler apart, the model each agent reported, `input`/`output`/`cache_write`/`cache_read` tokens, `cost_usd` + `cost_source`) and in total. Schema: [`docs/schemas/report.v2.json`](schemas/report.v2.json) (v1 superseded). Field reference: [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson). `agg run --report-json` prints it on stdout. |
 | **`agg run` exit codes** | 0 done · 3 `abort_if` · 4 session cap · 5 stopped · 1 error. The report's `outcome` is authoritative. |
+| **`agg status --json`** | Where a run stands now, from another process, without re-judging: `running`, `phase`, `current_step`, `session`, `time`, `sessions`, each judge's `last` verdict and `ratchet` reference, `detectors` (`stalled`, `oscillating`, `rollbacks`, `consecutive_rollbacks`, `ratchet_regressed`), `open_asks` with `options`, running `usage` totals, `waiting` (`{reason, agent, until}` during a rate-limit wait, else `null`). Field names match the report. Schema: [`docs/schemas/status.v1.json`](schemas/status.v1.json). Reference: [CONFIG.md](CONFIG.md#the-live-status-agg-status---json). |
+| **`agg answer <id> <value> --json`** | `{schema_version, accepted, reason, id, answer}`; exit 0 accepted · 1 refused (unknown id, already answered, a value off the options). The answer reaches the worker's next brief, or the driver waiting on it. Schema: [`docs/schemas/answer.v1.json`](schemas/answer.v1.json). |
 | `agg check --json` | `{schema_version, ok, config, problems: [{path, message}], warnings: [{path, message}]}`. `path` is dotted (`steps.worker.isolation`, `sequence.steps[1].until`; `""` = the whole file). Exit 0 valid · 1 any problem. Runs nothing. |
 | `agg doctor --json` | `{schema_version, agg_version, ok, config: {path, found, valid, judges}, backends: [{name, bin, used, installed, path, version, self_sandboxes, capabilities: {reports_output_tokens, reports_cost_usd, supports_resume, supports_effort, detects_rate_limits, supports_one_shot}}], isolation: {none, sandbox, container: {available, mechanism, requested}}, container_engine, problems, warnings}`. Exit 0 ok · 1 otherwise. |
 | `agg schema` | The JSON Schema (draft 2020-12) of `agg.yaml`, generated from the parser's own types; `$comment` names the agg version. |
@@ -791,6 +793,13 @@ carries only the report. SIGTERM is treated like `agg stop`: the worker is kille
 the report says `stopped`, and the exit code is 5. `agg stop --project <dir>` stops a run from another
 process. Runs in different project directories share nothing — pid file, scratch directories and the
 report are all per project.
+
+Poll `agg status --json` to watch a run and read `report.json` once `agg run` has exited:
+
+```bash
+agg --project ./svc status --json | jq '{running, session, step: .current_step.name, waiting, asks: [.open_asks[].id]}'
+agg --project ./svc answer "$id" sqlite --json | jq .accepted
+```
 
 **Not** interfaces — internals that change without notice: `state.json`, the rows of
 `verdicts.jsonl` and `calls.jsonl`, `project.json`, `gate.json`, the bus files, everything else under

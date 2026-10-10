@@ -87,6 +87,8 @@ impl LoopState {
             self.dash.finished = true;
             self.dash.finish_reason = reason.clone();
             let (gm, gt) = self.tally();
+            let usage = self.ext.get::<crate::usage::Ledger>().summary();
+            self.ledger.set_usage(usage);
             self.ledger.update(self.session, self.tokens_spent, gm, gt);
             self.ledger.finish(now_epoch(), ledger_tag);
         }
@@ -117,6 +119,29 @@ impl LoopState {
         e.tokens += tokens;
         if let Some(c) = cost {
             e.cost = Some(e.cost.unwrap_or(0.0) + c);
+        }
+    }
+
+    /// Account one agent call everywhere it counts: the run's spend counters (what `limits.tokens`
+    /// and `limits.cost` read — output tokens and reported dollars), the per-agent tally, and the
+    /// per-session usage record behind the report's `session_log` (A-19).
+    pub fn charge_usage(&mut self, role: crate::usage::Role, agent: &str, u: &crate::usage::Usage) {
+        let output = u.tokens.output_or_zero();
+        self.tokens_spent += output;
+        if let Some(c) = u.cost_usd {
+            self.cost_spent += c;
+        }
+        self.charge(agent, output, u.cost_usd);
+        let step = self.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+        let session = self.session;
+        self.ext.get::<crate::usage::Ledger>().record(session, &step, role, agent, u);
+    }
+
+    /// Account every call the RULER made (LLM judges, the summarizer).
+    pub fn charge_ruler(&mut self, calls: &[crate::usage::Usage]) {
+        let ruler = self.cfg.judge.agent.clone();
+        for u in calls {
+            self.charge_usage(crate::usage::Role::Ruler, &ruler, u);
         }
     }
 
@@ -154,6 +179,7 @@ impl LoopState {
         let (m, t) = self.tally();
         self.dash.goals_met = m;
         self.dash.goals_total = t;
+        self.publish_report_parts(now);
         let snapshot = self.dash.clone();
         self.live.update(|s| {
             let now = std::mem::take(&mut s.now);
@@ -168,6 +194,30 @@ impl LoopState {
             s.idle_secs = idle_secs;
             s.seq = seq;
         });
+    }
+
+    /// Copy into the snapshot what the run report states and a live reader needs mid-run (A-17):
+    /// the clock, session fates, detectors, ratchet references and usage totals. All from the loop's
+    /// own memory — the same sources the report is built from, so the two never disagree.
+    fn publish_report_parts(&mut self, now: u64) {
+        self.dash.clock_started_at = self.clock.started_at_epoch;
+        self.dash.time = crate::report::Time {
+            wall_time_s: self.clock.wall_secs(now),
+            work_time_s: self.clock.work_secs(now),
+            human_wait_time_s: self.clock.human_wait_secs,
+        };
+        let staged = self.ext.get::<AGGState>().git.span_branches.len() as u32;
+        let tally = self.ext.get::<crate::report::Tally>();
+        self.dash.sessions = crate::report::Sessions {
+            total: self.session,
+            merged: tally.merged,
+            rolled_back: tally.rolled_back,
+            no_improvement: tally.no_improvement,
+            staged_unmerged: staged,
+        };
+        self.dash.detectors = crate::report::detectors(&self.eng.gate, &self.dash.judges);
+        self.dash.ratchet = crate::report::ratchets(&self.eng.gate);
+        self.dash.usage = self.ext.get::<crate::usage::Ledger>().summary();
     }
 
     pub fn run_state(&self) -> RunState {

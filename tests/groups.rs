@@ -233,6 +233,10 @@ fn a_reformat_only_session_is_not_merged_with_the_option_and_merged_without() {
     assert_eq!(git(&dir, &["show", "main:fmt.txt"]), "", "the reformat never reached main");
     let st = agg::core::ratchet::load(&dir).unwrap();
     assert_eq!((st.rollbacks, st.no_improvements, st.consecutive_no_improvements), (0, 1, 0), "not a rollback");
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(agg::paths::report_json(&dir)).unwrap()).unwrap();
+    let sessions = &report["sessions"];
+    assert_eq!((&sessions["merged"], &sessions["rolled_back"], &sessions["no_improvement"]), (&1.into(), &0.into(), &1.into()), "{report}");
 
     let (_tmp, dir, path) = setup(false);
     let (code, combined) = run(&dir, &path, "3");

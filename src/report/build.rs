@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::{JudgeEntry, OpenAsk, Outcome, Paths, Report, RunHandle, RunResult, Sessions, Time, VerdictView};
 use crate::context::LoopState;
+use crate::core::verdicts::Outcome as Gated;
 use crate::core::model::Verdict;
 use crate::features::state::AGGState;
 use crate::plugin::RunOutcome;
@@ -18,22 +19,23 @@ use crate::plugin::RunOutcome;
 pub struct Tally {
     pub merged: u32,
     pub rolled_back: u32,
+    pub no_improvement: u32,
     /// each judge's verdict from the baseline pass, before any session ran.
     pub baseline: BTreeMap<String, VerdictView>,
 }
 
-/// Record one gate decision about the span ending in `branch`: `kept` merged it onto base, else it
-/// was discarded. A span carries every session staged on it, and they all share its fate.
-pub fn record_gate(ctx: &mut LoopState, kept: bool, branch: Option<&str>) {
+/// Record one gate decision about the span ending in `branch`: merged onto base, discarded, or not
+/// merged for lack of improvement. A span carries every session staged on it, and they all share its fate.
+pub fn record_gate(ctx: &mut LoopState, fate: Gated, branch: Option<&str>) {
     let git = &ctx.ext.get::<AGGState>().git;
     // the span's other branches, plus the one gated — which IS in the list on the driver path (the
     // tip) and is not on the YAML path (a judged session cut off the tip).
     let n = git.span_branches.iter().filter(|b| Some(b.as_str()) != branch).count() as u32 + 1;
     let t = ctx.ext.get::<Tally>();
-    if kept {
-        t.merged += n;
-    } else {
-        t.rolled_back += n;
+    match fate {
+        Gated::Merged => t.merged += n,
+        Gated::NoImprovement => t.no_improvement += n,
+        _ => t.rolled_back += n,
     }
 }
 
@@ -68,19 +70,23 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
     let tally = std::mem::take(st.ext.get::<Tally>());
     let kept = crate::features::evidence::all_saved(st);
     let evidence_dir = crate::features::evidence::run_dir_if_used(st).map(abs);
+    let usage = std::mem::take(st.ext.get::<crate::usage::Ledger>());
     let base_branch = Some(iso_base).filter(|b| !b.is_empty());
     let final_commit = base_branch.as_deref().and_then(|b| crate::git::rev_parse(&st.dir, b));
     Report {
-        sessions: Sessions { total: st.session, merged: tally.merged, rolled_back: tally.rolled_back, staged_unmerged: staged },
+        sessions: Sessions { total: st.session, merged: tally.merged, rolled_back: tally.rolled_back, no_improvement: tally.no_improvement, staged_unmerged: staged },
         time: Time {
             wall_time_s: st.clock.wall_secs(now),
             work_time_s: st.clock.work_secs(now),
             human_wait_time_s: st.clock.human_wait_secs,
         },
-        judges: judges(&st.dash.judges, tally.baseline, &kept),
+        judges: judges(&st.dash.judges, tally.baseline, &st.dash.ratchet, &kept),
         result: RunResult { base_branch, final_commit, staged_branch: span_tip },
         open_asks: open_asks(&st.dir, now),
         paths: Paths { evidence_dir, ..paths(&st.dir) },
+        detectors: st.dash.detectors.clone(),
+        usage: usage.summary(),
+        session_log: usage.sessions().to_vec(),
         waiting: st.dash.waiting.clone(),
         ..skeleton(&st.dir, &st.cfg.project, run.run_id(), run.started_at(), res, &st.dash.finish_reason)
     }
@@ -123,57 +129,67 @@ fn skeleton(
         result: RunResult::default(),
         open_asks: Vec::new(),
         paths: paths(dir),
+        detectors: super::Detectors::default(),
+        usage: crate::usage::Summary::default(),
+        session_log: Vec::new(),
         waiting: None,
     }
 }
 
 /// Every judge the run consulted: its last verdict (the published scoreboard, which both entry
-/// points fill) joined with its baseline. A judge that never produced a verdict has `last: null`.
+/// points fill) joined with its baseline and its ratchet. A judge that never produced a verdict has
+/// `last: null`.
 ///
 /// `kept` is each judge's last kept verdict and its evidence copies: they are listed on `last` only
 /// when `last` IS that verdict — after a rollback restored an older one, they describe another.
-fn judges(
+pub(super) fn judges(
     board: &[crate::state::JudgeView],
     mut baseline: BTreeMap<String, VerdictView>,
+    ratchet: &BTreeMap<String, super::RatchetView>,
     kept: &HashMap<String, (Verdict, Vec<std::path::PathBuf>)>,
 ) -> BTreeMap<String, JudgeEntry> {
     let mut out = BTreeMap::new();
     for j in board {
-        let last = (j.state != "pending").then(|| {
-            let mut view = VerdictView {
-                met: j.met,
-                value: j.value,
-                max: j.max,
-                target: j.target,
-                rationale: j.rationale.clone(),
-                error: j.error.clone(),
-                evidence: Vec::new(),
-            };
+        let last = last_verdict(j).map(|mut view| {
             if let Some((_, saved)) = kept.get(&j.name).filter(|(v, _)| VerdictView::from(v) == view) {
                 view.evidence = absolute(saved.iter().cloned());
             }
             view
         });
-        out.insert(j.name.clone(), JudgeEntry { last, baseline: baseline.remove(&j.name) });
+        let entry = JudgeEntry { last, baseline: baseline.remove(&j.name), ratchet: ratchet.get(&j.name).cloned() };
+        out.insert(j.name.clone(), entry);
     }
     for (name, b) in baseline {
-        out.insert(name, JudgeEntry { last: None, baseline: Some(b) });
+        let entry = JudgeEntry { last: None, baseline: Some(b), ratchet: ratchet.get(&name).cloned() };
+        out.insert(name, entry);
     }
     out
 }
 
+/// A scoreboard row as a verdict — `None` while the judge has not run.
+pub(super) fn last_verdict(j: &crate::state::JudgeView) -> Option<VerdictView> {
+    j.judged.then(|| VerdictView {
+        met: j.met,
+        value: j.value,
+        max: j.max,
+        target: j.target,
+        rationale: j.rationale.clone(),
+        error: j.error.clone(),
+        evidence: Vec::new(),
+    })
+}
+
+/// An open ask as both the report and the live status state it.
+pub(super) fn open_ask(v: &crate::state::AskView) -> OpenAsk {
+    OpenAsk { id: v.id.clone(), kind: v.case.clone(), question: v.question.clone(), options: v.options.clone(), age_s: v.age_secs }
+}
+
 fn open_asks(dir: &Path, now: u64) -> Vec<OpenAsk> {
-    crate::core::asks::open(dir)
-        .iter()
-        .map(|a| {
-            let v = crate::state::AskView::of(a, now);
-            OpenAsk { id: v.id, kind: v.case, question: v.question, age_s: v.age_secs }
-        })
-        .collect()
+    crate::core::asks::open(dir).iter().map(|a| open_ask(&crate::state::AskView::of(a, now))).collect()
 }
 
 /// Absolute paths, so a consumer can open them from any cwd.
-fn paths(dir: &Path) -> Paths {
+pub(super) fn paths(dir: &Path) -> Paths {
     Paths {
         report: abs(crate::paths::report_json(dir)),
         ledger: abs(crate::paths::verdicts_jsonl(dir)),
@@ -219,13 +235,22 @@ mod tests {
         b.insert("a".to_string(), VerdictView { met: false, ..Default::default() });
         b.insert("gone".to_string(), VerdictView::default());
         let dash = vec![
-            JudgeView { name: "a".into(), state: "met".into(), met: true, ..Default::default() },
+            JudgeView { name: "a".into(), state: "met".into(), met: true, judged: true, ..Default::default() },
             JudgeView { name: "p".into(), state: "pending".into(), ..Default::default() },
+            JudgeView { name: "z".into(), state: "pending".into(), judged: true, value: Some(0.0), ..Default::default() },
         ];
-        let out = judges(&dash, b, &HashMap::new());
+        let mut ratchet = BTreeMap::new();
+        ratchet.insert(
+            "a".to_string(),
+            super::super::RatchetView { reference: Some(3.0), direction: crate::core::ratchet::Direction::Up, tolerance: 0.0, tolerance_pct: None },
+        );
+        let out = judges(&dash, b, &ratchet, &HashMap::new());
+        assert_eq!(out["a"].ratchet.as_ref().and_then(|r| r.reference), Some(3.0), "a ratcheted judge carries its reference");
+        assert!(out["p"].ratchet.is_none(), "an unratcheted one carries none");
         assert!(out["a"].last.as_ref().is_some_and(|v| v.met));
         assert!(out["a"].baseline.as_ref().is_some_and(|v| !v.met));
-        assert!(out["p"].last.is_none(), "a pending judge has no verdict yet");
+        assert!(out["p"].last.is_none(), "a judge that has not run has no verdict yet");
+        assert!(out["z"].last.as_ref().is_some_and(|v| !v.met), "an unmet judge at 0 HAS run — its verdict is reported");
         assert!(out["gone"].last.is_none() && out["gone"].baseline.is_some());
     }
 
@@ -240,6 +265,7 @@ mod tests {
         kept.insert("b".to_string(), (kept_v, vec![std::path::PathBuf::from("/p/x")]));
         let view = |name: &str, met: bool| JudgeView {
             name: name.into(),
+            judged: true,
             state: "met".into(),
             met,
             value: Some(1.0),
@@ -248,7 +274,7 @@ mod tests {
             rationale: "r".into(),
             ..Default::default()
         };
-        let out = judges(&[view("a", true), view("b", false)], BTreeMap::new(), &kept);
+        let out = judges(&[view("a", true), view("b", false)], BTreeMap::new(), &BTreeMap::new(), &kept);
         assert_eq!(out["a"].last.as_ref().unwrap().evidence, ["/p/agg/private/evidence/r/1/a/cc.sarif"]);
         assert!(out["b"].last.as_ref().unwrap().evidence.is_empty(), "b shows a restored verdict, not the kept one");
     }

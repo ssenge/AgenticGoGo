@@ -118,8 +118,7 @@ impl Handler for GateKeepRollback {
                 notify: recomputed.notify,
                 deltas: Vec::new(),
                 fresh_verdicts: Vec::new(),
-                judge_tokens: 0,
-                judge_cost: None,
+                judge_usage: Vec::new(),
             };
         }
         ctx.scratch.get::<AGGScratch>().res = Some(res);
@@ -235,7 +234,7 @@ pub(crate) fn keep_or_rollback(
                 };
                 eprintln!("  ⚠ {line} — beyond tolerance, {what}");
             }
-            crate::report::record_gate(ctx, keep, Some(br));
+            crate::report::record_gate(ctx, tag, Some(br));
             // the whole span merged with this branch (it descends from every other one), or was
             // discarded with it. Either way the span is closed.
             clear_span(ctx, Some(br));
@@ -276,7 +275,7 @@ pub(crate) fn keep_or_rollback(
             // tree that base is not, so record them rolled_back and restore base truth, or the next
             // step is gated against a phantom.
             ctx.eng.restore_goal_state(pre_goals);
-            crate::report::record_gate(ctx, false, staged.map(|(br, _)| br.as_str()));
+            crate::report::record_gate(ctx, Outcome::RolledBack, staged.map(|(br, _)| br.as_str()));
             clear_span(ctx, staged.map(|(br, _)| br.as_str()));
             crate::core::verdicts::append_full(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack, &[], &kept)?;
             Gated::NotStaged

@@ -61,9 +61,7 @@ impl Handler for LaunchWorker {
             &step.image,
         );
         crate::features::protect::after_worker(ctx, &step)?;
-        ctx.tokens_spent += outcome.output_tokens;
-        ctx.cost_spent += outcome.cost_usd;
-        ctx.charge(&step.agent, outcome.output_tokens, Some(outcome.cost_usd));
+        ctx.charge_usage(crate::usage::Role::Worker, &step.agent, &outcome.usage);
 
         if crate::os::signals::interrupted() {
             // an interrupted session is incomplete: never judged, never lost (A-18.3).
@@ -77,9 +75,9 @@ impl Handler for LaunchWorker {
             outcome.duration_secs,
             if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
             if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
-            outcome.output_tokens,
+            outcome.usage.tokens.output_or_zero(),
             ctx.tokens_spent,
-            outcome.cost_usd,
+            outcome.usage.cost_usd.unwrap_or(0.0),
             ctx.cost_spent,
         );
         // warn (loudly) if the agent never touched its forward state file (§5.6 / OQ3).
@@ -90,7 +88,7 @@ impl Handler for LaunchWorker {
             }
         }
 
-        let dud = !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.output_tokens == 0;
+        let dud = !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.usage.tokens.output_or_zero() == 0;
         let w = &mut ctx.ext.get::<AGGState>().worker;
         w.dud_streak = if dud { w.dud_streak + 1 } else { 0 };
         ctx.scratch.get::<AGGScratch>().outcome = Some(outcome);

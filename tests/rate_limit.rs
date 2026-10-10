@@ -225,7 +225,7 @@ fn a_wait_is_visible_and_wake_or_resume_start_the_next_session() {
     assert_eq!(git(&p.dir, &["for-each-ref", "refs/agg/partial/"]), "");
     let report = p.report();
     assert_eq!(report["outcome"], "done");
-    assert!(report.get("waiting").is_none(), "only a run that ENDED waiting reports a wait: {report}");
+    assert!(report["waiting"].is_null(), "only a run that ENDED waiting reports a wait: {report}");
 }
 
 /// A-18.2: `agg stop` during the wait ends the run as stopped (exit 5), and the ledger says how.

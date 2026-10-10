@@ -246,7 +246,7 @@ impl AgentBackend for Codex {
         }
     }
 
-    /// `turn.completed.usage.output_tokens` — reported ONCE per turn, like Claude.
+    /// `turn.completed.usage` — reported ONCE per turn, like Claude.
     ///
     /// `reasoning_output_tokens` is deliberately NOT added. Codex's source documents neither
     /// relationship, but the wire settles it: a real run reported `input_tokens: 24695` with
@@ -254,12 +254,23 @@ impl AgentBackend for Codex {
     /// By the same construction (and OpenAI's Responses-API convention, where reasoning tokens are
     /// counted within output tokens), `reasoning_output_tokens` is a breakdown of `output_tokens`.
     /// Summing them would DOUBLE-COUNT and make the budget guard fire early.
-    fn parse_usage(&self, line: &str) -> Option<u64> {
+    ///
+    /// For the same reason `input` is `input_tokens − cached_input_tokens`: agg's kinds do not
+    /// overlap, and the cached part is `cache_read`. Codex reports no cache-write figure at all.
+    fn parse_usage(&self, line: &str) -> Option<crate::usage::Tokens> {
         let v: Value = serde_json::from_str(line).ok()?;
         if v.get("type")?.as_str()? != "turn.completed" {
             return None;
         }
-        v.get("usage")?.get("output_tokens")?.as_u64()
+        let usage = v.get("usage")?;
+        let get = |k: &str| usage.get(k).and_then(|x| x.as_u64());
+        let cached = get("cached_input_tokens");
+        Some(crate::usage::Tokens {
+            input: get("input_tokens").map(|i| i.saturating_sub(cached.unwrap_or(0))),
+            output: get("output_tokens"),
+            cache_write: None,
+            cache_read: cached,
+        })
     }
 
     /// From `thread.started` — the FIRST event, not the terminal one. This is the whole reason
@@ -329,14 +340,8 @@ impl AgentBackend for Codex {
         // report of its own flag; agg's outer jail is not conditional on it.
         let command = self.confine_one_shot(command, cwd, isolation)?;
         let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
-        let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
-        Ok(OneShot {
-            body: last_agent_message(&out.stdout),
-            stderr: out.stderr,
-            success: out.success,
-            output_tokens,
-            cost_usd,
-        })
+        let usage = self.tally_one_shot(&out.stdout);
+        Ok(OneShot { body: last_agent_message(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
 
     fn is_installed(&self) -> bool {

@@ -401,7 +401,7 @@ could never become true) but never the **DoD-set** — it is machinery, not a go
 | key | default | notes |
 |---|---|---|
 | `limits: { tokens, cost, sessions }` | all unlimited | The run-level ceilings, unified. Each key `null`/absent = unlimited. The three subkeys below. **No ceiling is implied:** with no `limits` at all a run ends only on `done_if`, `abort_if` or a stop. |
-| `limits.tokens` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. |
+| `limits.tokens` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. Output only: cache writes are input and are not counted (agg ≤ 0.0.15 added Claude's cache writes to output, so the same work now counts far fewer tokens). |
 | `limits.cost` | unlimited | **dollar** ceiling → `over_cost`. **CLAUDE-ONLY** — see [Choosing an agent](#agent-specific-rules). |
 | `limits.sessions` | unlimited (`null`) | session cap → `over_iterations`. A **non-zero** `agg run --max-sessions <n>` overrides it; the flag's default `0` falls back to this key (not to unlimited). |
 | `limits.wall_time` | unlimited | **END-TO-END wall ceiling in SECONDS**, human waiting INCLUDED — a *deadline*. ⚠ Replaces `wall_hours`; the unit changed by 3600×, so the old key is a **hard error at startup**, never an alias. |
@@ -718,7 +718,13 @@ not count the waiting. Full detail in [docs/RUST_API.md](RUST_API.md).
 agg status                        # lists every open ask, its age, and the command to answer it
 agg answer <id> "value"           # any ask. For a choice: an option, or its 1-based number
 agg answer <id> yes               # a yes/no ask takes yes/no (or 1/2)
+agg answer <id> 2 --json          # for a program: {schema_version, accepted, reason, id, answer}
 ```
+
+`--json` prints the result as [`docs/schemas/answer.v1.json`](schemas/answer.v1.json) whether or not
+the answer was accepted: `accepted`, `reason` (why it was refused, else `null`), the `id` as given and
+the `answer` as recorded (an option number resolved to its text, `null` when refused). A refused
+answer exits **1** with or without `--json`.
 
 An answer to a `choose`/`bool` ask must be **on the recorded list** — anything else is refused at the
 CLI with the options re-printed, and the ask stays open. That closed answer set is why `hil_choose`
@@ -1522,13 +1528,35 @@ agg run --report-json | jq -r .outcome      # logs go to agg/private/run.log; st
 | `exit_code` | what `agg run` exited with: 0 done · 3 `abort_if` · 4 session cap (`outcome: aborted`) · 5 stopped · 1 error. |
 | `stop_reason` · `error` | human-readable reason (the `abort_if` expression, the cap, the stop reason); the error chain or panic message when `outcome` is `error`. |
 | `started_at` · `finished_at` | epoch seconds. |
-| `sessions` | `total`, `merged`, `rolled_back`, `staged_unmerged` (staged on a span no gate decided). |
+| `sessions` | `total`, `merged`, `rolled_back` (discarded: a regression, a veto, a conflict), `no_improvement` (not merged because nothing improved — [`merge_requires_improvement`](#sequence--the-loop)), `staged_unmerged` (staged on a span no gate decided). |
 | `time` | `wall_time_s`, `work_time_s`, `human_wait_time_s` — the [clock](#the-clock--three-terms-all-in-seconds). |
 | `judges` | by name: `last` and `baseline` verdicts (`met`, `value`, `max`, `target`, `rationale`, `error`, and `evidence` — the absolute paths of the [kept](#evidence--what-agg-keeps) evidence copies, omitted when none); `null` where there is none. The driver path has no baseline. |
 | `result` | `base_branch`, `final_commit` (the base's tip after the last gate), `staged_branch` (an ungated span's tip — `git merge` it to land that work). |
-| `open_asks` | questions still waiting on a human: `id`, `kind`, `question`, `age_s`. |
+| `open_asks` | questions still waiting on a human: `id`, `kind`, `question`, `options` (the allowed answers of a `bool`/`choose` ask; `null` for `input`), `age_s`. |
 | `paths` | absolute paths of `report`, `ledger` (`verdicts.jsonl`), `log`, `evidence_dir` (this run's `agg/private/evidence/<run_id>`; `null` when no evidence was kept). |
-| `waiting` | present only when the run **ended while waiting**: `{reason: "rate_limit", agent, until}` — see [rate limits](#rate-limits--wait-wake-resume). |
+| `detectors` | the stop detectors as the run ended: `stalled` (the last verdict of a judge named `stalled`; `null` if there is none or it never ran), `oscillating`, `rollbacks`, `consecutive_rollbacks`, `ratchet_regressed`. |
+| `usage` | the run's totals: `total`, `worker`, `ruler` — each `{tokens, cost_usd, cost_source}` (see [usage](#usage-tokens-and-cost)). |
+| `session_log` | every session that made an agent call, in order: `{session, step, usage: [{role, agent, model, tokens, cost_usd, cost_source}]}`. Session `0` is the baseline pass (its LLM judges); `step` is empty there. One line per role and model: `worker` is the session's agent, `ruler` the LLM judges and the summarizer. |
+| `waiting` | a wait the loop was in when it ended — `{reason: "rate_limit", agent, until}` (`until`: epoch seconds) — else `null`. See [rate limits](#rate-limits--wait-wake-resume). |
+
+Each judge's entry also has `ratchet`: `{reference, direction, tolerance, tolerance_pct}` for a
+ratcheted judge (`reference` = its value at the last kept gate, or the seed), `null` otherwise. `last`
+is `null` only for a judge that never ran — an unmet judge reports its verdict.
+
+### Usage: tokens and cost
+
+agg runs the agents, so it records what each call **reported** — never an estimate, never the
+configured model:
+
+| field | meaning |
+|---|---|
+| `model` | the model the agent says it ran (Claude: `system`/`init`, or `modelUsage` on a one-shot; Copilot: `data.model`, the model `auto` resolved to). `null` when the agent never names it (Codex). |
+| `tokens` | `input` (uncached prompt), `output`, `cache_write` (prompt written to the cache), `cache_read` (prompt served from it). The four do not overlap. A kind the agent does not report is `null`, not `0`: Copilot reports `output` only; Codex has no `cache_write`. In a sum, a kind is `null` only if no call reported it. |
+| `cost_usd` | dollars as the agent priced itself — the API-equivalent price, not a subscription bill. Only Claude reports one. |
+| `cost_source` | `reported` (every call in the figure priced itself) · `partial` (some did — `cost_usd` is their sum, a lower bound) · `unknown` (none did — `cost_usd` is `null`). |
+
+Recording usage never caps a run. `agg history --json` carries the same `usage` totals for every
+run; `agg status --json` shows them live.
 
 **Outcome precedence** — when several hold at the end of one session: `error` > `stopped` > `done` >
 `aborted`.
@@ -1540,8 +1568,39 @@ agg run --report-json | jq -r .outcome      # logs go to agg/private/run.log; st
   So does a panic. If the report cannot be written, `agg run` exits **1** with the reason on stderr.
 - **SIGKILL, an OOM kill or a power cut leave no report.** A consumer MUST treat a missing report as
   `outcome: error`.
-- The schema is published at [`docs/schemas/report.v1.json`](schemas/report.v1.json). Any change to
-  the shape bumps `schema_version` and ships a new file.
+- The schema is published at [`docs/schemas/report.v2.json`](schemas/report.v2.json). Any change to
+  the shape bumps `schema_version` and ships a new file. `schema_version` 1
+  ([`report.v1.json`](schemas/report.v1.json), agg 0.0.15) is superseded: v2 adds `detectors`,
+  `usage`, `session_log`, `waiting`, each judge's `ratchet` and each open ask's `options`, and
+  removes nothing.
+
+## The live status: `agg status --json`
+
+Where a run stands **now**, for a program watching it from another process (`agg --project <dir>
+status --json`). It is cheap: it reads the snapshot the loop publishes, the ask ledger and
+`run.pid`, and never runs a judge. Its field names are the report's wherever the two say the same
+thing, so one parser reads both. Schema: [`docs/schemas/status.v1.json`](schemas/status.v1.json).
+Exit 1 with a hint when no run has ever published a snapshot in the project.
+
+| field | meaning |
+|---|---|
+| `schema_version` · `agg_version` · `run_id` · `project` | identity. `run_id` is the one the report will carry. |
+| `running` | a loop process is alive for this project right now. |
+| `finished` · `stop_reason` | the run published its ending, and why (`null` while it runs). Neither `running` nor `finished`: it was killed. |
+| `phase` | where the loop is: `starting` · `inject` · `run` · `verify` · `gate` · `backoff` · `staging` · `done`. |
+| `current_step` | `{name, agent, model}` of the step being run (`model` is what agg asked for, `null` = the agent's default); `null` before the first. |
+| `session` · `lifetime_session` | the session number in this run, and across every run of the project. |
+| `time` · `sessions` | as in the report; `time` ticks while the run is alive. |
+| `judges` | by name: `last` (latest verdict, `null` until it ran), `in_dod` (counted toward `done_if`), `ratchet` (as in the report). |
+| `detectors` · `open_asks` | as in the report (`open_asks` with `options`). |
+| `usage` | the running totals `total` / `worker` / `ruler`. The per-session breakdown is in the report. |
+| `waiting` | `{reason, agent, until}` while the loop waits before its next session — an agent's rate limit (`reason: "rate_limit"`, `until` the reset in epoch seconds or `null`) — else `null`. |
+| `paths` | as in the report. |
+
+Values change between two reads only at stage boundaries (and `time` continuously): the loop
+publishes on every stage change, and a worker session's usage lands when the session ends.
+
+`agg status` without `--json` is for humans, and its text changes without notice.
 
 ## Environment overrides (CI-friendly)
 
