@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Which way is BETTER for a ratcheted judge's `value`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     /// higher is better (coverage, mutation score).
@@ -33,7 +33,7 @@ pub enum Direction {
 }
 
 /// One judge's ratchet: `sequence.ratchet.<judge>` in YAML, [`crate::driver::Agg::ratchet`] in Rust.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Ratchet {
     /// REQUIRED — there is no sensible default for which way is better.

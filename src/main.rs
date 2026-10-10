@@ -47,6 +47,8 @@ enum Cmd {
     Doctor,
     /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
     Plan,
+    /// Print the JSON Schema of agg.yaml, generated from the config types agg parses into.
+    Schema,
     /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
     /// re-run judges; reads agg/private/state.json, same as the /agg:status skill).
     Status {
@@ -259,6 +261,10 @@ fn run_cli() -> Result<ExitCode> {
     match &cli.cmd {
         Cmd::Init { agent, force } => init::run(&p.dir, *force, agent.as_deref()),
         Cmd::Doctor => doctor::run(&p.dir, &p.config_base, &p.config),
+        Cmd::Schema => {
+            println!("{}", serde_json::to_string_pretty(&agg::schema::config_schema())?);
+            Ok(())
+        }
         Cmd::Plan => {
             no_config_hint(&p.config)?;
             let cfg = config::AggConfig::load(&p.config)?;
