@@ -47,6 +47,7 @@ pub mod paths;
 pub mod plugin;
 pub mod problem;
 pub mod project;
+pub mod protect;
 pub mod registry;
 pub mod report;
 pub mod schema;

@@ -56,6 +56,8 @@ impl AggConfig {
             // answer to that repetition).
             readonly: crate::isolation::normalize_paths(&body.readonly),
             writable: crate::isolation::normalize_paths(&body.writable),
+            // UNION, never override: a step can add protected paths, never drop the default ones.
+            write_deny: crate::protect::union(&self.defaults.write_deny, &body.write_deny),
             // YAML cannot name a driver-supplied backend; `agent:` is a string there.
             custom: None,
         })

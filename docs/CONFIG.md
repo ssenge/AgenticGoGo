@@ -44,6 +44,7 @@ defaults:
   state: "state/STATE.md"          # the forward-advice file under agg/ (gitignored)
   isolation: none                  # none (default) | sandbox | container — the blast-radius jail
   image: "alpine:3.20"             # the base image an `isolation: container` step runs in
+  write_deny: ["tests/oracles/**"] # PROTECTED paths: readable, never changed — on EVERY tier (below)
 
 # THE RULER — runs LLM judges + the summarizer. Run-level and IMMUTABLE: naming any of these keys
 # in a step body is a hard error (a grader that moves makes verdicts incomparable across cycles).
@@ -107,6 +108,7 @@ prompt_includes: []                # files prepended to every worker prompt
 | `role_prompt` | none | generic **role** framing composed *above* a step's `prompt:`. Inheritable; a step body may override it. |
 | `isolation` | `none` | `none` \| `sandbox` \| `container` — blast-radius jail (below). Inheritable; a step may override. |
 | `image` | `alpine:3.20` | the base image an `isolation: container` step runs in. Inert on every other tier. |
+| `write_deny` | `[]` | **protected paths** — globs every step may read but never change. Enforced on **every** tier by the gate's content-hash check, and by the kernel under `sandbox`/`container` ([below](#protected-paths--write_deny-readonly-writable)). A step's own list is ADDED to this one. |
 
 ## `judge` — THE RULER
 
@@ -162,6 +164,9 @@ Each NAME maps to a body of overrides. **The complete legal key list** (anything
 | `skip_judges` | `false` | `true` ⇒ no judges run after this step, so nothing merges — the work **stages** (below). |
 | `isolation` | `defaults.isolation` | `none` \| `sandbox` \| `container` — the blast-radius jail for this step (below). |
 | `image` | `defaults.image` | the base image for this step under `isolation: container`. |
+| `readonly` | `[]` | project paths this step may read but not write — **kernel only**: inert under `isolation: none` (agg warns). No `defaults.readonly`. ([below](#protected-paths--write_deny-readonly-writable)) |
+| `writable` | `[]` | paths subtracted from this step's `readonly` (exact match). Never touches `write_deny`. |
+| `write_deny` | `[]` | MORE protected paths for this step, **unioned** with `defaults.write_deny`. Nothing subtracts from it. |
 
 **`skip_judges` steps stage.** Nothing was judged, so nothing merges; the work stays on the session
 branch and the **next judged step gates the whole span** — pass ⇒ the span merges, a regression ⇒ the
@@ -213,6 +218,108 @@ doctor` reports whether the tooling the config asks for is present.
 This is **orthogonal** to `session_isolation` (below): that protects the repo *history* from bad work
 (per-session branches + a rollback gate); `isolation` protects the *host* from an errant worker. They
 compose.
+
+### Protected paths — `write_deny`, `readonly`, `writable`
+
+An agent that cannot pass a test will, given the chance, edit the test: delete it, special-case it,
+or weaken the golden file it compares against. Committed judges are restored by a rollback, but an
+oracle **outside** `agg/judges/` that the worker weakens makes the judges pass — and the session
+merges. Three keys say which project paths the worker may read but not change:
+
+| key | where | what binds it | under `isolation: none` |
+|---|---|---|---|
+| `write_deny` | `defaults` + each step (**union**) | the **kernel** (confining tiers) **and the gate check** (every tier) | **enforced** — the gate rolls the session back |
+| `readonly` | each step | the kernel only | inert — agg warns that the step *can write* them |
+| `writable` | each step | subtracts from that step's `readonly` (exact spelling) | — |
+
+**Use `write_deny` for anything a judge trusts** — oracles, golden masters, contract tests, rule
+files, gate configuration, reference material. `readonly`/`writable` are the older, kernel-only lists,
+useful for paths you would like a step not to touch but that no judge depends on.
+
+```yaml
+defaults:
+  isolation: "sandbox"
+  write_deny: ["tests/oracles/**", "rules/", ".gitlab-ci.yml"]
+steps:
+  implement: {}
+  refactor: { write_deny: ["src/api/**"] }   # refactor may not touch the API either — ADDED, never instead
+```
+
+**Patterns** are relative to the project root, `/`-separated: `*` and `?` match inside one path
+component, `**` matches zero or more whole components. `dir/` is shorthand for `dir/**`, and
+`dir/**` covers the directory **itself** too, so swapping it for a symlink or deleting and recreating
+it counts as a change. Refused at startup, on every tier: an absolute path, `..`, a pattern naming the
+project root, and syntax agg does not implement (`[…]`, `{…}`, a leading `!`, `\`) — read literally,
+those would protect nothing while looking like they did. Matching is on **canonical** paths (a file
+reached through a symlinked directory is matched where it really lives) and **case-insensitive** on a
+case-insensitive volume (the macOS default), where `TESTS/X.JSON` *is* `tests/x.json`.
+
+**Union, never subtraction.** A step's `write_deny` is added to `defaults.write_deny`; `writable:` does
+not reach it. A step can only ever be *more* restricted than the project default, which is what lets
+an operator rely on the default list. The Rust driver's twin is `Step::write_deny([..])`, which
+accumulates down a template chain the same way.
+
+#### Two layers — and the gate check is the guarantee
+
+1. **The kernel (first line).** Under `sandbox`/`container` the patterns go to the same mechanism as
+   `agg/private/`: the write is refused (`EPERM` / `EROFS`) before it happens. Reads stay open, so
+   judges and the worker still read every protected file.
+2. **The gate check (the guarantee, every tier).** Right before the worker starts, agg fingerprints
+   every covered entry — **tracked, untracked and gitignored** (a `git diff` would miss the last two):
+   a file's bytes (SHA-256) and permission bits, a directory's permission bits, a symlink's target.
+   The moment the worker exits it does it again. Any difference — a path changed, appeared or
+   disappeared — is a **`protected_path_violation`**:
+   - the paths are **restored** from agg's own copies (`agg/private/protected/<sha256>`, each checked
+     against the hash agg holds in memory) **before any judge runs**, so nothing is ever graded
+     against a weakened oracle;
+   - a row is appended to **`agg/private/violations.jsonl`**:
+     `{"session":3,"step":"implement","reason":"protected_path_violation","window":"session","paths":["tests/oracles/x.json"],"restored":true,"ts":…}`;
+   - the gate **rolls the session back** — the whole span, if it was staged — whatever the judges
+     said, and whatever `gate_regressions` (or a driver's `on_regression`) is set to.
+
+   A change made **after** a session's check — by a process the worker left running, say, or a hook —
+   is caught when the next session starts: restored, and recorded with `"window":"between_sessions"`
+   against the session before. A restore that fails is a hard stop of the run, never a silent pass.
+
+#### Platform matrix
+
+| tier | platform | `write_deny` is… | how |
+|---|---|---|---|
+| `none` | any | **gate check only** — agg warns at startup | snapshot + compare + restore + rollback |
+| `sandbox` | macOS | **kernel-enforced** + gate check | one Seatbelt `(deny file-write* (regex …))` per pattern — any glob — case-folded on a case-insensitive volume, plus an unlink deny on each ancestor of the pattern's literal directory |
+| `sandbox` | Linux | **kernel-enforced** for a literal path or `dir/**`; any other glob is **refused** at startup; + gate check | `bwrap --ro-bind` of the directory or file (a `dir/**` root that does not exist yet is created first; a literal path that does not exist yet has no mount point and is left to the gate, with a warning) |
+| `container` | any host | same as Linux `sandbox` | a `:ro` bind mount per directory or file |
+
+The refusal is the rule "refuse rather than degrade": a bind can only cover a path that exists when
+the session starts, so a pattern like `**/*.golden` — which names files that do not exist yet, in
+directories it does not list — cannot be kernel-enforced there. Protect the directories that hold
+them (`fixtures/**`) or list literal paths.
+
+#### What each bypass meets (measured)
+
+| attempt | `none` | macOS `sandbox` | `container` (Docker) |
+|---|---|---|---|
+| direct write · child-process write · `chmod` | caught | blocked | blocked |
+| delete, or delete and recreate | caught | blocked | blocked |
+| rename another file over it | caught | blocked | blocked |
+| symlink to it, write through the link | caught | blocked | blocked |
+| hard link to it, write through the link | caught | blocked (the link itself is refused) | blocked (`EXDEV`) |
+| `git checkout`/`git restore` an old version | caught | blocked | blocked |
+| new file inside a protected directory | caught | blocked | blocked |
+| change a **gitignored** file inside one | caught | blocked | blocked |
+| case variant (`TESTS/X.JSON`) on a case-insensitive volume | caught | blocked | blocked |
+| move an **ancestor** away (`mv tests tests_old`) | caught | blocked | **caught** — the mount moves with it |
+| swap the protected directory for another | caught | blocked | caught |
+| write through a hard link that existed **before** the session | caught | **caught** — no path rule names the link | caught |
+
+*caught* = the gate restored the path and rolled the session back; *blocked* = the kernel refused the
+write and the rest of the session's work is judged normally. Linux `sandbox` (bwrap) uses the same
+bind mechanism as the container column and is expected to behave like it; it is not yet verified on a
+real Linux host. The suite that produced this table is `tests/protected_paths.rs`.
+
+**What is NOT covered.** `.git/` and `agg/private/` are never part of the check — agg owns both and
+writes them during a session. Judges and hooks are operator code: a change they make is caught at the
+next session start (above), not attributed to the session that ran them.
 
 ## `sequence` — the loop
 
@@ -1024,9 +1131,11 @@ Every session **always** branches off `base`, does its work, and is gated — th
 `agg run` therefore **refuses to start** without a git repo, a clean tree, and a non-detached HEAD.
 The gate rule: **auto-accept a session's work, UNLESS a judge that was previously met now fails, or a
 [ratcheted](#the-ratchet--numeric-no-regression) value got worse beyond its tolerance — then roll that
-session back** (`gate_regressions: true`). Three things can suppress a merge, in this
+session back** (`gate_regressions: true`). Four things can suppress a merge, in this
 precedence:
 
+0. **a protected-path violation** — the session changed a [`write_deny`](#protected-paths--write_deny-readonly-writable)
+   path ⇒ roll back, regardless of `gate_regressions` and of every verdict.
 1. **`red_file`** (`.agg_red` at the project root) — the worker's own veto. Present ⇒ do not merge.
 2. **`skip_judges`** — nothing was judged, so nothing merges; the work stages.
 3. **the regression gate** — a previously-met judge now fails, or a ratchet regressed ⇒ roll back.
@@ -1085,7 +1194,7 @@ gitignored, auto-created directories — and the split is by **who may write the
 | directory | written by | contents |
 |---|---|---|
 | **`agg/state/`** | the **worker** (agg reads it as untrusted input) | `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/`, `BLOCKED.md` |
-| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `bus/`, `run.pid`, `run.log`, `report.json` |
+| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `gate.json`, `violations.jsonl`, `protected/`, `bus/`, `run.pid`, `run.log`, `report.json` |
 
 **The one rule that decides which is which:** *if the worker writing it could change when the loop ends,
 what it may spend, or what agg believes happened, it is private.* Everything the worker is **supposed** to

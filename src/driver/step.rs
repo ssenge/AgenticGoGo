@@ -8,6 +8,7 @@
 //! | `agent` `model` `effort` `isolation` `prompt` `state` | **OVERRIDE** — the derived step wins |
 //! | `readonly` | **ACCUMULATES** — a derived step cannot silently lose a deny its template set |
 //! | `writable` | **SUBTRACTS** from what accumulated — re-grant exactly one deny, not the rest |
+//! | `write_deny` | **ACCUMULATES**, and nothing subtracts from it — not even `writable` |
 //!
 //! That asymmetry is the whole reason templates are worth having. A YAML project repeats
 //! `isolation: sandbox` + `readonly: [tests/, agg/judges/]` on every step that needs it, and the
@@ -43,6 +44,8 @@ pub struct Step {
     pub readonly: Vec<String>,
     /// paths subtracted from [`Self::readonly`]. See [`Step::writable`].
     pub writable: Vec<String>,
+    /// PROTECTED globs, accumulated and never subtracted. See [`Step::write_deny`].
+    pub write_deny: Vec<String>,
     /// ADDITIVE to the composed brief, never replacing it.
     pub prompt: Option<String>,
     /// the forward-state file this step's worker rewrites. `None` = `"state/STATE.md"` under the
@@ -137,6 +140,23 @@ impl Step {
         S: AsRef<str>,
     {
         extend_unique(&mut self.writable, normalize_paths(paths));
+        self
+    }
+
+    /// ADD protected paths: globs (`*`, `?`, `**`) this step may read but never change — the twin
+    /// of YAML's `write_deny:`. Accumulates over the template's list and is NEVER reduced:
+    /// [`Step::writable`] does not reach it, so a derived step cannot lose a protection.
+    ///
+    /// Unlike `readonly`, it binds on EVERY tier: the gate rolls back a session that changed a
+    /// covered path even under [`Isolation::None`]; a confining tier also denies the write itself.
+    /// See [`crate::protect`].
+    pub fn write_deny<I, S>(mut self, patterns: I) -> Step
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let merged = crate::protect::union(&self.write_deny, &crate::protect::normalize(patterns));
+        self.write_deny = merged;
         self
     }
 
@@ -242,6 +262,16 @@ mod tests {
     fn an_uncanonical_path_is_dropped() {
         let s = Step::new("x").readonly(["../escape", "src/", ".", "agg/judges/../judges"]);
         assert_eq!(s.readonly, ["src", "agg/judges"]);
+    }
+
+    /// `write_deny` ACCUMULATES and `writable` cannot touch it — the one list a derived step can
+    /// never shrink.
+    #[test]
+    fn write_deny_accumulates_and_writable_cannot_subtract_from_it() {
+        let tmpl = Step::template().write_deny(["tests/oracles/"]);
+        let s = tmpl.create("implement").write_deny(["**/*.golden", "./tests/oracles/**"]).writable(["tests/oracles"]);
+        assert_eq!(s.write_deny, ["tests/oracles/**", "**/*.golden"]);
+        assert_eq!(tmpl.write_deny, ["tests/oracles/**"], "the template keeps its own list");
     }
 
     /// `Step::new` and `Step::template().create(..)` differ in exactly one thing: the template's

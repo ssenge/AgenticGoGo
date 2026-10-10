@@ -166,11 +166,23 @@ pub(crate) fn keep_or_rollback(
 ) -> Result<Gated> {
     let Judged { fresh, regressed, ratchet, signature } = judged;
     let step_name = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+    // ⛔ A protected-path violation anywhere in the span vetoes the merge — before the regression
+    // policy, and regardless of it: `gate_regressions: false` relaxes what a REGRESSION means, it
+    // does not license a session that rewrote an oracle. Taken (cleared) on every arm, because
+    // every arm closes the span.
+    let violated = std::mem::take(&mut ctx.ext.get::<AGGState>().protect.span_violation);
     // The `verdicts::append` `?` below is a HARD disk Err that bubbles out to the caller (R7) — the
     // gate's "was met" reads this file, so a swallowed write would silently un-arm the next gate.
     let out = match staged {
         Some((br, StagedSession::Staged)) => {
-            let keep = if ctx.gate_regressions { !regressed } else { true };
+            let keep = violated.is_empty() && if ctx.gate_regressions { !regressed } else { true };
+            if !violated.is_empty() {
+                eprintln!(
+                    "  [gate] ROLLED BACK — {}: {}",
+                    crate::protect::VIOLATION,
+                    violated.join(", ")
+                );
+            }
             crate::git::finalize_session(&ctx.dir, br, ctx.session, keep);
             let tag = if keep { Outcome::Merged } else { Outcome::RolledBack };
             crate::core::verdicts::append_marked(&ctx.dir, Some(ctx.session), &step_name, fresh, tag, &ratchet)?;

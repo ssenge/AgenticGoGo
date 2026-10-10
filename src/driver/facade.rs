@@ -464,6 +464,14 @@ impl Agg {
                  `template.create(\"implement\")`"
             )));
         };
+        let write_deny = crate::protect::union(&self.cfg.defaults.write_deny, &step.write_deny);
+        // The driver's steps are built in code, so `capability::check` never sees them: the
+        // write_deny refusal for this tier happens HERE, before the step can run unprotected.
+        match crate::protect::check_step(&name, step.isolation, &write_deny) {
+            Err(problems) => return Err(Fatal::Other(anyhow::anyhow!("{}", problems.join("\n")))),
+            Ok(Some(warning)) => eprintln!("  ⚠ {warning}"),
+            Ok(None) => {}
+        }
         Ok(ResolvedStep {
             name,
             agent: step.agent.name().to_string(),
@@ -487,6 +495,7 @@ impl Agg {
                 .unwrap_or_else(|| crate::isolation::DEFAULT_IMAGE.to_string()),
             readonly: step.readonly.clone(),
             writable: step.writable.clone(),
+            write_deny,
             custom: match &step.agent {
                 Agent::Custom(b) => Some(CustomBackend(b.clone())),
                 _ => None,
@@ -548,6 +557,9 @@ impl Agg {
         //    ordinal is consumed — a gate on an empty span must be free to call unconditionally at
         //    the bottom of a driver's `for`.
         let Some(tip) = st.ext.get::<AGGState>().git.span_tip.clone() else {
+            // no span means nothing to roll back; a violation recorded without one (its paths were
+            // restored already) must not poison the NEXT span's gate.
+            st.ext.get::<AGGState>().protect.span_violation.clear();
             return Ok(GateOutcome::Nothing);
         };
 

@@ -31,7 +31,8 @@ pub fn available() -> bool {
 /// Build the `bwrap` wrapper command around `prog args…`, writable = cwd + tmpfs /tmp + `writable`,
 /// minus `denied` (agg's own private state plus this step's `readonly` set — see
 /// [`super::deny_set`]), which lives inside cwd.
-pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], prog: &OsStr, args: &[OsString]) -> Result<Command> {
+/// `_rules` are Seatbelt rules — macOS only; bwrap's protected paths arrive in `denied` instead.
+pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], _rules: &[String], prog: &OsStr, args: &[OsString]) -> Result<Command> {
     let mut cmd = Command::new("bwrap");
     cmd.arg("--die-with-parent")
         // whole host read-only …
