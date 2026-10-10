@@ -55,10 +55,17 @@ pub fn available() -> bool {
 }
 
 /// Build the `sandbox-exec -p '<profile>' -- prog args…` wrapper.
-pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], prog: &OsStr, args: &[OsString]) -> Result<Command> {
+/// `rules` are extra, already-formed Seatbelt deny rules — the step's `write_deny` patterns
+/// ([`crate::protect::seatbelt_rules`]) — emitted after every allow so they win.
+pub fn build(cwd: &Path, writable: &[PathBuf], denied: &[PathBuf], rules: &[String], prog: &OsStr, args: &[OsString]) -> Result<Command> {
     // `$TMPDIR` is always writable (falling back to `/tmp` if unset).
     let tmp = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    let profile = profile(cwd, &tmp, writable, denied)?;
+    let mut profile = profile(cwd, &tmp, writable, denied)?;
+    // Seatbelt resolves the LAST matching rule, so the protected-path denies go at the very end:
+    // after the cwd allow they take back, and after the network/mach allows they do not touch.
+    for r in rules {
+        profile.push_str(r);
+    }
     let mut cmd = Command::new("sandbox-exec");
     cmd.arg("-p").arg(profile).arg("--").arg(prog);
     for a in args {

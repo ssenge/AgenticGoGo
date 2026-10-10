@@ -67,7 +67,9 @@ impl SessionOutcome {
 /// this costs nothing. `image` is the step's base image, read ONLY under `isolation: container`.
 /// `denied` is this step's `readonly` minus `writable`, read only under a CONFINING tier — see
 /// [`crate::isolation::wrap`] for why it is a second argument beside the derived carve-out and never
-/// a replacement for it.
+/// a replacement for it. `write_deny` is the step's protected globs, delivered to the same tier
+/// ([`crate::isolation::wrap_protected`]); the gate check that backs them on every tier lives in
+/// [`crate::features::protect`].
 #[allow(clippy::too_many_arguments)]
 pub fn run_session(
     cfg: &AggConfig,
@@ -81,6 +83,7 @@ pub fn run_session(
     live: &LiveState,
     isolation: crate::isolation::Isolation,
     denied: &[String],
+    write_deny: &[String],
     image: &str,
 ) -> SessionOutcome {
     let start = Instant::now();
@@ -119,11 +122,19 @@ pub fn run_session(
     // step's own warning about that is emitted by the caller, which is the layer that knows the
     // step's NAME.
     let confined = match isolation {
-        crate::isolation::Isolation::Sandbox => {
-            crate::isolation::wrap(command, dir, &agent.writable_state_paths(), denied)
-        }
+        crate::isolation::Isolation::Sandbox => crate::isolation::wrap_protected(
+            command,
+            dir,
+            &agent.writable_state_paths(),
+            denied,
+            write_deny,
+        ),
         crate::isolation::Isolation::Container => {
-            crate::isolation::containerize(command, dir, &agent.writable_state_paths(), denied, image)
+            // a container denies by `:ro` mount only, so the protected paths join the deny list as
+            // the concrete paths they name (shapes a mount cannot express were refused at startup).
+            let mut d = denied.to_vec();
+            d.extend(crate::protect::bind_paths(dir, write_deny));
+            crate::isolation::containerize(command, dir, &agent.writable_state_paths(), &d, image)
         }
         _ => Ok(command),
     };

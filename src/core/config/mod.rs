@@ -115,6 +115,15 @@ pub struct Defaults {
     /// tier. `None` = [`crate::isolation::DEFAULT_IMAGE`].
     #[serde(default)]
     pub image: Option<String>,
+    /// PROTECTED PATHS: project-relative globs (`*`, `?`, `**`) every step may read but never
+    /// change — oracles, golden files, rule files, gate config. See [`crate::protect`].
+    ///
+    /// A step's own `write_deny` is ADDED to this list (union); nothing subtracts from it, so a step
+    /// can only be MORE restricted than the default. Enforced twice: by the kernel under
+    /// `sandbox`/`container`, and on EVERY tier by the gate's content-hash check, which rolls back a
+    /// session that changed a covered path.
+    #[serde(default)]
+    pub write_deny: Vec<String>,
 }
 
 impl Default for Defaults {
@@ -128,6 +137,7 @@ impl Default for Defaults {
             role_prompt: None,
             isolation: None,
             image: None,
+            write_deny: vec![],
         }
     }
 }
@@ -173,7 +183,7 @@ pub struct JudgeOverride {
 ///
 /// ```text
 /// agent · model · effort · worker_args · state · role_prompt · prompt · skip_judges
-/// isolation · image · readonly · writable
+/// isolation · image · readonly · writable · write_deny
 /// ```
 ///
 /// Any other key is a HARD ERROR (deny_unknown), which is what makes naming a `judge_*` key in a
@@ -222,6 +232,10 @@ pub struct StepBody {
     /// ([`crate::isolation::normalize_path`]), so `agg/judges` and `agg/judges/` are one path.
     #[serde(default)]
     pub writable: Vec<String>,
+    /// MORE protected paths for this step, ADDED to `defaults.write_deny` (union). `writable:` never
+    /// subtracts from these — see [`Defaults::write_deny`].
+    #[serde(default)]
+    pub write_deny: Vec<String>,
 }
 
 /// One entry in `sequence.steps` — a step name plus how many times to dispatch it.
@@ -608,6 +622,9 @@ pub struct ResolvedStep {
     /// paths subtracted from [`Self::readonly`]. See [`StepBody::writable`]; [`Self::denied`] is the
     /// resulting deny set.
     pub writable: Vec<String>,
+    /// the protected paths: `defaults.write_deny ∪` this step's own, normalised
+    /// ([`crate::protect::union`]). Read by the kernel layer AND by the gate check.
+    pub write_deny: Vec<String>,
     /// a backend the DRIVER implements itself (`Agent::Custom`), consulted by [`Self::backend`]
     /// BEFORE `backend::for_name`. Always `None` on the YAML path — `agent:` is a string there and
     /// an `Arc<dyn AgentBackend>` cannot be `Deserialize`, which is the documented break in the

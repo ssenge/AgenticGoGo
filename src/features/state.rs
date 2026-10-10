@@ -19,6 +19,8 @@ pub struct AGGState {
     pub operator: Operator,
     pub inject: Inject,
     pub notify: Notify,
+    /// protected paths (`write_deny`): the open span's violations + the last check's state.
+    pub protect: crate::features::protect::ProtectState,
 }
 /// stuck-notification debounce (STUCK_NOTIFY §8.3). Per-RUN, deliberately not persisted: a fresh
 /// process starting cold and notifying once is acceptable, and the alternative is a state file whose
@@ -100,4 +102,7 @@ pub struct AGGScratch {
     pub rolled_back: bool,
     /// `Summarize` (on_session_end) → `RefineFold`'s mechanical+summary source choice.
     pub summarized_this_cycle: bool,
+    /// `protect::before_worker` → `protect::after_worker`: the protected entries as they were the
+    /// moment the worker started. `None` for a step with no `write_deny`.
+    pub protect_before: Option<crate::protect::snapshot::Snapshot>,
 }
