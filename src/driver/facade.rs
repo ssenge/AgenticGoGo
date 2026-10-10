@@ -106,6 +106,8 @@ struct Started {
     /// panic-unwind.
     _stop: StopHooks,
     _pid: RunPidGuard,
+    /// this run's report handle (`run_id`, the write latch). `Drop for Agg` writes the report.
+    report: crate::report::RunHandle,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -246,6 +248,8 @@ impl Agg {
         crate::os::detach::write_run_pid(&dir);
         let pid_guard = RunPidGuard { dir: dir.clone() };
         crate::os::signals::install();
+        // behind the guard, like the YAML path: it deletes the previous run's report.
+        let report = crate::report::begin(&dir);
 
         // THE LEDGER, decided here and nowhere else — and deliberately AFTER the double-run guard
         // above, because both branches WRITE. A resume truncates to the last KEPT gate and replays
@@ -369,7 +373,7 @@ impl Agg {
             self.ended.set(Some(outcome));
         }
 
-        Ok(Started { st: RefCell::new(st), lc: lifecycle, replay, _stop: stop_hooks, _pid: pid_guard })
+        Ok(Started { st: RefCell::new(st), lc: lifecycle, replay, _stop: stop_hooks, _pid: pid_guard, report })
     }
 }
 
@@ -1505,8 +1509,15 @@ impl Drop for Agg {
 
         // `dash.finished`, not the latch: a `Flow::Stop` that already emitted `Finished` must not be
         // re-recorded, while a latched outcome that never got emitted still must be.
+        let outcome = self.ended.get().unwrap_or(RunOutcome::GoalsMet);
         if !st.dash.finished {
-            record_end(&mut st, self.ended.get().unwrap_or(RunOutcome::GoalsMet));
+            record_end(&mut st, outcome);
+        }
+        // the report, from the state the run ended in — before `on_stop` fires, as on the YAML path.
+        // A driver that returns `Err` reads as `done` here; `driver::run` amends it to `error`.
+        let report = crate::report::from_state(&mut st, &started.report, &Ok(outcome));
+        if let Err(e) = started.report.finish(&report) {
+            eprintln!("  ⚠ agg: cannot write {}: {e}", crate::paths::report_json(&st.dir).display());
         }
     }
 }

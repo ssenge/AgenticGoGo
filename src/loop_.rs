@@ -114,6 +114,10 @@ use crate::registry::run_pre_start;
 pub fn wait_for_resume(bus: &Bus) -> Option<String> {
     loop {
         std::thread::sleep(Duration::from_secs(2));
+        // a paused run is still a running one: SIGTERM ends it like a `stop`, not after a `resume`.
+        if crate::os::signals::interrupted() {
+            return Some("interrupted (SIGINT/SIGTERM) while paused".into());
+        }
         for cmd in bus.drain() {
             match cmd {
                 Command::Resume => {
@@ -178,8 +182,6 @@ pub fn run_with(
     max_sessions_flag: u32,
     register: impl FnOnce(&mut Lifecycle),
 ) -> Result<RunOutcome> {
-    let Assembly { engine: eng, steps: seq_steps } = assembly;
-
     // ── double-run guard ──
     if let Some(pid) = crate::os::detach::live_pid(dir) {
         if pid != std::process::id() {
@@ -194,6 +196,46 @@ pub fn run_with(
     let _run_pid_guard = RunPidGuard { dir: dir.to_path_buf() };
     crate::os::signals::install();
 
+    // From here on EVERY ending leaves a report (A-1): the run deletes its predecessor's now, and a
+    // fault before the loop state exists still gets one — under THIS run's id, so the id in run.log
+    // and the id in the report agree.
+    let run = crate::report::begin(dir);
+    let project = cfg.project.clone();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_reported(cfg, assembly, dir, config_base, max_sessions_flag, register, &run)
+    }));
+    let fallback = |msg: &str| {
+        if !run.written() {
+            if let Err(e) = run.finish_error(&project, msg) {
+                eprintln!("error: cannot write the run report: {e}");
+            }
+        }
+    };
+    match res {
+        Ok(res) => {
+            if let Err(e) = &res {
+                fallback(&format!("{e:#}"));
+            }
+            res
+        }
+        Err(panic) => {
+            fallback(&format!("panic: {}", crate::report::panic_message(&*panic)));
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
+/// The run body behind the guards: build the loop state, drive it, and write its report from it.
+fn run_reported(
+    cfg: AggConfig,
+    assembly: Assembly,
+    dir: &Path,
+    config_base: &Path,
+    max_sessions_flag: u32,
+    register: impl FnOnce(&mut Lifecycle),
+    run: &crate::report::RunHandle,
+) -> Result<RunOutcome> {
+    let Assembly { engine: eng, steps: seq_steps } = assembly;
     let ruler = cfg.ruler_backend()?;
     let judge_model = cfg.judge_model(ruler);
     let judge_timeout = cfg.judge.timeout;
@@ -313,11 +355,32 @@ pub fn run_with(
     st.publish();
     st.dash.lifetime_session = lifetime_base;
 
+    // The report is written from the state the run ended in, BEFORE the `on_stop` hooks fire (they
+    // drop with this frame) — so a hook that ships `report.json` somewhere finds it.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drive(&mut st, &lifecycle)));
+    match res {
+        Ok(res) => {
+            let report = crate::report::from_state(&mut st, run, &res);
+            run.finish(&report)
+                .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", crate::paths::report_json(dir).display()))?;
+            res
+        }
+        Err(panic) => {
+            let msg = format!("panic: {}", crate::report::panic_message(&*panic));
+            let report = crate::report::from_state(&mut st, run, &Err(anyhow::anyhow!("{msg}")));
+            let _ = run.finish(&report);
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
+/// Everything from the run-start hooks to the run's end.
+fn drive(st: &mut LoopState, lifecycle: &Lifecycle) -> Result<RunOutcome> {
     // ── run-start hooks: spawn the user's background watchers, then the baseline pass (§5.5.1) —
     //    both are registry handlers now (the `background` / `on_run_start` hooks). Baseline's two
     //    launch-time early exits come back as End::Stop and finish the run. ──
-    run_hook(&lifecycle.background, &mut st)?;
-    if let Some(End::Stop(outcome)) = run_hook(&lifecycle.on_run_start, &mut st)? {
+    run_hook(&lifecycle.background, st)?;
+    if let Some(End::Stop(outcome)) = run_hook(&lifecycle.on_run_start, st)? {
         return Ok(outcome);
     }
 
@@ -326,12 +389,18 @@ pub fn run_with(
 
     // ── the deterministic outer loop, one step at a time ──
     loop {
+        // A SIGTERM that landed while no worker was running (the baseline pass, a judge, a hook)
+        // killed nothing, so nothing returned early: without this check the next session would
+        // launch and run to completion before the signal was noticed.
+        if crate::os::signals::interrupted() {
+            return Ok(st.finish_interrupted());
+        }
         // `over_max_sessions` is the SCHEDULER's ceiling, not the step's: it belongs to whoever owns
         // the iteration, so it stays here and out of `step_once`.
         if let Some(outcome) = st.over_max_sessions() {
             return Ok(outcome);
         }
-        match step_once(&mut st, &lifecycle)?.end {
+        match step_once(st, lifecycle)?.end {
             Some(End::Stop(outcome)) => return Ok(outcome),
             Some(End::NextSession) => continue,
             None => {}
@@ -366,6 +435,9 @@ pub(crate) fn step_once(st: &mut LoopState, lc: &Lifecycle) -> Result<StepEnd> {
     if let Some(e) = st.worker_is_broken() {
         return Err(e);
     }
+    // the test hook for "agg itself fails during VERIFY" (`report::fault_point`); debug builds only.
+    #[cfg(debug_assertions)]
+    crate::report::fault_point("verify")?;
     // rate-limited: incomplete session — go round again. Ceiling tripped during backoff → Halt.
     if let Some(end) = run_hook(&lc.on_verify, st)? {
         return Ok(StepEnd::ended(end));

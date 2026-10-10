@@ -169,6 +169,26 @@ impl Bus {
         out
     }
 
+    /// If a `stop` is queued, drain the queue and return its reason; otherwise touch nothing.
+    ///
+    /// For the end of a session, where a stop must beat the run's other endings: draining
+    /// unconditionally there would swallow an `inject` meant for the NEXT session's brief.
+    pub fn take_stop(&self) -> Option<String> {
+        let queued = std::fs::read_dir(&self.inbox).ok()?.flatten().any(|e| {
+            std::fs::read_to_string(e.path())
+                .ok()
+                .and_then(|t| serde_json::from_str::<Command>(&t).ok())
+                .is_some_and(|c| matches!(c, Command::Stop { .. }))
+        });
+        if !queued {
+            return None;
+        }
+        self.drain().into_iter().find_map(|c| match c {
+            Command::Stop { reason } => Some(reason),
+            _ => None,
+        })
+    }
+
     /// Write a message to the operator (`out/`), e.g. a question or a status push.
     pub fn emit(&self, kind: &str, text: &str, stamp: &str) -> std::io::Result<()> {
         let file = self.outbox.join(format!("{stamp}-{kind}.txt"));
@@ -214,6 +234,22 @@ mod tests {
 
         // consumed exactly once: a second drain is empty
         assert!(bus.drain().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `take_stop` leaves a queue without a stop untouched (an `inject` still reaches the next
+    /// session), and drains one that has a stop.
+    #[test]
+    fn take_stop_drains_only_when_a_stop_is_queued() {
+        let dir = tmpdir("take-stop");
+        let bus = Bus::open(&dir).unwrap();
+        bus.send(&Command::InjectInstruction { text: "next brief".into() }, "0001").unwrap();
+        assert_eq!(bus.take_stop(), None);
+        assert_eq!(std::fs::read_dir(&bus.inbox).unwrap().count(), 1, "the inject must survive");
+
+        bus.send(&Command::Stop { reason: "kill switch".into() }, "0002").unwrap();
+        assert_eq!(bus.take_stop().as_deref(), Some("kill switch"));
+        assert!(bus.drain().is_empty(), "the stop was consumed");
         std::fs::remove_dir_all(&dir).ok();
     }
 

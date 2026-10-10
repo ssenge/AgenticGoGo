@@ -34,6 +34,13 @@ pub fn is_repo(dir: &Path) -> bool {
     git(dir, &["rev-parse", "--is-inside-work-tree"]).1 == "true"
 }
 
+/// The commit `rev` names, or `None` if it names none. `^{commit}` makes a tag or a typo fail here
+/// rather than resolve to something that is not a commit.
+pub fn rev_parse(dir: &Path, rev: &str) -> Option<String> {
+    let (ok, out, _) = git(dir, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")]);
+    (ok && !out.is_empty()).then_some(out)
+}
+
 /// The current branch name, or None if detached / not a repo.
 pub fn current_branch(dir: &Path) -> Option<String> {
     let (ok, out, _) = git(dir, &["symbolic-ref", "--short", "HEAD"]);

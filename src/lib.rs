@@ -48,6 +48,7 @@ pub mod plugin;
 pub mod problem;
 pub mod project;
 pub mod registry;
+pub mod report;
 pub mod schema;
 pub mod skills;
 pub mod state;

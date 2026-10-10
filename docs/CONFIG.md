@@ -246,7 +246,9 @@ steps:
   listing what does exist. Never a runtime surprise. So is a typo'd entry key, by name.
 
 The sequence repeats from the top, forever, until `done_if` fires (exit **0**) or `abort_if` fires
-(exit **3**). Before session 1, every judge in the run-set runs once against the untouched repo (the
+(exit **3**). When both hold at the end of the same session, **`done_if` wins**; an operator stop
+(`agg stop`, SIGTERM, SIGINT) that arrived during that session beats both. Every ending writes
+[`agg/private/report.json`](#the-run-report-aggprivatereportjson). Before session 1, every judge in the run-set runs once against the untouched repo (the
 **baseline**), so a run can end immediately as already-done or already-aborting.
 
 A judge named in an `until` condition joins the **run-set** (it has to execute, or the condition
@@ -256,7 +258,7 @@ could never become true) but never the **DoD-set** — it is machinery, not a go
 
 | key | default | notes |
 |---|---|---|
-| `limits: { tokens, cost, sessions }` | all unlimited | The run-level ceilings, unified. Each key `null`/absent = unlimited. The three subkeys below. |
+| `limits: { tokens, cost, sessions }` | all unlimited | The run-level ceilings, unified. Each key `null`/absent = unlimited. The three subkeys below. **No ceiling is implied:** with no `limits` at all a run ends only on `done_if`, `abort_if` or a stop. |
 | `limits.tokens` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. |
 | `limits.cost` | unlimited | **dollar** ceiling → `over_cost`. **CLAUDE-ONLY** — see [Choosing an agent](#agent-specific-rules). |
 | `limits.sessions` | unlimited (`null`) | session cap → `over_iterations`. A **non-zero** `agg run --max-sessions <n>` overrides it; the flag's default `0` falls back to this key (not to unlimited). |
@@ -1083,7 +1085,7 @@ gitignored, auto-created directories — and the split is by **who may write the
 | directory | written by | contents |
 |---|---|---|
 | **`agg/state/`** | the **worker** (agg reads it as untrusted input) | `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/`, `BLOCKED.md` |
-| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `bus/`, `run.pid`, `run.log` |
+| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `bus/`, `run.pid`, `run.log`, `report.json` |
 
 **The one rule that decides which is which:** *if the worker writing it could change when the loop ends,
 what it may spend, or what agg believes happened, it is private.* Everything the worker is **supposed** to
@@ -1112,7 +1114,10 @@ author lives in `agg/state/`.
 - **`agg/private/state.json`** — the live scoreboard snapshot (the TUI, `agg serve`, `/agg:status` read it).
 - **`agg/private/verdicts.jsonl`** — the append-only, safety-critical GATE record.
 - **`agg/private/project.json`** — the run-history ledger (`agg history`): lifetime sessions/tokens.
-- **`agg/private/run.pid` · `run.log`** — the loop's liveness and its detached log.
+- **`agg/private/run.pid` · `run.log`** — the loop's liveness, and its log: every run stamps its
+  `run_id` here, and `--detach` / `--report-json` send the whole process output here.
+- **`agg/private/report.json`** — the end-of-run report, the stable interface for programs that
+  embed agg. See [below](#the-run-report-aggprivatereportjson).
 - **`agg/private/bus/`** — the steering queue (`agg send …` writes here; the loop drains it at `INJECT`).
   Private because the bus is the **operator's** channel: a worker writing here would raise its own token
   ceiling with `agg send budget`, unpause itself, or inject its own next-session instructions.
@@ -1166,6 +1171,44 @@ a worker tampered with.
 
 `memory:` keys: `enabled` (default true), `max_kb` (cap on the stored file), `inject_kb` (how much is
 injected per prompt). `0` for either disables that cap.
+
+## The run report: `agg/private/report.json`
+
+Every ending agg can observe writes one report: `done_if` met, `abort_if` fired, a session cap, an
+operator stop (`agg stop`, SIGTERM, SIGINT), an error, and a panic inside agg itself. It is the
+**stable** interface for a program that embeds agg — unlike `state.json`, `verdicts.jsonl` and
+`project.json`, which are internal and change without notice.
+
+```bash
+agg run --report-json | jq -r .outcome      # logs go to agg/private/run.log; stdout is the report
+```
+
+| field | meaning |
+|---|---|
+| `schema_version` · `agg_version` · `run_id` · `project` | identity. `run_id` is fresh per run and also in `run.log`. |
+| `outcome` | **authoritative**: `done` · `aborted` · `stopped` · `error`. |
+| `exit_code` | what `agg run` exited with: 0 done · 3 `abort_if` · 4 session cap (`outcome: aborted`) · 5 stopped · 1 error. |
+| `stop_reason` · `error` | human-readable reason (the `abort_if` expression, the cap, the stop reason); the error chain or panic message when `outcome` is `error`. |
+| `started_at` · `finished_at` | epoch seconds. |
+| `sessions` | `total`, `merged`, `rolled_back`, `staged_unmerged` (staged on a span no gate decided). |
+| `time` | `wall_time_s`, `work_time_s`, `human_wait_time_s` — the [clock](#the-clock--three-terms-all-in-seconds). |
+| `judges` | by name: `last` and `baseline` verdicts (`met`, `value`, `max`, `target`, `rationale`, `error`); `null` where there is none. The driver path has no baseline. |
+| `result` | `base_branch`, `final_commit` (the base's tip after the last gate), `staged_branch` (an ungated span's tip — `git merge` it to land that work). |
+| `open_asks` | questions still waiting on a human: `id`, `kind`, `question`, `age_s`. |
+| `paths` | absolute paths of `report`, `ledger` (`verdicts.jsonl`), `log`, `evidence_dir` (`null` for now). |
+
+**Outcome precedence** — when several hold at the end of one session: `error` > `stopped` > `done` >
+`aborted`.
+
+**Guarantees.**
+- Written **atomically** (temp file, fsync, rename): a partial report is never readable.
+- Deleted when a run **starts**, so a report on disk is always the latest run's — never a stale one.
+- A refused start (bad config, unknown `--base-branch`, dirty tree) still writes an `error` report.
+  So does a panic. If the report cannot be written, `agg run` exits **1** with the reason on stderr.
+- **SIGKILL, an OOM kill or a power cut leave no report.** A consumer MUST treat a missing report as
+  `outcome: error`.
+- The schema is published at [`docs/schemas/report.v1.json`](schemas/report.v1.json). Any change to
+  the shape bumps `schema_version` and ships a new file.
 
 ## Environment overrides (CI-friendly)
 

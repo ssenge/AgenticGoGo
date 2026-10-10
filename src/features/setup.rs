@@ -76,7 +76,9 @@ impl Handler for Baseline {
         eprint!("{}", indent(&ctx.eng.scoreboard()));
         ctx.publish();
         crate::core::verdicts::append(&ctx.dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;
-        if pre.halt {
+        crate::report::record_baseline(ctx, &pre.fresh_verdicts);
+        // `!pre.stop`: done beats aborted when both already hold (`report::decide`).
+        if pre.halt && !pre.stop {
             eprintln!("⚠ ABORT at baseline — abort_if already true: {}", pre.halt_reason.clone().unwrap_or_default());
             // The "stop + notify" policy has to hold HERE too, and this is its likeliest trigger:
             // a stale `agg/state/BLOCKED.md` survives a crash, a reboot and a rollback, so the run

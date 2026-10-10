@@ -19,8 +19,9 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(name = "agg", version, about = "AgenticGoGo — a generic agent-loop harness")]
 struct Cli {
-    /// project directory (defaults to current dir)
-    #[arg(long, global = true)]
+    /// project directory (defaults to current dir). `--project` is the same flag, for callers that
+    /// name the project they drive from another process (`agg stop --project <dir>`).
+    #[arg(long, global = true, visible_alias = "project")]
     dir: Option<PathBuf>,
     /// path to harness config (default: <dir>/agg/agg.yaml)
     #[arg(long, global = true)]
@@ -76,6 +77,14 @@ enum Cmd {
         /// run in the background: detach, write agg/private/run.pid, log to agg/private/run.log.
         #[arg(long, short = 'd')]
         detach: bool,
+        /// headless: send every log line to agg/private/run.log and print ONLY the run report
+        /// (agg/private/report.json) on stdout when the run ends.
+        #[arg(long, conflicts_with = "detach")]
+        report_json: bool,
+        /// the branch the run bases its sessions on and merges into; overrides
+        /// `session_isolation.base_branch`. Must name an existing commit.
+        #[arg(long)]
+        base_branch: Option<String>,
     },
     /// Run ONE judge once (resolved by NAME from disk) and print its raw verdict JSON + a human
     /// line — for authoring or debugging a single judge without running the whole `plan`.
@@ -379,26 +388,14 @@ fn run_cli() -> Result<ExitCode> {
             );
             Ok(())
         }
-        Cmd::Run { max_sessions, detach } => {
-            no_config_hint(&p.config)?;
-            let agg_cfg = config::AggConfig::load(&p.config)?;
-            // build the run-set engine + parse the sequence (validates step names / judge files /
-            // the not-all-skip rule in the FOREGROUND — a typo fails loudly here, not inside a
-            // detached child the user can't see).
-            let asm = loop_::assemble(&agg_cfg, &p.config_base)?;
-
-            // …then REFUSE anything the config asks for that the chosen agent(s) cannot do.
-            agg::capability::check(&agg_cfg, &asm.engine.judges)?;
-            // EVERY agent the sequence names must be on PATH (§7.3), before launching the loop.
-            for name in agg_cfg.agent_names() {
-                agg::backend::for_name(&name)?.preflight()?;
-            }
-
+        Cmd::Run { max_sessions, detach, report_json, base_branch } => {
             if *detach {
+                // validated in the FOREGROUND — a typo fails loudly here, not inside a detached child
+                // the user can't see.
+                prepare_run(&p, base_branch.as_deref())?;
                 return detach::spawn_detached(&p.dir).map(|_| ExitCode::SUCCESS);
             }
-            let outcome = loop_::run(agg_cfg, asm, &p.dir, &p.config_base, *max_sessions)?;
-            return Ok(ExitCode::from(outcome.exit_code()));
+            return Ok(ExitCode::from(run_reported(&p, *max_sessions, *report_json, base_branch.as_deref())));
         }
         Cmd::Serve { port, cors_origin, token } => {
             agg::ui::serve::run(agg::ui::serve::ServeConfig {
@@ -485,6 +482,67 @@ fn run_cli() -> Result<ExitCode> {
     // Every non-`run` subcommand yields `()` on success → exit 0. `agg run` returns its outcome
     // code earlier via an explicit `return`, so it never reaches here.
     .map(|()| ExitCode::SUCCESS)
+}
+
+/// Load, override, assemble and preflight a run — everything that can refuse it before it starts.
+fn prepare_run(p: &Paths, base_branch: Option<&str>) -> Result<(config::AggConfig, loop_::Assembly)> {
+    no_config_hint(&p.config)?;
+    let mut agg_cfg = config::AggConfig::load(&p.config)?;
+    if let Some(b) = base_branch {
+        // refused here rather than at the first `git checkout -b`, which would fail every session.
+        if agg::git::rev_parse(&p.dir, b).is_none() {
+            anyhow::bail!("--base-branch `{b}` does not name a commit in {}", p.dir.display());
+        }
+        agg_cfg.session_isolation.base_branch = b.to_string();
+    }
+    // build the run-set engine + parse the sequence (validates step names / judge files / the
+    // not-all-skip rule).
+    let asm = loop_::assemble(&agg_cfg, &p.config_base)?;
+    // …then REFUSE anything the config asks for that the chosen agent(s) cannot do.
+    agg::capability::check(&agg_cfg, &asm.engine.judges)?;
+    // EVERY agent the sequence names must be on PATH (§7.3), before launching the loop.
+    for name in agg_cfg.agent_names() {
+        agg::backend::for_name(&name)?.preflight()?;
+    }
+    Ok((agg_cfg, asm))
+}
+
+/// A foreground `agg run`, under the report contract: whatever happens — a refused config, a fault,
+/// a panic inside agg — it ends with `agg/private/report.json` and the exit code that report states.
+fn run_reported(p: &Paths, max_sessions: u32, report_json: bool, base_branch: Option<&str>) -> u8 {
+    use agg::report::headless::{conclude, Headless};
+    // only once `agg/` exists: a directory that is not a project has nowhere to put a log.
+    let headless = if report_json && p.config_base.is_dir() {
+        match Headless::redirect(&p.dir) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("error: cannot send the logs to {}: {e}", agg::paths::run_log(&p.dir).display());
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+    // Another live run owns the report file, so a refused second start must not touch it; and a
+    // directory that is not a project gets no `agg/private/` scaffolded into it.
+    let may_write =
+        p.config_base.is_dir() && detach::live_pid(&p.dir).is_none_or(|pid| pid == std::process::id());
+    if may_write {
+        agg::report::clear(&p.dir);
+    }
+    let mut project = String::new();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (cfg, asm) = prepare_run(p, base_branch)?;
+        project = cfg.project.clone();
+        loop_::run(cfg, asm, &p.dir, &p.config_base, max_sessions)
+    }))
+    .unwrap_or_else(|panic| Err(anyhow::anyhow!("panic inside agg: {}", agg::report::panic_message(&*panic))));
+    // `--report-json` outside a project still answers on stdout, through a printer on the real fds.
+    let printer = match (&headless, report_json) {
+        (None, true) => Headless::redirect_none().ok(),
+        _ => None,
+    };
+    conclude(&p.dir, &project, res, may_write, headless.as_ref().or(printer.as_ref()))
 }
 
 /// The RULER — the backend that runs LLM judges — for a command that may have a missing/broken

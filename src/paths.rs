@@ -25,7 +25,8 @@
 //!       gate.json           the gate's own state: ratchet references, rollback/oscillation history
 //!       bus/{in,out}/       operator↔loop command bus; bus/log.jsonl audit
 //!       run.pid             the live loop's pid (double-run guard + `agg stop` target)
-//!       run.log             detached-loop log (`agg run --detach`)
+//!       run.log             the run log: run ids, `--detach`/`--report-json` output
+//!       report.json         the end-of-run report — the stable interface for embedders
 //! ```
 //!
 //! # Why the split exists
@@ -191,9 +192,18 @@ pub fn run_pid(dir: &Path) -> PathBuf {
     private_dir(dir).join("run.pid")
 }
 
-/// The detached-loop log: `agg/private/run.log` (`agg run --detach`).
+/// The run log: `agg/private/run.log`. Every run stamps its `run_id` here; `--detach` and
+/// `--report-json` send the whole process output here too.
 pub fn run_log(dir: &Path) -> PathBuf {
     private_dir(dir).join("run.log")
+}
+
+/// The end-of-run report: `agg/private/report.json` (`crate::report`).
+///
+/// Private because it is what an embedding program ACTS on — a worker able to write it could turn
+/// an aborted run into a `done` one for whoever reads it.
+pub fn report_json(dir: &Path) -> PathBuf {
+    private_dir(dir).join("report.json")
 }
 
 #[cfg(test)]
@@ -229,10 +239,12 @@ mod tests {
         assert_eq!(instructions_md(d), Path::new("/proj/agg/private/INSTRUCTIONS.md"));
         assert_eq!(run_pid(d), Path::new("/proj/agg/private/run.pid"));
         assert_eq!(run_log(d), Path::new("/proj/agg/private/run.log"));
+        // what an embedder ACTS on — a forged `done` would ship unfinished work.
+        assert_eq!(report_json(d), Path::new("/proj/agg/private/report.json"));
 
         // and the carve-out must actually CONTAIN the private files, or the sandbox deny (which is
         // one subpath rule) would confine nothing.
-        for p in [verdicts_jsonl(d), calls_jsonl(d), gate_json(d), bus_dir(d), state_json(d), run_pid(d)] {
+        for p in [verdicts_jsonl(d), calls_jsonl(d), gate_json(d), bus_dir(d), state_json(d), run_pid(d), report_json(d)] {
             assert!(p.starts_with(private_dir(d)), "{} must live under the carve-out", p.display());
         }
     }
