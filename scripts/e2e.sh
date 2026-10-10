@@ -1799,6 +1799,51 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9p. context: — read-only directories from outside the project (REAL kernel sandbox)"
+# A-8. Unlike §9l this uses the REAL OS sandbox, not a fake wrapper: the claim is that the kernel
+# refuses the write, which only the kernel can show. Skipped where no restricting sandbox can be
+# applied (a nested jail, a CI container).
+if [ "$(uname -s)" = Darwin ] && sandbox-exec -p '(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow mach*)' /usr/bin/true 2>/dev/null; then
+  CX="$(mkproj context)"
+  KB="$WS/kb-parent/brain"; mkdir -p "$KB"; printf '# brain index\n' > "$KB/index.md"
+  cat > "$CX/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
+cp agg/private/INSTRUCTIONS.md prompt_latest.txt
+cat "$AGG_CONTEXT_BRAIN/index.md" > context_read.log 2>&1
+if echo evil >> "$AGG_CONTEXT_BRAIN/index.md" 2>/dev/null; then echo WRITE_OK; else echo WRITE_DENIED; fi > context_write.log
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+  chmod +x "$CX/bin/claude"
+  cat > "$CX/agg/agg.yaml" <<EOF
+project: context
+defaults: { model: fake, isolation: sandbox }
+steps:
+  worker: {}
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+context:
+  - { path: "$KB", as: "brain", mode: "ro" }
+EOF
+  agg_do "$CX" run --max-sessions 1 > "$CX/run.log" 2>&1
+  is   "context: a sandboxed run with a context dir reaches done (exit 0)" "$?" "0"
+  has  "…the brief lists it, with a pointer to its index.md"  "$CX/prompt_latest.txt" "start at \`$(cd "$KB" && pwd -P)/index.md\`"
+  has  "…the worker READ it (via \$AGG_CONTEXT_BRAIN)"        "$CX/context_read.log" "# brain index"
+  has  "…and the kernel REFUSED its write"                    "$CX/context_write.log" "WRITE_DENIED"
+  is   "…the context is byte-identical afterwards"            "$(cat "$KB/index.md")" "# brain index"
+  # …and an unconfined step is refused at startup rather than left able to write it.
+  sed -i.bak 's/isolation: sandbox/isolation: none/' "$CX/agg/agg.yaml"
+  agg_do "$CX" check > "$CX/check.log" 2>&1
+  is   "context: an \`isolation: none\` step is refused (agg check exit 1)" "$?" "1"
+  has  "…located at the key that set the tier"               "$CX/check.log" "defaults.isolation"
+else
+  skip "context: read-only dirs under the real sandbox" "no restricting kernel sandbox usable here"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "9n. human-in-the-loop — a person can ANSWER the loop (HUMAN_LOOP.md)"
 
 # The channel is a QUEUE, not a callback: an ask is written to the agg-owned ledger, emitted on the

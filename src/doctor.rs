@@ -59,7 +59,7 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
             Ok(asm) => {
                 check(true, &format!("sequence + judges resolve ({} judge(s))", asm.engine.judges.len()), "", &mut fail);
                 // 3b) the chosen agent(s) can do what the config asks.
-                match crate::capability::check(c, &asm.engine.judges) {
+                match crate::capability::check(c, &asm.engine.judges, dir) {
                     Ok(()) => check(true, "the agent(s) can do everything this config asks", "", &mut fail),
                     Err(e) => check(false, "the agent(s) support what this config asks", &format!("{e}"), &mut fail),
                 }

@@ -313,7 +313,9 @@ fn run_cli() -> Result<ExitCode> {
             let asm = loop_::assemble(&cfg, &p.config_base)?;
             // `plan` RE-RUNS the judges, so an LLM judge would make a real model call — refuse a
             // config the chosen agent(s) cannot honour first.
-            agg::capability::check(&cfg, &asm.engine.judges)?;
+            agg::capability::check(&cfg, &asm.engine.judges, &p.dir)?;
+            // the judges find the run's context dirs (`AGG_CONTEXT_*`) exactly as in a run.
+            let _policy = agg::isolation::run::register(&cfg, &p.dir)?;
             let ruler = cfg.ruler_backend()?;
             let jm = cfg.judge_model(ruler);
             let mut eng = asm.engine;
@@ -367,9 +369,15 @@ fn run_cli() -> Result<ExitCode> {
             let kind = agg::core::judges::resolve(name, &p.config_base)?;
             // run it exactly as the loop would (scripts from the project root, rubric on the RULER).
             let ruler = ruler_for(&p.config)?;
-            let (jm, timeout) = match config::AggConfig::load(&p.config) {
-                Ok(c) => (c.judge_model(ruler), c.judge.timeout),
-                Err(_) => (ruler.default_summary_model().to_string(), 300),
+            let loaded = config::AggConfig::load(&p.config).ok();
+            let (jm, timeout) = match &loaded {
+                Some(c) => (c.judge_model(ruler), c.judge.timeout),
+                None => (ruler.default_summary_model().to_string(), 300),
+            };
+            // the judge finds the run's context dirs (`AGG_CONTEXT_*`) exactly as in a run.
+            let _policy = match &loaded {
+                Some(c) => Some(agg::isolation::run::register(c, &p.dir)?),
+                None => None,
             };
             // Manual `agg judge` — no worker ran this session, so no confinement is needed.
             // No run-set here (this is one judge, by hand), so a native judge's ctx would have
@@ -517,7 +525,7 @@ fn prepare_run(p: &Paths, base_branch: Option<&str>) -> Result<(config::AggConfi
     // not-all-skip rule).
     let asm = loop_::assemble(&agg_cfg, &p.config_base)?;
     // …then REFUSE anything the config asks for that the chosen agent(s) cannot do.
-    agg::capability::check(&agg_cfg, &asm.engine.judges)?;
+    agg::capability::check(&agg_cfg, &asm.engine.judges, &p.dir)?;
     // EVERY agent the sequence names must be on PATH (§7.3), before launching the loop.
     for name in agg_cfg.agent_names() {
         agg::backend::for_name(&name)?.preflight()?;

@@ -43,6 +43,9 @@ mod imp;
 // The container tier is NOT cfg-split: one `docker run` argv works on every host that has an
 // engine (macOS reaches a Linux VM, which is the engine's problem, not ours).
 pub mod container;
+pub mod context;
+pub mod policy;
+pub mod run;
 pub use container::{container_available, container_engine, containerize, DEFAULT_IMAGE};
 
 // Any OS that is neither Linux nor macOS has no wrapper. Both entry points fail LOUD — the whole
@@ -53,12 +56,26 @@ mod imp {
     pub fn available() -> bool {
         false
     }
-    pub fn build(_cwd: &Path, _writable: &[PathBuf], _denied: &[PathBuf], _rules: &[String], _prog: &std::ffi::OsStr, _args: &[std::ffi::OsString]) -> Result<Command> {
+    pub fn build(_jail: &Jail, _prog: &std::ffi::OsStr, _args: &[std::ffi::OsString]) -> Result<Command> {
         anyhow::bail!(
             "`isolation: sandbox` is not supported on this operating system — only Linux (bubblewrap) \
              and macOS (sandbox-exec) have an OS wrapper. Use `isolation: none`, or run on a supported OS."
         )
     }
+}
+
+/// Everything one OS-sandbox wrapper is told, resolved to canonical absolute paths.
+pub(crate) struct Jail<'a> {
+    /// the project dir — writable.
+    pub cwd: &'a Path,
+    /// extra writable paths (the agent's own state, a judge's scratch).
+    pub writable: &'a [PathBuf],
+    /// paths INSIDE the writable set that are write-denied ([`deny_set`]).
+    pub denied: &'a [PathBuf],
+    /// already-formed Seatbelt rules (the `write_deny` globs) — macOS only.
+    pub rules: &'a [String],
+    /// directories OUTSIDE the project that must stay read-only — the run's context dirs.
+    pub readonly: &'a [PathBuf],
 }
 
 /// The per-step blast-radius isolation tier. `none` = direct subprocess (today); `sandbox` =
@@ -171,13 +188,26 @@ pub fn wrap_protected(
         writable.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
 
     let (denies, rules) = protect_channels(&cwd_resolved, denies, protect)?;
-    let mut wrapped =
-        imp::build(&cwd_resolved, &writable, &deny_set(&cwd_resolved, &denies), &rules, &prog, &args)?;
+    // The RUN's policy, derived from the project dir like the carve-out is (see [`policy`]): every
+    // surface that confines — worker, judge, one-shot, hook — gets it without having to pass it.
+    let run = policy::for_dir(&cwd_resolved);
+    let readonly: Vec<PathBuf> = run.contexts.iter().map(|c| c.host.clone()).collect();
+    let jail = Jail {
+        cwd: &cwd_resolved,
+        writable: &writable,
+        denied: &deny_set(&cwd_resolved, &denies),
+        rules: &rules,
+        readonly: &readonly,
+    };
+    let mut wrapped = imp::build(&jail, &prog, &args)?;
     for (k, v) in envs {
         match v {
             Some(v) => wrapped.env(k, v),
             None => wrapped.env_remove(k),
         };
+    }
+    for (k, v) in run.context_env(Isolation::Sandbox) {
+        wrapped.env(k, v);
     }
     wrapped
         .current_dir(cwd)

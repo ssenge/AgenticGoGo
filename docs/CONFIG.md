@@ -98,6 +98,8 @@ memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
 session_isolation: {}              # MANDATORY; keys: branch_prefix, base_branch, red_file
 hooks: {}                          # on_start / on_session_start / on_session_end / on_stop / background
 prompt_includes: []                # files prepended to every worker prompt
+context:                           # READ-ONLY dirs from outside the project (needs sandbox/container)
+  - { path: "~/kb/brain", as: "brain", mode: "ro" }
 ```
 
 ## `defaults` — inherited by every step
@@ -355,6 +357,49 @@ real Linux host. The suite that produced this table is `tests/protected_paths.rs
 **What is NOT covered.** `.git/` and `agg/private/` are never part of the check — agg owns both and
 writes them during a session. Judges and hooks are operator code: a change they make is caught at the
 next session start (above), not attributed to the session that ran them.
+
+### Context directories — `context:` (read-only material from outside the project)
+
+A knowledge base, reference architectures, another repository's docs: material every session should
+read and no session may change. Copying it into the project duplicates it and makes it writable;
+`context:` mounts it instead.
+
+```yaml
+defaults: { isolation: "sandbox" }       # or "container" — EVERY step must be confined
+context:
+  - { path: "~/kb/brain", as: "brain", mode: "ro" }
+  - { path: "../shared-docs", as: "docs" }   # relative ⇒ against the project dir; `mode` defaults to ro
+```
+
+| key | rule |
+|---|---|
+| `path` | absolute, `~/…`, or relative to the project dir. Must exist and be a directory, and must not overlap the project (inside it, or containing it — which also keeps `agg/private/` out). |
+| `as` | a short name: lowercase letters, digits, `-`, `_` (≤ 64, starting with a letter or digit), unique. |
+| `mode` | `ro` — the only mode. Anything else is refused. |
+
+What each process sees:
+
+| tier | where | what keeps it read-only |
+|---|---|---|
+| `sandbox` (macOS) | its host path | a Seatbelt write deny on the directory, plus an unlink deny on each ancestor, so it cannot be renamed away and replaced with a forged copy |
+| `sandbox` (Linux) | its host path | `bwrap --ro-bind` (after the `/tmp` tmpfs, so a directory under `/tmp` stays visible) |
+| `container` | `/context/<as>` | a `:ro` bind mount |
+| `none` | — | nothing — so a run that names a context and has an unconfined step is **refused at startup** |
+
+- **The brief lists them.** `INSTRUCTIONS.md` gets a `## Context (read-only)` section naming each
+  directory where the step's tier shows it, with a pointer to its `index.md` when it has one. agg never
+  reads or interprets the contents.
+- **Every confined process finds them by name**: `AGG_CONTEXT_<AS>` (uppercased, `-` → `_`) holds the
+  path — `/context/brain` in a container, the host path otherwise. Judges run in the run's strongest
+  tier and get the same read-only view as the worker; so do hooks and `notify.cmd` under `sandbox`
+  (under `container` they are host tooling — see the isolation table). A judge run by hand (`agg
+  judge`, `agg plan`) gets the variables too, unconfined.
+- **Refused at startup** (`agg check` lists each at its key, `context[i].path` / `context[i].as`): a
+  missing path, a file, an overlap with the project, a malformed or duplicate `as` (two names that map
+  to the same variable count as duplicates), a `mode` other than `ro`, and an unconfined step.
+
+A Rust driver adds one with `Agg::open(dir)?.context("~/kb/brain", "brain")`; `step()` then refuses an
+`Isolation::None` step.
 
 ## `sequence` — the loop
 
