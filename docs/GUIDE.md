@@ -243,6 +243,7 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
 - **Numeric ratchet** *(`sequence.ratchet`)* — a tracked number (complexity, coverage, latency) may not get worse than at the last kept gate beyond a tolerance, so the agent cannot trade one metric for another; seed the first reference or let the baseline pass measure it ([details](CONFIG.md#the-ratchet--numeric-no-regression)).
 - **Judge groups, k of n** *(`sequence.groups`)* — name several judges that measure one thing (three static-analysis tools that disagree) and count over just them: `count_met(static_quality) >= 2`, `all_goals(security)`. At the gate a `done_if` group is judged net, so one tool flipping while another catches up is not a regression ([details](CONFIG.md#judge-groups--k-of-n)).
+- **Judges built on swe-metrics** *(`judges.<name>.metric` / `.score`, optional)* — declare a judge as one number of a [swe-metrics](https://github.com/ssenge/swe-metrics) report (cyclomatic complexity p95 from lizard, duplication %, critical+high vulnerabilities) or as its 0–100 quality score, with a `max:`/`min:` threshold — no script to write. Every such judge of a session shares **one** measurement; a skipped or failed analyzer makes the judge error, never pass; several tools are merged with `combine: strictest | all | majority`; `scope: changed` judges only new code; the score is computed against the incumbent's report. Works with the ratchet without a `direction:`. agg works without swe-metrics; declaring such a judge without it is refused at startup ([details](CONFIG.md#judges-built-on-swe-metrics--metric-and-score)).
 - **Merge only on improvement** *(`sequence.merge_requires_improvement`, opt-in)* — a session that regressed nothing but improved nothing either (a reformat) is not merged and is recorded `no_improvement`; not a rollback, but it counts for `stalled` and `consecutive_no_improvements` ([details](CONFIG.md#merge-only-on-improvement--merge_requires_improvement)).
 - **Damage and oscillation stops** — `rollbacks`, `consecutive_rollbacks` and `oscillating` (fix A, break B, fix B, break A) are built-in condition terms computed by the gate itself, so they are unfakeable and safe in `abort_if` ([details](CONFIG.md#rollbacks-and-oscillation--the-gates-own-detectors)).
 - **A Rust driver API, when the flow is a program** — `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, for control flow `agg.yaml` cannot express: branch on a verdict's number, step back only when stalled, or short-circuit a 40-minute judge behind three cheap ones with `&&`. Same engine, same judges — heavier, and Rust-only, so **use YAML unless you need it** ([when YAML is not enough](#when-yaml-is-not-enough-the-rust-driver-api)).
@@ -466,6 +467,27 @@ breaks B, then fixes B and breaks A) are counted by the gate itself, in agg's me
 file the worker could touch — so unlike `stalled` they are safe in `abort_if` on every isolation tier.
 The full rules (references, drift warnings, which sessions count) are in
 [`docs/CONFIG.md`](CONFIG.md#the-ratchet--numeric-no-regression).
+
+**Measured judges without a script: swe-metrics.** Most quality gates measure software — complexity,
+duplication, vulnerabilities, secrets. With [swe-metrics](https://github.com/ssenge/swe-metrics) on
+`PATH`, declare such a judge in `judges:` instead of writing a script that runs a tool and parses it:
+
+```yaml
+judges:
+  cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 10 }
+  vulns:   { metric: { id: "dependencies.vulnerabilities", labels: { severity: ["critical", "high"] } }, max: 0 }
+  quality: { score: { definition: "swe-default", version: "2" }, min: 80 }
+sequence:
+  done_if: "tests_pass AND quality AND vulns"
+  ratchet:
+    cc_p95: { tolerance: 0.5 }   # `max:` already says lower is better
+```
+
+All such judges of a session share ONE `swe-metrics measure` (and its SARIF is kept as evidence). A
+metric that was not measured — its analyzer skipped or failed — makes the judge **error** with the
+analyzer's reason; it is never met. The score is computed against the report of the last kept state,
+so a metric that got worse costs points. Selectors, `combine`, `scope: changed` and the score's
+comparability rules are in [`docs/CONFIG.md`](CONFIG.md#judges-built-on-swe-metrics--metric-and-score).
 
 **Several tools for one question: groups.** When three tools measure the same thing and disagree, name
 them once and count over just them — *k of n* is a threshold in the condition, never on the group:
