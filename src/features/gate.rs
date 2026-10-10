@@ -58,25 +58,29 @@ impl Handler for GateKeepRollback {
         let pre_cycle_goals = std::mem::take(&mut ctx.scratch.get::<AGGScratch>().pre_cycle_goals);
 
         // the regression gate: a DoD-set judge MET before (durable, §5.7) that now fails. Scope to
-        // the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs `in_scope` →
+        // the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs `scope` →
         // `g.in_dod`). A run-set-only control judge like `stalled` is DESIGNED to flip met→unmet —
         // that flip is the very signal that fired `reconsider` — so counting its flip as a
         // regression would roll back the work that escaped the stall (and, because rolled-back rows
         // never land, livelock the loop). §5.7 protects the DoD-set; a judge named only in an `if`
-        // condition is not in it.
+        // condition is not in it. A judge in the DoD-set only through a `done_if` GROUP is judged
+        // with its group, net (`core::groups`): a swap inside a k-of-n group is not a regression.
         //
         // ⚠ This is exactly the half the DRIVER path spells differently (BUILD.md §3.5 item 5:
         // every judge asked since the last gate, no DoD scope), which is why it lives HERE and not
         // in the shared body below.
         let is_staged = matches!(staged, Some((_, StagedSession::Staged)));
-        let regressed = is_staged && {
+        let progress = if is_staged {
             let landed = crate::core::verdicts::landed_met(&ctx.dir);
-            res.fresh_verdicts.iter().any(|(id, v)| {
-                ctx.eng.judges.iter().any(|g| g.in_dod && &g.name == id)
-                    && v.error.is_none()
-                    && !v.met
-                    && landed.get(id).copied().unwrap_or(false)
-            })
+            let eng = &ctx.eng;
+            crate::core::groups::assess(
+                &res.fresh_verdicts,
+                &landed,
+                |n| eng.judges.iter().any(|g| g.in_dod && g.name == n) && !eng.groups.group_only(n),
+                &eng.groups.gated_members(),
+            )
+        } else {
+            crate::core::groups::Progress::default()
         };
         // the numeric half: a ratcheted value that moved the wrong way beyond its tolerance. Only a
         // staged merge is held to it — a no-change session graded base itself.
@@ -87,7 +91,12 @@ impl Handler for GateKeepRollback {
             |n| ctx.eng.judges.iter().any(|g| g.in_dod && g.name == n),
             &ratchet,
         );
-        let judged = Judged { fresh: &res.fresh_verdicts, regressed: regressed || !ratchet.is_empty(), ratchet, signature };
+        let judged = Judged {
+            fresh: &res.fresh_verdicts,
+            regressed: progress.regressed || !ratchet.is_empty(),
+            ratchet,
+            signature,
+        };
 
         let gated = keep_or_rollback(ctx, staged.as_ref(), judged, &pre_cycle_goals)?;
         let rs = ctx.run_state();

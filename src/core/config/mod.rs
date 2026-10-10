@@ -362,6 +362,11 @@ pub struct Sequence {
     /// how many earlier judged sessions `oscillating` looks back over for an A→B→A repeat.
     #[serde(default = "default_oscillation_window")]
     pub oscillation_window: usize,
+    /// named judge GROUPS, keyed by group name: the aggregates take one as a subset —
+    /// `count_met(quality) >= 2` is "two of three" ([`crate::core::groups`]). Every member joins the
+    /// run-set; a group named in `done_if` puts its members in the DoD-set too.
+    #[serde(default)]
+    pub groups: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Sequence {
@@ -377,6 +382,7 @@ impl Default for Sequence {
             notify: None,
             ratchet: BTreeMap::new(),
             oscillation_window: default_oscillation_window(),
+            groups: BTreeMap::new(),
         }
     }
 }

@@ -16,7 +16,7 @@
 
 use crate::core::asks::AskCase;
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -25,7 +25,7 @@ use crate::core::calls::{CallRecord, NoteLevel};
 use crate::core::config::{AggConfig, CustomBackend, Limits, ResolvedStep};
 use crate::core::engine::GoalRuntime;
 use crate::core::model::{Judge, JudgeKind, JudgeSource, Verdict};
-use crate::driver::{Agent, Fatal, GateFailure, GateOutcome, OnRegression, Opts, Step, StepOutcome};
+use crate::driver::{Agent, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, OnRegression, Opts, Step, StepOutcome};
 use crate::git::StagedSession;
 use crate::loop_::{
     run_hook, AGGState, End, Flow, Handler, Lifecycle, LoopState, RunPidGuard, RunOutcome, StopHooks,
@@ -64,6 +64,11 @@ pub struct Agg {
     verdicts: RefCell<HashMap<String, Verdict>>,
     /// every verdict consulted since the last `gate()`; `gate()` reads and clears it.
     span: RefCell<HashMap<String, Verdict>>,
+    /// the judges the driver asked BY NAME (`judge()`) since the last gate — held one by one there.
+    span_direct: RefCell<HashSet<String>>,
+    /// the groups asked (`group()`) since the last gate: a member asked only through one is judged
+    /// with its group, net (`core::groups`).
+    span_groups: RefCell<BTreeMap<String, Vec<String>>>,
     /// the engine's goal truth as of the moment the open span began — what a rollback restores.
     ///
     /// On this path it is provably EMPTY (§3.6 item 3: the run-set is empty, so the engine has no
@@ -150,6 +155,8 @@ impl Agg {
             ord: Cell::new(0),
             verdicts: RefCell::new(HashMap::new()),
             span: RefCell::new(HashMap::new()),
+            span_direct: RefCell::new(HashSet::new()),
+            span_groups: RefCell::new(BTreeMap::new()),
             span_goals: RefCell::new(Vec::new()),
             iso_seen: Cell::new(crate::isolation::Isolation::None),
             pos: RefCell::new(Vec::new()),
@@ -545,7 +552,7 @@ impl Agg {
             }
             // the span this gate closed is behind us; the next one opens against today's tree.
             *self.span_goals.borrow_mut() = started.st.borrow().eng.snapshot_goal_state();
-            self.span.borrow_mut().clear();
+            self.clear_span_asks();
             self.verdicts.borrow_mut().clear();
             eprintln!("  [resume] ord {} · gate — fast-forwarded ({outcome:?})", self.ord.get());
             self.skip();
@@ -593,10 +600,16 @@ impl Agg {
         let mut fresh: Vec<(String, Verdict)> =
             self.span.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         fresh.sort_by(|a, b| a.0.cmp(&b.0));
+        //    A judge asked ONLY through `group()` is judged with its group, net (`core::groups`);
+        //    everything else one by one — which, for a driver that never asks a group, is all of it.
         let landed = crate::core::verdicts::landed_met(&st.dir);
-        let regressed = fresh
-            .iter()
-            .any(|(id, v)| v.error.is_none() && !v.met && landed.get(id).copied().unwrap_or(false));
+        let progress = {
+            let direct = self.span_direct.borrow();
+            let groups = self.span_groups.borrow();
+            let members: Vec<&[String]> = groups.values().map(Vec::as_slice).collect();
+            let grouped = |n: &str| members.iter().any(|m| m.iter().any(|x| x == n));
+            crate::core::groups::assess(&fresh, &landed, |n| direct.contains(n) || !grouped(n), &members)
+        };
         // …and the numeric half: every ratcheted judge asked since the last gate, held to its
         // reference. Same scope as the boolean rule — the driver decides what it asks.
         let ratchet =
@@ -608,7 +621,7 @@ impl Agg {
         let pre_goals = std::mem::take(&mut *self.span_goals.borrow_mut());
         let judged = crate::features::gate::Judged {
             fresh: &fresh,
-            regressed: regressed || !ratchet.is_empty(),
+            regressed: progress.regressed || !ratchet.is_empty(),
             ratchet,
             signature,
         };
@@ -627,7 +640,7 @@ impl Agg {
         *self.span_goals.borrow_mut() = st.eng.snapshot_goal_state();
         let gate = Some(st.eng.gate.state.clone());
         drop(st);
-        self.span.borrow_mut().clear();
+        self.clear_span_asks();
         // ⚠ and the PER-STEP cache too. A gate is a state discontinuity inside a step window: after
         // a rollback the tree is base again while a memoized verdict still describes the span that
         // was just discarded, and the driver's next `if` would read it as current.
@@ -689,12 +702,43 @@ impl Agg {
     /// driver. After the latch this returns a NOT-MET verdict naming the outcome; never a
     /// fabricated `met: true`.
     pub fn judge(&self, j: &Judge) -> Verdict {
+        self.consult(j, true)
+    }
+
+    /// This step's verdict for every member of `g`, each through the same lazy, memoized cache as
+    /// [`Agg::judge`] — so a member already asked this step is not run again. Count over the result:
+    /// `agg.group(&quality).at_least(2)` is "two of three".
+    ///
+    /// At the next [`Agg::gate`], a member asked ONLY through a group is judged with the group, net:
+    /// one member flipping met→unmet while another goes unmet→met is not a regression. A member the
+    /// driver also asked by name is held one by one. After the latch every member reads not-met.
+    pub fn group(&self, g: &Group) -> GroupVerdict {
+        if self.ended.get().is_none() {
+            self.span_groups.borrow_mut().insert(g.name.clone(), g.member_names());
+        }
+        let verdicts = g.members.iter().map(|j| (j.name.clone(), self.consult(j, false))).collect();
+        GroupVerdict { name: g.name.clone(), verdicts }
+    }
+
+    /// One ask, by name (`judge()`) or as a group member (`group()`): the latch, the span's by-name
+    /// mark, then the lazy, memoized verdict.
+    fn consult(&self, j: &Judge, by_name: bool) -> Verdict {
         if let Some(o) = self.ended.get() {
             return Verdict::binary(false)
                 .with_rationale(format!("run ended ({o:?}) — judge `{}` was not run", j.name));
         }
+        if by_name {
+            self.span_direct.borrow_mut().insert(j.name.clone());
+        }
         let lazy = Lazy { agg: self, asking: RefCell::new(Vec::new()) };
         lazy.verdict_for(j)
+    }
+
+    /// Forget which judges and groups the closed span asked for — the gate decided on them.
+    fn clear_span_asks(&self) {
+        self.span.borrow_mut().clear();
+        self.span_direct.borrow_mut().clear();
+        self.span_groups.borrow_mut().clear();
     }
 
     /// Run one judge for real: resolve its paths against the project, dispatch it, and charge its
