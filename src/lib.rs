@@ -33,6 +33,7 @@ pub mod ui;
 pub mod assembly;
 pub mod bus;
 pub mod capability;
+pub mod check;
 pub mod context;
 pub mod doctor;
 pub mod driver;

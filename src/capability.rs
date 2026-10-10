@@ -26,7 +26,19 @@
 
 use crate::core::config::AggConfig;
 use crate::core::model::{Judge, JudgeKind};
+use crate::problem::{self, Problem};
 use anyhow::Result;
+
+/// Everything [`assess`] found, each located at the config key that caused it.
+#[derive(Debug, Default)]
+pub struct Assessment {
+    /// agent names that resolve to no backend — nothing else can be said about such an agent.
+    pub unknown_agents: Vec<Problem>,
+    /// demands the chosen agent(s) cannot meet: refused at startup.
+    pub problems: Vec<Problem>,
+    /// guards that are inert on an agent which still caps itself: loud, not fatal (§7.3).
+    pub warnings: Vec<Problem>,
+}
 
 /// Check the config + resolved run-set against EVERY agent the sequence names (§7.3). The
 /// one-shot demands (LLM judges + summarizer) fall on the RULER; the token/cost/effort demands fall
@@ -35,123 +47,174 @@ use anyhow::Result;
 /// A capability the agent lacks must never degrade into a quiet no-op: a guard that never fires is
 /// worse than no guard.
 pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
-    let mut problems: Vec<String> = Vec::new();
-    // Non-fatal but LOUD (§7.3): a guard that is inert on a given agent, yet the loop still has a
-    // working ceiling (the agent caps itself). Printed whether or not we go on to bail.
-    let mut warnings: Vec<String> = Vec::new();
-
-    // ── one-shot demands land on the RULER (§7.3) ──
-    let ruler = cfg.ruler_backend()?;
-    let uses_llm_judge = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
-    let uses_summarizer = cfg.summary.enabled;
-    if (uses_llm_judge || uses_summarizer) && !ruler.capabilities().supports_one_shot {
-        problems.push(format!(
-            "the ruler `{}` cannot make a tools-off one-shot call, which {} need.\n      \
-             fix: use script judges + `summary.enabled: false`, or a ruler that supports it",
-            ruler.name(),
-            if uses_llm_judge { "LLM judges / the summarizer" } else { "the summarizer" },
-        ));
+    let a = assess(cfg, judges);
+    if !a.unknown_agents.is_empty() {
+        anyhow::bail!(problem::render(&a.unknown_agents));
     }
-
-    // ── token / cost / effort demands land on each WORKER agent the sequence names ──
-    let named = |p: &str| {
-        cfg.sequence.done_if.contains(p) || cfg.sequence.abort_if.as_deref().unwrap_or("").contains(p)
-    };
-    let budget_wanted = cfg.sequence.limits.tokens.is_some() || named("over_budget");
-    let cost_wanted = cfg.sequence.limits.cost.is_some() || named("over_cost");
-
-    for step_name in cfg.steps.keys() {
-        let step = cfg.resolve_step(step_name)?;
-        let b = step.backend()?;
-        let caps = b.capabilities();
-        let agent = b.name();
-        let model = step.model(b).to_string();
-        let effort = step.effort(b).to_string();
-
-        if budget_wanted && !caps.reports_output_tokens {
-            problems.push(format!(
-                "step `{step_name}` (agent `{agent}`): `limits.tokens`/`over_budget` set, but it \
-                 does not report token usage — the token guard would NEVER fire."
-            ));
-        }
-        if cost_wanted && !caps.reports_cost_usd {
-            // §7.3: only Claude reports dollars, and the owner's ruling is acceptable-but-LOUD. If
-            // the agent can cap ITSELF, the loop is not left unbounded — the dollar guard is merely
-            // inert on this agent, so WARN, don't refuse. Refuse ONLY when there is no working
-            // ceiling at all (no dollar reporting AND no self-cap): an autonomous loop with no bound
-            // on real money. `spend_ceiling_hint()` is exactly the "does it have a ceiling?" oracle.
-            match b.spend_ceiling_hint() {
-                Some(h) => warnings.push(format!(
-                    "limits.cost/over_cost is INERT on `{agent}` (step `{step_name}`) — it cannot \
-                     report dollars, so this guard will never fire. Cap it directly instead: {h}"
-                )),
-                None => problems.push(format!(
-                    "step `{step_name}` (agent `{agent}`): `limits.cost`/`over_cost` set, but it \
-                     cannot report dollars and has no self-cap — the SPEND guard would NEVER fire, \
-                     leaving an autonomous loop spending real money with no ceiling at all. Remove \
-                     the cost guard, or use an agent that reports a dollar cost."
-                )),
-            }
-        }
-        if !effort.is_empty() && !caps.supports_effort {
-            problems.push(format!(
-                "step `{step_name}` (agent `{agent}`): `effort: {effort}` set, but the agent does \
-                 not accept a thinking-effort level."
-            ));
-        }
-        if let Some(c) = b.config_conflict(&model, &effort) {
-            problems.push(format!("step `{step_name}` (agent `{agent}`): model + effort — {c}"));
-        }
-        // Blast-radius isolation: `sandbox` needs an OS wrapper (bwrap / sandbox-exec) for EVERY
-        // agent — §2.4, agg never delegates its jail — so this is no longer gated on
-        // `self_sandboxes()`. If no wrapper is available on this host, refuse at startup rather
-        // than let the run discover it: `worker.rs` would fail every session at spawn, and the
-        // alternative (a silent downgrade to `none`) is a worker that thinks it is confined and is
-        // not, which is exactly the blast radius this feature exists to bound.
-        if step.isolation == crate::isolation::Isolation::Sandbox && !crate::isolation::available() {
-            problems.push(format!(
-                "step `{step_name}` (agent `{agent}`): `isolation: sandbox` is set, but no OS \
-                 wrapper (bubblewrap on Linux, sandbox-exec on macOS) is available on this host — \
-                 the worker could not be confined, and agg confines every agent itself rather than \
-                 trusting the agent's own sandbox.\n      \
-                 fix: install the wrapper (`apt install bubblewrap` on Linux), use `isolation: none`, \
-                 or run on a supported OS."
-            ));
-        }
-        // Same rule one rung up: `container` needs a container engine that ANSWERS (the client
-        // binary alone is not enough — a dead daemon means every session dies at spawn). Refuse at
-        // startup rather than let the run discover it, session by session.
-        if step.isolation == crate::isolation::Isolation::Container
-            && !crate::isolation::container_available()
-        {
-            problems.push(format!(
-                "step `{step_name}` (agent `{agent}`): `isolation: container` is set, but no \
-                 container engine is runnable on this host — `docker`/`podman` is missing or its \
-                 daemon is not answering, so the worker could not start at all.\n      \
-                 fix: start the engine (e.g. `colima start`, `docker desktop`), install one, or use \
-                 `isolation: sandbox` / `isolation: none`."
-            ));
-        }
-    }
-
     // Loud but non-fatal (§7.3): an inert-but-still-bounded guard. Surface it whether or not we
     // then bail on a hard problem — a run that proceeds should still know its cost guard is inert.
-    for w in &warnings {
-        eprintln!("⚠ {w}");
+    for w in &a.warnings {
+        eprintln!("⚠ {}", w.message);
     }
-    if problems.is_empty() {
+    if a.problems.is_empty() {
         return Ok(());
     }
     let mut msg = format!(
         "the config asks for {} thing(s) the chosen agent(s) cannot do.\n\
          These are refused at startup rather than silently ignored — a guard that never fires is \
          worse than no guard.\n",
-        problems.len()
+        a.problems.len()
     );
-    for p in problems {
-        msg.push_str(&format!("\n  ✗ {p}\n"));
+    for p in a.problems {
+        msg.push_str(&format!("\n  ✗ {}\n", p.message));
     }
     anyhow::bail!(msg)
+}
+
+/// [`check`]'s findings, collected rather than rendered — what `agg check` and `agg doctor --json`
+/// report. Never fails: an agent that does not resolve is itself a finding.
+pub fn assess(cfg: &AggConfig, judges: &[Judge]) -> Assessment {
+    let mut a = Assessment::default();
+    // ── one-shot demands land on the RULER (§7.3) ──
+    match cfg.ruler_backend() {
+        Ok(ruler) => {
+            let uses_llm_judge = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
+            let uses_summarizer = cfg.summary.enabled;
+            if (uses_llm_judge || uses_summarizer) && !ruler.capabilities().supports_one_shot {
+                a.problems.push(Problem::new(
+                    "judge.agent",
+                    format!(
+                        "the ruler `{}` cannot make a tools-off one-shot call, which {} need.\n      \
+                         fix: use script judges + `summary.enabled: false`, or a ruler that supports it",
+                        ruler.name(),
+                        if uses_llm_judge { "LLM judges / the summarizer" } else { "the summarizer" },
+                    ),
+                ));
+            }
+        }
+        Err(e) => a.unknown_agents.push(Problem::new("judge.agent", format!("{e:#}"))),
+    }
+    // ── token / cost / effort / isolation demands land on each WORKER agent the sequence names ──
+    for step_name in cfg.steps.keys() {
+        step_demands(cfg, step_name, &mut a);
+    }
+    a
+}
+
+/// The demands ONE step makes of its worker agent.
+fn step_demands(cfg: &AggConfig, step_name: &str, a: &mut Assessment) {
+    let named = |p: &str| {
+        cfg.sequence.done_if.contains(p) || cfg.sequence.abort_if.as_deref().unwrap_or("").contains(p)
+    };
+    let budget_wanted = cfg.sequence.limits.tokens.is_some() || named("over_budget");
+    let cost_wanted = cfg.sequence.limits.cost.is_some() || named("over_cost");
+    let body = &cfg.steps[step_name];
+    let at = |key: &str, in_body: bool, in_defaults: bool| origin(cfg, step_name, key, in_body, in_defaults);
+    let agent_at = at("agent", body.agent.is_some(), true);
+
+    let Ok(step) = cfg.resolve_step(step_name) else { return };
+    let b = match step.backend() {
+        Ok(b) => b,
+        Err(e) => {
+            problem::push_unique(&mut a.unknown_agents, Problem::new(agent_at, format!("{e:#}")));
+            return;
+        }
+    };
+    let caps = b.capabilities();
+    let agent = b.name();
+    let model = step.model(b).to_string();
+    let effort = step.effort(b).to_string();
+    let effort_at = at("effort", body.effort.is_some(), cfg.defaults.effort.is_some());
+    let iso_at = at("isolation", body.isolation.is_some(), cfg.defaults.isolation.is_some());
+    let problems = &mut a.problems;
+    if budget_wanted && !caps.reports_output_tokens {
+        problems.push(Problem::new(guard_at(cfg, cfg.sequence.limits.tokens.is_some(), "tokens", "over_budget"), format!(
+            "step `{step_name}` (agent `{agent}`): `limits.tokens`/`over_budget` set, but it \
+             does not report token usage — the token guard would NEVER fire."
+        )));
+    }
+    if cost_wanted && !caps.reports_cost_usd {
+        let cost_at = guard_at(cfg, cfg.sequence.limits.cost.is_some(), "cost", "over_cost");
+        // §7.3: only Claude reports dollars, and the owner's ruling is acceptable-but-LOUD. If
+        // the agent can cap ITSELF, the loop is not left unbounded — the dollar guard is merely
+        // inert on this agent, so WARN, don't refuse. Refuse ONLY when there is no working
+        // ceiling at all (no dollar reporting AND no self-cap): an autonomous loop with no bound
+        // on real money. `spend_ceiling_hint()` is exactly the "does it have a ceiling?" oracle.
+        match b.spend_ceiling_hint() {
+            Some(h) => a.warnings.push(Problem::new(cost_at, format!(
+                "limits.cost/over_cost is INERT on `{agent}` (step `{step_name}`) — it cannot \
+                 report dollars, so this guard will never fire. Cap it directly instead: {h}"
+            ))),
+            None => problems.push(Problem::new(cost_at, format!(
+                "step `{step_name}` (agent `{agent}`): `limits.cost`/`over_cost` set, but it \
+                 cannot report dollars and has no self-cap — the SPEND guard would NEVER fire, \
+                 leaving an autonomous loop spending real money with no ceiling at all. Remove \
+                 the cost guard, or use an agent that reports a dollar cost."
+            ))),
+        }
+    }
+    if !effort.is_empty() && !caps.supports_effort {
+        problems.push(Problem::new(effort_at.clone(), format!(
+            "step `{step_name}` (agent `{agent}`): `effort: {effort}` set, but the agent does \
+             not accept a thinking-effort level."
+        )));
+    }
+    if let Some(c) = b.config_conflict(&model, &effort) {
+        problems.push(Problem::new(effort_at, format!("step `{step_name}` (agent `{agent}`): model + effort — {c}")));
+    }
+    // Blast-radius isolation: `sandbox` needs an OS wrapper (bwrap / sandbox-exec) for EVERY
+    // agent — §2.4, agg never delegates its jail — so this is no longer gated on
+    // `self_sandboxes()`. If no wrapper is available on this host, refuse at startup rather
+    // than let the run discover it: `worker.rs` would fail every session at spawn, and the
+    // alternative (a silent downgrade to `none`) is a worker that thinks it is confined and is
+    // not, which is exactly the blast radius this feature exists to bound.
+    if step.isolation == crate::isolation::Isolation::Sandbox && !crate::isolation::available() {
+        problems.push(Problem::new(iso_at.clone(), format!(
+            "step `{step_name}` (agent `{agent}`): `isolation: sandbox` is set, but no OS \
+             wrapper (bubblewrap on Linux, sandbox-exec on macOS) is available on this host — \
+             the worker could not be confined, and agg confines every agent itself rather than \
+             trusting the agent's own sandbox.\n      \
+             fix: install the wrapper (`apt install bubblewrap` on Linux), use `isolation: none`, \
+             or run on a supported OS."
+        )));
+    }
+    // Same rule one rung up: `container` needs a container engine that ANSWERS (the client
+    // binary alone is not enough — a dead daemon means every session dies at spawn). Refuse at
+    // startup rather than let the run discover it, session by session.
+    if step.isolation == crate::isolation::Isolation::Container
+        && !crate::isolation::container_available()
+    {
+        problems.push(Problem::new(iso_at, format!(
+            "step `{step_name}` (agent `{agent}`): `isolation: container` is set, but no \
+             container engine is runnable on this host — `docker`/`podman` is missing or its \
+             daemon is not answering, so the worker could not start at all.\n      \
+             fix: start the engine (e.g. `colima start`, `docker desktop`), install one, or use \
+             `isolation: sandbox` / `isolation: none`."
+        )));
+    }
+}
+
+/// Where a step's `key` comes from: its own body, else `defaults`, else (a backend default) the
+/// step's agent choice — the key an operator would edit.
+fn origin(cfg: &AggConfig, step: &str, key: &str, in_body: bool, in_defaults: bool) -> String {
+    if in_body {
+        format!("steps.{step}.{key}")
+    } else if in_defaults {
+        format!("defaults.{key}")
+    } else {
+        origin(cfg, step, "agent", cfg.steps[step].agent.is_some(), true)
+    }
+}
+
+/// Where a spend guard is switched on: its `limits:` key when set, else the expression naming it.
+fn guard_at(cfg: &AggConfig, limit_set: bool, key: &str, term: &str) -> String {
+    if limit_set {
+        format!("sequence.limits.{key}")
+    } else if cfg.sequence.done_if.contains(term) {
+        "sequence.done_if".into()
+    } else {
+        "sequence.abort_if".into()
+    }
 }
 
 #[cfg(test)]
@@ -308,5 +371,53 @@ mod tests {
         assert!(err.contains("build"), "must name the codex STEP:\n{err}");
         assert!(err.contains("codex"), "must name the agent:\n{err}");
         assert!(!err.contains("step `plan`"), "the claude step reports dollars — it must NOT be flagged:\n{err}");
+    }
+
+    fn problem_paths(cfg: &AggConfig) -> Vec<String> {
+        assess(cfg, &[script_judge("g")]).problems.into_iter().map(|p| p.path).collect()
+    }
+
+    /// Every finding is located at the key an operator would edit: the step body when it sets the
+    /// key, else `defaults`, and a spend guard at its `limits:` key or the expression naming it.
+    #[test]
+    fn each_problem_is_located_where_it_is_configured() {
+        let cfg = cfg_yaml(
+            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\nsummary: { enabled: false }\n\
+             steps: { b: { effort: \"\" }, c: { agent: copilot, model: auto, effort: high } }\n\
+             sequence: { steps: [b], limits: { cost: 1.0 } }\n",
+        );
+        // b: codex, no dollar reporting, no self-cap → at the limits key; c: copilot auto+effort → at its effort.
+        assert_eq!(problem_paths(&cfg), ["sequence.limits.cost", "steps.c.effort"]);
+
+        let cfg = cfg_yaml(
+            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\nsummary: { enabled: false }\n\
+             steps: { w: {} }\nsequence: { steps: [w], abort_if: \"over_cost\" }\n",
+        );
+        assert_eq!(problem_paths(&cfg), ["sequence.abort_if"], "no limit set → the expression naming the guard");
+        assert_eq!(guard_at(&cfg, false, "cost", "over_cost"), "sequence.abort_if");
+        let cfg = cfg_yaml("project: p\nsequence: { done_if: \"over_cost\" }\n");
+        assert_eq!(guard_at(&cfg, false, "cost", "over_cost"), "sequence.done_if");
+    }
+
+    #[test]
+    fn origin_falls_back_from_step_to_defaults_to_the_agent_choice() {
+        let cfg = cfg_yaml("project: p\nsteps: { s: { agent: codex }, t: {} }\n");
+        assert_eq!(origin(&cfg, "s", "isolation", true, true), "steps.s.isolation");
+        assert_eq!(origin(&cfg, "s", "isolation", false, true), "defaults.isolation");
+        assert_eq!(origin(&cfg, "s", "effort", false, false), "steps.s.agent");
+        assert_eq!(origin(&cfg, "t", "effort", false, false), "defaults.agent");
+    }
+
+    /// An agent that resolves to no backend is its own finding, at the key that names it — and
+    /// `check` reports it the way startup always did (the bare `unknown agent` error).
+    #[test]
+    fn an_unknown_agent_is_located_and_check_bails_with_it_alone() {
+        let cfg = cfg_yaml("project: p\njudge: { agent: robot }\nsteps: { w: { agent: droid } }\n");
+        let a = assess(&cfg, &[]);
+        let at: Vec<&str> = a.unknown_agents.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(at, ["judge.agent", "steps.w.agent"]);
+        let cfg = cfg_yaml("project: p\njudge: { agent: robot }\n");
+        let err = check(&cfg, &[]).unwrap_err().to_string();
+        assert!(err.starts_with("unknown agent `robot`"), "{err}");
     }
 }

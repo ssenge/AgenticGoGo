@@ -20,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"          # verdict JSON (judge contract) + dashboard state
+serde_json = { version = "1", features = ["preserve_order"] }  # verdict JSON (judge contract) + dashboard state; key order kept so `agg schema` lists fields as declared
 serde_yaml = "0.9"        # agg.yaml (harness + steps + sequence) — the one config file
 clap = { version = "4", features = ["derive"] }   # CLI subcommands
 anyhow = "1"              # ergonomic error handling at the boundary
@@ -30,6 +30,7 @@ tiny_http = "0.12"        # `agg serve` — the thin JSON API for the standalone
 jiff = "0.2.32"
 nix = { version = "0.31.3", features = ["signal", "process"] }
 signal-hook = "0.4.4"
+serde_path_to_error = "0.1"  # `agg check`: the dotted config path of a parse error
 schemars = "1"            # `agg schema`: the agg.yaml JSON Schema, DERIVED from the config types so it cannot drift
 
 [dev-dependencies]
