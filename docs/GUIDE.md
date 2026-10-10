@@ -217,6 +217,11 @@ Supported features:
   `sequence.limits.tokens` (tokens), which works everywhere. Copilot can also cap itself:
   `worker_args: ["--max-ai-credits", "50"]`.
 
+**Another agent CLI?** A backend is one Rust module behind the `AgentBackend` trait; how to write one,
+with the capability flags, the recorded fixtures and the required tests, is in
+[docs/BACKENDS.md](BACKENDS.md). The Kiro CLI was investigated and is not supported yet:
+[why](backends/kiro.md).
+
 **Where `agg skills install` puts the skills.** Both routes — the plugin marketplace (see
 [Quick start](#quick-start)) and `agg skills install` — work on all three agents. The *only* per-agent
 difference is the install directory, which is why the latter is a command and not a `cp`:
@@ -658,6 +663,13 @@ the loop ends, what it may spend, or what agg believes happened, it is private:*
   worker never runs git) and gates it; the next **fresh** session resumes from the filesystem + `LOG.md`.
   Git *is* the memory between sessions.
 
+**The worker's wiki is an OKF bundle.** `agg/state/wiki/` is the worker's durable knowledge base — one
+concept per markdown file with a `type:` in its frontmatter, cross-linked, plus a reserved `index.md` and
+`log.md` — in the [Open Knowledge Format v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md),
+so other tools (and an Obsidian vault opened on `agg/`) can read it as is. agg writes nothing into it;
+the brief tells the worker the format. `agg wiki lint` checks it, and exits 1 if it is not conformant —
+see [the wiki](CONFIG.md#the-wiki-okf-v02-and-agg-wiki-lint).
+
 **`agg/private/` is carved out of the sandbox's writable set.** Under `isolation: sandbox` or
 `container`, the worker may write the project dir and its own `agg/state/` but writes to `agg/private/`
 are refused by the kernel — otherwise a confined worker could append forged `merged` rows to
@@ -750,6 +762,7 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg send <cmd>` | Steering for a **running** workflow, applied at the next session boundary. Refused if none is running | `inject <text>` · `budget [total]` · `pause` · `resume` · `wake` (end a rate-limit wait now) · `stop [reason]` · `note <text>` · `answer <id> <value>` · `approve <id>` · `deny <id>` |
 | `agg answer <id> <value>` | Answer an open human ask. Needs NO running workflow — an ask outlives the run that raised it. A value off a `choose`/`bool` ask's options is refused (exit 1) | `--json` `{schema_version, accepted, reason, id, answer}` |
 | `agg hil <kind>` | *(used by the worker, not the operator)* ask a human. **Records and exits — it never waits** | `bool <q>` · `choose <q> --option … --option …` · `input <q>` |
+| `agg wiki lint [path]` | Check the worker's wiki (`agg/state/wiki/`, or any `path`) against OKF v0.2: frontmatter with a non-empty `type` on every concept, a valid `index.md` and `log.md`. Read-only. Exit 1 on any violation | `--json` (`docs/schemas/wiki_lint.v1.json`) |
 
 `agg run` exit codes, so automation can branch on the outcome: **0** `done_if` met · **1** hard
 error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions` · **5** an operator stopped it
@@ -778,6 +791,7 @@ breaking change, so ignore unknown fields.
 | `agg check --json` | `{schema_version, ok, config, problems: [{path, message}], warnings: [{path, message}]}`. `path` is dotted (`steps.worker.isolation`, `sequence.steps[1].until`; `""` = the whole file). Exit 0 valid · 1 any problem. Runs nothing. |
 | `agg doctor --json` | `{schema_version, agg_version, ok, config: {path, found, valid, judges}, backends: [{name, bin, used, installed, path, version, self_sandboxes, capabilities: {reports_output_tokens, reports_cost_usd, supports_resume, supports_effort, detects_rate_limits, supports_one_shot}}], isolation: {none, sandbox, container: {available, mechanism, requested}}, container_engine, problems, warnings}`. Exit 0 ok · 1 otherwise. |
 | `agg schema` | The JSON Schema (draft 2020-12) of `agg.yaml`, generated from the parser's own types; `$comment` names the agg version. |
+| `agg wiki lint --json` | `{schema_version, ok, wiki, exists, files, concepts, problems: [{file, line, rule, message}], warnings}`. Exit 0 conformant · 1 a violation or a missing path. Schema: [`docs/schemas/wiki_lint.v1.json`](schemas/wiki_lint.v1.json). |
 | The judge verdict JSON | One line on stdout: `{"met", "value", "max", "target", "rationale", "error"}` — see [Building judges](#building-judges). |
 
 ```bash
