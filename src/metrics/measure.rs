@@ -16,10 +16,14 @@
 //!
 //! # Confinement
 //! swe-metrics runs as a judge does (`core::judge`): from the project root, with `stdin` closed,
-//! the `AGG_*` judge env, `TMPDIR` in the scratch, and under `isolation: sandbox` in the OS jail
-//! with the project read-only and only the scratch and the judge cache writable. Unlike a script
-//! judge, `XDG_CACHE_HOME` is left alone: swe-metrics' tools keep machine-wide caches there (trivy's
-//! vulnerability database), and pointing it at a per-project directory would fetch them per project.
+//! the `AGG_*` judge env and `TMPDIR` in the scratch, in the run's strongest tier.
+//! - `sandbox`: in the OS jail with the project read-only and only the scratch and the judge cache
+//!   writable. Unlike a script judge, `XDG_CACHE_HOME` is left alone: swe-metrics' tools keep
+//!   machine-wide caches there (trivy's vulnerability database), and pointing it at a per-project
+//!   directory would fetch them per project.
+//! - `container`: in the judges' image (`super::contained`), the project read-only, writing only its
+//!   session scratch (under `agg/private/container/judge/`), a fresh home and the container's own
+//!   `/tmp` (its `TMPDIR`); the host's trivy database mounted read-only.
 
 use super::report::Report;
 use super::spec::Scope;
@@ -73,7 +77,9 @@ impl Measured {
 
 struct Entry {
     key: String,
-    scratch: PathBuf,
+    /// the canonical project and the session — what [`promote`] keeps, whatever tier measured.
+    project: PathBuf,
+    session: Option<u32>,
     scope: String,
     result: Result<Arc<Measured>, String>,
 }
@@ -87,7 +93,8 @@ fn cache() -> std::sync::MutexGuard<'static, Vec<Entry>> {
 /// The shared measurement of `scope` for the judge in `c`: from the cache when this session's tree
 /// was measured already, else measured now (holding the cache, so two judges never measure twice).
 pub fn measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>) -> Result<Arc<Measured>, String> {
-    let scratch = crate::core::judge::scratch_path(c.cwd, c.session, crate::isolation::Isolation::None);
+    // where the judges of this tier keep their scratch — and their evidence (`features::evidence`).
+    let scratch = crate::core::judge::scratch_path(c.cwd, c.session, c.isolation);
     let base = c.base.unwrap_or("HEAD");
     let families = only.map(|o| o.join(",")).unwrap_or_else(|| "*".into());
     let key = format!("{}|{}|{families}|{base}|{}", scratch.display(), scope.dir_name(), tree_key(c.cwd));
@@ -96,7 +103,7 @@ pub fn measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>) -> Result<Ar
         return e.result.clone();
     }
     let result = run_measure(c, scope, only, base, &scratch).map(Arc::new);
-    entries.push(Entry { key, scratch, scope: scope.dir_name(), result: result.clone() });
+    entries.push(Entry { key, project: canonical(c.cwd), session: c.session, scope: scope.dir_name(), result: result.clone() });
     let excess = entries.len().saturating_sub(CACHE_CAP);
     entries.drain(..excess);
     result
@@ -126,16 +133,44 @@ fn run_measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, base: &str, 
     for f in only.unwrap_or_default() {
         args.extend(["--only".into(), f.clone()]);
     }
-    run_tool(c, &args).map_err(|e| format!("`swe-metrics measure` failed: {e}"))?;
+    run_tool(c, &args, &[]).map_err(|e| format!("`swe-metrics measure` failed: {e}"))?;
     let text = std::fs::read_to_string(dir.join("report.json")).map_err(|e| format!("swe-metrics wrote no report: {e}"))?;
     let report = Report::parse(&text)?;
     Ok(Measured { report, rel, dir })
 }
 
 /// Run `swe-metrics <args>` confined as a judge; `Ok` = it exited 0 (its stdout), `Err` = why not.
-pub fn run_tool(c: &Ctx<'_>, args: &[String]) -> Result<String, String> {
+/// `readonly` = host paths outside the project the call reads (a scoring definition's directory) —
+/// what a container must mount; the other tiers read them where they are.
+pub fn run_tool(c: &Ctx<'_>, args: &[String], readonly: &[PathBuf]) -> Result<String, String> {
+    let command = if c.isolation == Isolation::Container { super::contained::command(c, args, readonly)? } else { host_command(c, args)? };
+    let out = crate::os::proc::run_with_timeout(command, c.timeout)?;
+    if out.success {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let tail: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).rev().take(3).collect();
+    let tail: Vec<&str> = tail.into_iter().rev().collect();
+    Err(if tail.is_empty() { "exited non-zero (no stderr)".into() } else { tail.join(" | ") })
+}
+
+/// swe-metrics on the host: unconfined, or in the OS jail under `sandbox`.
+fn host_command(c: &Ctx<'_>, args: &[String]) -> Result<Command, String> {
     let scratch = crate::core::judge::scratch_dir(c.cwd, c.session).map_err(|e| format!("judge scratch: {e}"))?;
     let cache = crate::core::judge::cache_dir(c.cwd).map_err(|e| format!("judge cache: {e}"))?;
+    let mut command = command(c, args, &scratch);
+    command.env("PYTHONPYCACHEPREFIX", &cache);
+    if c.isolation == Isolation::Sandbox {
+        // the project is read-only to a judge (§2.5) — the deny of `.` wins over the cwd grant.
+        command = crate::isolation::wrap(command, c.cwd, &[scratch, cache], &[".".to_string()])
+            .map_err(|e| format!("could not sandbox swe-metrics: {e}"))?;
+    }
+    Ok(command)
+}
+
+/// `swe-metrics <args>` as every tier starts it: from the project root, stdin closed, the `AGG_*`
+/// judge env, and `TMPDIR` in `scratch`.
+pub(super) fn command(c: &Ctx<'_>, args: &[String], scratch: &Path) -> Command {
     let mut command = Command::new(PROGRAM);
     command
         .args(args)
@@ -145,22 +180,13 @@ pub fn run_tool(c: &Ctx<'_>, args: &[String]) -> Result<String, String> {
         .env("AGG_STEP", c.step)
         .env("AGG_JUDGE", c.judge)
         .env("AGG_PROJECT_DIR", c.cwd)
-        .env("AGG_JUDGE_SCRATCH", &scratch)
-        .env("TMPDIR", &scratch)
-        .env("PYTHONPYCACHEPREFIX", &cache);
-    if c.isolation == Isolation::Sandbox {
-        // the project is read-only to a judge (§2.5) — the deny of `.` wins over the cwd grant.
-        command = crate::isolation::wrap(command, c.cwd, &[scratch, cache], &[".".to_string()])
-            .map_err(|e| format!("could not sandbox swe-metrics: {e}"))?;
-    }
-    let out = crate::os::proc::run_with_timeout(command, c.timeout)?;
-    if out.success {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
-    }
-    let err = String::from_utf8_lossy(&out.stderr);
-    let tail: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).rev().take(3).collect();
-    let tail: Vec<&str> = tail.into_iter().rev().collect();
-    Err(if tail.is_empty() { "exited non-zero (no stderr)".into() } else { tail.join(" | ") })
+        .env("AGG_JUDGE_SCRATCH", scratch)
+        .env("TMPDIR", scratch);
+    command
+}
+
+fn canonical(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// A key for the tree the judges see: HEAD, everything that differs from it (a staged merge
@@ -190,11 +216,11 @@ pub fn incumbent(cwd: &Path, scope: &Scope) -> Option<PathBuf> {
 /// Every scope measured in `session`'s scratch by THIS process replaces its incumbent, and a scope
 /// it did not measure is dropped (it describes an older tree). Returns what could not be kept.
 pub fn promote(cwd: &Path, session: Option<u32>) -> Vec<String> {
-    let scratch = crate::core::judge::scratch_path(cwd, session, crate::isolation::Isolation::None);
+    let project = canonical(cwd);
     let latest: Vec<(String, PathBuf)> = {
         let entries = cache();
         let mut seen: Vec<(String, PathBuf)> = Vec::new();
-        for e in entries.iter().rev().filter(|e| e.scratch == scratch) {
+        for e in entries.iter().rev().filter(|e| e.project == project && e.session == session) {
             if let (Ok(m), false) = (&e.result, seen.iter().any(|(s, _)| s == &e.scope)) {
                 seen.push((e.scope.clone(), m.report_path()));
             }

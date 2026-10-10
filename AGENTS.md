@@ -188,7 +188,10 @@ A judge lives at `agg/judges/<name>.{sh,md}` and is referenced by its **bare NAM
   computed with the INCUMBENT's report (`agg/private/metrics/incumbent/`, replaced on every kept gate) as
   `--baseline`; definition/version mismatch refuses; `null` ⇒ error. Their ratchet may omit `direction`
   (`max:` ⇒ down, `min:` ⇒ up, score ⇒ up; checked against the report). Declared + a file of the same
-  name, or no `swe-metrics` on PATH / wrong schema ⇒ startup refusal. Code: `src/metrics/`.
+  name, or no `swe-metrics` where it runs / wrong schema ⇒ startup refusal. WHERE: the host's PATH, or on
+  a container run `judge.image` (`metrics::probe::Site`; measured there by `metrics::contained` — project
+  ro, fresh HOME per call, `TMPDIR=/tmp`, no persistent cache, the host's trivy DB mounted ro with updates
+  off; `agg judge`/`agg plan` too, via `RunPolicy::judge_tier`). Code: `src/metrics/`.
 - **Evidence:** files named in a verdict's `evidence` (relative → `$AGG_JUDGE_SCRATCH` first, then the
   project) are COPIED after judging to `agg/private/evidence/<run_id>/<session>/<judge>/`
   (`core::evidence`, `features::evidence`), recorded on the ledger row (`evidence_saved`/
@@ -284,7 +287,8 @@ src/core/verdicts.rs  `agg/private/verdicts.jsonl` — one row per judge per GAT
 src/metrics/          metric/score judges over swe-metrics: `declare` (startup: kinds, ratchet directions,
                       shared `--only` sets, the probe), `report`+`combine` (pure selection), `measure`
                       (ONE measurement per session tree — a process cache; the incumbent, promoted on a
-                      kept gate and by the baseline pass), `score`. swe-metrics is OPTIONAL: nothing here
+                      kept gate and by the baseline pass), `score`, `contained` (the container tier:
+                      swe-metrics in `judge.image`). swe-metrics is OPTIONAL: nothing here
                       runs unless a judge is declared with `metric:`/`score:`.
 src/core/ratchet.rs   the numeric ratchet + the gate's own history (rollbacks, oscillation). Engine
                       state (`eng.gate`), moved ONLY in `features::gate::keep_or_rollback` — the body

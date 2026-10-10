@@ -6,6 +6,7 @@
 //! | worker | the step's `image:` | read-write (minus the carve-outs) | `worker`, FRESH every session | its agent's |
 //! | LLM judge (one-shot) | the judges' image | read-only | `ruler` | the ruler's |
 //! | script judge | the judges' image | read-only | `judge` | none (only `pass_env`) |
+//! | swe-metrics (a metric/score judge's measurement) | the judges' image | read-only | `metrics`, FRESH every call | none (only `pass_env`) |
 //!
 //! Every one gets the run's `isolation_policy.pass_env` and `credentials`, its context dirs, and
 //! runs as the project owner (see [`super::container::containerize_spec`]).
@@ -16,6 +17,12 @@
 //! next that agg neither sees nor controls. The judges' homes are separate and read-only to the
 //! worker (they sit in `agg/private/`), so a worker can never plant a setting its grader then runs
 //! with.
+//!
+//! # Why swe-metrics' home is fresh every call
+//! swe-metrics runs the project's own tool configs (a dependency-cruiser config is JavaScript), so a
+//! measurement of a worker's tree may run worker-authored code. A home that survived it — or any
+//! other writable dir that outlives the session — would carry that code's leftovers into the next
+//! session's measurement and score. Its only writes are its session scratch and this fresh home.
 
 use super::container::{containerize_spec, Spec};
 use anyhow::{Context, Result};
@@ -47,6 +54,16 @@ pub fn script_judge(cmd: Command, dir: &Path, script: &Path, writable: &[PathBuf
     let project = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let lib: Vec<PathBuf> = script.parent().filter(|p| !p.starts_with(&project)).map(Path::to_path_buf).into_iter().collect();
     let spec = Spec { image: &image, writable, readonly: &lib, project_ro: true, home: Some(&home), ..Spec::default() };
+    containerize_spec(cmd, dir, &spec)
+}
+
+/// Re-host `swe-metrics` — the measurement behind every metric and score judge — in the judges'
+/// image: the project read-only, `writable` (its session scratch) read-write, `readonly` (the
+/// host's trivy cache, a scoring definition kept outside the project) read-only, and a FRESH home.
+pub fn metrics_judge(cmd: Command, dir: &Path, writable: &[PathBuf], readonly: &[PathBuf]) -> Result<Command> {
+    let image = super::policy::for_dir(dir).judge_image.clone();
+    let home = fresh_home(dir, "metrics")?;
+    let spec = Spec { image: &image, writable, readonly, project_ro: true, home: Some(&home), ..Spec::default() };
     containerize_spec(cmd, dir, &spec)
 }
 

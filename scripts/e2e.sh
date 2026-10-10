@@ -1900,6 +1900,52 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9q-m. metric and score judges in the judges' image (REAL engine, fake swe-metrics image)"
+# A-11 × A-20. On a container run swe-metrics runs in judge.image (a test image with a FAKE swe-metrics
+# baked in — tests/fixtures/container/fake-metrics), never on the host: a swe-metrics stub first on the
+# host's PATH fails and leaves a mark. The project is read-only to it; the score reads the incumbent.
+ENGINE_BIN="$(command -v docker || command -v podman || true)"
+if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
+  CM="$ROOT/target/agg-e2e-metrics-ctr.$$"; rm -rf "$CM"; mkdir -p "$CM/hostbin"
+  "$ENGINE_BIN" build -q -t agg-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$CM/build.log" 2>&1 \
+    && "$ENGINE_BIN" build -q -t agg-test-fake-metrics:1 "$ROOT/tests/fixtures/container/fake-metrics" >> "$CM/build.log" 2>&1
+  is "metrics container: the fake swe-metrics test image builds" "$?" "0"
+  printf '#!/bin/sh\ntouch "%s/HOST_CALLED"; exit 1\n' "$CM" > "$CM/hostbin/swe-metrics"; chmod +x "$CM/hostbin/swe-metrics"
+  CMP="$CM/proj"; mkdir -p "$CMP/agg/state"; echo work > "$CMP/agg/state/STATE.md"
+  printf 'agg/state/\nagg/private/\n' > "$CMP/.gitignore"
+  cat > "$CMP/agg/agg.yaml" <<'EOF'
+project: mctr
+defaults: { model: fake, isolation: container, image: "agg-test-fake-agent:1" }
+judge: { image: "agg-test-fake-metrics:1" }
+judges:
+  sessions: { metric: { id: "work.sessions" }, min: 1 }
+  quality:  { score: { definition: "swe-default", version: "2" }, min: 60 }
+steps: { worker: {} }
+sequence: { steps: [worker], done_if: "sessions AND quality" }
+summary: { enabled: false }
+EOF
+  ( cd "$CMP" && git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init )
+  ( cd "$CMP" && PATH="$CM/hostbin:$PATH" "$AGG" doctor --json > "$CM/doctor.json" 2>/dev/null )
+  has  "metrics container: doctor --json reports swe-metrics in judge.image" "$CM/doctor.json" '"swe-metrics": "fake-swe-metrics 1.0.0"'
+  ( cd "$CMP" && PATH="$CM/hostbin:$PATH" "$AGG" run --max-sessions 2 > "$CM/run.log" 2>&1 )
+  is   "metrics container: the run reaches done (exit 0)"            "$?" "0"
+  [ -e "$CM/HOST_CALLED" ] && bad "…swe-metrics never ran on the host" || ok "…swe-metrics never ran on the host"
+  has  "…it measured INSIDE the judges' image"                       "$CMP/agg/private/container/judge/scratch-1/swe-metrics.log" "MEASURE_IN_CONTAINER"
+  has  "…on a READ-ONLY project"                                     "$CMP/agg/private/container/judge/scratch-1/swe-metrics.log" "MEASURE_PROJECT_WRITE_DENIED"
+  has  "…and scored against the incumbent it could read"             "$CMP/agg/private/container/judge/scratch-1/swe-metrics.log" "BASELINE_READ"
+  is   "…one measurement for both judges"                            "$(grep -c '^measure ' "$CMP/agg/private/container/judge/scratch-1/swe-metrics.log")" "1"
+  # the worker's image has no swe-metrics: refused at judge.image
+  sed -i.bak 's/image: "agg-test-fake-metrics:1"/image: "agg-test-fake-agent:1"/' "$CMP/agg/agg.yaml"
+  ( cd "$CMP" && PATH="$CM/hostbin:$PATH" "$AGG" check > "$CM/check.log" 2>&1 )
+  is   "metrics container: a judges' image without swe-metrics is refused (agg check exit 1)" "$?" "1"
+  has  "…at judge.image"                                             "$CM/check.log" "judge.image"
+  has  "…saying the image lacks it"                                  "$CM/check.log" "has no \`swe-metrics\` on PATH"
+  [ -n "${KEEP:-}" ] || rm -rf "$CM"
+else
+  skip "metrics container: swe-metrics in the judges' image" "no running container engine"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "9r. network egress allow-list (A-7): only the listed hosts, through agg's proxy"
 # The acceptance case: under `allow: [api.anthropic.com]`, `curl example.com` from the worker FAILS
 # and the agent still works (its session completes and is judged). Real mechanisms only — Seatbelt

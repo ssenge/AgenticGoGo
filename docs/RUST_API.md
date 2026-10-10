@@ -204,8 +204,9 @@ let agg = Agg::open(".")?.ratchet("cc_p95", Ratchet::down(0.5));   // the driver
 
 `MetricJudge` also takes `.combine(Combine::All)`, `.scope(Scope::Changed)` and `.min(..)`; a relative
 `ScoreJudge` definition file is resolved against the project dir. A missing value fails closed exactly
-as on the YAML path. Two differences: a driver has no startup, so a missing or incompatible
-`swe-metrics` shows as an ERRORED verdict, not a refusal; and a driver run has no incumbent until its
+as on the YAML path. When the run's tier is `container` (a step with `Isolation::Container`),
+swe-metrics runs in `.judge_image()` like every judge. Two differences: a driver has no startup, so a
+missing or incompatible `swe-metrics` shows as an ERRORED verdict, not a refusal; and a driver run has no incumbent until its
 first kept gate — a score asked before that is computed without `--baseline`.
 
 ### Groups and the improvement rule
