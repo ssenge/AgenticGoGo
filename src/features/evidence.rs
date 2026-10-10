@@ -37,9 +37,10 @@ fn run_dir(ctx: &mut LoopState) -> PathBuf {
 
 /// Keep the evidence of every verdict in `fresh`, judged in `session` (`None` = the baseline pass).
 /// Never fails: what cannot be kept is recorded with its reason and warned about.
-pub fn keep(ctx: &mut LoopState, session: Option<u32>, fresh: &[(String, Verdict)]) {
+/// `tier` is the one the judges ran in — it decides where their scratch was.
+pub fn keep(ctx: &mut LoopState, session: Option<u32>, fresh: &[(String, Verdict)], tier: crate::isolation::Isolation) {
     let cap = ctx.cfg.judge.evidence_max_mb;
-    let roots = Roots { scratch: crate::core::judge::scratch_path(&ctx.dir, session), project: ctx.dir.clone() };
+    let roots = Roots { scratch: crate::core::judge::scratch_path(&ctx.dir, session, tier), project: ctx.dir.clone() };
     let label = session.map_or_else(|| "baseline".to_string(), |s| s.to_string());
     let base = run_dir(ctx).join(label);
     let st = ctx.ext.get::<EvidenceState>();

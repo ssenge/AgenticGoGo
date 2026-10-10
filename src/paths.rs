@@ -33,6 +33,7 @@
 //!       evidence/<run>/<session>/<judge>/  the files each verdict cited, kept after its judge ran
 //!       prompts.jsonl       per session, the hash of every prompt file its brief was read from
 //!       metrics/incumbent/<scope>.json  the swe-metrics report of the last KEPT state (a score's baseline)
+//!       container/          `isolation: container` runtime: worker + judge homes, judge scratch
 //! ```
 //!
 //! # Why the split exists
@@ -219,6 +220,20 @@ pub fn protected_store(dir: &Path) -> PathBuf {
     private_dir(dir).join("protected")
 }
 
+/// The container runtime's own dirs: `agg/private/container/` — a fresh `HOME` for each worker
+/// session, the judges' homes, and the scratch + toolchain cache of a judge that runs in a
+/// container ([`crate::isolation::runtime`]).
+///
+/// Private for two reasons. The worker must not plant anything a JUDGE then runs with (a
+/// `~/.claude/settings.json` hook in the ruler's home would steer its grader), and must not write a
+/// judge's measurements. And it is under the PROJECT on purpose rather than in `$TMPDIR`: the engine
+/// can always see the project (it is bind-mounted), while a VM-backed engine (colima, lima) often
+/// cannot see `$TMPDIR` — and a bind of a path the engine cannot see is not an error, it is an EMPTY
+/// directory inside the container.
+pub fn container_dir(dir: &Path) -> PathBuf {
+    private_dir(dir).join("container")
+}
+
 /// The kept judge evidence: `agg/private/evidence/<run>/<session>/<judge>/` (`core::evidence`).
 ///
 /// Private because it is what a verdict CITES: a worker able to write here could swap the SARIF
@@ -311,11 +326,13 @@ mod tests {
         assert_eq!(waits_jsonl(d), Path::new("/proj/agg/private/waits.jsonl"));
         // a score judge's baseline — a swapped one would make a worse metric cost nothing.
         assert_eq!(metrics_incumbent_dir(d), Path::new("/proj/agg/private/metrics/incumbent"));
+        // the judges' homes + scratch in a container: a worker writing here steers its grader.
+        assert_eq!(container_dir(d), Path::new("/proj/agg/private/container"));
 
         // and the carve-out must actually CONTAIN the private files, or the sandbox deny (which is
         // one subpath rule) would confine nothing.
         for p in [verdicts_jsonl(d), calls_jsonl(d), gate_json(d), bus_dir(d), state_json(d), run_pid(d), report_json(d),
-                  violations_jsonl(d), protected_store(d), waits_jsonl(d), metrics_incumbent_dir(d)] {
+                  violations_jsonl(d), protected_store(d), waits_jsonl(d), metrics_incumbent_dir(d), container_dir(d)] {
             assert!(p.starts_with(private_dir(d)), "{} must live under the carve-out", p.display());
         }
     }

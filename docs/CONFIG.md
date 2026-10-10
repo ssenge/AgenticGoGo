@@ -43,7 +43,7 @@ defaults:
   worker_args: []                  # extra flags passed VERBATIM to the worker (the sandbox constraint)
   state: "state/STATE.md"          # the forward-advice file under agg/ (gitignored)
   isolation: none                  # none (default) | sandbox | container — the blast-radius jail
-  image: "alpine:3.20"             # the base image an `isolation: container` step runs in
+  image: "agg-claude"              # the image an `isolation: container` step runs IN (agent CLI inside)
   write_deny: ["tests/oracles/**"] # PROTECTED paths: readable, never changed — on EVERY tier (below)
 
 # THE RULER — runs LLM judges + the summarizer. Run-level and IMMUTABLE: naming any of these keys
@@ -52,6 +52,7 @@ judge:
   agent: "claude"
   model: "claude-haiku-4-5-20251001"   # None ⇒ the ruler's cheap default. A cheap model grades.
   timeout: 300                         # seconds — EVERY judge, script and LLM alike
+  image: "agg-claude"                  # the judges' image when a step is `container` (default: defaults.image)
 
 # Per-judge config: a timeout override, or a judge DECLARED here instead of as a file — a metric or
 # score judge over swe-metrics (optional; needs `swe-metrics` on PATH only when one is declared).
@@ -105,6 +106,12 @@ memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
 session_isolation: {}              # MANDATORY; keys: branch_prefix, base_branch, red_file
 hooks: {}                          # on_start / on_session_start / on_session_end / on_stop / background
 prompt_includes: []                # files prepended to every worker prompt
+context:                           # READ-ONLY dirs from outside the project (needs sandbox/container)
+  - { path: "~/kb/brain", as: "brain", mode: "ro" }
+isolation_policy:                  # run-level confinement beyond the tier
+  network: { allow: ["api.anthropic.com", "registry.npmjs.org"] }   # egress allow-list (default: open)
+  pass_env: ["NPM_TOKEN"]          # env vars passed BY NAME into a container (agents' own keys need no listing)
+  credentials: ["~/.config/gh"]    # host paths mounted READ-ONLY into the container's HOME
 ```
 
 ## `defaults` — inherited by every step
@@ -119,7 +126,7 @@ prompt_includes: []                # files prepended to every worker prompt
 | `role_prompt` | none | generic **role** framing composed *above* a step's `prompt:`. Inheritable; a step body may override it. |
 | `role_prompt_file` | none | `role_prompt` read from a **file** ([Prompts from files](#prompts-from-files--prompt_file-role_prompt_file)). An alternative to `role_prompt` — set one. |
 | `isolation` | `none` | `none` \| `sandbox` \| `container` — blast-radius jail (below). Inheritable; a step may override. |
-| `image` | `alpine:3.20` | the base image an `isolation: container` step runs in. Inert on every other tier. |
+| `image` | `alpine:3.20` | the image an `isolation: container` step runs in — the step's agent CLI runs inside it, so it must follow the [image contract](#the-container-tier-runs-the-agent) (reference images: `docker/claude`, `docker/codex`). Inert on every other tier. |
 | `write_deny` | `[]` | **protected paths** — globs every step may read but never change. Enforced on **every** tier by the gate's content-hash check, and by the kernel under `sandbox`/`container` ([below](#protected-paths--write_deny-readonly-writable)). A step's own list is ADDED to this one. |
 
 ## `judge` — THE RULER
@@ -134,6 +141,7 @@ block precisely because it is immutable: a moving grader makes verdicts incompar
 | `model` | none | none ⇒ the ruler's cheap-model default. |
 | `timeout` | `300` | seconds, enforced for **every** judge (script and LLM) with a process-group kill. |
 | `evidence_max_mb` | `100` | the most judge evidence (MiB) one run copies into `agg/private/evidence/` ([below](#evidence--what-agg-keeps)). A disk bound, not a run limit: a file that does not fit is skipped and recorded, and the run goes on. |
+| `image` | see notes | the image EVERY judge runs in when a step of the run is `isolation: container` ([the container tier](#the-container-tier-runs-the-agent)). Default: `defaults.image`, else the one image the container steps share; several different ones with neither key set is refused. |
 
 If the ruler is rate-limited or unreachable, the run **parks in backoff and merges nothing** — it
 never fails over to another agent (that would move the ruler) and never fabricates a verdict.
@@ -296,7 +304,7 @@ Each NAME maps to a body of overrides. **The complete legal key list** (anything
 | `prompt_file` | none | `prompt` read from a **file** (below). An alternative to `prompt` — set one. |
 | `skip_judges` | `false` | `true` ⇒ no judges run after this step, so nothing merges — the work **stages** (below). |
 | `isolation` | `defaults.isolation` | `none` \| `sandbox` \| `container` — the blast-radius jail for this step (below). |
-| `image` | `defaults.image` | the base image for this step under `isolation: container`. |
+| `image` | `defaults.image` | the image this step runs in under `isolation: container` (the [image contract](#the-container-tier-runs-the-agent)). |
 | `readonly` | `[]` | project paths this step may read but not write — **kernel only**: inert under `isolation: none` (agg warns). No `defaults.readonly`. ([below](#protected-paths--write_deny-readonly-writable)) |
 | `writable` | `[]` | paths subtracted from this step's `readonly` (exact match). Never touches `write_deny`. |
 | `write_deny` | `[]` | MORE protected paths for this step, **unioned** with `defaults.write_deny`. Nothing subtracts from it. |
@@ -342,13 +350,14 @@ that, **per step**:
 | tier | what the worker may do |
 |---|---|
 | `none` *(default)* | no confinement — full host access, today's behaviour. |
-| `sandbox` | **write** = the project dir (+subfolders) **minus `agg/private/`** + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open. Kernel-enforced. Also confines this step's judges + hooks. |
-| `container` | the worker runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir **minus `agg/private/`** + the agent's state dir + the container's own tmp; **read** = only what is mounted; **network** = fully open. |
+| `sandbox` | **write** = the project dir (+subfolders) **minus `agg/private/`** + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open unless [`isolation_policy.network`](#network-egress--isolation_policynetwork) narrows it. Kernel-enforced. Also confines this step's judges + hooks. |
+| `container` | the worker — the agent CLI itself — runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir **minus `agg/private/`** + a fresh `HOME` + the container's own tmp; **read** = only what is mounted; **network** = fully open unless [`isolation_policy.network`](#network-egress--isolation_policynetwork) narrows it. Its judges run in a container too. |
 
 `sandbox` uses the OS jail — **`sandbox-exec` (Seatbelt) on macOS**, `bwrap` (bubblewrap) on Linux —
 except Codex, which has its own kernel sandbox agg drives with flags. It confines the **worker, its
 script + LLM judges, and its foreground hooks** in one jail, so nothing a confined worker can rewrite
-in the project dir becomes an escape. It does **not** restrict network (full internet by design).
+in the project dir becomes an escape. It does not restrict the network unless
+[`isolation_policy.network`](#network-egress--isolation_policynetwork) says so.
 
 **The one hole punched in "the project dir is writable" is `agg/private/`** — agg's own runtime state
 (the verdict ledger, the command bus, the pidfile, the worker's brief). It stays fully **readable**; only
@@ -361,12 +370,8 @@ in a container, so the host filesystem is not there to read at all. The step's `
 base image (default `alpine:3.20`). It applies to **every** agent, self-sandboxing or not — the
 container boundary *is* the confinement.
 
-> **`container` is the confinement mechanism, not yet an agent runtime.** The base image has no
-> agent CLI and no credentials in it, so this tier is ready for commands you can run in a plain
-> image; running `claude`/`codex` themselves inside it needs an image with the CLI plus a mounted
-> credential store, and is a documented follow-up (`internal/ISOLATION.md` §15). That section also
-> records the residual: unlike `sandbox`, this tier confines the **worker only** — judges and hooks
-> are host tooling (they run `cargo`, `git`, your linters), so they still run on the host.
+`container` runs the agent CLI itself: see [The container tier runs the agent](#the-container-tier-runs-the-agent)
+for the image contract, credentials and what judges do on this tier.
 
 If `sandbox` is requested but the OS mechanism is unavailable — or `container` is requested and no
 container engine answers — agg **refuses at startup**, never a silent downgrade to `none`. `agg
@@ -378,6 +383,162 @@ doctor` reports whether the tooling the config asks for is present.
 This is **orthogonal** to `session_isolation` (below): that protects the repo *history* from bad work
 (per-session branches + a rollback gate); `isolation` protects the *host* from an errant worker. They
 compose.
+
+### The container tier runs the agent
+
+Under `isolation: container` the agent CLI runs **inside** the step's `image:` — the host's `~`, its
+other repositories and its agent logins are simply not there. agg builds every container the same
+way:
+
+| | worker | LLM judge (the ruler's one-shot) | script judge |
+|---|---|---|---|
+| image | the step's `image:` | `judge.image` | `judge.image` |
+| project | read-write, minus `agg/private/` and `write_deny` (`:ro`) | **read-only** | **read-only** |
+| `HOME` | a FRESH empty dir every session | its own (`agg/private/container/home/ruler`) | its own (`…/home/judge`) |
+| credentials | its agent's, + `isolation_policy` | the ruler's, + `isolation_policy` | `isolation_policy` only |
+| writes | the project, its `HOME`, the container's tmp | its `HOME` | `$AGG_JUDGE_SCRATCH` + the toolchain cache |
+
+Every container runs as the **owner of the project dir** (`--user uid:gid`), never root: files it
+writes are yours, and Claude Code refuses auto-approval as root. Context dirs are mounted read-only at
+`/context/<as>` in all three.
+
+**The image contract** — what an image must provide (reference images: [`docker/claude`](../docker/claude/Dockerfile),
+[`docker/codex`](../docker/codex/Dockerfile)):
+
+- the agent CLI on `PATH` **for any uid** (installed system-wide, not under `/root`), and `/bin/sh`;
+- everything the worker's tasks and your judges run — the judges run in `judge.image`, so a
+  `cargo_test` judge needs `cargo` there (`judge.image` may be a different image from the worker's);
+- **no credentials** baked in, and nothing that relies on a passwd entry — `HOME` is agg's to set;
+- no `ENTRYPOINT`, or one that execs its arguments: agg runs `<cli> <args…>` as the command.
+
+```sh
+docker build -t agg-claude docker/claude      # or docker/codex; add your toolchain to the Dockerfile
+```
+```yaml
+defaults: { agent: "claude", isolation: "container", image: "agg-claude" }
+```
+
+**Credentials** cross at run time and are never written anywhere agg keeps:
+
+- **by name** — each agent's own variables, whenever they are set in agg's environment:
+  Claude `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`;
+  Codex `CODEX_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`; Copilot `COPILOT_GITHUB_TOKEN`,
+  `GH_TOKEN`, `GITHUB_TOKEN` — plus every name in `isolation_policy.pass_env`. agg passes `-e NAME`
+  and the engine client reads the value from agg's environment: the secret is never on a command
+  line, in a log, a ledger or the report.
+- **as read-only mounts** — each agent's credential file when it exists (`~/.codex/auth.json`;
+  `~/.claude/.credentials.json`, which only Linux has), plus every path in
+  `isolation_policy.credentials`: under the container's `HOME` at their `~`-relative place, or at the
+  same absolute path. Each must exist (refused at startup otherwise).
+- A macOS Claude login lives in the Keychain, which no container can read: use
+  `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) or an API key. A mounted login cannot be refreshed
+  from inside (read-only), so prefer a token for unattended runs.
+
+| key | default | notes |
+|---|---|---|
+| `isolation_policy.pass_env` | `[]` | environment variable NAMES passed into every container (a `NAME=value` is refused: the value belongs in the environment, not in `agg.yaml`). |
+| `isolation_policy.credentials` | `[]` | host files or directories mounted read-only into every container. |
+
+**Judges run in the run's strongest tier — there is no opt-out.** When any step is `container`, every
+script judge and every LLM judge runs in `judge.image` with the project read-only. A container worker
+can rewrite `agg/judges/*.sh` in its bind-mounted tree; run on the host, that rewrite would be an
+escape. A judge's scratch and toolchain cache then live under `agg/private/container/judge/` (not
+`$TMPDIR`), which the worker can read but not write. **Hooks and `notify.cmd` stay host tooling** on
+this tier — they run on the host, unconfined, like the summarizer (which runs no tools).
+
+**Refused at startup** (`agg check` lists each at its key, `agg doctor --json` reports
+`container_images`): an image that cannot be started, or that lacks the CLI a step (or the ruler, for
+an LLM judge) runs in it — agg runs a short probe container per image as the project owner; container
+steps on several images with no `judge.image`; and a mounted path the engine cannot see. A VM-backed
+engine (colima, lima) shares only some host directories with its VM — colima only your home by
+default — and a bind of one it cannot see is not an error, it is an **empty directory** inside the
+container. Keep the project, context dirs and credentials where the engine can see them.
+
+Only the CLIs that run on the host must be on its `PATH`: a container step's agent need not be
+installed on the host at all, and the ruler only when something it runs stays there (the summarizer —
+`summary: { enabled: false }` if the host has no CLI — or LLM judges on a non-container run).
+
+A Rust driver sets these with `Agg::image`, `Step::image`, `Agg::judge_image`, `Agg::pass_env` and
+`Agg::credentials`.
+
+### Network egress — `isolation_policy.network`
+
+By default every tier leaves the network open (`network: open`). An allow-list closes it:
+
+```yaml
+defaults: { isolation: "container" }     # or "sandbox" on macOS — EVERY step must be one of the two
+isolation_policy:
+  network:
+    allow:
+      - "api.anthropic.com"              # the agent's own endpoint — REQUIRED (checked at startup)
+      - "registry.npmjs.org:443"         # a host on one port
+      - "*.pkg.example.com"              # every SUBdomain (not the apex)
+      - "10.20.0.5"                      # a literal address (only an IP entry admits an IP)
+      - "localhost:5432"                 # sandbox only: the worker may reach this loopback port directly
+```
+
+| entry | matches |
+|---|---|
+| `host` / `host:port` | that name (case-insensitive), any port / that port |
+| `*.domain` | every subdomain of `domain`, not `domain` itself |
+| `1.2.3.4[:port]`, `[v6][:port]` | that address — a name entry never admits a client that asks by address |
+| `localhost[:port]` | the sandboxed worker's own loopback, directly (a test server it starts); never via the proxy |
+
+No URLs, paths or CIDR ranges — such an entry is refused at startup, at its index.
+
+**How it is enforced.** One enforcement point: a small proxy inside the agg process. Every confined
+process gets `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (both cases) pointing at it, `NO_PROXY` for its own
+loopback, and `NODE_USE_ENV_PROXY=1`; the tier then makes the proxy the **only** way out, so a process
+that ignores or rewrites those variables gains nothing. The proxy checks the name the client asked for
+**before** resolving it (an unlisted name is never even looked up), resolves an allowed name itself,
+and refuses an answer that is loopback, link-local (the cloud metadata address) or unspecified — so a
+DNS-rebinding answer cannot turn an allowed name into a way to the host — and connects to the
+address it resolved. Refusals are logged: `[egress] DENIED CONNECT example.com:443 — not in the
+allow-list`.
+
+#### Platform matrix
+
+| tier · platform | enforced by | names or IPs | DNS inside the jail | covers |
+|---|---|---|---|---|
+| `container` · any Docker engine (**the reference**) | an `--internal` network with no route out; its one reachable address is a relay (busybox `nc` in the base image) to agg's proxy; `NET_RAW` dropped | names (the proxy resolves them); IPs only by IP entry | none — the engine's DNS answers no outside name there | worker, script judges, LLM judges |
+| `sandbox` · macOS | Seatbelt: outbound TCP only to the proxy's loopback port (+ granted `localhost` ports); UDP, raw sockets and unix sockets outside the project and `$TMPDIR` denied | names (the proxy resolves them); IPs only by IP entry | none — `mDNSResponder` is denied (`localhost` still resolves) | worker, script judges, LLM judges, hooks except `on_start`, `notify.cmd` |
+| `sandbox` · Linux | **refused at startup** — `bwrap` cannot narrow the host network to one port; use `container` | | | |
+| `container` · podman | **refused at startup** — the network is built on Docker's `--internal` networks | | | |
+| `none` | **refused at startup** — nothing would stop a direct connection | | | |
+
+**Not covered, and said so at startup (`agg check` warnings):** hooks on a `container` run (they are
+host tooling), `on_start` on any tier (it runs before any worker, unconfined), `background` hooks
+(never confined). The summarizer runs on the host too; it is agg's own tools-off call and executes
+nothing the worker wrote.
+
+**What each bypass meets** (measured; `tests/egress.rs`, `scripts/e2e.sh` §9r):
+
+| attempt | macOS `sandbox` | `container` |
+|---|---|---|
+| connect directly to an IP not on the list | refused by the kernel | no route |
+| DNS-over-HTTPS to an unlisted resolver | proxy `403` · direct: refused | proxy `403` · direct: no route |
+| a plain DNS lookup | fails (no resolver reachable) | fails (no outside name resolves) |
+| a raw socket / UDP, from a child process | refused | no route (`NET_RAW` dropped) |
+| the worker sets its own `HTTPS_PROXY` | refused (only agg's proxy is reachable) | no route |
+| an unlisted name through agg's proxy | `403` | `403` |
+| the host's own services | only `localhost` entries | unreachable |
+
+**The agent's own endpoint must be listed** — a worker that cannot reach its model is not confined, it
+is broken. agg checks at startup (and the driver at `step()`) that every step's agent, and the ruler
+when the run has LLM judges, can reach: Claude `api.anthropic.com` (or `ANTHROPIC_BASE_URL`'s host);
+Codex `api.openai.com` with an API key in the environment, `chatgpt.com` with a ChatGPT login (or
+`OPENAI_BASE_URL`'s host); Copilot `api.githubcopilot.com` and `api.github.com`. Missing ⇒ refused at
+`isolation_policy.network.allow`, naming the host. An agent's non-essential traffic (telemetry, update
+checks) is refused like anything else; Claude Code skips it with
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (add it to `pass_env` for a container).
+
+**Limits.** An allowed host is trusted with whatever the worker sends it — list your model endpoint
+and your mirrors, not a general-purpose host. The proxy decides on the `CONNECT` name; TLS inside the
+tunnel is opaque to it, so a CDN that serves an unlisted name from the same address as a listed one
+(domain fronting) is not distinguished.
+
+`agg doctor --json` reports `network: {mode, allow, sandbox, container}` — how this host would enforce
+the list on each tier. A Rust driver sets it with `Agg::network(Network::Allow(vec![…]))`.
 
 ### Protected paths — `write_deny`, `readonly`, `writable`
 
@@ -480,6 +641,49 @@ real Linux host. The suite that produced this table is `tests/protected_paths.rs
 **What is NOT covered.** `.git/` and `agg/private/` are never part of the check — agg owns both and
 writes them during a session. Judges and hooks are operator code: a change they make is caught at the
 next session start (above), not attributed to the session that ran them.
+
+### Context directories — `context:` (read-only material from outside the project)
+
+A knowledge base, reference architectures, another repository's docs: material every session should
+read and no session may change. Copying it into the project duplicates it and makes it writable;
+`context:` mounts it instead.
+
+```yaml
+defaults: { isolation: "sandbox" }       # or "container" — EVERY step must be confined
+context:
+  - { path: "~/kb/brain", as: "brain", mode: "ro" }
+  - { path: "../shared-docs", as: "docs" }   # relative ⇒ against the project dir; `mode` defaults to ro
+```
+
+| key | rule |
+|---|---|
+| `path` | absolute, `~/…`, or relative to the project dir. Must exist and be a directory, and must not overlap the project (inside it, or containing it — which also keeps `agg/private/` out). |
+| `as` | a short name: lowercase letters, digits, `-`, `_` (≤ 64, starting with a letter or digit), unique. |
+| `mode` | `ro` — the only mode. Anything else is refused. |
+
+What each process sees:
+
+| tier | where | what keeps it read-only |
+|---|---|---|
+| `sandbox` (macOS) | its host path | a Seatbelt write deny on the directory, plus an unlink deny on each ancestor, so it cannot be renamed away and replaced with a forged copy |
+| `sandbox` (Linux) | its host path | `bwrap --ro-bind` (after the `/tmp` tmpfs, so a directory under `/tmp` stays visible) |
+| `container` | `/context/<as>` | a `:ro` bind mount |
+| `none` | — | nothing — so a run that names a context and has an unconfined step is **refused at startup** |
+
+- **The brief lists them.** `INSTRUCTIONS.md` gets a `## Context (read-only)` section naming each
+  directory where the step's tier shows it, with a pointer to its `index.md` when it has one. agg never
+  reads or interprets the contents.
+- **Every confined process finds them by name**: `AGG_CONTEXT_<AS>` (uppercased, `-` → `_`) holds the
+  path — `/context/brain` in a container, the host path otherwise. Judges run in the run's strongest
+  tier and get the same read-only view as the worker; so do hooks and `notify.cmd` under `sandbox`
+  (under `container` they are host tooling — see the isolation table). A judge run by hand (`agg
+  judge`, `agg plan`) gets the variables too, unconfined.
+- **Refused at startup** (`agg check` lists each at its key, `context[i].path` / `context[i].as`): a
+  missing path, a file, an overlap with the project, a malformed or duplicate `as` (two names that map
+  to the same variable count as duplicates), a `mode` other than `ro`, and an unconfined step.
+
+A Rust driver adds one with `Agg::open(dir)?.context("~/kb/brain", "brain")`; `step()` then refuses an
+`Isolation::None` step.
 
 ## `sequence` — the loop
 
@@ -1113,7 +1317,9 @@ could rewrite.
 
 - **`sandbox`** — the delivery is confined too. A command agg **cannot** confine is **SKIPPED, loudly**,
   never run unconfined. Writes are limited to the project dir + `$TMPDIR`, so a notify command that
-  writes outside it (a log in `~`) fails. Network is fully open on this tier, so `curl` still works.
+  writes outside it (a log in `~`) fails. The network is open on this tier unless an
+  [allow-list](#network-egress--isolation_policynetwork) narrows it — then list your notification
+  host (`ntfy.sh`) too, or the `curl` is refused.
 - **`container`** — hooks are host tooling on this tier (see the isolation table above), so
   `notify.cmd` runs on the host, unconfined.
 
@@ -1265,8 +1471,8 @@ printf '{"met":%s,"value":%s,"max":100,"target":80,"rationale":"%s%% covered"}\n
 
 #### ⚠ A judge MAY NOT WRITE THE PROJECT TREE
 
-Under `isolation: sandbox` (or `container`) a judge reads everything and writes **only**
-`$AGG_JUDGE_SCRATCH`. The project tree is read-only to it, and `agg/private/` + `agg/judges/` are
+Under `isolation: sandbox` (or `container`, where the judge runs in `judge.image` with the project
+mounted read-only) a judge reads everything and writes **only** `$AGG_JUDGE_SCRATCH`. The project tree is read-only to it, and `agg/private/` + `agg/judges/` are
 denied outright. The reason is short: a judge that can write the tree it grades can edit its way to
 a pass, which is the same hole as letting a judge choose its own writable paths.
 

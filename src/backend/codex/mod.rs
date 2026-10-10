@@ -105,6 +105,27 @@ impl AgentBackend for Codex {
         true
     }
 
+    /// The host of `OPENAI_BASE_URL` when set; else `api.openai.com` when an API key is in the
+    /// environment, and `chatgpt.com` (a ChatGPT login's backend) when none is.
+    fn api_hosts(&self) -> Vec<String> {
+        if let Some(h) = std::env::var("OPENAI_BASE_URL").ok().and_then(|u| crate::backend::url_host(&u)) {
+            return vec![h];
+        }
+        let key = ["CODEX_API_KEY", "OPENAI_API_KEY"].iter().any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+        vec![if key { "api.openai.com" } else { "chatgpt.com" }.to_string()]
+    }
+
+    /// `CODEX_API_KEY` (what `codex exec` reads), `OPENAI_API_KEY`, and a custom endpoint.
+    fn container_env(&self) -> &'static [&'static str] {
+        &["CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"]
+    }
+
+    /// A ChatGPT login lives in `~/.codex/auth.json`. Read-only: a refreshed token is not written
+    /// back — prefer an API key for unattended runs.
+    fn container_credential_files(&self) -> &'static [&'static str] {
+        &[".codex/auth.json"]
+    }
+
     /// `~/.codex` — REQUIRED as of §2.4, and it was not before.
     ///
     /// While Codex was exempt from the OS wrapper this was correctly empty: nothing confined the

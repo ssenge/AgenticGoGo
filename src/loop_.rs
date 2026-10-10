@@ -257,6 +257,10 @@ fn run_reported(
     let Assembly { engine: mut eng, steps: seq_steps } = assembly;
     // FIRST, before anything below writes state.json, project.json or the ledger it reads.
     let resume = if opts.resume { Some(crate::features::resume::load(dir)?) } else { None };
+    // The run's confinement policy (context dirs, …), registered for this project BEFORE anything
+    // is confined and declared before `_stop_hooks` below, so it is still in force while the
+    // `on_stop` hooks fire on the way out.
+    let _policy = crate::isolation::run::register(&cfg, dir)?;
     let max_sessions_flag = opts.max_sessions;
     let ruler = cfg.ruler_backend()?;
     let judge_model = cfg.judge_model(ruler);

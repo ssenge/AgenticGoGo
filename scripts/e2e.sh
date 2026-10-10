@@ -1799,6 +1799,175 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9p. context: — read-only directories from outside the project (REAL kernel sandbox)"
+# A-8. Unlike §9l this uses the REAL OS sandbox, not a fake wrapper: the claim is that the kernel
+# refuses the write, which only the kernel can show. Skipped where no restricting sandbox can be
+# applied (a nested jail, a CI container).
+if [ "$(uname -s)" = Darwin ] && sandbox-exec -p '(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow mach*)' /usr/bin/true 2>/dev/null; then
+  CX="$(mkproj context)"
+  KB="$WS/kb-parent/brain"; mkdir -p "$KB"; printf '# brain index\n' > "$KB/index.md"
+  cat > "$CX/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
+cp agg/private/INSTRUCTIONS.md prompt_latest.txt
+cat "$AGG_CONTEXT_BRAIN/index.md" > context_read.log 2>&1
+if echo evil >> "$AGG_CONTEXT_BRAIN/index.md" 2>/dev/null; then echo WRITE_OK; else echo WRITE_DENIED; fi > context_write.log
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+  chmod +x "$CX/bin/claude"
+  cat > "$CX/agg/agg.yaml" <<EOF
+project: context
+defaults: { model: fake, isolation: sandbox }
+steps:
+  worker: {}
+sequence:
+  steps: [worker]
+  done_if: "worked"
+summary: { enabled: false }
+context:
+  - { path: "$KB", as: "brain", mode: "ro" }
+EOF
+  agg_do "$CX" run --max-sessions 1 > "$CX/run.log" 2>&1
+  is   "context: a sandboxed run with a context dir reaches done (exit 0)" "$?" "0"
+  has  "…the brief lists it, with a pointer to its index.md"  "$CX/prompt_latest.txt" "start at \`$(cd "$KB" && pwd -P)/index.md\`"
+  has  "…the worker READ it (via \$AGG_CONTEXT_BRAIN)"        "$CX/context_read.log" "# brain index"
+  has  "…and the kernel REFUSED its write"                    "$CX/context_write.log" "WRITE_DENIED"
+  is   "…the context is byte-identical afterwards"            "$(cat "$KB/index.md")" "# brain index"
+  # …and an unconfined step is refused at startup rather than left able to write it.
+  sed -i.bak 's/isolation: sandbox/isolation: none/' "$CX/agg/agg.yaml"
+  agg_do "$CX" check > "$CX/check.log" 2>&1
+  is   "context: an \`isolation: none\` step is refused (agg check exit 1)" "$?" "1"
+  has  "…located at the key that set the tier"               "$CX/check.log" "defaults.isolation"
+else
+  skip "context: read-only dirs under the real sandbox" "no restricting kernel sandbox usable here"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9q. the container tier runs the AGENT (REAL engine, fake-agent image)"
+# A-11. The worker CLI runs INSIDE its image (a test image with a fake `claude` baked in —
+# tests/fixtures/container/fake-agent), as the project owner, with a fresh HOME, its credential by
+# NAME, the context read-only at /context/<as>; the judges run in the image too, on a read-only
+# project. The workspace is under target/: a VM-backed engine (colima) cannot see $TMPDIR.
+ENGINE_BIN="$(command -v docker || command -v podman || true)"
+if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
+  CT="$ROOT/target/agg-e2e-container.$$"; rm -rf "$CT"; mkdir -p "$CT/kb"
+  printf '# kb\n' > "$CT/kb/index.md"
+  "$ENGINE_BIN" build -q -t agg-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$CT/build.log" 2>&1
+  is "container: the fake-agent test image builds" "$?" "0"
+  CP="$CT/proj"; mkdir -p "$CP/agg/judges" "$CP/agg/state" "$CP/tests"
+  printf 'orig\n' > "$CP/tests/oracle.txt"
+  printf 'agg/state/\nagg/private/\n' > "$CP/.gitignore"
+  cat > "$CP/agg/judges/done.sh" <<'EOF'
+#!/bin/sh
+{ [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; } && echo JUDGE_IN_CONTAINER > "$AGG_JUDGE_SCRATCH/where"
+if echo x > judge_probe 2>/dev/null; then echo JUDGE_WROTE_PROJECT >> "$AGG_JUDGE_SCRATCH/where"; fi
+n=$(cat src/sessions.log 2>/dev/null | wc -l | tr -d ' ')
+[ "${n:-0}" -ge 1 ] && echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"worked"}' \
+                     || echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
+EOF
+  chmod +x "$CP/agg/judges/done.sh"
+  printf -- '---\ninputs: []\n---\nDecide.\n' > "$CP/agg/judges/reviewed.md"
+  echo "work" > "$CP/agg/state/STATE.md"
+  cat > "$CP/agg/agg.yaml" <<EOF
+project: ctr
+defaults: { model: fake, isolation: container, image: "agg-test-fake-agent:1", write_deny: ["tests/**"] }
+judge: { agent: claude, model: fake }
+steps: { worker: {} }
+sequence: { steps: [worker], done_if: "done AND reviewed" }
+summary: { enabled: false }
+context: [{ path: "$CT/kb", as: "kb" }]
+EOF
+  ( cd "$CP" && git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init )
+  ( cd "$CP" && "$AGG" doctor --json > "$CT/doctor.json" 2>/dev/null )
+  has  "container: doctor --json reports the CLI the image provides" "$CT/doctor.json" '"claude": "fake-claude-in-image 1.0.0"'
+  ( cd "$CP" && ANTHROPIC_API_KEY=e2e-secret-value-91 "$AGG" run --max-sessions 2 > "$CT/run.log" 2>&1 )
+  is   "container: the run reaches done (exit 0)"                 "$?" "0"
+  has  "…the worker ran INSIDE the image"                         "$CP/src/worker.log" "WORKER_IN_CONTAINER"
+  has  "…with its credential passed by name"                      "$CP/src/worker.log" "KEY_SEEN"
+  has  "…reading the context at /context/kb"                      "$CP/src/worker.log" "CONTEXT_READ"
+  has  "…which it could not write"                                "$CP/src/worker.log" "CONTEXT_WRITE_DENIED"
+  has  "…nor the write_deny oracle"                               "$CP/src/worker.log" "ORACLE_WRITE_DENIED"
+  has  "…nor agg/private/"                                        "$CP/src/worker.log" "PRIVATE_WRITE_DENIED"
+  has  "the script judge ran in the image too"                    "$CP/agg/private/container/judge/scratch-1/where" "JUDGE_IN_CONTAINER"
+  hasnt "…on a READ-ONLY project"                                 "$CP/agg/private/container/judge/scratch-1/where" "JUDGE_WROTE_PROJECT"
+  has  "the LLM judge's verdict came from the image's ruler"     "$CT/run.log" "IMAGE_RULER_MET"
+  hasnt "the credential value is not in the run log"              "$CT/run.log" "e2e-secret-value-91"
+  if grep -rqF e2e-secret-value-91 "$CP/agg/private" 2>/dev/null; then bad "…nor anywhere under agg/private/"; else ok "…nor anywhere under agg/private/"; fi
+  [ -n "${KEEP:-}" ] || rm -rf "$CT"
+else
+  skip "container: the agent runs in its image" "no running container engine"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+sec "9r. network egress allow-list (A-7): only the listed hosts, through agg's proxy"
+# The acceptance case: under `allow: [api.anthropic.com]`, `curl example.com` from the worker FAILS
+# and the agent still works (its session completes and is judged). Real mechanisms only — Seatbelt
+# on macOS, an --internal network in a container — and no internet needed: every attempt is refused
+# before a packet leaves.
+if [ "$(uname -s)" = Darwin ] && sandbox-exec -p '(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow mach*)' /usr/bin/true 2>/dev/null; then
+  EG="$(mkproj egress)"
+  cat > "$EG/bin/claude" <<'EOF'
+#!/bin/sh
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude 0.0.0"; exit 0; }; done
+if curl -s -m 5 -o /dev/null https://example.com/; then echo EGRESS_OPEN; else echo EGRESS_BLOCKED; fi > egress.log
+[ -n "$HTTPS_PROXY" ] && echo PROXY_SET >> egress.log
+: > did_work
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
+EOF
+  chmod +x "$EG/bin/claude"
+  cat > "$EG/agg/agg.yaml" <<'EOF'
+project: egress
+defaults: { model: fake, isolation: sandbox }
+steps: { worker: {} }
+sequence: { steps: [worker], done_if: "worked" }
+summary: { enabled: false }
+isolation_policy: { network: { allow: ["api.anthropic.com"] } }
+EOF
+  agg_do "$EG" run --max-sessions 1 > "$EG/run.log" 2>&1
+  is   "egress (sandbox): the agent still works behind the allow-list (exit 0)" "$?" "0"
+  has  "…while curl example.com from the worker FAILED"                         "$EG/egress.log" "EGRESS_BLOCKED"
+  has  "…and the worker was pointed at agg's proxy"                             "$EG/egress.log" "PROXY_SET"
+  has  "…which logged the refusal"                                              "$EG/run.log" "[egress] DENIED CONNECT example.com:443"
+  # an allow-list that does not hold the agent's own endpoint is refused at startup
+  sed -i.bak 's/"api.anthropic.com"/"registry.npmjs.org"/' "$EG/agg/agg.yaml"
+  agg_do "$EG" check > "$EG/check.log" 2>&1
+  is   "egress: an allow-list without the agent's endpoint is refused (exit 1)" "$?" "1"
+  has  "…naming the endpoint it needs"                                          "$EG/check.log" "api.anthropic.com"
+else
+  skip "egress: allow-list under the real macOS sandbox" "no restricting kernel sandbox usable here"
+fi
+ENGINE_BIN="$(command -v docker || command -v podman || true)"
+if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
+  EC="$ROOT/target/agg-e2e-egress.$$"; rm -rf "$EC"; mkdir -p "$EC/proj/agg/judges" "$EC/proj/agg/state"
+  "$ENGINE_BIN" build -q -t agg-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$EC/build.log" 2>&1
+  cat > "$EC/proj/agg/judges/done.sh" <<'EOF'
+#!/bin/sh
+[ -f src/work.txt ] && echo '{"met":true,"value":1,"max":1,"target":1}' || echo '{"met":false,"value":0,"max":1,"target":1}'
+EOF
+  chmod +x "$EC/proj/agg/judges/done.sh"
+  echo work > "$EC/proj/agg/state/STATE.md"
+  printf 'agg/state/\nagg/private/\n' > "$EC/proj/.gitignore"
+  cat > "$EC/proj/agg/agg.yaml" <<'EOF'
+project: egressctr
+defaults: { model: fake, isolation: container, image: "agg-test-fake-agent:1" }
+steps: { worker: {} }
+sequence: { steps: [worker], done_if: "done" }
+summary: { enabled: false }
+isolation_policy: { pass_env: ["AGG_TEST_EGRESS"], network: { allow: ["api.anthropic.com"] } }
+EOF
+  ( cd "$EC/proj" && git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init )
+  ( cd "$EC/proj" && AGG_TEST_EGRESS=1 "$AGG" run --max-sessions 1 > "$EC/run.log" 2>&1 )
+  is   "egress (container): the agent still works behind the allow-list (exit 0)" "$?" "0"
+  has  "…while example.com from the worker FAILED"                                "$EC/proj/src/worker.log" "EGRESS_BLOCKED"
+  is   "…and the run removed its egress network and relay" \
+       "$("$ENGINE_BIN" ps -aq --filter label=agg.egress; "$ENGINE_BIN" network ls -q --filter label=agg.egress)" ""
+  [ -n "${KEEP:-}" ] || rm -rf "$EC"
+else
+  skip "egress: allow-list in a container" "no running container engine"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "9n. human-in-the-loop — a person can ANSWER the loop (HUMAN_LOOP.md)"
 
 # The channel is a QUEUE, not a callback: an ask is written to the agg-owned ledger, emitted on the
@@ -1931,7 +2100,7 @@ agg_do "$BQ" run --max-sessions 1 > "$BQ/purge.log" 2>&1
 has   "a workflow PURGES commands queued to a previous run"  "$BQ/purge.log" "purged 1 stale command"
 hasnt "…so the stale stop never fires"                       "$BQ/purge.log" "stale from a dead run"
 
-sec "9p. agg wiki lint — the wiki the brief prescribes is OKF v0.2"
+sec "9s. agg wiki lint — the wiki the brief prescribes is OKF v0.2"
 # agg writes NOTHING into the worker's wiki (agg/state/ is the worker's, read as untrusted input):
 # no frontmatter, no `generated`, never `verified`. What agg does own is the brief's footer, which
 # tells the worker the shape to write. This worker follows it literally — it copies every example
@@ -1972,7 +2141,7 @@ is  "a page without frontmatter fails the lint (exit 1)" "$?" "1"
 has "…naming the file and the rule" "$WK/lint2.json" '"rule": "frontmatter.missing"'
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9q. judges built on swe-metrics (A-20) — against the REAL swe-metrics"
+sec "9t. judges built on swe-metrics (A-20) — against the REAL swe-metrics"
 
 # The real tool, not a fake: a fixture with KNOWN complexity (classify: 4 decisions ⇒ cyclomatic 5)
 # and KNOWN duplication (report_b.py = report_a.py with one word changed ⇒ one clone). A counting

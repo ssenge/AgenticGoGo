@@ -28,6 +28,7 @@ use crate::core::config::AggConfig;
 use crate::core::model::{Judge, JudgeKind};
 use crate::problem::{self, Problem};
 use anyhow::Result;
+use std::path::Path;
 
 /// Everything [`assess`] found, each located at the config key that caused it.
 #[derive(Debug, Default)]
@@ -38,6 +39,9 @@ pub struct Assessment {
     pub problems: Vec<Problem>,
     /// guards that are inert on an agent which still caps itself: loud, not fatal (§7.3).
     pub warnings: Vec<Problem>,
+    /// what the startup probe learned about each container image the run uses (empty without a
+    /// container tier or an engine) — `agg doctor --json` reports it.
+    pub images: Vec<crate::isolation::probe::ImageFacts>,
 }
 
 /// Check the config + resolved run-set against EVERY agent the sequence names (§7.3). The
@@ -46,8 +50,8 @@ pub struct Assessment {
 ///
 /// A capability the agent lacks must never degrade into a quiet no-op: a guard that never fires is
 /// worse than no guard.
-pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
-    let a = assess(cfg, judges);
+pub fn check(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Result<()> {
+    let a = assess(cfg, judges, dir);
     if !a.unknown_agents.is_empty() {
         anyhow::bail!(problem::render(&a.unknown_agents));
     }
@@ -72,13 +76,22 @@ pub fn check(cfg: &AggConfig, judges: &[Judge]) -> Result<()> {
 }
 
 /// [`check`]'s findings, collected rather than rendered — what `agg check` and `agg doctor --json`
-/// report. Never fails: an agent that does not resolve is itself a finding.
-pub fn assess(cfg: &AggConfig, judges: &[Judge]) -> Assessment {
+/// report. Never fails: an agent that does not resolve is itself a finding. `dir` is the PROJECT
+/// dir, which relative `context:` paths resolve against.
+pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Assessment {
     let mut a = Assessment::default();
+    // ── the run-level confinement policy: context dirs, credentials, the judges' image ──
+    a.problems.extend(crate::isolation::run::resolve(cfg, dir).1);
     // ── one-shot demands land on the RULER (§7.3) ──
     match cfg.ruler_backend() {
         Ok(ruler) => {
             let uses_llm_judge = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
+            // an LLM judge's one-shot is confined like the worker — behind the allow-list too
+            if let (true, Some(allow)) = (uses_llm_judge, allow_list(cfg)) {
+                if let Some(m) = crate::isolation::egress::endpoint_problem(ruler, &allow) {
+                    a.problems.push(Problem::new("isolation_policy.network.allow", format!("the ruler: {m}")));
+                }
+            }
             let uses_summarizer = cfg.summary.enabled;
             if (uses_llm_judge || uses_summarizer) && !ruler.capabilities().supports_one_shot {
                 a.problems.push(Problem::new(
@@ -98,7 +111,64 @@ pub fn assess(cfg: &AggConfig, judges: &[Judge]) -> Assessment {
     for step_name in cfg.steps.keys() {
         step_demands(cfg, step_name, &mut a);
     }
+    // ── what an allow-list does NOT cover is said out loud, never left to be discovered ──
+    if allow_list(cfg).is_some() {
+        uncovered_by_allow_list(cfg, &mut a.warnings);
+    }
+    // ── the container images: each has the CLI it must run, and the engine sees what is mounted ──
+    let (images, found) = crate::isolation::probe::assess(cfg, judges, dir);
+    a.images = images;
+    for p in found {
+        problem::push_unique(&mut a.problems, p);
+    }
     a
+}
+
+/// The run's parsed allow-list, when it has a valid one (a malformed one is reported by
+/// `isolation::run::resolve`).
+fn allow_list(cfg: &AggConfig) -> Option<crate::isolation::egress::allow::AllowList> {
+    match &cfg.isolation_policy.network {
+        crate::isolation::egress::Network::Allow(e) => crate::isolation::egress::allow::AllowList::parse(e).ok(),
+        crate::isolation::egress::Network::Open => None,
+    }
+}
+
+/// Warnings for the processes an allow-list does not reach: hooks on a container run (host
+/// tooling, unconfined), and `background` hooks on every tier (never confined).
+fn uncovered_by_allow_list(cfg: &AggConfig, warnings: &mut Vec<Problem>) {
+    let h = &cfg.hooks;
+    let foreground = !(h.on_start.is_empty() && h.on_session_start.is_empty() && h.on_session_end.is_empty() && h.on_stop.is_empty())
+        || cfg.sequence.notify.as_ref().is_some_and(|n| !n.cmd.is_empty());
+    let container = cfg.steps.keys().filter_map(|s| cfg.resolve_step(s).ok()).any(|s| s.isolation == crate::isolation::Isolation::Container);
+    if foreground && (container || !h.on_start.is_empty()) {
+        warnings.push(Problem::new(
+            "hooks",
+            "the network allow-list does not cover hooks that run on the host — `on_start` always, and \
+             every hook and `notify.cmd` on a `container` run: they keep the host's open network",
+        ));
+    }
+    if !h.background.is_empty() {
+        warnings.push(Problem::new("hooks.background", "`background` hooks are never confined — the network allow-list does not cover them"));
+    }
+}
+
+/// The agents whose CLI must be on the HOST's PATH, each at the first key that names it: every
+/// agent of a step that does not run in a container, and the ruler when anything it runs stays on
+/// the host (the summarizer always does; LLM judges do unless the run's judges are containerized).
+/// A container step's agent is the image's business instead ([`crate::isolation::probe`]).
+pub fn host_agents(cfg: &AggConfig, judges: &[Judge]) -> Vec<(String, String)> {
+    use crate::isolation::Isolation::Container;
+    let llm = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
+    let ruler_on_host = cfg.summary.enabled || (llm && cfg.run_isolation() != Container);
+    let step_on_host = |name: &str| {
+        // a project with no steps (a Rust driver's): the defaults are what it runs.
+        cfg.steps.is_empty() && cfg.defaults.agent == name
+            || cfg.steps.keys().filter_map(|s| cfg.resolve_step(s).ok()).any(|s| s.agent == name && s.isolation != Container)
+    };
+    crate::check::agent_sites(cfg)
+        .into_iter()
+        .filter(|(_, name)| step_on_host(name) || (ruler_on_host && &cfg.judge.agent == name))
+        .collect()
 }
 
 /// The demands ONE step makes of its worker agent.
@@ -168,6 +238,26 @@ fn step_demands(cfg: &AggConfig, step_name: &str, a: &mut Assessment) {
     // than let the run discover it: `worker.rs` would fail every session at spawn, and the
     // alternative (a silent downgrade to `none`) is a worker that thinks it is confined and is
     // not, which is exactly the blast radius this feature exists to bound.
+    // Read-only context dirs bind only where a wrapper delivers the deny: an unconfined step could
+    // write every one of them, so a run that names one refuses the step rather than pretend.
+    if !cfg.context.is_empty() && step.isolation == crate::isolation::Isolation::None {
+        problems.push(Problem::new(iso_at.clone(), format!(
+            "step `{step_name}` runs under `isolation: none`, but the run names `context:` \
+             directories — nothing would stop this step from writing them.\n      \
+             fix: `isolation: sandbox` or `isolation: container` on every step"
+        )));
+    }
+    // A network allow-list needs a tier that can enforce it, and the step's agent must still be
+    // able to reach its own model behind it.
+    if let Some(allow) = allow_list(cfg) {
+        let (on_tier, on_endpoint) = crate::isolation::egress::step_problems(step.isolation, b, &allow);
+        for m in on_tier {
+            problems.push(Problem::new(iso_at.clone(), format!("step `{step_name}` (agent `{agent}`) {m}")));
+        }
+        for m in on_endpoint {
+            problem::push_unique(problems, Problem::new("isolation_policy.network.allow", m));
+        }
+    }
     if step.isolation == crate::isolation::Isolation::Sandbox && !crate::isolation::available() {
         problems.push(Problem::new(iso_at.clone(), format!(
             "step `{step_name}` (agent `{agent}`): `isolation: sandbox` is set, but no OS \
@@ -280,7 +370,7 @@ mod tests {
              summary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work], limits: { cost: 5.0 } }\n",
         );
-        let err = check(&cfg, &[script_judge("g")]).unwrap_err().to_string();
+        let err = check(&cfg, &[script_judge("g")], Path::new(".")).unwrap_err().to_string();
         assert!(err.contains("limits.cost"), "must name the offending key:\n{err}");
         assert!(err.contains("spending real money"), "must say what breaks:\n{err}");
         assert!(err.contains("codex"), "must name the agent:\n{err}");
@@ -296,7 +386,7 @@ mod tests {
              summary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work], limits: { cost: 5.0 } }\n",
         );
-        check(&cfg, &[script_judge("g")])
+        check(&cfg, &[script_judge("g")], Path::new("."))
             .expect("copilot self-caps (--max-ai-credits), so an inert dollar guard only warns");
     }
 
@@ -311,7 +401,7 @@ mod tests {
              judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work] }\n",
         );
-        let err = check(&bad, &[script_judge("g")]).unwrap_err().to_string();
+        let err = check(&bad, &[script_judge("g")], Path::new(".")).unwrap_err().to_string();
         assert!(err.contains("model: auto"), "must name the offending pair:\n{err}");
         assert!(err.contains("0 tokens"), "must say what actually breaks:\n{err}");
 
@@ -321,14 +411,14 @@ mod tests {
              judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work] }\n",
         );
-        check(&auto_no_effort, &[script_judge("g")]).expect("`auto` with no effort is the default, and works");
+        check(&auto_no_effort, &[script_judge("g")], Path::new(".")).expect("`auto` with no effort is the default, and works");
 
         let named_model_with_effort = cfg_yaml(
             "project: p\ndefaults: { agent: copilot, model: claude-sonnet-4.5, effort: high }\n\
              judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work] }\n",
         );
-        check(&named_model_with_effort, &[script_judge("g")]).expect("a concrete model may carry an effort");
+        check(&named_model_with_effort, &[script_judge("g")], Path::new(".")).expect("a concrete model may carry an effort");
     }
 
     /// §7.3: the one-shot demand (an LLM judge / the summarizer) lands on the RULER, not the worker.
@@ -341,7 +431,7 @@ mod tests {
             "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
              summary: { enabled: true }\nsteps: { work: {} }\nsequence: { steps: [work] }\n",
         );
-        check(&cfg, &[llm_judge("rubric")]).expect("the ruler (claude) hosts the one-shot; the codex worker is irrelevant");
+        check(&cfg, &[llm_judge("rubric")], Path::new(".")).expect("the ruler (claude) hosts the one-shot; the codex worker is irrelevant");
     }
 
     /// Claude can do everything, so a full-featured config must pass cleanly.
@@ -352,7 +442,7 @@ mod tests {
              summary: { enabled: true }\nsteps: { work: {} }\n\
              sequence: { steps: [work], limits: { cost: 5.0, tokens: 10 } }\n",
         );
-        check(&cfg, &[llm_judge("rubric"), script_judge("build")]).expect("claude does it all");
+        check(&cfg, &[llm_judge("rubric"), script_judge("build")], Path::new(".")).expect("claude does it all");
     }
 
     /// A config that asks for nothing special runs on ANY agent, however limited.
@@ -362,7 +452,7 @@ mod tests {
             "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
              summary: { enabled: false }\nsteps: { work: {} }\nsequence: { steps: [work] }\n",
         );
-        check(&cfg, &[script_judge("g")]).expect("nothing demanded, nothing refused");
+        check(&cfg, &[script_judge("g")], Path::new(".")).expect("nothing demanded, nothing refused");
     }
 
     /// §7.3: the check is PER STEP. A mixed sequence — a claude step (reports dollars) and a codex
@@ -376,14 +466,14 @@ mod tests {
              steps: { plan: {}, build: { agent: codex } }\n\
              sequence: { steps: [plan, build], limits: { cost: 5.0 } }\n",
         );
-        let err = check(&cfg, &[script_judge("g")]).unwrap_err().to_string();
+        let err = check(&cfg, &[script_judge("g")], Path::new(".")).unwrap_err().to_string();
         assert!(err.contains("build"), "must name the codex STEP:\n{err}");
         assert!(err.contains("codex"), "must name the agent:\n{err}");
         assert!(!err.contains("step `plan`"), "the claude step reports dollars — it must NOT be flagged:\n{err}");
     }
 
     fn problem_paths(cfg: &AggConfig) -> Vec<String> {
-        assess(cfg, &[script_judge("g")]).problems.into_iter().map(|p| p.path).collect()
+        assess(cfg, &[script_judge("g")], Path::new(".")).problems.into_iter().map(|p| p.path).collect()
     }
 
     /// Every finding is located at the key an operator would edit: the step body when it sets the
@@ -422,11 +512,11 @@ mod tests {
     #[test]
     fn an_unknown_agent_is_located_and_check_bails_with_it_alone() {
         let cfg = cfg_yaml("project: p\njudge: { agent: robot }\nsteps: { w: { agent: droid } }\n");
-        let a = assess(&cfg, &[]);
+        let a = assess(&cfg, &[], Path::new("."));
         let at: Vec<&str> = a.unknown_agents.iter().map(|p| p.path.as_str()).collect();
         assert_eq!(at, ["judge.agent", "steps.w.agent"]);
         let cfg = cfg_yaml("project: p\njudge: { agent: robot }\n");
-        let err = check(&cfg, &[]).unwrap_err().to_string();
+        let err = check(&cfg, &[], Path::new(".")).unwrap_err().to_string();
         assert!(err.starts_with("unknown agent `robot`"), "{err}");
     }
 }

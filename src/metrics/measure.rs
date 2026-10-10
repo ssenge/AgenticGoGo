@@ -87,7 +87,7 @@ fn cache() -> std::sync::MutexGuard<'static, Vec<Entry>> {
 /// The shared measurement of `scope` for the judge in `c`: from the cache when this session's tree
 /// was measured already, else measured now (holding the cache, so two judges never measure twice).
 pub fn measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>) -> Result<Arc<Measured>, String> {
-    let scratch = crate::core::judge::scratch_path(c.cwd, c.session);
+    let scratch = crate::core::judge::scratch_path(c.cwd, c.session, crate::isolation::Isolation::None);
     let base = c.base.unwrap_or("HEAD");
     let families = only.map(|o| o.join(",")).unwrap_or_else(|| "*".into());
     let key = format!("{}|{}|{families}|{base}|{}", scratch.display(), scope.dir_name(), tree_key(c.cwd));
@@ -190,7 +190,7 @@ pub fn incumbent(cwd: &Path, scope: &Scope) -> Option<PathBuf> {
 /// Every scope measured in `session`'s scratch by THIS process replaces its incumbent, and a scope
 /// it did not measure is dropped (it describes an older tree). Returns what could not be kept.
 pub fn promote(cwd: &Path, session: Option<u32>) -> Vec<String> {
-    let scratch = crate::core::judge::scratch_path(cwd, session);
+    let scratch = crate::core::judge::scratch_path(cwd, session, crate::isolation::Isolation::None);
     let latest: Vec<(String, PathBuf)> = {
         let entries = cache();
         let mut seen: Vec<(String, PathBuf)> = Vec::new();

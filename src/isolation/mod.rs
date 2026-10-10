@@ -12,9 +12,11 @@
 //!
 //! # The policy
 //! `sandbox` gives the worker: **write = cwd (+subfolders) + `$TMPDIR` + the agent's own state
-//! dir; read = everything; network = open.** No egress policy — the owner wants full internet.
+//! dir; read = everything; network = open** — unless the run sets an egress allow-list
+//! (`isolation_policy.network`, [`egress`]), which narrows every confining tier to agg's proxy.
 //! `container` targets the same policy from the other side: the only host paths that exist inside
-//! the container are the ones bind-mounted, so read is confined too.
+//! the container are the ones bind-mounted, so read is confined too. The run-level additions —
+//! context dirs, the allow-list, what crosses into a container — come from [`policy`].
 //!
 //! # agg ALWAYS confines — no agent is exempt
 //! Under `sandbox` this module wraps EVERY agent, including Codex, which has a kernel sandbox of
@@ -43,7 +45,13 @@ mod imp;
 // The container tier is NOT cfg-split: one `docker run` argv works on every host that has an
 // engine (macOS reaches a Linux VM, which is the engine's problem, not ours).
 pub mod container;
-pub use container::{container_available, container_engine, containerize, DEFAULT_IMAGE};
+pub mod context;
+pub mod egress;
+pub mod policy;
+pub mod probe;
+pub mod run;
+pub mod runtime;
+pub use container::{container_available, container_engine, containerize, containerize_spec, Spec, DEFAULT_IMAGE};
 
 // Any OS that is neither Linux nor macOS has no wrapper. Both entry points fail LOUD — the whole
 // point of this feature is that an unavailable mechanism is refused, never silently ignored.
@@ -53,12 +61,36 @@ mod imp {
     pub fn available() -> bool {
         false
     }
-    pub fn build(_cwd: &Path, _writable: &[PathBuf], _denied: &[PathBuf], _rules: &[String], _prog: &std::ffi::OsStr, _args: &[std::ffi::OsString]) -> Result<Command> {
+    pub fn build(_jail: &Jail, _prog: &std::ffi::OsStr, _args: &[std::ffi::OsString]) -> Result<Command> {
         anyhow::bail!(
             "`isolation: sandbox` is not supported on this operating system — only Linux (bubblewrap) \
              and macOS (sandbox-exec) have an OS wrapper. Use `isolation: none`, or run on a supported OS."
         )
     }
+}
+
+/// Everything one OS-sandbox wrapper is told, resolved to canonical absolute paths.
+pub(crate) struct Jail<'a> {
+    /// the project dir — writable.
+    pub cwd: &'a Path,
+    /// extra writable paths (the agent's own state, a judge's scratch).
+    pub writable: &'a [PathBuf],
+    /// paths INSIDE the writable set that are write-denied ([`deny_set`]).
+    pub denied: &'a [PathBuf],
+    /// already-formed Seatbelt rules (the `write_deny` globs) — macOS only.
+    pub rules: &'a [String],
+    /// directories OUTSIDE the project that must stay read-only — the run's context dirs.
+    pub readonly: &'a [PathBuf],
+    /// the network allow-list's jail side: `None` = the network is open.
+    pub net: Option<NetRule>,
+}
+
+/// What a jail lets a process reach when the run has a network allow-list: TCP to agg's proxy on
+/// loopback, plus the loopback ports `localhost` entries grant. Everything else is denied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NetRule {
+    pub proxy_port: u16,
+    pub loopback: egress::allow::Loopback,
 }
 
 /// The per-step blast-radius isolation tier. `none` = direct subprocess (today); `sandbox` =
@@ -171,13 +203,48 @@ pub fn wrap_protected(
         writable.iter().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
 
     let (denies, rules) = protect_channels(&cwd_resolved, denies, protect)?;
-    let mut wrapped =
-        imp::build(&cwd_resolved, &writable, &deny_set(&cwd_resolved, &denies), &rules, &prog, &args)?;
+    // The RUN's policy, derived from the project dir like the carve-out is (see [`policy`]): every
+    // surface that confines — worker, judge, one-shot, hook — gets it without having to pass it.
+    let run = policy::for_dir(&cwd_resolved);
+    let readonly: Vec<PathBuf> = run.contexts.iter().map(|c| c.host.clone()).collect();
+    let net = match &run.egress {
+        None => None,
+        Some(e) => {
+            // Only Seatbelt can narrow the host network to one loopback port. Startup refuses
+            // this combination elsewhere; refusing here too means a caller that skipped the check
+            // gets an error, never an open network.
+            if !cfg!(target_os = "macos") {
+                anyhow::bail!(
+                    "a network allow-list cannot be enforced by `isolation: sandbox` on this OS — use \
+                     `isolation: container`, or `network: open`"
+                );
+            }
+            Some(NetRule { proxy_port: e.sandbox_port().map_err(anyhow::Error::msg)?, loopback: e.allow.loopback() })
+        }
+    };
+    let proxy_port = net.as_ref().map(|n| n.proxy_port);
+    let jail = Jail {
+        cwd: &cwd_resolved,
+        writable: &writable,
+        denied: &deny_set(&cwd_resolved, &denies),
+        rules: &rules,
+        readonly: &readonly,
+        net,
+    };
+    let mut wrapped = imp::build(&jail, &prog, &args)?;
     for (k, v) in envs {
         match v {
             Some(v) => wrapped.env(k, v),
             None => wrapped.env_remove(k),
         };
+    }
+    for (k, v) in run.context_env(Isolation::Sandbox) {
+        wrapped.env(k, v);
+    }
+    if let Some(port) = proxy_port {
+        for (k, v) in egress::proxy_env(&format!("http://127.0.0.1:{port}")) {
+            wrapped.env(k, v);
+        }
     }
     wrapped
         .current_dir(cwd)

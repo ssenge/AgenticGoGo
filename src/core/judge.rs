@@ -159,14 +159,19 @@ fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
 /// after the fact. Upgrade path when it bites: sweep this project's `agg-judges-<key>-*` on run end
 /// (`Agg::drop` / the loop's finalize), keeping the newest few.
 pub(crate) fn scratch_dir(cwd: &Path, session: Option<u32>) -> std::io::Result<std::path::PathBuf> {
-    let dir = scratch_path(cwd, session);
+    let dir = scratch_path(cwd, session, crate::isolation::Isolation::None);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
-/// Where [`scratch_dir`] puts a session's judge scratch, without creating it — what evidence
-/// persistence resolves a verdict's relative `evidence` paths against (`core::evidence`).
-pub fn scratch_path(cwd: &Path, session: Option<u32>) -> std::path::PathBuf {
+/// Where a judge on `tier` gets its session scratch, without creating it — what evidence
+/// persistence resolves a verdict's relative `evidence` paths against (`core::evidence`). Under
+/// `$TMPDIR` ([`scratch_dir`]), except in a container, where it must be somewhere the engine can see
+/// ([`crate::isolation::runtime::judge_scratch`]).
+pub fn scratch_path(cwd: &Path, session: Option<u32>, tier: crate::isolation::Isolation) -> std::path::PathBuf {
+    if tier == crate::isolation::Isolation::Container {
+        return crate::isolation::runtime::judge_scratch(cwd, session);
+    }
     std::env::temp_dir().join(format!("agg-judges-{}-{}", project_key(cwd), session.unwrap_or(0)))
 }
 
@@ -259,9 +264,18 @@ fn run_script(
         Ok(p) => p,
         Err(e) => return Verdict::failed(format!("judge script {}: {e}", path.display())),
     };
-    let (scratch, cache) = match (scratch_dir(cwd, session), cache_dir(cwd)) {
-        (Ok(s), Ok(c)) => (s, c),
-        (Err(e), _) | (_, Err(e)) => return Verdict::failed(format!("judge `{name}`: {e}")),
+    let dirs = if isolation == crate::isolation::Isolation::Container {
+        // in a container both live under the project (`agg/private/container/judge/`), where the
+        // engine can see them — see `crate::paths::container_dir`.
+        let s = crate::isolation::runtime::judge_scratch(cwd, session);
+        let c = crate::isolation::runtime::judge_cache(cwd);
+        std::fs::create_dir_all(&s).and_then(|_| std::fs::create_dir_all(&c)).map(|_| (s, c))
+    } else {
+        scratch_dir(cwd, session).and_then(|s| cache_dir(cwd).map(|c| (s, c)))
+    };
+    let (scratch, cache) = match dirs {
+        Ok(d) => d,
+        Err(e) => return Verdict::failed(format!("judge `{name}`: {e}")),
     };
     let mut command = Command::new(&abs);
     command
@@ -272,6 +286,13 @@ fn run_script(
         .env("AGG_JUDGE", name)
         .env("AGG_PROJECT_DIR", cwd);
     redirect_caches(&mut command, &scratch, &cache);
+    if isolation == crate::isolation::Isolation::None {
+        // a confining tier exports the run's context dirs itself (`wrap`/`containerize`); an
+        // unconfined judge (`agg judge`, a driver's baseline) still finds them by the same names.
+        for (k, v) in crate::isolation::policy::for_dir(cwd).context_env(isolation) {
+            command.env(k, v);
+        }
+    }
     if isolation == crate::isolation::Isolation::Sandbox {
         // `denies` = the whole project. Emitted AFTER the allow-list (`isolation/macos.rs`), so it
         // WINS over the `cwd` grant every wrapped command gets — which is the point: this judge may
@@ -284,6 +305,16 @@ fn run_script(
             // Loud, not silent: a judge that can't be confined must FAIL, never run unconfined and
             // reopen the escape. Mirrors worker.rs's spawn-failure path.
             Err(e) => return Verdict::failed(format!("could not sandbox judge {name}: {e}")),
+        }
+    }
+    if isolation == crate::isolation::Isolation::Container {
+        // §2.5 on the strongest tier: the judge runs in the judges' image, the project read-only,
+        // writing only its scratch + cache — the same rule as the sandbox's `denies = ["."]`. A
+        // container worker can rewrite `agg/judges/*.sh` in its bind-mounted tree; run on the host,
+        // that rewrite would be an escape (the residual this closes).
+        match crate::isolation::runtime::script_judge(command, cwd, &abs, &[scratch.clone(), cache.clone()]) {
+            Ok(c) => command = c,
+            Err(e) => return Verdict::failed(format!("could not containerize judge {name}: {e}")),
         }
     }
     match proc::run_with_timeout(command, timeout_secs) {

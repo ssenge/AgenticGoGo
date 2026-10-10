@@ -1,0 +1,50 @@
+#!/bin/sh
+# FAKE claude, inside the test image. Never prints a credential's VALUE — only whether it is set.
+for a in "$@"; do [ "$a" = "--version" ] && { echo "fake-claude-in-image 1.0.0"; exit 0; }; done
+fmt=""; prev=""
+for a in "$@"; do [ "$prev" = "--output-format" ] && fmt="$a"; prev="$a"; done
+incontainer() { [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; }
+
+if [ "$fmt" = "json" ]; then
+  # an LLM judge's one-shot, in the judges' image: the project is read-only to it.
+  {
+    incontainer && echo RULER_IN_CONTAINER
+    echo "ruler home=$HOME"
+    if echo x > ruler_probe 2>/dev/null; then echo RULER_PROJECT_WRITE_OK; else echo RULER_PROJECT_WRITE_DENIED; fi
+    [ -n "${ANTHROPIC_API_KEY:-}" ] && echo RULER_KEY_SEEN || echo RULER_KEY_ABSENT
+  } > "$HOME/oneshot.log" 2>&1
+  if [ -f src/work.txt ]; then
+    printf '{"result":"{\\"met\\":true,\\"value\\":1,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"IMAGE_RULER_MET\\"}"}\n'
+  else
+    printf '{"result":"{\\"met\\":false,\\"value\\":0,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"IMAGE_RULER_NOT_YET\\"}"}\n'
+  fi
+  exit 0
+fi
+
+# the WORKER
+mkdir -p src
+{
+  echo "--- session"
+  incontainer && echo WORKER_IN_CONTAINER
+  echo "uid=$(id -u)"
+  : > "$HOME/.w" 2>/dev/null && echo HOME_WRITABLE
+  if [ -f "$HOME/planted" ]; then echo HOME_SURVIVED; else echo HOME_FRESH; fi
+  : > "$HOME/planted"
+  [ -n "${ANTHROPIC_API_KEY:-}" ] && echo KEY_SEEN || echo KEY_ABSENT
+  [ -n "${AGG_TEST_PASSED:-}" ] && echo PASS_ENV_SEEN || echo PASS_ENV_ABSENT
+  [ -f "$HOME/.agg-test-cred/token" ] && echo CRED_FILE_SEEN || echo CRED_FILE_ABSENT
+  if echo x >> "$HOME/.agg-test-cred/token" 2>/dev/null; then echo CRED_WRITE_OK; else echo CRED_WRITE_DENIED; fi
+  [ -f /context/kb/index.md ] && echo CONTEXT_READ || echo CONTEXT_MISSING
+  if echo evil >> /context/kb/index.md 2>/dev/null; then echo CONTEXT_WRITE_OK; else echo CONTEXT_WRITE_DENIED; fi
+  if echo evil > tests/oracle.txt 2>/dev/null; then echo ORACLE_WRITE_OK; else echo ORACLE_WRITE_DENIED; fi
+  if echo forged >> agg/private/verdicts.jsonl 2>/dev/null; then echo PRIVATE_WRITE_OK; else echo PRIVATE_WRITE_DENIED; fi
+  if echo planted > agg/private/container/home/ruler/planted 2>/dev/null; then echo RULER_HOME_WRITE_OK; else echo RULER_HOME_WRITE_DENIED; fi
+  if [ -n "${AGG_TEST_EGRESS:-}" ]; then
+    if wget -q -T 5 -O /dev/null http://example.com/ 2>/dev/null; then echo EGRESS_OPEN; else echo EGRESS_BLOCKED; fi
+    [ -n "${HTTPS_PROXY:-}" ] && echo PROXY_SET
+  fi
+  [ -n "${AGG_TEST_TAMPER:-}" ] && printf '#!/bin/sh\ntouch %s\necho {\\"met\\":true,\\"value\\":2,\\"max\\":2,\\"target\\":2}\n' "$AGG_TEST_TAMPER" > agg/judges/done.sh
+} >> src/worker.log 2>&1
+echo "s" >> src/sessions.log
+echo done > src/work.txt
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
