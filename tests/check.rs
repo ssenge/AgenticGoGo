@@ -149,3 +149,80 @@ fn check_without_a_config_is_one_root_problem() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(problem_paths(&json(&out)), [""]);
 }
+
+// ── agg doctor --json ──────────────────────────────────────────────────────────────────────────
+
+/// A complete setup: ok, the fake agent found at its path with its version and capability flags,
+/// the other backends reported as absent, and this PATH-starved host offering only `none`.
+#[test]
+fn doctor_json_reports_backends_tiers_and_ok() {
+    let (tmp, path) = project(GOOD);
+    let dir = tmp.path();
+    let out = agg(dir, &path, &["doctor", "--json"]);
+    let v = json(&out);
+    assert_eq!(out.status.code(), Some(0), "{v:#}");
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["agg_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["config"]["valid"], true);
+    assert_eq!(v["config"]["judges"], 1);
+
+    let claude = &v["backends"][0];
+    assert_eq!(claude["name"], "claude");
+    assert_eq!((claude["used"].clone(), claude["installed"].clone()), (Value::Bool(true), Value::Bool(true)));
+    assert_eq!(claude["version"], "fake-claude 9.9.9");
+    assert_eq!(claude["path"], dir.join("bin/claude").display().to_string());
+    for flag in ["reports_output_tokens", "reports_cost_usd", "supports_resume", "supports_effort", "detects_rate_limits", "supports_one_shot"] {
+        assert!(claude["capabilities"][flag].is_boolean(), "capability `{flag}` must be reported");
+    }
+    let codex = &v["backends"][1];
+    assert_eq!((codex["name"].as_str(), codex["installed"].as_bool(), codex["used"].as_bool()), (Some("codex"), Some(false), Some(false)));
+    assert!(codex["path"].is_null() && codex["version"].is_null());
+
+    assert_eq!(v["isolation"]["none"]["available"], true);
+    assert_eq!(v["isolation"]["none"]["requested"], true);
+    assert_eq!(v["isolation"]["sandbox"]["available"], false, "no wrapper on this PATH");
+    assert_eq!(v["isolation"]["container"]["available"], false);
+    assert!(v["container_engine"].is_null());
+    assert!(!dir.join("judge_ran").exists() && !dir.join("agent_ran").exists(), "doctor must run nothing");
+}
+
+/// A requested tier the host lacks is a problem AT ITS KEY, and the tier says it was requested.
+#[test]
+fn doctor_json_flags_an_unavailable_requested_tier() {
+    let (tmp, path) = project(BAD_TIER);
+    let out = agg(tmp.path(), &path, &["doctor", "--json"]);
+    let v = json(&out);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["isolation"]["sandbox"]["requested"], true);
+    assert_eq!(problem_paths(&v), ["steps.worker.isolation"]);
+}
+
+/// Doctor adds the one check startup does not make: the forward state file exists.
+#[test]
+fn doctor_json_flags_a_missing_state_file_and_a_missing_config() {
+    let (tmp, path) = project(GOOD);
+    fs::remove_file(tmp.path().join("agg/state/STATE.md")).unwrap();
+    let v = json(&agg(tmp.path(), &path, &["doctor", "--json"]));
+    assert_eq!(problem_paths(&v), ["defaults.state"]);
+    assert_eq!(v["config"]["valid"], true, "a missing state file is not a config error");
+
+    let empty = tempfile::tempdir().unwrap();
+    let out = agg(empty.path(), &path, &["doctor", "--json"]);
+    let v = json(&out);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!((v["config"]["found"].as_bool(), v["ok"].as_bool()), (Some(false), Some(false)));
+}
+
+/// A container engine that answers is reported by name, and makes the container tier available.
+#[test]
+fn doctor_json_names_a_running_container_engine() {
+    let (tmp, path) = project(&GOOD.replace("steps: { worker: {} }", "steps: { worker: { isolation: \"container\" } }"));
+    write(tmp.path(), "bin/docker", "#!/bin/sh\nexit 0\n");
+    let out = agg(tmp.path(), &path, &["doctor", "--json"]);
+    let v = json(&out);
+    assert_eq!(out.status.code(), Some(0), "{v:#}");
+    assert_eq!(v["container_engine"], "docker");
+    assert_eq!(v["isolation"]["container"], serde_json::json!({ "available": true, "mechanism": "docker", "requested": true }));
+}

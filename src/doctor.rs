@@ -4,6 +4,16 @@ use crate::core::config::AggConfig;
 use anyhow::Result;
 use std::path::Path;
 
+mod json;
+pub use json::{report, BackendFacts, ConfigFacts, DoctorReport, Tier, Tiers};
+
+/// `agg doctor --json`: print the [`DoctorReport`] and return its `ok`.
+pub fn run_json(config_base: &Path, config: &Path) -> Result<bool> {
+    let r = report(config_base, config);
+    println!("{}", serde_json::to_string_pretty(&r)?);
+    Ok(r.ok)
+}
+
 pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
     eprintln!("agg doctor — checking your setup in {}\n", dir.display());
     eprintln!("  config dir: {}/", crate::paths::CONFIG_DIR);

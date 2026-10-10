@@ -44,7 +44,12 @@ enum Cmd {
     },
     /// Diagnose your setup (the agent is on PATH and can do what your config asks, config
     /// parses, conditions valid, skills installed).
-    Doctor,
+    Doctor {
+        /// emit a versioned JSON report: every backend (installed, path, version, capability
+        /// flags), the isolation tiers this host offers, and every problem with its config path.
+        #[arg(long)]
+        json: bool,
+    },
     /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
     Plan,
     /// Print the JSON Schema of agg.yaml, generated from the config types agg parses into.
@@ -267,7 +272,11 @@ fn run_cli() -> Result<ExitCode> {
 
     match &cli.cmd {
         Cmd::Init { agent, force } => init::run(&p.dir, *force, agent.as_deref()),
-        Cmd::Doctor => doctor::run(&p.dir, &p.config_base, &p.config),
+        Cmd::Doctor { json: false } => doctor::run(&p.dir, &p.config_base, &p.config),
+        Cmd::Doctor { json: true } => {
+            let ok = doctor::run_json(&p.config_base, &p.config)?;
+            return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
+        }
         Cmd::Check { json } => {
             let ok = agg::check::run(&p.config_base, &p.config, *json)?;
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
