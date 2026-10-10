@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/wiki_lint.v1.json",
+  "title": "agg wiki lint result, schema_version 1",
+  "description": "`agg wiki lint [PATH] --json`: OKF v0.2 conformance of a knowledge wiki (default: the project's agg/state/wiki/). Exit 0 when `ok`, 1 on any problem or when PATH does not exist. Read-only: the lint writes nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "ok",
+    "wiki",
+    "exists",
+    "files",
+    "concepts",
+    "problems",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "no problems; warnings do not count"
+    },
+    "wiki": {
+      "type": "string",
+      "description": "the directory that was checked"
+    },
+    "exists": {
+      "type": "boolean",
+      "description": "false when the default wiki does not exist yet (then ok is true and nothing was checked)"
+    },
+    "files": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "markdown files checked, index.md and log.md included"
+    },
+    "concepts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "of those, concept documents (every .md that is not a reserved filename)"
+    },
+    "problems": {
+      "type": "array",
+      "description": "OKF §11 conformance violations",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "producer guidance (OKF §5) that a consumer must not reject a concept over",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "line",
+        "rule",
+        "message"
+      ],
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "relative to the wiki root, `/`-separated"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "1-based; null when the finding is about the file or a frontmatter key"
+        },
+        "rule": {
+          "type": "string",
+          "description": "a stable rule id, e.g. frontmatter.missing, type.empty, index.entry, log.order, status.unknown"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

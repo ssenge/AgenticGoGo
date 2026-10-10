@@ -56,6 +56,7 @@ pub mod state;
 pub mod summary;
 pub mod usage;
 pub mod util;
+pub mod wiki;
 
 /// Everything a Rust driver needs from one `use agg::prelude::*;`.
 ///

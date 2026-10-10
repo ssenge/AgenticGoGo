@@ -4,7 +4,8 @@ Real `--output-format json` output, recorded from live CLIs. These exist so a fu
 written and tested against **observed** field paths instead of documentation — which, for Copilot,
 turned out to be wrong on three counts (see `backend.rs`).
 
-Recording one costs real quota. Diff against these first.
+Recording one costs real quota. Diff against these first. How to record one, and what a backend
+must test against it: `docs/BACKENDS.md` ("Recorded fixtures").
 
 | file | produced by |
 |---|---|
