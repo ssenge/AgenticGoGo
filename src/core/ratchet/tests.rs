@@ -226,3 +226,49 @@ fn the_state_round_trips_through_agg_private() {
     assert!(crate::paths::gate_json(tmp.path()).starts_with(crate::paths::private_dir(tmp.path())));
     assert_eq!(load(tmp.path()), Some(g.state));
 }
+
+/// `improved` mirrors `regressed`: the GOOD way beyond the allowance, in both directions — noise
+/// inside the tolerance is no more an improvement than it is a regression.
+#[test]
+fn improved_is_better_beyond_tolerance() {
+    let down = Ratchet::down(0.5);
+    assert!(down.improved(10.0, 9.4), "lower is better: -0.6 is beyond 0.5");
+    assert!(!down.improved(10.0, 9.5), "exactly the tolerance is noise");
+    assert!(!down.improved(10.0, 11.0), "worse is never an improvement");
+    let up = Ratchet::up(0.0);
+    assert!(up.improved(71.0, 71.5));
+    assert!(!up.improved(0.3, 0.1 + 0.2), "float noise is not an improvement");
+}
+
+/// The gate's list: only ratcheted judges with a reference and a graded number can improve.
+#[test]
+fn the_gate_lists_the_ratcheted_judges_that_improved() {
+    let mut g = gate(&[("cc", Ratchet::down(0.5)), ("cov", Ratchet::up(1.0)), ("fresh", Ratchet::up(0.0))]);
+    g.state.refs.insert("cc".into(), 10.0);
+    g.state.refs.insert("cov".into(), 70.0);
+    let rows = fresh(&[
+        ("cc", val(9.0)),                      // improved
+        ("cov", val(70.5)),                    // within tolerance
+        ("fresh", val(5.0)),                   // no reference yet
+        ("other", val(1.0)),                   // not ratcheted
+    ]);
+    assert_eq!(g.improved(&rows), vec!["cc".to_string()]);
+    assert!(g.improved(&fresh(&[("cc", Verdict::failed("boom"))])).is_empty(), "an error never improves");
+}
+
+/// A `NoImprovement` gate is not a rollback: neither counter moves and no reference moves, but the
+/// signature is still recorded (the session still showed where the worker went).
+#[test]
+fn a_no_improvement_gate_counts_for_no_rollback_and_moves_no_reference() {
+    let mut g = gate(&[("cc", Ratchet::down(0.0).baseline(10.0))]);
+    g.record(GateDecision::RolledBack, &fresh(&[("cc", val(11.0))]), &[], sig(&["cc"]));
+    g.record(GateDecision::NoImprovement, &fresh(&[("cc", val(10.0))]), &[], sig(&[]));
+    assert_eq!((g.state.rollbacks, g.state.consecutive_rollbacks), (1, 1), "neither extended nor broken");
+    assert_eq!((g.state.no_improvements, g.state.consecutive_no_improvements), (1, 1));
+    assert_eq!(g.state.reference("cc"), Some(10.0), "a no_improvement value never becomes the reference");
+    g.record(GateDecision::RolledBack, &fresh(&[("cc", val(11.0))]), &[], sig(&["cc"]));
+    assert_eq!(g.state.consecutive_no_improvements, 1, "a rollback does not break the no_improvement streak");
+    g.record(GateDecision::Kept, &fresh(&[("cc", val(9.0))]), &[], sig(&[]));
+    assert_eq!((g.state.no_improvements, g.state.consecutive_no_improvements, g.state.consecutive_rollbacks), (1, 0, 0));
+    assert_eq!(g.state.signatures.len(), 4);
+}

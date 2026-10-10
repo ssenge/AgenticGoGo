@@ -34,6 +34,10 @@ pub enum Outcome {
     /// a `skip_judges` span's verdicts while it is unmerged (§5.7/§5.8). Re-appended as `merged`
     /// when the span later merges; readers of "was met" and `stalled` ignore `staged` rows.
     Staged,
+    /// `sequence.merge_requires_improvement` refused the merge: nothing regressed and nothing
+    /// improved. The work did not land, so "was met" ignores it; `stalled` counts it as a step in
+    /// which nothing moved.
+    NoImprovement,
 }
 
 /// One line in `verdicts.jsonl`: a [`Verdict`] flattened into an envelope with the fields a

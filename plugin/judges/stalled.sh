@@ -10,7 +10,10 @@
 #
 # K is hardcoded (library judges are parameterless — §5.1); a project overrides K by shadowing
 # this file in agg/judges/stalled.sh. Only `merged` rows count — a rolled-back step's churn was
-# undone and must not read as progress-or-stall.
+# undone and must not read as progress-or-stall — with ONE exception: a `no_improvement` step
+# (`sequence.merge_requires_improvement` refused it) is a step in which NOTHING MOVED, by the gate's
+# own verdict. It joins the window carrying the state of the step before it, so K sessions in a row
+# that improve nothing read as a stall.
 set -u
 DIR="${AGG_PROJECT_DIR:-.}"
 LOG="$DIR/agg/private/verdicts.jsonl"
@@ -25,8 +28,9 @@ except OSError:
     print('{"met":false,"target":1,"rationale":"no verdicts.jsonl yet — nothing to stall on"}')
     sys.exit(0)
 
-# ordered list of merged steps, each a dict judge -> (met, value); skip our own rows.
-steps = []           # list of ((session, step), {judge: (met, value_or_None)})
+# ordered list of merged (and no_improvement) steps, each a dict judge -> (met, value); skip our own
+# rows. A no_improvement step is recorded as None and filled below.
+steps = []           # list of [(session, step), {judge: (met, value_or_None)} or None]
 index = {}
 for ln in lines:
     ln = ln.strip()
@@ -36,15 +40,24 @@ for ln in lines:
         r = json.loads(ln)
     except ValueError:
         continue
-    if r.get("outcome") != "merged":
+    outcome = r.get("outcome")
+    if outcome not in ("merged", "no_improvement"):
         continue
     if r.get("judge") == "stalled":
         continue
     key = (r.get("session"), r.get("step"))
     if key not in index:
         index[key] = len(steps)
-        steps.append((key, {}))
-    steps[index[key]][1][r["judge"]] = (bool(r.get("met")), r.get("value", None))
+        steps.append([key, {} if outcome == "merged" else None])
+    if outcome == "merged":
+        steps[index[key]][1][r["judge"]] = (bool(r.get("met")), r.get("value", None))
+
+# a no_improvement step carries the state of the step before it: nothing moved.
+prev = {}
+for s in steps:
+    if s[1] is None:
+        s[1] = dict(prev)
+    prev = s[1]
 
 window = [s for (_, s) in steps][-K:]
 if len(window) < K:

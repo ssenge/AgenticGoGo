@@ -289,6 +289,8 @@ impl<'a> Parser<'a> {
             // reads as a run that has gated nothing yet.
             "rollbacks" => Val::Num(c.gate.map_or(0, |g| g.state.rollbacks) as f64),
             "consecutive_rollbacks" => Val::Num(c.gate.map_or(0, |g| g.state.consecutive_rollbacks) as f64),
+            "no_improvements" => Val::Num(c.gate.map_or(0, |g| g.state.no_improvements) as f64),
+            "consecutive_no_improvements" => Val::Num(c.gate.map_or(0, |g| g.state.consecutive_no_improvements) as f64),
             "oscillating" => Val::Bool(c.gate.is_some_and(|g| g.oscillating())),
             "ratchet_regressed" => Val::Bool(c.gate.is_some_and(|g| g.state.ratchet_regressed())),
             // otherwise: a judge name -> its met bool. GoalBool, not Bool: comparing it to a number
@@ -305,7 +307,7 @@ impl<'a> Parser<'a> {
     pub(super) fn resolve_accessor(&self, base: &str, field: &str) -> Result<Val> {
         // The gate's numbers are TERMS, not judges, so they have no accessor. Refused with the
         // spelling that works rather than aliased: one way to write each thing.
-        if matches!(base, "rollbacks" | "consecutive_rollbacks") {
+        if matches!(base, "rollbacks" | "consecutive_rollbacks" | "no_improvements" | "consecutive_no_improvements") {
             bail!("`{base}` is a built-in number, not a judge — compare it directly: `{base} >= 2`, not `{base}.{field}`");
         }
         let goal = match self.ctx.judge(base) {

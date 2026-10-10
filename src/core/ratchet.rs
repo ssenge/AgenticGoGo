@@ -1,5 +1,6 @@
 //! The numeric RATCHET and the gate's own history — `rollbacks`, `consecutive_rollbacks`,
-//! `oscillating`, `ratchet_regressed`, `<judge>.ref`.
+//! `no_improvements`, `consecutive_no_improvements`, `oscillating`, `ratchet_regressed`,
+//! `<judge>.ref`.
 //!
 //! # Why these are process-internal terms, not judges
 //!
@@ -101,6 +102,17 @@ impl Ratchet {
         };
         worse > self.allowance(reference) + 1e-9 * reference.abs().max(1.0)
     }
+
+    /// Did `now` move the GOOD way from `reference` by more than the allowance? The mirror of
+    /// [`Self::regressed`] — what `merge_requires_improvement` counts as a ratcheted improvement, so
+    /// noise inside the tolerance is no more an improvement than it is a regression.
+    pub fn improved(&self, reference: f64, now: f64) -> bool {
+        let better = match self.direction {
+            Direction::Up => now - reference,
+            Direction::Down => reference - now,
+        };
+        better > self.allowance(reference) + 1e-9 * reference.abs().max(1.0)
+    }
 }
 
 /// One ratchet regression, as the gate recorded it: the judge, the reference it was held to, and
@@ -120,6 +132,9 @@ pub enum GateDecision {
     Kept,
     /// the regression policy discarded it.
     RolledBack,
+    /// `merge_requires_improvement` refused it: nothing regressed, but nothing improved either. Not
+    /// a rollback — it neither counts for `rollbacks` nor extends or breaks the streak.
+    NoImprovement,
     /// nothing was decided (no changes, a veto, a conflict).
     Nothing,
 }
@@ -143,6 +158,12 @@ pub struct GateState {
     /// rollbacks since the last kept gate.
     #[serde(default)]
     pub consecutive_rollbacks: u32,
+    /// sessions `merge_requires_improvement` refused this run — never counted as rollbacks.
+    #[serde(default)]
+    pub no_improvements: u32,
+    /// no_improvement gates since the last kept gate. A rollback neither extends nor breaks it.
+    #[serde(default)]
+    pub consecutive_no_improvements: u32,
     /// one signature per judged gate, oldest first: the sorted names of the judges that were
     /// failing (see [`signature`]).
     #[serde(default)]
@@ -278,6 +299,19 @@ impl Gate {
             .collect()
     }
 
+    /// The ratcheted judges among `fresh` that IMPROVED on their reference beyond tolerance. One with
+    /// no reference yet, an error or no number cannot show an improvement.
+    pub fn improved(&self, fresh: &[(String, Verdict)]) -> Vec<String> {
+        fresh
+            .iter()
+            .filter(|(name, v)| {
+                let (Some(spec), Some(r)) = (self.specs.get(name), self.state.reference(name)) else { return false };
+                finite(v).filter(|_| v.error.is_none()).is_some_and(|now| spec.improved(r, now))
+            })
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// Fold one gate into the state: counters, the signature history, and — on a KEEP — the new
     /// references. `fresh` empty = no judge ran, so there is no signature to record.
     pub fn record(
@@ -291,6 +325,7 @@ impl Gate {
         match decision {
             GateDecision::Kept => {
                 st.consecutive_rollbacks = 0;
+                st.consecutive_no_improvements = 0;
                 for (name, v) in fresh.iter().filter(|(n, _)| self.specs.contains_key(n)) {
                     if let Some(now) = finite(v).filter(|_| v.error.is_none()) {
                         st.refs.insert(name.clone(), now);
@@ -300,6 +335,10 @@ impl Gate {
             GateDecision::RolledBack => {
                 st.rollbacks += 1;
                 st.consecutive_rollbacks += 1;
+            }
+            GateDecision::NoImprovement => {
+                st.no_improvements += 1;
+                st.consecutive_no_improvements += 1;
             }
             GateDecision::Nothing => {}
         }
