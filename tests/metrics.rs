@@ -44,10 +44,10 @@ case "$cmd" in
     id=$(cat "{BIN}/schema-id-$1" 2>/dev/null || echo "swe-metrics/$1/v1")
     printf '{"$id": "%s"}\n' "$id"; exit 0 ;;
   measure)
-    target=$1; shift; out=; det=
-    while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift ;; --details) det=$2; shift ;; esac; shift; done
-    [ -f "$target/fake-report.json" ] || { echo "no fake-report.json in $target" >&2; exit 2; }
-    cp "$target/fake-report.json" "$out"
+    target=$1; shift; out=; det=; src=fake-report.json
+    while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift ;; --details) det=$2; shift ;; --changed-since) [ -f "$target/fake-changed.json" ] && src=fake-changed.json; shift ;; esac; shift; done
+    [ -f "$target/$src" ] || { echo "no $src in $target" >&2; exit 2; }
+    cp "$target/$src" "$out"
     mkdir -p "$det"; echo '{"runs":[]}' > "$det/gitleaks.sarif"
     exit 0 ;;
   score)
@@ -378,6 +378,60 @@ fn a_changed_scope_measures_since_the_base_branch() {
     assert_eq!(measures.iter().filter(|m| m.contains("--changed-since main")).count(), 2, "{measures:?}");
 }
 
+/// A `--changed-since` report of the cyclomatic family: lizard either measured `cc` or had nothing to
+/// measure (`files` changed, none of them code), or `status`/`reason` say otherwise.
+fn changed_report(files: u64, lizard: (&str, &str), cc: Option<f64>) -> Value {
+    let rows = match cc {
+        Some(v) => json!([row("complexity.cyclomatic", "lizard", "lower_better", json!({"stats": {"count": 1, "sum": v, "mean": v, "p50": v, "p95": v, "max": v}}))]),
+        None => json!([]),
+    };
+    json!({"schema": "swe-metrics/report/v1",
+           "subject": {"target": ".", "kind": "repository", "commit": null, "changed_since": "main", "files": files, "languages": {}},
+           "analyzers": [analyzer("lizard", "lizard", lizard.0, lizard.1, &["size", "complexity"])],
+           "metrics": rows, "details": []})
+}
+
+const NEW_CC: &str = "  new_cc: { metric: { id: \"complexity.cyclomatic\", stat: \"max\", tool: \"lizard\", scope: \"changed\" }, max: 3 }\n";
+
+/// "New code must be clean" with no new code in scope is VACUOUSLY met — and a vacuous met moves
+/// nothing at the gate: unmet (measured) → vacuously met is NO improvement for
+/// `merge_requires_improvement`, so that session is not merged.
+#[test]
+fn a_vacuous_changed_scope_pass_is_met_but_no_improvement() {
+    let p = Project::new(&["cp '{BIN}/docs-only.json' fake-changed.json"], true);
+    write(&p.dir, "fake-report.json", &report(6.0).to_string());
+    write(&p.dir, "fake-changed.json", &changed_report(1, ("ran", ""), Some(9.0)).to_string());
+    p.stage_report("docs-only.json", &changed_report(1, ("skipped", "no applicable files"), None));
+    p.config(NEW_CC, "  done_if: \"feature AND new_cc\"\n  merge_requires_improvement: true\n");
+    p.commit();
+    let (code, out) = p.agg(&["run", "--max-sessions", "1"]);
+    assert_eq!(code, Some(4), "{out}");
+    let rows = rows_for(&p.dir, "new_cc", false);
+    assert_eq!((rows[0].value, rows[0].met, rows[0].vacuous), (Some(9.0), false, false), "baseline: measured, unmet");
+    let s1 = &rows[1];
+    assert_eq!((s1.value, s1.met, s1.vacuous, s1.error.as_deref()), (None, true, true, None), "{}", s1.rationale);
+    assert!(s1.rationale.contains("no changed files in scope for lizard"), "{}", s1.rationale);
+    assert_eq!(s1.outcome, Outcome::NoImprovement, "a vacuous pass is not progress:\n{out}");
+}
+
+/// Fail closed stays for REAL failures in the changed scope: a failed analyzer errors even though no
+/// file changed, and so does a skip for any reason but "no applicable files".
+#[test]
+fn a_failed_or_otherwise_skipped_analyzer_in_the_changed_scope_still_errors() {
+    for (status, reason, files) in [("failed", "lizard is not installed", 0), ("skipped", "no SAST rules given (--sast-rules)", 2)] {
+        let p = Project::new(&["true"], true);
+        write(&p.dir, "fake-report.json", &report(6.0).to_string());
+        write(&p.dir, "fake-changed.json", &changed_report(files, (status, reason), None).to_string());
+        p.config(NEW_CC, "  done_if: \"feature\"\n  invariants: [new_cc]\n");
+        p.commit();
+        let (_, out) = p.agg(&["run", "--max-sessions", "1"]);
+        for (_, _, value, met, err) in p.rows("new_cc") {
+            assert!(!met && value.is_none(), "{status}: {out}");
+            assert!(err.as_deref().unwrap_or_default().contains(reason), "{status}: {err:?}");
+        }
+    }
+}
+
 /// `combine: all` — two tools moving in DIFFERENT directions are no improvement for the ratchet,
 /// even when the reported (strictest) value got better; `strictest` counts the same move.
 #[test]
@@ -424,6 +478,60 @@ fn a_ratchet_against_the_metrics_direction_errors() {
 
 // ── the REAL swe-metrics ───────────────────────────────────────────────────────────────────────
 
+/// Is the real swe-metrics on the inherited PATH? Prints why a test is skipped when not.
+fn real_swe_metrics() -> bool {
+    let ok = Command::new("swe-metrics").args(["schema", "report"]).output().map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
+        eprintln!("SKIPPED: `swe-metrics` is not on PATH — install it (github.com/ssenge/swe-metrics) to run this test");
+    }
+    ok
+}
+
+/// Run `agg run --max-sessions <n>` with the REAL swe-metrics on PATH (the fake worker first).
+fn run_real(p: &Project, sessions: &str) -> (Option<i32>, String) {
+    let out = Command::cargo_bin("agg")
+        .unwrap()
+        .current_dir(&p.dir)
+        .env("PATH", format!("{}:{}", p.bin.display(), std::env::var("PATH").unwrap_or_default()))
+        .env("HOME", p.dir.join(".home"))
+        .args(["run", "--max-sessions", sessions])
+        .output()
+        .unwrap();
+    (out.status.code(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+}
+
+/// Against the REAL swe-metrics, a `scope: changed` code-metric judge: the baseline pass (nothing
+/// changed) and a session that touches only docs are VACUOUSLY met; a session that changes code is
+/// measured as before (a 5-decision function: cyclomatic 6 > 3).
+#[test]
+fn the_real_changed_scope_is_vacuous_without_changed_code_and_measured_with_it() {
+    if !real_swe_metrics() {
+        return;
+    }
+    let p = Project::new(
+        &[
+            "echo more >> README.md",
+            "printf 'def worse(a):\\n    if a > 1:\\n        a += 1\\n    if a > 2:\\n        a += 2\\n    if a > 3:\\n        a += 3\\n    if a > 4:\\n        a += 4\\n    if a > 5:\\n        a += 5\\n    return a\\n' >> calc.py",
+        ],
+        false,
+    );
+    write(&p.dir, "calc.py", "def add(a, b):\n    return a + b\n");
+    write(&p.dir, "README.md", "# Fixture\n");
+    p.config(NEW_CC, "  done_if: \"feature\"\n  invariants: [new_cc]\n");
+    p.commit();
+    let (code, out) = run_real(&p, "2");
+    assert_eq!(code, Some(4), "{out}");
+    let rows = rows_for(&p.dir, "new_cc", false);
+    assert_eq!(rows.len(), 3, "{out}");
+    for (r, what) in [(&rows[0], "the baseline pass (nothing changed)"), (&rows[1], "a docs-only session")] {
+        assert!(r.met && r.vacuous && r.value.is_none() && r.error.is_none(), "{what}: {} {:?}", r.rationale, r.error);
+        assert!(r.rationale.contains("no changed files in scope for lizard"), "{what}: {}", r.rationale);
+    }
+    let code_row = &rows[2];
+    assert_eq!((code_row.value, code_row.met, code_row.vacuous), (Some(6.0), false, false), "{} {:?}", code_row.rationale, code_row.error);
+}
+
+
 const CALC: &str = "\"\"\"A small calculator with one branchy function.\"\"\"\n\n\ndef classify(n):\n    \"\"\"Classify a number.\"\"\"\n    if n < 0:\n        return \"negative\"\n    if n == 0:\n        return \"zero\"\n    if n < 10:\n        return \"small\"\n    if n < 100:\n        return \"medium\"\n    return \"large\"\n\n\ndef add(a, b):\n    \"\"\"Add two numbers.\"\"\"\n    return a + b\n";
 
 const REPORT_A: &str = "\"\"\"Report A.\"\"\"\n\n\ndef render(rows):\n    \"\"\"Render rows as text.\"\"\"\n    lines = []\n    for row in rows:\n        name = row.get(\"name\", \"\")\n        value = row.get(\"value\", 0)\n        unit = row.get(\"unit\", \"\")\n        label = f\"{name}: {value} {unit}\".strip()\n        lines.append(label.upper())\n        lines.append(\"-\" * len(label))\n    total = sum(r.get(\"value\", 0) for r in rows)\n    lines.append(f\"total: {total}\")\n    return \"\\n\".join(lines)\n";
@@ -434,9 +542,7 @@ const REPORT_A: &str = "\"\"\"Report A.\"\"\"\n\n\ndef render(rows):\n    \"\"\"
 /// thresholds imply; the swe-default score of it is a number in 0..=100.
 #[test]
 fn the_real_swe_metrics_measures_a_fixture_with_known_values() {
-    let real = Command::new("swe-metrics").args(["schema", "report"]).output();
-    if !real.map(|o| o.status.success()).unwrap_or(false) {
-        eprintln!("SKIPPED: `swe-metrics` is not on PATH — install it (github.com/ssenge/swe-metrics) to run this test");
+    if !real_swe_metrics() {
         return;
     }
     let p = Project::new(&["true"], false);
@@ -452,18 +558,8 @@ fn the_real_swe_metrics_measures_a_fixture_with_known_values() {
         "  done_if: \"feature\"\n  invariants: [cc_max, cc_p95, clones, dup_pct, quality]\n",
     );
     p.commit();
-    // the real tool on PATH, the fake worker first.
-    let real_path = format!("{}:{}", p.bin.display(), std::env::var("PATH").unwrap_or_default());
-    let out = Command::cargo_bin("agg")
-        .unwrap()
-        .current_dir(&p.dir)
-        .env("PATH", real_path)
-        .env("HOME", p.dir.join(".home"))
-        .args(["run", "--max-sessions", "1"])
-        .output()
-        .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert_eq!(out.status.code(), Some(4), "{text}");
+    let (code, text) = run_real(&p, "1");
+    assert_eq!(code, Some(4), "{text}");
     let baseline = |j: &str| rows_for(&p.dir, j, false).into_iter().next().unwrap_or_else(|| panic!("no row for {j}:\n{text}"));
     let cc_max = baseline("cc_max");
     assert_eq!((cc_max.value, cc_max.met), (Some(5.0), false), "classify: 4 decisions + 1 = 5 > 4: {}", cc_max.rationale);

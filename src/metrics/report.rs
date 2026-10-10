@@ -26,12 +26,31 @@ pub const REPORT_SCHEMA: &str = "swe-metrics/report/v1";
 pub struct Report {
     pub schema: String,
     #[serde(default)]
+    pub subject: Option<Subject>,
+    #[serde(default)]
     pub analyzers: Vec<Analyzer>,
     #[serde(default)]
     pub metrics: Vec<Row>,
     #[serde(default)]
     pub details: Vec<Detail>,
 }
+
+/// What was measured.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Subject {
+    /// set when only the files changed since this Git ref were measured (`--changed-since`).
+    #[serde(default)]
+    pub changed_since: Option<String>,
+    /// how many files were measured.
+    #[serde(default)]
+    pub files: Option<u64>,
+}
+
+/// The reason swe-metrics' runner gives an analyzer that found no file it applies to
+/// (`runner/measure.py`). There is no reason CODE in the report, so this exact constant is the
+/// signal; if swe-metrics ever words it differently, [`nothing_to_measure`] stops matching and the
+/// judge errors again — it fails closed, never open.
+pub const NO_APPLICABLE_FILES: &str = "no applicable files";
 
 /// One analyzer's run.
 #[derive(Debug, Clone, Deserialize)]
@@ -220,6 +239,30 @@ pub fn select(report: &Report, sel: &Selector) -> Result<Vec<ToolValue>, String>
     Ok(values)
 }
 
+/// For a `--changed-since` report: the analyzers that had NOTHING TO MEASURE for this selection —
+/// `Some(ids)` only when no target row of the metric exists, every analyzer of its family (of its
+/// `tool`, if named) was SKIPPED (none ran, none failed), and either no file changed at all
+/// (`subject.files == 0`, the structural signal) or each of them gave exactly
+/// [`NO_APPLICABLE_FILES`]. Anything else — a failure, a missing tool, a skip for a missing
+/// prerequisite, an analyzer that ran but reported no value — is `None`: a real measurement failure.
+pub fn nothing_to_measure(report: &Report, sel: &Selector) -> Option<Vec<String>> {
+    let subject = report.subject.as_ref()?;
+    subject.changed_since.as_ref()?;
+    if report.metrics.iter().any(|r| r.id == sel.id && r.scope.level == "target") {
+        return None;
+    }
+    let fam = family(&sel.id);
+    let mine: Vec<&Analyzer> = report.analyzers_of(fam, sel.tool.as_deref()).collect();
+    // a FAILED sibling fails closed even when the judge names its tool's (skipped) analyzer.
+    if mine.is_empty() || report.analyzers_of(fam, None).any(|a| a.status == "failed") {
+        return None;
+    }
+    let skipped = mine.iter().all(|a| a.status == "skipped");
+    let none_applicable =
+        subject.files == Some(0) || mine.iter().all(|a| a.reason.as_deref() == Some(NO_APPLICABLE_FILES));
+    (skipped && none_applicable).then(|| mine.iter().map(|a| a.id.clone()).collect())
+}
+
 /// `lizard skipped: no applicable files` for each analyzer of `family` (and `tool`) that did not run.
 fn not_ran(report: &Report, family: &str, tool: Option<&str>) -> Vec<String> {
     report.analyzers_of(family, tool).filter(|a| a.status != "ran").map(reason).collect()
@@ -388,6 +431,37 @@ pub(crate) mod tests {
         let py = Selector { labels: vec![("language".into(), vec!["python".into()])], ..both };
         let v = select(&r, &py).unwrap();
         assert_eq!(v.iter().map(|t| (t.tool.as_str(), t.value)).collect::<Vec<_>>(), [("a", 1.0), ("b", 3.0)]);
+    }
+
+    /// A `--changed-since` report in which the metric's analyzers had nothing to measure.
+    fn changed(files: u64, analyzers: &[(&str, &str, &str, &[&str])]) -> Report {
+        let mut r = report(analyzers, serde_json::json!([]));
+        r.subject = Some(Subject { changed_since: Some("main".into()), files: Some(files) });
+        r
+    }
+
+    /// Nothing to measure in the changed set — nothing changed, or only files no analyzer of the
+    /// family applies to — is told apart from every real failure.
+    #[test]
+    fn nothing_to_measure_is_only_no_applicable_changed_files() {
+        let s = Selector { stat: Some(Stat::P95), ..sel("complexity.cyclomatic") };
+        let none = |r: &Report| nothing_to_measure(r, &s);
+        let skip = |id| (id, "skipped", NO_APPLICABLE_FILES, CX);
+        assert_eq!(none(&changed(0, &[skip("lizard"), skip("complexipy")])), Some(vec!["lizard".into(), "complexipy".into()]));
+        assert_eq!(none(&changed(3, &[skip("lizard")])), Some(vec!["lizard".into()]), "only docs changed");
+        // nothing changed at all: the structural signal holds whatever the reason text.
+        assert!(none(&changed(0, &[("lizard", "skipped", "worded differently", CX)])).is_some());
+        // …but with files changed, only the runner's exact reason counts.
+        assert_eq!(none(&changed(3, &[("lizard", "skipped", "no SAST rules given", CX)])), None);
+        assert_eq!(none(&changed(3, &[("lizard", "skipped", "No applicable files.", CX)])), None, "exact, not fuzzy");
+        assert_eq!(none(&changed(0, &[skip("lizard"), ("complexipy", "failed", "complexipy is not installed", CX)])), None);
+        assert_eq!(none(&changed(3, &[("lizard", "ran", "", CX)])), None, "it ran and reported nothing: absent");
+        assert_eq!(none(&changed(0, &[])), None, "no analyzer of the family at all");
+        let mut whole = changed(0, &[skip("lizard")]);
+        whole.subject.as_mut().unwrap().changed_since = None;
+        assert_eq!(none(&whole), None, "only a changed-scope measurement can be vacuous");
+        let named = Selector { tool: Some("lizard".into()), ..s.clone() };
+        assert!(nothing_to_measure(&changed(0, &[skip("lizard"), ("complexipy", "failed", "boom", CX)]), &named).is_none());
     }
 
     #[test]

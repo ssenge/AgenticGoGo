@@ -493,7 +493,7 @@ mod tests {
             rationale: String::new(),
             evidence: vec![],
             error: None,
-            mixed: false,
+            mixed: false, vacuous: false,
         });
         j
     }
@@ -510,7 +510,7 @@ mod tests {
             rationale: rationale.into(),
             evidence: vec![],
             error: None,
-            mixed: false,
+            mixed: false, vacuous: false,
         });
         j
     }
@@ -810,7 +810,7 @@ mod tests {
             rationale: rationale.into(),
             evidence: vec![],
             error: None,
-            mixed: false,
+            mixed: false, vacuous: false,
         });
         j
     }

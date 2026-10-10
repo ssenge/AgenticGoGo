@@ -30,7 +30,7 @@ fn g(id: &str, met: bool, invariant: bool) -> Judge {
         rationale: String::new(),
         evidence: vec![],
         error: None,
-        mixed: false,
+        mixed: false, vacuous: false,
     });
     goal
 }
@@ -38,7 +38,7 @@ fn g(id: &str, met: bool, invariant: bool) -> Judge {
 fn regressed(id: &str, invariant: bool) -> Judge {
     let mut goal = g(id, true, invariant);
     // flip to not-met -> regressed
-    goal.apply(Verdict { met: false, value: Some(0.0), max: Some(1.0), target: 1.0, rationale: String::new(), evidence: vec![], error: None, mixed: false });
+    goal.apply(Verdict { met: false, value: Some(0.0), max: Some(1.0), target: 1.0, rationale: String::new(), evidence: vec![], error: None, mixed: false, vacuous: false });
     assert!(goal.regressed());
     goal
 }
@@ -306,7 +306,7 @@ fn scored(id: &str, value: f64, max: f64) -> Judge {
         rationale: String::new(),
         evidence: vec![],
         error: None,
-        mixed: false,
+        mixed: false, vacuous: false,
     });
     goal
 }
@@ -415,7 +415,7 @@ fn a_measured_zero_is_distinct_from_no_number() {
     numberless.apply(Verdict {
         met: true, value: None, max: None, target: 1.0,
         rationale: String::new(), evidence: vec![], error: None,
-        mixed: false,
+        mixed: false, vacuous: false,
     });
     let numberless = [numberless];
     assert!(!ev("coverage.value == 0", &numberless));

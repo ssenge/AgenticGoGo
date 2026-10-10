@@ -15,7 +15,10 @@
     moving in different directions are no improvement for the ratchet (the verdict's new optional
     `mixed` field).
   - `scope: changed` measures only the files changed since the base branch; a sub-path scope measures a
-    directory of the project.
+    directory of the project. With no changed file the analyzer applies to (nothing changed, or only
+    docs), the judge is vacuously met (`met: true`, no `value`, the verdict's new optional `vacuous`
+    field) — no improvement, no regression, and not a "was met" reading at the gate. Real failures in
+    the changed scope still error.
   - A score is computed against the incumbent's report (`agg/private/metrics/incumbent/`); a score
     capped by a failed gate names the gates; a definition/version mismatch is refused; a `null` score is
     an error with the score's notes; a changed definition resets the ratchet reference on `--resume`.

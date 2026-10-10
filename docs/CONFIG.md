@@ -220,9 +220,20 @@ the metric's analyzer was skipped (`trivy skipped: no applicable files`) or fail
 jscpd is not installed`), or nothing reported the metric. One more rule, because the report does not
 say which analyzer measures which metric: when a judge names no `tool`, ANY failed analyzer of the
 metric's family errors the judge (it may be the one whose value is missing) — name the `tool:` to rely
-on that tool alone. A consequence worth knowing: `scope: changed` measures nothing in a session that
-changed no file the analyzer applies to, so its judge errors there (and on the baseline pass) — which
-is why a ratchet on a `scope: changed` judge is refused.
+on that tool alone.
+
+**`scope: changed` with no changed code is vacuously met.** "New code must be clean" with no new code
+is not a measurement failure. When the session (or the baseline pass) changed no file the metric's
+analyzer applies to — nothing changed at all (`subject.files: 0`), or only files no analyzer of the
+family takes (a docs-only session: each one skipped with exactly swe-metrics' `no applicable files`) —
+the verdict is `met: true` with no `value`, `"vacuous": true`, and the rationale `no changed files in
+scope for lizard`. A vacuous pass **moves nothing at the gate**: it is no improvement (unmet → vacuous
+met does not satisfy `merge_requires_improvement`), no regression, and not a reading the next session
+is compared against. Fail closed stays for everything else in the changed scope: a failed analyzer, a
+missing tool, a skip for any other reason (a missing prerequisite), an analyzer that ran on changed
+files but reported no value. (swe-metrics has no skip reason CODE, so the docs-only case matches its
+reason text exactly; were it ever reworded, the judge would error again — closed, never open.) A
+ratchet on a `scope: changed` judge is refused: it would compare different files every session.
 
 **`score:` — swe-metrics' quality score.** `swe-metrics score` (0–100) of the session's shared report,
 by `definition` — `swe-default` (shipped with swe-metrics), a `.py` file (relative to `agg/`, or
@@ -1227,8 +1238,10 @@ A judge prints a **verdict JSON** to stdout (agg reads the *last* JSON object, s
   "target":    80,          // optional — presentational only
   "rationale": "one line",  // optional — shown on the dashboard
   "evidence":  ["…"],       // optional — files the verdict cites; agg KEEPS a copy (see Evidence)
-  "mixed":     false        // optional — true: the judge's own measurements moved in different
+  "mixed":     false,       // optional — true: the judge's own measurements moved in different
                             //   directions, so a ratchet does not count this as an improvement
+  "vacuous":   false        // optional — true: met because there was nothing to measure; moves
+                            //   nothing at the gate (no improvement, no regression, not "was met")
 }
 ```
 
