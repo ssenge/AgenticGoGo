@@ -562,4 +562,15 @@ mod tests {
         let cfg = cfg_with("  abort_if: \"goal >= \"\n");
         assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.abort_if"]);
     }
+
+    /// The ratchet refusals are located like every other: at the ratchet's own key, at
+    /// `oscillation_window`, and a `.ref` on an unratcheted judge at the expression using it.
+    #[test]
+    fn ratchet_problems_are_located() {
+        let tmp = base_with_judges(&["goal", "cc"]);
+        let cfg = cfg_with("  ratchet: { cc: { direction: up, tolerance: -1 } }\n  oscillation_window: 1\n");
+        assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.ratchet.cc", "sequence.oscillation_window"]);
+        let cfg = cfg_with("  abort_if: \"goal.ref > 1\"\n");
+        assert_eq!(refused_paths(&cfg, tmp.path()), ["sequence.abort_if"]);
+    }
 }
