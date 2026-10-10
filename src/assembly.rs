@@ -15,7 +15,7 @@ pub struct Assembly {
 
 /// Build the run-set engine + validate the sequence from `cfg` (§5.3/§5.4). Refuses at startup:
 /// an unknown step name, an all-`skip_judges` sequence (nothing could ever merge), an unbounded or
-/// zero repetition, or a judge name that resolves to no file.
+/// zero repetition, a judge name that resolves to no file, or a ratchet that cannot mean anything.
 ///
 /// # The DRIVER variant (BUILD.md §3.6)
 ///
@@ -120,6 +120,23 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
         }
     }
 
+    // A RATCHETED judge joins the run-set on the same terms as an `until:` judge: it must EXECUTE
+    // every judged step or there is no value to hold to its reference — and it stays OUT of the
+    // DoD-set, because the ratchet is a gate rule, not a goal. On the driver path judges are lazy
+    // and named by the driver, so the ratchet is kept but nothing joins a run-set.
+    for (name, spec) in &cfg.sequence.ratchet {
+        spec.validate(name)?;
+        if !driver {
+            push_unique(&mut run_set, name);
+        }
+    }
+    if cfg.sequence.oscillation_window < 2 {
+        anyhow::bail!(
+            "sequence.oscillation_window must be >= 2 — an A→B→A repeat needs two earlier sessions to look back over, got {}",
+            cfg.sequence.oscillation_window
+        );
+    }
+
     // resolve every run-set name to a judge FILE (§5.1) — a name with no file is a startup error.
     let mut judges_vec: Vec<Judge> = Vec::with_capacity(run_set.len());
     for name in &run_set {
@@ -151,11 +168,12 @@ pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
         );
     }
 
-    let engine = Engine::new(
+    let engine = Engine::with_gate(
         judges_vec,
         done_if,
         cfg.sequence.abort_if.clone(),
         cfg.sequence.notify_if.clone(),
+        crate::core::ratchet::Gate::new(cfg.sequence.ratchet.clone(), cfg.sequence.oscillation_window),
     )?;
     Ok(Assembly { engine, steps: cfg.sequence.steps.clone() })
 }
@@ -205,7 +223,7 @@ mod tests {
     fn assemble_err(cfg: &AggConfig, base: &Path) -> String {
         match assemble(cfg, base) {
             Ok(_) => panic!("assemble was expected to REFUSE this config, but it succeeded"),
-            Err(e) => e.to_string(),
+            Err(e) => format!("{e:#}"),
         }
     }
 
@@ -339,6 +357,40 @@ mod tests {
         let cfg = cfg_with("  notify_if: \"ghost_detector\"\n  notify: { cmd: [\"true\"] }\n");
         let err = assemble_err(&cfg, tmp.path());
         assert!(err.contains("ghost_detector"), "the error must NAME the unresolvable judge, got: {err}");
+    }
+
+    /// A RATCHETED judge must EXECUTE every judged step (or there is nothing to hold to its
+    /// reference), so it joins the run-set — and it is a gate rule, not a goal, so it stays out of
+    /// the DoD-set. `.ref` is accepted on it and refused on anything else, at startup.
+    #[test]
+    fn a_ratcheted_judge_joins_the_run_set_but_never_the_dod() {
+        let tmp = base_with_judges(&["goal", "cc"]);
+        let cfg = cfg_with("  ratchet: { cc: { direction: down, tolerance: 0.5 } }\n  abort_if: \"cc.ref > 100 OR rollbacks >= 2\"\n");
+        let asm = assemble(&cfg, tmp.path()).expect("a ratcheted judge must assemble");
+        let cc = asm.engine.judges.iter().find(|g| g.name == "cc").expect("`cc` must be in the run-set");
+        assert!(!cc.in_dod, "a ratchet is a gate rule, not a goal");
+        assert!(asm.engine.gate.is_ratcheted("cc"));
+        assert_eq!(asm.engine.tally(), (0, 1));
+
+        let err = assemble_err(&cfg_with("  abort_if: \"goal.ref > 1\"\n"), tmp.path());
+        assert!(err.contains("has no ratchet"), "`.ref` on an unratcheted judge is a startup error: {err}");
+    }
+
+    /// The refusals: a ratchet naming no judge file, a meaningless tolerance, a missing direction,
+    /// an unknown key, and an oscillation window too short to hold A→B→A.
+    #[test]
+    fn a_ratchet_that_cannot_mean_anything_is_refused_at_startup() {
+        let tmp = base_with_judges(&["goal", "cc"]);
+        let err = assemble_err(&cfg_with("  ratchet: { ghost: { direction: up } }\n"), tmp.path());
+        assert!(err.contains("ghost"), "{err}");
+        let err = assemble_err(&cfg_with("  ratchet: { cc: { direction: up, tolerance: -1 } }\n"), tmp.path());
+        assert!(err.contains("tolerance"), "{err}");
+        let err = assemble_err(&cfg_with("  oscillation_window: 1\n"), tmp.path());
+        assert!(err.contains("oscillation_window"), "{err}");
+        for bad in ["  ratchet: { cc: { tolerance: 1 } }\n", "  ratchet: { cc: { direction: up, best: true } }\n"] {
+            let body = format!("project: p\nsteps: {{ worker: {{}} }}\nsequence:\n  steps: [worker]\n  done_if: \"goal\"\n{bad}");
+            assert!(serde_yaml::from_str::<AggConfig>(&body).is_err(), "deny_unknown_fields / required direction: {bad}");
+        }
     }
 
     /// The §12.7 validity matrix, all four cells. Row 3 is the trap: `notify:` ALONE is not a

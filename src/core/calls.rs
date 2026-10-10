@@ -66,7 +66,20 @@ pub enum CallRecord {
     /// ⛔ REQUIRED, and not merely for symmetry: it is the truncate boundary. Without a Gate record
     /// [`truncate_to_base`] has no record kind to search for and the OD-12 rule is unimplementable
     /// against its own schema — a resumed gate would re-execute a real merge.
-    Gate { ord: u64, label: String, outcome: GateOutcome, ts: u64 },
+    ///
+    /// `gate` is the gate's own state AS OF this gate (`core::ratchet`: the ratchet references, the
+    /// rollback counts, the oscillation history). A resume restores it from the last replayed gate,
+    /// which is exactly the truncation point — `agg/private/gate.json` alone may be AHEAD of it, by
+    /// the rollbacks of gates that were dropped and will re-execute. Absent in a ledger written
+    /// before the ratchet existed; such a resume starts the gate state fresh.
+    Gate {
+        ord: u64,
+        label: String,
+        outcome: GateOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gate: Option<crate::core::ratchet::GateState>,
+        ts: u64,
+    },
     Note { ord: u64, label: String, level: NoteLevel, msg: String, ts: u64 },
     /// A human ask and the answer it got (`internal/HUMAN_LOOP.md` §4.7).
     ///
@@ -307,7 +320,24 @@ mod tests {
         }
     }
     fn gate(ord: u64, outcome: GateOutcome) -> CallRecord {
-        CallRecord::Gate { ord, label: "g".into(), outcome, ts: 1 }
+        CallRecord::Gate { ord, label: "g".into(), outcome, gate: None, ts: 1 }
+    }
+
+    /// The gate's state rides on its Gate record and survives the round trip; a record written
+    /// before the field existed still parses, with no state.
+    #[test]
+    fn a_gate_record_carries_the_gate_state() {
+        let d = tmp("gatestate");
+        let state = crate::core::ratchet::GateState { rollbacks: 2, ..Default::default() };
+        let rec = CallRecord::Gate { ord: 0, label: "g".into(), outcome: GateOutcome::RolledBack, gate: Some(state.clone()), ts: 1 };
+        append(&d, &rec).unwrap();
+        match &load(&d).unwrap()[0] {
+            CallRecord::Gate { gate, .. } => assert_eq!(gate.as_ref(), Some(&state)),
+            other => panic!("expected a gate record, got {other:?}"),
+        }
+        let old: CallRecord =
+            serde_json::from_str(r#"{"kind":"gate","ord":1,"label":"g","outcome":"Kept","ts":1}"#).unwrap();
+        assert!(matches!(old, CallRecord::Gate { gate: None, .. }));
     }
 
     /// A ledger round-trips, in order, through a real file.

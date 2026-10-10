@@ -22,6 +22,7 @@
 //!       state.json          live dashboard snapshot (loop writes, `agg dashboard` reads)
 //!       project.json        persistent run-history ledger (lifetime sessions/tokens)
 //!       verdicts.jsonl      append-only, safety-critical GATE record — one line per verdict (§5.8)
+//!       gate.json           the gate's own state: ratchet references, rollback/oscillation history
 //!       bus/{in,out}/       operator↔loop command bus; bus/log.jsonl audit
 //!       run.pid             the live loop's pid (double-run guard + `agg stop` target)
 //!       run.log             detached-loop log (`agg run --detach`)
@@ -124,6 +125,16 @@ pub fn calls_jsonl(dir: &Path) -> PathBuf {
     private_dir(dir).join("calls.jsonl")
 }
 
+/// The gate's own state: `agg/private/gate.json` (`core::ratchet`) — the ratchet references and the
+/// rollback / oscillation history behind `ratchet_regressed`, `<judge>.ref`, `rollbacks`,
+/// `consecutive_rollbacks` and `oscillating`.
+///
+/// Private because those terms may sit in `abort_if`: a worker able to rewrite this file could lower
+/// its own ratchet references or zero its rollback count, which is exactly "change when the loop ends".
+pub fn gate_json(dir: &Path) -> PathBuf {
+    private_dir(dir).join("gate.json")
+}
+
 /// The append-only human-ask ledger: `<dir>/agg/private/asks.jsonl`.
 ///
 /// AGG-OWNED, like `verdicts.jsonl` and for the same reason: an ask's *request* may be
@@ -210,6 +221,8 @@ mod tests {
         // a ledger HIT skips work and returns a recorded verdict — a worker able to append here
         // could make agg fabricate both. Strictly stronger than the verdicts.jsonl case.
         assert_eq!(calls_jsonl(d), Path::new("/proj/agg/private/calls.jsonl"));
+        // the ratchet references and the rollback count back `abort_if` terms.
+        assert_eq!(gate_json(d), Path::new("/proj/agg/private/gate.json"));
         assert_eq!(bus_dir(d), Path::new("/proj/agg/private/bus"));
         assert_eq!(state_json(d), Path::new("/proj/agg/private/state.json"));
         assert_eq!(project_json(d), Path::new("/proj/agg/private/project.json"));
@@ -219,7 +232,7 @@ mod tests {
 
         // and the carve-out must actually CONTAIN the private files, or the sandbox deny (which is
         // one subpath rule) would confine nothing.
-        for p in [verdicts_jsonl(d), calls_jsonl(d), bus_dir(d), state_json(d), run_pid(d)] {
+        for p in [verdicts_jsonl(d), calls_jsonl(d), gate_json(d), bus_dir(d), state_json(d), run_pid(d)] {
             assert!(p.starts_with(private_dir(d)), "{} must live under the carve-out", p.display());
         }
     }

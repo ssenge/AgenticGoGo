@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::loop_::{AGGState, AGGScratch, Flow, Handler, LoopState, LifecycleEvent, RunOutcome, indent};
 use crate::core::engine::{CycleResult, GoalRuntime};
 use crate::core::model::Verdict;
+use crate::core::ratchet::{GateDecision, RatchetRegression};
 use crate::core::verdicts::Outcome;
 use crate::git::StagedSession;
 
@@ -67,7 +68,8 @@ impl Handler for GateKeepRollback {
         // ⚠ This is exactly the half the DRIVER path spells differently (BUILD.md §3.5 item 5:
         // every judge asked since the last gate, no DoD scope), which is why it lives HERE and not
         // in the shared body below.
-        let regressed = matches!(staged, Some((_, StagedSession::Staged))) && {
+        let is_staged = matches!(staged, Some((_, StagedSession::Staged)));
+        let regressed = is_staged && {
             let landed = crate::core::verdicts::landed_met(&ctx.dir);
             res.fresh_verdicts.iter().any(|(id, v)| {
                 ctx.eng.judges.iter().any(|g| g.in_dod && &g.name == id)
@@ -76,13 +78,27 @@ impl Handler for GateKeepRollback {
                     && landed.get(id).copied().unwrap_or(false)
             })
         };
+        // the numeric half: a ratcheted value that moved the wrong way beyond its tolerance. Only a
+        // staged merge is held to it — a no-change session graded base itself.
+        let ratchet = if is_staged { ctx.eng.gate.check(&res.fresh_verdicts) } else { Vec::new() };
+        // the DoD-set, scoped exactly as the boolean rule above: a detector flipping is not a state.
+        let signature = crate::core::ratchet::signature(
+            &res.fresh_verdicts,
+            |n| ctx.eng.judges.iter().any(|g| g.in_dod && g.name == n),
+            &ratchet,
+        );
+        let judged = Judged { fresh: &res.fresh_verdicts, regressed: regressed || !ratchet.is_empty(), ratchet, signature };
 
-        let gated = keep_or_rollback(ctx, staged.as_ref(), &res.fresh_verdicts, regressed, &pre_cycle_goals)?;
-        if gated != Gated::Merged {
+        let gated = keep_or_rollback(ctx, staged.as_ref(), judged, &pre_cycle_goals)?;
+        let rs = ctx.run_state();
+        if gated == Gated::Merged {
+            // the verdicts stand, but the GATE just moved its own state (the rollback streak, the
+            // ratchet references, the oscillation history), so the terms that read it are re-read.
+            ctx.eng.reevaluate(&rs, &mut res);
+        } else {
             // nothing landed: the judged verdicts describe base, not a merge, so re-derive the
             // conditions against RESTORED base truth. `NotifyOnStuck` runs after this handler, so it
             // flags what was kept, never what was rolled back.
-            let rs = ctx.run_state();
             let recomputed = ctx.eng.conditions_only(&rs);
             res = CycleResult {
                 stop: recomputed.stop,
@@ -102,6 +118,20 @@ impl Handler for GateKeepRollback {
     fn name(&self) -> &'static str {
         "GateKeepRollback"
     }
+}
+
+/// What the caller judged about the span, handed to [`keep_or_rollback`]. Each path computes it its
+/// own way (DoD-scoped on the YAML path, every judge asked on the driver path); the body that acts
+/// on it is shared.
+pub(crate) struct Judged<'a> {
+    /// the verdicts the gate decides on (and appends to `verdicts.jsonl`).
+    pub fresh: &'a [(String, Verdict)],
+    /// the span regressed — the boolean rule OR the ratchet.
+    pub regressed: bool,
+    /// the ratchet regressions among `fresh` (marked on their ledger rows).
+    pub ratchet: Vec<RatchetRegression>,
+    /// this gate's judge-state signature, for `oscillating`.
+    pub signature: Vec<String>,
 }
 
 /// What [`keep_or_rollback`] did with the span.
@@ -131,10 +161,10 @@ pub(crate) enum Gated {
 pub(crate) fn keep_or_rollback(
     ctx: &mut LoopState,
     staged: Option<&(String, StagedSession)>,
-    fresh: &[(String, Verdict)],
-    regressed: bool,
+    judged: Judged<'_>,
     pre_goals: &[GoalRuntime],
 ) -> Result<Gated> {
+    let Judged { fresh, regressed, ratchet, signature } = judged;
     let step_name = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
     // The `verdicts::append` `?` below is a HARD disk Err that bubbles out to the caller (R7) — the
     // gate's "was met" reads this file, so a swallowed write would silently un-arm the next gate.
@@ -143,7 +173,11 @@ pub(crate) fn keep_or_rollback(
             let keep = if ctx.gate_regressions { !regressed } else { true };
             crate::git::finalize_session(&ctx.dir, br, ctx.session, keep);
             let tag = if keep { Outcome::Merged } else { Outcome::RolledBack };
-            crate::core::verdicts::append(&ctx.dir, Some(ctx.session), &step_name, fresh, tag)?;
+            crate::core::verdicts::append_marked(&ctx.dir, Some(ctx.session), &step_name, fresh, tag, &ratchet)?;
+            for line in crate::core::ratchet::describe(&ratchet) {
+                let what = if keep { "kept (gate_regressions: false)" } else { "rolling back" };
+                eprintln!("  ⚠ {line} — beyond tolerance, {what}");
+            }
             // the whole span merged with this branch (it descends from every other one), or was
             // discarded with it. Either way the span is closed.
             clear_span(ctx, Some(br));
@@ -191,6 +225,16 @@ pub(crate) fn keep_or_rollback(
             Gated::NotStaged
         }
     };
+    // The gate's own state moves HERE, in the shared body, so both paths count a rollback, extend
+    // the oscillation history and move the ratchet references identically — and persist it before
+    // anything can read it back.
+    let decision = match out {
+        Gated::Merged => GateDecision::Kept,
+        Gated::RolledBack => GateDecision::RolledBack,
+        Gated::NotStaged => GateDecision::Nothing,
+    };
+    ctx.eng.gate.record(decision, fresh, &ratchet, signature);
+    crate::core::ratchet::save(&ctx.dir, &ctx.eng.gate.state)?;
     ctx.publish();
     Ok(out)
 }
