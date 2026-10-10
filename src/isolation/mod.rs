@@ -43,7 +43,7 @@ mod imp;
 // The container tier is NOT cfg-split: one `docker run` argv works on every host that has an
 // engine (macOS reaches a Linux VM, which is the engine's problem, not ours).
 pub mod container;
-pub use container::{container_available, containerize, DEFAULT_IMAGE};
+pub use container::{container_available, container_engine, containerize, DEFAULT_IMAGE};
 
 // Any OS that is neither Linux nor macOS has no wrapper. Both entry points fail LOUD — the whole
 // point of this feature is that an unavailable mechanism is refused, never silently ignored.
