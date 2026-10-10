@@ -64,7 +64,7 @@ mod imp {
 /// The per-step blast-radius isolation tier. `none` = direct subprocess (today); `sandbox` =
 /// kernel-enforced FS confinement; `container` = the command runs inside a container.
 /// Deserialized from the lowercase tier name in agg.yaml.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Isolation {
     /// Direct subprocess, no confinement — full host blast radius (today's behaviour).
