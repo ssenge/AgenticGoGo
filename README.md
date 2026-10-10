@@ -275,6 +275,8 @@ Run from the project root. Full detail in [docs/GUIDE.md](docs/GUIDE.md).
 | `agg status` | Live scoreboard, read from state; cheap, does not re-judge |
 | `agg dashboard` | Live TUI, or a one-shot snapshot with `--once` |
 | `agg doctor` | Check the chosen agent is installed and the config is valid for it |
+| `agg check` | Validate the config as `agg run` startup would, listing every problem at once (`--json`) |
+| `agg schema` | Print the JSON Schema of `agg.yaml` |
 | `agg judge <name>` | Run one judge and print its verdict, for authoring and debugging |
 | `agg history` | Run history and lifetime totals |
 | `agg send` | Steer a **running** workflow: `inject`, `pause`, `resume`, `budget`, `stop`, `note`. Refused if none is running |
