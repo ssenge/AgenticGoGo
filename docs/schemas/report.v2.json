@@ -613,6 +613,13 @@
             "null"
           ],
           "description": "set when the judge could not grade at all"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "absolute paths of the evidence files agg kept for this verdict, under paths.evidence_dir; omitted when none were kept"
         }
       }
     },
