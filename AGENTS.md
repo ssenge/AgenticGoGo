@@ -39,11 +39,17 @@ commands are purged at start — a queue does not outlive the workflow it was me
 in `bus::queue_command`, which every channel goes through; it used to be decided separately by the
 CLI and the web API, and they disagreed. An ANSWER is not a send: it is a durable fact written to
 `agg/private/asks.jsonl` (`agg answer` / `POST /api/answer`), so it works with nothing running.
+The loop drains the bus at each session boundary AND every second during a RATE-LIMIT WAIT
+(`features/backoff.rs`) — a waiting loop is a running workflow: `wake`/`resume` end the wait (no sooner
+than `ratelimit_min_gap_secs`, default 60, after the limited attempt), `stop` ends the run (exit 5), every
+other command is re-queued for the next boundary. `wake` outside a wait is a no-op.
 
 ## CLI (run from the project root)
 - `agg init [--agent claude|codex|copilot] [--force]` — scaffold `agg.yaml` + `AGG.md` + `state/STATE.md` + a starter judge.
 - `agg plan` — dry run: evaluate every judge once, print the starting scoreboard.
-- `agg run [--max-sessions N] [--detach] [--report-json] [--base-branch <ref>]` — run the loop until `done_if`/`abort_if`.
+- `agg run [--max-sessions N] [--detach] [--report-json] [--base-branch <ref>] [--resume]` — run the loop until `done_if`/`abort_if`.
+  `--resume` continues the last interrupted run: same `run_id`, session counter (next session = n+1),
+  ratchet state and call ledger — truncated back to the last KEPT gate (`features/resume.rs`).
   Every ending writes `agg/private/report.json` (`outcome` done|aborted|stopped|error — authoritative;
   schema `docs/schemas/report.v1.json`). `--report-json`: logs → `agg/private/run.log`, stdout = the report only.
   Exit codes: 0 done · 3 abort_if · 4 max-sessions · 5 stopped (agg stop / SIGTERM / SIGINT) · 1 error.
@@ -57,7 +63,8 @@ CLI and the web API, and they disagreed. An ANSWER is not a send: it is a durabl
 - `agg schema` — print the agg.yaml JSON Schema (generated from the config types; cannot drift).
 - `agg judge <name>` — run ONE judge and print its verdict (author/debug a judge).
 - `agg history [--json]` — run history + lifetime totals.
-- `agg send inject "<text>" | pause | resume | budget <n> | stop | note "<text>"` — steer a RUNNING loop.
+- `agg send inject "<text>" | pause | resume | wake | budget <n> | stop | note "<text>"` — steer a RUNNING loop.
+  `wake` ends a rate-limit wait now (`resume` does too while waiting).
 - `agg stop` — graceful stop (alias of `send stop`).
 - `agg spawn --name <n> --reason "<why>" -- <cmd…>` — a long task that outlives one worker session.
 - `agg skills install [--agent <a>] [--user]` — install the `/agg:*` skills where the agent finds them.
@@ -171,7 +178,8 @@ agg/state/                   GITIGNORED runtime state THE WORKER WRITES (agg rea
 agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of the sandbox's writable set
   INSTRUCTIONS.md              the worker's whole `-p` (agg REGENERATES it every session; the worker's ORDERS)
   LOG.md                       durable institutional memory (worker's input arrives sanitized via sessions/)
-  verdicts.jsonl  gate.json  state.json  project.json  bus/  run.{pid,log}
+  verdicts.jsonl  gate.json  calls.jsonl  clock.json  state.json  project.json  bus/  run.{pid,log}
+  waits.jsonl                  every rate-limit wait: start (agent, until, partial ref) + how it ended
   report.json                  the end-of-run report — the STABLE interface for embedders (src/report/)
   violations.jsonl  protected/   write_deny: the rollback record + agg's copies to restore from
 ```
@@ -210,7 +218,9 @@ src/core/ratchet.rs   the numeric ratchet + the gate's own history (rollbacks, o
                       state (`eng.gate`), moved ONLY in `features::gate::keep_or_rollback` — the body
                       both front ends share — and persisted to `agg/private/gate.json` + driver
                       `Gate` call records (what `--resume` restores).
-src/core/calls.rs     `agg/private/calls.jsonl` — the DRIVER CALL ledger that makes `--resume` work.
+src/core/calls.rs     `agg/private/calls.jsonl` — the CALL ledger that makes `--resume` work (the driver's
+                      calls; on the YAML path one `step` row per session + one `gate` row per judged one,
+                      the step's label carrying the walk position — `features/resume.rs`).
                       Fast-forward is sound only back to the last KEPT gate (OD-12): everything after
                       it is parked on per-run span branches the ledger cannot carry.
 src/assembly.rs       builds the run-set: `done_if ∪ abort_if ∪ invariants ∪ every until: ∪ ratchet keys`.
@@ -237,6 +247,12 @@ facade publishes its own into `dash.judges`. Tests: `tests/driver_api.rs`, `test
 - **Gate before any commit:** `cargo build` (0 warnings) · `cargo test` · `cargo clippy --all-targets -- -D warnings` · `bash scripts/e2e.sh` (~12 min).
 - **Run `cargo test` / e2e OUTSIDE the sandbox** (they SIGKILL processes + bind sockets; a sandboxed e2e gives false failures). If `rtk` rewrites cargo output, use `rtk proxy cargo …`.
 - **THE MOAT — never break it:** gitignore ONLY `agg/state/` + `agg/private/`, NEVER all of `agg/`. The judges must stay committed so a rollback can restore a grader a worker tampered with.
+  The same entries go to `.git/info/exclude` (`git::ensure_agg_excluded`): a rollback can delete an
+  uncommitted-on-base `.gitignore`, never `info/exclude`.
+- **A session cut short (rate limit, Ctrl-C, `agg stop` mid-session) is INCOMPLETE — never judged, never
+  lost:** its work goes to `refs/agg/partial/<run>/<session>` and the tree is reset (`features/partial.rs`,
+  `git/partial.rs`). A rate-limit wait publishes `waiting: {reason, agent, until}` in `state.json`
+  and the report, and its seconds are excluded from `work_time`.
 - **agg owns ALL git; the worker NEVER runs git** — the worker just edits files. agg auto-commits its work on the session branch (a `GitAutoCommit` handler on `on_verify`), then merges/keeps or rolls back. The worker never adds/commits/merges/pushes. (GIT_REDESIGN.)
 - **Verify agent behavior on the WIRE** (`scripts/e2e_real.sh`), never from docs — agent CLIs differ (Codex's `-p` is `--profile`; only Claude reports dollar cost; etc.).
 - **Design specs live in `internal/`** (gitignored): `SEQUENCES.md`, `STATE_REDESIGN.md`.
