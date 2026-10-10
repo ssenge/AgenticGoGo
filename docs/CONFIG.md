@@ -1425,7 +1425,8 @@ author lives in `agg/state/`.
   rewrites this advice each session. Gitignored, so it **survives a session rollback** — the code
   attempt is thrown away, the advice about it is not.
 - **`agg/state/wiki/`** · **`agg/state/sessions/`** — the worker's durable knowledge base and its
-  transient per-session scratch notes. Worker-owned by design.
+  transient per-session scratch notes. Worker-owned by design. The wiki is an
+  [OKF v0.2](#the-wiki-okf-v02-and-agg-wiki-lint) bundle, checked with `agg wiki lint`.
 - **`agg/state/spawns.json`** · **`agg/state/spawns/`** — the long-task registry and per-spawn logs.
   Worker-writable because `agg spawn` is a command the **worker** invokes; its blast radius is bounded
   (what to reap, what to tell the next session — nothing that gates the run).
@@ -1457,6 +1458,40 @@ author lives in `agg/state/`.
   ceiling with `agg send budget`, unpause itself, or inject its own next-session instructions.
 - **`agg/private/waits.jsonl`** — every rate-limit wait: its start (agent, `until`, partial ref) and how
   it ended.
+
+### The wiki: OKF v0.2 and `agg wiki lint`
+
+`agg/state/wiki/` is the worker's knowledge base, kept across sessions and rollbacks, in the
+[Open Knowledge Format v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md):
+a directory of markdown concepts, each with YAML frontmatter carrying a non-empty `type`, plus the
+reserved `index.md` (a listing) and `log.md` (newest-first history). agg **writes nothing into it**.
+The worker writes it, agg reads it as untrusted input, and the brief's standing footer shows the
+worker the shape (a concept, an index and a log it can copy). agg never writes `generated` or
+`verified`: verification is a reviewer's act, outside agg.
+
+`agg wiki lint [PATH] [--json]` checks a wiki against the spec's conformance rules (§11) without
+changing it. `PATH` defaults to the project's `agg/state/wiki/`; any other OKF bundle works too.
+
+| rule | level | checks |
+|---|---|---|
+| `frontmatter.missing` · `frontmatter.unterminated` · `frontmatter.yaml` | problem | every `.md` that is not `index.md`/`log.md` opens with a `---` block that closes and parses as a YAML mapping (§4, §11) |
+| `type.missing` · `type.empty` · `type.invalid` | problem | the frontmatter has `type`, a non-blank string (§4.1) |
+| `index.frontmatter` | problem | an `index.md` has no frontmatter, except at the bundle root, and there only `okf_version` (§8, §12) |
+| `index.sections` · `index.entry` | problem | an `index.md` has at least one `#` heading, and every list entry sits under one and opens with a link: `* [Title](page.md) - description` (§8) |
+| `log.date` · `log.order` · `log.entry` | problem | in a `log.md`, every heading below the `#` title is a real `YYYY-MM-DD` date, the dates are strictly newest first (one group per date), and no entry precedes the first date (§9) |
+| `file.encoding` · `file.unreadable` | problem | the file is readable UTF-8 (§4) |
+| `status.unknown` · `generated.*` · `verified.shape` · `sources.*` · `timestamp.format` · `timestamp.legacy` | warning | the optional §5 families: `status` is `draft`/`stable`/`deprecated`; `generated` has `by`; `verified` entries have `by` and `at`; every `sources` entry has `resource`; timestamps are ISO 8601 with an offset (`2026-06-30T14:00:00Z`); `timestamp` is v0.1 (`generated.at` in v0.2) |
+| `verified.worker` | warning | only in the project's own wiki: a `verified` key there is a claim of review that neither agg nor the worker can make |
+| `index.text` · `log.empty` · `file.symlink` | warning | free text in an index; a log without date groups; a symlink, which is not followed |
+
+Problems make the wiki non-conformant: `ok: false`, exit code **1**. Warnings never do (§11 forbids a
+consumer to reject a concept over an optional family). A missing default wiki is conformant, `exists:
+false` (nothing written yet); a missing `PATH` is an error, exit 1. Files and directories whose names
+start with `.` (`.obsidian/`) are skipped.
+
+`--json` prints `{schema_version, ok, wiki, exists, files, concepts, problems, warnings}`, each finding
+`{file, line, rule, message}` with `file` relative to the wiki root and `line` 1-based or `null`.
+Schema: [`docs/schemas/wiki_lint.v1.json`](schemas/wiki_lint.v1.json).
 
 ### What the split actually buys you — and on which tier
 

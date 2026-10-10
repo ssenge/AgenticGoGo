@@ -423,7 +423,7 @@ pub fn for_name(name: &str) -> Result<&'static dyn AgentBackend> {
         "copilot" => Ok(&copilot::Copilot),
         other => anyhow::bail!(
             "unknown agent `{other}` in agg.yaml.\n  known agents: {}\n  \
-             (adding one means implementing `trait AgentBackend` — see src/backend.rs)",
+             (adding one means implementing `trait AgentBackend` — see docs/BACKENDS.md)",
             KNOWN.join(", ")
         ),
     }
