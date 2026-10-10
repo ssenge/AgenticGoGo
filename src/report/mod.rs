@@ -24,6 +24,7 @@ mod build;
 mod file;
 pub mod headless;
 mod live;
+pub mod status;
 
 pub use build::{from_state, record_baseline, record_gate, Tally};
 pub use live::{detectors, ratchets, Detectors, RatchetView, Waiting};
