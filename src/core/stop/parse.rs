@@ -247,6 +247,15 @@ impl<'a> Parser<'a> {
             // "any judge that RAN this step returned error". No judge ran => false: a skipped
             // step reports no errors because there were none to have, not because it forgot.
             "any_judge_error" => Val::Bool(!c.judge_errors.is_empty()),
+            // ── the gate's own history (`core::ratchet`) ─────────────────────────────────────
+            // Process-internal, like `over_iterations`: computed from what the GATE decided, in the
+            // loop's memory — never read back from a file the worker can reach. So they are
+            // unfakeable on every tier and may sit in `abort_if`. No gate (a validate-only context)
+            // reads as a run that has gated nothing yet.
+            "rollbacks" => Val::Num(c.gate.map_or(0, |g| g.state.rollbacks) as f64),
+            "consecutive_rollbacks" => Val::Num(c.gate.map_or(0, |g| g.state.consecutive_rollbacks) as f64),
+            "oscillating" => Val::Bool(c.gate.is_some_and(|g| g.oscillating())),
+            "ratchet_regressed" => Val::Bool(c.gate.is_some_and(|g| g.state.ratchet_regressed())),
             // otherwise: a judge name -> its met bool. GoalBool, not Bool: comparing it to a number
             // is a type error (`coverage >= 80`), while `over_budget == 1` stays legal.
             other => match c.judge_met(other) {
@@ -259,10 +268,23 @@ impl<'a> Parser<'a> {
 
     /// `judge.value` / `judge.max` — the NUMBER the judge emitted, not its `met` bool.
     pub(super) fn resolve_accessor(&self, base: &str, field: &str) -> Result<Val> {
+        // The gate's numbers are TERMS, not judges, so they have no accessor. Refused with the
+        // spelling that works rather than aliased: one way to write each thing.
+        if matches!(base, "rollbacks" | "consecutive_rollbacks") {
+            bail!("`{base}` is a built-in number, not a judge — compare it directly: `{base} >= 2`, not `{base}.{field}`");
+        }
         let goal = match self.ctx.judge(base) {
             Some(g) => g,
             None => bail!("unknown judge `{base}` in condition (in `{base}.{field}`)"),
         };
+        // `.ref` is the RATCHET's reference, not something the judge emitted — so it is answered by
+        // the gate, and only for a judge that has a ratchet.
+        if field == "ref" {
+            return match self.ctx.gate.filter(|g| g.is_ratcheted(base)) {
+                Some(g) => Ok(g.state.reference(base).map_or(Val::Missing, Val::Num)),
+                None => bail!("`{base}.ref` reads a ratchet reference, but `{base}` has no ratchet — add it under `sequence.ratchet`"),
+            };
+        }
         // The FIELD NAME is checked before the verdict is read, and that order is load-bearing: at
         // `validate` time no judge has run, so a bad accessor would otherwise short-circuit to
         // `Missing` and sail through startup.
@@ -275,7 +297,7 @@ impl<'a> Parser<'a> {
                 "`{base}.target` is not readable — a judge's `target` is presentational only. \
                  Put the threshold in the condition itself: `{base}.value >= <n>`"
             ),
-            other => bail!("unknown accessor `{base}.{other}` — a judge exposes `.value` and `.max`"),
+            other => bail!("unknown accessor `{base}.{other}` — a judge exposes `.value` and `.max` (and `.ref` when ratcheted)"),
         }
 
         // No verdict yet, the judge ERRORED, or it emitted no number => no usable number. `Missing`

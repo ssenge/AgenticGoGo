@@ -99,6 +99,7 @@ impl Handler for PickStep {
                     max_sessions: rs.max_sessions,
                     wall_secs: rs.wall_secs,
                     human_wait_secs: rs.human_wait_secs,
+                    gate: Some(&eng.gate),
                 };
                 stop::evaluate(cond, &sc)
             });

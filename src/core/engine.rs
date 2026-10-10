@@ -140,6 +140,9 @@ pub struct Engine {
     pub abort_if: Option<String>,
     /// the non-terminal notify guard (STUCK_NOTIFY §3). Same grammar, no effect on stop/halt.
     pub notify_if: Option<String>,
+    /// the gate's ratchet config + history — the in-memory state behind `rollbacks`,
+    /// `consecutive_rollbacks`, `oscillating`, `ratchet_regressed` and `<judge>.ref`.
+    pub gate: crate::core::ratchet::Gate,
 }
 
 /// The YAML path's verdict store for a native judge's [`crate::core::model::JudgeCtx`]: this step's
@@ -180,16 +183,22 @@ impl Engine {
         abort_if: Option<String>,
         notify_if: Option<String>,
     ) -> Result<Self> {
-        if let Some(d) = &done_if {
-            stop::validate(d, &judges)?;
+        Self::with_gate(judges, done_if, abort_if, notify_if, crate::core::ratchet::Gate::default())
+    }
+
+    /// [`Engine::new`] with a ratchet configured — the expressions are validated against it, so a
+    /// `<judge>.ref` on an unratcheted judge fails at load.
+    pub fn with_gate(
+        judges: Vec<Judge>,
+        done_if: Option<String>,
+        abort_if: Option<String>,
+        notify_if: Option<String>,
+        gate: crate::core::ratchet::Gate,
+    ) -> Result<Self> {
+        for expr in [&done_if, &abort_if, &notify_if].into_iter().flatten() {
+            stop::validate_with(expr, &judges, Some(&gate))?;
         }
-        if let Some(a) = &abort_if {
-            stop::validate(a, &judges)?;
-        }
-        if let Some(n) = &notify_if {
-            stop::validate(n, &judges)?;
-        }
-        Ok(Engine { judges, done_if, abort_if, notify_if })
+        Ok(Engine { judges, done_if, abort_if, notify_if, gate })
     }
 
     /// The one-line `{{reason}}` for a `notify_if` that just fired (STUCK_NOTIFY §5 / §12.3): the
@@ -355,6 +364,19 @@ impl Engine {
         self.conditions_with_deltas(run, Vec::new(), &[])
     }
 
+    /// Re-evaluate done/abort/notify for a cycle whose judges already ran, after the GATE moved its
+    /// own state (`rollbacks`, `oscillating`, the ratchet). The judges that errored are re-derived
+    /// from the cycle's fresh verdicts, so `any_judge_error` reads exactly as it did.
+    pub fn reevaluate(&self, run: &RunState, res: &mut CycleResult) {
+        let errors: Vec<String> =
+            res.fresh_verdicts.iter().filter(|(_, v)| v.error.is_some()).map(|(n, _)| n.clone()).collect();
+        let now = self.conditions_with_deltas(run, Vec::new(), &errors);
+        res.stop = now.stop;
+        res.halt = now.halt;
+        res.halt_reason = now.halt_reason;
+        res.notify = now.notify;
+    }
+
     fn conditions_with_deltas(
         &self,
         run: &RunState,
@@ -372,6 +394,7 @@ impl Engine {
             max_sessions: run.max_sessions,
             wall_secs: run.wall_secs,
             human_wait_secs: run.human_wait_secs,
+            gate: Some(&self.gate),
         };
         // No `done_if` ⇒ never a DoD stop. That is the driver path: agg is not told what "done"
         // means there, so it must never claim the run succeeded.
@@ -740,6 +763,29 @@ mod tests {
         // expression, the same answer an empty rationale already gets.
         let blank = engine(vec![goal("f", false), detector("stuck", 90.0, "\u{1b}\u{7}\0")], Some("stuck.value >= 85"));
         assert_eq!(cycle(&blank).notify.as_deref(), Some("stuck.value >= 85"));
+    }
+
+    /// The GATE moves its own state after the judges ran, so a cycle's verdict is re-read against
+    /// it: `rollbacks` in `abort_if` fires on the gate that made it true, not one cycle later — and
+    /// `any_judge_error` survives the re-read, because it is re-derived from the fresh verdicts.
+    #[test]
+    fn reevaluate_reads_the_gate_state_the_gate_just_moved() {
+        use crate::core::ratchet::GateDecision;
+        let mut eng = Engine::new(vec![goal("feature", false)], Some("all_goals".into()), Some("rollbacks >= 2".into()), None)
+            .expect("the gate terms validate");
+        let mut res = cycle(&eng);
+        res.fresh_verdicts = vec![("feature".into(), Verdict::failed("boom"))];
+        eng.gate.record(GateDecision::RolledBack, &res.fresh_verdicts, &[], vec!["feature".into()]);
+        eng.reevaluate(&RunState::default(), &mut res);
+        assert!(!res.halt, "one rollback is under the guard");
+        eng.gate.record(GateDecision::RolledBack, &res.fresh_verdicts, &[], vec!["feature".into()]);
+        eng.reevaluate(&RunState::default(), &mut res);
+        assert!(res.halt, "the second rollback trips `rollbacks >= 2`");
+        assert_eq!(res.halt_reason.as_deref(), Some("rollbacks >= 2"));
+
+        let errs = Engine::new(vec![goal("feature", false)], Some("all_goals".into()), Some("any_judge_error".into()), None).unwrap();
+        errs.reevaluate(&RunState::default(), &mut res);
+        assert!(res.halt, "the errored fresh verdict still reads as `any_judge_error`");
     }
 
     /// A detector that is LOUD but NOT firing — `met: false` with a non-zero `value`. `detector()`

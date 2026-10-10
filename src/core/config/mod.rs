@@ -323,6 +323,14 @@ pub struct Sequence {
     /// policy (ping only when `abort_if` halts, §8.5). Required WITH it (else nothing would fire).
     #[serde(default)]
     pub notify: Option<NotifyCfg>,
+    /// the numeric RATCHET, keyed by judge NAME: that judge's `value` may not get worse than at the
+    /// last kept gate by more than its tolerance ([`crate::core::ratchet`]). A ratcheted judge joins
+    /// the run-set (never the DoD-set); a regression is a gate regression.
+    #[serde(default)]
+    pub ratchet: BTreeMap<String, crate::core::ratchet::Ratchet>,
+    /// how many earlier judged sessions `oscillating` looks back over for an A→B→A repeat.
+    #[serde(default = "default_oscillation_window")]
+    pub oscillation_window: usize,
 }
 
 impl Default for Sequence {
@@ -336,6 +344,8 @@ impl Default for Sequence {
             abort_if: None,
             notify_if: None,
             notify: None,
+            ratchet: BTreeMap::new(),
+            oscillation_window: default_oscillation_window(),
         }
     }
 }
@@ -548,6 +558,9 @@ fn default_wd_cpu() -> u64 {
 }
 fn default_done_if() -> String {
     "all_goals".into()
+}
+fn default_oscillation_window() -> usize {
+    crate::core::ratchet::DEFAULT_OSCILLATION_WINDOW
 }
 fn default_cooldown() -> u32 {
     3

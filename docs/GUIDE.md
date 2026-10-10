@@ -240,6 +240,8 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 - **Judges-as-DoD** — compose judge names with `AND` / `OR` / `NOT` (plus numeric accessors like `coverage.value >= 80`) into one `done_if` expression; resolved by name from disk, no registry.
 - **Per-step agents + sequences** — a repeating list of steps, each with its own agent/model, so a stall can step back on a *different vendor* ([Steps and sequences](#steps-and-sequences)). Making that step-back **conditional** ("only when stalled") is the [Rust driver API](#when-yaml-is-not-enough-the-rust-driver-api) — YAML has no `if:`.
 - **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
+- **Numeric ratchet** *(`sequence.ratchet`)* — a tracked number (complexity, coverage, latency) may not get worse than at the last kept gate beyond a tolerance, so the agent cannot trade one metric for another; seed the first reference or let the baseline pass measure it ([details](CONFIG.md#the-ratchet--numeric-no-regression)).
+- **Damage and oscillation stops** — `rollbacks`, `consecutive_rollbacks` and `oscillating` (fix A, break B, fix B, break A) are built-in condition terms computed by the gate itself, so they are unfakeable and safe in `abort_if` ([details](CONFIG.md#rollbacks-and-oscillation--the-gates-own-detectors)).
 - **A Rust driver API, when the flow is a program** — `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, for control flow `agg.yaml` cannot express: branch on a verdict's number, step back only when stalled, or short-circuit a 40-minute judge behind three cheap ones with `&&`. Same engine, same judges — heavier, and Rust-only, so **use YAML unless you need it** ([when YAML is not enough](#when-yaml-is-not-enough-the-rust-driver-api)).
 - **Crash-resumable driver runs** — every completed `agg.*` call is recorded, so a driver that dies at hour six replays its finished work in seconds and spends nothing on it. Your loop is never serialized: it runs from the top and its own `if`/`for` walk it back. Fast-forward reaches back to the last gate that landed on base — never past it, because staged work lives on a branch the ledger cannot describe ([details](#when-yaml-is-not-enough-the-rust-driver-api)).
 
@@ -425,6 +427,26 @@ a detector sits in *is* your human policy: none = pure autonomy, `notify_if` = t
 `abort_if` = stop. Put
 **worker-authored** signals in `notify_if` only, or the agent gains a way to end its own run — the
 tradeoff, and the copy-ready `stuck` / `blocked` detectors, are in [`docs/CONFIG.md`](CONFIG.md).
+
+**Numbers that may only get better: the ratchet.** An invariant keeps a `met` from flipping back; a
+ratchet keeps a *number* from sliding back. Name the judge under `sequence.ratchet` with the direction
+that is better and a tolerance for noise, and a session that makes it worse beyond that is rolled back
+like any other regression:
+
+```yaml
+sequence:
+  done_if: "tests_pass"
+  ratchet:
+    complexity: { direction: "down", tolerance: 0.5 }               # reference = last kept value
+    coverage:   { direction: "up", tolerance: 1.0, baseline: 71.0 } # seed the first reference
+  abort_if: "consecutive_rollbacks >= 3 OR oscillating OR over_budget"
+```
+
+`consecutive_rollbacks` (damage: the agent keeps making things worse) and `oscillating` (it fixes A,
+breaks B, then fixes B and breaks A) are counted by the gate itself, in agg's memory — not read from a
+file the worker could touch — so unlike `stalled` they are safe in `abort_if` on every isolation tier.
+The full rules (references, drift warnings, which sessions count) are in
+[`docs/CONFIG.md`](CONFIG.md#the-ratchet--numeric-no-regression).
 
 The rule that makes it a moat: **`agg` runs the judges, never the agent.** So make the judges check
 the resulting artifacts — tests, a compiler, a proof checker — not the agent's claim about it — the agent will often enough hallucinate that a job is done.

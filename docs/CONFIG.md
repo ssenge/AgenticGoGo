@@ -49,8 +49,11 @@ sequence:
     sessions: null                 # session cap → over_iterations (null = unlimited)
   gate_regressions: true           # roll a session back if a previously-met judge regresses
   invariants: ["no_regression"]    # judge names that must STAY met
+  ratchet:                         # NUMERIC no-regression: a value may not get worse than at the
+    cc_p95:   { direction: "down", tolerance: 0.5 }              # last kept gate (± tolerance)
+    mutation: { direction: "up", tolerance: 1.0, baseline: 71.0 } # seeded reference for session 1
   done_if: "correct_result AND all_tests_pass AND coverage.value >= 80"
-  abort_if: "over_budget OR work_time >= 28800 OR any_regressed(invariants) OR any_judge_error"
+  abort_if: "over_budget OR work_time >= 28800 OR any_regressed(invariants) OR any_judge_error OR consecutive_rollbacks >= 3 OR oscillating"
   notify_if: "stuck.value >= 85"   # NON-TERMINAL twin of abort_if: ping a human, KEEP RUNNING.
                                    # STRICTER than whatever bounds the repeat above, deliberately —
                                    # see "the escalation ladder". (`stalled` ships; `stuck` you author.)
@@ -238,6 +241,8 @@ could never become true) but never the **DoD-set** — it is machinery, not a go
 | `limits.work_time` | unlimited | **EFFORT ceiling in SECONDS**: `wall_time` minus time spent blocked on a human. The ceiling a run with humans in it actually wants — see [the clock](#the-clock--three-terms-all-in-seconds). |
 | `gate_regressions` | `true` | roll a session back if a previously-met judge now fails. The rename of the old `rollback_on_regression`. |
 | `invariants` | `[]` | judge names that must STAY met. The gate protects them; `any_regressed(invariants)` gives up on them. |
+| `ratchet: { <judge>: { direction, tolerance, tolerance_pct, baseline } }` | none | the **numeric** no-regression rule — see [The ratchet](#the-ratchet--numeric-no-regression). `direction` (`up` = higher is better, `down` = lower is better) is required; `tolerance` (absolute, default `0`), `tolerance_pct` (% of the reference; the larger allowance wins) and `baseline` (the seeded reference) are optional. A ratcheted judge joins the run-set, never the DoD-set. |
+| `oscillation_window` | `4` | how many earlier judged sessions [`oscillating`](#rollbacks-and-oscillation--the-gates-own-detectors) looks back over for an A→B→A repeat. Must be `>= 2`. |
 | `done_if` | `all_goals` | the **Definition of Done** — success stop (exit 0). |
 | `abort_if` | none | the giving-up guard (exit 3). |
 | `notify_if` | none | the **non-terminal twin of `abort_if`**: same grammar, but true ⇒ run `notify.cmd` and **keep looping**. Requires a non-empty `notify.cmd`. See [Stuck detection and notification](#stuck-detection-and-notification). |
@@ -254,9 +259,10 @@ comparisons `== != >= <= > <`, and parentheses. Precedence: `or > and > cmp > at
 | kind | terms |
 |---|---|
 | **judge (bare name)** | any judge name → its `met` **bool**. |
-| **judge accessor** | `name.value`, `name.max` → the number the judge emitted. (`.target` is NOT an accessor — it is presentational.) |
+| **judge accessor** | `name.value`, `name.max` → the number the judge emitted. (`.target` is NOT an accessor — it is presentational.) `name.ref` → a **ratcheted** judge's current reference ([the ratchet](#the-ratchet--numeric-no-regression)); on any other judge it is a startup error. |
 | **aggregates** | `all_goals`, `count_met`, `count_regressed`, `total`, `met_fraction`, `any_regressed` |
 | **run scalars/ceilings** | `tokens_spent`, `budget_total`, `over_budget`, `cost_spent`, `cost_limit`, `over_cost`, `iterations`, `max_iterations`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_judge_error` |
+| **gate history** | `rollbacks`, `consecutive_rollbacks` (numbers), `oscillating`, `ratchet_regressed` (bools) — see [the gate's own detectors](#rollbacks-and-oscillation--the-gates-own-detectors). Process-internal, so they may sit in `abort_if`. |
 | **invariant subset** | `(invariants)` — an argument on exactly `count_met`, `count_regressed`, `total`, `met_fraction`, `any_regressed`, e.g. `any_regressed(invariants)`. |
 
 ### Numeric thresholds — use the accessor
@@ -273,7 +279,7 @@ it at startup** and tells you to use `coverage.value >= 80`. A threshold has one
 ### The two quantifiers — the DoD-set vs the run-set
 
 - **The RUN-SET** = every judge named in `done_if` ∪ `abort_if` ∪ `notify_if` ∪ `invariants:` ∪ every
-  entry's `until:`. These are the judges that actually execute after each step. `any_judge_error` ranges
+  entry's `until:` ∪ every `ratchet:` key. These are the judges that actually execute after each step. `any_judge_error` ranges
   over this set. (This is why a `stalled` judge used only in an `until:` — or a `stuck`
   detector used only in `notify_if` — runs, without being listed anywhere else.)
 - **The DoD-set** = judges named in `done_if` ∪ `invariants:` only. The aggregates (`all_goals`,
@@ -303,6 +309,50 @@ Do **not** fold a ceiling into `done_if` — putting `over_budget` there would r
 *success*. **Never leave an autonomous loop with no ceiling at all.** `any_judge_error` is `true` when
 a judge that ran this step crashed / timed out / emitted garbage — an `error` is never a regression
 and never satisfies `done_if`; wiring `abort_if: … OR any_judge_error` is the explicit policy.
+
+## The ratchet — numeric no-regression
+
+`invariants` protect a **boolean**: a judge that was met may not become unmet. A ratchet protects a
+**number**: a judge's `value` may not get worse than it was at the **last kept gate**, by more than its
+tolerance. Use it for the metrics a worker would otherwise trade against each other — complexity,
+duplication, mutation score, latency.
+
+```yaml
+sequence:
+  ratchet:
+    cc_p95:   { direction: "down", tolerance: 0.5 }                # lower is better
+    latency:  { direction: "down", tolerance_pct: 5 }              # noisy: 5% of the reference
+    mutation: { direction: "up", tolerance: 1.0, baseline: 71.0 }  # higher is better, seeded
+  abort_if: "consecutive_rollbacks >= 3 OR cc_p95.ref > 20"
+```
+
+- **The reference** is the judge's value at the last kept gate. Before the first keep it is the
+  `baseline:` seed, else the value the pre-session [baseline pass](#session-isolation-mandatory-and-the-gate)
+  measured on the untouched repo. With both, the **seed wins** and a gap beyond tolerance is printed as a
+  *measurement drift* warning. A rolled-back value never becomes the reference; an improvement that is
+  kept always does.
+- **The rule.** A session whose value moved the wrong way by more than `max(tolerance, |ref| ×
+  tolerance_pct / 100)` is a **gate regression**: under `gate_regressions: true` it is rolled back. The
+  operator sees ``ratchet `cc_p95`: 10.4 → 11.5``, and the judge's row in `verdicts.jsonl` carries
+  `"ratchet": {"from": 10.4, "to": 11.5}`. With `gate_regressions: false` the session is kept and the
+  reference follows it — "last kept" is the rule either way.
+- **An unmeasured value never passes.** A ratcheted judge that errors (or emits no number) on a session
+  is a ratchet regression (`"to": null`), and `any_judge_error` is true. That is stricter than the
+  boolean rule, where a flake keeps the merge — deliberately: a ratchet is a *no worse than* promise,
+  and a value nobody measured cannot keep it.
+- **Refused at startup:** a ratcheted judge that emits no `value` on the baseline pass (there is nothing
+  to ratchet), one that **errors** on the baseline pass with no `baseline:` seed (nothing to compare
+  session 1 against), a ratchet naming no judge file, a negative or non-finite tolerance, a missing
+  `direction`, an unknown key.
+- **Run-set, not DoD-set.** A ratcheted judge executes every judged step (it has to, to be compared),
+  but it is a gate rule, not a goal: it never counts toward `all_goals` or the `N/M` scoreboard. Name
+  it in `done_if` too if you also want its `met` as a goal.
+- **Terms:** `ratchet_regressed` is true when the most recent judged gate recorded a ratchet regression;
+  `<judge>.ref` is a ratcheted judge's current reference (no reference yet ⇒ every comparison is false).
+
+The ratchet's state lives in agg's memory and is persisted to `agg/private/gate.json` (and, on the Rust
+driver path, on every `gate` record of the call ledger, which is what a `--resume` restores it from).
+It is never read back from `verdicts.jsonl`, so the worker cannot move its own reference.
 
 ## The clock — three terms, all in seconds
 
@@ -671,7 +721,7 @@ it is never "the agent ended the run."
 
 | tier | example terms | what stops the worker |
 |---|---|---|
-| **process-internal** | `over_budget`, `over_cost`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_regressed(invariants)` | agg computes them from its own in-memory run state. Nothing on disk. **Genuinely unfakeable** — these are what termination should stand on. |
+| **process-internal** | `over_budget`, `over_cost`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_regressed(invariants)`, `rollbacks`, `consecutive_rollbacks`, `oscillating`, `ratchet_regressed`, `<judge>.ref` | agg computes them from its own in-memory run state. Nothing on disk. **Genuinely unfakeable** — these are what termination should stand on. |
 | **agg-owned file** | `stalled`, `stuck` — both read `agg/private/verdicts.jsonl` | **depends on the isolation tier.** Under `sandbox`/`container` this is a real **permission** boundary: the ledger lives in `agg/private/`, which is carved out of the worker's writable set, so a write is refused by the kernel. Under the default `isolation: none` it is only a **protocol** boundary — agg writes that ledger and a worker has no sanctioned reason to touch it, so appending is unambiguously tampering, but nothing stops it and the ledger carries no integrity check. Forging three flat `merged` rows makes `stalled` report met. |
 | **worker-authored** | `blocked` over `agg/state/BLOCKED.md` | nothing, on any tier. `agg/state/` is the worker's own directory — the worker is *supposed* to write this file. |
 
@@ -685,6 +735,50 @@ confined and accept that the moat is only as strong as the tier you configured.*
 `abort_if`, and no integrity check on the ledger: "stop when the worker says it is blocked" is a
 legitimate policy for a run you are watching, and the config is yours. It is a tradeoff you make
 explicitly, not one agg makes for you.
+
+### Rollbacks and oscillation — the gate's own detectors
+
+Besides stagnation (`stalled`), two failure shapes need a stop rule in any long loop: **damage** — the
+worker keeps making things worse and the gate keeps rolling it back — and **oscillation** — it fixes A
+and breaks B, then fixes B and breaks A. agg answers both with **built-in terms**, not judges:
+
+| term | type | what it counts |
+|---|---|---|
+| `rollbacks` | number | sessions the regression policy rolled back this run (boolean or ratchet regression). |
+| `consecutive_rollbacks` | number | rollbacks since the last kept gate. |
+| `oscillating` | bool | the unmet set after a judged session repeats one seen within the last `oscillation_window` (default 4) judged sessions, with a **different** set in between: A→B→A. |
+| `ratchet_regressed` | bool | the most recent judged gate recorded a [ratchet](#the-ratchet--numeric-no-regression) regression. |
+
+```yaml
+abort_if:  "consecutive_rollbacks >= 3 OR oscillating"   # unfakeable: safe in abort_if
+notify_if: "rollbacks >= 2"                               # or just tell a human
+```
+
+**Why terms and not library judges like `stalled`.** `stalled` reads `verdicts.jsonl`, which is only a
+protocol boundary under `isolation: none`. These are computed from what the gate decided, in agg's own
+memory — the same tier as `over_iterations` — so they are unfakeable on every tier and belong in
+`abort_if` without the caveat. They are persisted to `agg/private/gate.json` only so a resume can
+restore them. Requirement-style spellings like `rollbacks.value >= 2` are refused with the right one:
+a built-in number has no accessor, so write `rollbacks >= 2`.
+
+The details that decide whether they fire when you expect:
+
+- **Which sessions count.** `rollbacks` counts sessions whose staged merge the regression policy
+  discarded. A session with no changes, a `red_file` veto or a merge conflict is not a rollback; it
+  neither extends nor breaks the `consecutive_rollbacks` streak. A kept gate resets the streak.
+  `skip_judges` steps are not gated, so they count for neither. With `gate_regressions: false` nothing is
+  ever rolled back, so both stay `0`.
+- **The signature** `oscillating` compares is the sorted set of **DoD-set** judges that were unmet (or
+  errored) after the session, plus every judge that regressed its ratchet. Run-set-only detectors
+  (`stalled`, a `notify_if` judge) are not part of it — a detector flipping is not a state of the work.
+  Every judged session contributes one, **merged or rolled back** (a rolled-back session still showed
+  where the worker went).
+- **Short history.** Fewer than three judged sessions can never oscillate. An all-green signature never
+  counts — returning to a good state is not oscillation — and A→A→A is a stall, not an oscillation.
+  A monotonically improving run never trips it.
+- **Shadowing.** These are grammar terms, so there is no file to shadow. A project judge with one of
+  these names cannot be referenced — the built-in wins; name your own detector differently
+  (`flapping`, …) and name that in the condition instead. The window is `sequence.oscillation_window`.
 
 ## Judges resolved by name
 
@@ -903,13 +997,14 @@ startup** — checked for **every** agent the sequence names. The full matrix is
 
 Every session **always** branches off `base`, does its work, and is gated — there is no master switch.
 `agg run` therefore **refuses to start** without a git repo, a clean tree, and a non-detached HEAD.
-The gate rule: **auto-accept a session's work, UNLESS a judge that was previously met now fails — then
-roll that session back** (`gate_regressions: true`). Three things can suppress a merge, in this
+The gate rule: **auto-accept a session's work, UNLESS a judge that was previously met now fails, or a
+[ratcheted](#the-ratchet--numeric-no-regression) value got worse beyond its tolerance — then roll that
+session back** (`gate_regressions: true`). Three things can suppress a merge, in this
 precedence:
 
 1. **`red_file`** (`.agg_red` at the project root) — the worker's own veto. Present ⇒ do not merge.
 2. **`skip_judges`** — nothing was judged, so nothing merges; the work stages.
-3. **the regression gate** — a previously-met judge now fails ⇒ roll back.
+3. **the regression gate** — a previously-met judge now fails, or a ratchet regressed ⇒ roll back.
 
 `session_isolation` surviving keys: `branch_prefix` (default `agg`), `base_branch` (default: the
 current branch), `red_file` (default `.agg_red`).

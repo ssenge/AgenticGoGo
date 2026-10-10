@@ -17,6 +17,7 @@ pub mod judge;
 pub mod judges;
 pub mod memory;
 pub mod model;
+pub mod ratchet;
 pub mod stop;
 pub mod walk;
 pub mod verdicts;
