@@ -1,0 +1,39 @@
+# A fully isolated run: the agent CLI in a container, a read-only knowledge base from outside the
+# project, and a network that reaches only the model's API and the package mirror.
+#
+#   docker build -t agg-claude docker/claude     # the reference image (add your toolchain to it)
+#   export CLAUDE_CODE_OAUTH_TOKEN=…             # or ANTHROPIC_API_KEY — passed by NAME, never stored
+#   agg check && agg run
+#
+# See docs/CONFIG.md: "The container tier runs the agent", "Context directories", "Network egress".
+project: "isolated"
+
+defaults:
+  agent: "claude"
+  isolation: "container"            # the worker AND its judges run in containers
+  image: "agg-claude"
+  write_deny: ["tests/oracles/**"]  # readable, never changed
+
+judge:
+  agent: "claude"
+  image: "agg-claude"               # the judges' image: it needs whatever your judges run
+
+context:
+  - { path: "~/kb/architecture", as: "arch", mode: "ro" }   # /context/arch inside the container
+
+isolation_policy:
+  network:
+    allow:
+      - "api.anthropic.com"         # the agent's own endpoint — required, checked at startup
+      - "registry.npmjs.org:443"
+  pass_env: ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "NPM_TOKEN"]
+
+steps:
+  worker:
+    prompt: "Implement the next item from the plan, following the reference architecture in /context/arch."
+
+sequence:
+  steps: ["worker"]
+  done_if: "tests_pass"
+  abort_if: "over_iterations OR consecutive_rollbacks >= 3"
+  limits: { sessions: 20 }

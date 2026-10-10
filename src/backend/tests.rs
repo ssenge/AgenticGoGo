@@ -236,3 +236,14 @@ fn the_terminal_event_owns_the_cumulative_facts() {
     let r = b.parse_result(r#"{"type":"result","session_id":"s1"}"#).unwrap();
     assert_eq!(r.cost_usd, None, "absent cost must be None — Some(0.0) would disarm over_cost");
 }
+
+/// An endpoint override's HOST is what the egress allow-list must hold — scheme, port, path and
+/// userinfo stripped; anything that is not a URL yields nothing (and the default endpoint is used).
+#[test]
+fn url_host_extracts_the_host_an_allow_list_must_hold() {
+    assert_eq!(super::url_host("https://gw.corp.example:8443/v1?x=1").as_deref(), Some("gw.corp.example"));
+    assert_eq!(super::url_host("http://user:pw@API.example.com/").as_deref(), Some("api.example.com"));
+    assert_eq!(super::url_host("https://[2001:db8::1]:443/").as_deref(), Some("2001:db8::1"));
+    assert_eq!(super::url_host("not a url"), None);
+    assert_eq!(super::url_host("https:///path"), None);
+}
