@@ -18,8 +18,10 @@ use std::path::{Path, PathBuf};
 
 mod live;
 mod phase;
+mod waiting;
 pub use live::*;
 pub use phase::*;
+pub use waiting::*;
 
 /// Recent-events ring cap — how many activity lines the dashboard tail carries.
 pub const RECENT_CAP: usize = 50;
@@ -220,6 +222,10 @@ pub struct DashboardState {
     /// on a human" is never a silent state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asks: Vec<AskView>,
+    /// The wait the loop is in, or `null` while it works (A-18.1). Set when a rate-limited session
+    /// ends and cleared when the next attempt starts; a run that ENDS while waiting keeps it, so the
+    /// final snapshot (and the report) say what it was waiting for.
+    pub waiting: Option<Waiting>,
     /// monotonically increasing; lets the dashboard detect updates
     pub seq: u64,
     /// terminal flag — dashboard shows the final banner and can exit

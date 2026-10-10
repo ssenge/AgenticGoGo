@@ -9,7 +9,7 @@
 //!   GET  /api/state    → the live DashboardState (204 when no snapshot exists yet)
 //!   GET  /api/history  → the Project run-history ledger
 //!   GET  /api/health   → { running: bool, pid: number|null }
-//!   POST /api/send     → { cmd: "pause"|"resume"|"stop"|"inject"|"budget", ... } → the bus
+//!   POST /api/send     → { cmd: "pause"|"resume"|"wake"|"stop"|"inject"|"budget", ... } → the bus
 //!                        (409 if no loop is running here)
 //!
 //! Sync server (tiny_http) — a JSON API for one local reader doesn't need async. CORS is locked to
@@ -180,6 +180,7 @@ fn parse_send(body: &str) -> std::result::Result<Command, String> {
     match cmd {
         "pause" => Ok(Command::Pause),
         "resume" => Ok(Command::Resume),
+        "wake" => Ok(Command::Wake),
         "stop" => {
             let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("web").to_string();
             Ok(Command::Stop { reason })
@@ -266,6 +267,7 @@ mod tests {
     fn parse_send_maps_all_verbs() {
         assert!(matches!(parse_send(r#"{"cmd":"pause"}"#).unwrap(), Command::Pause));
         assert!(matches!(parse_send(r#"{"cmd":"resume"}"#).unwrap(), Command::Resume));
+        assert!(matches!(parse_send(r#"{"cmd":"wake"}"#).unwrap(), Command::Wake));
         assert!(matches!(parse_send(r#"{"cmd":"stop","reason":"done"}"#).unwrap(),
             Command::Stop { reason } if reason == "done"));
         assert!(matches!(parse_send(r#"{"cmd":"inject","text":"focus X"}"#).unwrap(),

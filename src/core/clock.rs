@@ -35,6 +35,15 @@ pub struct Clock {
     /// seconds spent inside blocking human calls, accumulated across resumes.
     #[serde(default)]
     pub human_wait_secs: f64,
+    /// seconds spent waiting out an agent's rate limit, accumulated across resumes (A-18). Like the
+    /// human wait it is NOT work, so it never counts against `work_time` — a provider's quota window
+    /// must not consume an effort ceiling.
+    #[serde(default)]
+    pub rate_limit_wait_secs: f64,
+    /// the run's identity across resumes: the `run_id` its report carries. Empty in a clock written
+    /// before resume kept it; such a run gets a fresh id.
+    #[serde(default)]
+    pub run_id: String,
 }
 
 impl Clock {
@@ -53,7 +62,7 @@ impl Clock {
                 return c;
             }
         }
-        let c = Clock { started_at_epoch: now_epoch, human_wait_secs: 0.0 };
+        let c = Clock { started_at_epoch: now_epoch, ..Clock::default() };
         c.save(dir);
         c
     }
@@ -79,6 +88,29 @@ impl Clock {
         self.save(dir);
     }
 
+    /// Add rate-limit wait and persist — same reason as [`Clock::add_human_wait`].
+    pub fn add_rate_limit_wait(&mut self, dir: &Path, secs: f64) {
+        if secs <= 0.0 {
+            return;
+        }
+        self.rate_limit_wait_secs += secs;
+        self.save(dir);
+    }
+
+    /// The run id a resumed run continues under, if the clock on disk recorded one.
+    pub fn recorded_run_id(dir: &Path) -> Option<String> {
+        std::fs::read_to_string(crate::paths::clock_json(dir))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Clock>(&s).ok())
+            .map(|c| c.run_id)
+            .filter(|id| !id.is_empty())
+    }
+
+    /// Seconds the run spent waiting rather than working: on a human, and on a rate limit.
+    pub fn idle_secs(&self) -> f64 {
+        self.human_wait_secs + self.rate_limit_wait_secs
+    }
+
     /// End-to-end seconds since the run began. Clamped at 0: a clock moved backwards (NTP, a
     /// hand-edited file) must not produce a negative ceiling that reads as "unlimited".
     pub fn wall_secs(&self, now_epoch: u64) -> f64 {
@@ -87,13 +119,29 @@ impl Clock {
 
     /// Seconds the loop was actually working. Clamped at 0 for the same reason.
     pub fn work_secs(&self, now_epoch: u64) -> f64 {
-        (self.wall_secs(now_epoch) - self.human_wait_secs).max(0.0)
+        (self.wall_secs(now_epoch) - self.idle_secs()).max(0.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rate-limit wait banks like the human wait, survives a resume, and leaves `work_time`.
+    /// The run id rides along so a resumed run reports under the id it started with.
+    #[test]
+    fn rate_limit_wait_and_run_id_survive_a_resume() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = Clock::open(d.path(), 1_000, true);
+        assert_eq!(Clock::recorded_run_id(d.path()), None, "a fresh clock names no run yet");
+        c.run_id = "run-1".into();
+        c.add_rate_limit_wait(d.path(), 300.0);
+        c.add_rate_limit_wait(d.path(), 0.0);
+        let resumed = Clock::open(d.path(), 2_000, false);
+        assert_eq!(resumed.rate_limit_wait_secs, 300.0);
+        assert_eq!(resumed.work_secs(2_000), 700.0, "1000s wall − 300s rate-limit wait");
+        assert_eq!(Clock::recorded_run_id(d.path()).as_deref(), Some("run-1"));
+    }
 
     /// The whole point of the file: a "resumed" open keeps the original start and the wait already
     /// banked, so `wall_time` stays end-to-end instead of restarting with the process.
@@ -127,7 +175,7 @@ mod tests {
     /// ceiling and silently means "unlimited".
     #[test]
     fn a_backwards_clock_clamps_to_zero() {
-        let c = Clock { started_at_epoch: 9_000, human_wait_secs: 100.0 };
+        let c = Clock { started_at_epoch: 9_000, human_wait_secs: 100.0, ..Clock::default() };
         assert_eq!(c.wall_secs(1_000), 0.0);
         assert_eq!(c.work_secs(1_000), 0.0);
     }

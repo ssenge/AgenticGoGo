@@ -44,6 +44,7 @@ impl Handler for LaunchWorker {
         // changed oracle on disk. Done here rather than as separate handlers because a `Flow::Stop`
         // out of this handler would skip a handler registered after it.
         crate::features::protect::before_worker(ctx, &step)?;
+        crate::features::partial::note_untracked_before(ctx);
         let outcome = worker::run_session(
             &ctx.cfg,
             agent,
@@ -65,6 +66,8 @@ impl Handler for LaunchWorker {
         ctx.charge(&step.agent, outcome.output_tokens, Some(outcome.cost_usd));
 
         if crate::os::signals::interrupted() {
+            // an interrupted session is incomplete: never judged, never lost (A-18.3).
+            crate::features::partial::save_and_reset(ctx);
             return Ok(Flow::Stop(ctx.finish_interrupted()));
         }
         eprintln!(

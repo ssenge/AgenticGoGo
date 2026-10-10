@@ -86,6 +86,23 @@ fn work_time_excludes_human_wait_so_a_slow_human_does_not_blow_an_effort_ceiling
     assert!(!evaluate("work_time > 0", &ctx(100.0, 9_999.0)).unwrap());
 }
 
+/// A-18.5: waiting out an agent's rate limit is not work either. A subscription window that closes
+/// for four hours must not eat four hours of an effort ceiling — while a DEADLINE still counts it.
+#[test]
+fn work_time_excludes_rate_limit_waiting_too() {
+    let goals = [g("a", false, false)];
+    let ctx = StopContext {
+        wall_secs: 5.0 * 3600.0,
+        human_wait_secs: 3600.0,
+        rate_limit_wait_secs: 4.0 * 3600.0,
+        ..StopContext::from_judges(&goals)
+    };
+    assert!(evaluate("wall_time >= 18000", &ctx).unwrap(), "a deadline counts every second");
+    assert!(!evaluate("work_time > 0", &ctx).unwrap(), "neither wait is effort");
+    assert!(evaluate("human_wait_time >= 3600", &ctx).unwrap(), "human_wait_time stays the human's alone");
+    assert!(!evaluate("human_wait_time > 3600", &ctx).unwrap());
+}
+
 /// `wall_hours` is REMOVED, not aliased. It must fail the parser as an unknown judge name rather
 /// than silently resolving to a number in the wrong unit — a 3600x mistake is worse than an error.
 #[test]

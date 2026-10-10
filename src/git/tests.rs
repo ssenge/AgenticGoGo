@@ -317,3 +317,126 @@ fn ensure_agg_gitignored_adds_the_missing_entries_to_an_already_migrated_project
     assert_eq!(gi2.matches("agg/private/").count(), 1, "must not append a duplicate agg/private/: {gi2:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// REGRESSION: agg's own ignore entries must survive a ROLLBACK on a project whose base branch has
+/// no committed `.gitignore`.
+///
+/// The mechanism, end to end: `ensure_agg_gitignored` writes an UNTRACKED `.gitignore`; session 1's
+/// auto-commit commits it on the session branch; checking base out for the gate and aborting the
+/// rolled-back merge then DELETE it from the work tree (it is tracked on the session branch and
+/// absent on base). From then on nothing ignored `agg/private/`, and the next worker's own
+/// `git add -A` committed agg's ledger onto its session branch. The entries live in the
+/// repository's `info/exclude` too, which no checkout, merge or reset ever touches.
+#[test]
+fn agg_ignore_entries_survive_a_rollback_on_a_base_without_a_gitignore() {
+    let d = std::env::temp_dir().join(format!("agg-git-{}-exclude", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    git_t(&d, &["init", "-q", "-b", "main"]);
+    git_t(&d, &["config", "user.email", "t@t"]);
+    git_t(&d, &["config", "user.name", "t"]);
+    git_t(&d, &["config", "commit.gpgsign", "false"]);
+    git_t(&d, &["config", "core.hooksPath", "/dev/null"]);
+    std::fs::write(d.join("f.txt"), "base\n").unwrap();
+    git_t(&d, &["add", "f.txt"]);
+    git_t(&d, &["commit", "-qm", "base — no .gitignore"]);
+
+    // run start: the ignore entries, then session 1 does work and agg auto-commits it.
+    ensure_agg_gitignored(&d);
+    assert!(create_branch(&d, "agg/p/session-1", "main"));
+    std::fs::create_dir_all(d.join("agg/private")).unwrap();
+    std::fs::write(d.join("agg/private/state.json"), "{}").unwrap();
+    std::fs::write(d.join("f.txt"), "base\nregressing work\n").unwrap();
+    assert!(auto_commit_tracked(&d, "agg: session 1"));
+    // …and the gate rolls it back.
+    assert_eq!(stage_session(&d, "main", "agg/p/session-1", ".agg_red"), StagedSession::Staged);
+    finalize_session(&d, "agg/p/session-1", 1, false);
+    assert!(!d.join(".gitignore").exists(), "precondition: the rollback took the untracked .gitignore with it");
+
+    // session 2's worker stages EVERYTHING it can see, as a worker running git would.
+    assert!(create_branch(&d, "agg/p/session-2", "main"));
+    git_t(&d, &["add", "-A"]);
+    let staged = Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(&d).output().unwrap();
+    let staged = String::from_utf8_lossy(&staged.stdout).to_string();
+    assert!(!staged.contains("agg/private"), "agg's private state must stay ignored after a rollback: {staged:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The `info/exclude` writer is idempotent and keeps whatever the repository already excluded.
+#[test]
+fn ensure_agg_excluded_appends_once_and_keeps_existing_entries() {
+    let d = std::env::temp_dir().join(format!("agg-git-{}-exclude-idem", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    git_t(&d, &["init", "-q", "-b", "main"]);
+    let exclude = d.join(".git/info/exclude");
+    std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    std::fs::write(&exclude, "*.swp\n").unwrap();
+    ensure_agg_excluded(&d);
+    ensure_agg_excluded(&d);
+    let text = std::fs::read_to_string(&exclude).unwrap();
+    assert!(text.lines().any(|l| l == "*.swp"), "existing entries survive: {text:?}");
+    for entry in AGG_IGNORED {
+        assert_eq!(text.lines().filter(|l| *l == entry).count(), 1, "{entry} exactly once: {text:?}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A-18.3: an interrupted session's work — tracked edits AND new files — lands on its partial ref,
+/// without moving the branch or the index; the reset then restores HEAD, removes the session's new
+/// files, and leaves the untracked files that were there before the session.
+#[test]
+fn save_partial_keeps_the_work_on_a_ref_and_the_reset_restores_the_tree() {
+    let d = repo_with_session_branch("partial");
+    std::fs::write(d.join("operator-notes.txt"), "mine, untracked, before the session\n").unwrap();
+    let before = untracked_files(&d);
+    git_t(&d, &["checkout", "-q", "agg/p/session-1"]);
+    let head = rev_parse(&d, "HEAD").unwrap();
+    std::fs::write(d.join("f.txt"), "half-finished edit\n").unwrap();
+    std::fs::write(d.join("new.rs"), "fn wip() {}\n").unwrap();
+    std::fs::create_dir_all(d.join("agg/private")).unwrap();
+    std::fs::write(d.join("agg/private/state.json"), "{}").unwrap();
+
+    assert!(has_uncommitted_work(&d, Some(&before)), "a tracked edit and a new file are the session's work");
+    let r = save_partial(&d, "run-7", 3, false, Some(&before)).expect("dirty tree ⇒ a ref");
+    assert_eq!(r, "refs/agg/partial/run-7/3");
+    assert_eq!(rev_parse(&d, "HEAD").unwrap(), head, "the branch does not move");
+    let show = |spec: &str| {
+        let o = Command::new("git").args(["show", spec]).current_dir(&d).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).to_string()
+    };
+    assert_eq!(show(&format!("{r}:f.txt")), "half-finished edit\n");
+    assert_eq!(show(&format!("{r}:new.rs")), "fn wip() {}\n");
+    assert!(show(&format!("{r}:agg/private/state.json")).is_empty(), "agg's runtime state is not the work");
+
+    reset_work_tree(&d, Some(&before));
+    assert_eq!(untracked_files(&d), before, "only the pre-session untracked files remain");
+    assert_eq!(std::fs::read_to_string(d.join("f.txt")).unwrap(), "base\nsession-work\n", "tracked edit reverted");
+    assert!(!d.join("new.rs").exists(), "the session's new file is gone from the tree (it is on the ref)");
+    assert!(d.join("operator-notes.txt").exists(), "an untracked file from BEFORE the session survives");
+    assert!(d.join("agg/private/state.json").exists(), "agg's runtime state is never reset");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Nothing uncommitted and no session commits ⇒ no ref; a session that only COMMITTED gets HEAD saved.
+#[test]
+fn save_partial_saves_nothing_from_a_clean_tree_unless_head_is_the_work() {
+    let d = repo_with_session_branch("partial-clean");
+    assert_eq!(save_partial(&d, "r", 1, false, None), None);
+    // an untracked file from BEFORE the session is not the session's work…
+    std::fs::write(d.join("notes.txt"), "x").unwrap();
+    let before = untracked_files(&d);
+    assert!(!has_uncommitted_work(&d, Some(&before)));
+    assert_eq!(save_partial(&d, "r", 1, false, Some(&before)), None);
+    // …but after a crash agg cannot tell, so it counts.
+    assert!(has_uncommitted_work(&d, None));
+    std::fs::remove_file(d.join("notes.txt")).unwrap();
+    git_t(&d, &["checkout", "-q", "agg/p/session-1"]);
+    let r = save_partial(&d, "r", 2, true, None).expect("the session's own commit is work");
+    assert_eq!(rev_parse(&d, &r), rev_parse(&d, "HEAD"));
+    // crash path: no knowledge of the pre-session files ⇒ untracked files are left alone.
+    std::fs::write(d.join("stray.txt"), "x").unwrap();
+    reset_work_tree(&d, None);
+    assert!(d.join("stray.txt").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}

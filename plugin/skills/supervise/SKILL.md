@@ -60,6 +60,7 @@ cost. So:
    agg send budget 8000000        # raise the token ceiling   (omit value = unlimited)
    agg send pause                 # hold before the next session
    agg send resume                # continue a paused loop
+   agg send wake                  # end a rate-limit wait now (status shows `waiting`); still limited ⇒ it waits again
    agg send stop "operator done"  # graceful stop at the next boundary
    agg send note "fyi: ignore the flaky perf judge today"
    # (answering is `agg answer`, NOT `agg send` — see 2. It is not a steering message.)

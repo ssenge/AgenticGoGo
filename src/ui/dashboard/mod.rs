@@ -344,6 +344,7 @@ pub fn sample_state() -> DashboardState {
         finished: false,
         finish_reason: String::new(),
         asks: Vec::new(),
+        waiting: None,
     }
 }
 

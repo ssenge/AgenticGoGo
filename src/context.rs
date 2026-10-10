@@ -182,6 +182,7 @@ impl LoopState {
             // end-to-end across resumes (`internal/HUMAN_LOOP.md` §7.4).
             wall_secs: self.clock.wall_secs(crate::util::now_epoch()),
             human_wait_secs: self.clock.human_wait_secs,
+            rate_limit_wait_secs: self.clock.rate_limit_wait_secs,
         }
     }
 

@@ -88,7 +88,8 @@ sequence:
 # ---- top-level survivors (all optional) ----
 heartbeat_secs: 30
 watchdog: { idle_secs: 900, cpu_grace: 180 }
-ratelimit_backoff_secs: 1800       # claude + codex; copilot cannot flag a rate-limit
+ratelimit_backoff_secs: 1800       # claude + codex; copilot cannot flag a rate-limit. Used when no reset time is reported
+ratelimit_min_gap_secs: 60         # least time between a rate-limited attempt and the next (`agg send wake` waits it out)
 summary: { enabled: true, min_interval_secs: 300 }   # runs on the RULER — no model: here
 memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
 session_isolation: {}              # MANDATORY; keys: branch_prefix, base_branch, red_file
@@ -528,11 +529,11 @@ process uptime.
 |---|---|---|
 | `wall_time` | now − run start, human waiting **included** | a **deadline** |
 | `human_wait_time` | time accumulated inside blocking human calls | observability |
-| `work_time` | `wall_time − human_wait_time` | an **effort ceiling** |
+| `work_time` | `wall_time − human_wait_time −` time spent [waiting out a rate limit](#rate-limits--wait-wake-resume) | an **effort ceiling** |
 
 ```yaml
 abort_if: "wall_time >= 86400"   # DEADLINE — 24h; a sleeping human counts against it
-abort_if: "work_time >= 28800"   # EFFORT   — 8h of actual looping; a slow human costs nothing
+abort_if: "work_time >= 28800"   # EFFORT   — 8h of actual looping; a slow human or a closed quota window costs nothing
 ```
 
 All three exist as separate terms because the [condition grammar](#the-condition-grammar) has
@@ -674,6 +675,61 @@ disagree about it. Answering is exempt only because it is not a `send` at all �
 > ⚠ **A forgotten ask waits forever.** That is the accepted cost of having no timeout. `notify.cmd`
 > fires when an ask opens, `agg status` shows it with its age, and `agg stop` ends a run nobody
 > intends to answer. A worker-opened ask cannot hang anything — it never blocks the loop.
+
+## Rate limits — wait, wake, resume
+
+A subscription limit is a time window, not a budget. When a worker session ends on one ("You've hit
+your session limit · resets 2:20pm"), agg treats that session as **incomplete**: it is never judged and
+never merged. agg then:
+
+1. **saves its work** — tracked edits, new files, and any commits the worker made — under
+   `refs/agg/partial/<run_id>/<session>` and resets the tree to where the session started. Nothing is
+   lost and nothing leaks into the next session. `git diff main refs/agg/partial/<run>/<n>` shows it;
+   `git cherry-pick`/`git checkout <ref> -- <path>` takes it.
+2. **waits** until the reported reset + 90 s (or `ratelimit_backoff_secs` when no reset was named), then
+   starts the next session. Still limited ⇒ it detects that and waits again.
+
+**The wait is visible.** `state.json` / `agg status --json` carry
+`waiting: {reason: "rate_limit", agent, until}` (`until` = epoch seconds; `null` while working), and
+`agg/private/waits.jsonl` gets a `wait` row when it starts (with the partial ref, if any) and a
+`wait_end` row when it ends — `how`: `elapsed` · `woken` · `stopped` · `interrupted` · `ceiling`.
+
+**The wait drains the bus** — a waiting loop is a running workflow:
+
+| command | during the wait |
+|---|---|
+| `agg send wake` | end the wait and start the next session now — but no sooner than `ratelimit_min_gap_secs` (default 60) after the limited attempt, so an eager wake never hammers the provider |
+| `agg send resume` | the same as `wake` while waiting (and unpauses, as always, otherwise) |
+| `agg stop` / `agg send stop` | end the run: exit **5**, `outcome: stopped` |
+| anything else | kept, in order, for the next session boundary |
+
+Outside a wait, `agg send wake` is a logged no-op.
+
+**Waiting is never a limit.** Its seconds are excluded from `work_time` (like a human's), and nothing
+about waiting ends the run: without a signal agg waits as long as the provider requires. A ceiling
+that trips on its own while waiting — a `wall_time` deadline — still ends it.
+
+**Exit contract.** Exit 0 means only "`done_if` met". SIGINT/SIGTERM or `agg stop` during a session
+or a wait exit **5** with `outcome: stopped`; a run that ended while waiting has `waiting` in its
+[report](#the-run-report-aggprivatereportjson).
+
+### `agg run --resume`
+
+Continues the project's last interrupted run — the same `run_id`, session counter, ratchet state and
+call ledger. It reuses the [driver's call-ledger resume](RUST_API.md): the YAML loop records a `step`
+row per session and a `gate` row per judged session in `agg/private/calls.jsonl`, and a resume keeps
+them back to the **last kept gate** — the only point it is sound to skip to, because everything after
+it was never merged. From there:
+
+- the sequence walk continues at the step after that gate (an `agg.yaml` whose `sequence.steps` no
+  longer matches the ledger is refused: re-run without `--resume`);
+- the ratchet references and gate history are those of that gate;
+- session numbers **continue** after the interrupted session `n` — the resumed run starts with `n+1` —
+  and tokens, cost and the clock are the interrupted run's, so a resume never launders a ceiling.
+
+The interrupted session's work is on its partial ref, not judged. A run killed hard mid-session
+(SIGKILL, power cut) left it in the tree instead; `--resume` saves it to the ref then. Refused when
+there is no previous run, or when the last one met `done_if`.
 
 ### What a human's answer does NOT do
 
@@ -1257,7 +1313,7 @@ gitignored, auto-created directories — and the split is by **who may write the
 | directory | written by | contents |
 |---|---|---|
 | **`agg/state/`** | the **worker** (agg reads it as untrusted input) | `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/`, `BLOCKED.md` |
-| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `gate.json`, `violations.jsonl`, `protected/`, `evidence/`, `prompts.jsonl`, `bus/`, `run.pid`, `run.log`, `report.json` |
+| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `calls.jsonl`, `gate.json`, `clock.json`, `violations.jsonl`, `waits.jsonl`, `protected/`, `evidence/`, `prompts.jsonl`, `bus/`, `run.pid`, `run.log`, `report.json` |
 
 **The one rule that decides which is which:** *if the worker writing it could change when the loop ends,
 what it may spend, or what agg believes happened, it is private.* Everything the worker is **supposed** to
@@ -1295,9 +1351,12 @@ author lives in `agg/state/`.
   `run_id` here, and `--detach` / `--report-json` send the whole process output here.
 - **`agg/private/report.json`** — the end-of-run report, the stable interface for programs that
   embed agg. See [below](#the-run-report-aggprivatereportjson).
-- **`agg/private/bus/`** — the steering queue (`agg send …` writes here; the loop drains it at `INJECT`).
+- **`agg/private/bus/`** — the steering queue (`agg send …` writes here; the loop drains it at `INJECT`,
+  and every second during a [rate-limit wait](#rate-limits--wait-wake-resume)).
   Private because the bus is the **operator's** channel: a worker writing here would raise its own token
   ceiling with `agg send budget`, unpause itself, or inject its own next-session instructions.
+- **`agg/private/waits.jsonl`** — every rate-limit wait: its start (agent, `until`, partial ref) and how
+  it ended.
 
 ### What the split actually buys you — and on which tier
 
@@ -1343,7 +1402,9 @@ grep your `agg/` for `state/` once after the move.
 
 Both directories are gitignored. `agg run` appends `agg/private/` to your `.gitignore` on startup if it is
 missing, alongside the `agg/state/` entry it has always written — an existing project picks the new entry up
-on the next run. `agg/` itself stays committed: the judges must be in git so a rollback can restore a grader
+on the next run. It writes the same entries to the repository's `.git/info/exclude` too: on a base branch
+that never committed a `.gitignore`, session 1 commits the one agg wrote, and a rollback of that session
+deletes it again — `info/exclude` is outside the work tree, so no checkout, merge or reset can remove it. `agg/` itself stays committed: the judges must be in git so a rollback can restore a grader
 a worker tampered with.
 
 `memory:` keys: `enabled` (default true), `max_kb` (cap on the stored file), `inject_kb` (how much is
@@ -1362,7 +1423,7 @@ agg run --report-json | jq -r .outcome      # logs go to agg/private/run.log; st
 
 | field | meaning |
 |---|---|
-| `schema_version` · `agg_version` · `run_id` · `project` | identity. `run_id` is fresh per run and also in `run.log`. |
+| `schema_version` · `agg_version` · `run_id` · `project` | identity. `run_id` is fresh per run (kept by `agg run --resume`) and also in `run.log`. |
 | `outcome` | **authoritative**: `done` · `aborted` · `stopped` · `error`. |
 | `exit_code` | what `agg run` exited with: 0 done · 3 `abort_if` · 4 session cap (`outcome: aborted`) · 5 stopped · 1 error. |
 | `stop_reason` · `error` | human-readable reason (the `abort_if` expression, the cap, the stop reason); the error chain or panic message when `outcome` is `error`. |
@@ -1373,6 +1434,7 @@ agg run --report-json | jq -r .outcome      # logs go to agg/private/run.log; st
 | `result` | `base_branch`, `final_commit` (the base's tip after the last gate), `staged_branch` (an ungated span's tip — `git merge` it to land that work). |
 | `open_asks` | questions still waiting on a human: `id`, `kind`, `question`, `age_s`. |
 | `paths` | absolute paths of `report`, `ledger` (`verdicts.jsonl`), `log`, `evidence_dir` (this run's `agg/private/evidence/<run_id>`; `null` when no evidence was kept). |
+| `waiting` | present only when the run **ended while waiting**: `{reason: "rate_limit", agent, until}` — see [rate limits](#rate-limits--wait-wake-resume). |
 
 **Outcome precedence** — when several hold at the end of one session: `error` > `stopped` > `done` >
 `aborted`.
