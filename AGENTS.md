@@ -91,10 +91,13 @@ defaults:                        # inherited by every step; a step may override 
   write_deny: ["tests/oracles/**"]  # PROTECTED: readable, never changed — gate-checked on EVERY tier
 context:                         # READ-ONLY dirs from OUTSIDE the project; every step must be sandbox/container
   - { path: "~/kb/brain", as: "brain", mode: "ro" }   # container: /context/brain · env AGG_CONTEXT_BRAIN
+isolation_policy:                # what crosses INTO a container (agents' own keys pass automatically, by name)
+  pass_env: ["NPM_TOKEN"]        # env NAMES, never values · credentials: ["~/.config/x"] = read-only mounts
 judge:                           # THE RULER — runs .md judges + the summarizer. Immutable across a run.
   agent: "claude"
   model: "haiku"
   timeout: 300
+  # image: "agg-claude"          # judges' image when any step is `container` (they run IN it, project read-only)
 steps:                           # palette. legal keys: agent model effort worker_args state role_prompt prompt skip_judges
                                  #   isolation image readonly writable write_deny role_prompt_file prompt_file
                                  # *_file = the inline key read from a file (rel. to agg/ or absolute) at EVERY
@@ -215,7 +218,14 @@ agg/private/                 GITIGNORED runtime state AGG OWNS — carved OUT of
   violations.jsonl  protected/   write_deny: the rollback record + agg's copies to restore from
   evidence/<run>/<session>/<judge>/  the files each verdict cited, kept after its judge ran
   prompts.jsonl                per session: sha256 of every prompt_file/role_prompt_file its brief read
+  container/                   `isolation: container` runtime: a fresh worker HOME per session, the
+                               judges' homes, a containerized judge's scratch + cache (engine-visible)
 ```
+**`isolation: container` runs the AGENT in the step's `image:`** (image contract + reference images in
+`docker/`): as the project owner, never root; fresh `HOME`; credentials by NAME (`-e NAME`) or read-only
+mount — never on argv, never in a ledger. Judges run in `judge.image` (the strongest tier, NO opt-out)
+on a read-only project; hooks stay host tooling. Startup probes each image for its CLI and refuses a
+mounted path the engine cannot see (colima shares only `$HOME`). Code: `src/isolation/{runtime,probe}.rs`.
 **The split rule:** if the worker writing it could change *when the loop ends, what it may spend, or what
 agg believes happened*, it is private. `verdicts.jsonl` is why: forged `merged` rows make `stalled` report
 met, so a project with `abort_if: "stalled"` has its worker end its own run. `src/paths.rs` is the

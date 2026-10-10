@@ -81,6 +81,7 @@ fn a_misspelled_key_fails_both_the_schema_and_the_parser() {
         "project: \"p\"\nsequence: { steps: [{ step: \"w\", tims: 2 }] }\n",
         "project: \"p\"\nsequence: { limits: { token: 5 } }\n",
         "project: \"p\"\ncontext: [{ path: \"/kb\", as: \"kb\", mod: \"ro\" }]\n",
+        "project: \"p\"\nisolation_policy: { pass_envs: [\"X\"] }\n",
     ] {
         assert!(!errors(&v, bad).is_empty(), "the schema must reject:\n{bad}");
         let tmp = tempfile::tempdir().unwrap();
@@ -101,7 +102,9 @@ fn a_minimal_config_validates() {
 #[test]
 fn the_confinement_keys_validate() {
     let v = validator();
-    let doc = "project: \"p\"\ncontext:\n  - { path: \"~/kb\", as: \"brain\", mode: \"ro\" }\n  - { path: \"../docs\", as: \"docs\" }\n";
+    let doc = "project: \"p\"\ncontext:\n  - { path: \"~/kb\", as: \"brain\", mode: \"ro\" }\n  - { path: \"../docs\", as: \"docs\" }\n\
+               judge: { image: \"agg-claude\" }\n\
+               isolation_policy: { pass_env: [\"NPM_TOKEN\"], credentials: [\"~/.config/gh\"] }\n";
     let errs = errors(&v, doc);
     assert!(errs.is_empty(), "{}", errs.join("\n"));
     assert!(!errors(&v, "project: \"p\"\ncontext: [{ path: \"/kb\", as: \"kb\", mode: \"rw\" }]\n").is_empty(), "only `ro`");

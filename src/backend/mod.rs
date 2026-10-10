@@ -235,6 +235,12 @@ pub trait AgentBackend: Send + Sync {
                 crate::isolation::wrap(command, dir, &self.writable_state_paths(), &[])
                     .map_err(|e| e.to_string())
             }
+            // the judges' image, the project READ-ONLY, the ruler's own credentials (§2.5: a judge
+            // runs in the run's strongest tier — here, a container like the worker it grades).
+            Some(dir) if isolation == crate::isolation::Isolation::Container => {
+                crate::isolation::runtime::one_shot(command, dir, self.container_env(), self.container_credential_files())
+                    .map_err(|e| e.to_string())
+            }
             _ => Ok(command),
         }
     }
@@ -332,6 +338,21 @@ pub trait AgentBackend: Send + Sync {
     /// which self-sandboxes anyway).
     fn writable_state_paths(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
+    }
+
+    /// The environment variables that carry this agent's credentials and endpoint, passed into a
+    /// CONTAINER by name when set in agg's environment (`-e NAME`, so the value never appears on a
+    /// command line). A container starts from the image's environment, not agg's, so an agent whose
+    /// key is not listed here cannot authenticate in one. Default: none.
+    fn container_env(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Credential FILES this agent reads from its home, `~`-relative — mounted READ-ONLY into the
+    /// container's home when they exist on the host. Never copied, never baked into an image.
+    /// Default: none (an agent that authenticates from the environment only).
+    fn container_credential_files(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// Is the agent CLI on PATH and runnable?

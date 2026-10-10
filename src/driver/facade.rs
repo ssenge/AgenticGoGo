@@ -220,6 +220,44 @@ impl Agg {
         self
     }
 
+    /// The image every [`Isolation::Container`](crate::isolation::Isolation::Container) step runs in
+    /// unless it names its own ([`Step::image`]) — YAML's `defaults.image`. It must follow the
+    /// image contract (`docs/CONFIG.md`): the step's agent CLI on PATH for any uid, `/bin/sh`.
+    pub fn image(mut self, image: impl Into<String>) -> Agg {
+        self.cfg.defaults.image = Some(image.into());
+        self
+    }
+
+    /// The image judges run in when a step of the run is containerized — YAML's `judge.image`.
+    /// `None` set = [`Agg::image`], else the base image.
+    pub fn judge_image(mut self, image: impl Into<String>) -> Agg {
+        self.cfg.judge.image = Some(image.into());
+        self
+    }
+
+    /// Environment variables passed INTO every container of the run by NAME — YAML's
+    /// `isolation_policy.pass_env`. The values come from this process's environment and never
+    /// appear on a command line. Each agent's own credential variables need not be listed.
+    pub fn pass_env<I, S>(mut self, names: I) -> Agg
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.cfg.isolation_policy.pass_env.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Host files or directories mounted READ-ONLY into every container of the run — YAML's
+    /// `isolation_policy.credentials` (under the container's `HOME` when they live under `~`).
+    pub fn credentials<I, S>(mut self, paths: I) -> Agg
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.cfg.isolation_policy.credentials.extend(paths.into_iter().map(Into::into));
+        self
+    }
+
     /// A READ-ONLY context directory from outside the project, seen by every step and judge of the
     /// run — the driver's spelling of a YAML `context:` entry. `path` is absolute, `~/`-relative or
     /// relative to the project; `name` is the short `as:` (`/context/<name>` in a container,
@@ -573,11 +611,10 @@ impl Agg {
             // run-set to run here — judges are lazy and the driver asks.
             skip_judges: true,
             isolation: step.isolation,
-            image: self
-                .cfg
-                .defaults
+            image: step
                 .image
                 .clone()
+                .or_else(|| self.cfg.defaults.image.clone())
                 .unwrap_or_else(|| crate::isolation::DEFAULT_IMAGE.to_string()),
             readonly: step.readonly.clone(),
             writable: step.writable.clone(),
@@ -895,7 +932,7 @@ impl Agg {
             // this upsert is what the TUI, the web BFF and Progress actually render.
             Self::publish_verdict(&mut st.dash.judges, &j.name, &kind, &verdict);
             // judged in THIS session's scratch, so the evidence is kept now, not at the gate.
-            crate::features::evidence::keep(&mut st, Some(session), &[(j.name.clone(), verdict.clone())]);
+            crate::features::evidence::keep(&mut st, Some(session), &[(j.name.clone(), verdict.clone())], isolation);
             st.dash.pos = self.label_path();
             st.publish();
         }

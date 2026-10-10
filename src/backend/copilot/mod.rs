@@ -350,6 +350,11 @@ impl AgentBackend for Copilot {
         Ok(OneShot { body: last_assistant_message(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
 
+    /// Copilot authenticates from a GitHub token in the environment.
+    fn container_env(&self) -> &'static [&'static str] {
+        &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+    }
+
     /// Copilot writes session state under `~/.copilot` — add it to the sandbox's writable set so a
     /// confined worker can still record its session. Only returned when it actually exists.
     fn writable_state_paths(&self) -> Vec<std::path::PathBuf> {

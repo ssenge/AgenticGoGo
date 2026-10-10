@@ -70,7 +70,8 @@ impl Handler for Baseline {
         ctx.charge_ruler(&pre.judge_usage);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
         ctx.publish();
-        crate::features::evidence::keep(ctx, None, &pre.fresh_verdicts);
+        let tier = ctx.cfg.run_isolation();
+        crate::features::evidence::keep(ctx, None, &pre.fresh_verdicts, tier);
         let kept = crate::features::evidence::for_ledger(ctx, &pre.fresh_verdicts);
         crate::core::verdicts::append_full(
             &ctx.dir,

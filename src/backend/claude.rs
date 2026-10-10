@@ -161,6 +161,21 @@ impl AgentBackend for Claude {
         Ok(OneShot { body: unwrap_envelope(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
 
+    /// An API key (`ANTHROPIC_API_KEY`), a long-lived subscription token (`CLAUDE_CODE_OAUTH_TOKEN`,
+    /// from `claude setup-token`) or a gateway's (`ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`).
+    /// On macOS the interactive login lives in the Keychain, which no container can read — one of
+    /// these is how a containerized Claude authenticates.
+    fn container_env(&self) -> &'static [&'static str] {
+        &["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"]
+    }
+
+    /// Linux keeps the interactive login in a file (macOS: the Keychain, so nothing to mount).
+    /// Read-only: a token the container refreshes is not written back — prefer
+    /// `CLAUDE_CODE_OAUTH_TOKEN` for unattended runs.
+    fn container_credential_files(&self) -> &'static [&'static str] {
+        &[".claude/.credentials.json"]
+    }
+
     /// What a confined Claude worker must still be able to write outside the repo, measured on a
     /// real host rather than assumed: `~/.claude` (session transcripts, shell snapshots the Bash
     /// tool writes on EVERY tool call, plugin markers) and `~/.claude.json` — the primary config

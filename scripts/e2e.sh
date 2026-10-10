@@ -1844,6 +1844,62 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+sec "9q. the container tier runs the AGENT (REAL engine, fake-agent image)"
+# A-11. The worker CLI runs INSIDE its image (a test image with a fake `claude` baked in —
+# tests/fixtures/container/fake-agent), as the project owner, with a fresh HOME, its credential by
+# NAME, the context read-only at /context/<as>; the judges run in the image too, on a read-only
+# project. The workspace is under target/: a VM-backed engine (colima) cannot see $TMPDIR.
+ENGINE_BIN="$(command -v docker || command -v podman || true)"
+if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
+  CT="$ROOT/target/agg-e2e-container.$$"; rm -rf "$CT"; mkdir -p "$CT/kb"
+  printf '# kb\n' > "$CT/kb/index.md"
+  "$ENGINE_BIN" build -q -t agg-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$CT/build.log" 2>&1
+  is "container: the fake-agent test image builds" "$?" "0"
+  CP="$CT/proj"; mkdir -p "$CP/agg/judges" "$CP/agg/state" "$CP/tests"
+  printf 'orig\n' > "$CP/tests/oracle.txt"
+  printf 'agg/state/\nagg/private/\n' > "$CP/.gitignore"
+  cat > "$CP/agg/judges/done.sh" <<'EOF'
+#!/bin/sh
+{ [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; } && echo JUDGE_IN_CONTAINER > "$AGG_JUDGE_SCRATCH/where"
+if echo x > judge_probe 2>/dev/null; then echo JUDGE_WROTE_PROJECT >> "$AGG_JUDGE_SCRATCH/where"; fi
+n=$(cat src/sessions.log 2>/dev/null | wc -l | tr -d ' ')
+[ "${n:-0}" -ge 1 ] && echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"worked"}' \
+                     || echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
+EOF
+  chmod +x "$CP/agg/judges/done.sh"
+  printf -- '---\ninputs: []\n---\nDecide.\n' > "$CP/agg/judges/reviewed.md"
+  echo "work" > "$CP/agg/state/STATE.md"
+  cat > "$CP/agg/agg.yaml" <<EOF
+project: ctr
+defaults: { model: fake, isolation: container, image: "agg-test-fake-agent:1", write_deny: ["tests/**"] }
+judge: { agent: claude, model: fake }
+steps: { worker: {} }
+sequence: { steps: [worker], done_if: "done AND reviewed" }
+summary: { enabled: false }
+context: [{ path: "$CT/kb", as: "kb" }]
+EOF
+  ( cd "$CP" && git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init )
+  ( cd "$CP" && "$AGG" doctor --json > "$CT/doctor.json" 2>/dev/null )
+  has  "container: doctor --json reports the CLI the image provides" "$CT/doctor.json" '"claude": "fake-claude-in-image 1.0.0"'
+  ( cd "$CP" && ANTHROPIC_API_KEY=e2e-secret-value-91 "$AGG" run --max-sessions 2 > "$CT/run.log" 2>&1 )
+  is   "container: the run reaches done (exit 0)"                 "$?" "0"
+  has  "…the worker ran INSIDE the image"                         "$CP/src/worker.log" "WORKER_IN_CONTAINER"
+  has  "…with its credential passed by name"                      "$CP/src/worker.log" "KEY_SEEN"
+  has  "…reading the context at /context/kb"                      "$CP/src/worker.log" "CONTEXT_READ"
+  has  "…which it could not write"                                "$CP/src/worker.log" "CONTEXT_WRITE_DENIED"
+  has  "…nor the write_deny oracle"                               "$CP/src/worker.log" "ORACLE_WRITE_DENIED"
+  has  "…nor agg/private/"                                        "$CP/src/worker.log" "PRIVATE_WRITE_DENIED"
+  has  "the script judge ran in the image too"                    "$CP/agg/private/container/judge/scratch-1/where" "JUDGE_IN_CONTAINER"
+  hasnt "…on a READ-ONLY project"                                 "$CP/agg/private/container/judge/scratch-1/where" "JUDGE_WROTE_PROJECT"
+  has  "the LLM judge's verdict came from the image's ruler"     "$CT/run.log" "IMAGE_RULER_MET"
+  hasnt "the credential value is not in the run log"              "$CT/run.log" "e2e-secret-value-91"
+  if grep -rqF e2e-secret-value-91 "$CP/agg/private" 2>/dev/null; then bad "…nor anywhere under agg/private/"; else ok "…nor anywhere under agg/private/"; fi
+  [ -n "${KEEP:-}" ] || rm -rf "$CT"
+else
+  skip "container: the agent runs in its image" "no running container engine"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 sec "9n. human-in-the-loop — a person can ANSWER the loop (HUMAN_LOOP.md)"
 
 # The channel is a QUEUE, not a callback: an ask is written to the agg-owned ledger, emitted on the

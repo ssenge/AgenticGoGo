@@ -45,8 +45,10 @@ mod imp;
 pub mod container;
 pub mod context;
 pub mod policy;
+pub mod probe;
 pub mod run;
-pub use container::{container_available, container_engine, containerize, DEFAULT_IMAGE};
+pub mod runtime;
+pub use container::{container_available, container_engine, containerize, containerize_spec, Spec, DEFAULT_IMAGE};
 
 // Any OS that is neither Linux nor macOS has no wrapper. Both entry points fail LOUD — the whole
 // point of this feature is that an unavailable mechanism is refused, never silently ignored.
