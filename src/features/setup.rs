@@ -67,12 +67,7 @@ impl Handler for Baseline {
         }
         crate::core::ratchet::save(&ctx.dir, &ctx.eng.gate.state)?;
         ctx.eng.reevaluate(&rs, &mut pre);
-        ctx.tokens_spent += pre.judge_tokens;
-        if let Some(c) = pre.judge_cost {
-            ctx.cost_spent += c;
-        }
-        let ruler_agent = ctx.cfg.judge.agent.clone();
-        ctx.charge(&ruler_agent, pre.judge_tokens, pre.judge_cost);
+        ctx.charge_ruler(&pre.judge_usage);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
         ctx.publish();
         crate::core::verdicts::append(&ctx.dir, None, "baseline", &pre.fresh_verdicts, crate::core::verdicts::Outcome::Baseline)?;

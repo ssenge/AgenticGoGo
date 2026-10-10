@@ -314,6 +314,7 @@ fn run_reported(
         budget_total,
         cost_limit,
         phase: Phase::Starting,
+        run_id: run.run_id().to_string(),
         ..Default::default()
     };
     let live = LiveState::new(dir, loop_start, dash.clone());

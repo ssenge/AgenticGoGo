@@ -4,10 +4,23 @@ const CAPTURED: &str = include_str!("../../../tests/fixtures/agent-streams/codex
 
 #[test]
 fn usage_comes_from_turn_completed_and_reasoning_is_not_double_counted() {
-    let total: u64 = CAPTURED.lines().filter_map(|l| Codex.parse_usage(l)).sum();
+    let mut total = crate::usage::Tokens::default();
+    CAPTURED.lines().filter_map(|l| Codex.parse_usage(l)).for_each(|t| total.add(&t));
     // the captured run reported output_tokens: 151 with reasoning_output_tokens: 16.
     // 151, not 167 — reasoning is a BREAKDOWN of output, not an addition to it.
-    assert_eq!(total, 151, "reasoning_output_tokens must NOT be summed on top of output_tokens");
+    assert_eq!(total.output, Some(151), "reasoning_output_tokens must NOT be summed on top of output_tokens");
+    // input_tokens 24695 INCLUDES cached_input_tokens 22528: the kinds agg reports do not overlap.
+    assert_eq!(total.cache_read, Some(22528));
+    assert_eq!(total.input, Some(24695 - 22528));
+    assert_eq!(total.cache_write, None, "codex reports no cache-write figure — None, not 0");
+}
+
+/// Codex's stream never names its model, so the record says so rather than guessing the config's.
+#[test]
+fn the_codex_stream_names_no_model() {
+    assert!(CAPTURED.lines().all(|l| Codex.parse_model(l).is_none()));
+    let u = Codex.tally_one_shot(CAPTURED.as_bytes());
+    assert_eq!((u.model, u.tokens.output, u.cost_usd), (None, Some(151), None));
 }
 
 /// THE trap that terminal-only parsing gets wrong: Codex's resume handle is on the FIRST event.

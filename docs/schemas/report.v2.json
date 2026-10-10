@@ -1,0 +1,648 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/report.v2.json",
+  "title": "agg run report, schema_version 2",
+  "description": "agg/private/report.json, written atomically when `agg run` (or a Rust driver) ends for any reason. `outcome` is authoritative. A missing report means the process was killed (SIGKILL, OOM, power loss): treat it as outcome `error`. Any change to this shape bumps schema_version and ships a new file. v2 adds per-judge `ratchet`, `options` on open asks, `detectors`, `usage`, `session_log` and `waiting`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "agg_version",
+    "run_id",
+    "project",
+    "outcome",
+    "exit_code",
+    "stop_reason",
+    "error",
+    "started_at",
+    "finished_at",
+    "sessions",
+    "time",
+    "judges",
+    "result",
+    "open_asks",
+    "paths",
+    "detectors",
+    "usage",
+    "session_log",
+    "waiting"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "agg_version": {
+      "type": "string",
+      "description": "the agg version that wrote the report"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "fresh per run; also stamped into agg/private/run.log"
+    },
+    "project": {
+      "type": "string",
+      "description": "the config's `project:` name; empty if the config could not be read"
+    },
+    "outcome": {
+      "enum": [
+        "done",
+        "aborted",
+        "stopped",
+        "error"
+      ],
+      "description": "done: done_if held. aborted: abort_if fired or a session cap was reached. stopped: agg stop / SIGTERM / SIGINT. error: a fault in agg or its environment. Precedence when several hold at one session end: error > stopped > done > aborted."
+    },
+    "exit_code": {
+      "enum": [
+        0,
+        1,
+        3,
+        4,
+        5
+      ],
+      "description": "0 done, 3 abort_if, 4 session cap, 5 stopped, 1 error"
+    },
+    "stop_reason": {
+      "type": "string",
+      "description": "human-readable: the abort_if expression that fired, the cap, the stop reason, or `error: <message>`"
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "the error chain or panic message when outcome is error"
+    },
+    "started_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "epoch seconds"
+    },
+    "finished_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "epoch seconds"
+    },
+    "sessions": {
+      "$ref": "#/$defs/sessions"
+    },
+    "time": {
+      "$ref": "#/$defs/time"
+    },
+    "judges": {
+      "type": "object",
+      "description": "every judge the run consulted, keyed by name",
+      "additionalProperties": {
+        "$ref": "#/$defs/judge"
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_branch",
+        "final_commit",
+        "staged_branch"
+      ],
+      "properties": {
+        "base_branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "final_commit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the tip of base_branch after the last gate"
+        },
+        "staged_branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "tip of a span no gate decided; `git merge` it to land that work"
+        }
+      }
+    },
+    "open_asks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/open_ask"
+      }
+    },
+    "paths": {
+      "$ref": "#/$defs/paths"
+    },
+    "detectors": {
+      "$ref": "#/$defs/detectors"
+    },
+    "usage": {
+      "$ref": "#/$defs/usage_summary"
+    },
+    "session_log": {
+      "type": "array",
+      "description": "every session that made an agent call, in order; session 0 is the baseline pass before any work",
+      "items": {
+        "$ref": "#/$defs/session_usage"
+      }
+    },
+    "waiting": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/waiting"
+        }
+      ],
+      "description": "a wait the loop was in when it ended (a rate limit), else null"
+    }
+  },
+  "$defs": {
+    "cost_source": {
+      "enum": [
+        "reported",
+        "partial",
+        "unknown"
+      ],
+      "description": "reported: every call priced itself. partial: some did, cost_usd is their sum (a lower bound). unknown: none did, cost_usd is null"
+    },
+    "detectors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stalled",
+        "oscillating",
+        "rollbacks",
+        "consecutive_rollbacks",
+        "ratchet_regressed"
+      ],
+      "properties": {
+        "stalled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "the last verdict of a judge named `stalled`, if the run-set has one and it has run; else null"
+        },
+        "oscillating": {
+          "type": "boolean",
+          "description": "A→B→A over the unmet DoD-set within sequence.oscillation_window"
+        },
+        "rollbacks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions the regression policy rolled back, this run"
+        },
+        "consecutive_rollbacks": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "rollbacks since the last kept gate"
+        },
+        "ratchet_regressed": {
+          "type": "boolean",
+          "description": "the most recent judged gate regressed a ratchet"
+        }
+      },
+      "description": "the stop detectors as they stand"
+    },
+    "judge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "last",
+        "baseline",
+        "ratchet"
+      ],
+      "properties": {
+        "last": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/verdict"
+            }
+          ]
+        },
+        "baseline": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/verdict"
+            }
+          ],
+          "description": "null on the driver path (no baseline pass)"
+        },
+        "ratchet": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ratchet"
+            }
+          ],
+          "description": "null for a judge that is not ratcheted"
+        }
+      }
+    },
+    "open_ask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "question",
+        "options",
+        "age_s"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "bool",
+            "choose",
+            "input"
+          ]
+        },
+        "question": {
+          "type": "string"
+        },
+        "options": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "the allowed answers of a bool/choose ask; null for input"
+        },
+        "age_s": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report",
+        "ledger",
+        "log",
+        "evidence_dir"
+      ],
+      "properties": {
+        "report": {
+          "type": "string"
+        },
+        "ledger": {
+          "type": "string",
+          "description": "the verdict ledger; its row format is internal"
+        },
+        "log": {
+          "type": "string"
+        },
+        "evidence_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ratchet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "direction",
+        "tolerance",
+        "tolerance_pct"
+      ],
+      "properties": {
+        "reference": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "the value at the last KEPT gate (or the seed / baseline before the first keep); null until one exists"
+        },
+        "direction": {
+          "enum": [
+            "up",
+            "down"
+          ],
+          "description": "which way is better"
+        },
+        "tolerance": {
+          "type": "number",
+          "minimum": 0
+        },
+        "tolerance_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "description": "a ratcheted judge's ratchet: the reference it is held to and the rule"
+    },
+    "session_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session",
+        "step",
+        "usage"
+      ],
+      "properties": {
+        "session": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "step": {
+          "type": "string",
+          "description": "the step the session ran; empty for the baseline pass"
+        },
+        "usage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/usage_entry"
+          }
+        }
+      }
+    },
+    "sessions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "merged",
+        "rolled_back",
+        "staged_unmerged"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "worker sessions this run launched"
+        },
+        "merged": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions whose work a gate merged onto the base branch"
+        },
+        "rolled_back": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions whose work a gate discarded"
+        },
+        "staged_unmerged": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions staged on a span no gate decided (see result.staged_branch)"
+        }
+      }
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wall_time_s",
+        "work_time_s",
+        "human_wait_time_s"
+      ],
+      "properties": {
+        "wall_time_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "work_time_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "human_wait_time_s": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "output",
+        "cache_write",
+        "cache_read"
+      ],
+      "properties": {
+        "input": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "uncached input tokens"
+        },
+        "output": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "output tokens"
+        },
+        "cache_write": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "input tokens written to the prompt cache"
+        },
+        "cache_read": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "input tokens served from the prompt cache"
+        }
+      },
+      "description": "tokens split by kind; the kinds do not overlap. null = the agent does not report that kind (never a fabricated 0)"
+    },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tokens",
+        "cost_usd",
+        "cost_source"
+      ],
+      "properties": {
+        "tokens": {
+          "$ref": "#/$defs/tokens"
+        },
+        "cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "dollars as the agents reported them (API-equivalent price, not a bill)"
+        },
+        "cost_source": {
+          "$ref": "#/$defs/cost_source"
+        }
+      }
+    },
+    "usage_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "agent",
+        "model",
+        "tokens",
+        "cost_usd",
+        "cost_source"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "worker",
+            "ruler"
+          ]
+        },
+        "agent": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "the model the agent REPORTED running (not the configured one); null if its stream never names it"
+        },
+        "tokens": {
+          "$ref": "#/$defs/tokens"
+        },
+        "cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "cost_source": {
+          "$ref": "#/$defs/cost_source"
+        }
+      },
+      "description": "what one role spent on one (agent, model) in one session; several calls on the same model share a line"
+    },
+    "usage_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "worker",
+        "ruler"
+      ],
+      "properties": {
+        "total": {
+          "$ref": "#/$defs/totals"
+        },
+        "worker": {
+          "$ref": "#/$defs/totals"
+        },
+        "ruler": {
+          "$ref": "#/$defs/totals"
+        }
+      },
+      "description": "usage totals: all of it, the worker part (the sessions' agents), the ruler part (LLM judges and the summarizer)"
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "met",
+        "value",
+        "max",
+        "target",
+        "rationale",
+        "error"
+      ],
+      "properties": {
+        "met": {
+          "type": "boolean"
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "null when the judge emitted no number"
+        },
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "target": {
+          "type": "number"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "set when the judge could not grade at all"
+        }
+      }
+    },
+    "waiting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "agent",
+        "until"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "why the loop waits: `rate_limit`"
+        },
+        "agent": {
+          "type": "string",
+          "description": "the agent that is limited"
+        },
+        "until": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "epoch seconds the wait ends, if known"
+        }
+      },
+      "description": "the loop is waiting before its next session"
+    }
+  }
+}

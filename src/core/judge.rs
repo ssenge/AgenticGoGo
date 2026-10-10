@@ -17,7 +17,8 @@
 //! Both kinds are crash-safe: any failure (spawn, timeout, malformed output) yields
 //! `Verdict::failed(...)` rather than panicking.
 
-use crate::backend::{AgentBackend, Spend};
+use crate::backend::AgentBackend;
+use crate::usage::Usage;
 use crate::core::model::{JudgeCtx, JudgeKind, JudgeSource, Verdict};
 use crate::os::proc::{self, Captured};
 use crate::util::last_json_object;
@@ -58,17 +59,17 @@ pub fn run(
     isolation: crate::isolation::Isolation,
     src: &dyn JudgeSource,
     iso_base: Option<&str>,
-) -> (Verdict, Spend) {
+) -> (Verdict, Option<Usage>) {
     match kind {
         JudgeKind::Script { path } => {
-            (run_script(path, cwd, name, session, step, timeout_secs, isolation), Spend::default())
+            (run_script(path, cwd, name, session, step, timeout_secs, isolation), None)
         }
         JudgeKind::Llm { path, inputs } => run_llm(path, inputs, model, timeout_secs, cwd, ruler, isolation),
         // A native judge is a Rust closure in the DRIVER's own binary — the one judge kind that is
         // not a subprocess, and therefore the one kind that is not crash-safe by construction.
         // Hence `catch_unwind`: a panicking judge must report "I could not grade this" and let the
         // run continue, exactly as a segfaulting script does. The per-judge `timeout` is meaningless
-        // here (there is nothing to kill) and `Spend` is zero (no ruler call).
+        // here (there is nothing to kill) and there is no usage (no ruler call).
         JudgeKind::Native { f } => {
             // the SAME scratch a script judge gets, so a measure/threshold pair works across kinds.
             // An unwritable scratch is not fatal here (a native judge may never touch it) — it falls
@@ -78,7 +79,7 @@ pub fn run(
                 JudgeCtx::new(src, session.unwrap_or(0), step, cwd, session_diff(cwd, iso_base), scratch);
             let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&ctx)))
                 .unwrap_or_else(|_| Verdict::failed(format!("native judge `{name}` panicked")));
-            (verdict, Spend::default())
+            (verdict, None)
         }
     }
 }
@@ -276,11 +277,11 @@ fn run_llm(
     cwd: &Path,
     ruler: &dyn AgentBackend,
     isolation: crate::isolation::Isolation,
-) -> (Verdict, Spend) {
+) -> (Verdict, Option<Usage>) {
     // 1) read the rubric (the judge's prompt body) — `rubric_path` is already the resolved file.
     let rubric_text = match std::fs::read_to_string(rubric_path) {
         Ok(t) => t,
-        Err(e) => return (Verdict::failed(format!("reading rubric {}: {e}", rubric_path.display())), Spend::default()),
+        Err(e) => return (Verdict::failed(format!("reading rubric {}: {e}", rubric_path.display())), None),
     };
     // strip the yaml frontmatter (it declares `inputs:`, it is not part of the prompt).
     let rubric_text = strip_frontmatter(&rubric_text);
@@ -313,14 +314,13 @@ fn run_llm(
     //    and `isolation` OS-jails the call under Sandbox (defense-in-depth over its permission layer).
     let out = match ruler.one_shot(&prompt, model, timeout_secs, Some(cwd), isolation) {
         Ok(o) => o,
-        Err(e) => return (Verdict::failed(format!("llm judge: {e}")), Spend::default()),
+        Err(e) => return (Verdict::failed(format!("llm judge: {e}")), None),
     };
 
-    // 5) parse the model text as the verdict, carrying through exit status/stderr. The judge's
-    //    token/cost spend rides back so the ceilings can count it (§5.6).
-    let spend = Spend::from_one_shot(&out);
+    // 5) parse the model text as the verdict, carrying through exit status/stderr. The call's usage
+    //    rides back so the ceilings and the usage record can count it (§5.6).
     let verdict = parse_judge_output(&Captured { stdout: out.body.into_bytes(), stderr: out.stderr, success: out.success });
-    (verdict, spend)
+    (verdict, Some(out.usage))
 }
 
 /// Drop a leading `---`…`---` yaml frontmatter block from a rubric before it becomes the prompt.

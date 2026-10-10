@@ -319,6 +319,7 @@ impl Agg {
             // RECORDED for the next run, not for a reader (§3.9 rule 1): a run that starts with HEAD
             // stranded on a crashed session branch recovers its real base from here.
             iso_base: iso_base.clone(),
+            run_id: report.run_id().to_string(),
             ..Default::default()
         };
         let live = crate::state::LiveState::new(&dir, loop_start, dash.clone());
@@ -746,7 +747,7 @@ impl Agg {
             )
         };
         let kind = self.resolve_kind(&j.kind);
-        let (verdict, spend) = crate::core::judge::run(
+        let (verdict, usage) = crate::core::judge::run(
             &kind,
             &j.name,
             &self.dir,
@@ -762,12 +763,7 @@ impl Agg {
         // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
         {
             let mut st = started.st.borrow_mut();
-            st.tokens_spent += spend.tokens;
-            if let Some(c) = spend.cost_usd {
-                st.cost_spent += c;
-            }
-            let ruler_agent = st.cfg.judge.agent.clone();
-            st.charge(&ruler_agent, spend.tokens, spend.cost_usd);
+            st.charge_ruler(usage.as_slice());
             // …and the VERDICT reaches the snapshot, not just the spend. Charging alone was the whole
             // of this block, which is why a driver run published `judges: []` to every reader while
             // its judges ran. `publish()` leaves `dash.judges` alone when the engine has none, so
@@ -784,8 +780,8 @@ impl Agg {
             label: self.label_path(),
             judge: j.name.clone(),
             verdict: verdict.clone(),
-            tokens: spend.tokens,
-            cost: spend.cost_usd.unwrap_or(0.0),
+            tokens: usage.as_ref().map(|u| u.tokens.output_or_zero()).unwrap_or(0),
+            cost: usage.as_ref().and_then(|u| u.cost_usd).unwrap_or(0.0),
             ts: crate::util::now_epoch(),
         }) {
             eprintln!("  ⚠ could not record judge `{}` in the call ledger — resume will re-run it: {e}", j.name);
@@ -809,6 +805,7 @@ impl Agg {
         };
         let row = crate::state::JudgeView {
             name: name.to_string(),
+            judged: true,
             kind: kind.tag().to_string(),
             in_dod: false,
             invariant: false,

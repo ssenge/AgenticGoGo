@@ -6,8 +6,10 @@ const CAPTURED: &str = include_str!("../../../tests/fixtures/agent-streams/copil
 
 #[test]
 fn tokens_are_summed_from_assistant_messages_not_the_terminal_event() {
-    let total: u64 = CAPTURED.lines().filter_map(|l| Copilot.parse_usage(l)).sum();
-    assert_eq!(total, 124, "outputTokens ride on assistant.message in the captured stream");
+    let mut total = crate::usage::Tokens::default();
+    CAPTURED.lines().filter_map(|l| Copilot.parse_usage(l)).for_each(|t| total.add(&t));
+    assert_eq!(total.output, Some(124), "outputTokens ride on assistant.message in the captured stream");
+    assert_eq!((total.input, total.cache_write, total.cache_read), (None, None, None), "output is all copilot reports");
 
     // and the terminal event contributes NOTHING — this is the whole trap.
     let terminal = CAPTURED.lines().find(|l| l.contains(r#""type":"result""#)).unwrap();
@@ -16,6 +18,14 @@ fn tokens_are_summed_from_assistant_messages_not_the_terminal_event() {
         None,
         "copilot's result event carries no token count — a terminal-only reader would see 0"
     );
+}
+
+/// The model `auto` mode resolved to, read off the stream — what ran, not what was configured.
+#[test]
+fn the_model_comes_from_the_assistant_events() {
+    assert_eq!(CAPTURED.lines().find_map(|l| Copilot.parse_model(l)).as_deref(), Some("gpt-5-mini"));
+    let u = Copilot.tally_one_shot(CAPTURED.as_bytes());
+    assert_eq!((u.model.as_deref(), u.tokens.output, u.cost_usd), (Some("gpt-5-mini"), Some(124), None));
 }
 
 #[test]

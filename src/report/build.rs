@@ -55,6 +55,7 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
         (git.iso_base.clone(), git.span_tip.clone(), git.span_branches.len() as u32)
     };
     let tally = std::mem::take(st.ext.get::<Tally>());
+    let usage = std::mem::take(st.ext.get::<crate::usage::Ledger>());
     let base_branch = Some(iso_base).filter(|b| !b.is_empty());
     let final_commit = base_branch.as_deref().and_then(|b| crate::git::rev_parse(&st.dir, b));
     Report {
@@ -64,9 +65,13 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
             work_time_s: st.clock.work_secs(now),
             human_wait_time_s: st.clock.human_wait_secs,
         },
-        judges: judges(&st.dash.judges, tally.baseline),
+        judges: judges(&st.dash.judges, tally.baseline, &st.dash.ratchet),
         result: RunResult { base_branch, final_commit, staged_branch: span_tip },
         open_asks: open_asks(&st.dir, now),
+        detectors: st.dash.detectors.clone(),
+        usage: usage.summary(),
+        session_log: usage.sessions().to_vec(),
+        waiting: st.dash.waiting.clone(),
         ..skeleton(&st.dir, &st.cfg.project, run.run_id(), run.started_at(), res, &st.dash.finish_reason)
     }
 }
@@ -108,42 +113,56 @@ fn skeleton(
         result: RunResult::default(),
         open_asks: Vec::new(),
         paths: paths(dir),
+        detectors: super::Detectors::default(),
+        usage: crate::usage::Summary::default(),
+        session_log: Vec::new(),
+        waiting: None,
     }
 }
 
 /// Every judge the run consulted: its last verdict (the published scoreboard, which both entry
-/// points fill) joined with its baseline. A judge that never produced a verdict has `last: null`.
-fn judges(board: &[crate::state::JudgeView], mut baseline: BTreeMap<String, VerdictView>) -> BTreeMap<String, JudgeEntry> {
+/// points fill) joined with its baseline and its ratchet. A judge that never produced a verdict has
+/// `last: null`.
+pub(super) fn judges(
+    board: &[crate::state::JudgeView],
+    mut baseline: BTreeMap<String, VerdictView>,
+    ratchet: &BTreeMap<String, super::RatchetView>,
+) -> BTreeMap<String, JudgeEntry> {
     let mut out = BTreeMap::new();
     for j in board {
-        let last = (j.state != "pending").then(|| VerdictView {
-            met: j.met,
-            value: j.value,
-            max: j.max,
-            target: j.target,
-            rationale: j.rationale.clone(),
-            error: j.error.clone(),
-        });
-        out.insert(j.name.clone(), JudgeEntry { last, baseline: baseline.remove(&j.name) });
+        let entry = JudgeEntry { last: last_verdict(j), baseline: baseline.remove(&j.name), ratchet: ratchet.get(&j.name).cloned() };
+        out.insert(j.name.clone(), entry);
     }
     for (name, b) in baseline {
-        out.insert(name, JudgeEntry { last: None, baseline: Some(b) });
+        let entry = JudgeEntry { last: None, baseline: Some(b), ratchet: ratchet.get(&name).cloned() };
+        out.insert(name, entry);
     }
     out
 }
 
+/// A scoreboard row as a verdict — `None` while the judge has not run.
+pub(super) fn last_verdict(j: &crate::state::JudgeView) -> Option<VerdictView> {
+    j.judged.then(|| VerdictView {
+        met: j.met,
+        value: j.value,
+        max: j.max,
+        target: j.target,
+        rationale: j.rationale.clone(),
+        error: j.error.clone(),
+    })
+}
+
+/// An open ask as both the report and the live status state it.
+pub(super) fn open_ask(v: &crate::state::AskView) -> OpenAsk {
+    OpenAsk { id: v.id.clone(), kind: v.case.clone(), question: v.question.clone(), options: v.options.clone(), age_s: v.age_secs }
+}
+
 fn open_asks(dir: &Path, now: u64) -> Vec<OpenAsk> {
-    crate::core::asks::open(dir)
-        .iter()
-        .map(|a| {
-            let v = crate::state::AskView::of(a, now);
-            OpenAsk { id: v.id, kind: v.case, question: v.question, age_s: v.age_secs }
-        })
-        .collect()
+    crate::core::asks::open(dir).iter().map(|a| open_ask(&crate::state::AskView::of(a, now))).collect()
 }
 
 /// Absolute paths, so a consumer can open them from any cwd.
-fn paths(dir: &Path) -> Paths {
+pub(super) fn paths(dir: &Path) -> Paths {
     let abs = |p: std::path::PathBuf| {
         let p = if p.is_absolute() { p } else { std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p) };
         p.to_string_lossy().into_owned()
@@ -193,13 +212,22 @@ mod tests {
         b.insert("a".to_string(), VerdictView { met: false, ..Default::default() });
         b.insert("gone".to_string(), VerdictView::default());
         let dash = vec![
-            JudgeView { name: "a".into(), state: "met".into(), met: true, ..Default::default() },
+            JudgeView { name: "a".into(), state: "met".into(), met: true, judged: true, ..Default::default() },
             JudgeView { name: "p".into(), state: "pending".into(), ..Default::default() },
+            JudgeView { name: "z".into(), state: "pending".into(), judged: true, value: Some(0.0), ..Default::default() },
         ];
-        let out = judges(&dash, b);
+        let mut ratchet = BTreeMap::new();
+        ratchet.insert(
+            "a".to_string(),
+            super::super::RatchetView { reference: Some(3.0), direction: crate::core::ratchet::Direction::Up, tolerance: 0.0, tolerance_pct: None },
+        );
+        let out = judges(&dash, b, &ratchet);
+        assert_eq!(out["a"].ratchet.as_ref().and_then(|r| r.reference), Some(3.0), "a ratcheted judge carries its reference");
+        assert!(out["p"].ratchet.is_none(), "an unratcheted one carries none");
         assert!(out["a"].last.as_ref().is_some_and(|v| v.met));
         assert!(out["a"].baseline.as_ref().is_some_and(|v| !v.met));
-        assert!(out["p"].last.is_none(), "a pending judge has no verdict yet");
+        assert!(out["p"].last.is_none(), "a judge that has not run has no verdict yet");
+        assert!(out["z"].last.as_ref().is_some_and(|v| !v.met), "an unmet judge at 0 HAS run — its verdict is reported");
         assert!(out["gone"].last.is_none() && out["gone"].baseline.is_some());
     }
 }

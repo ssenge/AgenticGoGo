@@ -96,8 +96,13 @@ impl AgentBackend for Claude {
     /// Claude reports usage ONCE, on its terminal `result` event — so this fires exactly once per
     /// session and the accumulated total equals the reported total. (Contrast Copilot, which
     /// reports per-message; the worker sums either shape identically.)
-    fn parse_usage(&self, line: &str) -> Option<u64> {
-        stream::output_tokens_from_result(line)
+    fn parse_usage(&self, line: &str) -> Option<crate::usage::Tokens> {
+        stream::tokens_from_result(line)
+    }
+
+    /// `system`/`init` names the model on a stream; a one-shot's result names it in `modelUsage`.
+    fn parse_model(&self, line: &str) -> Option<String> {
+        stream::model_from_line(line)
     }
 
     /// Claude puts the session id on its TERMINAL `result` event (unlike Codex, which puts it on
@@ -152,14 +157,8 @@ impl AgentBackend for Claude {
         // denies tool writes here, but that is not a kernel jail — the OS wrapper is.
         let command = self.confine_one_shot(command, cwd, isolation)?;
         let out: Captured = proc::run_with_timeout(command, timeout_secs)?;
-        let (output_tokens, cost_usd) = self.tally_one_shot(&out.stdout);
-        Ok(OneShot {
-            body: unwrap_envelope(&out.stdout),
-            stderr: out.stderr,
-            success: out.success,
-            output_tokens,
-            cost_usd,
-        })
+        let usage = self.tally_one_shot(&out.stdout);
+        Ok(OneShot { body: unwrap_envelope(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
 
     /// What a confined Claude worker must still be able to write outside the repo, measured on a

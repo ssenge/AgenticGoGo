@@ -3,7 +3,7 @@
 //! Before this existed, an embedding program had to piece the ending together from the exit code,
 //! `state.json`, `verdicts.jsonl` and `project.json` — all documented as INTERNAL, so any refactor of
 //! agg could break every wrapper. The report is the stable interface instead: versioned, published
-//! as a JSON Schema (`docs/schemas/report.v1.json`), written atomically, and written on EVERY ending
+//! as a JSON Schema (`docs/schemas/report.v2.json`), written atomically, and written on EVERY ending
 //! agg can observe — done, aborted, stopped, an error, and a panic inside agg itself.
 //!
 //! ```text
@@ -23,8 +23,10 @@
 mod build;
 mod file;
 pub mod headless;
+mod live;
 
 pub use build::{from_state, record_baseline, record_gate, Tally};
+pub use live::{detectors, ratchets, Detectors, RatchetView, Waiting};
 pub use file::{amend_to_error, begin, clear, last_written_on_this_thread, read_text, write, write_fallback, RunHandle};
 
 use serde::{Deserialize, Serialize};
@@ -53,7 +55,7 @@ pub fn fault_point(point: &str) -> anyhow::Result<()> {
 }
 
 /// The report format's version. Bump it on any change to the serialized shape (see module doc).
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// How the run ended, as a consumer should act on it. Authoritative over the exit code.
 ///
@@ -130,6 +132,15 @@ pub struct Report {
     pub result: RunResult,
     pub open_asks: Vec<OpenAsk>,
     pub paths: Paths,
+    /// the stop detectors as the run ended.
+    pub detectors: Detectors,
+    /// the run's usage totals: all of it, the worker part, the ruler part.
+    pub usage: crate::usage::Summary,
+    /// every session that made an agent call — session `0` is the baseline pass — with what each
+    /// role spent on each model.
+    pub session_log: Vec<crate::usage::SessionUsage>,
+    /// a wait the loop was in when it ended (a rate limit), else `null`.
+    pub waiting: Option<Waiting>,
 }
 
 /// Worker sessions THIS run launched, by what became of their work.
@@ -152,12 +163,15 @@ pub struct Time {
     pub human_wait_time_s: f64,
 }
 
-/// One judge: what it said last, and what it said before any work (the baseline pass).
+/// One judge: what it said last, what it said before any work (the baseline pass), and — for a
+/// ratcheted judge — its ratchet.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct JudgeEntry {
     pub last: Option<VerdictView>,
     /// `null` on the driver path, which has no baseline pass (its judges are lazy).
     pub baseline: Option<VerdictView>,
+    /// `null` for a judge that is not ratcheted.
+    pub ratchet: Option<RatchetView>,
 }
 
 /// A verdict as the report states it: the judge contract minus `evidence`.
@@ -204,6 +218,8 @@ pub struct OpenAsk {
     /// `bool` | `choose` | `input`.
     pub kind: String,
     pub question: String,
+    /// the allowed answers of a `bool`/`choose` ask; `null` for `input`.
+    pub options: Option<Vec<String>>,
     pub age_s: u64,
 }
 
