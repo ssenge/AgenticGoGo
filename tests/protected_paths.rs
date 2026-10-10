@@ -76,7 +76,7 @@ fn project(tier: &str, top_extra: &str) -> (tempfile::TempDir, String) {
     write(d, "tests/oracles/x.json", "orig\n");
     write(d, "tests/oracles/cache.gen", "generated\n");
     write(d, "src/lib.txt", "base\n");
-    write(d, ".gitignore", "agg/state/\nagg/private/\nbin/\n.home/\n*.gen\nattack.log\nattack.err\n");
+    write(d, ".gitignore", "agg/state/\nagg/private/\nbin/\n.home/\n*.gen\nattack.log\nattack.err\npre_hl\n");
     write(
         d,
         "agg/agg.yaml",
@@ -94,6 +94,9 @@ fn project(tier: &str, top_extra: &str) -> (tempfile::TempDir, String) {
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "oracle + config"]);
 
+    // a hard link to the oracle that ALREADY exists when the session starts (gitignored): no kernel
+    // rule keyed on paths can stop a write through it, so it is the gate's case on every tier.
+    fs::hard_link(d.join("tests/oracles/x.json"), d.join("pre_hl")).unwrap();
     write(d, "bin/claude", FAKE_CLAUDE);
     chmod_x(&d.join("bin/claude"));
     let path = format!("{}:{}", d.join("bin").display(), std::env::var("PATH").unwrap_or_default());
@@ -148,6 +151,7 @@ const ATTACKS: &[(&str, &str)] = &[
     ("case_variant", "echo evil > TESTS/Oracles/X.JSON"),
     ("ancestor_moved_away", "mv tests tests_moved"),
     ("directory_swapped", "mv tests/oracles o2 && mkdir tests/oracles && echo evil > tests/oracles/x.json"),
+    ("preexisting_hardlink", "echo evil > pre_hl"),
 ];
 
 #[derive(Debug, PartialEq)]
@@ -222,7 +226,9 @@ fn under_none_the_gate_catches_every_attack() {
     }
 }
 
-/// The host's kernel sandbox: every attack is blocked or caught; on macOS, Seatbelt BLOCKS them all.
+/// The host's kernel sandbox: every attack is blocked or caught. On macOS Seatbelt BLOCKS all of
+/// them but one: a write through a hard link that existed BEFORE the session goes through a path no
+/// rule names, and only the gate can see that the oracle's bytes changed.
 #[test]
 fn under_the_sandbox_every_attack_is_blocked_or_caught() {
     if !kernel_sandbox_usable() {
@@ -231,7 +237,8 @@ fn under_the_sandbox_every_attack_is_blocked_or_caught() {
     }
     for (name, end, _) in all_attacks("sandbox") {
         if cfg!(target_os = "macos") {
-            assert_eq!(end, End::Blocked, "Seatbelt must deny `{name}` outright");
+            let want = if name == "preexisting_hardlink" { End::Caught } else { End::Blocked };
+            assert_eq!(end, want, "Seatbelt and `{name}`");
         }
     }
 }
