@@ -13,6 +13,7 @@ pub mod calls;
 pub mod clock;
 pub mod config;
 pub mod engine;
+pub mod groups;
 pub mod judge;
 pub mod judges;
 pub mod memory;

@@ -1,7 +1,7 @@
 //! Stop-condition parser + value type: consumes tokens and evaluates against the run context.
 
 use super::lex::Tok;
-use super::StopContext;
+use super::{StopContext, Subset};
 use anyhow::{bail, Result};
 
 // ---------------- value ----------------
@@ -66,6 +66,9 @@ pub(super) struct Parser<'a> {
     pub(super) tokens: &'a [Tok],
     pub(super) pos: usize,
     pub(super) ctx: &'a StopContext<'a>,
+    /// set by the last `count_met(<group>)` / `count_regressed(<group>)` resolved: the spelling and
+    /// the group's size, so `parse_cmp` can refuse a threshold the group can never reach.
+    pub(super) last_count: Option<(String, f64)>,
 }
 
 impl<'a> Parser<'a> {
@@ -105,10 +108,24 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn parse_cmp(&mut self) -> Result<Val> {
+        let start = self.pos;
+        self.last_count = None;
         let left = self.parse_atom()?;
+        let left_count = self.last_count.take();
+        let left_literal = self.pos == start + 1 && matches!(self.tokens.get(start), Some(Tok::Num(_)));
         if let Some(Tok::Op(op)) = self.peek().cloned() {
             self.pos += 1;
+            let right_literal = matches!(self.peek(), Some(Tok::Num(_)));
             let right = self.parse_atom()?;
+            let right_count = self.last_count.take();
+            // k > n: a group threshold no outcome can reach is a typo, and a `done_if` built on it
+            // would run to its ceiling. Only a LITERAL is checked — a run term like `budget_total`
+            // reads infinity at startup and would be refused for no reason.
+            match (left_count, right_count) {
+                (Some((what, n)), None) if right_literal => unreachable_count(&what, n, &op, right.as_num(), false)?,
+                (None, Some((what, n))) if left_literal => unreachable_count(&what, n, &op, left.as_num(), true)?,
+                _ => {}
+            }
             // THE TYPE CHECK. A bare judge name is a `met` BOOL, and a bool has no ordering against
             // a number: `coverage >= 80` coerces met→1.0 and is silently ALWAYS FALSE. `validate`
             // runs this at config load, so it is a startup error, not a run that never finishes.
@@ -166,31 +183,49 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Resolve an identifier to a value: a goal id, a dotted accessor on one (`coverage.value`),
-    /// or an aggregate (optionally with an `(invariants)` subset).
-    pub(super) fn resolve_ident(&mut self, name: &str) -> Result<Val> {
-        // optional subset arg, e.g. any_regressed(invariants)
-        let mut invariants_only = false;
-        if matches!(self.peek(), Some(Tok::LParen)) {
-            self.pos += 1;
-            match self.next().cloned() {
-                Some(Tok::Ident(s)) if s == "invariants" => invariants_only = true,
-                other => bail!("aggregate subset must be `invariants`, got {:?}", other),
-            }
-            match self.next() {
-                Some(Tok::RParen) => {}
-                _ => bail!("expected `)` after aggregate subset"),
-            }
+    /// The optional `(subset)` after an identifier: `invariants`, or a configured group. `None` for
+    /// no parentheses at all.
+    fn parse_subset(&mut self, name: &str) -> Result<Option<(String, Subset<'a>)>> {
+        if !matches!(self.peek(), Some(Tok::LParen)) {
+            return Ok(None);
         }
+        self.pos += 1;
+        let groups = self.ctx.groups;
+        let subset = match self.next().cloned() {
+            Some(Tok::Ident(s)) if s == "invariants" => (s, Subset::Invariants),
+            Some(Tok::Ident(s)) => match groups.members(&s) {
+                Some(m) => (s, Subset::Group(m)),
+                None => {
+                    let defined = groups.names();
+                    let hint = if defined.is_empty() { "none — define one under `sequence.groups`".to_string() } else { defined.join(", ") };
+                    bail!("unknown group `{s}` in `{name}({s})` — a subset is `invariants` or a group; defined groups: {hint}")
+                }
+            },
+            other => bail!("an aggregate subset is `invariants` or a group name, got {:?}", other),
+        };
+        match self.next() {
+            Some(Tok::RParen) => Ok(Some(subset)),
+            _ => bail!("expected `)` after aggregate subset"),
+        }
+    }
 
-        // The `(invariants)` subset is only meaningful on count/fraction aggregates.
-        // Reject it on anything else rather than silently ignoring it — a silent
-        // "accepted but ignored" subset is a real footgun in a user's agg.yaml.
-        if invariants_only
-            && !matches!(name, "count_met" | "count_regressed" | "total" | "met_fraction" | "any_regressed")
-        {
-            bail!("`{name}` does not take an (invariants) subset");
+    /// Resolve an identifier to a value: a goal id, a dotted accessor on one (`coverage.value`),
+    /// or an aggregate (optionally over an `(invariants)` or `(<group>)` subset).
+    pub(super) fn resolve_ident(&mut self, name: &str) -> Result<Val> {
+        let subset = self.parse_subset(name)?;
+
+        // A subset is only meaningful on an aggregate. Reject it on anything else rather than
+        // silently ignoring it — a silent "accepted but ignored" subset is a real footgun in a
+        // user's agg.yaml.
+        if let Some((s, sub)) = &subset {
+            if !matches!(name, "all_goals" | "count_met" | "count_regressed" | "total" | "met_fraction" | "any_regressed") {
+                bail!("`{name}` does not take a subset — `({s})` belongs on an aggregate (count_met, total, met_fraction, all_goals, any_regressed, count_regressed)");
+            }
+            if let (Subset::Group(m), "count_met" | "count_regressed") = (sub, name) {
+                self.last_count = Some((format!("{name}({s})"), m.len() as f64));
+            }
         }
+        let scope = subset.map_or(Subset::Dod, |(_, s)| s);
 
         // Dotted accessor: the ONLY way to read the number a judge emitted. (The bare name is its
         // `met` bool — see `Val::GoalBool`.)
@@ -200,15 +235,15 @@ impl<'a> Parser<'a> {
 
         let c = self.ctx;
         let v = match name {
-            "all_goals" => Val::Bool(c.total(false) > 0.0 && c.count_met(false) == c.total(false)),
-            "count_met" => Val::Num(c.count_met(invariants_only)),
-            "count_regressed" => Val::Num(c.count_regressed(invariants_only)),
-            "total" => Val::Num(c.total(invariants_only)),
+            "all_goals" => Val::Bool(c.total(scope) > 0.0 && c.count_met(scope) == c.total(scope)),
+            "count_met" => Val::Num(c.count_met(scope)),
+            "count_regressed" => Val::Num(c.count_regressed(scope)),
+            "total" => Val::Num(c.total(scope)),
             "met_fraction" => {
-                let t = c.total(invariants_only);
-                Val::Num(if t == 0.0 { 0.0 } else { c.count_met(invariants_only) / t })
+                let t = c.total(scope);
+                Val::Num(if t == 0.0 { 0.0 } else { c.count_met(scope) / t })
             }
-            "any_regressed" => Val::Bool(c.count_regressed(invariants_only) > 0.0),
+            "any_regressed" => Val::Bool(c.count_regressed(scope) > 0.0),
             // ── run-level ceiling guards ──────────────────────────────────────────────
             // Each ceiling has ONE user-facing predicate: over_budget (tokens),
             // over_cost (dollars), over_iterations (sessions). Same `over_<noun>` shape;
@@ -313,4 +348,27 @@ impl<'a> Parser<'a> {
             _ => Ok(Val::Missing),
         }
     }
+}
+
+/// Refuse a count over a group compared to a literal it can never reach: `count_met(q) >= 3` on a
+/// two-member group. `flipped` = the literal is on the LEFT (`3 <= count_met(q)`).
+fn unreachable_count(what: &str, n: f64, op: &str, k: f64, flipped: bool) -> Result<()> {
+    // normalise to `count OP k`.
+    let op = match (flipped, op) {
+        (false, o) => o,
+        (true, "<=") => ">=",
+        (true, "<") => ">",
+        (true, ">=") => "<=",
+        (true, ">") => "<",
+        (true, o) => o,
+    };
+    let never = match op {
+        ">=" | "==" => k > n,
+        ">" => k >= n,
+        _ => false,
+    };
+    if never {
+        bail!("`{what} {op} {k}` can never hold — the group has only {n} member(s). Lower the threshold or add members");
+    }
+    Ok(())
 }

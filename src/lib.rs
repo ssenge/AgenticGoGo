@@ -73,8 +73,8 @@ pub mod prelude {
     pub use crate::core::ratchet::{Direction, GateState, Ratchet};
     pub use crate::core::asks::Ask;
     pub use crate::driver::{
-        run, Agg, Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts,
-        PosFrame, Step, StepOutcome,
+        run, Agg, Agent, Effort, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, Landing,
+        OnRegression, Opts, PosFrame, Step, StepOutcome,
     };
     pub use crate::isolation::Isolation;
     pub use crate::plugin::RunOutcome;

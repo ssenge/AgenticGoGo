@@ -1,6 +1,7 @@
 //! Stop-expression evaluator tests.
 
 use super::*;
+use crate::core::groups::Groups;
 use crate::core::model::{Judge, JudgeKind, Lifecycle, Verdict};
 
 /// A judge that has never been evaluated (no verdict). The state `validate` sees at startup.
@@ -243,12 +244,15 @@ fn statistical() {
 
 #[test]
 fn invariants_subset_rejected_on_unsupported_aggregates() {
-    // all_goals + weighted_fraction must NOT silently accept-and-ignore the subset
-    assert!(evaluate("all_goals(invariants)", &StopContext::from_judges(&[])).is_err());
+    // weighted_fraction / a bare judge must NOT silently accept-and-ignore the subset
     assert!(evaluate("weighted_fraction(invariants) >= 0.5", &StopContext::from_judges(&[])).is_err());
-    // count_met / any_regressed DO support it
-    let goals = [g("a", true, true)];
+    let goals = [g("a", true, true), g("b", false, false)];
+    let err = format!("{:#}", evaluate("a(invariants)", &StopContext::from_judges(&goals)).unwrap_err());
+    assert!(err.contains("does not take a subset"), "{err}");
+    // count_met / any_regressed / all_goals DO support it — all_goals(invariants) is "every
+    // invariant met", whatever the rest of the DoD-set says.
     assert!(evaluate("count_met(invariants) >= 1", &StopContext::from_judges(&goals)).is_ok());
+    assert!(ev("all_goals(invariants) AND NOT all_goals", &goals));
 }
 
 #[test]
@@ -492,9 +496,9 @@ fn dot_ref_reads_the_ratchet_reference_and_only_on_a_ratcheted_judge() {
     let gate = gate_with(0, 0, &[], false);
     assert!(ev_gate("cc.ref == 10", &goals, &gate));
     assert!(ev_gate("cc.ref <= 10.5", &goals, &gate));
-    assert!(validate_with("cc.ref > 1", &goals, Some(&gate)).is_ok());
+    assert!(validate_with("cc.ref > 1", &goals, Some(&gate), Groups::none()).is_ok());
 
-    let err = format!("{:#}", validate_with("a.ref > 1", &goals, Some(&gate)).unwrap_err());
+    let err = format!("{:#}", validate_with("a.ref > 1", &goals, Some(&gate), Groups::none()).unwrap_err());
     assert!(err.contains("has no ratchet"), "{err}");
     assert!(validate("cc.ref > 1", &goals).is_err(), "no gate ⇒ no ratchet ⇒ refused");
 
@@ -517,4 +521,80 @@ fn a_gate_number_has_no_accessor_and_says_how_to_write_it() {
         judge_names("rollbacks >= 2 OR consecutive_rollbacks >= 1 OR oscillating OR ratchet_regressed OR cc.ref > 1").unwrap(),
         vec!["cc".to_string()]
     );
+}
+
+// ── judge groups (`sequence.groups`) ─────────────────────────────────────────────────────────────
+
+fn groups(pairs: &[(&str, &[&str])]) -> Groups {
+    Groups::from_map(pairs.iter().map(|(g, m)| (g.to_string(), m.iter().map(|s| s.to_string()).collect())).collect())
+}
+
+fn ev_groups(expr: &str, goals: &[Judge], gs: &Groups) -> bool {
+    evaluate(expr, &StopContext { groups: gs, ..StopContext::from_judges(goals) }).unwrap()
+}
+
+/// THE ACCEPTANCE ROW: `count_met(qs) >= 2` over three judges passes with two met and fails with one
+/// — and the group's members are counted over the whole run-set, DoD-set or not.
+#[test]
+fn count_met_over_a_group_is_k_of_n() {
+    let gs = groups(&[("qs", &["a", "b", "c"])]);
+    let mut two = [g("a", true, false), g("b", true, false), g("c", false, false), g("other", true, false)];
+    assert!(ev_groups("count_met(qs) >= 2", &two, &gs));
+    two[1] = g("b", false, false);
+    assert!(!ev_groups("count_met(qs) >= 2", &two, &gs), "one of three is not two of three");
+    // not in the DoD-set: still a member.
+    two.iter_mut().for_each(|j| j.in_dod = false);
+    assert!(ev_groups("count_met(qs) == 1 AND total(qs) == 3", &two, &gs));
+}
+
+/// all / any / fraction / regression over a group — every aggregate takes one.
+#[test]
+fn every_aggregate_takes_a_group() {
+    let gs = groups(&[("q", &["a", "b"]), ("r", &["c"])]);
+    let goals = [g("a", true, false), regressed("b", false), g("c", true, false)];
+    assert!(!ev_groups("all_goals(q)", &goals, &gs));
+    assert!(ev_groups("all_goals(r)", &goals, &gs));
+    assert!(ev_groups("count_met(q) >= 1", &goals, &gs), "any = count_met >= 1");
+    assert!(ev_groups("met_fraction(q) == 0.5", &goals, &gs));
+    assert!(ev_groups("any_regressed(q) AND count_regressed(q) == 1", &goals, &gs));
+    assert!(!ev_groups("any_regressed(r)", &goals, &gs));
+}
+
+/// An unknown group is an error that LISTS the groups that exist (or says there are none).
+#[test]
+fn an_unknown_group_names_the_defined_ones() {
+    let gs = groups(&[("quality", &["a"]), ("speed", &["b"])]);
+    let goals = [g("a", true, false), g("b", true, false)];
+    let err = format!("{:#}", validate_with("count_met(qualty) >= 1", &goals, None, &gs).unwrap_err());
+    assert!(err.contains("unknown group `qualty`") && err.contains("quality, speed"), "{err}");
+    let err = format!("{:#}", validate("count_met(quality) >= 1", &goals).unwrap_err());
+    assert!(err.contains("none — define one under `sequence.groups`"), "{err}");
+    assert!(validate("count_met(7) >= 1", &goals).is_err(), "a subset is a name");
+}
+
+/// k > n: a threshold the group can never reach is refused at validate time, in either operand
+/// order — and only against a LITERAL (a run term like `budget_total` reads infinity at startup).
+#[test]
+fn a_threshold_above_the_group_size_is_refused() {
+    let gs = groups(&[("q", &["a", "b"])]);
+    let goals = [g("a", true, false), g("b", true, false)];
+    for bad in ["count_met(q) >= 3", "count_met(q) > 2", "count_met(q) == 3", "3 <= count_met(q)", "2 < count_met(q)", "count_regressed(q) >= 5"] {
+        let err = format!("{:#}", validate_with(bad, &goals, None, &gs).unwrap_err());
+        assert!(err.contains("can never hold") && err.contains("2 member"), "`{bad}`: {err}");
+    }
+    for ok in ["count_met(q) >= 2", "count_met(q) > 1", "2 >= count_met(q)", "count_met(q) <= 5", "count_met(q) >= budget_total", "count_met(q) != 7", "(count_met(q)) >= 2"] {
+        assert!(validate_with(ok, &goals, None, &gs).is_ok(), "`{ok}` must validate");
+    }
+}
+
+/// A subset argument names a group, never a judge: it is not in `judge_names` (so it is never
+/// resolved to a file), and `subsets` returns it — once, and never `invariants`.
+#[test]
+fn a_group_in_subset_position_is_not_a_judge_name() {
+    let expr = "count_met(quality) >= 2 AND build AND any_regressed(invariants) AND total(quality) == 3 AND all_goals(speed)";
+    assert_eq!(judge_names(expr).unwrap(), vec!["build".to_string()]);
+    assert_eq!(subsets(expr).unwrap(), vec!["quality".to_string(), "speed".to_string()]);
+    // a bare name in parentheses is grouping, not a subset.
+    assert_eq!(judge_names("(build) AND NOT (lint)").unwrap(), vec!["build".to_string(), "lint".to_string()]);
+    assert!(subsets("(build)").unwrap().is_empty());
 }

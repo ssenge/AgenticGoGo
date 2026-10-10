@@ -100,6 +100,7 @@ impl Handler for PickStep {
                     wall_secs: rs.wall_secs,
                     human_wait_secs: rs.human_wait_secs,
                     gate: Some(&eng.gate),
+                    groups: &eng.groups,
                 };
                 stop::evaluate(cond, &sc)
             });
