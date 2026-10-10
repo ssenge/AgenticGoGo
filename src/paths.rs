@@ -30,6 +30,7 @@
 //!       violations.jsonl    append-only record of `protected_path_violation` rollbacks (write_deny)
 //!       protected/<sha256>  agg's own copies of every `write_deny` file, to restore a violation from
 //!       evidence/<run>/<session>/<judge>/  the files each verdict cited, kept after its judge ran
+//!       prompts.jsonl       per session, the hash of every prompt file its brief was read from
 //! ```
 //!
 //! # Why the split exists
@@ -215,6 +216,15 @@ pub fn evidence_dir(dir: &Path) -> PathBuf {
     private_dir(dir).join("evidence")
 }
 
+/// The prompt-file ledger: `agg/private/prompts.jsonl` (`core::prompts`) — per session, the hash
+/// of every `prompt_file` / `role_prompt_file` its brief was composed from.
+///
+/// Private because it is the audit trail of what the worker was TOLD: a worker able to rewrite it
+/// could hide which version of its orders a session ran under.
+pub fn prompts_jsonl(dir: &Path) -> PathBuf {
+    private_dir(dir).join("prompts.jsonl")
+}
+
 /// The live loop's pidfile: `agg/private/run.pid` (double-run guard + `agg stop` target).
 pub fn run_pid(dir: &Path) -> PathBuf {
     private_dir(dir).join("run.pid")
@@ -268,6 +278,8 @@ mod tests {
         assert_eq!(run_pid(d), Path::new("/proj/agg/private/run.pid"));
         // what a verdict cites — swapping a kept file rewrites why a gate passed.
         assert_eq!(evidence_dir(d), Path::new("/proj/agg/private/evidence"));
+        // the record of which prompt version each session was given.
+        assert_eq!(prompts_jsonl(d), Path::new("/proj/agg/private/prompts.jsonl"));
         assert_eq!(run_log(d), Path::new("/proj/agg/private/run.log"));
         // what an embedder ACTS on — a forged `done` would ship unfinished work.
         assert_eq!(report_json(d), Path::new("/proj/agg/private/report.json"));

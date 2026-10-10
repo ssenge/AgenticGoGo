@@ -6,6 +6,7 @@
 //! | field | rule |
 //! |---|---|
 //! | `agent` `model` `effort` `isolation` `prompt` `state` | **OVERRIDE** — the derived step wins |
+//! | `prompt` / `prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other |
 //! | `readonly` | **ACCUMULATES** — a derived step cannot silently lose a deny its template set |
 //! | `writable` | **SUBTRACTS** from what accumulated — re-grant exactly one deny, not the rest |
 //! | `write_deny` | **ACCUMULATES**, and nothing subtracts from it — not even `writable` |
@@ -48,6 +49,9 @@ pub struct Step {
     pub write_deny: Vec<String>,
     /// ADDITIVE to the composed brief, never replacing it.
     pub prompt: Option<String>,
+    /// [`Self::prompt`] read from a FILE at every session start — relative to `agg/`, or absolute.
+    /// See [`Step::prompt_file`].
+    pub prompt_file: Option<String>,
     /// the forward-state file this step's worker rewrites. `None` = `"state/STATE.md"` under the
     /// config base, as YAML's `defaults.state` resolves it.
     pub state: Option<String>,
@@ -95,8 +99,20 @@ impl Step {
         self.isolation = i;
         self
     }
+    /// The step's task text. Replaces a [`Step::prompt_file`] the template set.
     pub fn prompt(mut self, p: impl Into<String>) -> Step {
         self.prompt = Some(p.into());
+        self.prompt_file = None;
+        self
+    }
+
+    /// The step's task text, from a FILE (relative to `agg/`, or absolute) — the twin of YAML's
+    /// `prompt_file:`. Read at EVERY session start, so an edit applies from the next session, and
+    /// its SHA-256 is recorded per session in `agg/private/prompts.jsonl`. Replaces a
+    /// [`Step::prompt`] the template set; `agg.step()` refuses a step with both, or an unreadable file.
+    pub fn prompt_file(mut self, rel: impl Into<String>) -> Step {
+        self.prompt_file = Some(rel.into());
+        self.prompt = None;
         self
     }
 
@@ -180,6 +196,17 @@ fn extend_unique(dst: &mut Vec<String>, more: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `prompt` and `prompt_file` override AS A PAIR: a derived step's choice replaces the
+    /// template's, so a step can never inherit both forms.
+    #[test]
+    fn prompt_and_prompt_file_replace_each_other() {
+        let filed = Step::template().prompt_file("steps/w.md");
+        let inline = filed.create("a").prompt("do it");
+        assert_eq!((inline.prompt.as_deref(), inline.prompt_file.as_deref()), (Some("do it"), None));
+        let back = inline.prompt_file("steps/x.md");
+        assert_eq!((back.prompt.as_deref(), back.prompt_file.as_deref()), (None, Some("steps/x.md")));
+    }
 
     /// A template survives being created from, and the child carries the template's shape.
     #[test]

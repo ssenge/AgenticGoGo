@@ -486,6 +486,11 @@ sequence:
     - reconsider                   # step back on a different vendor — runs EVERY lap, see below
 ```
 
+A long prompt does not have to live in `agg.yaml`: `prompt_file: "steps/reconsider.md"` (and
+`role_prompt_file:`) reads it from a file under `agg/` instead — re-read at every session start, so an
+edit applies from the next session, with each version's hash recorded in `agg/private/prompts.jsonl`
+([details](CONFIG.md#prompts-from-files--prompt_file-role_prompt_file)).
+
 An entry is tiny: a bare `NAME`, or `{ step: NAME, times: N }`, or `{ step: NAME, until: <expr>,
 max: N }` (the `<expr>` is the same `done_if` grammar, checked after each dispatch). Both bounds are
 mandatory. The list repeats from the top until `done_if` or `abort_if` fires.

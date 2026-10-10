@@ -93,6 +93,12 @@ fn main() -> Result<(), agg::driver::Fatal> {
 | `agg.open_asks()` | the asks a human still owes an answer to — including ones the WORKER opened |
 | `agg.block(q)` | the old doorbell: waits for `agg send resume`, returns nothing. Prefer `hil_bool` |
 
+A step's task can live in a file: `Step::new("implement").prompt_file("steps/implement.md")` (relative
+to `agg/`, or absolute) is read at every session start and hashed into `agg/private/prompts.jsonl`,
+exactly like YAML's `prompt_file:`. `.prompt()` and `.prompt_file()` replace each other — a derived
+step overrides its template's choice — and `agg.step()` refuses a step carrying both, or naming a
+file it cannot read.
+
 ### Judges
 
 Three kinds, one type:
