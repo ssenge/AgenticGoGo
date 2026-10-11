@@ -278,4 +278,6 @@ fn make_writable_tree(p: &Path) {
             }
         }
     }
+    #[cfg(not(unix))]
+    let _ = p; // no permission bits to undo
 }

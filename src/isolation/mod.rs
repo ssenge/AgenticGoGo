@@ -70,6 +70,7 @@ mod imp {
 }
 
 /// Everything one OS-sandbox wrapper is told, resolved to canonical absolute paths.
+#[cfg_attr(not(unix), allow(dead_code))] // only the unix wrappers read it
 pub(crate) struct Jail<'a> {
     /// the project dir — writable.
     pub cwd: &'a Path,
