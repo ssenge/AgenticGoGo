@@ -126,7 +126,7 @@ Bare judge names combined with `AND` / `OR` / parens, plus these terms: `all_goa
 `any_regressed(invariants)`, `count_regressed >= N`, a GROUP subset on any aggregate —
 `count_met(<group>) >= k` (k of n), `all_goals(<group>)`, `any_regressed(<group>)` …, the gate's own
 history — `rollbacks >= N`, `consecutive_rollbacks >= N`, `no_improvements >= N`,
-`consecutive_no_improvements >= N`, `oscillating` (A→B→A over the unmet DoD-set, window
+`consecutive_no_improvements >= N`, `no_changes >= N`, `consecutive_no_changes >= N`, `oscillating` (A→B→A over the unmet DoD-set, window
 `sequence.oscillation_window`, default 4), `ratchet_regressed`, `<judge>.ref` (a ratcheted judge's
 reference) — and the three clock terms — all **SECONDS**:
 `wall_time` (e2e, human waiting included — a deadline), `human_wait_time`, `work_time`
@@ -148,7 +148,8 @@ file) in `notify_if`, never `abort_if` — otherwise the agent can end its own r
 read agg's `verdicts.jsonl`, which is a PROTOCOL boundary, not a permission one — it sits in the
 worker's writable cwd on every isolation tier. Only the process-internal terms (`over_budget`,
 `over_cost`, `over_iterations`, `wall_time`/`human_wait_time`/`work_time`, `any_regressed(invariants)`,
-`rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `oscillating`,
+`rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `no_changes`,
+`consecutive_no_changes`, `oscillating`,
 `ratchet_regressed`, `<judge>.ref`) are unfakeable —
 the gate's history is computed in agg's memory and only persisted (`agg/private/gate.json`) for resume.
 
@@ -168,6 +169,10 @@ Code: `src/core/groups.rs` (`assess` = the one rule both gates call). Driver: `G
 `done_if` group: net gain) or a ratchet improved beyond tolerance; else ledger outcome `no_improvement`
 — NOT a rollback (never `rollbacks`), counts for `stalled` and `consecutive_no_improvements`. Gate
 precedence: protected path > `red_file` > `skip_judges` > regression > improvement.
+**A session that changes nothing git-visible** (`StagedSession::NoChanges`): nothing to merge, base IS
+what was judged, so the verdicts stay (no restore); ledger outcome `no_changes` — not a rollback, not
+"was met"; counts for `stalled` (with its own readings) and `no_changes`/`consecutive_no_changes`, and
+`sessions.no_changes` in the report. It is what bounds an idle worker that thinks it is done.
 Do NOT name the SAME detector in `notify_if` and an entry's `until:`: the `until:` is resolved at the
 start of the next session, so the human is paged before the recovery step runs.
 

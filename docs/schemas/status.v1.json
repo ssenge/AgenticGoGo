@@ -344,6 +344,7 @@
         "merged",
         "rolled_back",
         "no_improvement",
+        "no_changes",
         "staged_unmerged"
       ],
       "properties": {
@@ -366,6 +367,11 @@
           "type": "integer",
           "minimum": 0,
           "description": "sessions a gate did not merge because nothing improved (sequence.merge_requires_improvement)"
+        },
+        "no_changes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "sessions that changed nothing git-visible, so a gate had nothing to merge"
         },
         "staged_unmerged": {
           "type": "integer",

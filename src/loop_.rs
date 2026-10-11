@@ -568,8 +568,9 @@ impl StepStaging {
             // discarded it.
             Some((_, crate::git::StagedSession::Staged)) if !rolled_back => Landing::Base,
             Some((_, crate::git::StagedSession::Staged)) => Landing::RolledBack,
-            // Vetoed / NoChanges / Conflict / CheckoutFailed — nothing merged, and the `_` arm of
-            // `GateKeepRollback` restored base truth. No work landed anywhere.
+            // Vetoed / NoChanges / Conflict / CheckoutFailed — nothing merged (and, but for
+            // NoChanges, whose verdicts already describe base, `GateKeepRollback` restored base
+            // truth). No work landed anywhere.
             Some(_) => Landing::Nothing,
             // no merge was staged: the driver/`skip_judges` path. The span tip says whether this
             // session's branch joined the open span or was discarded (a red_file veto).

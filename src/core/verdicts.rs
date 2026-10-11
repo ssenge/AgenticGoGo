@@ -21,7 +21,8 @@ use std::path::Path;
 
 /// What the GATE decided about the session that produced a verdict. Rows are stamped once the
 /// session's fate is known (§5.8) — never at judge time. Only `Merged`/`Baseline` rows count as
-/// "was met"; `RolledBack` describes code that did not land, `Staged` is unmerged span work.
+/// "was met"; `RolledBack` describes code that did not land, `Staged` is unmerged span work,
+/// `NoChanges` a session that left base exactly as it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -38,6 +39,10 @@ pub enum Outcome {
     /// improved. The work did not land, so "was met" ignores it; `stalled` counts it as a step in
     /// which nothing moved.
     NoImprovement,
+    /// the session changed nothing git-visible: there was no merge to decide about, and its verdicts
+    /// are a reading of base itself. "Was met" ignores it (nothing landed); `stalled` counts it as a
+    /// step, with its own readings — the ones the next session starts from.
+    NoChanges,
 }
 
 /// One line in `verdicts.jsonl`: a [`Verdict`] flattened into an envelope with the fields a
@@ -282,6 +287,8 @@ mod tests {
         assert_eq!(serde_json::to_string(&Outcome::Merged).unwrap(), "\"merged\"");
         // NOT "rolledback" — a reader keys off the exact spelling.
         assert_eq!(serde_json::to_string(&Outcome::RolledBack).unwrap(), "\"rolled_back\"");
+        assert_eq!(serde_json::to_string(&Outcome::NoImprovement).unwrap(), "\"no_improvement\"");
+        assert_eq!(serde_json::to_string(&Outcome::NoChanges).unwrap(), "\"no_changes\"");
     }
 
     #[test]
@@ -315,6 +322,17 @@ mod tests {
             Some(&true),
             "a rolled_back row must not overwrite the baseline 'was met'"
         );
+    }
+
+    #[test]
+    fn a_no_changes_row_does_not_count_as_was_met() {
+        // nothing landed: base already held the last landed reading, and a no-change session must
+        // not become the "was met" a later session is gated against.
+        let d = tmpdir("nochanges");
+        append(&d, None, "baseline", &[("build".into(), v(true))], Outcome::Baseline).unwrap();
+        append(&d, Some(1), "worker", &[("build".into(), v(false))], Outcome::NoChanges).unwrap();
+        assert_eq!(landed_met(&d).get("build"), Some(&true));
+        assert!(rows_for(&d, "build", true).iter().all(|r| r.outcome == Outcome::Baseline));
     }
 
     #[test]

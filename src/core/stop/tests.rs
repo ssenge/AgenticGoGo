@@ -633,3 +633,18 @@ fn the_no_improvement_terms_read_the_gate_state() {
     assert!(err.contains("`consecutive_no_improvements >= 2`"), "{err}");
     assert!(judge_names("no_improvements >= 1 OR consecutive_no_improvements >= 1").unwrap().is_empty());
 }
+
+/// `no_changes` / `consecutive_no_changes` (sessions that changed nothing git-visible) read the gate
+/// like the other history numbers: no accessor, no judge of that name, `0` before any gate.
+#[test]
+fn the_no_changes_terms_read_the_gate_state() {
+    let goals = [g("a", false, false)];
+    let mut gate = gate_with(0, 0, &[], false);
+    gate.state.no_changes = 5;
+    gate.state.consecutive_no_changes = 3;
+    assert!(ev_gate("no_changes == 5 AND consecutive_no_changes >= 3 AND no_improvements == 0", &goals, &gate));
+    assert!(ev("no_changes == 0 AND consecutive_no_changes == 0", &goals), "no gate ⇒ none");
+    let err = format!("{:#}", validate("consecutive_no_changes.value >= 2", &[]).unwrap_err());
+    assert!(err.contains("`consecutive_no_changes >= 2`"), "{err}");
+    assert!(judge_names("no_changes >= 1 OR consecutive_no_changes >= 1").unwrap().is_empty());
+}

@@ -213,6 +213,7 @@ impl LoopState {
             merged: tally.merged,
             rolled_back: tally.rolled_back,
             no_improvement: tally.no_improvement,
+            no_changes: tally.no_changes,
             staged_unmerged: staged,
         };
         self.dash.detectors = crate::report::detectors(&self.eng.gate, &self.dash.judges);

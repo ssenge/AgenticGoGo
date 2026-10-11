@@ -20,12 +20,14 @@ pub struct Tally {
     pub merged: u32,
     pub rolled_back: u32,
     pub no_improvement: u32,
+    pub no_changes: u32,
     /// each judge's verdict from the baseline pass, before any session ran.
     pub baseline: BTreeMap<String, VerdictView>,
 }
 
-/// Record one gate decision about the span ending in `branch`: merged onto base, discarded, or not
-/// merged for lack of improvement. A span carries every session staged on it, and they all share its fate.
+/// Record one gate decision about the span ending in `branch`: merged onto base, discarded, not
+/// merged for lack of improvement, or nothing to merge at all. A span carries every session staged
+/// on it, and they all share its fate.
 pub fn record_gate(ctx: &mut LoopState, fate: Gated, branch: Option<&str>) {
     let git = &ctx.ext.get::<AGGState>().git;
     // the span's other branches, plus the one gated — which IS in the list on the driver path (the
@@ -35,6 +37,7 @@ pub fn record_gate(ctx: &mut LoopState, fate: Gated, branch: Option<&str>) {
     match fate {
         Gated::Merged => t.merged += n,
         Gated::NoImprovement => t.no_improvement += n,
+        Gated::NoChanges => t.no_changes += n,
         _ => t.rolled_back += n,
     }
 }
@@ -74,7 +77,7 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
     let base_branch = Some(iso_base).filter(|b| !b.is_empty());
     let final_commit = base_branch.as_deref().and_then(|b| crate::git::rev_parse(&st.dir, b));
     Report {
-        sessions: Sessions { total: st.session, merged: tally.merged, rolled_back: tally.rolled_back, no_improvement: tally.no_improvement, staged_unmerged: staged },
+        sessions: Sessions { total: st.session, merged: tally.merged, rolled_back: tally.rolled_back, no_improvement: tally.no_improvement, no_changes: tally.no_changes, staged_unmerged: staged },
         time: Time {
             wall_time_s: st.clock.wall_secs(now),
             work_time_s: st.clock.work_secs(now),
