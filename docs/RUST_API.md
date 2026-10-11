@@ -87,7 +87,7 @@ fn main() -> Result<(), agg::driver::Fatal> {
 | `agg.judge(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
 | `agg.group(&g)` | every member of a `Group`'s verdict, through `judge()`'s memoized cache — count over it: `.at_least(2)`, `.all()`, `.any()` |
 | `agg.gate()` | close the span: merge everything staged since the last gate, or discard it per policy |
-| `agg.gate_state()` | the gate's own history: ratchet references, `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `oscillating(k)` |
+| `agg.gate_state()` | the gate's own history: ratchet references, `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes`, `oscillating(k)` |
 | `agg.check_limits()` | enforce ceilings, drain the operator bus, honour Ctrl-C |
 | `agg.pos(label, max)` | an RAII breadcrumb — `cycle 3/20 › attempt 2/3` — published to `state.json` |
 | `agg.ask()` `agg.info()` `agg.log()` | the three notification levels — non-blocking, and still the default |
@@ -182,8 +182,11 @@ for _ in 0..20 {
 - **The reference** before the first keep is the seed, else the first value asked before the first
   `step()`; without either, the first kept gate sets it. A kept gate moves it; a rollback never does.
 - **A ratcheted judge that errored or emitted no number never passes** — it rolls the span back.
-- **`gate_state()`** is what `ratchet_regressed`, `<judge>.ref`, `rollbacks`, `consecutive_rollbacks` and
-  `oscillating` read on the YAML path. The signature `oscillating` compares is every judge asked since the
+- **`gate_state()`** is what `ratchet_regressed`, `<judge>.ref`, `rollbacks`, `consecutive_rollbacks`,
+  `no_improvements`, `no_changes` (and their `consecutive_` forms) and `oscillating` read on the YAML path.
+  A span with no commits returns `GateOutcome::Nothing` from `gate()`, but it is still a gate: its rows
+  are stamped `no_changes` and it counts for `no_changes` / `consecutive_no_changes` — bound an idle
+  worker with `agg.gate_state().consecutive_no_changes >= 3`. The signature `oscillating` compares is every judge asked since the
   last gate that was unmet, plus every ratchet regression.
 - **On resume** the state is restored from the last replayed `gate` record — i.e. as of the last kept
   gate — not from `agg/private/gate.json`, which may be ahead of it by gates that will re-execute.

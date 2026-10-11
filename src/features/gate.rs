@@ -158,7 +158,9 @@ pub(crate) enum Gated {
     /// the staged merge was ABORTED by `merge_requires_improvement`: nothing regressed, nothing
     /// improved. Base is unchanged; it is not a rollback.
     NoImprovement,
-    /// there was no staged merge to decide about (vetoed, no commits, a conflict, no branch).
+    /// the span changed nothing git-visible: no commits, so nothing to merge and nothing discarded.
+    NoChanges,
+    /// there was no staged merge to decide about (vetoed, a conflict, no branch).
     NotStaged,
 }
 
@@ -266,13 +268,24 @@ pub(crate) fn keep_or_rollback(
         // Note the fixture comment in tests/cli.rs that says "a worker that means its work commits
         // it": that is true of a FAKE worker, which runs git itself. A real one never does — agg owns
         // all git — so "commit it" is not a lever the worker has.
-        Some((_, StagedSession::NoChanges)) | None => {
-            // ⚠ NO `restore_goal_state` — that is the whole fix. The LEDGER tag stays `RolledBack`,
-            // because OD-13 closed that question (`RUST_API.md` §OD-13: the `_` arm records
-            // `RolledBack` for Vetoed/NoChanges/Conflict under every policy) and nothing landed in
-            // git. What changes is only the ENGINE's live judge state, which is a reading of the
-            // filesystem rather than a claim about what merged.
-            clear_span(ctx, staged.map(|(br, _)| br.as_str()));
+        //
+        // And it is a STEP, with its own ledger tag `no_changes`: a session in which nothing moved.
+        // Recorded as `rolled_back` it counted for nothing — not for `stalled`, not for any gate
+        // term — so a worker that believed it was finished while a judge stayed unmet idled forever
+        // under `abort_if: stalled`. It counts for `stalled` (with these readings, which are base's)
+        // and for `no_changes` / `consecutive_no_changes`. (This supersedes OD-13 for `NoChanges`
+        // only: a veto and a conflict are still recorded `rolled_back`.)
+        Some((br, StagedSession::NoChanges)) => {
+            // ⚠ NO `restore_goal_state`: the ENGINE's live judge state is a reading of the
+            // filesystem, and this one is current.
+            crate::report::record_gate(ctx, Outcome::NoChanges, Some(br));
+            clear_span(ctx, Some(br));
+            crate::core::verdicts::append_full(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::NoChanges, &[], &kept)?;
+            Gated::NoChanges
+        }
+        None => {
+            // no session branch: nothing was staged, and the tree was not restored either.
+            clear_span(ctx, None);
             crate::core::verdicts::append_full(&ctx.dir, Some(ctx.session), &step_name, fresh, Outcome::RolledBack, &[], &kept)?;
             Gated::NotStaged
         }
@@ -295,6 +308,7 @@ pub(crate) fn keep_or_rollback(
         Gated::Merged => GateDecision::Kept,
         Gated::RolledBack => GateDecision::RolledBack,
         Gated::NoImprovement => GateDecision::NoImprovement,
+        Gated::NoChanges => GateDecision::NoChanges,
         Gated::NotStaged => GateDecision::Nothing,
     };
     ctx.eng.gate.record(decision, fresh, &ratchet, signature);

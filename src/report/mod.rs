@@ -155,6 +155,11 @@ pub struct Sessions {
     pub rolled_back: u32,
     /// sessions a gate did not merge because nothing improved — not a regression (A-15).
     pub no_improvement: u32,
+    /// sessions that changed nothing git-visible, so there was nothing to merge (an idle worker, or
+    /// a step whose whole output is gitignored worker state). Defaults to 0 when read from a live
+    /// state an older agg wrote.
+    #[serde(default)]
+    pub no_changes: u32,
     /// sessions staged on a span that no gate ever decided — the work is on `result.staged_branch`.
     pub staged_unmerged: u32,
 }

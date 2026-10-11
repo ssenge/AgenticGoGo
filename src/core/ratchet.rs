@@ -1,6 +1,6 @@
 //! The numeric RATCHET and the gate's own history — `rollbacks`, `consecutive_rollbacks`,
-//! `no_improvements`, `consecutive_no_improvements`, `oscillating`, `ratchet_regressed`,
-//! `<judge>.ref`.
+//! `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes`,
+//! `oscillating`, `ratchet_regressed`, `<judge>.ref`.
 //!
 //! # Why these are process-internal terms, not judges
 //!
@@ -186,7 +186,10 @@ pub enum GateDecision {
     /// `merge_requires_improvement` refused it: nothing regressed, but nothing improved either. Not
     /// a rollback — it neither counts for `rollbacks` nor extends or breaks the streak.
     NoImprovement,
-    /// nothing was decided (no changes, a veto, a conflict).
+    /// the span changed nothing git-visible: nothing to merge, nothing discarded. Like
+    /// `NoImprovement` it neither counts for `rollbacks` nor extends or breaks either streak.
+    NoChanges,
+    /// nothing was decided (a veto, a conflict, no session branch).
     Nothing,
 }
 
@@ -215,6 +218,13 @@ pub struct GateState {
     /// no_improvement gates since the last kept gate. A rollback neither extends nor breaks it.
     #[serde(default)]
     pub consecutive_no_improvements: u32,
+    /// sessions that changed nothing git-visible this run (an idle worker) — never rollbacks.
+    #[serde(default)]
+    pub no_changes: u32,
+    /// no-change gates since the last kept gate. A rollback or a no_improvement neither extends nor
+    /// breaks it.
+    #[serde(default)]
+    pub consecutive_no_changes: u32,
     /// one signature per judged gate, oldest first: the sorted names of the judges that were
     /// failing (see [`signature`]).
     #[serde(default)]
@@ -437,6 +447,7 @@ impl Gate {
             GateDecision::Kept => {
                 st.consecutive_rollbacks = 0;
                 st.consecutive_no_improvements = 0;
+                st.consecutive_no_changes = 0;
                 for (name, v) in fresh.iter().filter(|(n, _)| self.specs.contains_key(n)) {
                     if let Some(now) = finite(v).filter(|_| v.error.is_none()) {
                         st.refs.insert(name.clone(), now);
@@ -453,6 +464,10 @@ impl Gate {
             GateDecision::NoImprovement => {
                 st.no_improvements += 1;
                 st.consecutive_no_improvements += 1;
+            }
+            GateDecision::NoChanges => {
+                st.no_changes += 1;
+                st.consecutive_no_changes += 1;
             }
             GateDecision::Nothing => {}
         }

@@ -1,5 +1,6 @@
-//! Judge GROUPS (`sequence.groups`, k-of-n aggregates, the gate's net group rule) and the
-//! `merge_requires_improvement` merge rule — end to end, on both front ends.
+//! Judge GROUPS (`sequence.groups`, k-of-n aggregates, the gate's net group rule), the
+//! `merge_requires_improvement` merge rule and the session that changes nothing (`no_changes`) —
+//! end to end, on both front ends.
 //!
 //! The YAML half drives the real `agg` binary with a fake `claude` whose sessions follow a PLAN: one
 //! shell line per session, run in the project, then committed. The plan sits OUTSIDE the project so
@@ -308,6 +309,93 @@ fn stalled_counts_no_improvement_sessions_as_steps_where_nothing_moved() {
     assert_eq!(judge(dir)["met"], true, "merged + two no_improvement steps: nothing moved");
 }
 
+/// `stalled` counts a `no_changes` session as a step with its OWN readings — they are base's, since
+/// nothing was merged or discarded. Flat readings are a stall; a judge that moved on one (a step
+/// whose output is gitignored worker state) is progress.
+#[test]
+fn stalled_counts_no_changes_sessions_with_their_own_readings() {
+    let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/judges/stalled.sh");
+    let judge = |dir: &Path| -> serde_json::Value {
+        let out = Command::new("bash").arg(&stalled).env("AGG_PROJECT_DIR", dir).output().unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
+    };
+    let row = |dir: &Path, s: u32, v: f64, o: Outcome| {
+        append(dir, Some(s), "w", &[("spec".to_string(), Verdict::binary(false).with_value(v))], o).unwrap();
+    };
+
+    let idle = tempfile::tempdir().unwrap();
+    row(idle.path(), 1, 10.0, Outcome::NoChanges);
+    row(idle.path(), 2, 10.0, Outcome::NoChanges);
+    assert_eq!(judge(idle.path())["met"], false, "two steps are not enough history");
+    row(idle.path(), 3, 10.0, Outcome::NoChanges);
+    assert_eq!(judge(idle.path())["met"], true, "three idle sessions, nothing moved: a stall");
+
+    let state_only = tempfile::tempdir().unwrap();
+    row(state_only.path(), 1, 10.0, Outcome::Merged);
+    row(state_only.path(), 2, 50.0, Outcome::NoChanges);
+    row(state_only.path(), 3, 50.0, Outcome::NoChanges);
+    assert_eq!(judge(state_only.path())["met"], false, "`spec` moved on a no-change session: progress");
+}
+
+/// A project whose idle worker changes NOTHING git-visible, `.home/` ignored too so agg's own
+/// library install cannot be swept onto session 1.
+fn idle_project(plan: &[&str], seq: &str) -> (tempfile::TempDir, PathBuf, String) {
+    let (tmp, dir, path) = planned_project(plan);
+    write_judge(&dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0}'\n");
+    write_cfg(&dir, seq);
+    write(&dir, ".gitignore", "agg/state/\nagg/private/\n.obsidian/\n.home/\n");
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "base"]);
+    (tmp, dir, path)
+}
+
+/// THE BUG: a worker that believes it is finished while a judge stays unmet changes nothing, every
+/// session. Those sessions used to count for nothing — not for `stalled`, not for any gate term — so
+/// `abort_if: stalled` idled forever. Now each is a `no_changes` step: `stalled` turns met once it
+/// sees three, and the run aborts.
+#[test]
+fn an_idle_worker_is_a_stall_and_abort_if_stalled_ends_the_run() {
+    let (_tmp, dir, path) = idle_project(&["true"; 8], "  done_if: \"feature\"\n  abort_if: \"stalled\"\n");
+    let (code, combined) = run(&dir, &path, "8");
+    assert_eq!(code, Some(3), "abort_if, not the session cap:\n{combined}");
+    let no_changes = |s| (Some(s), Outcome::NoChanges);
+    assert_eq!(
+        outcomes(&dir, "feature"),
+        vec![(None, Outcome::Baseline), no_changes(1), no_changes(2), no_changes(3), no_changes(4)],
+        "`stalled` reads sessions 1-3 during session 4's judging:\n{combined}"
+    );
+    let st = agg::core::ratchet::load(&dir).unwrap();
+    assert_eq!((st.no_changes, st.consecutive_no_changes, st.rollbacks), (4, 4, 0), "never a rollback");
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(agg::paths::report_json(&dir)).unwrap()).unwrap();
+    let s = &report["sessions"];
+    assert_eq!(
+        (&s["total"], &s["no_changes"], &s["merged"], &s["rolled_back"], &s["no_improvement"]),
+        (&4.into(), &4.into(), &0.into(), &0.into(), &0.into()),
+        "{report}"
+    );
+}
+
+/// The unfakeable bound on the same streak: `consecutive_no_changes` is the gate's own count, and
+/// a kept gate resets it.
+#[test]
+fn an_idle_streak_aborts_on_consecutive_no_changes_counted_from_the_last_keep() {
+    let (_tmp, dir, path) = idle_project(
+        &["true", "touch work.txt", "true", "true", "true"],
+        "  done_if: \"feature\"\n  abort_if: \"consecutive_no_changes >= 2\"\n",
+    );
+    let (code, combined) = run(&dir, &path, "5");
+    assert_eq!(code, Some(3), "{combined}");
+    assert!(combined.contains("consecutive_no_changes >= 2"), "{combined}");
+    assert_eq!(
+        outcomes(&dir, "feature").into_iter().map(|(_, o)| o).collect::<Vec<_>>(),
+        [Outcome::Baseline, Outcome::NoChanges, Outcome::Merged, Outcome::NoChanges, Outcome::NoChanges],
+        "the keep at session 2 restarted the streak:\n{combined}"
+    );
+    let st = agg::core::ratchet::load(&dir).unwrap();
+    assert_eq!((st.no_changes, st.consecutive_no_changes), (3, 2));
+}
+
 // ── the Rust driver ────────────────────────────────────────────────────────────────────────────
 
 /// A fake `claude` that appends one line to `work.log` per worker session and commits it.
@@ -327,7 +415,8 @@ for a in "$@"; do
     *INSTRUCTIONS.md*) worker=1 ;;
   esac
 done
-if [ -n "$worker" ]; then
+# a step whose brief says IDLE changes nothing — the `no_changes` session.
+if [ -n "$worker" ] && ! grep -q IDLE agg/private/INSTRUCTIONS.md 2>/dev/null; then
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
   git commit -qm "worker: did work" >/dev/null 2>&1
@@ -429,4 +518,29 @@ fn a_driver_span_that_improves_nothing_is_not_merged() {
         agg.judge(&any);
         assert_eq!(agg.gate().unwrap(), GateOutcome::Kept, "off by default");
     }
+}
+
+/// A driver span that changes nothing git-visible: `gate()` has nothing to merge (`Nothing`), but the
+/// gate counts it — `no_changes` / `consecutive_no_changes`, the driver's unfakeable idle bound —
+/// and stamps its rows `no_changes`. A kept gate ends the streak.
+#[test]
+fn a_driver_span_that_changes_nothing_counts_as_a_no_change_gate() {
+    let (tmp, _, _, any) = driver_project();
+    let idle = Step::new("idle").model("fake").prompt("IDLE: you are done, change nothing");
+    let agg = Agg::open(tmp.path()).unwrap();
+    // the first session also carries agg's own `.gitignore` entries, so it is never a no-change one.
+    agg.step(&work()).unwrap();
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    for _ in 0..2 {
+        agg.step(&idle).unwrap();
+        agg.judge(&any);
+        assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing, "nothing to merge");
+    }
+    let st = agg.gate_state();
+    assert_eq!((st.no_changes, st.consecutive_no_changes, st.rollbacks), (2, 2, 0));
+    let tags: Vec<Outcome> = rows_for(tmp.path(), "any", false).into_iter().map(|r| r.outcome).collect();
+    assert_eq!(tags, [Outcome::NoChanges, Outcome::NoChanges]);
+    agg.step(&work()).unwrap();
+    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    assert_eq!((agg.gate_state().no_changes, agg.gate_state().consecutive_no_changes), (2, 0));
 }

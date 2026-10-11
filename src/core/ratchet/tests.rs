@@ -273,6 +273,27 @@ fn a_no_improvement_gate_counts_for_no_rollback_and_moves_no_reference() {
     assert_eq!(g.state.signatures.len(), 4);
 }
 
+/// A `NoChanges` gate (the worker changed nothing git-visible) counts in its own terms only: no
+/// rollback, no reference moves, the other streaks are neither extended nor broken, and a kept
+/// gate ends its streak.
+#[test]
+fn a_no_changes_gate_counts_in_its_own_terms_and_a_keep_resets_the_streak() {
+    let mut g = gate(&[("cc", Ratchet::down(0.0).baseline(10.0))]);
+    g.record(GateDecision::NoImprovement, &fresh(&[("cc", val(10.0))]), &[], sig(&[]));
+    g.record(GateDecision::NoChanges, &fresh(&[("cc", val(8.0))]), &[], sig(&[]));
+    g.record(GateDecision::RolledBack, &fresh(&[("cc", val(11.0))]), &[], sig(&["cc"]));
+    g.record(GateDecision::NoChanges, &fresh(&[("cc", val(8.0))]), &[], sig(&[]));
+    assert_eq!((g.state.no_changes, g.state.consecutive_no_changes), (2, 2), "a rollback does not break it");
+    assert_eq!((g.state.rollbacks, g.state.consecutive_rollbacks), (1, 1), "not a rollback, nor a break");
+    assert_eq!(g.state.consecutive_no_improvements, 1, "nor a break of the no_improvement streak");
+    assert_eq!(g.state.reference("cc"), Some(10.0), "nothing merged, so no reference moves");
+    g.record(GateDecision::Nothing, &fresh(&[("cc", val(8.0))]), &[], sig(&[]));
+    assert_eq!(g.state.consecutive_no_changes, 2, "a veto or conflict is not a no-change session");
+    g.record(GateDecision::Kept, &fresh(&[("cc", val(9.0))]), &[], sig(&[]));
+    assert_eq!((g.state.no_changes, g.state.consecutive_no_changes), (2, 0));
+    assert_eq!(g.state.signatures.len(), 6, "every judged gate still records where the worker was");
+}
+
 /// A `mixed` verdict — its own tools moved in different directions — is never an improvement,
 /// however far its number moved; it still regresses like any other.
 #[test]

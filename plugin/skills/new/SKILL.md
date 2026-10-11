@@ -229,7 +229,9 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
     exist to prevent. In `notify_if` the worst case is an annoying ping, rate-limited by the
     cooldown, and the loop keeps going. Keep TERMINATION on the signals the worker genuinely cannot
     reach — the process-internal ones: `over_budget`, `over_cost`, `over_iterations`, `wall_time`/`work_time`,
-    `any_regressed(invariants)`. A `stalled`/`stuck` detector over agg's own
+    `any_regressed(invariants)`, and the gate's own history — `consecutive_rollbacks`, `oscillating`,
+    `consecutive_no_changes` (a worker that believes it is done while a judge is unmet changes
+    nothing, session after session: `consecutive_no_changes >= 3` ends that run). A `stalled`/`stuck` detector over agg's own
     `agg/private/verdicts.jsonl` is a **higher bar, and how much higher depends on the isolation
     tier**: agg owns that file and a worker touching it is tampering, and under `isolation:
     sandbox`/`container` the ledger sits in `agg/private/`, carved out of the worker's writable set,

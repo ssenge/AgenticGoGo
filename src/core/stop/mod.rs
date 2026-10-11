@@ -69,8 +69,8 @@ pub struct StopContext<'a> {
     /// term of its own: it only keeps `work_time` from counting a provider's quota window as effort.
     pub rate_limit_wait_secs: f64,
     /// the gate's ratchet config and history (backs `rollbacks`, `consecutive_rollbacks`,
-    /// `no_improvements`, `consecutive_no_improvements`, `oscillating`, `ratchet_regressed`,
-    /// `<judge>.ref`). `None` = a context with no gate behind
+    /// `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes`,
+    /// `oscillating`, `ratchet_regressed`, `<judge>.ref`). `None` = a context with no gate behind
     /// it, which reads as a run that has gated nothing — and `.ref` on it is an error.
     pub gate: Option<&'a crate::core::ratchet::Gate>,
     /// the configured judge groups (`sequence.groups`) — what a `(<group>)` subset resolves against.
@@ -191,7 +191,7 @@ pub fn judge_names(expr: &str) -> Result<Vec<String>> {
         "over_budget", "cost_spent", "cost_limit",
         "over_cost", "iterations", "max_iterations", "over_iterations", "any_judge_error",
         "invariants", "rollbacks", "consecutive_rollbacks", "oscillating", "ratchet_regressed",
-        "no_improvements", "consecutive_no_improvements",
+        "no_improvements", "consecutive_no_improvements", "no_changes", "consecutive_no_changes",
     ];
     let tokens = tokenize(expr)?;
     let mut out: Vec<String> = Vec::new();

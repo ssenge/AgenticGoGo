@@ -2,6 +2,25 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Fixed
+
+- **A worker that changes nothing no longer idles forever under `abort_if: "stalled"`.** A session
+  that changed nothing git-visible (no commit, so nothing to merge) used to be written to
+  `verdicts.jsonl` as `rolled_back` and counted for nothing: not for `stalled` (which read only
+  `merged` and `no_improvement` rows), not for any gate term. A worker that believed it was finished
+  while a judge stayed unmet therefore ran session after session — one run reached 325. Such a session
+  is now a step in which nothing moved:
+  - its ledger rows carry the new outcome **`no_changes`** (not a rollback, not a "was met" reading);
+  - the shipped **`stalled`** judge counts `no_changes` steps, with their own readings (they are base's:
+    nothing was merged or discarded), so three idle sessions in a row are a stall;
+  - two new gate-history terms, **`no_changes`** and **`consecutive_no_changes`** (since the last kept
+    gate), count them — process-internal like `consecutive_rollbacks`, so unfakeable and safe in
+    `abort_if`: `abort_if: "consecutive_no_changes >= 3"`. Driver: `agg.gate_state()`.
+  - the report and `agg status --json` count them in **`sessions.no_changes`** (`report.v2` and
+    `status.v1` schemas: a new required field).
+
 ## 0.0.16 (2026-10-11)
 
 ### Added

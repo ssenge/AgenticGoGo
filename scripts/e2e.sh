@@ -799,6 +799,35 @@ is    "a work_time ceiling HALTS the loop (exit 3)" "$?" "3"
 has   "…and names the expression"                    "$WH/run.log" "work_time"
 hasnt "…it did not simply run out of sessions"       "$WH/run.log" "reached max_sessions"
 
+# ── an IDLE worker is a stall: `no_changes` sessions count for `stalled` (exit 3) ─────────
+# A worker that believes it is finished while a judge is still unmet changes NOTHING git-visible,
+# session after session. Those sessions used to be ledgered `rolled_back`, which the shipped
+# `stalled` ignores, so `abort_if: stalled` never fired (a real run reached 325 sessions). Each is now
+# a `no_changes` step: during session 4's judging `stalled` reads three flat ones and the run aborts.
+# HOME is a fresh dir OUTSIDE the project, so `stalled` is this build's library copy (installed there
+# by `agg run`), and nothing agg writes to HOME can be swept onto a session branch. `.obsidian/` is
+# the one `.gitignore` entry agg would otherwise append (and commit) in session 1.
+IDL="$(mkproj idle)"; : > "$IDL/NO_WORK"; mkdir -p "$WS/idle-home"
+printf '.obsidian/\n' >> "$IDL/.gitignore"; ( cd "$IDL" && git commit -qam "ignore .obsidian/" )
+cat > "$IDL/agg/agg.yaml" <<'EOF'
+project: idle
+defaults: { model: fake }
+steps: { worker: {} }
+sequence:
+  steps: [worker]
+  done_if: "worked"
+  abort_if: "stalled"
+summary: { enabled: false }
+EOF
+( cd "$IDL" && PATH="$IDL/bin:$PATH" HOME="$WS/idle-home" "$AGG" run --max-sessions 10 ) > "$IDL/run.log" 2>&1
+is    "an idle worker ends the run under abort_if: stalled (exit 3, not the cap)" "$?" "3"
+hasnt "…the max-sessions cap never fired"                 "$IDL/run.log" "reached max_sessions"
+idl_report() { python3 -c "import json;r=json.load(open('$IDL/agg/private/report.json'));print($1)"; }
+is    "…the report names stalled as the reason"           "$(idl_report "r['stop_reason']")" "ABORT: stalled"
+is    "…every session is ledgered no_changes"             "$(grep -c '"judge":"worked".*"outcome":"no_changes"' "$IDL/agg/private/verdicts.jsonl")" "4"
+is    "…and counted as such in the report"                "$(idl_report "r['sessions']['no_changes']")" "4"
+is    "…never as rolled back"                             "$(idl_report "r['sessions']['rolled_back']")" "0"
+
 # ═══════════════════════════════════════════════════════════════════════════
 sec "9m. notify_if — flag a human WITHOUT killing the loop (STUCK_NOTIFY)"
 

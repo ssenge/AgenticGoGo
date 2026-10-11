@@ -4,16 +4,19 @@
 # this judge decides "is the loop making progress", projects wire it to abort_if, so a worker able
 # to append forged `merged` rows could end its own run.
 #
-#   met:true when, across the last K=3 MERGED steps: no binary judge changed `met`, AND no
-#   numeric judge changed `value`. Judges with no row in the window are ignored; `stalled`
-#   ignores its OWN rows. Fewer than K qualifying merged steps ⇒ met:false.
+#   met:true when, across the last K=3 qualifying steps (merged, and the two kinds below): no
+#   binary judge changed `met`, AND no numeric judge changed `value`. Judges with no row in the
+#   window are ignored; `stalled` ignores its OWN rows. Fewer than K qualifying steps ⇒ met:false.
 #
 # K is hardcoded (library judges are parameterless — §5.1); a project overrides K by shadowing
 # this file in agg/judges/stalled.sh. Only `merged` rows count — a rolled-back step's churn was
-# undone and must not read as progress-or-stall — with ONE exception: a `no_improvement` step
-# (`sequence.merge_requires_improvement` refused it) is a step in which NOTHING MOVED, by the gate's
-# own verdict. It joins the window carrying the state of the step before it, so K sessions in a row
-# that improve nothing read as a stall.
+# undone and must not read as progress-or-stall — with TWO exceptions, both steps in which NOTHING
+# MOVED by the gate's own verdict:
+#   - a `no_improvement` step (`sequence.merge_requires_improvement` refused it) joins the window
+#     carrying the state of the step before it — its own rows describe a tree that was discarded;
+#   - a `no_changes` step (the worker changed nothing git-visible) joins it with its OWN rows: nothing
+#     was merged or discarded, so they are a reading of base itself, like a merged step's.
+# So K sessions in a row that improve nothing, or that change nothing, read as a stall.
 set -u
 DIR="${AGG_PROJECT_DIR:-.}"
 LOG="$DIR/agg/private/verdicts.jsonl"
@@ -28,8 +31,8 @@ except OSError:
     print('{"met":false,"target":1,"rationale":"no verdicts.jsonl yet — nothing to stall on"}')
     sys.exit(0)
 
-# ordered list of merged (and no_improvement) steps, each a dict judge -> (met, value); skip our own
-# rows. A no_improvement step is recorded as None and filled below.
+# ordered list of merged, no_changes and no_improvement steps, each a dict judge -> (met, value);
+# skip our own rows. A no_improvement step is recorded as None and filled below.
 steps = []           # list of [(session, step), {judge: (met, value_or_None)} or None]
 index = {}
 for ln in lines:
@@ -41,15 +44,15 @@ for ln in lines:
     except ValueError:
         continue
     outcome = r.get("outcome")
-    if outcome not in ("merged", "no_improvement"):
+    if outcome not in ("merged", "no_changes", "no_improvement"):
         continue
     if r.get("judge") == "stalled":
         continue
     key = (r.get("session"), r.get("step"))
     if key not in index:
         index[key] = len(steps)
-        steps.append([key, {} if outcome == "merged" else None])
-    if outcome == "merged":
+        steps.append([key, None if outcome == "no_improvement" else {}])
+    if outcome != "no_improvement":
         steps[index[key]][1][r["judge"]] = (bool(r.get("met")), r.get("value", None))
 
 # a no_improvement step carries the state of the step before it: nothing moved.
@@ -61,7 +64,7 @@ for s in steps:
 
 window = [s for (_, s) in steps][-K:]
 if len(window) < K:
-    print('{"met":false,"target":1,"rationale":"fewer than %d merged steps — not enough history to call a stall"}' % K)
+    print('{"met":false,"target":1,"rationale":"fewer than %d qualifying steps — not enough history to call a stall"}' % K)
     sys.exit(0)
 
 # for every judge seen in the window, is it flat across the rows where it appears?
@@ -89,5 +92,5 @@ if changed:
         "rationale": "not stalled — moved in last %d steps: %s" % (K, ", ".join(changed))}))
 else:
     print(json.dumps({"met": True, "target": 1,
-        "rationale": "STALLED — no judge moved across the last %d merged steps" % K}))
+        "rationale": "STALLED — no judge moved across the last %d steps" % K}))
 PY

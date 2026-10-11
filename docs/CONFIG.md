@@ -822,7 +822,7 @@ comparisons `== != >= <= > <`, and parentheses. Precedence: `or > and > cmp > at
 | **judge accessor** | `name.value`, `name.max` → the number the judge emitted. (`.target` is NOT an accessor — it is presentational.) `name.ref` → a **ratcheted** judge's current reference ([the ratchet](#the-ratchet--numeric-no-regression)); on any other judge it is a startup error. |
 | **aggregates** | `all_goals`, `count_met`, `count_regressed`, `total`, `met_fraction`, `any_regressed` — bare, over the DoD-set; with a subset argument, over that subset. |
 | **run scalars/ceilings** | `tokens_spent`, `budget_total`, `over_budget`, `cost_spent`, `cost_limit`, `over_cost`, `iterations`, `max_iterations`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_judge_error` |
-| **gate history** | `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements` (numbers), `oscillating`, `ratchet_regressed` (bools) — see [the gate's own detectors](#rollbacks-and-oscillation--the-gates-own-detectors). Process-internal, so they may sit in `abort_if`. |
+| **gate history** | `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes` (numbers), `oscillating`, `ratchet_regressed` (bools) — see [the gate's own detectors](#rollbacks-and-oscillation--the-gates-own-detectors). Process-internal, so they may sit in `abort_if`. |
 | **subsets** | `(invariants)` or `(<group>)` — an argument on exactly the six aggregates, e.g. `any_regressed(invariants)`, `count_met(quality) >= 2`, `all_goals(quality)`. A [group](#judge-groups--k-of-n) is a name from `sequence.groups`; an unknown one is a startup error listing the defined groups. |
 
 ### Numeric thresholds — use the accessor
@@ -1436,9 +1436,11 @@ explicitly, not one agg makes for you.
 
 ### Rollbacks and oscillation — the gate's own detectors
 
-Besides stagnation (`stalled`), two failure shapes need a stop rule in any long loop: **damage** — the
-worker keeps making things worse and the gate keeps rolling it back — and **oscillation** — it fixes A
-and breaks B, then fixes B and breaks A. agg answers both with **built-in terms**, not judges:
+Besides stagnation (`stalled`), three failure shapes need a stop rule in any long loop: **damage** — the
+worker keeps making things worse and the gate keeps rolling it back — **oscillation** — it fixes A
+and breaks B, then fixes B and breaks A — and **idling** — the worker believes it is finished while a
+judge is still unmet, and changes nothing session after session. agg answers them with **built-in
+terms**, not judges:
 
 | term | type | what it counts |
 |---|---|---|
@@ -1446,11 +1448,13 @@ and breaks B, then fixes B and breaks A. agg answers both with **built-in terms*
 | `consecutive_rollbacks` | number | rollbacks since the last kept gate. |
 | `no_improvements` | number | sessions [`merge_requires_improvement`](#merge-only-on-improvement--merge_requires_improvement) refused this run — never counted as rollbacks. |
 | `consecutive_no_improvements` | number | no_improvement sessions since the last kept gate; a rollback neither extends nor breaks it. |
+| `no_changes` | number | sessions that changed nothing git-visible this run, so the gate had nothing to merge ([`no_changes`](#a-session-that-changes-nothing--no_changes)) — never counted as rollbacks. |
+| `consecutive_no_changes` | number | no_changes sessions since the last kept gate; a rollback or a no_improvement neither extends nor breaks it. |
 | `oscillating` | bool | the unmet set after a judged session repeats one seen within the last `oscillation_window` (default 4) judged sessions, with a **different** set in between: A→B→A. |
 | `ratchet_regressed` | bool | the most recent judged gate recorded a [ratchet](#the-ratchet--numeric-no-regression) regression. |
 
 ```yaml
-abort_if:  "consecutive_rollbacks >= 3 OR oscillating"   # unfakeable: safe in abort_if
+abort_if:  "consecutive_rollbacks >= 3 OR oscillating OR consecutive_no_changes >= 3"   # unfakeable: safe in abort_if
 notify_if: "rollbacks >= 2"                               # or just tell a human
 ```
 
@@ -1466,14 +1470,15 @@ The details that decide whether they fire when you expect:
 - **Which sessions count.** `rollbacks` counts sessions whose staged merge the regression policy
   discarded. A session with no changes, a `red_file` veto or a merge conflict is not a rollback; it
   neither extends nor breaks the `consecutive_rollbacks` streak; nor does a `no_improvement` session,
-  which counts for `no_improvements` instead. A kept gate resets both streaks.
+  which counts for `no_improvements` instead, or a no-change session, which counts for `no_changes`.
+  A veto or a conflict counts for none of them. A kept gate resets all three streaks.
   `skip_judges` steps are not gated, so they count for neither. With `gate_regressions: false` nothing is
   ever rolled back, so both stay `0`.
 - **The signature** `oscillating` compares is the sorted set of **DoD-set** judges that were unmet (or
   errored) after the session, plus every judge that regressed its ratchet. Run-set-only detectors
   (`stalled`, a `notify_if` judge) are not part of it — a detector flipping is not a state of the work.
-  Every judged session contributes one, **merged, rolled back or no_improvement** (a discarded session
-  still showed where the worker went).
+  Every judged session contributes one, **merged, rolled back, no_improvement or no_changes** (a
+  discarded session still showed where the worker went).
 - **Short history.** Fewer than three judged sessions can never oscillate. An all-green signature never
   counts — returning to a good state is not oscillation — and A→A→A is a stall, not an oscillation.
   A monotonically improving run never trips it.
@@ -1632,21 +1637,26 @@ argument is a three-line script in your own `agg/judges/` — library judges tak
 ### `stalled` — the shipped stall detector
 
 `stalled` is the detector behind `until: "NOT stalled"` and the zero-authoring `notify_if: "stalled"`. It
-reads `agg/private/verdicts.jsonl` and is **met** when, across the last **K = 3 MERGED steps**, no binary
-judge changed its `met` and no numeric judge changed its `value`. The details that decide whether it
-fires when you expect:
+reads `agg/private/verdicts.jsonl` and is **met** when, across the last **K = 3 steps** (merged, no_changes
+or no_improvement), no binary judge changed its `met` and no numeric judge changed its `value`. The
+details that decide whether it fires when you expect:
 
-- **Only `merged` rows count.** A rolled-back step's churn was undone, so it must read as neither
-  progress nor stall. **Except `no_improvement` rows** ([`merge_requires_improvement`](#merge-only-on-improvement--merge_requires_improvement)):
-  the gate itself found that nothing improved, so such a step joins the window carrying the state of
-  the step before it — a step in which nothing moved.
+- **Only `merged` rows count** — a rolled-back step's churn was undone, so it must read as neither
+  progress nor stall — **plus the two kinds of step in which nothing moved**, by the gate's own verdict:
+  - **`no_changes` rows** ([a session that changes nothing](#a-session-that-changes-nothing--no_changes)):
+    nothing was merged or discarded, so the step's readings are base's own, and it joins the window
+    with them. Three idle sessions in a row are a stall; a judge whose reading moved on one (a step
+    whose output is gitignored worker state, like a wiki page) is progress.
+  - **`no_improvement` rows** ([`merge_requires_improvement`](#merge-only-on-improvement--merge_requires_improvement)):
+    the readings describe a tree that was discarded, so such a step joins the window carrying the
+    state of the step before it.
 - **Like every discarded session, a `no_improvement` session's own verdicts — `stalled`'s included —
   are reset to base truth after the gate**, so within an unbroken no_improvement streak `stalled` cannot
   turn met; it fires on the next kept session. To bound a streak itself, use the gate's term:
   `abort_if: "consecutive_no_improvements >= 3"`.
 - **`stalled` ignores its own rows** — it cannot stall on itself.
 - A judge with **fewer than two rows** in the window is ignored; it cannot have changed.
-- **Fewer than K qualifying merged steps ⇒ not met.** It refuses to call a stall on thin history, so it
+- **Fewer than K qualifying steps ⇒ not met.** It refuses to call a stall on thin history, so it
   is silent at the start of a run.
 
 **K is hardcoded**, because library judges are parameterless. To change it — or the whole heuristic —
@@ -1663,7 +1673,7 @@ first one ships:
 
 | detector | ships? | signal | can the worker fake it? | put it in |
 |---|---|---|---|---|
-| `stalled` | ✅ embedded in the binary | judge values flat over the last 3 merged steps | **not without tampering**, and not at all under `sandbox`/`container` — `verdicts.jsonl` lives in the carved-out `agg/private/` | `if … then`, `notify_if` |
+| `stalled` | ✅ embedded in the binary | judge values flat over the last 3 merged (or no-change) steps | **not without tampering**, and not at all under `sandbox`/`container` — `verdicts.jsonl` lives in the carved-out `agg/private/` | `if … then`, `notify_if` |
 | `stuck` | ✗ **you author it** | a 0–100 confidence over agg's own ledger | **not without tampering** — same file, same tier-dependence | `notify_if` (or `abort_if`, if you accept [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s middle row) |
 | `blocked` | ✗ **you author it** | the worker declaring a human-only blocker | **yes** — the worker writes the file | `notify_if` — see [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if) |
 
@@ -1762,6 +1772,26 @@ precedence (plus a fifth, opt-in):
 
 `session_isolation` surviving keys: `branch_prefix` (default `agg`), `base_branch` (default: the
 current branch), `red_file` (default `.agg_red`).
+
+### A session that changes nothing — `no_changes`
+
+A session whose worker changed nothing git-visible made no commit, so there is nothing to merge and
+nothing to discard: base is exactly the tree the judges just graded. agg keeps those verdicts as the
+current reading (a step whose whole output is gitignored worker state, like `agg/state/wiki/`, can
+still satisfy an `until:`), and records the session's rows in `verdicts.jsonl` with
+`"outcome": "no_changes"`:
+
+- **Not a rollback** and not a `no_improvement`: it never counts for `rollbacks` or `no_improvements`,
+  and it neither extends nor breaks those streaks. It is not a "was met" reading either — the next
+  gate still compares against the last merged or baseline row.
+- **It is a step in which nothing moved.** It counts for [`stalled`](#stalled--the-shipped-stall-detector)
+  with its own readings, and for the gate's own terms `no_changes` and `consecutive_no_changes` (since
+  the last kept gate) — process-internal, so safe in `abort_if`.
+- The report and `agg status --json` count these sessions in `sessions.no_changes`.
+
+This is what ends a run whose worker believes it is finished while a judge is still unmet: it would
+otherwise change nothing forever. `abort_if: "consecutive_no_changes >= 3"` bounds that on every
+isolation tier; `stalled` catches it too, once its window holds three steps in which no reading moved.
 
 ## Hooks and prompt includes
 
@@ -1964,7 +1994,7 @@ agg run --report-json | jq -r .outcome      # logs go to agg/private/run.log; st
 | `exit_code` | what `agg run` exited with: 0 done · 3 `abort_if` · 4 session cap (`outcome: aborted`) · 5 stopped · 1 error. |
 | `stop_reason` · `error` | human-readable reason (the `abort_if` expression, the cap, the stop reason); the error chain or panic message when `outcome` is `error`. |
 | `started_at` · `finished_at` | epoch seconds. |
-| `sessions` | `total`, `merged`, `rolled_back` (discarded: a regression, a veto, a conflict), `no_improvement` (not merged because nothing improved — [`merge_requires_improvement`](#sequence--the-loop)), `staged_unmerged` (staged on a span no gate decided). |
+| `sessions` | `total`, `merged`, `rolled_back` (discarded: a regression, a veto, a conflict), `no_improvement` (not merged because nothing improved — [`merge_requires_improvement`](#sequence--the-loop)), `no_changes` (changed nothing git-visible, so nothing to merge — [`no_changes`](#a-session-that-changes-nothing--no_changes)), `staged_unmerged` (staged on a span no gate decided). |
 | `time` | `wall_time_s`, `work_time_s`, `human_wait_time_s` — the [clock](#the-clock--three-terms-all-in-seconds). |
 | `judges` | by name: `last` and `baseline` verdicts (`met`, `value`, `max`, `target`, `rationale`, `error`, and `evidence` — the absolute paths of the [kept](#evidence--what-agg-keeps) evidence copies, omitted when none); `null` where there is none. The driver path has no baseline. |
 | `result` | `base_branch`, `final_commit` (the base's tip after the last gate), `staged_branch` (an ungated span's tip — `git merge` it to land that work). |
