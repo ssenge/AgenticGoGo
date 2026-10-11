@@ -192,11 +192,20 @@ fn version_of(bin: &str) -> Option<String> {
 
 /// The first executable `bin` on PATH (what `Command::new(bin)` will run).
 fn on_path(bin: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(bin))
-        .find(|p| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+    std::env::split_paths(&path).map(|d| d.join(bin)).find(|p| executable(p))
+}
+
+#[cfg(unix)]
+fn executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Windows has no exec bit; `Command::new(bin)` also finds `<bin>.exe`.
+#[cfg(not(unix))]
+fn executable(p: &Path) -> bool {
+    p.is_file() || p.with_extension("exe").is_file()
 }
 
 #[cfg(test)]
