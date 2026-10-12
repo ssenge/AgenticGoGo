@@ -2,6 +2,13 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **`Agent` and `Effort` parse from their YAML names** (`FromStr`): a driver that takes its agents as text
+  (from its own config) passes them through, and an unknown name is refused with the valid ones listed.
+
 ## 0.0.18 (2026-10-12)
 
 ### Added
