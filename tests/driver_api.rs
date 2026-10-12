@@ -1509,3 +1509,38 @@ fn a_driver_step_prompt_file_is_read_hashed_and_checked() {
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].session, rows[0].step.as_str()), (1, "implement"));
 }
+
+/// `finish_with`: the driver's own stop condition lands where `agg run` puts the `abort_if` term
+/// that fired — the report's `stop_reason` and the run ledger's end reason, worded identically.
+#[test]
+fn finish_with_names_the_drivers_stop_condition_in_the_report_and_the_ledger() {
+    let tmp = project();
+    let dir = tmp.path();
+    {
+        let agg = Agg::open(dir).unwrap();
+        agg.step(&work()).unwrap();
+        agg.finish_with(RunOutcome::Halt, "rollbacks >= 2");
+        assert!(matches!(agg.step(&work()), Err(Fatal::Ended(RunOutcome::Halt))), "the latch holds");
+    }
+    let r = read_report(dir);
+    assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("aborted"), Some(3)));
+    assert_eq!(r["stop_reason"], "ABORT: rollbacks >= 2");
+    let runs = agg::project::Project::load(dir).runs;
+    assert_eq!(runs.last().unwrap().end_reason, "abort:rollbacks >= 2");
+}
+
+/// `Step::role_prompt_file` on the driver path: the role text reaches the brief and its hash the
+/// prompt ledger, beside the task prompt's.
+#[test]
+fn a_driver_step_role_prompt_file_reaches_the_brief() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("agg/roles")).unwrap();
+    std::fs::write(dir.join("agg/roles/tester.md"), "You are the tester of this parser.\n").unwrap();
+    let agg = Agg::open(dir).unwrap();
+    agg.step(&work().role_prompt_file("roles/tester.md")).unwrap();
+    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
+    assert!(brief.contains("You are the tester of this parser."), "{brief}");
+    let rows = agg::core::prompts::read_ledger(dir);
+    assert_eq!(rows.len(), 1);
+}

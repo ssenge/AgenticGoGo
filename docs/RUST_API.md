@@ -82,6 +82,7 @@ fn main() -> Result<(), agg::driver::Fatal> {
 |---|---|
 | `Agg::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
 | `.limits()` `.on_regression()` `.ratchet()` `.merge_requires_improvement()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
+| `.judge_agent(Agent::Codex)` `.judge_model(m)` `.judge_timeout(secs)` | the ruler — YAML's `judge.agent` / `judge.model` / `judge.timeout` ([CONFIG](CONFIG.md#judge--the-ruler)). `Agent::Custom` is refused when the run boots: the ruler is resolved by name |
 | `.context(path, name)` `.network(Network::Allow(..))` `.image()` `.judge_image()` `.pass_env([..])` `.credentials([..])` | the run's confinement: read-only context dirs, the egress allow-list, the container images and what crosses into a container — YAML's `context:` / `isolation_policy:` / `image:` / `judge.image` ([CONFIG](CONFIG.md#network-egress--isolation_policynetwork)) |
 | `agg.step(&s)` | run one session. Commits on a session branch — **stages**, never merges |
 | `agg.judge(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
@@ -94,12 +95,17 @@ fn main() -> Result<(), agg::driver::Fatal> {
 | `agg.hil_bool(q)` `hil_choose(q,&[..])` `hil_input(q)` | **ask a human and get the value back.** BLOCKS until answered |
 | `agg.open_asks()` | the asks a human still owes an answer to — including ones the WORKER opened |
 | `agg.block(q)` | the old doorbell: waits for `agg send resume`, returns nothing. Prefer `hil_bool` |
+| `agg.finish(outcome)` `agg.finish_with(outcome, reason)` | end the run explicitly (else dropping `Agg` records `GoalsMet`). `finish_with(RunOutcome::Halt, "rollbacks >= 2")` names the stop condition the driver saw fire, worded as `agg run` words a fired `abort_if` term: report `stop_reason` `ABORT: rollbacks >= 2`, run-ledger end reason `abort:rollbacks >= 2` |
 
 A step's task can live in a file: `Step::new("implement").prompt_file("steps/implement.md")` (relative
 to `agg/`, or absolute) is read at every session start and hashed into `agg/private/prompts.jsonl`,
 exactly like YAML's `prompt_file:`. `.prompt()` and `.prompt_file()` replace each other — a derived
 step overrides its template's choice — and `agg.step()` refuses a step carrying both, or naming a
 file it cannot read.
+
+The role works the same way: `.role_prompt(text)` / `.role_prompt_file("roles/tester.md")` are YAML's
+per-step `role_prompt:` / `role_prompt_file:`, replace each other, and — set either — replace the run's
+defaults for that step; a step that sets neither runs with the defaults.
 
 ### Judges
 

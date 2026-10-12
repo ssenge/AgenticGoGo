@@ -143,6 +143,9 @@ block precisely because it is immutable: a moving grader makes verdicts incompar
 | `evidence_max_mb` | `100` | the most judge evidence (MiB) one run copies into `agg/private/evidence/` ([below](#evidence--what-agg-keeps)). A disk bound, not a run limit: a file that does not fit is skipped and recorded, and the run goes on. |
 | `image` | see notes | the image EVERY judge runs in when a step of the run is `isolation: container` ([the container tier](#the-container-tier-runs-the-agent)). Default: `defaults.image`, else the one image the container steps share; several different ones with neither key set is refused. |
 
+A Rust driver sets `agent` / `model` / `timeout` with `Agg::judge_agent` / `Agg::judge_model` /
+`Agg::judge_timeout`.
+
 If the ruler is rate-limited or unreachable, the run **parks in backoff and merges nothing** — it
 never fails over to another agent (that would move the ruler) and never fabricates a verdict.
 
@@ -362,7 +365,8 @@ steps:
 - The brief is **the same** as with the inline keys: the file's text is used exactly as an inline
   string would be.
 
-A Rust driver has the same for a step's task: `Step::new("implement").prompt_file("steps/implement.md")`.
+A Rust driver has the same for a step's task: `Step::new("implement").prompt_file("steps/implement.md")`,
+and for its role: `.role_prompt_file("roles/tester.md")` (or `.role_prompt(text)`).
 
 **`skip_judges` steps stage.** Nothing was judged, so nothing merges; the work stays on the session
 branch and the **next judged step gates the whole span** — pass ⇒ the span merges, a regression ⇒ the
