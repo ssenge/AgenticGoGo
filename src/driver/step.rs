@@ -7,6 +7,7 @@
 //! |---|---|
 //! | `agent` `model` `effort` `isolation` `image` `prompt` `state` | **OVERRIDE** — the derived step wins |
 //! | `prompt` / `prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other |
+//! | `role_prompt` / `role_prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other; neither set = the run's defaults, as in YAML |
 //! | `readonly` | **ACCUMULATES** — a derived step cannot silently lose a deny its template set |
 //! | `writable` | **SUBTRACTS** from what accumulated — re-grant exactly one deny, not the rest |
 //! | `write_deny` | **ACCUMULATES**, and nothing subtracts from it — not even `writable` |
@@ -50,6 +51,12 @@ pub struct Step {
     pub writable: Vec<String>,
     /// PROTECTED globs, accumulated and never subtracted. See [`Step::write_deny`].
     pub write_deny: Vec<String>,
+    /// the step's ROLE — who the worker is — opening the composed brief. `None` (with
+    /// [`Self::role_prompt_file`] also `None`) = the run's defaults. See [`Step::role_prompt`].
+    pub role_prompt: Option<String>,
+    /// [`Self::role_prompt`] read from a FILE at every session start — relative to `agg/`, or
+    /// absolute. See [`Step::role_prompt_file`].
+    pub role_prompt_file: Option<String>,
     /// ADDITIVE to the composed brief, never replacing it.
     pub prompt: Option<String>,
     /// [`Self::prompt`] read from a FILE at every session start — relative to `agg/`, or absolute.
@@ -108,6 +115,24 @@ impl Step {
         self.image = Some(image.into());
         self
     }
+    /// The step's role text — the twin of YAML's per-step `role_prompt:`. Replaces a
+    /// [`Step::role_prompt_file`] the template set, and the run's defaults for this step.
+    pub fn role_prompt(mut self, p: impl Into<String>) -> Step {
+        self.role_prompt = Some(p.into());
+        self.role_prompt_file = None;
+        self
+    }
+
+    /// The step's role text, from a FILE (relative to `agg/`, or absolute) — the twin of YAML's
+    /// per-step `role_prompt_file:`. Read at EVERY session start and hashed into
+    /// `agg/private/prompts.jsonl`, like [`Step::prompt_file`]. Replaces a [`Step::role_prompt`]
+    /// the template set; `agg.step()` refuses a step with both, or an unreadable file.
+    pub fn role_prompt_file(mut self, rel: impl Into<String>) -> Step {
+        self.role_prompt_file = Some(rel.into());
+        self.role_prompt = None;
+        self
+    }
+
     /// The step's task text. Replaces a [`Step::prompt_file`] the template set.
     pub fn prompt(mut self, p: impl Into<String>) -> Step {
         self.prompt = Some(p.into());
@@ -215,6 +240,18 @@ mod tests {
         assert_eq!((inline.prompt.as_deref(), inline.prompt_file.as_deref()), (Some("do it"), None));
         let back = inline.prompt_file("steps/x.md");
         assert_eq!((back.prompt.as_deref(), back.prompt_file.as_deref()), (None, Some("steps/x.md")));
+    }
+
+    /// `role_prompt` and `role_prompt_file` override AS A PAIR too, and independently of the task
+    /// prompt's pair.
+    #[test]
+    fn role_prompt_and_role_prompt_file_replace_each_other() {
+        let filed = Step::template().role_prompt_file("roles/tester.md").prompt("do it");
+        let inline = filed.create("a").role_prompt("you are a tester");
+        assert_eq!((inline.role_prompt.as_deref(), inline.role_prompt_file.as_deref()), (Some("you are a tester"), None));
+        assert_eq!(inline.prompt.as_deref(), Some("do it"), "the task prompt is a separate pair");
+        let back = inline.role_prompt_file("roles/x.md");
+        assert_eq!((back.role_prompt.as_deref(), back.role_prompt_file.as_deref()), (None, Some("roles/x.md")));
     }
 
     /// A template survives being created from, and the child carries the template's shape.

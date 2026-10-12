@@ -86,6 +86,9 @@ pub struct Agg {
     iso_seen: Cell<crate::isolation::Isolation>,
     /// the label path — see [`Agg::pos`].
     pos: RefCell<Vec<PosItem>>,
+    /// the name of an [`Agent::Custom`] handed to [`Agg::judge_agent`], refused when the run boots:
+    /// the builder chain cannot fail, and the ruler is resolved BY NAME (`judge.agent`).
+    custom_ruler: Option<String>,
 }
 
 /// Everything that only exists once the run-level setup has run.
@@ -163,6 +166,7 @@ impl Agg {
             span_goals: RefCell::new(Vec::new()),
             iso_seen: Cell::new(crate::isolation::Isolation::None),
             pos: RefCell::new(Vec::new()),
+            custom_ruler: None,
         })
     }
 
@@ -225,6 +229,38 @@ impl Agg {
     /// image contract (`docs/CONFIG.md`): the step's agent CLI on PATH for any uid, `/bin/sh`.
     pub fn image(mut self, image: impl Into<String>) -> Agg {
         self.cfg.defaults.image = Some(image.into());
+        self
+    }
+
+    /// The RULER — the backend that runs the LLM judges and the summarizer. YAML's `judge.agent`;
+    /// default [`Agent::Claude`]. Its CLI is preflighted at boot like every step's.
+    ///
+    /// ⛔ [`Agent::Custom`] is REFUSED when the run boots (the first `step()`/`judge()`/`gate()`/
+    /// `check_limits()` returns the error): the ruler is resolved by NAME, exactly as YAML's
+    /// `judge.agent` is, and a custom backend has no name agg could resolve — a custom backend
+    /// that called itself `claude` would otherwise silently become the real Claude.
+    pub fn judge_agent(mut self, agent: Agent) -> Agg {
+        match &agent {
+            Agent::Custom(b) => self.custom_ruler = Some(b.name().to_string()),
+            a => {
+                self.cfg.judge.agent = a.name().to_string();
+                self.custom_ruler = None;
+            }
+        }
+        self
+    }
+
+    /// The model the ruler runs the LLM judges and the summarizer on — YAML's `judge.model`.
+    /// Unset = the ruler's own cheap default.
+    pub fn judge_model(mut self, model: impl Into<String>) -> Agg {
+        self.cfg.judge.model = Some(model.into());
+        self
+    }
+
+    /// EVERY judge's timeout in seconds, script and LLM alike — YAML's `judge.timeout` (default
+    /// 300). A single judge overrides it with [`Judge::timeout`].
+    pub fn judge_timeout(mut self, secs: u64) -> Agg {
+        self.cfg.judge.timeout = secs;
         self
     }
 
@@ -313,6 +349,13 @@ impl Agg {
     /// `run_with`'s `register` host-plugin seam is deliberately not exposed — a driver IS the host
     /// program. Re-add it the first time one wants a third-party handler.
     fn boot(&self) -> Result<Started, Fatal> {
+        if let Some(name) = &self.custom_ruler {
+            return Err(Fatal::Other(anyhow::anyhow!(
+                "judge_agent(Agent::Custom(`{name}`)): the ruler must be a built-in agent ({}) — it is \
+                 resolved by name, as YAML's `judge.agent` is. Run a custom backend as a step's agent",
+                crate::backend::KNOWN.join(", ")
+            )));
+        }
         let cfg = self.cfg.clone();
         let dir = self.dir.clone();
         let config_base = crate::paths::config_base(&dir);
@@ -578,6 +621,13 @@ impl Agg {
         let at = format!("step `{name}`");
         let mut problems =
             crate::core::prompts::pair_problems(&at, "prompt", step.prompt.as_deref(), step.prompt_file.as_deref(), &config_base);
+        problems.extend(crate::core::prompts::pair_problems(
+            &at,
+            "role_prompt",
+            step.role_prompt.as_deref(),
+            step.role_prompt_file.as_deref(),
+            &config_base,
+        ));
         let d = &self.cfg.defaults;
         problems.extend(crate::core::prompts::pair_problems(
             "defaults",
@@ -622,6 +672,13 @@ impl Agg {
             Ok(Some(warning)) => eprintln!("  ⚠ {warning}"),
             Ok(None) => {}
         }
+        // the role pair inherits AS A PAIR, as `AggConfig::resolve_step` does for YAML: a step naming
+        // either form replaces both of the defaults'.
+        let role = if step.role_prompt.is_some() || step.role_prompt_file.is_some() {
+            (&step.role_prompt, &step.role_prompt_file)
+        } else {
+            (&d.role_prompt, &d.role_prompt_file)
+        };
         Ok(ResolvedStep {
             name,
             agent: step.agent.name().to_string(),
@@ -629,9 +686,9 @@ impl Agg {
             effort: step.effort.as_str().map(String::from),
             worker_args: self.cfg.defaults.worker_args.clone(),
             state: step.state.clone().unwrap_or_else(|| self.cfg.defaults.state.clone()),
-            role_prompt: self.cfg.defaults.role_prompt.clone(),
+            role_prompt: role.0.clone(),
             prompt: step.prompt.clone(),
-            role_prompt_file: self.cfg.defaults.role_prompt_file.clone(),
+            role_prompt_file: role.1.clone(),
             prompt_file: step.prompt_file.clone(),
             // ⛔ ALWAYS. `step()` STAGES and `gate()` decides, so the driver path takes today's
             // `skip_judges` route unconditionally: `StageSpan` keeps the branch and extends the
@@ -1633,6 +1690,21 @@ impl Agg {
     /// see whether `main` returned `Ok` or `Err` — this is how a driver that cares says which it was.
     /// Idempotent, and a no-op once a ceiling has already latched an outcome.
     pub fn finish(&self, outcome: RunOutcome) {
+        self.end(outcome, None);
+    }
+
+    /// [`Agg::finish`], saying WHY — the stop condition the driver's own code saw fire
+    /// (`"rollbacks >= 2"`, `"stalled"`). It lands where `agg run` puts the `abort_if` term that
+    /// fired: for [`RunOutcome::Halt`], `ABORT: <reason>` in the report's `stop_reason` (and
+    /// `state.json`'s `finish_reason`) and `abort:<reason>` as the run ledger's end reason, word for
+    /// word the YAML path's. Any other outcome records the reason as given under its usual ledger
+    /// tag. A blank reason records `finish`'s wording.
+    pub fn finish_with(&self, outcome: RunOutcome, reason: impl Into<String>) {
+        self.end(outcome, Some(reason.into()));
+    }
+
+    /// The body of [`Agg::finish`] / [`Agg::finish_with`].
+    fn end(&self, outcome: RunOutcome, reason: Option<String>) {
         if self.ended.get().is_some() {
             return;
         }
@@ -1640,7 +1712,7 @@ impl Agg {
         // is over would be absurd. A driver that never spent anything simply latches.
         if let Some(started) = self.started.get() {
             let mut st = started.st.borrow_mut();
-            record_end(&mut st, outcome);
+            record_end(&mut st, outcome, reason.as_deref());
         }
         self.ended.set(Some(outcome));
     }
@@ -1662,9 +1734,28 @@ impl Agg {
 /// Stamp the run's end into `state.json` (`dash.finished` + the reason) and the run ledger
 /// (`ledger.finish`), through the SAME `emit(Finished)` every `Flow::Stop` on the YAML path uses —
 /// so `agg status`, the dashboard and `agg history` cannot come to mean one thing per entry point.
-fn record_end(st: &mut LoopState, outcome: RunOutcome) {
-    let n = st.session;
-    let (reason, tag) = match outcome {
+fn record_end(st: &mut LoopState, outcome: RunOutcome, why: Option<&str>) {
+    let (reason, ledger_tag) = end_wording(outcome, st.session, why);
+    st.emit(crate::plugin::LifecycleEvent::Finished { reason, ledger_tag });
+}
+
+/// The run end's `(reason, ledger tag)`. A driver's own reason for a [`RunOutcome::Halt`] is worded
+/// exactly as the YAML path words the `abort_if` term that fired (`features::finalize`), so a
+/// report reader cannot tell which entry point stopped the run; a blank one is no reason.
+fn end_wording(outcome: RunOutcome, n: u32, why: Option<&str>) -> (String, String) {
+    match (outcome, why.map(str::trim).filter(|w| !w.is_empty())) {
+        (RunOutcome::Halt, Some(w)) => (format!("ABORT: {w}"), format!("abort:{w}")),
+        (o, Some(w)) => (w.to_string(), default_wording(o, n).1.to_string()),
+        (o, None) => {
+            let (reason, tag) = default_wording(o, n);
+            (reason, tag.to_string())
+        }
+    }
+}
+
+/// [`Agg::finish`]'s fixed wording, per outcome.
+fn default_wording(outcome: RunOutcome, n: u32) -> (String, &'static str) {
+    match outcome {
         // ⚠ NOT "goals-met". A driver declares no DoD — it decides it is done by RETURNING — so
         // claiming its goals were met is a statement about something that does not exist, and
         // `agg history` rendered it beside `goals_met: 0, goals_total: 0`: vacuously true and read by
@@ -1675,8 +1766,7 @@ fn record_end(st: &mut LoopState, outcome: RunOutcome) {
         RunOutcome::Halt => (format!("driver ended the run after {n} session(s)"), "abort:driver"),
         RunOutcome::MaxSessions => (format!("driver stopped at its session ceiling ({n})"), "max-sessions"),
         RunOutcome::Stopped => (format!("driver stopped the run after {n} session(s)"), "stopped"),
-    };
-    st.emit(crate::plugin::LifecycleEvent::Finished { reason, ledger_tag: tag.to_string() });
+    }
 }
 
 /// RUN END. For a driver, "run end" is `main` returning or panicking — there is no post-loop
@@ -1721,7 +1811,7 @@ impl Drop for Agg {
         // re-recorded, while a latched outcome that never got emitted still must be.
         let outcome = self.ended.get().unwrap_or(RunOutcome::GoalsMet);
         if !st.dash.finished {
-            record_end(&mut st, outcome);
+            record_end(&mut st, outcome, None);
         }
         // the report, from the state the run ended in — before `on_stop` fires, as on the YAML path.
         // A driver that returns `Err` reads as `done` here; `driver::run` amends it to `error`.
@@ -1729,5 +1819,103 @@ impl Drop for Agg {
         if let Err(e) = started.report.finish(&report) {
             eprintln!("  ⚠ agg: cannot write {}: {e}", crate::paths::report_json(&st.dir).display());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn open() -> (tempfile::TempDir, Agg) {
+        let tmp = tempfile::tempdir().unwrap();
+        let agg = Agg::open(tmp.path()).unwrap();
+        (tmp, agg)
+    }
+
+    /// The ruler builders set exactly the fields YAML's `judge:` block sets, and nothing is set
+    /// until asked: the defaults stay `AggConfig::default()`'s.
+    #[test]
+    fn the_ruler_builders_set_the_judge_block() {
+        let (_tmp, agg) = open();
+        let untouched = AggConfig::default().judge;
+        assert_eq!((agg.cfg.judge.agent.as_str(), agg.cfg.judge.model.as_deref()), (untouched.agent.as_str(), None));
+        assert_eq!(agg.cfg.judge.timeout, untouched.timeout);
+
+        let agg = agg.judge_agent(Agent::Codex).judge_model("gpt-cheap").judge_timeout(900);
+        assert_eq!(agg.cfg.judge.agent, "codex");
+        assert_eq!(agg.cfg.judge.model.as_deref(), Some("gpt-cheap"));
+        assert_eq!(agg.cfg.judge.timeout, 900);
+        assert_eq!(agg.custom_ruler, None);
+    }
+
+    /// A custom ruler is refused when the run boots — even one that NAMES a built-in agent, which
+    /// would otherwise silently become that agent — and a later built-in ruler withdraws the refusal.
+    #[test]
+    fn a_custom_ruler_is_refused_at_boot_and_a_built_in_one_clears_it() {
+        let (_tmp, agg) = open();
+        let custom = Agent::Custom(Arc::new(crate::backend::claude::Claude));
+        let agg = agg.judge_agent(Agent::Codex).judge_agent(custom.clone());
+        assert_eq!(agg.cfg.judge.agent, "codex", "the refused agent never reaches the config");
+        let err = agg.check_limits().unwrap_err().to_string();
+        assert!(err.contains("Agent::Custom(`claude`)") && err.contains("built-in agent"), "{err}");
+        assert!(agg.started.get().is_none(), "nothing booted");
+
+        let (_tmp, agg) = open();
+        let agg = agg.judge_agent(custom).judge_agent(Agent::Copilot);
+        assert_eq!((agg.custom_ruler.as_deref(), agg.cfg.judge.agent.as_str()), (None, "copilot"));
+    }
+
+    /// The resolved step's role pair: the step's own when it sets either form, else the defaults' —
+    /// AS A PAIR, exactly as `AggConfig::resolve_step` merges a YAML step.
+    #[test]
+    fn a_steps_role_prompt_replaces_the_defaults_as_a_pair() {
+        let (tmp, mut agg) = open();
+        std::fs::create_dir_all(tmp.path().join("agg/roles")).unwrap();
+        std::fs::write(tmp.path().join("agg/roles/tester.md"), "you are a tester\n").unwrap();
+        agg.cfg.defaults.role_prompt = Some("you are the default".into());
+        let role = |s: &Step| {
+            let r = agg.resolve(s).unwrap();
+            (r.role_prompt, r.role_prompt_file)
+        };
+
+        assert_eq!(role(&Step::new("a")), (Some("you are the default".into()), None));
+        assert_eq!(role(&Step::new("b").role_prompt("you are a reviewer")), (Some("you are a reviewer".into()), None));
+        assert_eq!(role(&Step::new("c").role_prompt_file("roles/tester.md")), (None, Some("roles/tester.md".into())));
+    }
+
+    /// A step carrying both role forms, or a role file that cannot be read, is refused before it runs.
+    #[test]
+    fn a_bad_step_role_prompt_is_refused() {
+        let (_tmp, agg) = open();
+        let mut both = Step::new("a").role_prompt("inline");
+        both.role_prompt_file = Some("roles/r.md".into());
+        let err = agg.resolve(&both).unwrap_err().to_string();
+        assert!(err.contains("are alternatives"), "{err}");
+        let err = agg.resolve(&Step::new("b").role_prompt_file("roles/gone.md")).unwrap_err().to_string();
+        assert!(err.contains("cannot read"), "{err}");
+    }
+
+    /// `finish_with`'s wording: a halt reads as the YAML path's `abort_if` stop, any other outcome
+    /// keeps its tag, and no reason (or a blank one) is `finish`'s fixed wording.
+    #[test]
+    fn the_end_wording_names_the_drivers_reason() {
+        let w = |o, why| end_wording(o, 3, why);
+        assert_eq!(w(RunOutcome::Halt, Some("rollbacks >= 2")), ("ABORT: rollbacks >= 2".into(), "abort:rollbacks >= 2".into()));
+        assert_eq!(w(RunOutcome::Stopped, Some("operator said so")), ("operator said so".into(), "stopped".into()));
+        assert_eq!(w(RunOutcome::Halt, Some("  ")), ("driver ended the run after 3 session(s)".into(), "abort:driver".into()));
+        assert_eq!(w(RunOutcome::Halt, None), w(RunOutcome::Halt, Some("")));
+        assert_eq!(w(RunOutcome::GoalsMet, None), ("driver returned after 3 session(s)".into(), "driver-returned".into()));
+        assert_eq!(w(RunOutcome::MaxSessions, None).1, "max-sessions");
+    }
+
+    /// `finish_with` latches like `finish`, and once latched neither records again.
+    #[test]
+    fn finish_with_latches_and_is_idempotent() {
+        let (_tmp, agg) = open();
+        agg.finish_with(RunOutcome::Halt, "stalled");
+        assert_eq!(agg.ended(), Some(RunOutcome::Halt));
+        agg.finish(RunOutcome::GoalsMet);
+        assert_eq!(agg.ended(), Some(RunOutcome::Halt), "the first end wins");
     }
 }

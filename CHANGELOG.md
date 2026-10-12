@@ -2,6 +2,24 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **The Rust driver can say what the YAML `judge:` block, a step's `role_prompt*` and a fired
+  `abort_if` term say.**
+  - `Agg::judge_agent(Agent)`, `Agg::judge_model(m)`, `Agg::judge_timeout(secs)` — the ruler, YAML's
+    `judge.agent` / `judge.model` / `judge.timeout`. `Agent::Custom` as the ruler is refused when the
+    run boots (the ruler is resolved by name, as in YAML).
+  - `Step::role_prompt(text)` / `Step::role_prompt_file(rel)` — YAML's per-step `role_prompt:` /
+    `role_prompt_file:`. They replace each other, and a step setting either replaces the defaults'
+    pair, exactly as a YAML step does; both on one step, or an unreadable file, is refused by
+    `agg.step()`.
+  - `Agg::finish_with(outcome, reason)` — end the run naming the stop condition the driver saw fire.
+    For `RunOutcome::Halt` it is recorded as `agg run` records a fired `abort_if` term: report
+    `stop_reason` `ABORT: <reason>`, run-ledger end reason `abort:<reason>`. `Agg::finish` is
+    unchanged.
+
 ## 0.0.17 (2026-10-12)
 
 ### Fixed
