@@ -278,6 +278,19 @@ impl Agent {
     }
 }
 
+/// The `agent:` names of YAML, for a driver that takes its agents as text (from its own config): the
+/// built-in backends only, so a misspelt name is refused here instead of at preflight.
+impl std::str::FromStr for Agent {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Agent, String> {
+        [Agent::Claude, Agent::Codex, Agent::Copilot]
+            .into_iter()
+            .find(|a| a.name() == name)
+            .ok_or_else(|| format!("unknown agent `{name}`: one of claude, codex, copilot"))
+    }
+}
+
 // Hand-written because `dyn AgentBackend` is not `Debug` — and requiring it would be a trait-wide
 // tax on every backend author for one line of formatting.
 impl std::fmt::Debug for Agent {
@@ -323,9 +336,30 @@ impl Effort {
     }
 }
 
+/// The `effort:` spelling of YAML; the empty string is [`Effort::Default`] (no effort asked for).
+impl std::str::FromStr for Effort {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Effort, String> {
+        [Effort::Default, Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh, Effort::Max]
+            .into_iter()
+            .find(|e| e.as_str().unwrap_or("") == name)
+            .ok_or_else(|| format!("unknown effort `{name}`: one of low, medium, high, xhigh, max"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_and_efforts_parse_from_their_yaml_names() {
+        assert_eq!("codex".parse::<Agent>().unwrap().name(), "codex");
+        assert!("claude-code".parse::<Agent>().unwrap_err().contains("unknown agent"));
+        assert_eq!("max".parse::<Effort>(), Ok(Effort::Max));
+        assert_eq!("".parse::<Effort>(), Ok(Effort::Default));
+        assert!("huge".parse::<Effort>().is_err());
+    }
 
     /// The vocabulary is load-bearing: `capability::check` refuses a run whose effort string the
     /// backend does not know, so a typo here would be a runtime refusal, not a compile error.
