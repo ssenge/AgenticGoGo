@@ -2,6 +2,17 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.20 (2026-10-13)
+
+### Added
+
+- **Working memory per step on the Rust driver** (`Step::memory(bool)`, `Agg::memory(bool)`). With memory
+  off, a session's brief names no forward state (`STATE.md`), no wiki and no memory log, its footer asks
+  for neither, agg doesn't warn about an untouched `STATE.md`, and no memory fold or summary runs after it.
+  Off never deletes memory: a later step with it on sees what earlier sessions left. `Agg::memory` is the
+  run's default (on); a step's own setting wins. For a workflow whose steps run once and hand their results
+  on in their own files. agg.yaml is unchanged.
+
 ## 0.0.19 (2026-10-13)
 
 ### Added
