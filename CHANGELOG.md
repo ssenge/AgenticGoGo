@@ -2,6 +2,28 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.21 (2026-10-13)
+
+### Added
+
+- **Agent, model and effort per LLM judge** (`Judge::agent(Agent)`, `Judge::model(m)`, `Judge::effort(Effort)`
+  on a `Judge::rubric`). The judge asks that agent instead of the run's ruler — a reviewer that is not the
+  worker's agent, sized for the job. With its own agent and no model it uses that agent's default judge
+  model; `Agent::Custom` is a failed verdict. Its spend counts toward the agent that answered. Unset, the
+  call is the same as before.
+- The ruler's one-shot call takes a reasoning effort: Claude and Copilot `--effort`, Codex
+  `model_reasoning_effort` (clamped as for workers).
+
+### Changed
+
+- An LLM judge is asked for a rationale that lists every point to fix when its verdict is not met, so it
+  can serve as a review.
+
+### Fixed
+
+- **Web UI:** the control panel is rendered once, outside the state branches. Two branch copies could sit in
+  the DOM at the moment the state appeared, showing an action's feedback twice (a flaky browser e2e).
+
 ## 0.0.20 (2026-10-13)
 
 ### Added
