@@ -316,6 +316,7 @@ mod tests {
                 effort: None,
                 worker_args: vec![],
                 state: "agg/state/STATE.md".into(),
+                memory: true,
                 role_prompt: None,
                 prompt: None,
                 role_prompt_file: None,

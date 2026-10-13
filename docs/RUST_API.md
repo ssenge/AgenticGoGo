@@ -82,6 +82,7 @@ fn main() -> Result<(), agg::driver::Fatal> {
 |---|---|
 | `Agg::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
 | `.limits()` `.on_regression()` `.ratchet()` `.merge_requires_improvement()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
+| `.memory(bool)` | the run's default for `Step::memory`: whether sessions keep agg's working memory (forward state, wiki, memory log, summary). On by default; a step's own setting wins |
 | `.judge_agent(Agent::Codex)` `.judge_model(m)` `.judge_timeout(secs)` | the ruler — YAML's `judge.agent` / `judge.model` / `judge.timeout` ([CONFIG](CONFIG.md#judge--the-ruler)). `Agent::Custom` is refused when the run boots: the ruler is resolved by name |
 | `.context(path, name)` `.network(Network::Allow(..))` `.image()` `.judge_image()` `.pass_env([..])` `.credentials([..])` | the run's confinement: read-only context dirs, the egress allow-list, the container images and what crosses into a container — YAML's `context:` / `isolation_policy:` / `image:` / `judge.image` ([CONFIG](CONFIG.md#network-egress--isolation_policynetwork)) |
 | `agg.step(&s)` | run one session. Commits on a session branch — **stages**, never merges |
@@ -106,6 +107,10 @@ file it cannot read.
 The role works the same way: `.role_prompt(text)` / `.role_prompt_file("roles/tester.md")` are YAML's
 per-step `role_prompt:` / `role_prompt_file:`, replace each other, and — set either — replace the run's
 defaults for that step; a step that sets neither runs with the defaults.
+
+A step that runs once and hands its result on in its own files can drop agg's working memory:
+`Step::new("check").memory(false)`. Its brief then names no `STATE.md`, wiki or memory log, and no memory
+fold or summary runs after it. Memory stays on for steps that loop, where one session advises the next.
 
 ### Judges
 

@@ -81,7 +81,7 @@ impl Handler for LaunchWorker {
             ctx.cost_spent,
         );
         // warn (loudly) if the agent never touched its forward state file (§5.6 / OQ3).
-        if let (Some(step), false) = (&ctx.cur_step, outcome.rate_limited) {
+        if let (Some(step), false) = (ctx.cur_step.as_ref().filter(|s| s.memory), outcome.rate_limited) {
             let now = std::fs::read_to_string(ctx.config_base.join(&step.state)).ok();
             if now == ctx.ext.get::<AGGState>().inject.state_before {
                 eprintln!("  ⚠ the worker did not update `{}` this session — the next session inherits stale forward-state.", step.state);

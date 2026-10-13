@@ -89,6 +89,8 @@ pub struct Agg {
     /// the name of an [`Agent::Custom`] handed to [`Agg::judge_agent`], refused when the run boots:
     /// the builder chain cannot fail, and the ruler is resolved BY NAME (`judge.agent`).
     custom_ruler: Option<String>,
+    /// the working-memory default of a step that doesn't set its own — see [`Agg::memory`].
+    memory: bool,
 }
 
 /// Everything that only exists once the run-level setup has run.
@@ -167,6 +169,7 @@ impl Agg {
             iso_seen: Cell::new(crate::isolation::Isolation::None),
             pos: RefCell::new(Vec::new()),
             custom_ruler: None,
+            memory: true,
         })
     }
 
@@ -211,6 +214,14 @@ impl Agg {
     /// driver's spelling of `sequence.merge_requires_improvement`; off by default.
     pub fn merge_requires_improvement(mut self, on: bool) -> Agg {
         self.cfg.sequence.merge_requires_improvement = on;
+        self
+    }
+
+    /// The run's default for [`Step::memory`]: whether a step's sessions keep agg's working memory
+    /// (forward state, wiki, memory log, summary). On by default; a step's own setting wins. The
+    /// driver's twin of YAML's `memory.enabled`.
+    pub fn memory(mut self, on: bool) -> Agg {
+        self.memory = on;
         self
     }
 
@@ -686,6 +697,7 @@ impl Agg {
             effort: step.effort.as_str().map(String::from),
             worker_args: self.cfg.defaults.worker_args.clone(),
             state: step.state.clone().unwrap_or_else(|| self.cfg.defaults.state.clone()),
+            memory: step.memory.unwrap_or(self.memory),
             role_prompt: role.0.clone(),
             prompt: step.prompt.clone(),
             role_prompt_file: role.1.clone(),

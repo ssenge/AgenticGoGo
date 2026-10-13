@@ -6,7 +6,7 @@ use anyhow::Result;
 use crate::bus::Command;
 use crate::core::config::ResolvedStep;
 use crate::core::stop::{self, StopContext};
-use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LoopState, EXIT_FOOTER, INSTRUCTIONS_POINTER, wait_for_resume};
+use crate::loop_::{keeps_memory, AGGScratch, AGGState, Flow, Handler, LoopState, EXIT_FOOTER, EXIT_FOOTER_NO_MEMORY, INSTRUCTIONS_POINTER, wait_for_resume};
 
 /// Drain the operator bus at the session boundary (inject / pause / set-budget / stop / note).
 pub struct BusDrain;
@@ -216,7 +216,7 @@ impl Handler for WriteInstructions {
 pub struct ClearMemScratch;
 impl Handler for ClearMemScratch {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if ctx.cfg.memory.enabled {
+        if ctx.cfg.memory.enabled && keeps_memory(ctx) {
             crate::core::memory::clear_scratch(&ctx.dir, ctx.session);
         }
         Ok(Flow::Continue)
@@ -292,7 +292,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     }
 
     // ── context: memory recent-tail excerpt + a conditional pointer to the full LOG ──
-    if ctx.cfg.memory.enabled {
+    if ctx.cfg.memory.enabled && step.memory {
         let last_session = ctx.ext.get::<AGGState>().memory.last_session.clone();
         let mem = crate::core::memory::read_block(&ctx.dir, &last_session, ctx.cfg.memory.inject_kb);
         if !mem.trim().is_empty() {
@@ -304,7 +304,8 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     }
 
     // ── STATE → a POINTER, not an excerpt (it is crisp by design; read the whole small file) ──
-    if let Ok(st) = std::fs::read_to_string(ctx.config_base.join(&step.state)) {
+    let state = if step.memory { std::fs::read_to_string(ctx.config_base.join(&step.state)).ok() } else { None };
+    if let Some(st) = state {
         if !st.trim().is_empty() {
             s.push_str(&format!(
                 "\n## Where things stand\nRead `agg/{}` — your predecessor's forward advice (kept short; read it in full).\n",
@@ -327,7 +328,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
 
     // ── the LLM wiki — list its pages if any exist ──
     let wiki = crate::paths::wiki_dir(&ctx.dir);
-    if wiki.exists() {
+    if step.memory && wiki.exists() {
         let pages = wiki_pages(&wiki);
         if !pages.is_empty() {
             s.push_str(&format!(
@@ -339,7 +340,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
 
     // ── standing footer (from plugin/scaffold/exit_footer.md). {{STATE}} is filled from step.state. ──
     s.push('\n');
-    s.push_str(&EXIT_FOOTER.replace("{{STATE}}", &step.state));
+    s.push_str(&if step.memory { EXIT_FOOTER.replace("{{STATE}}", &step.state) } else { EXIT_FOOTER_NO_MEMORY.to_string() });
 
     // write the composed brief to disk; the worker's actual `-p` is the tiny pointer.
     let path = crate::paths::instructions_md(&ctx.dir);

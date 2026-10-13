@@ -1544,3 +1544,42 @@ fn a_driver_step_role_prompt_file_reaches_the_brief() {
     let rows = agg::core::prompts::read_ledger(dir);
     assert_eq!(rows.len(), 1);
 }
+
+/// `Step::memory(false)` (A-24): the session's brief names no forward state, no wiki and no memory,
+/// and no memory fold runs after it; the next step with memory on gets all of it as before.
+#[test]
+fn a_driver_step_without_memory_gets_no_state_wiki_or_fold() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("agg/state/wiki")).unwrap();
+    std::fs::write(dir.join("agg/state/STATE.md"), "advice from before\n").unwrap();
+    std::fs::write(dir.join("agg/state/wiki/index.md"), "# Concepts\n").unwrap();
+    let log = dir.join("agg/private/LOG.md");
+    let agg = Agg::open(dir).unwrap();
+
+    agg.step(&work().memory(false)).unwrap();
+    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
+    assert!(!brief.contains("STATE.md") && !brief.contains("wiki/"), "{brief}");
+    assert!(brief.contains("keeps no working memory"), "{brief}");
+    assert!(!log.exists(), "no memory fold after a step without memory");
+    assert_eq!(std::fs::read_to_string(dir.join("agg/state/STATE.md")).unwrap(), "advice from before\n");
+
+    agg.step(&work()).unwrap();
+    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
+    assert!(brief.contains("agg/state/STATE.md") && brief.contains("wiki/index.md"), "{brief}");
+    assert!(log.exists(), "the memory fold runs again");
+}
+
+/// `Agg::memory(false)` is the run's default; a step's own `memory(true)` wins over it.
+#[test]
+fn the_runs_memory_default_yields_to_the_steps_own() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("agg/state")).unwrap();
+    std::fs::write(dir.join("agg/state/STATE.md"), "advice\n").unwrap();
+    let agg = Agg::open(dir).unwrap().memory(false);
+    agg.step(&work()).unwrap();
+    assert!(!std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap().contains("STATE.md"));
+    agg.step(&work().memory(true)).unwrap();
+    assert!(std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap().contains("agg/state/STATE.md"));
+}

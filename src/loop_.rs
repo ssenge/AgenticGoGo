@@ -41,6 +41,16 @@ pub const INSTRUCTIONS_POINTER: &str =
 /// string; `{{STATE}}` is filled with the step's state path when composed.
 pub const EXIT_FOOTER: &str = include_str!("../plugin/scaffold/exit_footer.md");
 
+/// The footer of a session whose step keeps no working memory (`Step::memory(false)`): no forward
+/// state, no wiki.
+pub const EXIT_FOOTER_NO_MEMORY: &str = include_str!("../plugin/scaffold/exit_footer_no_memory.md");
+
+/// Whether the current step's sessions keep the working memory (`ResolvedStep::memory`); with no
+/// current step, as before steps could say so: yes.
+pub fn keeps_memory(ctx: &LoopState) -> bool {
+    ctx.cur_step.as_ref().is_none_or(|s| s.memory)
+}
+
 // ── the lifecycle registry (HOOK_REDESIGN §3.1/§5) ────────────────────────────────────────────
 // Handlers are `.add()`ed to hook points in code and dispatched in order by the loop — the seed of
 // "every task is a hook". agg's own tasks (pick/compose/judges/gate/memory) are handlers too; only

@@ -151,7 +151,7 @@ impl Handler for RunJudges {
 /// The early ENFORCED memory floor (so the session's facts survive a later panic). Writes a
 /// mechanical session-start note to LOG.md before any judging runs.
 pub fn fold_memory_floor(ctx: &mut LoopState, outcome: &SessionOutcome) -> bool {
-    if ctx.cfg.memory.enabled && !outcome.rate_limited {
+    if ctx.cfg.memory.enabled && crate::loop_::keeps_memory(ctx) && !outcome.rate_limited {
         let scoreboard_now = ctx.eng.scoreboard();
         let ended = crate::util::now_epoch();
         let body = crate::core::memory::mechanical_note(
