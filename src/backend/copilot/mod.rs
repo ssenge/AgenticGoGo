@@ -329,12 +329,16 @@ impl AgentBackend for Copilot {
         &self,
         prompt: &str,
         model: &str,
+        effort: &str,
         timeout_secs: u64,
         cwd: Option<&Path>,
         isolation: crate::isolation::Isolation,
     ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command.args(ONE_SHOT_FLAGS).arg("--model").arg(model).arg("-p").arg(prompt).stdin(Stdio::null());
+        if !effort.is_empty() {
+            command.arg("--effort").arg(effort);
+        }
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }

@@ -100,6 +100,7 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
                 in_dod: n.in_dod,
                 // the `judges:` block's `timeout:`; absent ⇒ the run-level `judge.timeout` (300s).
                 timeout: cfg.judges.get(&n.name).and_then(|j| j.timeout),
+                ruler: None,
                 state: Lifecycle::Pending,
                 last_verdict: None,
                 ever_met: false,

@@ -422,6 +422,7 @@ fn run_cli() -> Result<ExitCode> {
                 &p.dir,
                 ruler,
                 &jm,
+                "",
                 timeout,
                 None,
                 "judge",

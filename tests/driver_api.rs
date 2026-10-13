@@ -60,6 +60,20 @@ exit 0
     .unwrap();
     chmod_x(&claude);
 
+    // The fake `codex`, asked only as a judge's own ruler (A-25): it records its argv in the
+    // project and answers one review verdict in Codex's `--json` stream shape.
+    let codex = bin.join("codex");
+    std::fs::write(
+        &codex,
+        r#"#!/bin/sh
+for a in "$@"; do [ "$a" = --version ] && { echo "fake-codex 0.0.0"; exit 0; }; done
+for a in "$@"; do echo "$a"; done > codex.args
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"met\": false, \"rationale\": \"fix A; fix B\"}"}}'
+"#,
+    )
+    .unwrap();
+    chmod_x(&codex);
+
     std::env::set_var("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
     std::env::set_var("HOME", &home);
     root
@@ -1582,4 +1596,23 @@ fn the_runs_memory_default_yields_to_the_steps_own() {
     assert!(!std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap().contains("STATE.md"));
     agg.step(&work().memory(true)).unwrap();
     assert!(std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap().contains("agg/state/STATE.md"));
+}
+
+/// A-25: an LLM judge with its own agent, model and effort asks that agent — here Codex, while the
+/// run's ruler is Claude — and its review comes back as the verdict.
+#[test]
+fn an_llm_judge_asks_its_own_agent_with_its_model_and_effort() {
+    let tmp = project();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("agg/judges")).unwrap();
+    std::fs::write(dir.join("agg/judges/review.md"), "Review the work; list every point to fix.\n").unwrap();
+    let agg = Agg::open(dir).unwrap();
+    agg.step(&work()).unwrap();
+    let review = Judge::rubric("review", "agg/judges/review.md").agent(Agent::Codex).model("m-review").effort(Effort::Low);
+    let verdict = agg.judge(&review);
+    assert!(!verdict.met());
+    assert_eq!(verdict.rationale(), "fix A; fix B");
+    let args: Vec<String> = std::fs::read_to_string(dir.join("codex.args")).unwrap().lines().map(String::from).collect();
+    assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "m-review"), "{args:?}");
+    assert!(args.iter().any(|a| a == "model_reasoning_effort=low"), "{args:?}");
 }
