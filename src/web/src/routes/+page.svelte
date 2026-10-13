@@ -40,23 +40,22 @@
     <Asks state={s} />
     <Stats state={s} />
     <Step state={s} />
-    <div class="grid">
-      <div class="col-main">
+  {/if}
+  <div class="grid">
+    <div class="col-main">
+      {#if hasState}
         <Judges state={s} />
         <Activity state={s} />
-      </div>
-      <div class="col-side">
-        <PerAgent state={s} />
-        <Controls health={loop.health} />
-      </div>
+      {/if}
     </div>
-  {:else}
-    <!-- still show controls (disabled) so the operator sees them even before a run -->
-    <div class="grid">
-      <div class="col-main"></div>
-      <div class="col-side"><Controls health={loop.health} /></div>
+    <div class="col-side">
+      {#if hasState}<PerAgent state={s} />{/if}
+      <!-- ONE instance, outside the state branches: shown (disabled) before a run too, and never
+           remounted when state comes and goes — two branch copies could both sit in the DOM at the
+           moment the state flipped, showing the feedback twice. -->
+      <Controls health={loop.health} />
     </div>
-  {/if}
+  </div>
 
   <footer>
     <span>AgenticGoGo web · polling every 1s</span>
