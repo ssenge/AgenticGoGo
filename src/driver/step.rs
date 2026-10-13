@@ -5,7 +5,7 @@
 //!
 //! | field | rule |
 //! |---|---|
-//! | `agent` `model` `effort` `isolation` `image` `prompt` `state` | **OVERRIDE** — the derived step wins |
+//! | `agent` `model` `effort` `isolation` `image` `prompt` `state` `memory` | **OVERRIDE** — the derived step wins |
 //! | `prompt` / `prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other |
 //! | `role_prompt` / `role_prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other; neither set = the run's defaults, as in YAML |
 //! | `readonly` | **ACCUMULATES** — a derived step cannot silently lose a deny its template set |
@@ -65,6 +65,9 @@ pub struct Step {
     /// the forward-state file this step's worker rewrites. `None` = `"state/STATE.md"` under the
     /// config base, as YAML's `defaults.state` resolves it.
     pub state: Option<String>,
+    /// whether this step's sessions keep agg's working memory. `None` = the run's
+    /// ([`crate::driver::Agg::memory`], on by default). See [`Step::memory`].
+    pub memory: Option<bool>,
 }
 
 impl Step {
@@ -159,6 +162,16 @@ impl Step {
     /// not created, and deliberately not validated.
     pub fn state(mut self, rel: impl Into<String>) -> Step {
         self.state = Some(rel.into());
+        self
+    }
+
+    /// Whether this step's sessions keep agg's WORKING MEMORY: the forward state, the wiki, the
+    /// memory log and the summary. On by default; it pays off where one step runs session after
+    /// session. Off suits a step that runs once and hands its result on in its own files: its brief
+    /// then names no state, wiki or memory, and no fold or summary runs after it. Off never deletes
+    /// memory — a later step with it on sees what earlier sessions left. Overrides [`crate::driver::Agg::memory`].
+    pub fn memory(mut self, on: bool) -> Step {
+        self.memory = Some(on);
         self
     }
 

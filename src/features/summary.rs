@@ -19,7 +19,7 @@ impl Handler for Summarize {
             .last_summary
             .map(|t| t.elapsed().as_secs() >= min_interval)
             .unwrap_or(true); // None only before Setup primes it — treat as due (matches old init)
-        if !(ctx.cfg.summary.enabled && due) {
+        if !(ctx.cfg.summary.enabled && due && crate::loop_::keeps_memory(ctx)) {
             return Ok(Flow::Continue);
         }
         let model = ctx.ruler.default_summary_model().to_string();

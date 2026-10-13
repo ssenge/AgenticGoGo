@@ -774,6 +774,10 @@ pub struct ResolvedStep {
     pub effort: Option<String>,
     pub worker_args: Vec<String>,
     pub state: String,
+    /// this step's sessions keep the working memory (forward state, wiki, memory log, summary).
+    /// Always `true` on the YAML path, where `memory.enabled` governs the log run-wide; a driver
+    /// step sets it with `Step::memory`.
+    pub memory: bool,
     pub role_prompt: Option<String>,
     pub prompt: Option<String>,
     /// the file `role_prompt` is read from at session start (`core::prompts`), as written.
