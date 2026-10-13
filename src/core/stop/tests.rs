@@ -14,6 +14,7 @@ fn unjudged(id: &str, invariant: bool) -> Judge {
         invariant,
         in_dod: true,
         timeout: None,
+        ruler: None,
         state: Lifecycle::Pending,
         last_verdict: None,
         ever_met: false,

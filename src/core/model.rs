@@ -382,6 +382,15 @@ impl JudgeKind {
     }
 }
 
+/// An LLM judge's own ruler ([`Judge::agent`], [`Judge::model`], [`Judge::effort`]); each `None` falls
+/// back to the run's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct JudgeRuler {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
 /// A judge — a goal, made executable. Resolved by NAME from disk (§5.1); it carries its DoD-set
 /// membership and its runtime lifecycle.
 #[derive(Debug, Clone)]
@@ -402,6 +411,10 @@ pub struct Judge {
     /// one run-level number cannot serve both. Meaningless for [`JudgeKind::Native`] (no subprocess
     /// to kill).
     pub timeout: Option<u64>,
+    /// PER-JUDGE ruler for an LLM judge: its own agent, model and effort. `None` = the run's ruler,
+    /// which is what every YAML-resolved judge uses. Set with [`Judge::agent`] / [`Judge::model`] /
+    /// [`Judge::effort`]; meaningless for every other kind.
+    pub ruler: Option<JudgeRuler>,
 
     // ---- runtime state ----
     pub state: Lifecycle,
@@ -457,6 +470,26 @@ impl Judge {
         self
     }
 
+    /// The AGENT this LLM judge asks, instead of the run's ruler — a reviewer that is not the worker's
+    /// agent. Its model is then that agent's default judge model unless [`Judge::model`] names one.
+    /// `Agent::Custom` is refused when the judge runs (the ruler is resolved by name).
+    pub fn agent(mut self, agent: crate::driver::Agent) -> Judge {
+        self.ruler.get_or_insert_with(JudgeRuler::default).agent = Some(agent.name().to_string());
+        self
+    }
+
+    /// The MODEL this LLM judge asks, instead of the run's `judge_model`.
+    pub fn model(mut self, model: impl Into<String>) -> Judge {
+        self.ruler.get_or_insert_with(JudgeRuler::default).model = Some(model.into());
+        self
+    }
+
+    /// The reasoning EFFORT of this LLM judge's call (the run's ruler calls with none).
+    pub fn effort(mut self, effort: crate::driver::Effort) -> Judge {
+        self.ruler.get_or_insert_with(JudgeRuler::default).effort = effort.as_str().map(String::from);
+        self
+    }
+
     /// The shared body of the three constructors.
     ///
     /// `invariant`/`in_dod` are BOTH false, and that is correct rather than a gap: on the driver
@@ -470,6 +503,7 @@ impl Judge {
             invariant: false,
             in_dod: false,
             timeout: None,
+            ruler: None,
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,

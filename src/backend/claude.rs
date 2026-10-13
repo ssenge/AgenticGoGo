@@ -134,6 +134,7 @@ impl AgentBackend for Claude {
         &self,
         prompt: &str,
         model: &str,
+        effort: &str,
         timeout_secs: u64,
         cwd: Option<&Path>,
         isolation: crate::isolation::Isolation,
@@ -150,6 +151,9 @@ impl AgentBackend for Claude {
             .arg("--setting-sources")
             .arg("user")
             .stdin(Stdio::null());
+        if !effort.is_empty() {
+            command.arg("--effort").arg(effort);
+        }
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }

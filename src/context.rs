@@ -140,8 +140,13 @@ impl LoopState {
     /// Account every call the RULER made (LLM judges, the summarizer).
     pub fn charge_ruler(&mut self, calls: &[crate::usage::Usage]) {
         let ruler = self.cfg.judge.agent.clone();
+        self.charge_ruler_as(&ruler, calls);
+    }
+
+    /// [`Self::charge_ruler`] for a judge that asked an agent of its own (`Judge::agent`).
+    pub fn charge_ruler_as(&mut self, agent: &str, calls: &[crate::usage::Usage]) {
         for u in calls {
-            self.charge_usage(crate::usage::Role::Ruler, &ruler, u);
+            self.charge_usage(crate::usage::Role::Ruler, agent, u);
         }
     }
 

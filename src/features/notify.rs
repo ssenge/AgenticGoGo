@@ -496,6 +496,7 @@ mod tests {
             invariant: false,
             in_dod: false,
             timeout: None,
+            ruler: None,
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,

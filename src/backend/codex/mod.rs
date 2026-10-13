@@ -335,6 +335,7 @@ impl AgentBackend for Codex {
         &self,
         prompt: &str,
         model: &str,
+        effort: &str,
         timeout_secs: u64,
         cwd: Option<&Path>,
         isolation: crate::isolation::Isolation,
@@ -351,6 +352,9 @@ impl AgentBackend for Codex {
             .arg("--ephemeral");
         if !model.is_empty() {
             command.arg("--model").arg(model);
+        }
+        if let Some(level) = effort_arg(effort) {
+            command.arg("-c").arg(format!("model_reasoning_effort={level}"));
         }
         command.arg(prompt).stdin(Stdio::null()); // positional prompt; stdin nulled or it hangs
         if let Some(dir) = cwd {

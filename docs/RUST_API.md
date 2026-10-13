@@ -119,6 +119,8 @@ Three kinds, one type:
 ```rust
 Judge::script("tests_pass", "agg/judges/tests.sh")     // any executable; verdict JSON on stdout
 Judge::rubric("spec_sound", "agg/judges/spec.md")      // the .md IS the prompt; graded by the ruler
+Judge::rubric("review", "agg/judges/review.md")       // …asking its OWN agent, model and effort,
+    .agent(Agent::Codex).model("gpt-5").effort(Effort::Low) // not the run's ruler (a reviewer ≠ the worker)
 Judge::native("p99_ok", |c| {                          // a Rust closure over a JudgeCtx
     let ms = std::fs::read_to_string(c.scratch().join("bench.json"))
         .ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())

@@ -205,10 +205,12 @@ pub trait AgentBackend: Send + Sync {
     ///
     /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
+    /// `effort` is the reasoning effort in agg's vocabulary; empty = the agent's own default.
     fn one_shot(
         &self,
         prompt: &str,
         model: &str,
+        effort: &str,
         timeout_secs: u64,
         cwd: Option<&Path>,
         isolation: crate::isolation::Isolation,

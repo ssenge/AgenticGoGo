@@ -53,6 +53,7 @@ pub fn run(
     cwd: &Path,
     ruler: &dyn AgentBackend,
     model: &str,
+    effort: &str,
     timeout_secs: u64,
     session: Option<u32>,
     step: &str,
@@ -64,7 +65,7 @@ pub fn run(
         JudgeKind::Script { path } => {
             (run_script(path, cwd, name, session, step, timeout_secs, isolation), None)
         }
-        JudgeKind::Llm { path, inputs } => run_llm(path, inputs, model, timeout_secs, cwd, ruler, isolation),
+        JudgeKind::Llm { path, inputs } => run_llm(path, inputs, (model, effort), timeout_secs, cwd, ruler, isolation),
         // A native judge is a Rust closure in the DRIVER's own binary — the one judge kind that is
         // not a subprocess, and therefore the one kind that is not crash-safe by construction.
         // Hence `catch_unwind`: a panicking judge must report "I could not grade this" and let the
@@ -347,7 +348,7 @@ fn run_script(
 fn run_llm(
     rubric_path: &Path,
     inputs: &[String],
-    model: &str,
+    (model, effort): (&str, &str),
     timeout_secs: u64,
     cwd: &Path,
     ruler: &dyn AgentBackend,
@@ -378,7 +379,7 @@ fn run_llm(
          [BEGIN UNTRUSTED ARTIFACTS {nonce}]\n{context}\n[END UNTRUSTED ARTIFACTS {nonce}]\n\n\
          Now apply the rubric above. Output ONLY a single JSON object on the last line, \
          exactly this shape (no prose after it):\n\
-         {{\"met\": <true|false>, \"value\": <number>, \"max\": <number>, \"target\": <number>, \"rationale\": \"<one sentence>\"}}",
+         {{\"met\": <true|false>, \"value\": <number>, \"max\": <number>, \"target\": <number>, \"rationale\": \"<one sentence; when not met, every point to fix>\"}}",
         rubric = rubric_text,
         nonce = nonce,
         context = context,
@@ -387,7 +388,7 @@ fn run_llm(
     // 4) one-shot the ruler. The isolation flags that keep the worker from steering its own judge
     //    live in `backend::one_shot`; `cwd` is passed so the judge sees the project it is judging,
     //    and `isolation` OS-jails the call under Sandbox (defense-in-depth over its permission layer).
-    let out = match ruler.one_shot(&prompt, model, timeout_secs, Some(cwd), isolation) {
+    let out = match ruler.one_shot(&prompt, model, effort, timeout_secs, Some(cwd), isolation) {
         Ok(o) => o,
         Err(e) => return (Verdict::failed(format!("llm judge: {e}")), None),
     };

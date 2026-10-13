@@ -336,7 +336,7 @@ impl Engine {
                 // `g.timeout` is the `judges:` block's per-judge override; `timeout` is the
                 // run-level `judge.timeout`. Without this the override would parse and do nothing.
                 let secs = g.timeout.unwrap_or(timeout);
-                judge::run(&g.kind, &g.name, cwd, ruler, judge_model, secs, session, step, isolation, &src, self.base.as_deref())
+                judge::run(&g.kind, &g.name, cwd, ruler, judge_model, "", secs, session, step, isolation, &src, self.base.as_deref())
             })
             .collect()
     }
@@ -474,6 +474,7 @@ mod tests {
             invariant: false,
             in_dod,
             timeout: None,
+            ruler: None,
             state: Lifecycle::Pending,
             last_verdict: None,
             ever_met: false,

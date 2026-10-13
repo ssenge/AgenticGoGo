@@ -988,7 +988,7 @@ impl Agg {
             }
             Ok(_) => {}
         }
-        let (ruler, model, timeout, session, step, isolation, iso_base) = {
+        let (run_ruler, timeout, session, step, isolation, iso_base) = {
             let mut st = started.st.borrow_mut();
             let step = st.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "driver".into());
             // §2.5: the RUN tier, never `cur_step.isolation`. A driver's judge is an evaluator whose
@@ -998,8 +998,7 @@ impl Agg {
             let isolation = st.cfg.run_isolation().strongest(self.iso_seen.get());
             let base = st.ext.get::<AGGState>().git.iso_base.clone();
             (
-                st.ruler,
-                st.judge_model.clone(),
+                (st.ruler, st.judge_model.clone(), st.cfg.judge.agent.clone()),
                 j.timeout.unwrap_or(st.judge_timeout),
                 st.session,
                 step,
@@ -1008,23 +1007,31 @@ impl Agg {
             )
         };
         let kind = self.resolve_kind(&j.kind);
-        let (verdict, usage) = crate::core::judge::run(
-            &kind,
-            &j.name,
-            &self.dir,
-            ruler,
-            &model,
-            timeout,
-            Some(session),
-            &step,
-            isolation,
-            src,
-            Some(&iso_base),
-        );
+        // an unknown own agent is a failed verdict, recorded like any other (resume counts the call).
+        let (verdict, usage, agent) = match judge_ruler(j, run_ruler) {
+            Ok((ruler, model, effort, agent)) => {
+                let (verdict, usage) = crate::core::judge::run(
+                    &kind,
+                    &j.name,
+                    &self.dir,
+                    ruler,
+                    &model,
+                    &effort,
+                    timeout,
+                    Some(session),
+                    &step,
+                    isolation,
+                    src,
+                    Some(&iso_base),
+                );
+                (verdict, usage, agent)
+            }
+            Err(e) => (Verdict::failed(format!("judge `{}`: {e}", j.name)), None, String::new()),
+        };
         // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
         {
             let mut st = started.st.borrow_mut();
-            st.charge_ruler(usage.as_slice());
+            st.charge_ruler_as(&agent, usage.as_slice());
             // …and the VERDICT reaches the snapshot, not just the spend. Charging alone was the whole
             // of this block, which is why a driver run published `judges: []` to every reader while
             // its judges ran. `publish()` leaves `dash.judges` alone when the engine has none, so
@@ -1834,6 +1841,23 @@ impl Drop for Agg {
     }
 }
 
+/// The ruler an LLM judge asks: its own agent, model and effort ([`Judge::agent`] …) where it names
+/// them, else the run's. A judge with its own agent and no model gets that agent's default judge model.
+/// Returns the backend, model, effort and the agent's name (what its spend is charged to).
+fn judge_ruler(
+    j: &Judge,
+    (ruler, model, agent): (&'static dyn crate::backend::AgentBackend, String, String),
+) -> anyhow::Result<(&'static dyn crate::backend::AgentBackend, String, String, String)> {
+    let Some(own) = &j.ruler else { return Ok((ruler, model, String::new(), agent)) };
+    let effort = own.effort.clone().unwrap_or_default();
+    let Some(name) = &own.agent else {
+        return Ok((ruler, own.model.clone().unwrap_or(model), effort, agent));
+    };
+    let backend = crate::backend::for_name(name)?;
+    let model = own.model.clone().unwrap_or_else(|| backend.default_summary_model().to_string());
+    Ok((backend, model, effort, name.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1843,6 +1867,25 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let agg = Agg::open(tmp.path()).unwrap();
         (tmp, agg)
+    }
+
+    /// A-25: an LLM judge without its own ruler asks the run's; with its own model the run's agent;
+    /// with its own agent that agent (its default judge model unless named), charged to it.
+    #[test]
+    fn an_llm_judge_picks_its_own_ruler() {
+        let claude = crate::backend::for_name("claude").unwrap();
+        let run = || (claude, "run-model".to_string(), "claude".to_string());
+        let rubric = || Judge::rubric("r", "r.md");
+        let (b, m, e, a) = judge_ruler(&rubric(), run()).unwrap();
+        assert_eq!((b.name(), m.as_str(), e.as_str(), a.as_str()), ("claude", "run-model", "", "claude"));
+        let (b, m, e, _) = judge_ruler(&rubric().model("own").effort(crate::driver::Effort::High), run()).unwrap();
+        assert_eq!((b.name(), m.as_str(), e.as_str()), ("claude", "own", "high"));
+        let codex = crate::backend::for_name("codex").unwrap();
+        let (b, m, _, a) = judge_ruler(&rubric().agent(Agent::Codex), run()).unwrap();
+        assert_eq!((b.name(), m.as_str(), a.as_str()), ("codex", codex.default_summary_model(), "codex"));
+        let mut unknown = rubric();
+        unknown.ruler = Some(crate::core::model::JudgeRuler { agent: Some("nope".into()), ..Default::default() });
+        assert!(judge_ruler(&unknown, run()).is_err());
     }
 
     /// The ruler builders set exactly the fields YAML's `judge:` block sets, and nothing is set
