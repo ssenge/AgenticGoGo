@@ -1460,8 +1460,8 @@ impl Agg {
         }
         eprintln!("  [hil {id}] {question}");
         match &options {
-            Some(o) => eprintln!("      answer: `agg send answer {id} <{}>`", o.join("|")),
-            None => eprintln!("      answer: `agg send answer {id} \"<value>\"`"),
+            Some(o) => eprintln!("      answer: `agg answer {id} <{}>`", o.join("|")),
+            None => eprintln!("      answer: `agg answer {id} \"<value>\"`"),
         }
         eprintln!("      or end the run with `agg stop` — a block is interruptible.");
 

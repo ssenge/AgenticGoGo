@@ -74,7 +74,11 @@ impl Handler for StageSpan {
             crate::git::remove_file(&ctx.dir, &red_file);
             // leave the branch orphaned; the span tip is unchanged.
         } else if let Some(br) = sb {
-            eprintln!("  [span] session #{} staged on {br} (skip_judges) — nothing merged yet", ctx.session);
+            let base = crate::features::inject::base_ref(ctx);
+            let empty = crate::git::branch_has_no_new_commits(&ctx.dir, &base, &br);
+            ctx.scratch.get::<AGGScratch>().span_empty = empty;
+            let what = if empty { "changed nothing; " } else { "" };
+            eprintln!("  [span] session #{} {what}staged on {br} (skip_judges) — nothing merged yet", ctx.session);
             let git = &mut ctx.ext.get::<AGGState>().git;
             git.span_tip = Some(br.clone());
             git.span_branches.push(br);

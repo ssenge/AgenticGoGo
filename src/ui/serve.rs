@@ -126,7 +126,7 @@ fn handle_send(
         Err(e) => return json_resp(400, &err_json(&e), origin),
     };
     // ANSWERS validate against the ask ledger before they are queued — one validator shared with
-    // `agg send answer`, so a value off a closed option list is refused identically from both sides
+    // `agg answer`, so a value off a closed option list is refused identically from both sides
     // and the ask stays open instead of resolving to something the driver never offered.
     // NO liveness check here any more, and no per-command exemption: `bus::queue_command` owns that
     // rule for every channel. `NotConnected` is its "no workflow is running" — the 409 the UI has

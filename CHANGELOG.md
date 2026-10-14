@@ -2,6 +2,16 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Fixed
+
+- **Driver:** a `skip_judges` step whose session committed nothing reports `Landing::Nothing`, as documented,
+  instead of `Landing::Span` whenever an earlier session had opened the span. The session is still staged,
+  so the gate keeps counting the span as a no-change one (`no_changes`).
+- `agg status` and the driver's human-ask prompt name the command that answers an ask, `agg answer <id>`
+  (they said `agg send answer`, which does not exist).
+
 ## 0.0.21 (2026-10-13)
 
 ### Added

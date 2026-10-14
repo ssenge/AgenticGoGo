@@ -47,7 +47,7 @@ for a in "$@"; do
     *INSTRUCTIONS.md*) worker=1 ;;
   esac
 done
-if [ -n "$worker" ]; then
+if [ -n "$worker" ] && [ ! -f .git/agg-idle ]; then
   if [ -f attack.sh ]; then sh attack.sh; fi
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
@@ -198,6 +198,22 @@ fn a_driver_step_runs_the_real_pipeline() {
 
     drop(agg);
     assert!(!agg::paths::run_pid(dir).exists(), "…and released when the Agg is dropped");
+}
+
+/// A session that commits nothing lands NOTHING, even inside a span an earlier session opened —
+/// and the span still holds (and the gate still lands) the earlier session's work.
+#[test]
+fn a_session_that_changes_nothing_lands_nothing() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap();
+
+    assert_eq!(agg.step(&work()).unwrap().landed, Landing::Span);
+    std::fs::write(dir.join(".git/agg-idle"), "").unwrap();
+    assert_eq!(agg.step(&work()).unwrap().landed, Landing::Nothing, "the idle session staged nothing");
+
+    agg.gate().unwrap();
+    assert_eq!(work_landed_on_main(dir), 1, "the first session's work landed");
 }
 
 /// THE LATCH. A driver that ignores every `Err` and keeps calling `step()` after a ceiling fired

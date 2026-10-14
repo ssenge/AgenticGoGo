@@ -2100,7 +2100,7 @@ has "…and published to state.json, so every reader sees it" "$HL/agg/private/s
 # command that unblocks it.
 agg_do "$HL" status > "$HL/status.txt" 2>&1
 has "agg status leads with the open ask"   "$HL/status.txt" "WAITING ON A HUMAN"
-has "…naming the command that answers it"  "$HL/status.txt" "agg send answer"
+has "…naming the command that answers it"  "$HL/status.txt" "→ agg answer "
 
 ASK_ID="$(sed -n 's/.*"id":"\([a-f0-9]*\)".*/\1/p' "$HL/agg/private/asks.jsonl" | head -1)"
 [ -n "$ASK_ID" ] && ok "…and an id an operator can retype" || bad "…and an id an operator can retype" "no id parsed"

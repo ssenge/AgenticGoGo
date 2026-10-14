@@ -544,6 +544,7 @@ struct StepStaging {
     exit: i32,
     staged: Option<(String, crate::git::StagedSession)>,
     on_span: bool,
+    span_empty: bool,
 }
 
 impl StepStaging {
@@ -567,6 +568,7 @@ impl StepStaging {
             exit,
             staged,
             on_span: st.ext.get::<AGGState>().git.span_tip.is_some(),
+            span_empty: st.scratch.get::<AGGScratch>().span_empty,
         }
     }
 
@@ -583,8 +585,9 @@ impl StepStaging {
             // truth). No work landed anywhere.
             Some(_) => Landing::Nothing,
             // no merge was staged: the driver/`skip_judges` path. The span tip says whether this
-            // session's branch joined the open span or was discarded (a red_file veto).
-            None if self.on_span => Landing::Span,
+            // session's branch joined the open span or was discarded (a red_file veto); a session
+            // that committed nothing joined it but brought nothing.
+            None if self.on_span && !self.span_empty => Landing::Span,
             None => Landing::Nothing,
         };
         crate::driver::StepOutcome {
