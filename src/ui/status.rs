@@ -106,8 +106,8 @@ fn render_state(s: &DashboardState) -> String {
                 a.question
             ));
             match (&a.options, a.case.as_str()) {
-                (Some(o), _) => out.push_str(&format!("      → agg send answer {} <{}>\n", a.id, o.join("|"))),
-                (None, _) => out.push_str(&format!("      → agg send answer {} \"<value>\"\n", a.id)),
+                (Some(o), _) => out.push_str(&format!("      → agg answer {} <{}>\n", a.id, o.join("|"))),
+                (None, _) => out.push_str(&format!("      → agg answer {} \"<value>\"\n", a.id)),
             }
         }
     }

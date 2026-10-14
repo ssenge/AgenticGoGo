@@ -9,7 +9,7 @@
 //! | | channel | trust |
 //! |---|---|---|
 //! | request | a driver call site, or the worker via `agg hil` → `agg/state/asks/` | **untrusted** — a worker-authored question is text, exactly like `BLOCKED.md`'s rationale |
-//! | answer | `agg send answer` → `agg/private/bus/in/` | **trusted** — the bus is carved out of the worker's writable set under `sandbox`/`container` |
+//! | answer | `agg answer` → the ledger `agg/private/asks.jsonl` | **trusted** — `private/` is carved out of the worker's writable set under `sandbox`/`container` |
 //!
 //! That is why the ledger lives in `private/` while worker requests land in `state/`: a worker must
 //! not be able to answer its own question, or "a human approved the prod deploy" means nothing.
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 pub enum AskCase {
     /// `hil_bool` — sugar for a two-option `Choose`.
     Bool,
-    /// `hil_choose` — a CLOSED answer set. The options are recorded, so `agg send answer` can refuse
+    /// `hil_choose` — a CLOSED answer set. The options are recorded, so `agg answer` can refuse
     /// anything not on the list and the caller cannot be handed a value it did not offer.
     Choose,
     /// `hil_input` — an OPEN set. Pair it with a judge; agg cannot validate free text.
@@ -368,7 +368,7 @@ pub fn mark_delivered(dir: &Path, asks: &[Ask], now_epoch: u64) {
 
 /// Validate an answer against the ask it claims to answer, resolving it to a canonical value.
 ///
-/// ONE validator, shared by every inbound channel (`agg send answer`, `POST /api/send`, and whatever
+/// ONE validator, shared by every inbound channel (`agg answer`, `POST /api/send`, and whatever
 /// comes next), for the same reason `queue_command` is shared: two validators that disagreed about
 /// what "postgres" means would be a bug nobody could see from either side.
 ///
@@ -419,7 +419,7 @@ pub fn validate_answer(dir: &Path, id: &str, value: &str) -> Result<String, Stri
 ///
 /// A question is a message to the operator, which is what [`crate::bus::Bus::emit`] was built for —
 /// the in/out pair is symmetric: the ask goes out on `bus/out/`, the answer comes back on `bus/in/`
-/// via `agg send answer`. Readers (the TUI, `agg status`, the web UI) consume it through the
+/// via `agg answer`. Readers (the TUI, `agg status`, the web UI) consume it through the
 /// `asks` field agg publishes to `state.json`; a push transport can be layered on later without
 /// changing anything here.
 ///
@@ -439,7 +439,7 @@ pub fn emit_to_operator(dir: &Path, ask: &Ask) {
 
 /// Mint an id: short, sortable-ish, and unique per process even inside one second.
 ///
-/// Not a UUID — an operator retypes these into `agg send answer <id>`, so four hex characters that a
+/// Not a UUID — an operator retypes these into `agg answer <id>`, so four hex characters that a
 /// human can read off a phone beats a canonical identifier nobody will ever type twice. Collisions
 /// are checked against the ledger by the caller.
 pub fn mint_id(seq: u64, now_epoch: u64) -> String {

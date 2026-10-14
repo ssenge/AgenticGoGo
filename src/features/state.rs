@@ -99,6 +99,9 @@ pub struct AGGScratch {
     pub pre_cycle_goals: Vec<GoalRuntime>,
     /// `StageSpan` (skip) XOR `RunJudges` (judged) → GATE; REWRITTEN by GATE on a rollback.
     pub res: Option<CycleResult>,
+    /// `StageSpan` (skip) → the step's `Landing`: this session committed nothing. It is still staged,
+    /// so the gate counts the span as a no-change one; the step reports `Landing::Nothing`.
+    pub span_empty: bool,
     /// `StageMerge` (judged) → GATE's keep/rollback. `None` on a skip step.
     pub staged: Option<(String, crate::git::StagedSession)>,
     /// `GateKeepRollback` (on_gate) → `RefineFold`'s "session ROLLED BACK" prefix. Staged-!keep only.
