@@ -44,6 +44,8 @@ impl AggConfig {
             worker_args: body.worker_args.clone().unwrap_or_else(|| self.defaults.worker_args.clone()),
             state: body.state.clone().unwrap_or_else(|| self.defaults.state.clone()),
             memory: true,
+            resume: None,
+            user_settings: true,
             // the pair inherits AS A PAIR: a step naming either form replaces both of the defaults'.
             role_prompt: role.0.clone(),
             role_prompt_file: role.1.clone(),

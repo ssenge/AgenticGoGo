@@ -57,6 +57,8 @@ fn the_prompt_is_positional_never_behind_dash_p() {
         model: "",  // the default — see DEFAULT_MODEL
         effort: "", // codex has none
         resume_id: None,
+        fork: false,
+        user_settings: true,
         extra_args: &[],
         cwd: Path::new("/tmp"),
         isolation: crate::isolation::Isolation::None,
@@ -89,6 +91,8 @@ fn resume_is_a_subcommand_not_a_flag() {
         model: "m",
         effort: "",
         resume_id: Some("thread-1"),
+        fork: false,
+        user_settings: true,
         extra_args: &[],
         cwd: Path::new("/tmp"),
         isolation: crate::isolation::Isolation::None,
@@ -113,6 +117,8 @@ fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
         model: "",
         effort: "",
         resume_id: None,
+        fork: false,
+        user_settings: true,
         extra_args: &[],
         cwd: Path::new("/tmp"),
         isolation: crate::isolation::Isolation::None,
@@ -164,6 +170,8 @@ fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
         .session_command(&SessionSpec {
             isolation: crate::isolation::Isolation::Sandbox,
             resume_id: Some("abc123"),
+            fork: false,
+            user_settings: true,
             ..base
         })
         .get_args()

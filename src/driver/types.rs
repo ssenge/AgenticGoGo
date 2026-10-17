@@ -169,6 +169,19 @@ pub struct StepOutcome {
     pub secs: u64,
     /// the agent process's exit code.
     pub exit: i32,
+    /// the agent's own session this step ran in, if the agent reported one — the handle a later
+    /// step hands to [`crate::driver::Step::resume`] or [`crate::driver::Step::fork`] (A-33).
+    #[serde(default)]
+    pub agent_session: Option<AgentSession>,
+}
+
+/// An agent's own session: which agent ran it and the id that agent gave it. A step can continue
+/// it ([`crate::driver::Step::resume`]) or branch off it ([`crate::driver::Step::fork`]); only the
+/// same agent can, so the agent is part of the handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSession {
+    pub agent: String,
+    pub id: String,
 }
 
 // ---------------------------------------------------------------------------------------------

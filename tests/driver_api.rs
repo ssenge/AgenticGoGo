@@ -41,19 +41,24 @@ static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
         &claude,
         r#"#!/bin/sh
 worker=
+prev=
 for a in "$@"; do
   case "$a" in
     --version) echo "fake-claude 0.0.0"; exit 0 ;;
     *INSTRUCTIONS.md*) worker=1 ;;
   esac
+  # a session this agent no longer has fails before any work (A-33)
+  [ "$prev" = --resume ] && [ "$a" = gone ] && exit 1
+  prev=$a
 done
+if [ -n "$worker" ]; then for a in "$@"; do echo "$a"; done >> .git/agg-worker.args; fi
 if [ -n "$worker" ] && [ ! -f .git/agg-idle ]; then
   if [ -f attack.sh ]; then sh attack.sh; fi
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
   git commit -qm "worker: did work" >/dev/null 2>&1
 fi
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"fake-'$$'","usage":{"output_tokens":1},"total_cost_usd":0.01}'
 exit 0
 "#,
     )
@@ -1631,4 +1636,65 @@ fn an_llm_judge_asks_its_own_agent_with_its_model_and_effort() {
     let args: Vec<String> = std::fs::read_to_string(dir.join("codex.args")).unwrap().lines().map(String::from).collect();
     assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "m-review"), "{args:?}");
     assert!(args.iter().any(|a| a == "model_reasoning_effort=low"), "{args:?}");
+}
+
+/// The worker's argv across the run's sessions, one argument per line (the fake `claude` appends).
+fn worker_args(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join(".git/agg-worker.args")).unwrap_or_default()
+}
+
+/// A-33: a step reports its agent session; a later step resumes or forks it, on the same agent only.
+#[test]
+fn a_step_resumes_or_forks_an_earlier_steps_agent_session() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    let first = agg.step(&work()).unwrap();
+    let session = first.agent_session.clone().expect("the fake claude reports its session");
+    assert_eq!(session.agent, "claude");
+    assert!(session.id.starts_with("fake-"), "got {}", session.id);
+    assert!(!worker_args(dir).contains("--resume"), "the first step starts fresh");
+
+    agg.step(&work().resume(&session)).unwrap();
+    let args = worker_args(dir);
+    assert!(args.contains(&format!("--resume\n{}\n", session.id)), "{args}");
+    assert!(!args.contains("--fork-session"), "a resume appends to the session");
+
+    agg.step(&work().fork(&session)).unwrap();
+    assert!(worker_args(dir).contains("--fork-session"));
+
+    // a session another agent ran is not this agent's to continue
+    std::fs::remove_file(dir.join(".git/agg-worker.args")).unwrap();
+    let foreign = AgentSession { agent: "codex".into(), id: "t-1".into() };
+    agg.step(&work().resume(&foreign)).unwrap();
+    assert!(!worker_args(dir).contains("--resume"), "a foreign session starts fresh");
+}
+
+/// A-33: a session the agent no longer has fails before any work, and the step starts fresh.
+#[test]
+fn a_session_the_agent_no_longer_has_starts_the_step_fresh() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    let gone = AgentSession { agent: "claude".into(), id: "gone".into() };
+    let outcome = agg.step(&work().resume(&gone)).unwrap();
+    assert_eq!(outcome.exit, 0, "the fresh session ran");
+    assert!(outcome.agent_session.is_some_and(|s| s.id != "gone"));
+    assert_eq!(std::fs::read_to_string(dir.join("work.log")).unwrap().lines().count(), 1);
+}
+
+/// A-33: `Agg::user_settings(false)` starts Claude workers with the project's settings only.
+#[test]
+fn a_run_without_user_settings_starts_workers_on_the_projects_settings_only() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    agg.step(&work()).unwrap();
+    assert!(!worker_args(dir).contains("--setting-sources"), "on by default: the operator's settings load");
+    drop(agg);
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() }).user_settings(false);
+    agg.step(&work()).unwrap();
+    assert!(worker_args(dir).contains("--setting-sources\nproject,local\n"), "{}", worker_args(dir));
 }

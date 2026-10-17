@@ -30,6 +30,13 @@ pub struct Capabilities {
     pub reports_cost_usd: bool,
     /// Can continue a prior session's context. Required by `resume_sessions: true`.
     pub supports_resume: bool,
+    /// Can BRANCH a new session off a prior one, leaving the prior one as it was. Required by
+    /// `Step::fork`; without it the step starts fresh.
+    pub supports_fork: bool,
+    /// Can start a worker with the project's settings only, without the operator's own (plugins, MCP
+    /// servers, hooks, personal instructions). Required by `Agg::user_settings(false)`; without it
+    /// the worker loads them and the step says so.
+    pub supports_project_settings_only: bool,
     /// Accepts a thinking-effort level. Required by a non-empty `effort:`.
     pub supports_effort: bool,
     /// Can distinguish a rate-limit/usage-limit from an ordinary failure, so the loop backs off
@@ -97,6 +104,10 @@ pub struct SessionSpec<'a> {
     pub effort: &'a str,
     /// continue a prior session's context instead of starting fresh.
     pub resume_id: Option<&'a str>,
+    /// with `resume_id`: branch off that session instead of appending to it.
+    pub fork: bool,
+    /// `false`: start without the operator's own agent settings (only where the backend supports it).
+    pub user_settings: bool,
     /// operator-supplied extra flags (agg.yaml `worker_args`), passed through verbatim.
     pub extra_args: &'a [String],
     /// the project directory the worker runs in.

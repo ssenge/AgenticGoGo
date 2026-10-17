@@ -39,6 +39,8 @@ impl AgentBackend for Claude {
             reports_output_tokens: true, // usage.output_tokens on the result event
             reports_cost_usd: true,      // total_cost_usd — Claude prices itself; nobody else does
             supports_resume: true,       // --resume <session_id>
+            supports_fork: true,         // --fork-session
+            supports_project_settings_only: true, // --setting-sources project,local
             supports_effort: true,       // --effort
             detects_rate_limits: true,   // terminal result event carries the limit error
             supports_one_shot: true,     // --strict-mcp-config + --setting-sources user
@@ -73,6 +75,12 @@ impl AgentBackend for Claude {
         }
         if let Some(id) = spec.resume_id {
             command.arg("--resume").arg(id);
+            if spec.fork {
+                command.arg("--fork-session");
+            }
+        }
+        if !spec.user_settings {
+            command.arg("--setting-sources").arg("project,local");
         }
         // Applied AFTER agg's own flags and BEFORE -p, so an operator can extend the invocation
         // but not clobber its shape.
@@ -252,6 +260,26 @@ mod tests {
         assert_eq!(unwrap_envelope(b""), "");
     }
 
+    /// A-33: a fork resumes the session and branches off it.
+    #[test]
+    fn a_fork_resumes_with_fork_session() {
+        let spec = SessionSpec {
+            prompt: "p",
+            model: "m",
+            effort: "",
+            resume_id: Some("abc"),
+            fork: true,
+            user_settings: true,
+            extra_args: &[],
+            cwd: Path::new("/tmp"),
+            isolation: crate::isolation::Isolation::None,
+        };
+        let args: Vec<String> =
+            Claude.session_command(&spec).get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let at = args.iter().position(|a| a == "--resume").expect("--resume");
+        assert_eq!((args[at + 1].as_str(), args[at + 2].as_str()), ("abc", "--fork-session"));
+    }
+
     #[test]
     fn session_command_shape() {
         let spec = SessionSpec {
@@ -259,6 +287,8 @@ mod tests {
             model: "m",
             effort: "max",
             resume_id: Some("abc"),
+            fork: false,
+            user_settings: true,
             extra_args: &["--add-dir".to_string(), "/x".to_string()],
             cwd: Path::new("/tmp"),
             isolation: crate::isolation::Isolation::None,
@@ -273,6 +303,7 @@ mod tests {
         assert!(add_dir < p, "worker_args must precede -p");
         assert_eq!(args.last().unwrap(), "do the thing", "prompt is the final arg");
         assert!(args.contains(&"--resume".to_string()) && args.contains(&"abc".to_string()));
+        assert!(!args.contains(&"--fork-session".to_string()), "a resume appends unless asked to fork");
         assert!(args.contains(&"--effort".to_string()));
     }
 
@@ -288,6 +319,8 @@ mod tests {
             model: "m",
             effort: "",
             resume_id: None,
+            fork: false,
+            user_settings: true,
             extra_args: &[],
             cwd: Path::new("/tmp"),
             isolation: crate::isolation::Isolation::None,
@@ -316,6 +349,8 @@ mod tests {
             model: "m",
             effort: "",
             resume_id: None,
+            fork: false,
+            user_settings: true,
             extra_args: &[],
             cwd: Path::new("/tmp"),
             isolation: crate::isolation::Isolation::None,

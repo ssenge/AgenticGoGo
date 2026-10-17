@@ -2,6 +2,19 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.23 (2026-10-17)
+
+### Added
+
+- **A step can start from an earlier step's agent session** (A-33): `StepOutcome::agent_session` names the
+  agent and its session id; `Step::resume(&s)` continues that session, `Step::fork(&s)` branches off it and
+  leaves it unchanged (Claude `--resume <id> [--fork-session]`). Only the same agent can; on another agent,
+  a backend without resume or fork (`Capabilities::supports_fork`, Claude only), or a session the agent no
+  longer has, the step starts fresh and says why. The YAML path still starts every session fresh.
+- **Workers without the operator's own agent settings** (`Agg::user_settings(false)`): their plugins, MCP
+  servers, hooks and personal instructions stay out of the run's sessions (Claude `--setting-sources
+  project,local`; `Capabilities::supports_project_settings_only`). On by default, as before.
+
 ## 0.0.22 (2026-10-14)
 
 ### Fixed

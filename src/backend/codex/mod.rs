@@ -65,6 +65,10 @@ impl AgentBackend for Codex {
             reports_cost_usd: false,
             // `codex exec resume <SESSION_ID>`, id from thread.started.thread_id.
             supports_resume: true,
+            // no flag to branch a session off another: `Step::fork` starts fresh here.
+            supports_fork: false,
+            // not verified on the wire yet: workers load the operator's settings.
+            supports_project_settings_only: false,
             // YES — not via a flag (`codex exec` has none) but via the `-c model_reasoning_effort=`
             // config override, which is verified to work. See `effort_arg` for the level mapping.
             supports_effort: true,
