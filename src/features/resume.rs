@@ -170,6 +170,7 @@ mod tests {
             cost: 0.0,
             secs: 0,
             exit: 0,
+            agent_session: None,
         };
         CallRecord::Step { ord, label: label.into(), outcome, ts: 0 }
     }

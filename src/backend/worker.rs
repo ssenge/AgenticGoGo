@@ -83,17 +83,21 @@ pub fn run_session(
     denied: &[String],
     write_deny: &[String],
     image: &str,
+    resume: Option<&(String, bool)>,
+    user_settings: bool,
 ) -> SessionOutcome {
     let start = Instant::now();
 
     // WHAT to run is the backend's business (binary, flags, prompt placement); HOW to supervise
-    // it is ours (process group, stream reader, heartbeat, watchdog, reaping). Resume is dropped
-    // (§4.1: a session id is per-agent, so it cannot cross a mixed sequence) — always fresh context.
+    // it is ours (process group, stream reader, heartbeat, watchdog, reaping). A resume comes only
+    // from a driver step, already checked against this agent (A-33); otherwise the context is fresh.
     let command = agent.session_command(&backend::SessionSpec {
         prompt,
         model,
         effort,
-        resume_id: None,
+        resume_id: resume.map(|r| r.0.as_str()),
+        fork: resume.is_some_and(|r| r.1),
+        user_settings,
         extra_args: worker_args,
         cwd: dir,
         isolation,

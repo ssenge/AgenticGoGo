@@ -8,6 +8,11 @@ use anyhow::Result;
 use crate::backend::worker::{self, SessionOutcome};
 use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LoopState};
 
+/// A session that failed without a word: not rate-limited, a non-zero exit, no output.
+fn is_dud(outcome: &SessionOutcome) -> bool {
+    !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.usage.tokens.output_or_zero() == 0
+}
+
 pub struct LaunchWorker;
 impl Handler for LaunchWorker {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
@@ -45,21 +50,32 @@ impl Handler for LaunchWorker {
         // out of this handler would skip a handler registered after it.
         crate::features::protect::before_worker(ctx, &step)?;
         crate::features::partial::note_untracked_before(ctx);
-        let outcome = worker::run_session(
-            &ctx.cfg,
-            agent,
-            &model,
-            &effort,
-            &step.worker_args,
-            &prompt,
-            &ctx.dir,
-            ctx.session,
-            &ctx.live,
-            isolation,
-            &denied,
-            &step.write_deny,
-            &step.image,
-        );
+        let launch = |resume| {
+            worker::run_session(
+                &ctx.cfg,
+                agent,
+                &model,
+                &effort,
+                &step.worker_args,
+                &prompt,
+                &ctx.dir,
+                ctx.session,
+                &ctx.live,
+                isolation,
+                &denied,
+                &step.write_deny,
+                &step.image,
+                resume,
+                step.user_settings,
+            )
+        };
+        let mut outcome = launch(step.resume.as_ref());
+        // A session the agent no longer has fails before any work: the context was only a cache, so
+        // the step starts fresh rather than failing (A-33).
+        if let Some((id, _)) = step.resume.as_ref().filter(|_| is_dud(&outcome) && !crate::os::signals::interrupted()) {
+            eprintln!("  resuming session {id} failed (exit {:?}); starting fresh", outcome.exit_code);
+            outcome = launch(None);
+        }
         crate::features::protect::after_worker(ctx, &step)?;
         ctx.charge_usage(crate::usage::Role::Worker, &step.agent, &outcome.usage);
 
@@ -88,7 +104,7 @@ impl Handler for LaunchWorker {
             }
         }
 
-        let dud = !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.usage.tokens.output_or_zero() == 0;
+        let dud = is_dud(&outcome);
         let w = &mut ctx.ext.get::<AGGState>().worker;
         w.dud_streak = if dud { w.dud_streak + 1 } else { 0 };
         ctx.scratch.get::<AGGScratch>().outcome = Some(outcome);

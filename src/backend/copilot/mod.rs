@@ -66,6 +66,10 @@ impl AgentBackend for Copilot {
             reports_cost_usd: false,
             // `result.sessionId` + `-r/--resume=<id>`.
             supports_resume: true,
+            // no flag to branch a session off another: `Step::fork` starts fresh here.
+            supports_fork: false,
+            // not verified on the wire yet: workers load the operator's settings.
+            supports_project_settings_only: false,
             // `--effort`, and the same vocabulary Claude uses (low|medium|high|xhigh|max).
             supports_effort: true,
             // NO — and unlike Claude/Codex this is a genuine gap, not conservatism.

@@ -778,6 +778,12 @@ pub struct ResolvedStep {
     /// Always `true` on the YAML path, where `memory.enabled` governs the log run-wide; a driver
     /// step sets it with `Step::memory`.
     pub memory: bool,
+    /// the agent session id this step's sessions start from, and whether they fork it — already
+    /// checked against the step's agent (A-33). Always `None` on the YAML path.
+    pub resume: Option<(String, bool)>,
+    /// whether the worker loads the operator's own agent settings (`Agg::user_settings`). Always
+    /// `true` on the YAML path.
+    pub user_settings: bool,
     pub role_prompt: Option<String>,
     pub prompt: Option<String>,
     /// the file `role_prompt` is read from at session start (`core::prompts`), as written.

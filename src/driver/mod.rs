@@ -39,5 +39,5 @@ pub use facade::{Agg, PosFrame};
 pub use group::{Group, GroupVerdict};
 pub use step::Step;
 pub use types::{
-    run, Agent, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, StepOutcome,
+    run, Agent, AgentSession, Effort, Fatal, GateFailure, GateOutcome, Landing, OnRegression, Opts, StepOutcome,
 };

@@ -5,7 +5,7 @@
 //!
 //! | field | rule |
 //! |---|---|
-//! | `agent` `model` `effort` `isolation` `image` `prompt` `state` `memory` | **OVERRIDE** — the derived step wins |
+//! | `agent` `model` `effort` `isolation` `image` `prompt` `state` `memory` `resume` | **OVERRIDE** — the derived step wins |
 //! | `prompt` / `prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other |
 //! | `role_prompt` / `role_prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other; neither set = the run's defaults, as in YAML |
 //! | `readonly` | **ACCUMULATES** — a derived step cannot silently lose a deny its template set |
@@ -17,7 +17,7 @@
 //! fourth such step, added six months later, quietly forgets the line. A template makes the
 //! protection the default of the family and the re-grant the exception a reader can see.
 
-use crate::driver::{Agent, Effort};
+use crate::driver::{Agent, AgentSession, Effort};
 use crate::isolation::{denied_paths, normalize_paths, Isolation};
 
 /// One step of a driver's flow: which agent, on what model, confined how, with what prompt.
@@ -68,6 +68,9 @@ pub struct Step {
     /// whether this step's sessions keep agg's working memory. `None` = the run's
     /// ([`crate::driver::Agg::memory`], on by default). See [`Step::memory`].
     pub memory: Option<bool>,
+    /// the agent session this step's session continues, and whether it branches off it (`true`)
+    /// instead of appending to it. `None` = a fresh session. See [`Step::resume`] and [`Step::fork`].
+    pub resume: Option<(AgentSession, bool)>,
 }
 
 impl Step {
@@ -172,6 +175,24 @@ impl Step {
     /// memory — a later step with it on sees what earlier sessions left. Overrides [`crate::driver::Agg::memory`].
     pub fn memory(mut self, on: bool) -> Step {
         self.memory = Some(on);
+        self
+    }
+
+    /// CONTINUE an earlier step's agent session: this step's worker starts with that session's
+    /// context instead of a fresh one, and appends to it (A-33). Only the agent that ran the session
+    /// can continue it; on another agent, a backend that can't resume, or a session the agent no
+    /// longer has, the step says so and starts fresh. The context is a cache, never the record: the
+    /// step must still pass started fresh.
+    pub fn resume(mut self, session: &AgentSession) -> Step {
+        self.resume = Some((session.clone(), false));
+        self
+    }
+
+    /// BRANCH OFF an earlier step's agent session: like [`Step::resume`], but the session itself
+    /// stays as it was, so several steps can each start from it, and a rerun starts from the same
+    /// context. A backend that can't fork starts fresh, as [`Step::resume`] does.
+    pub fn fork(mut self, session: &AgentSession) -> Step {
+        self.resume = Some((session.clone(), true));
         self
     }
 

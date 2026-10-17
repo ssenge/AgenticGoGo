@@ -542,6 +542,7 @@ struct StepStaging {
     cost: f64,
     secs: u64,
     exit: i32,
+    agent_session: Option<crate::driver::AgentSession>,
     staged: Option<(String, crate::git::StagedSession)>,
     on_span: bool,
     span_empty: bool,
@@ -549,14 +550,18 @@ struct StepStaging {
 
 impl StepStaging {
     fn capture(st: &mut LoopState) -> StepStaging {
-        let (verdicts, staged, secs, exit) = {
+        let agent = st.cur_step.as_ref().map(|s| s.agent.clone()).unwrap_or_default();
+        let (verdicts, staged, secs, exit, agent_session) = {
             let sc = st.scratch.get::<AGGScratch>();
             let (secs, exit) = sc
                 .outcome
                 .as_ref()
                 .map(|o| (o.duration_secs, o.exit_code.unwrap_or(-1)))
                 .unwrap_or((0, -1));
-            (sc.res.as_ref().map(|r| r.fresh_verdicts.clone()).unwrap_or_default(), sc.staged.clone(), secs, exit)
+            let session = sc.outcome.as_ref().and_then(|o| o.session_id.clone());
+            let agent_session = session.map(|id| crate::driver::AgentSession { agent, id });
+            let verdicts = sc.res.as_ref().map(|r| r.fresh_verdicts.clone()).unwrap_or_default();
+            (verdicts, sc.staged.clone(), secs, exit, agent_session)
         };
         StepStaging {
             step: st.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
@@ -566,6 +571,7 @@ impl StepStaging {
             cost: st.cost_spent,
             secs,
             exit,
+            agent_session,
             staged,
             on_span: st.ext.get::<AGGState>().git.span_tip.is_some(),
             span_empty: st.scratch.get::<AGGScratch>().span_empty,
@@ -599,6 +605,7 @@ impl StepStaging {
             cost: self.cost,
             secs: self.secs,
             exit: self.exit,
+            agent_session: self.agent_session,
         }
     }
 }

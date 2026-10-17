@@ -315,6 +315,7 @@ mod tests {
                 cost: 0.5,
                 secs: 1,
                 exit: 0,
+                agent_session: None,
             },
             ts: 1,
         }

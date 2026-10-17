@@ -91,6 +91,8 @@ pub struct Agg {
     custom_ruler: Option<String>,
     /// the working-memory default of a step that doesn't set its own — see [`Agg::memory`].
     memory: bool,
+    /// whether workers load the operator's own agent settings — see [`Agg::user_settings`].
+    user_settings: bool,
 }
 
 /// Everything that only exists once the run-level setup has run.
@@ -170,6 +172,7 @@ impl Agg {
             pos: RefCell::new(Vec::new()),
             custom_ruler: None,
             memory: true,
+            user_settings: true,
         })
     }
 
@@ -222,6 +225,16 @@ impl Agg {
     /// driver's twin of YAML's `memory.enabled`.
     pub fn memory(mut self, on: bool) -> Agg {
         self.memory = on;
+        self
+    }
+
+    /// Whether the workers load the operator's OWN agent settings: their plugins, MCP servers, hooks and
+    /// personal instructions (A-33). On by default. Off, a worker sees only the project's settings, so
+    /// what the operator set up for their own sessions (a memory plugin, a command-rewriting hook, a mail
+    /// connector) neither changes nor reads the run's work. Claude: `--setting-sources project,local`; an
+    /// agent that can't leave them out runs with them and says so.
+    pub fn user_settings(mut self, on: bool) -> Agg {
+        self.user_settings = on;
         self
     }
 
@@ -690,6 +703,8 @@ impl Agg {
         } else {
             (&d.role_prompt, &d.role_prompt_file)
         };
+        let resume = resume_of(&name, step);
+        let user_settings = self.user_settings || !leaves_out_user_settings(&name, step);
         Ok(ResolvedStep {
             name,
             agent: step.agent.name().to_string(),
@@ -698,6 +713,8 @@ impl Agg {
             worker_args: self.cfg.defaults.worker_args.clone(),
             state: step.state.clone().unwrap_or_else(|| self.cfg.defaults.state.clone()),
             memory: step.memory.unwrap_or(self.memory),
+            resume,
+            user_settings,
             role_prompt: role.0.clone(),
             prompt: step.prompt.clone(),
             role_prompt_file: role.1.clone(),
@@ -1856,6 +1873,41 @@ fn judge_ruler(
     let backend = crate::backend::for_name(name)?;
     let model = own.model.clone().unwrap_or_else(|| backend.default_summary_model().to_string());
     Ok((backend, model, effort, name.clone()))
+}
+
+/// Whether the step's agent can start a worker without the operator's own settings; says so when it can't.
+fn leaves_out_user_settings(name: &str, step: &Step) -> bool {
+    let can = match &step.agent {
+        Agent::Custom(b) => b.capabilities().supports_project_settings_only,
+        a => crate::backend::for_name(a.name()).is_ok_and(|b| b.capabilities().supports_project_settings_only),
+    };
+    if !can {
+        eprintln!("  step `{name}`: {} can't leave out the operator's own settings; its worker loads them", step.agent.name());
+    }
+    can
+}
+
+/// The agent session a step starts from — its id and whether to fork it — or `None` for a fresh
+/// one, saying why when the step asked for a session (A-33). A session belongs to the agent that
+/// ran it, and only a backend that can resume (or fork) can start from it.
+fn resume_of(name: &str, step: &Step) -> Option<(String, bool)> {
+    let (session, fork) = step.resume.as_ref()?;
+    let agent = step.agent.name();
+    let caps = match &step.agent {
+        Agent::Custom(b) => b.capabilities(),
+        a => crate::backend::for_name(a.name()).ok()?.capabilities(),
+    };
+    let why = if session.agent != agent {
+        format!("it ran on {}, this step runs on {agent}", session.agent)
+    } else if !caps.supports_resume {
+        format!("{agent} can't resume a session")
+    } else if *fork && !caps.supports_fork {
+        format!("{agent} can't fork a session")
+    } else {
+        return Some((session.id.clone(), *fork));
+    };
+    eprintln!("  step `{name}` starts fresh, not from session {}: {why}", session.id);
+    None
 }
 
 #[cfg(test)]

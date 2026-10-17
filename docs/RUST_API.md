@@ -82,6 +82,7 @@ fn main() -> Result<(), agg::driver::Fatal> {
 |---|---|
 | `Agg::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
 | `.limits()` `.on_regression()` `.ratchet()` `.merge_requires_improvement()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
+| `.user_settings(bool)` | whether workers load the operator's own agent settings (plugins, MCP servers, hooks, personal instructions). On by default; off, Claude workers start with `--setting-sources project,local`, and an agent that can't leave them out says so |
 | `.memory(bool)` | the run's default for `Step::memory`: whether sessions keep agg's working memory (forward state, wiki, memory log, summary). On by default; a step's own setting wins |
 | `.judge_agent(Agent::Codex)` `.judge_model(m)` `.judge_timeout(secs)` | the ruler — YAML's `judge.agent` / `judge.model` / `judge.timeout` ([CONFIG](CONFIG.md#judge--the-ruler)). `Agent::Custom` is refused when the run boots: the ruler is resolved by name |
 | `.context(path, name)` `.network(Network::Allow(..))` `.image()` `.judge_image()` `.pass_env([..])` `.credentials([..])` | the run's confinement: read-only context dirs, the egress allow-list, the container images and what crosses into a container — YAML's `context:` / `isolation_policy:` / `image:` / `judge.image` ([CONFIG](CONFIG.md#network-egress--isolation_policynetwork)) |
@@ -111,6 +112,14 @@ defaults for that step; a step that sets neither runs with the defaults.
 A step that runs once and hands its result on in its own files can drop agg's working memory:
 `Step::new("check").memory(false)`. Its brief then names no `STATE.md`, wiki or memory log, and no memory
 fold or summary runs after it. Memory stays on for steps that loop, where one session advises the next.
+
+A step can start from an earlier step's agent session instead of a fresh context:
+`agg.step(&review.create("fix").resume(&done.agent_session.unwrap()))` continues it, `.fork(&s)` branches
+off it and leaves it as it was, so several steps can start from one session and a rerun starts from the
+same context. `StepOutcome::agent_session` is the handle (the agent and its session id). Only the agent that
+ran the session can continue it; on another agent, a backend without resume (or fork: only Claude has it),
+or a session the agent no longer has, the step says so and starts fresh. The context is a cache, never the
+record: a step must still pass started fresh. Not to be confused with resuming a crashed run, below.
 
 ### Judges
 
