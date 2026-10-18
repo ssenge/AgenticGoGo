@@ -120,15 +120,19 @@ fn run_measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, base: &str, 
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let target = match scope {
-        Scope::Path(p) if !c.cwd.join(p).exists() => return Err(format!("`scope: {p}` does not exist in the project")),
-        Scope::Path(p) => c.cwd.join(p),
+        Scope::Path(p) | Scope::ChangedIn { path: p, .. } if !c.cwd.join(p).exists() => {
+            return Err(format!("`scope: {p}` does not exist in the project"))
+        }
+        Scope::Path(p) | Scope::ChangedIn { path: p, .. } => c.cwd.join(p),
         _ => c.cwd.to_path_buf(),
     };
     let mut args: Vec<String> = vec!["measure".into(), target.display().to_string()];
     args.extend(["--out".into(), dir.join("report.json").display().to_string()]);
     args.extend(["--details".into(), dir.join("details").display().to_string()]);
-    if *scope == Scope::Changed {
-        args.extend(["--changed-since".into(), base.to_string()]);
+    match scope {
+        Scope::Changed => args.extend(["--changed-since".into(), base.to_string()]),
+        Scope::ChangedIn { since, .. } => args.extend(["--changed-since".into(), since.clone()]),
+        _ => {}
     }
     for f in only.unwrap_or_default() {
         args.extend(["--only".into(), f.clone()]);

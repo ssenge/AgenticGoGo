@@ -258,6 +258,11 @@ absolute — keep it under `agg/` and in `write_deny`, it is part of the grader)
 - `value` is the score. A score **capped by a failed gate** (a secret found, a critical vulnerability)
   names the failed gates in the rationale: `score 40 (swe-default@2) misses ≥ 80; capped by failed
   gates: secrets.findings = 2 (max 0, caps at 40)`.
+- **`scope`** (optional, `target` by default): a project-relative sub-path scores that path alone, measured as
+  its own target and compared with its own incumbent — `score: { definition: swe-default, version: "2",
+  scope: work }`. `changed` is refused: the incumbent would be other files.
+- A **missed** score names its costliest parts — `most points lost: complexity.cognitive [p95] = 12 (good 5,
+  bad 15), …` — the (at most three) components that cost the most points, worst first.
 - **Comparability.** A score names its definition and version; one that differs from the configured
   ones is **refused** — at startup (agg scores an empty report to ask) and on every run. A changed
   `definition`/`version` **resets the ratchet reference** on `--resume` (scores of two definitions are

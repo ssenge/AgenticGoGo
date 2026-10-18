@@ -228,7 +228,10 @@ let quality = Judge::score("quality", ScoreJudge::new("swe-default", "2").min(80
 let agg = Agg::open(".")?.ratchet("cc_p95", Ratchet::down(0.5));   // the driver states the direction
 ```
 
-`MetricJudge` also takes `.combine(Combine::All)`, `.scope(Scope::Changed)` and `.min(..)`; a relative
+`MetricJudge` also takes `.combine(Combine::All)`, `.scope(Scope::Changed)` and `.min(..)`; `ScoreJudge` takes
+`.scope(Scope::Path("work".into()))` (never `Scope::Changed`), and both take `Scope::ChangedIn { path, since }`:
+the files of `path` changed since the Git ref `since` (a step's own changes; a score of them has no incumbent,
+and is vacuously met when nothing changed); a relative
 `ScoreJudge` definition file is resolved against the project dir. A missing value fails closed exactly
 as on the YAML path. When the run's tier is `container` (a step with `Isolation::Container`),
 swe-metrics runs in `.judge_image()` like every judge. Two differences: a driver has no startup, so a

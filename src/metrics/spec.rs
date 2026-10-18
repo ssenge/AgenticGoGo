@@ -98,6 +98,10 @@ pub struct ScoreSel {
     pub definition: String,
     /// the version the definition must report; a score of any other version is refused.
     pub version: String,
+    /// what is scored: `target` (the project) or a project-relative sub-path, measured as its own
+    /// target. Not `changed`: a score is compared against the incumbent of the same files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// What one measurement covers.
@@ -109,6 +113,9 @@ pub enum Scope {
     Changed,
     /// a project-relative sub-path, measured as its own target.
     Path(String),
+    /// only the files of a project-relative sub-path changed since a Git ref (`--changed-since`): what
+    /// one workflow step wrote, from the ref it began at. The driver's alone; YAML has no form of it.
+    ChangedIn { path: String, since: String },
 }
 
 impl Scope {
@@ -139,12 +146,22 @@ impl Scope {
         match self {
             Scope::Target => "target".into(),
             Scope::Changed => "changed".into(),
-            Scope::Path(p) => {
-                let safe: String = p.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
-                format!("path-{safe}-{}", &crate::protect::sha256::hex(p.as_bytes())[..8])
+            Scope::Path(p) => format!("path-{}-{}", safe(p), &crate::protect::sha256::hex(p.as_bytes())[..8]),
+            Scope::ChangedIn { path, since } => {
+                format!("changed-{}-{}", safe(path), &crate::protect::sha256::hex(format!("{path}\0{since}").as_bytes())[..8])
             }
         }
     }
+
+    /// Whether only changed files are measured: with none, a judge is vacuously met.
+    pub fn is_changes(&self) -> bool {
+        matches!(self, Scope::Changed | Scope::ChangedIn { .. })
+    }
+}
+
+/// `p` with every character but letters, digits and `-` as `_`.
+fn safe(p: &str) -> String {
+    p.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
 }
 
 /// A scoring definition, resolved.
@@ -252,6 +269,8 @@ pub struct ScoreJudge {
     /// the definition as configured — part of the score's comparability basis.
     pub definition_name: String,
     pub version: String,
+    /// what is scored: never [`Scope::Changed`]; a [`Scope::ChangedIn`] score has no incumbent to compare with.
+    pub scope: Scope,
     pub max: Option<f64>,
     pub min: Option<f64>,
 }
@@ -264,9 +283,15 @@ impl ScoreJudge {
             definition: Definition::parse(definition, Path::new(".")),
             definition_name: definition.to_string(),
             version: version.to_string(),
+            scope: Scope::Target,
             max: None,
             min: None,
         }
+    }
+    /// Score only this sub-path (`Scope::Path`), or its files changed since a ref (`Scope::ChangedIn`).
+    pub fn scope(mut self, s: Scope) -> Self {
+        self.scope = s;
+        self
     }
     pub fn max(mut self, m: f64) -> Self {
         self.max = Some(m);
@@ -380,6 +405,15 @@ fn score_problems(s: &ScoreSel, config_base: &Path, at: &dyn Fn(&str) -> String)
         )),
         _ => {}
     }
+    match Scope::parse(s.scope.as_deref()) {
+        Err(e) => out.push(Problem::new(at(".score.scope"), e)),
+        Ok(Scope::Changed) => out.push(Problem::new(
+            at(".score.scope"),
+            "a score is compared against the incumbent of the same files — `changed` measures other files every session; \
+             use `target` or a sub-path",
+        )),
+        Ok(_) => {}
+    }
     out
 }
 
@@ -395,6 +429,7 @@ pub fn score_judge(s: &ScoreSel, max: Option<f64>, min: Option<f64>, config_base
         definition: Definition::parse(&s.definition, config_base),
         definition_name: s.definition.clone(),
         version: s.version.clone(),
+        scope: Scope::parse(s.scope.as_deref()).unwrap_or(Scope::Target),
         max,
         min,
     }
@@ -430,7 +465,7 @@ mod tests {
     #[test]
     fn shape_problems_are_located() {
         let both = sel("{ id: a.b, tool: x, combine: all }");
-        let score = ScoreSel { definition: DEFAULT_DEFINITION.into(), version: "2".into() };
+        let score = ScoreSel { definition: DEFAULT_DEFINITION.into(), version: "2".into(), scope: None };
         let d = |metric, score, max, min| Declared { name: "j", metric, score, max, min };
         assert_eq!(paths(&d(Some(&both), Some(&score), Some(1.0), None)), ["judges.j", "judges.j.metric.combine"]);
         let ab = sel("{ id: a.b }");
@@ -444,10 +479,15 @@ mod tests {
         assert_eq!(paths(&d(Some(&nolabel), None, Some(1.0), None)), ["judges.j.metric.labels.k"]);
         assert_eq!(paths(&d(None, None, Some(1.0), None)), ["judges.j"], "a threshold without a judge");
         assert!(paths(&d(None, None, None, None)).is_empty(), "a plain timeout entry is fine");
-        let empty = ScoreSel { definition: "nope".into(), version: " ".into() };
+        let empty = ScoreSel { definition: "nope".into(), version: " ".into(), scope: None };
         assert_eq!(paths(&d(None, Some(&empty), None, Some(80.0))), ["judges.j.score.version", "judges.j.score.definition"]);
-        let file = ScoreSel { definition: "scoring.py".into(), version: "1".into() };
+        let file = ScoreSel { definition: "scoring.py".into(), version: "1".into(), scope: None };
         assert_eq!(paths(&d(None, Some(&file), None, Some(80.0))), ["judges.j.score.definition"], "a missing file");
+        let changed = ScoreSel { scope: Some("changed".into()), ..score.clone() };
+        assert_eq!(paths(&d(None, Some(&changed), None, Some(80.0))), ["judges.j.score.scope"], "no incumbent of the same files");
+        let work = ScoreSel { scope: Some("work".into()), ..score.clone() };
+        assert!(paths(&d(None, Some(&work), None, Some(80.0))).is_empty());
+        assert_eq!(score_judge(&work, None, Some(80.0), Path::new("/x")).scope, Scope::Path("work".into()));
     }
 
     /// A scope is the project, its changes, or a sub-path — never a glob, never outside.
@@ -460,6 +500,9 @@ mod tests {
             assert!(Scope::parse(Some(bad)).is_err(), "{bad}");
         }
         assert_eq!(Scope::Target.dir_name(), "target");
+        let since = |r: &str| Scope::ChangedIn { path: "work".into(), since: r.into() };
+        assert!(since("a").dir_name().starts_with("changed-work-") && since("a").dir_name() != since("b").dir_name());
+        assert!(since("a").is_changes() && Scope::Changed.is_changes() && !Scope::Path("work".into()).is_changes());
         let d = Scope::Path("src/core".into()).dir_name();
         assert!(d.starts_with("path-src_core-") && d.len() == "path-src_core-".len() + 8, "{d}");
     }

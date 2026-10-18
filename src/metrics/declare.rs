@@ -119,10 +119,11 @@ fn resolve_ratchets(cfg: &AggConfig, d: &mut Declared) {
 }
 
 /// Every metric judge of one scope gets the same `--only` set — the union of their families — so
-/// they share ONE measurement; a score judge needs every family, so the project scope then has none.
+/// they share ONE measurement; a score judge needs every family, so its scope then has none.
 fn share_measurements(run_set: &[String], d: &mut Declared) {
     let in_run = |n: &String| run_set.contains(n);
-    let scored = d.kinds.iter().any(|(n, k)| in_run(n) && matches!(k, JudgeKind::Score(_)));
+    let scored: BTreeSet<Scope> = d.kinds.iter().filter(|(n, _)| in_run(n))
+        .filter_map(|(_, k)| if let JudgeKind::Score(s) = k { Some(s.scope.clone()) } else { None }).collect();
     let mut families: BTreeMap<Scope, BTreeSet<String>> = BTreeMap::new();
     for (_, k) in d.kinds.iter().filter(|(n, _)| in_run(n)) {
         if let JudgeKind::Metric(m) = k {
@@ -131,13 +132,13 @@ fn share_measurements(run_set: &[String], d: &mut Declared) {
     }
     for k in d.kinds.values_mut() {
         if let JudgeKind::Metric(m) = k {
-            m.only = only_for(m, scored, &families);
+            m.only = only_for(m, &scored, &families);
         }
     }
 }
 
-fn only_for(m: &MetricJudge, scored: bool, families: &BTreeMap<Scope, BTreeSet<String>>) -> Option<Vec<String>> {
-    if scored && m.scope == Scope::Target {
+fn only_for(m: &MetricJudge, scored: &BTreeSet<Scope>, families: &BTreeMap<Scope, BTreeSet<String>>) -> Option<Vec<String>> {
+    if scored.contains(&m.scope) {
         return None;
     }
     families.get(&m.scope).map(|f| f.iter().cloned().collect())
@@ -228,6 +229,11 @@ mod tests {
         let d = declare(&cfg(&scored, ""), &names(&["a", "b", "c", "q"]), Path::new("/x"), false);
         assert_eq!(metric(&d, "a").only, None, "the score needs every family of the project scope");
         assert!(metric(&d, "c").only.is_some(), "…not of another scope");
+        let sub = format!("{j}  w: {{ metric: {{ id: duplication.percent, scope: work }}, max: 3 }}\n  \
+                           q: {{ score: {{ definition: swe-default, version: \"2\", scope: work }}, min: 80 }}\n");
+        let d = declare(&cfg(&sub, ""), &names(&["a", "w", "q"]), Path::new("/x"), false);
+        assert_eq!(metric(&d, "w").only, None, "a score of a sub-path needs every family of that sub-path");
+        assert_eq!(metric(&d, "a").only.as_deref(), Some(&["complexity".to_string()][..]), "…not of the project");
     }
 
     /// A name declared here and as a file is two definitions of one judge.
