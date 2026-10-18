@@ -20,6 +20,8 @@ pub struct ScoreDoc {
     #[serde(default)]
     pub gates: Vec<GateRow>,
     #[serde(default)]
+    pub components: Vec<ComponentRow>,
+    #[serde(default)]
     pub regressions: Vec<RegressionRow>,
     #[serde(default)]
     pub notes: Vec<String>,
@@ -47,6 +49,23 @@ pub struct GateRow {
     pub cap: Option<f64>,
     #[serde(default)]
     pub status: Option<String>,
+}
+
+/// One weighted quality part of the score.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ComponentRow {
+    pub metric: String,
+    #[serde(default)]
+    pub value: Option<f64>,
+    #[serde(default)]
+    pub good: Option<f64>,
+    #[serde(default)]
+    pub bad: Option<f64>,
+    #[serde(default)]
+    pub weight: f64,
+    /// 0–100 between `bad` and `good`; none when the part wasn't measured.
+    #[serde(default)]
+    pub subscore: Option<f64>,
 }
 
 /// One metric compared against the baseline report.
@@ -103,11 +122,30 @@ pub fn conclude(doc: &ScoreDoc, j: &ScoreJudge) -> Result<(f64, bool, String), S
     if !failed.is_empty() {
         why.push_str(&format!("; capped by failed gates: {}", failed.join(", ")));
     }
+    let lost = costliest(&doc.components);
+    if !met && !lost.is_empty() {
+        why.push_str(&format!("; most points lost: {}", lost.join(", ")));
+    }
     let worse: Vec<&str> = doc.regressions.iter().filter(|r| r.worse).map(|r| r.metric.as_str()).collect();
     if !worse.is_empty() {
         why.push_str(&format!("; worse than the incumbent: {}", worse.join(", ")));
     }
     Ok((score, met, why))
+}
+
+/// The three parts that cost the most points (weight × what they miss of 100), worst first:
+/// what a worker repairs first when the score misses its threshold.
+fn costliest(components: &[ComponentRow]) -> Vec<String> {
+    let lost = |c: &ComponentRow| c.subscore.map_or(0.0, |s| c.weight * (100.0 - s));
+    let mut short: Vec<&ComponentRow> = components.iter().filter(|c| lost(c) > 0.0).collect();
+    short.sort_by(|a, b| lost(b).total_cmp(&lost(a)));
+    short.iter().take(3).map(|c| {
+        let value = c.value.map_or("unavailable".into(), |v| format!("= {v}"));
+        match (c.good, c.bad) {
+            (Some(g), Some(b)) => format!("{} {value} (good {g}, bad {b})", c.metric),
+            _ => format!("{} {value}", c.metric),
+        }
+    }).collect()
 }
 
 /// `secrets.findings = 2 (max 0, caps at 40)`.
@@ -186,6 +224,22 @@ mod tests {
         assert_eq!((v, met), (40.0, false));
         assert!(why.contains("capped by failed gates: secrets.findings = 2 (max 0, caps at 40), iac.validation_errors unavailable"), "{why}");
         assert!(why.contains("worse than the incumbent: duplication.percent") && !why.contains("x.y"), "{why}");
+    }
+
+    /// A missed score names the parts that cost the most points, worst first; a met one doesn't.
+    #[test]
+    fn a_missed_score_names_its_costliest_parts() {
+        let parts = serde_json::json!({"components": [
+            {"metric": "doc_coverage.percent", "value": 60.0, "good": 80, "bad": 30, "weight": 1, "subscore": 60.0},
+            {"metric": "complexity.cognitive [p95]", "value": 12.0, "good": 5, "bad": 15, "weight": 3, "subscore": 30.0},
+            {"metric": "duplication.percent", "value": 0.0, "good": 3, "bad": 10, "weight": 2, "subscore": 100.0},
+            {"metric": "coverage.line_percent", "weight": 3}]});
+        let (_, met, why) = conclude(&doc(serde_json::json!(70.0), "2", serde_json::json!([]), parts.clone()), &judge()).unwrap();
+        assert!(!met);
+        assert!(why.ends_with("most points lost: complexity.cognitive [p95] = 12 (good 5, bad 15), \
+                               doc_coverage.percent = 60 (good 80, bad 30)"), "{why}");
+        let (_, met, why) = conclude(&doc(serde_json::json!(90.0), "2", serde_json::json!([]), parts), &judge()).unwrap();
+        assert!(met && !why.contains("points lost"), "{why}");
     }
 
     /// A `null` score is an ERROR carrying the score's notes — never met.

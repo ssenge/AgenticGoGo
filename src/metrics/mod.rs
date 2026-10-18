@@ -51,7 +51,7 @@ fn metric_verdict(j: &MetricJudge, c: &Ctx<'_>) -> Result<Verdict, (String, Vec<
     let m = measure::measure(c, &j.scope, j.only.as_deref()).map_err(|e| (e, vec![]))?;
     let evidence = evidence(&m, Some(j.family()), None);
     let sel = selector(j);
-    if j.scope == Scope::Changed {
+    if j.scope.is_changes() {
         if let Some(ids) = report::nothing_to_measure(&m.report, &sel) {
             return Ok(vacuous(&sel, &ids, evidence));
         }
@@ -125,16 +125,25 @@ fn evidence(m: &measure::Measured, family: Option<&str>, extra: Option<&str>) ->
     out
 }
 
-/// Run a score judge: the session's shared report, scored against the incumbent's.
+/// Run a score judge: its scope's shared report, scored against the incumbent's.
 pub fn run_score(name: &str, j: &ScoreJudge, c: &Ctx<'_>) -> Verdict {
-    let m = match measure::measure(c, &Scope::Target, None) {
+    if j.scope == Scope::Changed {
+        return Verdict::failed("a score is compared against the incumbent of the same files — `changed` measures other files every session");
+    }
+    let m = match measure::measure(c, &j.scope, None) {
         Ok(m) => m,
         Err(e) => return Verdict::failed(e),
     };
     let file = format!("score-{}.json", crate::core::evidence::dir_name(name));
     let evidence = evidence(&m, None, Some(&format!("{}/{file}", m.rel)));
     // the incumbent is the baseline from session 1 on; the pass before it measures the incumbent.
-    let baseline = if c.session.unwrap_or(0) == 0 { None } else { measure::incumbent(c.cwd, &Scope::Target) };
+    if j.scope.is_changes() && m.report.subject.as_ref().and_then(|s| s.files) == Some(0) {
+        let mut v = Verdict::binary(true).with_rationale("no changed files in scope — the score is vacuously met").with_evidence(evidence);
+        v.vacuous = true;
+        return v;
+    }
+    // changed files have no incumbent of the same files to compare with.
+    let baseline = if c.session.unwrap_or(0) == 0 || j.scope.is_changes() { None } else { measure::incumbent(c.cwd, &j.scope) };
     let concluded = score::run(c, j, &m.report_path(), baseline.as_deref(), &m.dir.join(&file))
         .and_then(|doc| score::conclude(&doc, j));
     match concluded {

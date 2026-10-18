@@ -2,6 +2,20 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **A score of a sub-path:** `judges.<name>.score.scope` (`target` or a project-relative path, never `changed`)
+  and `ScoreJudge::scope`: the score measures that path as its own target, against that path's incumbent. A
+  workflow scores the code it builds without the rest of the project.
+- **What a step changed in a path:** `Scope::ChangedIn { path, since }` (driver only) measures the files of
+  `path` changed since the Git ref `since` — a workflow step's own changes, from the ref it began at. A score
+  of it has no incumbent to compare with, and is vacuously met when nothing changed.
+- **A missed score names its costliest parts:** the rationale ends with the (at most three) quality components
+  that cost the most points, with their value and the definition's good and bad thresholds, so a repair
+  knows where to start.
+
 ## 0.0.25 (2026-10-18)
 
 ### Added

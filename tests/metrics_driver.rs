@@ -121,3 +121,25 @@ fn driver_metric_judges_share_a_measurement_and_ratchet() {
     assert_eq!(measures(&dir), 2, "the changed tree is measured once more");
     assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack, "p95 6 → 9 under a zero-tolerance ratchet");
 }
+
+/// A score of what a step changed in a sub-path measures that path's changes since the step's ref,
+/// with no incumbent to compare with; with no change it is vacuously met.
+#[test]
+fn a_score_of_changed_files_in_a_path_measures_them_alone() {
+    let (_tmp, dir) = project();
+    write(&dir, "work/fake-report.json", REPORT);
+    let changed = Scope::ChangedIn { path: "work".into(), since: "HEAD".into() };
+    let q = Judge::score("q", ScoreJudge::new("swe-default", "2").scope(changed).min(50.0));
+    let agg = Agg::open(&dir).unwrap();
+    assert_eq!(agg.judge(&q).value(), Some(77.0));
+    let calls = fs::read_to_string(dir.join("../calls.log")).unwrap();
+    assert!(calls.lines().any(|l| l.starts_with("measure") && l.contains("/work ") && l.contains("--changed-since HEAD")), "{calls}");
+    assert!(!calls.contains("--baseline"), "{calls}");
+
+    write(&dir, "work/fake-report.json", &REPORT.replacen("\"analyzers\"", "\"subject\":{\"files\":0,\"changed_since\":\"HEAD\"},\"analyzers\"", 1));
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "nothing changed in work"]);
+    let nothing = Agg::open(&dir).unwrap().judge(&Judge::score("q2", ScoreJudge::new("swe-default", "2")
+        .scope(Scope::ChangedIn { path: "work".into(), since: "HEAD".into() }).min(50.0)));
+    assert!(nothing.met() && nothing.value().is_none(), "{}", nothing.rationale());
+}
