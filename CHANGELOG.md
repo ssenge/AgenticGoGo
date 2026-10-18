@@ -2,6 +2,15 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.24 (2026-10-18)
+
+### Added
+
+- **A system prompt for every worker** (A-34, `Agg::system_prompt(text)`): a rule that must hold for the
+  whole session, where the brief is read once in the first turn and fades over a long session. Claude
+  `--append-system-prompt`; `Capabilities::supports_system_prompt` (Claude only). An agent that can't take
+  it runs without it and the step says so. None by default.
+
 ## 0.0.23 (2026-10-17)
 
 ### Added
