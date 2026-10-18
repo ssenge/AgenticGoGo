@@ -7,14 +7,18 @@
 //! `--until` name, and what the history and the session store go by.
 
 mod brief;
+mod flow;
 mod git;
 mod history;
 mod task;
+mod triage;
 
 pub use brief::{task, with_lead, with_section};
+pub use flow::{Flow, Run, When};
 pub use git::{before, changes_since, commit, take_back, unchanged_since};
 pub use history::{History, DEFAULT as HISTORY};
 pub use task::{Outcome, Task};
+pub use triage::run;
 
 /// A step's key: the first word of its name.
 pub fn key(name: &str) -> &str {
