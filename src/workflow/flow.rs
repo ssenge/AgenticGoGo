@@ -193,6 +193,17 @@ impl Flow {
         }
     }
 
+    /// The rubric judge with its file as agg resolves it (relative: under the project).
+    pub(crate) fn absolute_judge(&self, judge: &Judge) -> Judge {
+        let mut judge = judge.clone();
+        if let crate::core::model::JudgeKind::Llm { path, .. } = &mut judge.kind {
+            if path.is_relative() {
+                *path = self.project.join(&*path);
+            }
+        }
+        judge
+    }
+
     /// The step failed: triage looks for its origin when the run has one (A-30), else the run ends.
     pub fn fail(&self, name: &str, why: &str) -> Result<(), Fatal> {
         super::triage::fail(self, name, why)
