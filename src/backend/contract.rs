@@ -37,6 +37,10 @@ pub struct Capabilities {
     /// servers, hooks, personal instructions). Required by `Agg::user_settings(false)`; without it
     /// the worker loads them and the step says so.
     pub supports_project_settings_only: bool,
+    /// Can add text to the worker's system prompt, so it holds for the whole session rather than as a
+    /// brief read in its first turn. Used by `Agg::system_prompt`; without it the worker runs without the
+    /// text and the step says so.
+    pub supports_system_prompt: bool,
     /// Accepts a thinking-effort level. Required by a non-empty `effort:`.
     pub supports_effort: bool,
     /// Can distinguish a rate-limit/usage-limit from an ordinary failure, so the loop backs off
@@ -108,6 +112,8 @@ pub struct SessionSpec<'a> {
     pub fork: bool,
     /// `false`: start without the operator's own agent settings (only where the backend supports it).
     pub user_settings: bool,
+    /// text added to the worker's system prompt (only where the backend supports it).
+    pub system_prompt: Option<&'a str>,
     /// operator-supplied extra flags (agg.yaml `worker_args`), passed through verbatim.
     pub extra_args: &'a [String],
     /// the project directory the worker runs in.

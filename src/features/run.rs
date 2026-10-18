@@ -67,6 +67,7 @@ impl Handler for LaunchWorker {
                 &step.image,
                 resume,
                 step.user_settings,
+                step.system_prompt.as_deref(),
             )
         };
         let mut outcome = launch(step.resume.as_ref());

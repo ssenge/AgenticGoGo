@@ -41,6 +41,7 @@ impl AgentBackend for Claude {
             supports_resume: true,       // --resume <session_id>
             supports_fork: true,         // --fork-session
             supports_project_settings_only: true, // --setting-sources project,local
+            supports_system_prompt: true, // --append-system-prompt
             supports_effort: true,       // --effort
             detects_rate_limits: true,   // terminal result event carries the limit error
             supports_one_shot: true,     // --strict-mcp-config + --setting-sources user
@@ -81,6 +82,9 @@ impl AgentBackend for Claude {
         }
         if !spec.user_settings {
             command.arg("--setting-sources").arg("project,local");
+        }
+        if let Some(text) = spec.system_prompt {
+            command.arg("--append-system-prompt").arg(text);
         }
         // Applied AFTER agg's own flags and BEFORE -p, so an operator can extend the invocation
         // but not clobber its shape.
@@ -270,6 +274,7 @@ mod tests {
             resume_id: Some("abc"),
             fork: true,
             user_settings: true,
+            system_prompt: None,
             extra_args: &[],
             cwd: Path::new("/tmp"),
             isolation: crate::isolation::Isolation::None,
@@ -289,6 +294,7 @@ mod tests {
             resume_id: Some("abc"),
             fork: false,
             user_settings: true,
+            system_prompt: None,
             extra_args: &["--add-dir".to_string(), "/x".to_string()],
             cwd: Path::new("/tmp"),
             isolation: crate::isolation::Isolation::None,
@@ -321,6 +327,7 @@ mod tests {
             resume_id: None,
             fork: false,
             user_settings: true,
+            system_prompt: None,
             extra_args: &[],
             cwd: Path::new("/tmp"),
             isolation: crate::isolation::Isolation::None,
@@ -351,6 +358,7 @@ mod tests {
             resume_id: None,
             fork: false,
             user_settings: true,
+            system_prompt: None,
             extra_args: &[],
             cwd: Path::new("/tmp"),
             isolation: crate::isolation::Isolation::None,

@@ -46,6 +46,7 @@ impl AggConfig {
             memory: true,
             resume: None,
             user_settings: true,
+            system_prompt: None,
             // the pair inherits AS A PAIR: a step naming either form replaces both of the defaults'.
             role_prompt: role.0.clone(),
             role_prompt_file: role.1.clone(),

@@ -784,6 +784,9 @@ pub struct ResolvedStep {
     /// whether the worker loads the operator's own agent settings (`Agg::user_settings`). Always
     /// `true` on the YAML path.
     pub user_settings: bool,
+    /// text the worker's agent adds to its system prompt (`Agg::system_prompt`), only where it can.
+    /// Always `None` on the YAML path.
+    pub system_prompt: Option<String>,
     pub role_prompt: Option<String>,
     pub prompt: Option<String>,
     /// the file `role_prompt` is read from at session start (`core::prompts`), as written.

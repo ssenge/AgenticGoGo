@@ -93,6 +93,8 @@ pub struct Agg {
     memory: bool,
     /// whether workers load the operator's own agent settings — see [`Agg::user_settings`].
     user_settings: bool,
+    /// text every worker's agent adds to its system prompt — see [`Agg::system_prompt`].
+    system_prompt: Option<String>,
 }
 
 /// Everything that only exists once the run-level setup has run.
@@ -173,6 +175,7 @@ impl Agg {
             custom_ruler: None,
             memory: true,
             user_settings: true,
+            system_prompt: None,
         })
     }
 
@@ -235,6 +238,14 @@ impl Agg {
     /// agent that can't leave them out runs with them and says so.
     pub fn user_settings(mut self, on: bool) -> Agg {
         self.user_settings = on;
+        self
+    }
+
+    /// Text every worker's agent adds to its system prompt (A-34): a rule that must hold for the whole
+    /// session, where a brief is read once in its first turn and fades over a long session (say, "end with
+    /// one line"). Claude: `--append-system-prompt`; an agent that can't runs without it and says so.
+    pub fn system_prompt(mut self, text: impl Into<String>) -> Agg {
+        self.system_prompt = Some(text.into());
         self
     }
 
@@ -705,6 +716,7 @@ impl Agg {
         };
         let resume = resume_of(&name, step);
         let user_settings = self.user_settings || !leaves_out_user_settings(&name, step);
+        let system_prompt = self.system_prompt.clone().filter(|_| takes_system_prompt(&name, step));
         Ok(ResolvedStep {
             name,
             agent: step.agent.name().to_string(),
@@ -715,6 +727,7 @@ impl Agg {
             memory: step.memory.unwrap_or(self.memory),
             resume,
             user_settings,
+            system_prompt,
             role_prompt: role.0.clone(),
             prompt: step.prompt.clone(),
             role_prompt_file: role.1.clone(),
@@ -1883,6 +1896,18 @@ fn leaves_out_user_settings(name: &str, step: &Step) -> bool {
     };
     if !can {
         eprintln!("  step `{name}`: {} can't leave out the operator's own settings; its worker loads them", step.agent.name());
+    }
+    can
+}
+
+/// Whether the step's agent can add text to its system prompt; says so when it can't.
+fn takes_system_prompt(name: &str, step: &Step) -> bool {
+    let can = match &step.agent {
+        Agent::Custom(b) => b.capabilities().supports_system_prompt,
+        a => crate::backend::for_name(a.name()).is_ok_and(|b| b.capabilities().supports_system_prompt),
+    };
+    if !can {
+        eprintln!("  step `{name}`: {} can't take a system prompt; its worker runs without it", step.agent.name());
     }
     can
 }

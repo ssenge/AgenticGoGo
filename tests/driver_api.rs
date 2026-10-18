@@ -1698,3 +1698,20 @@ fn a_run_without_user_settings_starts_workers_on_the_projects_settings_only() {
     agg.step(&work()).unwrap();
     assert!(worker_args(dir).contains("--setting-sources\nproject,local\n"), "{}", worker_args(dir));
 }
+
+/// A-34: the run's system prompt reaches every worker's agent as its own flag, not in the brief; none by default.
+#[test]
+fn a_system_prompt_reaches_the_worker_as_its_own_flag() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    agg.step(&work()).unwrap();
+    assert!(!worker_args(dir).contains("--append-system-prompt"), "none by default");
+    drop(agg);
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() })
+        .system_prompt("End with one line.");
+    agg.step(&work()).unwrap();
+    assert!(worker_args(dir).contains("--append-system-prompt\nEnd with one line.\n"), "{}", worker_args(dir));
+}
