@@ -6,10 +6,13 @@
 //! A step's key is the first word of its name (`"2.5"` of `"2.5 Resolve bindings"`): what `--from` and
 //! `--until` name, and what the history and the session store go by.
 
+mod agent;
 mod brief;
 mod flow;
 mod git;
 mod history;
+mod review;
+mod sessions;
 mod task;
 mod triage;
 
@@ -17,6 +20,7 @@ pub use brief::{task, with_lead, with_section};
 pub use flow::{Flow, Run, When};
 pub use git::{before, changes_since, commit, take_back, unchanged_since};
 pub use history::{History, DEFAULT as HISTORY};
+pub use sessions::forget;
 pub use task::{Outcome, Task};
 pub use triage::run;
 

@@ -4,7 +4,7 @@
 use crate::core::model::Judge;
 use crate::driver::Step;
 
-/// An agent step for a workflow: built with [`Task::new`] and the setters below.
+/// An agent step for [`super::Flow::task`]: built with [`Task::new`] and the setters below.
 #[derive(Clone)]
 pub struct Task {
     /// the step's name in the flow (its key is the first word); none: the worker step's own name.
