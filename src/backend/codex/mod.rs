@@ -69,6 +69,7 @@ impl AgentBackend for Codex {
             supports_fork: false,
             // not verified on the wire yet: workers load the operator's settings.
             supports_project_settings_only: false,
+            supports_system_prompt: false,
             // YES — not via a flag (`codex exec` has none) but via the `-c model_reasoning_effort=`
             // config override, which is verified to work. See `effort_arg` for the level mapping.
             supports_effort: true,

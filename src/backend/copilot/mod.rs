@@ -70,6 +70,7 @@ impl AgentBackend for Copilot {
             supports_fork: false,
             // not verified on the wire yet: workers load the operator's settings.
             supports_project_settings_only: false,
+            supports_system_prompt: false,
             // `--effort`, and the same vocabulary Claude uses (low|medium|high|xhigh|max).
             supports_effort: true,
             // NO — and unlike Claude/Codex this is a genuine gap, not conservatism.

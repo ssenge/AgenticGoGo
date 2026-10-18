@@ -59,6 +59,7 @@ fn the_prompt_is_positional_never_behind_dash_p() {
         resume_id: None,
         fork: false,
         user_settings: true,
+        system_prompt: None,
         extra_args: &[],
         cwd: Path::new("/tmp"),
         isolation: crate::isolation::Isolation::None,
@@ -93,6 +94,7 @@ fn resume_is_a_subcommand_not_a_flag() {
         resume_id: Some("thread-1"),
         fork: false,
         user_settings: true,
+        system_prompt: None,
         extra_args: &[],
         cwd: Path::new("/tmp"),
         isolation: crate::isolation::Isolation::None,
@@ -119,6 +121,7 @@ fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
         resume_id: None,
         fork: false,
         user_settings: true,
+        system_prompt: None,
         extra_args: &[],
         cwd: Path::new("/tmp"),
         isolation: crate::isolation::Isolation::None,
@@ -172,6 +175,7 @@ fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
             resume_id: Some("abc123"),
             fork: false,
             user_settings: true,
+            system_prompt: None,
             ..base
         })
         .get_args()

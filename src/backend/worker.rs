@@ -85,6 +85,7 @@ pub fn run_session(
     image: &str,
     resume: Option<&(String, bool)>,
     user_settings: bool,
+    system_prompt: Option<&str>,
 ) -> SessionOutcome {
     let start = Instant::now();
 
@@ -98,6 +99,7 @@ pub fn run_session(
         resume_id: resume.map(|r| r.0.as_str()),
         fork: resume.is_some_and(|r| r.1),
         user_settings,
+        system_prompt,
         extra_args: worker_args,
         cwd: dir,
         isolation,

@@ -319,6 +319,7 @@ mod tests {
                 memory: true,
                 resume: None,
                 user_settings: true,
+                system_prompt: None,
                 role_prompt: None,
                 prompt: None,
                 role_prompt_file: None,
