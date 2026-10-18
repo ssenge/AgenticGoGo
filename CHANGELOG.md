@@ -2,6 +2,16 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **Workflow building blocks** (A-26 to A-31, `agg::workflow`), moved from AMF's driver where they ran fifteen
+  measured runs: `Flow` (a run with `--from`/`--note`/`--reset`/`--until`, a step history, hooks, triage),
+  `script_step`, `applies`, `task` (an agent step with checks, a critic, repairs, a script first, refresh by
+  inputs, sessions resumed or forked), `approval`, `workflow::run` (re-entry after triage) and `Roles`.
+  A library on the driver API: no second execution model. Parallel sessions (A-32) are not part of it.
+
 ## 0.0.24 (2026-10-18)
 
 ### Added

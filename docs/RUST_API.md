@@ -318,6 +318,63 @@ whether `main` returned `Err`, so a driver's own error reads as `done` there —
 corrects it to `outcome: error`, which is one more reason to use it. A driver that panics leaves no
 report; a consumer reads a missing report as `error`.
 
+## Workflow building blocks (`agg::workflow`)
+
+A process of named steps — a script, an agent's work judged and repaired, a condition, a human's approval —
+needs the same few blocks in every driver. `agg::workflow` has them, built on the calls above (no second
+execution model). A step's **key** is the first word of its name (`"2.5"` of `"2.5 Resolve bindings"`).
+
+```rust
+use agg::prelude::*;
+use agg::workflow::{self, Flow, Run, Task, Roles};
+
+fn main() -> std::process::ExitCode {
+    workflow::run(drive)                       // starts the run again where triage sent it (--from, --note)
+}
+
+fn drive() -> Result<(), Fatal> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let roles = Roles::load("roles.yaml".as_ref(), &["worker", "critic"])?;
+    let flow = Flow::new(Agg::open(".")?, Run::from_args(&args)?)
+        .history("reports/steps.jsonl")        // default agg/private/steps.jsonl; a tracked path is committed
+        .own(["task.md"])                      // what --reset never takes back
+        .on_failure(roles.step("worker", "triage", "/abs/triage.md"), 3);
+    flow.script_step("1 Fetch", &Judge::script("fetch", "scripts/fetch.sh"))?;
+    let design = Task::new(roles.step("worker", "2 Design", "/abs/design.md"))
+        .check(Judge::script("design-ok", "judges/design.py"))
+        .critic(roles.judge("critic", "design-review", "/abs/design-review.md"))
+        .repairs(2);
+    if let workflow::Outcome::Accepted(point) = flow.task(&design)? {
+        // the critic's point after its repair round: the work is kept; put it before the next approval
+    }
+    flow.approval("3 Sign-off", "design.md", "Approve the design?", "decisions.md", &[])?;
+    Ok(())
+}
+```
+
+| block | what it does |
+|---|---|
+| `Flow::new(agg, Run)` | the run: `Run::from_args` reads `--from <key> [--note t] [--reset] [--until <key>] [--reentries n]`; a step before `from` doesn't run, the `from` step gets the note leading its brief, every later step refreshes; `--until` ends the run after that step |
+| `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; triage |
+| `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails |
+| `flow.applies(name, &when)` | the step applies when `when` is met; otherwise recorded `skipped` with the reason, no session; a condition that errs fails the step |
+| `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.context(key)` `.section(text)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |
+| `flow.approval(name, doc, question, decisions, inputs)` | a human approves `doc`, writing their decisions first; after a re-entry, unchanged inputs (else the document) stand without asking |
+| `workflow::run(drive)` | `driver::run`, then starts the run again at the step triage chose, with its note |
+| `Roles::load(file, names)` | named roles (`agent`, `model`, `effort`) from a YAML file; an agent that isn't installed is an error at load |
+
+An agent step, in order: a refresh whose `inputs` didn't change is `unchanged` without a session; the `first`
+script does what it can (nothing left and the judges met: done without a session); the worker's brief gets
+what is new first (the note, the changes since its result, the review to address), then its task, the
+driver's sections, the critic's rubric, the checks to run before finishing and a file for "I can't fix this";
+the session continues the step's own earlier one, else forks its `context` step's (A-33); then the checks in
+order, then the critic with the worker's task below its rubric. A repair resumes the session with the review
+leading the brief and a file for disputes; the critic re-reviews only its earlier points and gets one repair
+round, after which its open point is accepted and returned. No further round when the worker can't fix it or
+a check fails exactly as before. A failed step goes to triage: its agent writes `reenter`, `cause` and `note`
+to the file its brief names; an approval is never a re-entry point; a yes ends the run, and
+`workflow::run` starts it again.
+
 ## Resuming a crashed run
 
 An overnight driver that dies at hour six should not start again at hour zero.
