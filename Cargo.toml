@@ -1,6 +1,6 @@
 [package]
 name = "agg"
-version = "0.0.25"
+version = "0.0.26"
 edition = "2021"
 description = "AgenticGoGo — a generic agent loop for Claude Code workers"
 authors = ["Sebastian Senge"]
