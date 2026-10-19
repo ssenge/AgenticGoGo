@@ -92,18 +92,18 @@ fn cache() -> std::sync::MutexGuard<'static, Vec<Entry>> {
 
 /// The shared measurement of `scope` for the judge in `c`: from the cache when this session's tree
 /// was measured already, else measured now (holding the cache, so two judges never measure twice).
-pub fn measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>) -> Result<Arc<Measured>, String> {
+pub fn measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, reports: Option<&Path>) -> Result<Arc<Measured>, String> {
     // where the judges of this tier keep their scratch — and their evidence (`features::evidence`).
     let scratch = crate::core::judge::scratch_path(c.cwd, c.session, c.isolation);
     let base = c.base.unwrap_or("HEAD");
     let families = only.map(|o| o.join(",")).unwrap_or_else(|| "*".into());
-    let key = format!("{}|{}|{families}|{base}|{}", scratch.display(), scope.dir_name(), tree_key(c.cwd));
+    let key = format!("{}|{}|{families}|{base}|{}", scratch.display(), site(scope, reports), tree_key(c.cwd));
     let mut entries = cache();
     if let Some(e) = entries.iter().find(|e| e.key == key) {
         return e.result.clone();
     }
-    let result = run_measure(c, scope, only, base, &scratch).map(Arc::new);
-    entries.push(Entry { key, project: canonical(c.cwd), session: c.session, scope: scope.dir_name(), result: result.clone() });
+    let result = run_measure(c, scope, only, reports, base, &scratch).map(Arc::new);
+    entries.push(Entry { key, project: canonical(c.cwd), session: c.session, scope: site(scope, reports), result: result.clone() });
     let excess = entries.len().saturating_sub(CACHE_CAP);
     entries.drain(..excess);
     result
@@ -114,8 +114,18 @@ pub fn measured_count() -> usize {
     cache().len()
 }
 
-fn run_measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, base: &str, scratch: &Path) -> Result<Measured, String> {
-    let rel = format!("{SCRATCH_SUBDIR}/{}", scope.dir_name());
+/// What a measurement is of, and the name of its folder and incumbent: the scope, and the reports script that
+/// feeds it — a measurement with the build's reports is another than one without.
+pub fn site(scope: &Scope, reports: Option<&Path>) -> String {
+    let Some(script) = reports else { return scope.dir_name() };
+    let mut h = Sha256::default();
+    h.update(script.as_os_str().as_encoded_bytes());
+    format!("{}-reports-{}", scope.dir_name(), &h.hex()[..8])
+}
+
+fn run_measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, reports: Option<&Path>, base: &str, scratch: &Path)
+               -> Result<Measured, String> {
+    let rel = format!("{SCRATCH_SUBDIR}/{}", site(scope, reports));
     let dir = scratch.join(&rel);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
@@ -137,6 +147,9 @@ fn run_measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, base: &str, 
     for f in only.unwrap_or_default() {
         args.extend(["--only".into(), f.clone()]);
     }
+    if let Some(script) = reports {
+        args.extend(build_reports(c, script, &dir.join("build"))?);
+    }
     run_tool(c, &args, &[]).map_err(|e| format!("`swe-metrics measure` failed: {e}"))?;
     let text = std::fs::read_to_string(dir.join("report.json")).map_err(|e| format!("swe-metrics wrote no report: {e}"))?;
     let report = Report::parse(&text)?;
@@ -147,8 +160,50 @@ fn run_measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, base: &str, 
 /// `readonly` = host paths outside the project the call reads (a scoring definition's directory) —
 /// what a container must mount; the other tiers read them where they are.
 pub fn run_tool(c: &Ctx<'_>, args: &[String], readonly: &[PathBuf]) -> Result<String, String> {
-    let command = if c.isolation == Isolation::Container { super::contained::command(c, args, readonly)? } else { host_command(c, args)? };
-    let out = crate::os::proc::run_with_timeout(command, c.timeout)?;
+    let command = if c.isolation == Isolation::Container { super::contained::command(c, args, readonly)? }
+                  else { host_command(c, PROGRAM.as_ref(), args)? };
+    finished(command, c.timeout)
+}
+
+/// The build's reports as swe-metrics' arguments: `script` runs as swe-metrics does, with `dir` (fresh, in the
+/// scratch) to write them in as its argument, and prints `{kind: path | [path, …]}` as its last line; a
+/// relative path is the project's. Fails closed: a failed script, a report that isn't there, none at all.
+fn build_reports(c: &Ctx<'_>, script: &Path, dir: &Path) -> Result<Vec<String>, String> {
+    if c.isolation == Isolation::Container {
+        return Err("`score.reports` runs its script on the host — not under container isolation".into());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let why = |e: String| format!("reports script {}: {e}", script.display());
+    let out = finished(host_command(c, script.as_os_str(), &[dir.display().to_string()])?, c.timeout).map_err(why)?;
+    report_args(&out, c.cwd).map_err(why)
+}
+
+/// `--report kind=path` per report the script's last line names.
+fn report_args(stdout: &str, cwd: &Path) -> Result<Vec<String>, String> {
+    use serde_json::Value;
+    let last = stdout.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default();
+    let named: serde_json::Map<String, Value> = serde_json::from_str(last)
+        .map_err(|e| format!("its last line is no JSON object of reports ({e}): {last}"))?;
+    let mut args = Vec::new();
+    for (kind, paths) in named {
+        let paths = match paths {
+            Value::Array(list) => list,
+            one => vec![one],
+        };
+        for path in paths {
+            let path = cwd.join(path.as_str().ok_or_else(|| format!("`{kind}`: a path is a string"))?);
+            if !path.exists() {
+                return Err(format!("its {kind} report {} does not exist", path.display()));
+            }
+            args.extend(["--report".to_string(), format!("{kind}={}", path.display())]);
+        }
+    }
+    if args.is_empty() { Err("it named no report".into()) } else { Ok(args) }
+}
+
+/// A finished command: `Ok` = it exited 0 (its stdout), `Err` = its last lines of stderr.
+fn finished(command: Command, timeout: u64) -> Result<String, String> {
+    let out = crate::os::proc::run_with_timeout(command, timeout)?;
     if out.success {
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
@@ -158,11 +213,11 @@ pub fn run_tool(c: &Ctx<'_>, args: &[String], readonly: &[PathBuf]) -> Result<St
     Err(if tail.is_empty() { "exited non-zero (no stderr)".into() } else { tail.join(" | ") })
 }
 
-/// swe-metrics on the host: unconfined, or in the OS jail under `sandbox`.
-fn host_command(c: &Ctx<'_>, args: &[String]) -> Result<Command, String> {
+/// `program` (swe-metrics, a reports script) on the host: unconfined, or in the OS jail under `sandbox`.
+fn host_command(c: &Ctx<'_>, program: &std::ffi::OsStr, args: &[String]) -> Result<Command, String> {
     let scratch = crate::core::judge::scratch_dir(c.cwd, c.session).map_err(|e| format!("judge scratch: {e}"))?;
     let cache = crate::core::judge::cache_dir(c.cwd).map_err(|e| format!("judge cache: {e}"))?;
-    let mut command = command(c, args, &scratch);
+    let mut command = command_of(c, program, args, &scratch);
     command.env("PYTHONPYCACHEPREFIX", &cache);
     if c.isolation == Isolation::Sandbox {
         // the project is read-only to a judge (§2.5) — the deny of `.` wins over the cwd grant.
@@ -175,7 +230,11 @@ fn host_command(c: &Ctx<'_>, args: &[String]) -> Result<Command, String> {
 /// `swe-metrics <args>` as every tier starts it: from the project root, stdin closed, the `AGG_*`
 /// judge env, and `TMPDIR` in `scratch`.
 pub(super) fn command(c: &Ctx<'_>, args: &[String], scratch: &Path) -> Command {
-    let mut command = Command::new(PROGRAM);
+    command_of(c, PROGRAM.as_ref(), args, scratch)
+}
+
+fn command_of(c: &Ctx<'_>, program: &std::ffi::OsStr, args: &[String], scratch: &Path) -> Command {
+    let mut command = Command::new(program);
     command
         .args(args)
         .current_dir(c.cwd)
@@ -211,8 +270,8 @@ fn tree_key(cwd: &Path) -> String {
 // ---------------- the incumbent ----------------
 
 /// `agg/private/metrics/incumbent/<scope>.json` — the incumbent's report for `scope`, if kept.
-pub fn incumbent(cwd: &Path, scope: &Scope) -> Option<PathBuf> {
-    let p = crate::paths::metrics_incumbent_dir(cwd).join(format!("{}.json", scope.dir_name()));
+pub fn incumbent(cwd: &Path, scope: &Scope, reports: Option<&Path>) -> Option<PathBuf> {
+    let p = crate::paths::metrics_incumbent_dir(cwd).join(format!("{}.json", site(scope, reports)));
     p.is_file().then_some(p)
 }
 
@@ -284,13 +343,30 @@ mod tests {
     #[test]
     fn the_incumbent_is_absent_until_kept() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(incumbent(tmp.path(), &Scope::Target).is_none());
+        assert!(incumbent(tmp.path(), &Scope::Target, None).is_none());
         assert!(promote(tmp.path(), Some(7)).is_empty(), "nothing measured, nothing promoted");
         let dir = crate::paths::metrics_incumbent_dir(tmp.path());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("target.json"), "{}").unwrap();
-        assert!(incumbent(tmp.path(), &Scope::Target).is_some());
+        assert!(incumbent(tmp.path(), &Scope::Target, None).is_some());
         forget_incumbent(tmp.path());
-        assert!(incumbent(tmp.path(), &Scope::Target).is_none());
+        assert!(incumbent(tmp.path(), &Scope::Target, None).is_none());
+    }
+
+    /// The reports script's last line becomes one `--report kind=path` per path; a report that isn't there,
+    /// a line that isn't a JSON object or one naming nothing fails the measurement.
+    #[test]
+    fn a_reports_script_names_the_reports_swe_metrics_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        for f in ["jacoco.xml", "a.xml", "b.xml"] {
+            std::fs::write(tmp.path().join(f), "").unwrap();
+        }
+        let args = report_args("building…\n{\"jacoco\": \"jacoco.xml\", \"junit\": [\"a.xml\", \"b.xml\"]}\n", tmp.path()).unwrap();
+        let shown: Vec<String> = args.iter().map(|a| a.replace(&tmp.path().display().to_string(), "P")).collect();
+        assert_eq!(shown, ["--report", "jacoco=P/jacoco.xml", "--report", "junit=P/a.xml", "--report", "junit=P/b.xml"]);
+        assert!(report_args("{\"pit\": \"missing.xml\"}", tmp.path()).unwrap_err().contains("does not exist"));
+        assert!(report_args("done", tmp.path()).is_err());
+        assert_eq!(report_args("{}", tmp.path()).unwrap_err(), "it named no report");
+        assert_ne!(site(&Scope::Target, Some(Path::new("/r.sh"))), site(&Scope::Target, None), "its own measurement");
     }
 }

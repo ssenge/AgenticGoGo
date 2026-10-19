@@ -102,6 +102,10 @@ pub struct ScoreSel {
     /// target. Not `changed`: a score is compared against the incumbent of the same files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// a script (relative to `agg/`, or absolute) that writes the build's reports before the measurement
+    /// and prints `{kind: path}` as its last line: what swe-metrics reads as `--report kind=path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports: Option<String>,
 }
 
 /// What one measurement covers.
@@ -271,6 +275,8 @@ pub struct ScoreJudge {
     pub version: String,
     /// what is scored: never [`Scope::Changed`]; a [`Scope::ChangedIn`] score has no incumbent to compare with.
     pub scope: Scope,
+    /// the script that writes the build's reports before the measurement (see [`ScoreJudge::reports`]).
+    pub reports: Option<PathBuf>,
     pub max: Option<f64>,
     pub min: Option<f64>,
 }
@@ -284,6 +290,7 @@ impl ScoreJudge {
             definition_name: definition.to_string(),
             version: version.to_string(),
             scope: Scope::Target,
+            reports: None,
             max: None,
             min: None,
         }
@@ -291,6 +298,13 @@ impl ScoreJudge {
     /// Score only this sub-path (`Scope::Path`), or its files changed since a ref (`Scope::ChangedIn`).
     pub fn scope(mut self, s: Scope) -> Self {
         self.scope = s;
+        self
+    }
+    /// The build's reports (tests, coverage, mutation, classes) come from `script`: run before the
+    /// measurement from the project root with `$AGG_REPORTS_DIR` to write them in, it prints
+    /// `{"jacoco": "path", "junit": ["path", …]}` as its last line; a relative path is the project's.
+    pub fn reports(mut self, script: impl Into<PathBuf>) -> Self {
+        self.reports = Some(script.into());
         self
     }
     pub fn max(mut self, m: f64) -> Self {
@@ -414,6 +428,9 @@ fn score_problems(s: &ScoreSel, config_base: &Path, at: &dyn Fn(&str) -> String)
         )),
         Ok(_) => {}
     }
+    if let Some(r) = s.reports.as_deref().map(|r| config_base.join(r)).filter(|r| !r.is_file()) {
+        out.push(Problem::new(at(".score.reports"), format!("reports script {} does not exist (a relative path is taken from agg/)", r.display())));
+    }
     out
 }
 
@@ -430,6 +447,7 @@ pub fn score_judge(s: &ScoreSel, max: Option<f64>, min: Option<f64>, config_base
         definition_name: s.definition.clone(),
         version: s.version.clone(),
         scope: Scope::parse(s.scope.as_deref()).unwrap_or(Scope::Target),
+        reports: s.reports.as_deref().map(|r| config_base.join(r)),
         max,
         min,
     }
@@ -465,7 +483,7 @@ mod tests {
     #[test]
     fn shape_problems_are_located() {
         let both = sel("{ id: a.b, tool: x, combine: all }");
-        let score = ScoreSel { definition: DEFAULT_DEFINITION.into(), version: "2".into(), scope: None };
+        let score = ScoreSel { definition: DEFAULT_DEFINITION.into(), version: "2".into(), scope: None, reports: None };
         let d = |metric, score, max, min| Declared { name: "j", metric, score, max, min };
         assert_eq!(paths(&d(Some(&both), Some(&score), Some(1.0), None)), ["judges.j", "judges.j.metric.combine"]);
         let ab = sel("{ id: a.b }");
@@ -479,15 +497,18 @@ mod tests {
         assert_eq!(paths(&d(Some(&nolabel), None, Some(1.0), None)), ["judges.j.metric.labels.k"]);
         assert_eq!(paths(&d(None, None, Some(1.0), None)), ["judges.j"], "a threshold without a judge");
         assert!(paths(&d(None, None, None, None)).is_empty(), "a plain timeout entry is fine");
-        let empty = ScoreSel { definition: "nope".into(), version: " ".into(), scope: None };
+        let empty = ScoreSel { definition: "nope".into(), version: " ".into(), scope: None, reports: None };
         assert_eq!(paths(&d(None, Some(&empty), None, Some(80.0))), ["judges.j.score.version", "judges.j.score.definition"]);
-        let file = ScoreSel { definition: "scoring.py".into(), version: "1".into(), scope: None };
+        let file = ScoreSel { definition: "scoring.py".into(), version: "1".into(), scope: None, reports: None };
         assert_eq!(paths(&d(None, Some(&file), None, Some(80.0))), ["judges.j.score.definition"], "a missing file");
         let changed = ScoreSel { scope: Some("changed".into()), ..score.clone() };
         assert_eq!(paths(&d(None, Some(&changed), None, Some(80.0))), ["judges.j.score.scope"], "no incumbent of the same files");
         let work = ScoreSel { scope: Some("work".into()), ..score.clone() };
         assert!(paths(&d(None, Some(&work), None, Some(80.0))).is_empty());
         assert_eq!(score_judge(&work, None, Some(80.0), Path::new("/x")).scope, Scope::Path("work".into()));
+        let reports = ScoreSel { reports: Some("reports.sh".into()), ..score.clone() };
+        assert_eq!(paths(&d(None, Some(&reports), None, Some(80.0))), ["judges.j.score.reports"], "a missing script");
+        assert_eq!(score_judge(&reports, None, None, Path::new("/x/agg")).reports, Some(PathBuf::from("/x/agg/reports.sh")));
     }
 
     /// A scope is the project, its changes, or a sub-path — never a glob, never outside.

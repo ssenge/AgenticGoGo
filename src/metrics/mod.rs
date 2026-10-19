@@ -48,7 +48,7 @@ pub fn run_metric(j: &MetricJudge, c: &Ctx<'_>) -> Verdict {
 }
 
 fn metric_verdict(j: &MetricJudge, c: &Ctx<'_>) -> Result<Verdict, (String, Vec<String>)> {
-    let m = measure::measure(c, &j.scope, j.only.as_deref()).map_err(|e| (e, vec![]))?;
+    let m = measure::measure(c, &j.scope, j.only.as_deref(), None).map_err(|e| (e, vec![]))?;
     let evidence = evidence(&m, Some(j.family()), None);
     let sel = selector(j);
     if j.scope.is_changes() {
@@ -103,7 +103,7 @@ fn incumbent_values(j: &MetricJudge, c: &Ctx<'_>, sel: &Selector) -> Option<Vec<
     if j.sel.combine != Some(Combine::All) || c.session.unwrap_or(0) == 0 {
         return None;
     }
-    let text = std::fs::read_to_string(measure::incumbent(c.cwd, &j.scope)?).ok()?;
+    let text = std::fs::read_to_string(measure::incumbent(c.cwd, &j.scope, None)?).ok()?;
     report::select(&report::Report::parse(&text).ok()?, sel).ok()
 }
 
@@ -130,7 +130,7 @@ pub fn run_score(name: &str, j: &ScoreJudge, c: &Ctx<'_>) -> Verdict {
     if j.scope == Scope::Changed {
         return Verdict::failed("a score is compared against the incumbent of the same files — `changed` measures other files every session");
     }
-    let m = match measure::measure(c, &j.scope, None) {
+    let m = match measure::measure(c, &j.scope, None, j.reports.as_deref()) {
         Ok(m) => m,
         Err(e) => return Verdict::failed(e),
     };
@@ -143,7 +143,7 @@ pub fn run_score(name: &str, j: &ScoreJudge, c: &Ctx<'_>) -> Verdict {
         return v;
     }
     // changed files have no incumbent of the same files to compare with.
-    let baseline = if c.session.unwrap_or(0) == 0 || j.scope.is_changes() { None } else { measure::incumbent(c.cwd, &j.scope) };
+    let baseline = if c.session.unwrap_or(0) == 0 || j.scope.is_changes() { None } else { measure::incumbent(c.cwd, &j.scope, j.reports.as_deref()) };
     let concluded = score::run(c, j, &m.report_path(), baseline.as_deref(), &m.dir.join(&file))
         .and_then(|doc| score::conclude(&doc, j));
     match concluded {
