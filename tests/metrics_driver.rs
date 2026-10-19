@@ -143,3 +143,23 @@ fn a_score_of_changed_files_in_a_path_measures_them_alone() {
         .scope(Scope::ChangedIn { path: "work".into(), since: "HEAD".into() }).min(50.0)));
     assert!(nothing.met() && nothing.value().is_none(), "{}", nothing.rationale());
 }
+
+/// A score with a reports script runs it before the measurement, with a fresh folder to write in, and hands
+/// swe-metrics each report it names; a script that fails leaves the score unmet.
+#[test]
+fn a_score_reads_the_build_reports_its_script_writes() {
+    let (_tmp, dir) = project();
+    let script = write(&dir, "../reports.sh", "#!/bin/sh\necho building >&2\ntouch \"$1/jacoco.xml\"\necho \"{\\\"jacoco\\\": \\\"$1/jacoco.xml\\\"}\"\n");
+    chmod_x(&script);
+    let q = Judge::score("q", ScoreJudge::new("swe-default", "2").reports(&script).min(50.0));
+    assert_eq!(Agg::open(&dir).unwrap().judge(&q).value(), Some(77.0));
+    let calls = fs::read_to_string(dir.join("../calls.log")).unwrap();
+    assert!(calls.lines().any(|l| l.starts_with("measure") && l.contains("--report jacoco=") && l.contains("/build/jacoco.xml")), "{calls}");
+
+    let broken = write(&dir, "../broken.sh", "#!/bin/sh\necho 'tests failed' >&2\nexit 1\n");
+    chmod_x(&broken);
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "after the first score"]);
+    let v = Agg::open(&dir).unwrap().judge(&Judge::score("q2", ScoreJudge::new("swe-default", "2").reports(&broken).min(50.0)));
+    assert!(!v.met() && v.rationale().contains("tests failed"), "{}", v.rationale());
+}

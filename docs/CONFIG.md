@@ -261,6 +261,12 @@ absolute — keep it under `agg/` and in `write_deny`, it is part of the grader)
 - **`scope`** (optional, `target` by default): a project-relative sub-path scores that path alone, measured as
   its own target and compared with its own incumbent — `score: { definition: swe-default, version: "2",
   scope: work }`. `changed` is refused: the incumbent would be other files.
+- **`reports`** (optional): a script (relative to `agg/`, or absolute) that writes the build's reports —
+  tests, coverage, mutation, compiled classes — which swe-metrics reads but never produces. agg runs it before
+  the measurement, like a judge, with a fresh folder in the judge scratch as its argument; its last line names
+  the reports, `{"jacoco": "path", "junit": ["path", …]}` (a kind of `swe-metrics measure --report`; a relative
+  path is the project's). A failed script, a named report that isn't there or none named leaves the score
+  unmet. The measurement with reports is its own, with its own incumbent. Not under `container` isolation.
 - A **missed** score names its costliest parts — `most points lost: complexity.cognitive [p95] = 12 (good 5,
   bad 15), …` — the (at most three) components that cost the most points, worst first.
 - **Comparability.** A score names its definition and version; one that differs from the configured

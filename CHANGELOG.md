@@ -2,6 +2,15 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **A score of the build's reports:** `judges.<name>.score.reports` and `ScoreJudge::reports`: a script that
+  writes the build's test, coverage, mutation and class reports before the measurement and names them; agg
+  hands them to swe-metrics (`--report kind=path`), so a score includes test coverage, mutation score and
+  dependency cycles. Fails closed when the script fails or a report is missing.
+
 ## 0.0.26 (2026-10-19)
 
 ### Added
