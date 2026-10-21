@@ -2,6 +2,15 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.29 (2026-10-21)
+
+### Fixed
+
+- **Nothing to score is met:** a score judge on changed files (`ChangedIn`) whose changed files no part of the
+  definition applies to (e.g. only a shell script changed: every component `not_applicable`, no gate failing)
+  is vacuously met, like the existing "no changed files in scope". It used to fail as "the score is incomplete
+  (null)". A part that failed to measure (`unavailable`) or a failing gate still fails closed.
+
 ## 0.0.28 (2026-10-21)
 
 ### Fixed
