@@ -32,9 +32,14 @@ use std::time::{Duration, Instant};
 /// argv-parse fragility (a huge `-p` value that could start with `-`), and makes the exact context
 /// the worker saw inspectable on disk. The path is RELATIVE so it resolves from the worker's cwd
 /// (the project dir) on every backend (Claude/Copilot `-p`, Codex positional) with no per-backend
-/// special-casing — it is just a short, dash-free prompt value.
-pub const INSTRUCTIONS_POINTER: &str =
-    "Read the file `agg/private/INSTRUCTIONS.md` in full and follow it — it is your complete brief for this session.";
+/// special-casing — it is just a short, dash-free prompt value. It names the session and step: a session
+/// forked or resumed from an earlier step's must see that a new brief began, or it answers from memory.
+pub fn instructions_pointer(session: u32, step: &str) -> String {
+    format!(
+        "Read the file `agg/private/INSTRUCTIONS.md` in full and follow it — it is your complete brief for session \
+         {session}, step `{step}`."
+    )
+}
 
 /// The standing "Before you exit" footer of every session's brief (the wiki/OKF guidance lives here).
 /// Kept as a real markdown file (`include_str!`'d, like the scaffolds + skills) rather than an inline
@@ -626,13 +631,16 @@ mod tests {
     /// hit the size ceiling or be parsed as a flag.
     #[test]
     fn the_instructions_pointer_is_tiny_and_arg_safe() {
-        assert!(!INSTRUCTIONS_POINTER.starts_with('-'), "pointer must never look like a flag");
-        assert!(INSTRUCTIONS_POINTER.len() < 200, "pointer must stay tiny (no argv ceiling)");
+        let pointer = instructions_pointer(6, "user-docs");
+        assert!(!pointer.starts_with('-'), "pointer must never look like a flag");
+        assert!(pointer.len() < 200, "pointer must stay tiny (no argv ceiling)");
+        assert!(pointer.ends_with("session 6, step `user-docs`."), "a fork must see that a new step began: {pointer}");
+        assert_ne!(pointer, instructions_pointer(7, "user-docs"), "a repair round is a new session too");
         // derived from `paths`, not restated: the pointer is a LITERAL (a const can't call a fn), so
         // this is the only thing standing between a layout move and a worker sent to a missing brief.
         let rel = crate::paths::instructions_md(std::path::Path::new(""));
         assert!(
-            INSTRUCTIONS_POINTER.contains(&*rel.to_string_lossy()),
+            pointer.contains(&*rel.to_string_lossy()),
             "pointer must name the file agg actually writes ({})",
             rel.display()
         );
