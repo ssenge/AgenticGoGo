@@ -953,6 +953,20 @@ impl Agg {
         self.consult(j, true)
     }
 
+    /// A condition's verdict: whether something applies (a step of a workflow, a branch of a driver), not a
+    /// quality the gate guards. Run, recorded and memoized exactly like [`Agg::judge`], so a resumed run
+    /// replays it; but it never enters the gate's regression set. A condition flips with the world (a tag
+    /// that exists now and didn't when the last gate landed), and the gate would take that flip for a
+    /// regression and roll back the work that follows it. A judge the span also asked by name stays held.
+    pub fn condition(&self, j: &Judge) -> Verdict {
+        let held = self.span.borrow().contains_key(&j.name) || self.span_direct.borrow().contains(&j.name);
+        let verdict = self.consult(j, false);
+        if !held {
+            self.span.borrow_mut().remove(&j.name);
+        }
+        verdict
+    }
+
     /// This step's verdict for every member of `g`, each through the same lazy, memoized cache as
     /// [`Agg::judge`] — so a member already asked this step is not run again. Count over the result:
     /// `agg.group(&quality).at_least(2)` is "two of three".

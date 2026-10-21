@@ -237,3 +237,26 @@ fn answer_yes(dir: &Path) -> std::thread::JoinHandle<()> {
         panic!("no ask appeared");
     })
 }
+
+/// A condition flips with the world, not with the work: met when one step's work landed and unmet before the
+/// next, it is no regression, and the next step's work lands too (the gate held it once and rolled back).
+#[test]
+fn a_condition_that_flips_between_steps_is_no_regression() {
+    let tmp = project(1);
+    let d = tmp.path();
+    write_exe(&d.join("agg/judges/cond.sh"), "#!/bin/sh\nif [ -f cond.on ]; then m=true; else m=false; fi\n\
+                                             printf '{\"met\": %s, \"rationale\": \"cond\"}\\n' $m\n");
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "the condition"]);
+    std::fs::write(d.join("cond.on"), "").unwrap();
+    let cond = Judge::script("cond", "agg/judges/cond.sh");
+    let f = flow(d, Run::default());
+    assert!(f.applies("1 Prepare", &cond).unwrap());
+    assert_eq!(f.task(&task("2 Build")).unwrap(), Outcome::Done);
+    std::fs::remove_file(d.join("cond.on")).unwrap();
+    assert!(!f.applies("3 Optional", &cond).unwrap(), "the condition no longer holds");
+    assert_eq!(f.task(&task("4 Build more")).unwrap(), Outcome::Done);
+    f.flush().unwrap();
+    assert_eq!(git(d, &["show", "main:work.log"]).lines().count(), 2, "both steps' work landed");
+}
+

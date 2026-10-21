@@ -260,12 +260,13 @@ impl Flow {
     }
 
     /// Whether step `name` applies (A-27): `when` (a script) is met. One that doesn't is recorded as skipped
-    /// with the reason and costs no session; a condition that errs fails the step instead of skipping it.
+    /// with the reason and costs no session; a condition that errs fails the step instead of skipping it. The
+    /// condition is asked as one ([`Agg::condition`]): its flip between runs is no regression of the work.
     pub fn applies(&self, name: &str, when: &Judge) -> Result<bool, Fatal> {
         if !self.runs(name)? {
             return Ok(false);
         }
-        let verdict = self.agg.judge(when);
+        let verdict = self.agg.condition(when);
         if let Some(error) = verdict.error() {
             self.fail(name, &format!("whether it applies can't be told: {error}"))?;
             return Ok(false);
