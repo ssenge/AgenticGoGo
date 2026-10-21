@@ -6,7 +6,7 @@ use anyhow::Result;
 use crate::bus::Command;
 use crate::core::config::ResolvedStep;
 use crate::core::stop::{self, StopContext};
-use crate::loop_::{keeps_memory, AGGScratch, AGGState, Flow, Handler, LoopState, EXIT_FOOTER, EXIT_FOOTER_NO_MEMORY, INSTRUCTIONS_POINTER, wait_for_resume};
+use crate::loop_::{keeps_memory, AGGScratch, AGGState, Flow, Handler, LoopState, EXIT_FOOTER, EXIT_FOOTER_NO_MEMORY, instructions_pointer, wait_for_resume};
 
 /// Drain the operator bus at the session boundary (inject / pause / set-budget / stop / note).
 pub struct BusDrain;
@@ -348,7 +348,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
         let _ = std::fs::create_dir_all(parent);
     }
     match std::fs::write(&path, &s) {
-        Ok(()) => INSTRUCTIONS_POINTER.to_string(),
+        Ok(()) => instructions_pointer(ctx.session, &step.name),
         Err(e) => {
             eprintln!("  ⚠ could not write {} ({e}); passing the brief inline this session", path.display());
             if s.starts_with('-') { format!("\n{s}") } else { s }

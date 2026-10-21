@@ -2,6 +2,16 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.30 (2026-10-21)
+
+### Fixed
+
+- **The opening message names the session and step:** every worker is now told "… your complete brief for
+  session N, step `name`" instead of the same line every time. A session forked or resumed from an earlier
+  step's (`context`) got exactly the message its parent got, took the old brief for the new one and answered
+  from memory without opening `agg/private/INSTRUCTIONS.md`. `loop_::INSTRUCTIONS_POINTER` became
+  `loop_::instructions_pointer(session, step)`.
+
 ## 0.0.29 (2026-10-21)
 
 ### Fixed
