@@ -2,6 +2,16 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.28 (2026-10-21)
+
+### Fixed
+
+- **A condition's flip is no regression:** `Agg::condition` runs, records and memoizes a verdict exactly like
+  `Agg::judge`, but keeps it out of the gate's regression set; `Flow::applies` asks its condition with it. A
+  condition flips with the world (a tag that exists now and didn't when the last gate landed), and the gate
+  took that flip for a regression and rolled back the next step's work. A judge the span also asked by name
+  stays held.
+
 ## 0.0.27 (2026-10-19)
 
 ### Added
