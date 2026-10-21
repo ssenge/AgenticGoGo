@@ -66,6 +66,8 @@ pub struct ComponentRow {
     /// 0–100 between `bad` and `good`; none when the part wasn't measured.
     #[serde(default)]
     pub subscore: Option<f64>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// One metric compared against the baseline report.
@@ -100,6 +102,16 @@ impl ScoreDoc {
             self.definition.name, self.definition.version, j.definition_name, j.version
         ))
     }
+}
+
+/// No part of the score applies to the measured files (e.g. only a shell script changed): every
+/// component is `not_applicable` and no gate fails. A part that failed to measure is not this.
+pub fn nothing_to_score(doc: &ScoreDoc) -> bool {
+    let na = |s: &Option<String>| s.as_deref() == Some("not_applicable");
+    doc.score.is_none()
+        && !doc.components.is_empty()
+        && doc.components.iter().all(|c| na(&c.status))
+        && doc.gates.iter().all(|g| g.passed && (na(&g.status) || g.status.as_deref() == Some("ok")))
 }
 
 /// The verdict parts a score judge concludes: `(value, met, rationale)` — or the error.
@@ -263,4 +275,20 @@ mod tests {
         assert!(conclude(&other, &file).is_ok());
         assert!(ScoreDoc::parse(r#"{"schema":"swe-metrics/score/v9"}"#).unwrap_err().contains("v9"));
     }
+
+    #[test]
+    fn nothing_to_score_only_when_every_part_is_not_applicable() {
+        let na = serde_json::json!({"metric": "complexity.cyclomatic p95", "status": "not_applicable", "weight": 3});
+        let gate = |passed: bool, status: &str| serde_json::json!([{"metric": "secrets.findings", "passed": passed, "status": status}]);
+        let with = |score, gates, comps| doc(score, "2", gates, serde_json::json!({"components": comps}));
+        let null = serde_json::Value::Null;
+        assert!(nothing_to_score(&with(null.clone(), gate(true, "ok"), serde_json::json!([na]))));
+        assert!(!nothing_to_score(&with(null.clone(), gate(false, "ok"), serde_json::json!([na]))), "a failing gate");
+        assert!(!nothing_to_score(&with(null.clone(), gate(true, "unavailable"), serde_json::json!([na]))), "a gate not measured");
+        let failed = serde_json::json!({"metric": "coverage.line_percent", "status": "unavailable", "weight": 3});
+        assert!(!nothing_to_score(&with(null.clone(), gate(true, "ok"), serde_json::json!([na, failed]))), "a part that failed");
+        assert!(!nothing_to_score(&with(null, gate(true, "ok"), serde_json::json!([]))), "no parts at all");
+        assert!(!nothing_to_score(&with(serde_json::json!(80.0), gate(true, "ok"), serde_json::json!([na]))), "a score");
+    }
+
 }

@@ -144,8 +144,13 @@ pub fn run_score(name: &str, j: &ScoreJudge, c: &Ctx<'_>) -> Verdict {
     }
     // changed files have no incumbent of the same files to compare with.
     let baseline = if c.session.unwrap_or(0) == 0 || j.scope.is_changes() { None } else { measure::incumbent(c.cwd, &j.scope, j.reports.as_deref()) };
-    let concluded = score::run(c, j, &m.report_path(), baseline.as_deref(), &m.dir.join(&file))
-        .and_then(|doc| score::conclude(&doc, j));
+    let doc = score::run(c, j, &m.report_path(), baseline.as_deref(), &m.dir.join(&file));
+    if j.scope.is_changes() && doc.as_ref().is_ok_and(score::nothing_to_score) {
+        let mut v = Verdict::binary(true).with_rationale("no part of the score applies to the changed files — the score is vacuously met").with_evidence(evidence);
+        v.vacuous = true;
+        return v;
+    }
+    let concluded = doc.and_then(|doc| score::conclude(&doc, j));
     match concluded {
         Ok((value, met, why)) => {
             let mut v = Verdict::binary(met).with_value(value).with_rationale(why).with_evidence(evidence);
