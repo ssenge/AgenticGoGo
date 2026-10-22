@@ -2,6 +2,15 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.31 (2026-10-22)
+
+### Added
+
+- **A task can climb:** `Task::climbs()` makes an unmet end return `Outcome::Unmet(why)` to the caller, the
+  work kept (gated and merged), and recorded as `unmet`, instead of failing into triage. The caller runs its
+  next attempt (a stronger model, more repair rounds, another tool) on what this one left. Without it, nothing
+  changes: an unmet task fails into triage as before.
+
 ## 0.0.30 (2026-10-21)
 
 ### Fixed

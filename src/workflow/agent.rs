@@ -90,9 +90,9 @@ impl Flow {
             return Ok(Outcome::Unchanged);
         }
         if landed == Landing::Nothing && self.run.from.as_deref() == Some(key(&name)) && self.run.note.is_some() {
-            return self.failed(&name, "the re-entered step changed nothing, so its note wasn't carried out");
+            return self.unmet(&name, t.climbs, "the re-entered step changed nothing, so its note wasn't carried out");
         }
-        self.repaired(&name, &step, t.repairs, &judges, &cannot)
+        self.repaired(&name, &step, (t.repairs, t.climbs), &judges, &cannot)
     }
 
     /// Whether step `name` refreshes an earlier result: the run re-entered before it and keeps the later
@@ -162,7 +162,8 @@ impl Flow {
     }
 
     /// Judge, repair, judge again: up to `repairs` rounds, one of them the critic's.
-    fn repaired(&self, name: &str, step: &Step, repairs: usize, judges: &Judges, cannot: &std::path::Path)
+    fn repaired(&self, name: &str, step: &Step, (repairs, climbs): (usize, bool), judges: &Judges,
+                cannot: &std::path::Path)
                 -> Result<Outcome, Fatal> {
         let (mut verdict, mut by_critic) = judges.review(None)?;
         let (mut previous, mut critic_rounds): (Option<String>, usize) = (None, 0);
@@ -172,7 +173,7 @@ impl Flow {
             }
             critic_rounds += usize::from(by_critic);
             if let Some(why) = stuck(cannot, verdict.rationale(), by_critic, previous.as_deref()) {
-                return self.failed(name, &why);
+                return self.unmet(name, climbs, &why);
             }
             previous = Some(verdict.rationale().to_string());
             (verdict, by_critic) = self.repair(name, step, round, (&verdict, by_critic), judges)?;
@@ -183,7 +184,7 @@ impl Flow {
             return self.accepted(name, verdict.rationale());
         }
         if !verdict.met() {
-            return self.failed(name, verdict.rationale());
+            return self.unmet(name, climbs, verdict.rationale());
         }
         self.keep(name)?;
         self.record(name, "done", true, verdict.rationale());
@@ -220,6 +221,16 @@ impl Flow {
             GateOutcome::Kept | GateOutcome::Nothing => Ok(()),
             other => self.fail(name, &format!("the gate did not keep the work ({other:?})")),
         }
+    }
+
+    /// An unmet end: returned to a caller that climbs, the work kept for its next attempt; else a failure.
+    fn unmet(&self, name: &str, climbs: bool, why: &str) -> Result<Outcome, Fatal> {
+        if !climbs {
+            return self.failed(name, why);
+        }
+        self.keep(name)?;
+        self.record(name, "unmet", false, why);
+        Ok(Outcome::Unmet(why.to_string()))
     }
 
     /// Fails the step (triage, or the run's end).

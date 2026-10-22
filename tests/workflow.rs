@@ -142,6 +142,21 @@ fn a_critic_point_left_after_its_round_is_accepted_and_returned() {
     assert!(calls[0].contains("## The worker's task") && calls[0].contains("Do the work."));
 }
 
+/// A task that climbs and ends unmet returns why to its caller, its work kept, instead of failing into
+/// triage; the caller's next attempt continues from it.
+#[test]
+fn a_climbing_task_that_ends_unmet_returns_why_with_its_work_kept() {
+    let tmp = project(3);
+    let f = flow(tmp.path(), Run::default());
+    let outcome = f.task(&task("1 Build").repairs(0).climbs()).unwrap();
+    assert!(matches!(outcome, Outcome::Unmet(ref why) if why.contains("1 sessions")), "{outcome:?}");
+    assert_eq!(git(tmp.path(), &["show", "main:work.log"]).lines().count(), 1, "the unmet attempt's work landed");
+    let next = f.task(&task("1 Build").repairs(1).climbs()).unwrap();
+    f.flush().unwrap();
+    assert_eq!(next, Outcome::Done, "the next attempt continued from it: 3 sessions in all");
+    assert_eq!(kinds(&f, "1 Build"), ["unmet", "repair", "done"]);
+}
+
 /// A-27: a script step's changes land on `main`; a step whose condition is unmet is skipped with no session.
 #[test]
 fn a_script_step_commits_and_an_unmet_condition_skips_without_a_session() {
