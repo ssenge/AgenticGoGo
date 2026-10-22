@@ -27,13 +27,15 @@ pub struct Task {
     pub inputs: Option<Vec<String>>,
     /// the key of the step whose agent session this one starts from, forked: one that read the same.
     pub context: Option<String>,
+    /// an unmet end returns [`Outcome::Unmet`] to the caller, the work kept, instead of failing into triage.
+    pub climbs: bool,
 }
 
 impl Task {
     /// The worker's step, with no judges, no repairs and nothing else.
     pub fn new(step: Step) -> Task {
         Task { name: None, step, sections: vec![], checks: vec![], critic: None, critic_context: String::new(), repairs: 0,
-               first: None, inputs: None, context: None }
+               first: None, inputs: None, context: None, climbs: false }
     }
 
     /// The step's name in the flow, when it isn't the worker step's own (e.g. `"2.2 Derive goals"` for a
@@ -91,6 +93,12 @@ impl Task {
         self
     }
 
+    /// An unmet end returns to the caller (who climbs to a next attempt) instead of failing into triage.
+    pub fn climbs(mut self) -> Task {
+        self.climbs = true;
+        self
+    }
+
     /// The step's name in the flow.
     pub fn name(&self) -> String {
         self.name.clone().or_else(|| self.step.name.clone()).unwrap_or_default()
@@ -109,4 +117,6 @@ pub enum Outcome {
     /// the checks are met, the critic still sees this point after its repair round; the work is kept, and
     /// the point is for the humans at the next approval.
     Accepted(String),
+    /// a task that [`Task::climbs`] ended unmet, its work kept: why, for the caller's next attempt.
+    Unmet(String),
 }
