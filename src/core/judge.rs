@@ -359,6 +359,10 @@ fn run_llm(
         Ok(t) => t,
         Err(e) => return (Verdict::failed(format!("reading rubric {}: {e}", rubric_path.display())), None),
     };
+    let rubric_text = match crate::core::vars::apply(&rubric_text) {
+        Ok(t) => t,
+        Err(e) => return (Verdict::failed(format!("rubric {}: {e}", rubric_path.display())), None),
+    };
     // strip the yaml frontmatter (it declares `inputs:`, it is not part of the prompt).
     let rubric_text = strip_frontmatter(&rubric_text);
 

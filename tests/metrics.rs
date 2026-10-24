@@ -554,7 +554,7 @@ fn the_real_swe_metrics_measures_a_fixture_with_known_values() {
          cc_p95: { metric: { id: \"complexity.cyclomatic\", stat: \"p95\", tool: \"lizard\" }, max: 10 }\n  \
          clones: { metric: { id: \"duplication.clones\" }, max: 0 }\n  \
          dup_pct: { metric: { id: \"duplication.percent\" }, max: 50 }\n  \
-         quality: { score: { definition: \"swe-default\", version: \"3\" }, min: 0 }\n",
+         quality: { score: { definition: \"swe-default\", version: \"0.4\" }, min: 0 }\n",
         "  done_if: \"feature\"\n  invariants: [cc_max, cc_p95, clones, dup_pct, quality]\n",
     );
     p.commit();

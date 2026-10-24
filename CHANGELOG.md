@@ -2,6 +2,17 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.32 (2026-10-24)
+
+### Added
+
+- **Workflow variables:** `Agg::vars([(name, value), ..])` fills in `{{ name }}` in every step's prompt file
+  (the role prompt's too) and every LLM judge's rubric, its `inputs:` frontmatter included, where agg reads
+  them; a name the map lacks fails that step or judge (`unknown variable`). Only files are templates: inline
+  prompts a driver builds may carry a project's own `{{ … }}`, and `{{` without a plain name inside stays as
+  it is. `agg::prelude::render(text, &vars)` renders a driver's own files the same way. Without variables
+  nothing changes.
+
 ## 0.0.31 (2026-10-22)
 
 ### Added

@@ -105,7 +105,7 @@ pub(crate) fn kind_for(path: &Path) -> JudgeKind {
     if path.extension().and_then(|e| e.to_str()) == Some("md") {
         let inputs = std::fs::read_to_string(path)
             .ok()
-            .map(|t| parse_inputs(&t))
+            .map(|t| parse_inputs(&crate::core::vars::apply(&t).unwrap_or(t)))
             .unwrap_or_default();
         JudgeKind::Llm { path: path.to_path_buf(), inputs }
     } else {

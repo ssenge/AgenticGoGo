@@ -292,6 +292,14 @@ impl Agg {
         self
     }
 
+    /// The workflow's variables: `{{ name }}` in every step's prompt file (the role prompt's too) and every
+    /// LLM judge's rubric (its `inputs:` too) is filled in from `vars`; a name it lacks fails the step or
+    /// the judge. Inline prompts are not templates. One map per process: the last call wins.
+    pub fn vars(self, vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Agg {
+        crate::core::vars::set(vars.into_iter().map(|(k, v)| (k.into(), v.into())).collect());
+        self
+    }
+
     /// EVERY judge's timeout in seconds, script and LLM alike — YAML's `judge.timeout` (default
     /// 300). A single judge overrides it with [`Judge::timeout`].
     pub fn judge_timeout(mut self, secs: u64) -> Agg {
