@@ -2,6 +2,14 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.33 (2026-10-24)
+
+### Added
+
+- **A driver can send its run back itself:** `Flow::reenter(key, note)` ends the run and starts it again at a
+  step the run has seen, with the note, as after a triage a human said yes to; it counts as a re-entry and is
+  recorded `reentry`. A step the run hasn't seen is refused. Without it, only triage could re-enter.
+
 ## 0.0.32 (2026-10-24)
 
 ### Added

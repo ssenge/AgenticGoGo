@@ -365,7 +365,8 @@ fn drive() -> Result<(), Fatal> {
 | `flow.applies(name, &when)` | the step applies when `when` is met; otherwise recorded `skipped` with the reason, no session; a condition that errs fails the step |
 | `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.context(key)` `.section(text)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |
 | `flow.approval(name, doc, question, decisions, inputs)` | a human approves `doc`, writing their decisions first; after a re-entry, unchanged inputs (else the document) stand without asking |
-| `workflow::run(drive)` | `driver::run`, then starts the run again at the step triage chose, with its note |
+| `flow.reenter(key, note)` | the driver itself sends the run back: it ends this run and starts it again at a step the run has seen, with `note`, as after a triage a human said yes to (counts as a re-entry, recorded `reentry`); e.g. a decision taken at an approval that an earlier step's result doesn't carry yet |
+| `workflow::run(drive)` | `driver::run`, then starts the run again at the step triage or `reenter` chose, with its note |
 | `Roles::load(file, names)` | named roles (`agent`, `model`, `effort`) from a YAML file; an agent that isn't installed is an error at load |
 
 An agent step, in order: a refresh whose `inputs` didn't change is `unchanged` without a session; the `first`

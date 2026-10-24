@@ -19,6 +19,18 @@ impl Flow {
         self.triage = Some((step, max));
         self
     }
+
+    /// Ends this run and starts it again at step `at` (one this run has seen) with `note`, as after a triage
+    /// a human said yes to; it counts as a re-entry. For a driver that knows itself where the run must go
+    /// back: a decision taken at an approval that an earlier step's result doesn't carry yet.
+    pub fn reenter(&self, at: &str, note: &str) -> Result<(), Fatal> {
+        if !self.seen().iter().any(|s| s == at) {
+            return Err(Fatal::Other(anyhow::anyhow!("re-entering at {at}: no step of this run")));
+        }
+        self.record(at, "reentry", true, note);
+        let _ = REENTRY.set((at.to_string(), note.to_string(), self.project().to_path_buf()));
+        self.halt(format!("re-entering at {at}: {note}"))
+    }
 }
 
 /// Step `name` failed for `why`: triage proposes a re-entry and a human decides; without triage, after the
