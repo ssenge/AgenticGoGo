@@ -101,6 +101,8 @@ fn read(key: &str, config_base: &Path, file: &str) -> Result<(String, PromptFile
     let bytes = std::fs::read(&path).with_context(|| format!("reading {key} `{file}` ({})", path.display()))?;
     let sha256 = crate::protect::sha256::hex(&bytes);
     let text = String::from_utf8(bytes).with_context(|| format!("{key} `{file}` is not UTF-8"))?;
+    // the workflow's variables: a file is a template it wrote; inline text (a project's content) is not
+    let text = crate::core::vars::apply(&text).map_err(|e| anyhow::anyhow!("{key} `{file}`: {e}"))?;
     Ok((text, PromptFile { key: key.into(), path: path.display().to_string(), sha256 }))
 }
 

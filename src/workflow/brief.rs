@@ -22,7 +22,10 @@ pub fn with_lead(step: &Step, section: &str) -> Result<Step, Fatal> {
 /// The step's brief as it stands: its prompt, or its prompt file read now.
 pub fn task(step: &Step) -> Result<String, Fatal> {
     match &step.prompt_file {
-        Some(file) => Ok(std::fs::read_to_string(file).map_err(|e| anyhow!("reading {file}: {e}"))?),
+        Some(file) => {
+            let text = std::fs::read_to_string(file).map_err(|e| anyhow!("reading {file}: {e}"))?;
+            Ok(crate::core::vars::apply(&text).map_err(|e| anyhow!("{file}: {e}"))?)
+        }
         None => Ok(step.prompt.clone().unwrap_or_default()),
     }
 }

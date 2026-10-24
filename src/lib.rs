@@ -75,6 +75,7 @@ pub mod prelude {
     pub use crate::core::config::Limits;
     pub use crate::core::model::{Judge, JudgeCtx, Verdict};
     pub use crate::core::ratchet::{Direction, GateState, Ratchet};
+    pub use crate::core::vars::render;
     pub use crate::core::asks::Ask;
     pub use crate::driver::{
         run, Agg, Agent, AgentSession, Effort, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, Landing,

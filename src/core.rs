@@ -22,5 +22,6 @@ pub mod model;
 pub mod prompts;
 pub mod ratchet;
 pub mod stop;
+pub mod vars;
 pub mod walk;
 pub mod verdicts;
