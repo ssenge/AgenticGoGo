@@ -238,6 +238,19 @@ fn triage_proposes_an_earlier_step_and_a_yes_ends_the_run_for_the_reentry() {
     assert!(last["rationale"].as_str().unwrap().contains("re-enter at 1: build x"));
 }
 
+/// A driver re-enters at a step the run has seen, recorded with its note, and ends the run for it; a step
+/// the run hasn't seen is refused without ending it.
+#[test]
+fn a_driver_reenters_at_a_step_it_ran_and_not_at_one_it_didnt() {
+    let tmp = project(1);
+    let f = flow(tmp.path(), Run::default());
+    f.task(&Task::new(Step::new("1 Design").model("fake").prompt("Design."))).unwrap();
+    assert!(matches!(f.reenter("9", "x").unwrap_err(), Fatal::Other(_)), "no step 9 in this run");
+    assert!(matches!(f.reenter("1", "carry CP3's decision").unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+    let last = f.steps().entries().last().cloned().unwrap();
+    assert_eq!((last["kind"].as_str(), last["rationale"].as_str()), (Some("reentry"), Some("carry CP3's decision")));
+}
+
 /// Answers the first open yes/no ask with yes, from another thread, as an operator would.
 fn answer_yes(dir: &Path) -> std::thread::JoinHandle<()> {
     let dir = dir.to_path_buf();
