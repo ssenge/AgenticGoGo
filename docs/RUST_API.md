@@ -385,6 +385,11 @@ a check fails exactly as before. A failed step goes to triage: its agent writes 
 to the file its brief names; an approval is never a re-entry point; a yes ends the run, and
 `workflow::run` starts it again.
 
+The files a brief names (`flow.scratch(file)`, `flow.wrapper(file, command)`) live in the flow's own folder
+outside the project, `agg-flow-<pid>-<n>` in the temp dir. It is removed when the flow is dropped, however the
+run ended, and a flow that starts removes the folders of runs whose process is gone: a file a dead run left
+there would read as current to a later run's agent.
+
 ## Resuming a crashed run
 
 An overnight driver that dies at hour six should not start again at hour zero.
