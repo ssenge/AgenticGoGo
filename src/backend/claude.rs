@@ -82,6 +82,10 @@ impl AgentBackend for Claude {
         }
         if !spec.user_settings {
             command.arg("--setting-sources").arg("project,local");
+            // Without the user's settings a worker has none of the user's MCP servers: it gets the environment's.
+            if let Some(config) = super::overrides::claude_mcp_config() {
+                command.arg("--mcp-config").arg(config);
+            }
         }
         if let Some(text) = spec.system_prompt {
             command.arg("--append-system-prompt").arg(text);
