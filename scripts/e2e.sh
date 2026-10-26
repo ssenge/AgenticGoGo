@@ -2853,8 +2853,10 @@ if command -v codex >/dev/null 2>&1; then
   for s in new status supervise; do
     has "codex DISCOVERS agg-$s (real CLI, no API call)" "$SK/codex-prompt.json" "agg-$s"
   done
-  # …and it must be reading OUR project dir, not some stale personal install
-  has "…from the project's .agents/skills/" "$SK/codex-prompt.json" ".agents/skills/agg-new/SKILL.md"
+  # …and it must be reading OUR project dir, not some stale personal install. Codex lists a skill by a short
+  # path under a table of roots (`r6` = `<dir>/.agents/skills`), so the project's dir is a root of its own:
+  # `$SK` is `…/skills`, which the personal root `~/.agents/skills` never ends with
+  has "…from the project's .agents/skills/" "$SK/codex-prompt.json" "/skills/.agents/skills\`"
 else
   skip "codex discovers the installed skills" "codex not on PATH"
 fi
