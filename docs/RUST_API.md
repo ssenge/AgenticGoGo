@@ -363,7 +363,7 @@ fn drive() -> Result<(), Fatal> {
 | block | what it does |
 |---|---|
 | `Flow::new(agg, Run)` | the run: `Run::from_args` reads `--from <key> [--note t] [--reset] [--until <key>] [--reentries n]`; a step before `from` doesn't run, the `from` step gets the note leading its brief, every later step refreshes; `--until` ends the run after that step |
-| `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; triage |
+| `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` `.trust(rule)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; triage; which of triage's proposals go ahead without a human's yes (`rule(failed step, re-enter at)`) |
 | `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails |
 | `flow.applies(name, &when)` | the step applies when `when` is met; otherwise recorded `skipped` with the reason, no session; a condition that errs fails the step |
 | `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.context(key)` `.section(text)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |

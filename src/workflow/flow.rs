@@ -57,6 +57,9 @@ pub enum When {
 type Hooks = Box<dyn Fn(&Flow, &str, When) -> Vec<Judge>>;
 type OnStart = Box<dyn Fn(&Flow, &str) -> Result<(), String>>;
 
+/// A rule over triage's proposals: (the failed step, the step to re-enter) → go ahead without a human's yes.
+pub(crate) type Trust = dyn Fn(&str, &str) -> bool;
+
 /// A workflow run on agg: what every block of [`super`] works through.
 pub struct Flow {
     agg: Agg,
@@ -71,6 +74,8 @@ pub struct Flow {
     hooks: Option<Hooks>,
     on_start: Option<OnStart>,
     pub(crate) triage: Option<(Step, u32)>,
+    /// which of triage's proposals go ahead without a human's yes: (the failed step, the step to re-enter).
+    pub(crate) trusted: Option<Box<Trust>>,
     /// whether the step re-entered with a note started its fresh session in this run yet.
     pub(crate) renewed: Cell<bool>,
 }
@@ -97,7 +102,7 @@ impl Flow {
         super::scratch::sweep(&std::env::temp_dir());
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
                scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, triage: None,
-               renewed: Cell::new(false), agg }
+               trusted: None, renewed: Cell::new(false), agg }
     }
 
     /// The history in `path` (relative to the project) instead of `agg/private/steps.jsonl`.
