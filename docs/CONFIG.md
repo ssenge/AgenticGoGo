@@ -1761,6 +1761,19 @@ startup** — checked for **every** agent the sequence names. The full matrix is
 | `effort:` | Levels `low<medium<high<xhigh<max`, per-step (unset ⇒ the backend's default). **Defaults: Claude `max`, Codex `high`, Copilot none** — so the two you'd pick for a hard task are *already at their ceiling* without setting anything. Claude's `max` is the highest reachable **headlessly**: the top `ultracode` tier is interactive-only (not a valid `-p` value), so a worker can't select it — `max` is the ceiling. **Codex** clamps `xhigh`/`max`→`high` (it has no level above `high`). **Copilot** cannot combine `effort:` with `model: auto` (its default) — agg refuses the pair; name a concrete model to use an effort. |
 | `limits.cost` / `over_cost` | **Claude only.** Codex reports no dollars; Copilot bills in AI Credits. **Checked per step** — even one `agent: codex` step makes a `limits.cost` guard uncoverable, so agg refuses it. Use `sequence.limits.tokens`; Copilot can self-cap with `worker_args: ["--max-ai-credits", "50"]`. |
 
+### The operator's environment: model stand-ins and Codex's provider
+
+Two variables of the environment agg runs in change every agent call, whichever step or judge makes it, so
+switching between environments (a subscription, a cloud provider, another account) changes no config file:
+
+| variable | effect |
+|---|---|
+| `AGG_MODELS` | Model stand-ins, `<model>=<stand-in>` comma-separated: a session, judge or summary that names `<model>` calls `<stand-in>`. E.g. `claude-fable-5-1=claude-opus-5-5` where the provider has no Fable. |
+| `AGG_CODEX_CONFIG` | Codex `-c` overrides, one `key=value` per line, on every Codex session and one-shot, e.g. `model_provider="amazon-bedrock-runtime"` and `model="global.openai.gpt-6-luna"`. A Codex judge reads no config file (`--ignore-user-config`), so its provider can only come from here. |
+
+Claude Code takes its provider from its own variables (`CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`, …), which
+every agent agg starts inherits.
+
 ## Session isolation (mandatory) and the gate
 
 Every session **always** branches off `base`, does its work, and is gated — there is no master switch.

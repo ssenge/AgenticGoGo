@@ -2,6 +2,17 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.35 (2026-10-26)
+
+### Added
+
+- **`AGG_MODELS`:** model stand-ins from the environment (`<model>=<stand-in>`, comma-separated): every
+  session, judge and summary that names `<model>` calls `<stand-in>` (`backend::overrides::model`), e.g. Opus
+  for Fable where a provider has no Fable.
+- **`AGG_CODEX_CONFIG`:** Codex `-c` overrides from the environment, one `key=value` per line, on every Codex
+  session and one-shot (`backend::overrides::codex_config`): a Codex judge reads no config file, so this is how
+  it reaches a provider other than OpenAI's (e.g. Amazon Bedrock).
+
 ## 0.0.34 (2026-10-26)
 
 ### Added

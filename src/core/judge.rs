@@ -392,6 +392,7 @@ fn run_llm(
     // 4) one-shot the ruler. The isolation flags that keep the worker from steering its own judge
     //    live in `backend::one_shot`; `cwd` is passed so the judge sees the project it is judging,
     //    and `isolation` OS-jails the call under Sandbox (defense-in-depth over its permission layer).
+    let model = &crate::backend::overrides::model(model);
     let out = match ruler.one_shot(&prompt, model, effort, timeout_secs, Some(cwd), isolation) {
         Ok(o) => o,
         Err(e) => return (Verdict::failed(format!("llm judge: {e}")), None),
