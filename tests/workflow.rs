@@ -241,6 +241,22 @@ fn a_step_reentered_with_a_note_starts_fresh_and_its_repairs_continue() {
     assert!(argv.lines().filter(|l| l.contains("--resume")).all(|l| l.contains("## Review to address")), "{argv}");
 }
 
+/// A flow's scratch folder goes when the flow ends, however it ended, read-only files and all.
+#[test]
+fn a_flows_scratch_folder_is_removed_when_it_ends() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = project(1);
+    let f = flow(tmp.path(), Run::default());
+    let file = f.scratch("7.1-cannot-fix.md").unwrap();
+    let dir = file.parent().unwrap().to_path_buf();
+    std::fs::write(&file, "an old claim").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert!(matches!(f.halt("stop").unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+    drop(f);
+    assert!(!dir.exists(), "{} is left", dir.display());
+}
+
 /// A-30: a failed step goes to triage, which proposes an earlier step; a yes records the re-entry and ends
 /// the run.
 #[test]

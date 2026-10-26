@@ -1,5 +1,6 @@
 //! A workflow run (A-27, A-29): agg, plus where the run starts and ends, the steps it reached, its history,
-//! the checks around every step, and a scratch folder outside the project for the files a step's brief names.
+//! the checks around every step, and a scratch folder outside the project for the files a step's brief names,
+//! removed when the run ends.
 
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
@@ -74,6 +75,13 @@ pub struct Flow {
     pub(crate) renewed: Cell<bool>,
 }
 
+impl Drop for Flow {
+    /// Removes the run's scratch folder, however the run ended: what a step left there was for this run.
+    fn drop(&mut self) {
+        super::scratch::remove(&self.scratch);
+    }
+}
+
 impl Deref for Flow {
     type Target = Agg;
     fn deref(&self) -> &Agg {
@@ -85,7 +93,8 @@ impl Flow {
     /// A run of `agg` in its project, starting and ending as `run` says.
     pub fn new(agg: Agg, run: Run) -> Flow {
         let project = agg.dir().to_path_buf();
-        let scratch = std::env::temp_dir().join(format!("agg-flow-{}", std::process::id()));
+        let scratch = super::scratch::folder(&std::env::temp_dir());
+        super::scratch::sweep(&std::env::temp_dir());
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
                scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, triage: None,
                renewed: Cell::new(false), agg }

@@ -14,6 +14,7 @@ mod git;
 mod history;
 mod review;
 mod roles;
+mod scratch;
 mod sessions;
 mod task;
 mod triage;
