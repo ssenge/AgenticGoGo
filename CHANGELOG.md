@@ -4,6 +4,12 @@ Notable changes to agg. Newest first; each entry names the config keys and inter
 
 ## 0.0.34 (2026-10-26)
 
+### Added
+
+- **`Flow::trust(rule)`:** triage's proposals that the driver's rule accepts (the failed step, the step to
+  re-enter) go ahead without a human's yes, still within the run's re-entries, recorded as trusted: for a
+  failure the driver knows is the re-entered step's own to repair.
+
 ### Fixed
 
 - **A step re-entered with a note starts a fresh session:** with `--from <step> --note <text>`, the step's

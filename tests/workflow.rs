@@ -276,6 +276,23 @@ fn triage_proposes_an_earlier_step_and_a_yes_ends_the_run_for_the_reentry() {
     assert!(last["rationale"].as_str().unwrap().contains("re-enter at 1: build x"));
 }
 
+/// A proposal the driver trusts goes ahead without a human's yes: no ask, the re-entry recorded as trusted.
+#[test]
+fn a_trusted_triage_proposal_goes_ahead_without_asking() {
+    let tmp = project(9);
+    let d = tmp.path();
+    std::fs::write(d.join("triage.answer"), "reenter: '1'\ncause: step 1's script hid a failure\nnote: fix it\n").unwrap();
+    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(triage, 3).trust(|failed, at| failed == "2 Test" && at == "1");
+    f.task(&Task::new(Step::new("1 Build").model("fake").prompt("Build."))).unwrap();
+    let err = f.task(&task("2 Test")).unwrap_err();
+    assert!(matches!(err, Fatal::Ended(RunOutcome::Halt)), "{err:?}");
+    assert!(agg::core::asks::open(d).is_empty(), "no ask for a trusted proposal");
+    let last = f.steps().entries().last().cloned().unwrap();
+    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("triage"), Some(true)));
+    assert!(last["rationale"].as_str().unwrap().contains("re-enter at 1 (a proposal the driver trusts, no ask): fix it"));
+}
+
 /// A driver re-enters at a step the run has seen, recorded with its note, and ends the run for it; a step
 /// the run hasn't seen is refused without ending it.
 #[test]

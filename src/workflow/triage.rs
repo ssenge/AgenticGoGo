@@ -20,6 +20,14 @@ impl Flow {
         self
     }
 
+    /// Triage's proposals that `rule` (the failed step, the step to re-enter) accepts go ahead without a
+    /// human's yes, still within the run's re-entries: for a failure the driver knows is the re-entered step's
+    /// own to repair (a check of a step's script, sent back to the step that writes it).
+    pub fn trust(mut self, rule: impl Fn(&str, &str) -> bool + 'static) -> Flow {
+        self.trusted = Some(Box::new(rule));
+        self
+    }
+
     /// Ends this run and starts it again at step `at` (one this run has seen) with `note`, as after a triage
     /// a human said yes to; it counts as a re-entry. For a driver that knows itself where the run must go
     /// back: a decision taken at an approval that an earlier step's result doesn't carry yet.
@@ -60,10 +68,12 @@ pub(crate) fn fail(flow: &Flow, name: &str, why: &str) -> Result<(), Fatal> {
         flow.record(name, "triage", false, &format!("humans decide at {at}: {cause}"));
         return flow.halt(format!("{reason} (triage: humans decide at {at}: {cause})"));
     }
-    if !flow.hil_bool(&format!("{reason}\n\nTriage: {cause}\nRe-enter at {at}, with the note: {note}\nGo?"))? {
+    let trusted = flow.trusted.as_ref().is_some_and(|rule| rule(name, &at));
+    if !trusted && !flow.hil_bool(&format!("{reason}\n\nTriage: {cause}\nRe-enter at {at}, with the note: {note}\nGo?"))? {
         return flow.halt(reason);
     }
-    flow.record(name, "triage", true, &format!("re-enter at {at}: {note}"));
+    let how = if trusted { " (a proposal the driver trusts, no ask)" } else { "" };
+    flow.record(name, "triage", true, &format!("re-enter at {at}{how}: {note}"));
     let _ = REENTRY.set((at.clone(), note, flow.project().to_path_buf()));
     flow.halt(format!("{reason}; re-entering at {at}"))
 }
