@@ -41,6 +41,23 @@ pub fn instructions_pointer(session: u32, step: &str) -> String {
     )
 }
 
+/// How much of what is new a continued session's opening message carries; the rest is in its brief.
+const NEWS_LIMIT: usize = 4_000;
+
+/// The worker's opening message: the pointer to its brief, and for a session that continues its own (`news`
+/// set) what is new for this attempt. Such a session takes the brief for one it read before and skims it, so
+/// what is new must reach it unread. Bounded, so the message stays an argument and the brief the record.
+pub fn opening(session: u32, step: &str, news: Option<&str>) -> String {
+    let pointer = instructions_pointer(session, step);
+    let Some(news) = news.map(str::trim).filter(|n| !n.is_empty()) else { return pointer };
+    let cut = news.char_indices().nth(NEWS_LIMIT).map(|(i, _)| i);
+    let news = match cut {
+        Some(i) => format!("{}\n\n[… cut here; the rest is in your brief]", &news[..i]),
+        None => news.to_string(),
+    };
+    format!("{pointer}\n\nWhat is new for this attempt (also in your brief):\n\n{news}")
+}
+
 /// The standing "Before you exit" footer of every session's brief (the wiki/OKF guidance lives here).
 /// Kept as a real markdown file (`include_str!`'d, like the scaffolds + skills) rather than an inline
 /// string; `{{STATE}}` is filled with the step's state path when composed.
@@ -646,6 +663,19 @@ mod tests {
         );
     }
 
+    /// A continued session's opening message carries what is new after the pointer, cut at the limit with a
+    /// pointer to the brief; without news (a fresh or forked session) it is the pointer alone.
+    #[test]
+    fn a_continued_sessions_opening_carries_what_is_new() {
+        let pointer = instructions_pointer(3, "7.1");
+        assert_eq!(opening(3, "7.1", None), pointer);
+        assert_eq!(opening(3, "7.1", Some("  ")), pointer);
+        let short = opening(3, "7.1", Some("## Review to address\n\nfix A"));
+        assert!(short.starts_with(&pointer) && short.ends_with("(also in your brief):\n\n## Review to address\n\nfix A"));
+        let long = opening(3, "7.1", Some(&"é".repeat(NEWS_LIMIT + 10)));
+        assert!(long.ends_with("[… cut here; the rest is in your brief]"), "{long}");
+        assert_eq!(long.matches('é').count(), NEWS_LIMIT);
+    }
 
     /// The registry reads as HIGH-LEVEL FEATURES — one (or a couple) per lifecycle phase — so a human
     /// understands the loop's structure at a glance (Inject / Run / Verify / Gate / Finalize …). And

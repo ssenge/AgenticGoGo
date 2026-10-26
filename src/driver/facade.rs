@@ -723,6 +723,7 @@ impl Agg {
             (&d.role_prompt, &d.role_prompt_file)
         };
         let resume = resume_of(&name, step);
+        let news = step.news.clone().filter(|_| matches!(resume, Some((_, false))));
         let user_settings = self.user_settings || !leaves_out_user_settings(&name, step);
         let system_prompt = self.system_prompt.clone().filter(|_| takes_system_prompt(&name, step));
         Ok(ResolvedStep {
@@ -734,6 +735,7 @@ impl Agg {
             state: step.state.clone().unwrap_or_else(|| self.cfg.defaults.state.clone()),
             memory: step.memory.unwrap_or(self.memory),
             resume,
+            news,
             user_settings,
             system_prompt,
             role_prompt: role.0.clone(),

@@ -1,6 +1,6 @@
 //! A step's brief, put together: its own task with sections after it, or before it for what is new in a
 //! session that continues the step's own (a review, a note, the changes since), which a worker reads first
-//! where it takes the rest for known and skims it.
+//! where it takes the rest for known and skims it; what leads also goes into such a session's opening message.
 
 use anyhow::anyhow;
 
@@ -14,9 +14,10 @@ pub fn with_section(step: &Step, section: &str) -> Result<Step, Fatal> {
     Ok(step.clone().prompt(format!("{}\n\n{section}\n", task(step)?)))
 }
 
-/// The step's own task with `section` before it.
+/// The step's own task with `section` before it, and `section` as the step's news: a session that continues
+/// the step's own gets it in its opening message too.
 pub fn with_lead(step: &Step, section: &str) -> Result<Step, Fatal> {
-    Ok(step.clone().prompt(format!("{section}\n\n{}\n", task(step)?)))
+    Ok(step.clone().prompt(format!("{section}\n\n{}\n", task(step)?)).news(section))
 }
 
 /// The step's brief as it stands: its prompt, or its prompt file read now.
@@ -43,6 +44,8 @@ mod tests {
         let step = Step::new("1 Do").prompt_file(file.display().to_string());
         let both = with_lead(&with_section(&step, "## After").unwrap(), "## Before").unwrap();
         assert_eq!(both.prompt.as_deref(), Some("## Before\n\nDo it.\n\n## After\n\n"));
+        assert_eq!(both.news.as_deref(), Some("## Before"), "what leads is what is new");
+        assert_eq!(with_lead(&both, "## Review").unwrap().news.as_deref(), Some("## Review"), "the latest lead");
         assert_eq!(with_section(&step, " ").unwrap().prompt_file, step.prompt_file);
     }
 }

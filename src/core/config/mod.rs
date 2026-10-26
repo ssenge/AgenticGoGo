@@ -781,6 +781,9 @@ pub struct ResolvedStep {
     /// the agent session id this step's sessions start from, and whether they fork it — already
     /// checked against the step's agent (A-33). Always `None` on the YAML path.
     pub resume: Option<(String, bool)>,
+    /// what is new for this attempt, for the opening message of a session that continues the step's own
+    /// (`Step::news`). Always `None` on the YAML path, and for a fresh or forked session.
+    pub news: Option<String>,
     /// whether the worker loads the operator's own agent settings (`Agg::user_settings`). Always
     /// `true` on the YAML path.
     pub user_settings: bool,

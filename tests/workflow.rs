@@ -29,7 +29,7 @@ for a in "$@"; do
     *INSTRUCTIONS.md*) worker=1 ;;
   esac
 done
-if [ -n "$worker" ]; then cat agg/private/INSTRUCTIONS.md >> .git/agg-worker.args; echo "$*" >> .git/agg-worker.argv; fi
+if [ -n "$worker" ]; then cat agg/private/INSTRUCTIONS.md >> .git/agg-worker.args; { printf '%s' "$*" | tr '\n' ' '; echo; } >> .git/agg-worker.argv; fi
 answer=$(grep -o '/[^ ]*triage\.yaml' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1)
 if [ -n "$answer" ] && [ -f triage.answer ]; then cp triage.answer "$answer"; rm triage.answer; fi
 if [ -n "$worker" ] && [ ! -f .git/agg-idle ]; then
@@ -235,6 +235,10 @@ fn a_step_reentered_with_a_note_starts_fresh_and_its_repairs_continue() {
     let argv = std::fs::read_to_string(d.join(".git/agg-worker.argv")).unwrap();
     let resumed: Vec<bool> = argv.lines().map(|l| l.contains("--resume")).collect();
     assert_eq!(resumed, [false, true, false, true], "first run: fresh, repair; re-entry: fresh, repair\n{argv}");
+    // a continued session is told what is new in its opening message; a fresh one reads its brief
+    let told: Vec<bool> = argv.lines().map(|l| l.contains("What is new for this attempt")).collect();
+    assert_eq!(told, resumed, "the fresh session's note is in its brief alone\n{argv}");
+    assert!(argv.lines().filter(|l| l.contains("--resume")).all(|l| l.contains("## Review to address")), "{argv}");
 }
 
 /// A-30: a failed step goes to triage, which proposes an earlier step; a yes records the re-entry and ends

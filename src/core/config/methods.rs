@@ -45,6 +45,7 @@ impl AggConfig {
             state: body.state.clone().unwrap_or_else(|| self.defaults.state.clone()),
             memory: true,
             resume: None,
+            news: None,
             user_settings: true,
             system_prompt: None,
             // the pair inherits AS A PAIR: a step naming either form replaces both of the defaults'.
