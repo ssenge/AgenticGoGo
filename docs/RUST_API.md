@@ -373,7 +373,8 @@ An agent step, in order: a refresh whose `inputs` didn't change is `unchanged` w
 script does what it can (nothing left and the judges met: done without a session); the worker's brief gets
 what is new first (the note, the changes since its result, the review to address), then its task, the
 driver's sections, the critic's rubric, the checks to run before finishing and a file for "I can't fix this";
-the session continues the step's own earlier one, else forks its `context` step's (A-33); then the checks in
+the session continues the step's own earlier one, else forks its `context` step's (A-33), except that the step
+re-entered with a note starts fresh (its repairs continue that new session); then the checks in
 order, then the critic with the worker's task below its rubric. A repair resumes the session with the review
 leading the brief and a file for disputes; the critic re-reviews only its earlier points and gets one repair
 round, after which its open point is accepted and returned. No further round when the worker can't fix it or

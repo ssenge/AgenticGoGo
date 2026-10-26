@@ -70,6 +70,8 @@ pub struct Flow {
     hooks: Option<Hooks>,
     on_start: Option<OnStart>,
     pub(crate) triage: Option<(Step, u32)>,
+    /// whether the step re-entered with a note started its fresh session in this run yet.
+    pub(crate) renewed: Cell<bool>,
 }
 
 impl Deref for Flow {
@@ -85,7 +87,8 @@ impl Flow {
         let project = agg.dir().to_path_buf();
         let scratch = std::env::temp_dir().join(format!("agg-flow-{}", std::process::id()));
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
-               scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, triage: None, agg }
+               scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, triage: None,
+               renewed: Cell::new(false), agg }
     }
 
     /// The history in `path` (relative to the project) instead of `agg/private/steps.jsonl`.

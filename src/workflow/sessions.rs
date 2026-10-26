@@ -1,7 +1,8 @@
 //! The agents' own sessions per step (A-33 in a workflow): a step that ran before continues its own session (a
-//! repair, a re-entry, a refresh: it knows what it wrote and why), and a step with a `context` step starts
-//! from a fork of that step's session (it read the same inputs). Otherwise, and whenever the agent can't, the
-//! step starts fresh: the session is a cache, the files are the record.
+//! repair, a refresh: it knows what it wrote and why), and a step with a `context` step starts from a fork of
+//! that step's session (it read the same inputs). A step re-entered with a note starts fresh: its old session
+//! remembers the result as done and reads the brief for the note no closer than for a repeat. Otherwise, and
+//! whenever the agent can't, the step starts fresh: the session is a cache, the files are the record.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,7 +18,8 @@ const FILE: &str = ".git/agg-sessions.json";
 /// Runs `step` as the flow's step `name` from its session, and remembers the session it ran in.
 pub(crate) fn step(flow: &Flow, name: &str, step: &Step, context: Option<&str>) -> Result<StepOutcome, Fatal> {
     let mut known = load(flow.project());
-    let outcome = flow.step(&started(step, known.get(key(name)), context.and_then(|c| known.get(c))))?;
+    let anew = renews(flow, name);
+    let outcome = flow.step(&started(step, known.get(key(name)), context.and_then(|c| known.get(c)), anew))?;
     if let Some(session) = &outcome.agent_session {
         known.insert(key(name).to_string(), session.clone());
         let _ = std::fs::write(flow.project().join(FILE), serde_json::to_string(&known).unwrap_or_default());
@@ -25,9 +27,17 @@ pub(crate) fn step(flow: &Flow, name: &str, step: &Step, context: Option<&str>) 
     Ok(outcome)
 }
 
-/// The step continuing its own session, else forking the context step's, else fresh.
-fn started(step: &Step, own: Option<&AgentSession>, context: Option<&AgentSession>) -> Step {
+/// Whether step `name` starts anew: the run re-entered it with a note, and this is its first session in the
+/// run (its repairs continue the session this one starts).
+fn renews(flow: &Flow, name: &str) -> bool {
+    flow.run.note.is_some() && flow.run.from.as_deref() == Some(key(name)) && !flow.renewed.replace(true)
+}
+
+/// The step fresh when it starts `anew`, else continuing its own session, else forking the context step's,
+/// else fresh.
+fn started(step: &Step, own: Option<&AgentSession>, context: Option<&AgentSession>, anew: bool) -> Step {
     match (own, context) {
+        _ if anew => step.clone(),
         (Some(own), _) => step.clone().resume(own),
         (None, Some(theirs)) => step.clone().fork(theirs),
         (None, None) => step.clone(),
@@ -53,9 +63,10 @@ mod tests {
         let (own, theirs) = (AgentSession { agent: "claude".into(), id: "a".into() },
                              AgentSession { agent: "claude".into(), id: "b".into() });
         let step = Step::new("8.2 Ops docs");
-        assert_eq!(started(&step, Some(&own), Some(&theirs)).resume, Some((own.clone(), false)));
-        assert_eq!(started(&step, None, Some(&theirs)).resume, Some((theirs, true)));
-        assert_eq!(started(&step, None, None).resume, None);
+        assert_eq!(started(&step, Some(&own), Some(&theirs), false).resume, Some((own.clone(), false)));
+        assert_eq!(started(&step, None, Some(&theirs), false).resume, Some((theirs.clone(), true)));
+        assert_eq!(started(&step, None, None, false).resume, None);
+        assert_eq!(started(&step, Some(&own), Some(&theirs), true).resume, None, "re-entered with a note: fresh");
     }
 
     /// The sessions outlast the run in the git folder, and a reset forgets them.
