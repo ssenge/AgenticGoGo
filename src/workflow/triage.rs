@@ -91,10 +91,15 @@ fn answer(file: &std::path::Path) -> (String, String, String) {
     (field("reenter"), cause, field("note"))
 }
 
-/// Runs a workflow driver (`agg::driver::run`); when triage sent it back, starts it again at the step it
-/// chose, with the note and one more re-entry, keeping the call log the new run would replace.
+/// Runs a workflow driver (`agg::driver::run`), an error that ends it recorded in the history against the step
+/// running then; when triage sent it back, starts it again at the step it chose, with the note and one more
+/// re-entry, keeping the call log the new run would replace.
 pub fn run(drive: impl FnOnce() -> Result<(), Fatal>) -> ExitCode {
-    let code = crate::driver::run(drive);
+    let code = crate::driver::run(|| drive().inspect_err(|e| {
+        if !matches!(e, Fatal::Ended(_)) {
+            super::history::ended_by(&e.to_string());
+        }
+    }));
     let Some((at, note, project)) = REENTRY.get() else {
         return code;
     };
@@ -138,6 +143,18 @@ mod tests {
             .map(String::from).to_vec();
         assert_eq!(reentered(&args, "2.5", "fix y"),
                    ["proj", "--until", "5.3", "--from", "2.5", "--note", "fix y", "--reentries", "2"].map(String::from));
+    }
+
+    /// A driver's own error is recorded against the step running; an ended run's end is not an error.
+    #[test]
+    fn a_drivers_error_is_recorded_and_an_end_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = super::super::History::new(dir.path(), "steps.jsonl");
+        history.at("3.2 Capture");
+        let _ = run(|| Err(Fatal::Ended(crate::plugin::RunOutcome::Halt)));
+        assert!(history.entries().is_empty());
+        let _ = run(|| Err(Fatal::Other(anyhow::anyhow!("writing x: no folder"))));
+        assert_eq!(history.entries()[0]["rationale"], "writing x: no folder");
     }
 
     /// The answer's keys, or why there is none.

@@ -1,6 +1,6 @@
 //! What the operator's environment changes in every agent call, whichever step or judge makes it: a model the
 //! provider lacks and its stand-in (`AGG_MODELS`), Codex's config overrides (`AGG_CODEX_CONFIG`), and the MCP
-//! servers of a Claude worker (`AGG_CLAUDE_MCP_CONFIG`). Switching
+//! servers and settings of a Claude worker (`AGG_CLAUDE_MCP_CONFIG`, `AGG_CLAUDE_SETTINGS`). Switching
 //! between environments (a subscription, a cloud provider, another account) then changes no config file.
 
 /// The model to call for `model`: its stand-in in `AGG_MODELS` (`<model>=<stand-in>`, comma-separated), else
@@ -20,7 +20,18 @@ pub fn codex_config() -> Vec<String> {
 /// the user's settings and so without the MCP servers registered there: e.g. a web search where the provider has
 /// none.
 pub fn claude_mcp_config() -> Option<String> {
-    std::env::var("AGG_CLAUDE_MCP_CONFIG").ok().filter(|v| !v.trim().is_empty())
+    set("AGG_CLAUDE_MCP_CONFIG")
+}
+
+/// Claude Code's `--settings` (a file, or its JSON) from `AGG_CLAUDE_SETTINGS`, for a worker that runs without the
+/// user's settings: e.g. a hook that shortens its shell commands' output.
+pub fn claude_settings() -> Option<String> {
+    set("AGG_CLAUDE_SETTINGS")
+}
+
+/// Variable `name`'s value, unless it is unset or blank.
+fn set(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 /// `model`'s stand-in in `map`, else `model`.

@@ -1,12 +1,14 @@
 //! An agent step's run (A-26, A-29): refresh or not, a script first, the brief, the session, then the checks and
 //! the critic, and repair rounds until they are met, the worker can't fix it, or the critic's round is spent.
+//! Every session starts fresh: what a step knows is in its brief and the project's files, never in an earlier
+//! session.
 
 use super::brief::{with_lead, with_section};
 use super::flow::{Flow, When};
 use super::git::{changes_since, unchanged_since};
 use super::review::{cannot_fix, focused, self_checked, stuck, with_rubric, with_task, Earlier};
 use super::task::{Outcome, Task};
-use super::{key, sessions};
+use super::key;
 use crate::core::model::{Judge, Verdict};
 use crate::driver::{Fatal, GateOutcome, Landing, Step};
 
@@ -63,7 +65,8 @@ impl Flow {
         if !self.runs(&name)? {
             return Ok(Outcome::NotReached);
         }
-        let since = self.refreshing(&name);
+        // only a step that names what it reads can tell a refresh from a new task: one without inputs runs it whole
+        let since = t.inputs.as_ref().and_then(|_| self.refreshing(&name));
         if let Some(why) = since.as_deref().and_then(|c| untouched(self, t, c)) {
             self.record(&name, "unchanged", true, &why);
             return Ok(Outcome::Unchanged);
@@ -75,15 +78,16 @@ impl Flow {
         let critic = t.critic.as_ref().map(|c| with_task(self, &self.absolute_judge(c), &t.critic_context, &step))
             .transpose()?;
         let judges = Judges { flow: self, name: &name, checks: &t.checks, critic: critic.as_ref() };
-        let base = self.lead(&name, &step, since.as_deref())?;
+        let base = self.lead(&name, &step, since.as_deref(), t.inputs.as_deref().unwrap_or_default())?;
         let base = match self.first(&name, t, &judges)? {
             First::Done => return Ok(Outcome::Done),
             First::Rest(rest) => with_section(&base, &rest)?,
             First::None => base,
         };
         let cannot = self.scratch(&format!("{}-cannot-fix.md", key(&name)))?;
-        let step = self.briefed(&name, &base, t, critic.as_ref(), &cannot)?;
-        let landed = sessions::step(self, &name, &step, t.context.as_deref())?.landed;
+        let rubric = t.critic.as_ref().map(|c| self.absolute_judge(c));
+        let step = self.briefed(&name, &base, t, rubric.as_ref(), &cannot)?;
+        let landed = self.step(&step)?.landed;
         if landed == Landing::Nothing && since.is_some() {
             self.gate()?;
             self.record(&name, "unchanged", true, "refreshed: the changes since its last result didn't concern it");
@@ -102,15 +106,16 @@ impl Flow {
         if reentered { self.steps().last_commit(name, &["done", "unchanged"]) } else { None }
     }
 
-    /// The step with what is new leading its brief: the changes since its result, or the note at `--from`.
-    fn lead(&self, name: &str, step: &Step, since: Option<&str>) -> Result<Step, Fatal> {
+    /// The step with what is new leading its brief: the changes to its `inputs` since its result, or the note at
+    /// `--from`.
+    fn lead(&self, name: &str, step: &Step, since: Option<&str>, inputs: &[String]) -> Result<Step, Fatal> {
         if let Some(commit) = since {
             let mut skip = vec!["agg".to_string()];
             skip.extend(self.own.iter().cloned());
-            let (stat, diff) = changes_since(self.project(), commit, &skip, DIFF_LIMIT);
+            let (stat, diff) = changes_since(self.project(), commit, inputs, &skip, DIFF_LIMIT);
             return with_lead(step, &format!(
                 "## Since your last result\n\nYou did this task before, and your result is in place. Since then, \
-                 these changes were made in the project:\n\n```\n{stat}\n```\n\n```diff\n{diff}\n```\n\nAdjust your \
+                 these changes were made to what it reads:\n\n```\n{stat}\n```\n\n```diff\n{diff}\n```\n\nAdjust your \
                  result only where these changes require it, and change nothing else. If they don't concern your \
                  result, change nothing at all and finish."));
         }
@@ -146,8 +151,9 @@ impl Flow {
         Ok(First::Done)
     }
 
-    /// The worker's brief: the task and what leads it, the driver's sections, the critic's rubric, the checks
-    /// to run, and the way out when it can't fix a failure.
+    /// The worker's brief: the task and what leads it, the driver's sections, the critic's rubric (`critic` as
+    /// written: the task it would repeat is already above), the checks to run, and the way out when it can't
+    /// fix a failure.
     fn briefed(&self, name: &str, base: &Step, t: &Task, critic: Option<&Judge>, cannot: &std::path::Path)
                -> Result<Step, Fatal> {
         let mut step = base.clone();
@@ -191,17 +197,17 @@ impl Flow {
         Ok(Outcome::Done)
     }
 
-    /// One repair round: the worker fixes the points (or disputes one) in its own session, then the review.
+    /// One repair round: a fresh session fixes the points (or disputes one), then the review.
     fn repair(&self, name: &str, step: &Step, round: usize, (verdict, by_critic): (&Verdict, bool), judges: &Judges)
               -> Result<(Verdict, bool), Fatal> {
         self.record(name, "repair", false, verdict.rationale());
         let disputed = self.scratch(&format!("{}-disputes-{round}.md", key(name)))?;
-        sessions::step(self, name, &with_lead(step, &format!(
+        self.step(&with_lead(step, &format!(
             "## Review to address\n\nYou already did this task; a reviewer checked your result and found the \
              points below. Fix each point that is right, and change nothing else. If you are sure a point is \
              wrong, leave it unchanged and write the point with your reason, in one sentence, to {}. A point \
              the reviewer repeats after reading your reason must be fixed: the reviewer has weighed your \
-             reason and still sees the issue.\n\n{}", disputed.display(), verdict.rationale()))?, None)?;
+             reason and still sees the issue.\n\n{}", disputed.display(), verdict.rationale()))?)?;
         let disputes = std::fs::read_to_string(&disputed).unwrap_or_default();
         judges.review(Some(&Earlier { round, points: verdict.rationale().to_string(), disputes, by_critic }))
     }

@@ -157,6 +157,12 @@ pub trait AgentBackend: Send + Sync {
     /// Claude session look like it wrote tens of thousands of tokens it never wrote.
     fn parse_usage(&self, line: &str) -> Option<crate::usage::Tokens>;
 
+    /// The worker arguments that limit its session to `tools` (the agent's own names; `Step::tools`). Default
+    /// none: an agent that can't limit its tools runs with all of them.
+    fn tool_args(&self, _tools: &[String]) -> Vec<String> {
+        vec![]
+    }
+
     /// The model that ACTUALLY ran, if THIS line names it — as the agent reports it, which is not
     /// always what was configured (an alias resolves, an `auto` mode picks). The worker keeps the
     /// FIRST one seen. Default `None`: an agent whose stream never names its model (Codex).

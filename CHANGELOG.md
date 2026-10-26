@@ -2,6 +2,32 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.36 (2026-10-26)
+
+### Changed
+
+- **Every workflow session starts fresh** (`agg::workflow`): a step's first session, its repairs and its
+  refreshes no longer continue or fork an earlier agent session. What a step knows is in its brief and the
+  project's files. A continued session took its brief for known and could carry an earlier instruction into a
+  new task; on a cold cache it also paid for its whole history again. Removed: `Task::context`,
+  `workflow::forget` and the session store `.git/agg-sessions.json`. `Step::resume` and `Step::fork` stay on the
+  driver API.
+- **A refresh needs declared inputs:** after a re-entry, only a step with `Task::inputs` is a refresh (unchanged
+  inputs: no session; else a brief led by the changes since its result, now to its inputs alone). A step without
+  inputs can't tell a refresh from a new task, so it runs its task whole.
+- **The worker's brief carries the critic's rubric once:** "How your result is reviewed" quotes the rubric as
+  written, without the worker's own task, which the critic's copy appends and the brief already holds.
+
+### Added
+
+- **The error that ends a workflow run is in its history:** an error a driver returns past every block (e.g. a
+  file it can't write) is recorded as kind `error` against the step running then (`workflow::run`).
+- **`Step::tools(names)`:** limits a worker to these tools of its agent; its MCP servers' tools come on top.
+  Claude: `--tools a,b` (a session then starts with only those tools' descriptions); an agent that can't limit
+  its tools runs with all of them and the step says so (`AgentBackend::tool_args`).
+- **`AGG_CLAUDE_SETTINGS`:** Claude Code's `--settings` (a file or its JSON) for every Claude worker that runs
+  without the user's settings, e.g. a hook that shortens its shell commands' output.
+
 ## 0.0.35 (2026-10-26)
 
 ### Added

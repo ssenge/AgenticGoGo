@@ -74,6 +74,9 @@ pub struct Step {
     /// what is new for this attempt, said in the opening message of a session that continues the step's own
     /// (`resume`, not a fork). See [`Step::news`].
     pub news: Option<String>,
+    /// the agent's own tools this step's worker gets, by the agent's names; its MCP servers' tools come on
+    /// top. `None` = all of them. See [`Step::tools`].
+    pub tools: Option<Vec<String>>,
 }
 
 impl Step {
@@ -204,6 +207,18 @@ impl Step {
     /// context. A backend that can't fork starts fresh, as [`Step::resume`] does.
     pub fn fork(mut self, session: &AgentSession) -> Step {
         self.resume = Some((session.clone(), true));
+        self
+    }
+
+    /// LIMIT the worker to these tools of its agent, by the agent's own names (Claude's `Bash`, `Read`, …);
+    /// its MCP servers' tools come on top. A session then starts with only their descriptions in its context.
+    /// An agent that can't limit its tools runs with all of them, and the step says so.
+    pub fn tools<I, S>(mut self, names: I) -> Step
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.tools = Some(names.into_iter().map(Into::into).collect());
         self
     }
 

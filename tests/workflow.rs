@@ -140,6 +140,9 @@ fn a_critic_point_left_after_its_round_is_accepted_and_returned() {
     assert_eq!(calls.len(), 2);
     assert!(calls[1].contains("This is a re-review") && calls[1].contains("fix A"));
     assert!(calls[0].contains("## The worker's task") && calls[0].contains("Do the work."));
+    let brief = std::fs::read_to_string(tmp.path().join(".git/agg-worker.args")).unwrap();
+    assert!(brief.contains("Is the work right?") && !brief.contains("## The worker's task"),
+            "the worker gets the rubric without the task it would repeat\n{brief}");
 }
 
 /// A task that climbs and ends unmet returns why to its caller, its work kept, instead of failing into
@@ -219,10 +222,27 @@ fn a_later_step_with_unchanged_inputs_refreshes_without_a_session() {
     assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), sessions + 1);
 }
 
-/// A-33: a step re-entered with a note starts a fresh session, not its old one, and its repairs continue the
-/// session it started.
+/// A later step that names no inputs can't tell a refresh from a new task: after a re-entry it runs its task
+/// whole, without being told to keep its result.
 #[test]
-fn a_step_reentered_with_a_note_starts_fresh_and_its_repairs_continue() {
+fn a_later_step_without_inputs_runs_its_task_whole() {
+    let tmp = project(1);
+    let d = tmp.path();
+    let f = flow(d, Run::default());
+    assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done);
+    assert_eq!(f.task(&task("2 Docs")).unwrap(), Outcome::Done);
+    f.flush().unwrap();
+    drop(f);
+    let f = flow(d, Run { from: Some("1".into()), note: Some("again".into()), ..Run::default() });
+    assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done);
+    let _ = f.task(&task("2 Docs"));
+    let brief = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
+    assert!(!brief.contains("Since your last result"), "{brief}");
+}
+
+/// Every session starts fresh, a repair's and a re-entered step's too: what a step knows is in its files.
+#[test]
+fn every_session_starts_fresh() {
     let tmp = project(2);
     let d = tmp.path();
     let f = flow(d, Run::default());
@@ -233,12 +253,8 @@ fn a_step_reentered_with_a_note_starts_fresh_and_its_repairs_continue() {
     let f = flow(d, Run { from: Some("1".into()), note: Some("fix x".into()), ..Run::default() });
     assert_eq!(f.task(&task("1 Build").repairs(1)).unwrap(), Outcome::Done);
     let argv = std::fs::read_to_string(d.join(".git/agg-worker.argv")).unwrap();
-    let resumed: Vec<bool> = argv.lines().map(|l| l.contains("--resume")).collect();
-    assert_eq!(resumed, [false, true, false, true], "first run: fresh, repair; re-entry: fresh, repair\n{argv}");
-    // a continued session is told what is new in its opening message; a fresh one reads its brief
-    let told: Vec<bool> = argv.lines().map(|l| l.contains("What is new for this attempt")).collect();
-    assert_eq!(told, resumed, "the fresh session's note is in its brief alone\n{argv}");
-    assert!(argv.lines().filter(|l| l.contains("--resume")).all(|l| l.contains("## Review to address")), "{argv}");
+    assert_eq!(argv.lines().count(), 4, "first run: work, repair; re-entry: work, repair\n{argv}");
+    assert!(!argv.contains("--resume"), "{argv}");
 }
 
 /// A flow's scratch folder goes when the flow ends, however it ended, read-only files and all.

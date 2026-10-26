@@ -76,8 +76,6 @@ pub struct Flow {
     pub(crate) triage: Option<(Step, u32)>,
     /// which of triage's proposals go ahead without a human's yes: (the failed step, the step to re-enter).
     pub(crate) trusted: Option<Box<Trust>>,
-    /// whether the step re-entered with a note started its fresh session in this run yet.
-    pub(crate) renewed: Cell<bool>,
 }
 
 impl Drop for Flow {
@@ -102,7 +100,7 @@ impl Flow {
         super::scratch::sweep(&std::env::temp_dir());
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
                scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, triage: None,
-               trusted: None, renewed: Cell::new(false), agg }
+               trusted: None, agg }
     }
 
     /// The history in `path` (relative to the project) instead of `agg/private/steps.jsonl`.
@@ -175,6 +173,7 @@ impl Flow {
         }
         // a pending entry would count as the next session's change, and a refresh would never be unchanged
         self.flush()?;
+        self.history.at(name);
         git(&self.project, &["update-ref", &before(key(name)), "HEAD"])?;
         if let Some(Err(why)) = self.on_start.as_ref().map(|f| f(self, name)) {
             self.fail(name, &why)?;

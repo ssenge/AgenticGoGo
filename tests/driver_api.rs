@@ -1699,6 +1699,18 @@ fn a_run_without_user_settings_starts_workers_on_the_projects_settings_only() {
     assert!(worker_args(dir).contains("--setting-sources\nproject,local\n"), "{}", worker_args(dir));
 }
 
+/// A step's tools reach its Claude worker as one `--tools` list; a step that names none gets every tool.
+#[test]
+fn a_steps_tools_limit_its_worker() {
+    let tmp = project();
+    let dir = tmp.path();
+    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    agg.step(&work()).unwrap();
+    assert!(!worker_args(dir).contains("--tools"), "every tool by default");
+    agg.step(&work().tools(["Bash", "Read"])).unwrap();
+    assert!(worker_args(dir).contains("--tools\nBash,Read\n"), "{}", worker_args(dir));
+}
+
 /// A-34: the run's system prompt reaches every worker's agent as its own flag, not in the brief; none by default.
 #[test]
 fn a_system_prompt_reaches_the_worker_as_its_own_flag() {

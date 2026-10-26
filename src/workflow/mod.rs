@@ -4,7 +4,7 @@
 //! `agg.judge`, `agg.gate` and `agg.hil_bool`: no second execution model.
 //!
 //! A step's key is the first word of its name (`"2.5"` of `"2.5 Resolve bindings"`): what `--from` and
-//! `--until` name, and what the history and the session store go by.
+//! `--until` name, and what the history goes by.
 
 mod agent;
 mod approval;
@@ -15,7 +15,6 @@ mod history;
 mod review;
 mod roles;
 mod scratch;
-mod sessions;
 mod task;
 mod triage;
 
@@ -24,7 +23,6 @@ pub use flow::{Flow, Run, When};
 pub use git::{before, changes_since, commit, take_back, unchanged_since};
 pub use history::{History, DEFAULT as HISTORY};
 pub use roles::{Role, Roles};
-pub use sessions::forget;
 pub use task::{Outcome, Task};
 pub use triage::run;
 

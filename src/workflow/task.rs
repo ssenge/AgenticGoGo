@@ -25,8 +25,6 @@ pub struct Task {
     pub first: Option<Judge>,
     /// what the step reads (git pathspecs): a refresh with none of them changed needs no session.
     pub inputs: Option<Vec<String>>,
-    /// the key of the step whose agent session this one starts from, forked: one that read the same.
-    pub context: Option<String>,
     /// an unmet end returns [`Outcome::Unmet`] to the caller, the work kept, instead of failing into triage.
     pub climbs: bool,
 }
@@ -35,7 +33,7 @@ impl Task {
     /// The worker's step, with no judges, no repairs and nothing else.
     pub fn new(step: Step) -> Task {
         Task { name: None, step, sections: vec![], checks: vec![], critic: None, critic_context: String::new(), repairs: 0,
-               first: None, inputs: None, context: None, climbs: false }
+               first: None, inputs: None, climbs: false }
     }
 
     /// The step's name in the flow, when it isn't the worker step's own (e.g. `"2.2 Derive goals"` for a
@@ -87,11 +85,6 @@ impl Task {
         self
     }
 
-    /// The step whose session this one forks.
-    pub fn context(mut self, key: impl Into<String>) -> Task {
-        self.context = Some(key.into());
-        self
-    }
 
     /// An unmet end returns to the caller (who climbs to a next attempt) instead of failing into triage.
     pub fn climbs(mut self) -> Task {

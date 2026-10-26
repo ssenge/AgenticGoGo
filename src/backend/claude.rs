@@ -56,6 +56,12 @@ impl AgentBackend for Claude {
         DEFAULT_SUMMARY_MODEL
     }
 
+    /// `--tools`: only these built-in tools (the MCP servers' stay). One argument, comma-joined: the flag takes
+    /// a list, and `-p` after the worker arguments ends it.
+    fn tool_args(&self, tools: &[String]) -> Vec<String> {
+        vec!["--tools".to_string(), tools.join(",")]
+    }
+
     /// stdin is `/dev/null` so a worker can never block on a TTY read; stdout/stderr are piped
     /// because the event stream IS stdout.
     fn session_command(&self, spec: &SessionSpec) -> Command {
@@ -82,9 +88,13 @@ impl AgentBackend for Claude {
         }
         if !spec.user_settings {
             command.arg("--setting-sources").arg("project,local");
-            // Without the user's settings a worker has none of the user's MCP servers: it gets the environment's.
+            // Without the user's settings a worker has none of the user's MCP servers or hooks: it gets the
+            // environment's.
             if let Some(config) = super::overrides::claude_mcp_config() {
                 command.arg("--mcp-config").arg(config);
+            }
+            if let Some(settings) = super::overrides::claude_settings() {
+                command.arg("--settings").arg(settings);
             }
         }
         if let Some(text) = spec.system_prompt {
