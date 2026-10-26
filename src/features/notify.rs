@@ -318,6 +318,7 @@ mod tests {
                 state: "agg/state/STATE.md".into(),
                 memory: true,
                 resume: None,
+                news: None,
                 user_settings: true,
                 system_prompt: None,
                 role_prompt: None,

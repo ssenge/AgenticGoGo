@@ -122,6 +122,9 @@ same context. `StepOutcome::agent_session` is the handle (the agent and its sess
 ran the session can continue it; on another agent, a backend without resume (or fork: only Claude has it),
 or a session the agent no longer has, the step says so and starts fresh. The context is a cache, never the
 record: a step must still pass started fresh. Not to be confused with resuming a crashed run, below.
+`.news(text)` names what is new for this attempt (also written into its brief): a session that continues its
+own gets it in its opening message after the pointer to the brief (cut at 4000 characters), since it takes
+the rest of the brief for known; a fresh or forked session gets the pointer alone.
 
 ### Judges
 

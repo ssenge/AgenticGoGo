@@ -5,7 +5,7 @@
 //!
 //! | field | rule |
 //! |---|---|
-//! | `agent` `model` `effort` `isolation` `image` `prompt` `state` `memory` `resume` | **OVERRIDE** — the derived step wins |
+//! | `agent` `model` `effort` `isolation` `image` `prompt` `state` `memory` `resume` `news` | **OVERRIDE** — the derived step wins |
 //! | `prompt` / `prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other |
 //! | `role_prompt` / `role_prompt_file` | **OVERRIDE AS A PAIR** — setting one clears the other; neither set = the run's defaults, as in YAML |
 //! | `readonly` | **ACCUMULATES** — a derived step cannot silently lose a deny its template set |
@@ -71,6 +71,9 @@ pub struct Step {
     /// the agent session this step's session continues, and whether it branches off it (`true`)
     /// instead of appending to it. `None` = a fresh session. See [`Step::resume`] and [`Step::fork`].
     pub resume: Option<(AgentSession, bool)>,
+    /// what is new for this attempt, said in the opening message of a session that continues the step's own
+    /// (`resume`, not a fork). See [`Step::news`].
+    pub news: Option<String>,
 }
 
 impl Step {
@@ -185,6 +188,14 @@ impl Step {
     /// step must still pass started fresh.
     pub fn resume(mut self, session: &AgentSession) -> Step {
         self.resume = Some((session.clone(), false));
+        self
+    }
+
+    /// What is NEW for this attempt (a review to address, the changes since the last result), also in the
+    /// brief. A session that continues its own ([`Step::resume`]) gets it in its opening message too: it
+    /// takes the rest of the brief for known and may skim past it. A fresh or forked session reads the brief.
+    pub fn news(mut self, text: impl Into<String>) -> Step {
+        self.news = Some(text.into());
         self
     }
 
