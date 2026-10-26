@@ -2,6 +2,24 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.34 (2026-10-26)
+
+### Fixed
+
+- **A step re-entered with a note starts a fresh session:** with `--from <step> --note <text>`, the step's
+  first session in the run no longer continues (or forks) its old agent session, which remembered the result as
+  done, skimmed the brief, missed the note and reported done again. Its repairs continue the new session;
+  refreshes and repairs elsewhere continue theirs as before.
+- **A continued session's opening message carries what is new:** `Step::news(text)` names what is new for an
+  attempt; a session that resumes its own (not a fork) gets it in its opening message after the pointer to the
+  brief, cut at 4000 characters with a pointer to the brief (`loop_::opening`, `ResolvedStep::news`). The
+  workflow's leads (the review to address, the changes since the last result, the note) set it through
+  `workflow::with_lead`.
+- **A flow's scratch folder is removed when the flow ends:** the folder is now `agg-flow-<pid>-<n>` in the temp
+  dir, one per flow, removed when the `Flow` is dropped (normal end or error), read-only files and all; a flow
+  that starts removes the folders of processes that are gone. A dead run's files no longer read as current to
+  a later run's agent.
+
 ## 0.0.33 (2026-10-24)
 
 ### Added
