@@ -203,6 +203,9 @@ impl AgentBackend for Codex {
         if let Some(level) = effort_arg(spec.effort) {
             command.arg("-c").arg(format!("model_reasoning_effort={level}"));
         }
+        for kv in super::overrides::codex_config() {
+            command.arg("-c").arg(kv);
+        }
         for a in spec.extra_args {
             command.arg(a);
         }
@@ -360,6 +363,10 @@ impl AgentBackend for Codex {
         }
         if let Some(level) = effort_arg(effort) {
             command.arg("-c").arg(format!("model_reasoning_effort={level}"));
+        }
+        // the provider comes from the operator's environment: this call reads no config file
+        for kv in super::overrides::codex_config() {
+            command.arg("-c").arg(kv);
         }
         command.arg(prompt).stdin(Stdio::null()); // positional prompt; stdin nulled or it hangs
         if let Some(dir) = cwd {

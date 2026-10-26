@@ -92,6 +92,8 @@ pub fn run_session(
     // WHAT to run is the backend's business (binary, flags, prompt placement); HOW to supervise
     // it is ours (process group, stream reader, heartbeat, watchdog, reaping). A resume comes only
     // from a driver step, already checked against this agent (A-33); otherwise the context is fresh.
+    // a model the operator's environment stands in for (AGG_MODELS) is called as its stand-in
+    let model = &backend::overrides::model(model);
     let command = agent.session_command(&backend::SessionSpec {
         prompt,
         model,
