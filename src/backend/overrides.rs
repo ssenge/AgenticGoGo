@@ -1,5 +1,6 @@
 //! What the operator's environment changes in every agent call, whichever step or judge makes it: a model the
-//! provider lacks and its stand-in (`AGG_MODELS`), and Codex's config overrides (`AGG_CODEX_CONFIG`). Switching
+//! provider lacks and its stand-in (`AGG_MODELS`), Codex's config overrides (`AGG_CODEX_CONFIG`), and the MCP
+//! servers of a Claude worker (`AGG_CLAUDE_MCP_CONFIG`). Switching
 //! between environments (a subscription, a cloud provider, another account) then changes no config file.
 
 /// The model to call for `model`: its stand-in in `AGG_MODELS` (`<model>=<stand-in>`, comma-separated), else
@@ -13,6 +14,13 @@ pub fn model(model: &str) -> String {
 /// reads no config file (`--ignore-user-config`) and so can't take its provider from one.
 pub fn codex_config() -> Vec<String> {
     lines(std::env::var("AGG_CODEX_CONFIG").ok().as_deref())
+}
+
+/// Claude Code's `--mcp-config` (a file, or its JSON) from `AGG_CLAUDE_MCP_CONFIG`, for a worker that runs without
+/// the user's settings and so without the MCP servers registered there: e.g. a web search where the provider has
+/// none.
+pub fn claude_mcp_config() -> Option<String> {
+    std::env::var("AGG_CLAUDE_MCP_CONFIG").ok().filter(|v| !v.trim().is_empty())
 }
 
 /// `model`'s stand-in in `map`, else `model`.

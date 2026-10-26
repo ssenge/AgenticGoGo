@@ -12,6 +12,9 @@ Notable changes to agg. Newest first; each entry names the config keys and inter
 - **`AGG_CODEX_CONFIG`:** Codex `-c` overrides from the environment, one `key=value` per line, on every Codex
   session and one-shot (`backend::overrides::codex_config`): a Codex judge reads no config file, so this is how
   it reaches a provider other than OpenAI's (e.g. Amazon Bedrock).
+- **`AGG_CLAUDE_MCP_CONFIG`:** Claude Code's `--mcp-config` (a file or its JSON) for every Claude worker that runs
+  without the user's settings, since such a worker loads none of the user's MCP servers. E.g. a web search
+  where the provider has none.
 
 ## 0.0.34 (2026-10-26)
 
