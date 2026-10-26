@@ -1771,6 +1771,7 @@ switching between environments (a subscription, a cloud provider, another accoun
 | `AGG_MODELS` | Model stand-ins, `<model>=<stand-in>` comma-separated: a session, judge or summary that names `<model>` calls `<stand-in>`. E.g. `claude-fable-5-1=claude-opus-5-5` where the provider has no Fable. |
 | `AGG_CODEX_CONFIG` | Codex `-c` overrides, one `key=value` per line, on every Codex session and one-shot, e.g. `model_provider="amazon-bedrock-runtime"` and `model="global.openai.gpt-6-luna"`. A Codex judge reads no config file (`--ignore-user-config`), so its provider can only come from here. |
 | `AGG_CLAUDE_MCP_CONFIG` | Claude Code's `--mcp-config` (a file, or its JSON) for every Claude worker that runs without the user's settings (`user_settings: false`, the default): such a worker loads none of the user's MCP servers, so this is how it gets one, e.g. a web search where the provider has none. |
+| `AGG_CLAUDE_SETTINGS` | Claude Code's `--settings` (a file, or its JSON) for every Claude worker that runs without the user's settings: such a worker loads none of the user's hooks, so this is how it gets one, e.g. a hook that shortens its shell commands' output. |
 
 Claude Code takes its provider from its own variables (`CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`, …), which
 every agent agg starts inherits.

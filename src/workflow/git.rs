@@ -40,13 +40,14 @@ pub fn unchanged_since(dir: &Path, commit: &str, paths: &[String]) -> bool {
     git(dir, &[&["diff", "--quiet", commit, "HEAD", "--"], &paths[..]].concat()).is_ok()
 }
 
-/// What changed in the project since `commit`, as a stat and a diff cut at `limit` bytes; `skip` are
-/// pathspecs left out (the run's own records).
-pub fn changes_since(dir: &Path, commit: &str, skip: &[String], limit: usize) -> (String, String) {
-    let skip: Vec<String> = skip.iter().map(|s| format!(":!{s}")).collect();
-    let skip: Vec<&str> = skip.iter().map(String::as_str).collect();
-    let stat = git_out(dir, &[&["diff", "--stat", commit, "HEAD", "--", "."], &skip[..]].concat()).unwrap_or_default();
-    let mut diff = git_out(dir, &[&["diff", commit, "HEAD", "--", "."], &skip[..]].concat()).unwrap_or_default();
+/// What changed in `only` (pathspecs; none: the whole project) since `commit`, as a stat and a diff cut at
+/// `limit` bytes; `skip` are pathspecs left out (the run's own records).
+pub fn changes_since(dir: &Path, commit: &str, only: &[String], skip: &[String], limit: usize) -> (String, String) {
+    let mut paths: Vec<String> = if only.is_empty() { vec![".".to_string()] } else { only.to_vec() };
+    paths.extend(skip.iter().map(|s| format!(":!{s}")));
+    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let stat = git_out(dir, &[&["diff", "--stat", commit, "HEAD", "--"], &paths[..]].concat()).unwrap_or_default();
+    let mut diff = git_out(dir, &[&["diff", commit, "HEAD", "--"], &paths[..]].concat()).unwrap_or_default();
     if diff.len() > limit {
         let cut = diff.char_indices().take_while(|(i, _)| *i < limit).last().map_or(0, |(i, _)| i);
         diff.truncate(cut);
@@ -81,7 +82,8 @@ pub(crate) mod tests {
         dir
     }
 
-    /// A step's inputs count as unchanged only when nothing under them changed since its result.
+    /// A step's inputs count as unchanged only when nothing under them changed since its result, and its
+    /// changes are those to its inputs alone.
     #[test]
     fn unchanged_since_looks_only_at_the_named_paths() {
         let dir = repo();
@@ -95,7 +97,10 @@ pub(crate) mod tests {
         std::fs::write(dir.path().join("app/a.java"), "b").unwrap();
         commit(dir.path(), &["."], "input").unwrap();
         assert!(!unchanged_since(dir.path(), &at, &["app/".into()]));
-        assert!(changes_since(dir.path(), &at, &[], 5).1.ends_with("(cut; see `git diff` in the project folder)"));
+        let (stat, _) = changes_since(dir.path(), &at, &["app/".into()], &[], 1000);
+        assert!(stat.contains("app/a.java") && !stat.contains("notes.md"), "{stat}");
+        assert!(changes_since(dir.path(), &at, &[], &[], 1000).0.contains("notes.md"));
+        assert!(changes_since(dir.path(), &at, &[], &[], 5).1.ends_with("(cut; see `git diff` in the project folder)"));
     }
 
     /// Going back to before a step drops what it and later steps wrote, and keeps the humans' files.

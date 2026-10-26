@@ -726,12 +726,13 @@ impl Agg {
         let news = step.news.clone().filter(|_| matches!(resume, Some((_, false))));
         let user_settings = self.user_settings || !leaves_out_user_settings(&name, step);
         let system_prompt = self.system_prompt.clone().filter(|_| takes_system_prompt(&name, step));
+        let worker_args = worker_args(&self.cfg.defaults.worker_args, &name, step);
         Ok(ResolvedStep {
             name,
             agent: step.agent.name().to_string(),
             model: step.model.clone(),
             effort: step.effort.as_str().map(String::from),
-            worker_args: self.cfg.defaults.worker_args.clone(),
+            worker_args,
             state: step.state.clone().unwrap_or_else(|| self.cfg.defaults.state.clone()),
             memory: step.memory.unwrap_or(self.memory),
             resume,
@@ -1922,6 +1923,22 @@ fn leaves_out_user_settings(name: &str, step: &Step) -> bool {
         eprintln!("  step `{name}`: {} can't leave out the operator's own settings; its worker loads them", step.agent.name());
     }
     can
+}
+
+/// The run's worker arguments, then those that limit the worker to the step's tools; says so where its agent
+/// can't.
+fn worker_args(run: &[String], name: &str, step: &Step) -> Vec<String> {
+    let mut args = run.to_vec();
+    let Some(tools) = &step.tools else { return args };
+    let limits = match &step.agent {
+        Agent::Custom(b) => b.tool_args(tools),
+        a => crate::backend::for_name(a.name()).map(|b| b.tool_args(tools)).unwrap_or_default(),
+    };
+    if limits.is_empty() {
+        eprintln!("  step `{name}`: {} can't limit its tools; its worker runs with all of them", step.agent.name());
+    }
+    args.extend(limits);
+    args
 }
 
 /// Whether the step's agent can add text to its system prompt; says so when it can't.

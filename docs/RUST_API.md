@@ -115,6 +115,10 @@ A step that runs once and hands its result on in its own files can drop agg's wo
 `Step::new("check").memory(false)`. Its brief then names no `STATE.md`, wiki or memory log, and no memory
 fold or summary runs after it. Memory stays on for steps that loop, where one session advises the next.
 
+`.tools(["Bash", "Read", "Edit", "Write"])` limits a worker to these tools of its agent, by the agent's own
+names; its MCP servers' tools come on top. A session then starts with only those tools' descriptions in its
+context. Claude: `--tools`; an agent that can't limit its tools runs with all of them and the step says so.
+
 A step can start from an earlier step's agent session instead of a fresh context:
 `agg.step(&review.create("fix").resume(&done.agent_session.unwrap()))` continues it, `.fork(&s)` branches
 off it and leaves it as it was, so several steps can start from one session and a rerun starts from the
@@ -366,7 +370,7 @@ fn drive() -> Result<(), Fatal> {
 | `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` `.trust(rule)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; triage; which of triage's proposals go ahead without a human's yes (`rule(failed step, re-enter at)`) |
 | `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails |
 | `flow.applies(name, &when)` | the step applies when `when` is met; otherwise recorded `skipped` with the reason, no session; a condition that errs fails the step |
-| `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.context(key)` `.section(text)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |
+| `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.section(text)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |
 | `flow.approval(name, doc, question, decisions, inputs)` | a human approves `doc`, writing their decisions first; after a re-entry, unchanged inputs (else the document) stand without asking |
 | `flow.reenter(key, note)` | the driver itself sends the run back: it ends this run and starts it again at a step the run has seen, with `note`, as after a triage a human said yes to (counts as a re-entry, recorded `reentry`); e.g. a decision taken at an approval that an earlier step's result doesn't carry yet |
 | `workflow::run(drive)` | `driver::run`, then starts the run again at the step triage or `reenter` chose, with its note |
@@ -376,10 +380,10 @@ An agent step, in order: a refresh whose `inputs` didn't change is `unchanged` w
 script does what it can (nothing left and the judges met: done without a session); the worker's brief gets
 what is new first (the note, the changes since its result, the review to address), then its task, the
 driver's sections, the critic's rubric, the checks to run before finishing and a file for "I can't fix this";
-the session continues the step's own earlier one, else forks its `context` step's (A-33), except that the step
-re-entered with a note starts fresh (its repairs continue that new session); then the checks in
-order, then the critic with the worker's task below its rubric. A repair resumes the session with the review
-leading the brief and a file for disputes; the critic re-reviews only its earlier points and gets one repair
+every session starts fresh, its repairs' too: what a step knows is in its brief and the project's files; then
+the checks in order, then the critic with the worker's task below its rubric. Only a step with `inputs` is a
+refresh after a re-entry (one without them runs its task whole), and its changes are those to its inputs. A
+repair is a fresh session with the review leading the brief and a file for disputes; the critic re-reviews only its earlier points and gets one repair
 round, after which its open point is accepted and returned. No further round when the worker can't fix it or
 a check fails exactly as before. A failed step goes to triage: its agent writes `reenter`, `cause` and `note`
 to the file its brief names; an approval is never a re-entry point; a yes ends the run, and
