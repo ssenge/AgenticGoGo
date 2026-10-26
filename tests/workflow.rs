@@ -29,7 +29,7 @@ for a in "$@"; do
     *INSTRUCTIONS.md*) worker=1 ;;
   esac
 done
-if [ -n "$worker" ]; then cat agg/private/INSTRUCTIONS.md >> .git/agg-worker.args; fi
+if [ -n "$worker" ]; then cat agg/private/INSTRUCTIONS.md >> .git/agg-worker.args; echo "$*" >> .git/agg-worker.argv; fi
 answer=$(grep -o '/[^ ]*triage\.yaml' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1)
 if [ -n "$answer" ] && [ -f triage.answer ]; then cp triage.answer "$answer"; rm triage.answer; fi
 if [ -n "$worker" ] && [ ! -f .git/agg-idle ]; then
@@ -217,6 +217,24 @@ fn a_later_step_with_unchanged_inputs_refreshes_without_a_session() {
     assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done);
     assert_eq!(f.task(&task("2 Docs").inputs(["docs/"])).unwrap(), Outcome::Unchanged);
     assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), sessions + 1);
+}
+
+/// A-33: a step re-entered with a note starts a fresh session, not its old one, and its repairs continue the
+/// session it started.
+#[test]
+fn a_step_reentered_with_a_note_starts_fresh_and_its_repairs_continue() {
+    let tmp = project(2);
+    let d = tmp.path();
+    let f = flow(d, Run::default());
+    assert_eq!(f.task(&task("1 Build").repairs(1)).unwrap(), Outcome::Done);
+    drop(f);
+    std::fs::write(d.join("work.log"), "").unwrap();
+    git(d, &["commit", "-qam", "start over"]);
+    let f = flow(d, Run { from: Some("1".into()), note: Some("fix x".into()), ..Run::default() });
+    assert_eq!(f.task(&task("1 Build").repairs(1)).unwrap(), Outcome::Done);
+    let argv = std::fs::read_to_string(d.join(".git/agg-worker.argv")).unwrap();
+    let resumed: Vec<bool> = argv.lines().map(|l| l.contains("--resume")).collect();
+    assert_eq!(resumed, [false, true, false, true], "first run: fresh, repair; re-entry: fresh, repair\n{argv}");
 }
 
 /// A-30: a failed step goes to triage, which proposes an earlier step; a yes records the re-entry and ends
