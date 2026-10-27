@@ -136,6 +136,7 @@ impl VerdictRecord {
             error: self.error.clone(),
             mixed: false,
             vacuous: self.vacuous,
+            blocked_by: None,
         }
     }
 }
@@ -277,7 +278,7 @@ mod tests {
             rationale: "r".into(),
             evidence: vec![],
             error: None,
-            mixed: false, vacuous: false,
+            mixed: false, vacuous: false, blocked_by: None,
         }
     }
 
@@ -420,7 +421,7 @@ mod tests {
             rationale: String::new(),
             evidence: vec![],
             error: None,
-            mixed: false, vacuous: false,
+            mixed: false, vacuous: false, blocked_by: None,
         };
         append(&d, None, "baseline", &[("g".into(), numberless)], Outcome::Baseline).unwrap();
         let line = std::fs::read_to_string(crate::paths::verdicts_jsonl(&d)).unwrap();

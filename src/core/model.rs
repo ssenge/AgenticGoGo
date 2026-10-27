@@ -70,6 +70,10 @@ pub struct Verdict {
     /// regression, and it does not replace the judge's last landed reading. Absent = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vacuous: bool,
+    /// what the goal waits on lies in another step's result (a path or a step's name), so no repair of the
+    /// judged work can meet it. Optional in the contract; absent = nothing blocks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<String>,
 }
 
 fn one() -> f64 {
@@ -91,6 +95,7 @@ impl Verdict {
             error: Some(error),
             mixed: false,
             vacuous: false,
+            blocked_by: None,
         }
     }
 
@@ -108,6 +113,7 @@ impl Verdict {
             error: None,
             mixed: false,
             vacuous: false,
+            blocked_by: None,
         }
     }
 

@@ -366,13 +366,14 @@ fn drive() -> Result<(), Fatal> {
 
 | block | what it does |
 |---|---|
-| `Flow::new(agg, Run)` | the run: `Run::from_args` reads `--from <key> [--note t] [--reset] [--until <key>] [--reentries n]`; a step before `from` doesn't run, the `from` step gets the note leading its brief, every later step refreshes; `--until` ends the run after that step |
+| `Flow::new(agg, Run)` | the run: `Run::from_args` reads `--from <key> [--note t [--decided]] [--reset] [--until <key>] [--reentries n]`; a step before `from` doesn't run, the `from` step gets the note leading its brief (`--decided`: the note is the humans' decision, and the `from` step refreshes against it like a later step, unchanged when it doesn't concern it), every later step refreshes; `--until` ends the run after that step |
 | `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` `.trust(rule)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; triage; which of triage's proposals go ahead without a human's yes (`rule(failed step, re-enter at)`) |
-| `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails |
+| `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails, and after triage's repair in place the script runs again |
+| `flow.recover(name, why, &again)` | the driver's own failure that `again` can judge again (`Ok(None)`: met now): triage may repair it in place, and when `again` is met the call returns and the step goes on; `flow.fail(name, why)` for one it can't judge again |
 | `flow.applies(name, &when)` | the step applies when `when` is met; otherwise recorded `skipped` with the reason, no session; a condition that errs fails the step |
 | `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.section(text)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |
 | `flow.approval(name, doc, question, decisions, inputs)` | a human approves `doc`, writing their decisions first; after a re-entry, unchanged inputs (else the document) stand without asking |
-| `flow.reenter(key, note)` | the driver itself sends the run back: it ends this run and starts it again at a step the run has seen, with `note`, as after a triage a human said yes to (counts as a re-entry, recorded `reentry`); e.g. a decision taken at an approval that an earlier step's result doesn't carry yet |
+| `flow.reenter(key, note)` | the driver itself sends the run back with a decision: it ends this run and starts it again at a step the run has seen, with `note` and `--decided`, as after a triage a human said yes to (counts as a re-entry, recorded `reentry`); e.g. a decision taken at an approval that an earlier step's result doesn't carry yet |
 | `workflow::run(drive)` | `driver::run`, then starts the run again at the step triage or `reenter` chose, with its note |
 | `Roles::load(file, names)` | named roles (`agent`, `model`, `effort`) from a YAML file; an agent that isn't installed is an error at load |
 
@@ -384,10 +385,13 @@ every session starts fresh, its repairs' too: what a step knows is in its brief 
 the checks in order, then the critic with the worker's task below its rubric. Only a step with `inputs` is a
 refresh after a re-entry (one without them runs its task whole), and its changes are those to its inputs. A
 repair is a fresh session with the review leading the brief and a file for disputes; the critic re-reviews only its earlier points and gets one repair
-round, after which its open point is accepted and returned. No further round when the worker can't fix it or
-a check fails exactly as before. A failed step goes to triage: its agent writes `reenter`, `cause` and `note`
-to the file its brief names; an approval is never a re-entry point; a yes ends the run, and
-`workflow::run` starts it again.
+round, after which its open point is accepted and returned. No further round when the worker can't fix it, a
+check fails exactly as before, or a check's verdict is `blocked_by` another step's result. A failed step goes
+to triage: its agent writes `outcome`, `reenter`, `cause` and `note` to the file its brief names. `fixed`: it
+repaired the cause in place, and the step's judges (a script step: its script) judge it again; met, the step
+is done and the run goes on, recorded `triage` with the files it changed; still unmet, the run ends.
+`reenter`: an approval is never a re-entry point; a yes ends the run, and `workflow::run` starts it again.
+`escalate` (or no step): the run ends for a human. Repairs in place and re-entries share triage's limit.
 
 The files a brief names (`flow.scratch(file)`, `flow.wrapper(file, command)`) live in the flow's own folder
 outside the project, `agg-flow-<pid>-<n>` in the temp dir. It is removed when the flow is dropped, however the
