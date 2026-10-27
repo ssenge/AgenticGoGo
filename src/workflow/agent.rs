@@ -59,7 +59,7 @@ enum First {
 }
 
 impl Flow {
-    /// Runs an agent step (A-26) and says what it came to; a failed step goes to triage or ends the run.
+    /// Runs an agent step (A-26) and says what it came to; a failed step goes to the task force or ends the run.
     pub fn task(&self, t: &Task) -> Result<Outcome, Fatal> {
         let name = t.name();
         if !self.runs(&name)? {
@@ -198,7 +198,7 @@ impl Flow {
             (verdict, by_critic) = self.repair(name, step, round, (&verdict, by_critic), judges)?;
         }
         // a worker given no repair round can't answer the critic: its point lies in an earlier step's result,
-        // which triage finds; after a worker tried, what the critic still sees is for the next approval
+        // which the task force finds; after a worker tried, what the critic still sees is for the next approval
         if !verdict.met() && by_critic && repairs > 0 {
             return self.accepted(name, verdict.rationale());
         }
@@ -253,7 +253,7 @@ impl Flow {
         Ok(Outcome::Unmet(why.to_string()))
     }
 
-    /// Fails the step (triage, or the run's end); repaired in place and met when `judges` judge it again, the
+    /// Fails the step (the task force, or the run's end); repaired in place and met when `judges` judge it again, the
     /// step is done.
     fn failed(&self, name: &str, why: &str, judges: Option<&Judges>) -> Result<Outcome, Fatal> {
         let Some(judges) = judges else {
@@ -263,7 +263,7 @@ impl Flow {
         let again = || judges.review(None).map(|(v, _)| (!v.met()).then(|| v.rationale().to_string()));
         self.recover(name, why, &again)?;
         self.keep(name)?;
-        self.record(name, "done", true, "met after triage's repair in place");
+        self.record(name, "done", true, "met after the task force's repair in place");
         Ok(Outcome::Done)
     }
 }

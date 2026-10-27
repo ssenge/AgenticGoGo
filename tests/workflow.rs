@@ -19,7 +19,7 @@ static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
     let (bin, home) = (root.join("bin"), root.join("home"));
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-    // The worker: one line in work.log per session, unless the project says it is idle; a triage session
+    // The worker: one line in work.log per session, unless the project says it is idle; a task force session
     // writes its proposal to the file its brief names.
     write_exe(&bin.join("claude"), r#"#!/bin/sh
 worker=
@@ -30,8 +30,8 @@ for a in "$@"; do
   esac
 done
 if [ -n "$worker" ]; then cat agg/private/INSTRUCTIONS.md >> .git/agg-worker.args; { printf '%s' "$*" | tr '\n' ' '; echo; } >> .git/agg-worker.argv; fi
-answer=$(grep -o '/[^ ]*triage\.yaml' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1)
-if [ -n "$answer" ] && [ -f triage.answer ]; then cp triage.answer "$answer"; rm triage.answer; fi
+answer=$(grep -o '/[^ ]*task-force\.yaml' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1)
+if [ -n "$answer" ] && [ -f task-force.answer ]; then cp task-force.answer "$answer"; rm task-force.answer; fi
 if [ -n "$worker" ] && [ ! -f .git/agg-idle ]; then
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
@@ -146,7 +146,7 @@ fn a_critic_point_left_after_its_round_is_accepted_and_returned() {
 }
 
 /// A task that climbs and ends unmet returns why to its caller, its work kept, instead of failing into
-/// triage; the caller's next attempt continues from it.
+/// the task force; the caller's next attempt continues from it.
 #[test]
 fn a_climbing_task_that_ends_unmet_returns_why_with_its_work_kept() {
     let tmp = project(3);
@@ -273,39 +273,39 @@ fn a_flows_scratch_folder_is_removed_when_it_ends() {
     assert!(!dir.exists(), "{} is left", dir.display());
 }
 
-/// A-30: a failed step goes to triage, which proposes an earlier step; a yes records the re-entry and ends
+/// A-30: a failed step goes to the task force, which proposes an earlier step; a yes records the re-entry and ends
 /// the run.
 #[test]
-fn triage_proposes_an_earlier_step_and_a_yes_ends_the_run_for_the_reentry() {
+fn the_task_force_proposes_an_earlier_step_and_a_yes_ends_the_run_for_the_reentry() {
     let tmp = project(9);
     let d = tmp.path();
-    std::fs::write(d.join("triage.answer"), "reenter: '1'\ncause: step 1 built the wrong thing\nnote: build x\n").unwrap();
+    std::fs::write(d.join("task-force.answer"), "reenter: '1'\ncause: step 1 built the wrong thing\nnote: build x\n").unwrap();
     let answered = answer_yes(d);
-    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
-    let f = flow(d, Run::default()).on_failure(triage, 3);
+    let force = Step::new("task-force").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(force, 3);
     f.task(&Task::new(Step::new("1 Build").model("fake").prompt("Build."))).unwrap();
     let err = f.task(&task("2 Test")).unwrap_err();
     answered.join().unwrap();
     assert!(matches!(err, Fatal::Ended(RunOutcome::Halt)), "{err:?}");
     let last = f.steps().entries().last().cloned().unwrap();
-    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("triage"), Some(true)));
+    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("task-force"), Some(true)));
     assert!(last["rationale"].as_str().unwrap().contains("re-enter at 1: build x"));
 }
 
 /// A proposal the driver trusts goes ahead without a human's yes: no ask, the re-entry recorded as trusted.
 #[test]
-fn a_trusted_triage_proposal_goes_ahead_without_asking() {
+fn a_trusted_task_force_proposal_goes_ahead_without_asking() {
     let tmp = project(9);
     let d = tmp.path();
-    std::fs::write(d.join("triage.answer"), "reenter: '1'\ncause: step 1's script hid a failure\nnote: fix it\n").unwrap();
-    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
-    let f = flow(d, Run::default()).on_failure(triage, 3).trust(|failed, at| failed == "2 Test" && at == "1");
+    std::fs::write(d.join("task-force.answer"), "reenter: '1'\ncause: step 1's script hid a failure\nnote: fix it\n").unwrap();
+    let force = Step::new("task-force").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(force, 3).trust(|failed, at| failed == "2 Test" && at == "1");
     f.task(&Task::new(Step::new("1 Build").model("fake").prompt("Build."))).unwrap();
     let err = f.task(&task("2 Test")).unwrap_err();
     assert!(matches!(err, Fatal::Ended(RunOutcome::Halt)), "{err:?}");
     assert!(agg::core::asks::open(d).is_empty(), "no ask for a trusted proposal");
     let last = f.steps().entries().last().cloned().unwrap();
-    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("triage"), Some(true)));
+    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("task-force"), Some(true)));
     assert!(last["rationale"].as_str().unwrap().contains("re-enter at 1 (a proposal the driver trusts, no ask): fix it"));
 }
 
@@ -399,19 +399,19 @@ fn a_decision_outside_a_steps_inputs_needs_no_session() {
     assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), sessions);
 }
 
-/// A-35: triage repairs a failed step's cause in place; judged again and met, the step is done and the run
-/// goes on, recorded with what triage changed.
+/// A-35: the task force repairs a failed step's cause in place; judged again and met, the step is done and the run
+/// goes on, recorded with what the task force changed.
 #[test]
-fn triage_repairs_in_place_and_the_step_judged_again_goes_on() {
+fn the_task_force_repairs_in_place_and_the_step_judged_again_goes_on() {
     let tmp = project(2);
     let d = tmp.path();
-    std::fs::write(d.join("triage.answer"), "outcome: fixed\ncause: a tool was missing\nnote: installed it\n").unwrap();
-    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
-    let f = flow(d, Run::default()).on_failure(triage, 3);
-    assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done, "its check met after triage's session");
+    std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: a tool was missing\nnote: installed it\n").unwrap();
+    let force = Step::new("task-force").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(force, 3);
+    assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done, "its check met after the task force's session");
     assert_eq!(f.task(&task("2 Test")).unwrap(), Outcome::Done, "the run went on");
     f.flush().unwrap();
-    let fixed = f.steps().entries().into_iter().find(|e| e["kind"] == "triage").unwrap();
+    let fixed = f.steps().entries().into_iter().find(|e| e["kind"] == "task-force").unwrap();
     assert_eq!(fixed["met"].as_bool(), Some(true));
     let why = fixed["rationale"].as_str().unwrap();
     assert!(why.starts_with("fixed in place (") && why.contains("work.log") && why.ends_with("a tool was missing: installed it"),
@@ -424,26 +424,26 @@ fn triage_repairs_in_place_and_the_step_judged_again_goes_on() {
 fn a_repair_in_place_still_unmet_ends_the_run() {
     let tmp = project(9);
     let d = tmp.path();
-    std::fs::write(d.join("triage.answer"), "outcome: fixed\ncause: guessed\nnote: changed x\n").unwrap();
-    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
-    let f = flow(d, Run::default()).on_failure(triage, 3);
+    std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: guessed\nnote: changed x\n").unwrap();
+    let force = Step::new("task-force").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(force, 3);
     assert!(matches!(f.task(&task("1 Build")).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
     let last = f.steps().entries().last().cloned().unwrap();
-    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("triage"), Some(false)));
+    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("task-force"), Some(false)));
     assert!(last["rationale"].as_str().unwrap().contains("judged again: 2 sessions"), "{last}");
 }
 
-/// A-35: a script step that triage repaired runs its script again, and lands when it is met.
+/// A-35: a script step that the task force repaired runs its script again, and lands when it is met.
 #[test]
 fn a_script_step_repaired_in_place_runs_its_script_again() {
     let tmp = project(1);
     let d = tmp.path();
-    std::fs::write(d.join("triage.answer"), "outcome: fixed\ncause: no log\nnote: wrote one\n").unwrap();
-    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
-    let f = flow(d, Run::default()).on_failure(triage, 3);
+    std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: no log\nnote: wrote one\n").unwrap();
+    let force = Step::new("task-force").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(force, 3);
     f.script_step("1 Count", &Judge::script("check", "agg/judges/check.sh")).unwrap();
     f.flush().unwrap();
-    assert_eq!(kinds(&f, "1 Count"), ["tool", "triage", "tool"]);
+    assert_eq!(kinds(&f, "1 Count"), ["tool", "task-force", "tool"]);
 }
 
 /// A-35: a check blocked by another step's result gets no repair round: the step fails at once.

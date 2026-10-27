@@ -212,7 +212,7 @@ not count that verdict as an improvement (`merge_requires_improvement`).
 Optional `"vacuous": true` = met because there was nothing to measure — neither improvement nor
 regression, and not a "was met" reading for the next gate.
 Optional `"blocked_by": "<path or step>"` = unmet because of another step's result: a workflow step gets no
-repair round for it and goes to triage at once.
+repair round for it and goes to the task force at once.
 `met` (bool) is the gate. `value`/`max`/`target` are numeric progress (used by `count_met`, deltas, the
 scoreboard). `rationale` is a short human string.
 

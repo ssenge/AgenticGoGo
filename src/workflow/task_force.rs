@@ -1,4 +1,4 @@
-//! Triage on failure (A-30, A-35): when a step fails, an agent looks for the cause. Where it can, it repairs
+//! The task force (A-30, A-35): when a step fails, an agent looks for the cause. Where it can, it repairs
 //! the cause in place, and the step is judged again; met, the run goes on. Otherwise it proposes to go back to
 //! the earliest step whose result is wrong, with a note, and after a human's yes the run ends and [`run`]
 //! starts it again from there (A-29); or it leaves the failure to a human.
@@ -12,13 +12,13 @@ use super::flow::{Flow, Run};
 use crate::driver::{Fatal, Step};
 
 /// Where the next run re-enters, its note, the project, and whether the note is the humans' decision: set
-/// by triage or the driver, read by [`run`] after the run.
+/// by the task force or the driver, read by [`run`] after the run.
 static REENTRY: OnceLock<(String, String, PathBuf, bool)> = OnceLock::new();
 
 /// How a failed step is judged again after a repair in place: `None` when it is met now, else why not.
 pub type Again<'a> = &'a dyn Fn() -> Result<Option<String>, Fatal>;
 
-/// Triage's answer: `outcome` (`fixed`, `reenter` or `escalate`), the step to re-enter, the cause, the note.
+/// The task force's answer: `outcome` (`fixed`, `reenter` or `escalate`), the step to re-enter, the cause, the note.
 struct Answer {
     outcome: String,
     at: String,
@@ -29,11 +29,11 @@ struct Answer {
 impl Flow {
     /// On a failed step, `step` (an agent) looks for the failure's origin, up to `max` re-entries per run.
     pub fn on_failure(mut self, step: Step, max: u32) -> Flow {
-        self.triage = Some((step, max));
+        self.task_force = Some((step, max));
         self
     }
 
-    /// Triage's proposals that `rule` (the failed step, the step to re-enter) accepts go ahead without a
+    /// The task force's proposals that `rule` (the failed step, the step to re-enter) accepts go ahead without a
     /// human's yes, still within the run's re-entries: for a failure the driver knows is the re-entered step's
     /// own to repair (a check of a step's script, sent back to the step that writes it).
     pub fn trust(mut self, rule: impl Fn(&str, &str) -> bool + 'static) -> Flow {
@@ -41,7 +41,7 @@ impl Flow {
         self
     }
 
-    /// Ends this run and starts it again at step `at` (one this run has seen) with `note`, as after a triage
+    /// Ends this run and starts it again at step `at` (one this run has seen) with `note`, as after a proposal
     /// a human said yes to; it counts as a re-entry. For a driver that knows itself where the run must go
     /// back: a decision taken at an approval that an earlier step's result doesn't carry yet. The note is a
     /// decision (`--decided`): step `at` refreshes against it, and stays unchanged where it doesn't concern it.
@@ -55,16 +55,16 @@ impl Flow {
     }
 }
 
-/// Step `name` failed for `why`: triage repairs it in place (when `again` can judge the step again), proposes
-/// a re-entry a human decides, or leaves it to a human; without triage, or past its limit, the run ends.
+/// Step `name` failed for `why`: the task force repairs it in place (when `again` can judge the step again), proposes
+/// a re-entry a human decides, or leaves it to a human; without the task force, or past its limit, the run ends.
 pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> Result<(), Fatal> {
     let reason = format!("{name}: {why}");
     let spent = flow.run.reentries + flow.fixes.get();
-    let Some((triage, _)) = flow.triage.as_ref().filter(|(_, max)| spent < *max) else {
+    let Some((force, _)) = flow.task_force.as_ref().filter(|(_, max)| spent < *max) else {
         return flow.halt(reason);
     };
-    let file = flow.scratch("triage.yaml")?;
-    let step = with_section(&flow.absolute(triage), &brief(flow, name, why, &file, again.is_some()))?;
+    let file = flow.scratch("task-force.yaml")?;
+    let step = with_section(&flow.absolute(force), &brief(flow, name, why, &file, again.is_some()))?;
     flow.flush()?;
     let head = super::git::git_out(flow.project(), &["rev-parse", "HEAD"]).unwrap_or_default();
     flow.step(&step)?;
@@ -74,13 +74,13 @@ pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> 
         ("fixed", Some(again)) => fixed(flow, name, &reason, &a, (again, head.trim())),
         ("reenter", _) => reentered(flow, name, &reason, a),
         _ => {
-            flow.record(name, "triage", false, &format!("no re-entry: {}", a.cause));
-            flow.halt(format!("{reason} (triage: {})", a.cause))
+            flow.record(name, "task-force", false, &format!("no re-entry: {}", a.cause));
+            flow.halt(format!("{reason} (task force: {})", a.cause))
         }
     }
 }
 
-/// Triage's brief: the failure, the run's steps, and the answer it writes to `file`.
+/// The task force's brief: the failure, the run's steps, and the answer it writes to `file`.
 fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: bool) -> String {
     let fixed = if in_place {
         "`fixed`: you repaired the cause in place, and the failed step is judged again"
@@ -96,7 +96,7 @@ fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: b
             flow.seen().join(", "), flow.run.reentries, file.display())
 }
 
-/// Triage repaired the cause in place: the step judged again goes on when met, else the run ends.
+/// The task force repaired the cause in place: the step judged again goes on when met, else the run ends.
 fn fixed(flow: &Flow, name: &str, reason: &str, a: &Answer, (again, head): (Again, &str)) -> Result<(), Fatal> {
     flow.fixes.set(flow.fixes.get() + 1);
     let changed = super::git::git_out(flow.project(), &["diff", "--name-only", head, "HEAD"]).unwrap_or_default();
@@ -104,39 +104,39 @@ fn fixed(flow: &Flow, name: &str, reason: &str, a: &Answer, (again, head): (Agai
     let what = format!("fixed in place ({changed}): {}: {}", a.cause, a.note);
     match again()? {
         None => {
-            flow.record(name, "triage", true, &what);
+            flow.record(name, "task-force", true, &what);
             flow.flush()
         }
         Some(still) => {
-            flow.record(name, "triage", false, &format!("{what}; judged again: {still}"));
-            flow.halt(format!("{reason} (triage repaired it in place, but: {still})"))
+            flow.record(name, "task-force", false, &format!("{what}; judged again: {still}"));
+            flow.halt(format!("{reason} (the task force repaired it in place, but: {still})"))
         }
     }
 }
 
-/// Triage proposes to go back to `a.at`: after a human's yes (or a rule the driver trusts) the run ends for it.
+/// The task force proposes to go back to `a.at`: after a human's yes (or a rule the driver trusts) the run ends for it.
 fn reentered(flow: &Flow, name: &str, reason: &str, a: Answer) -> Result<(), Fatal> {
     if a.at.is_empty() || a.at == "none" || a.note.is_empty() || !flow.seen().contains(&a.at) {
-        flow.record(name, "triage", false, &format!("no re-entry: {}", a.cause));
-        return flow.halt(format!("{reason} (triage: {})", a.cause));
+        flow.record(name, "task-force", false, &format!("no re-entry: {}", a.cause));
+        return flow.halt(format!("{reason} (task force: {})", a.cause));
     }
     let (at, cause, note) = (a.at, a.cause, a.note);
     // an approval takes no note: what is decided there is the humans' own, never an agent's proposal
     if flow.steps().is_approval(&at) {
-        flow.record(name, "triage", false, &format!("humans decide at {at}: {cause}"));
-        return flow.halt(format!("{reason} (triage: humans decide at {at}: {cause})"));
+        flow.record(name, "task-force", false, &format!("humans decide at {at}: {cause}"));
+        return flow.halt(format!("{reason} (task force: humans decide at {at}: {cause})"));
     }
     let trusted = flow.trusted.as_ref().is_some_and(|rule| rule(name, &at));
-    if !trusted && !flow.hil_bool(&format!("{reason}\n\nTriage: {cause}\nRe-enter at {at}, with the note: {note}\nGo?"))? {
+    if !trusted && !flow.hil_bool(&format!("{reason}\n\nTask force: {cause}\nRe-enter at {at}, with the note: {note}\nGo?"))? {
         return flow.halt(reason.to_string());
     }
     let how = if trusted { " (a proposal the driver trusts, no ask)" } else { "" };
-    flow.record(name, "triage", true, &format!("re-enter at {at}{how}: {note}"));
+    flow.record(name, "task-force", true, &format!("re-enter at {at}{how}: {note}"));
     let _ = REENTRY.set((at.clone(), note, flow.project().to_path_buf(), false));
     flow.halt(format!("{reason}; re-entering at {at}"))
 }
 
-/// Triage's answer in `file`; a key that is missing is empty, and without `outcome` a step to re-enter means
+/// The task force's answer in `file`; a key that is missing is empty, and without `outcome` a step to re-enter means
 /// `reenter`, none `escalate` (the answer before A-35).
 fn answer(file: &std::path::Path) -> Answer {
     let parsed = std::fs::read_to_string(file).map_err(|e| e.to_string())
@@ -157,7 +157,7 @@ fn answer(file: &std::path::Path) -> Answer {
 }
 
 /// Runs a workflow driver (`agg::driver::run`), an error that ends it recorded in the history against the step
-/// running then; when triage sent it back, starts it again at the step it chose, with the note and one more
+/// running then; when the task force sent it back, starts it again at the step it chose, with the note and one more
 /// re-entry, keeping the call log the new run would replace.
 pub fn run(drive: impl FnOnce() -> Result<(), Fatal>) -> ExitCode {
     let code = crate::driver::run(|| drive().inspect_err(|e| {
@@ -206,7 +206,7 @@ mod tests {
     use super::*;
 
     /// A re-entered run keeps the driver's arguments and `--until`, and replaces step, note and count; a
-    /// decision's re-entry says so, and the next one, triage's, doesn't.
+    /// decision's re-entry says so, and the next one, the task force's, doesn't.
     #[test]
     fn a_reentered_run_replaces_the_step_and_counts_one_more() {
         let args: Vec<String> = ["proj", "--from", "4.1", "--note", "old", "--reset", "--until", "5.3", "--reentries", "1"]
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn the_answer_is_read_from_its_file() {
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("triage.yaml");
+        let file = dir.path().join("task-force.yaml");
         let read = |text: &str| {
             std::fs::write(&file, text).unwrap();
             let a = answer(&file);

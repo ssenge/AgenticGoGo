@@ -27,7 +27,7 @@ pub struct Run {
     pub reset: bool,
     /// the key of the step after which the run ends, done.
     pub until: Option<String>,
-    /// how often triage already sent this run back.
+    /// how often the task force already sent this run back.
     pub reentries: u32,
     /// the note is what humans decided at an approval, not a fault a later step found: the `from` step
     /// refreshes its result against it, and a result it doesn't concern stays unchanged.
@@ -65,7 +65,7 @@ pub enum When {
 type Hooks = Box<dyn Fn(&Flow, &str, When) -> Vec<Judge>>;
 type OnStart = Box<dyn Fn(&Flow, &str) -> Result<(), String>>;
 
-/// A rule over triage's proposals: (the failed step, the step to re-enter) → go ahead without a human's yes.
+/// A rule over the task force's proposals: (the failed step, the step to re-enter) → go ahead without a human's yes.
 pub(crate) type Trust = dyn Fn(&str, &str) -> bool;
 
 /// A workflow run on agg: what every block of [`super`] works through.
@@ -81,10 +81,10 @@ pub struct Flow {
     pub(crate) own: Vec<String>,
     hooks: Option<Hooks>,
     on_start: Option<OnStart>,
-    pub(crate) triage: Option<(Step, u32)>,
-    /// how often triage repaired a failure in place in this run: with the re-entries, within triage's limit.
+    pub(crate) task_force: Option<(Step, u32)>,
+    /// how often the task force repaired a failure in place in this run; with the re-entries, within its limit.
     pub(crate) fixes: Cell<u32>,
-    /// which of triage's proposals go ahead without a human's yes: (the failed step, the step to re-enter).
+    /// which of the task force's proposals go ahead without a human's yes: (the failed step, the step to re-enter).
     pub(crate) trusted: Option<Box<Trust>>,
 }
 
@@ -109,7 +109,7 @@ impl Flow {
         let scratch = super::scratch::folder(&std::env::temp_dir());
         super::scratch::sweep(&std::env::temp_dir());
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
-               scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, triage: None,
+               scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, task_force: None,
                fixes: Cell::new(0), trusted: None, agg }
     }
 
@@ -230,16 +230,16 @@ impl Flow {
         judge
     }
 
-    /// The step failed: triage looks for its origin when the run has one (A-30), else the run ends.
+    /// The step failed: the task force looks for its origin when the run has one (A-30), else the run ends.
     pub fn fail(&self, name: &str, why: &str) -> Result<(), Fatal> {
-        super::triage::fail(self, name, why, None)
+        super::task_force::fail(self, name, why, None)
     }
 
-    /// The step failed, and `again` judges it again (`None`: met now, else why not): triage may repair the
+    /// The step failed, and `again` judges it again (`None`: met now, else why not): the task force may repair the
     /// cause in place (A-35), and when the step is met then, this returns and the step goes on. Otherwise as
     /// [`Flow::fail`].
-    pub fn recover(&self, name: &str, why: &str, again: super::triage::Again) -> Result<(), Fatal> {
-        super::triage::fail(self, name, why, Some(again))
+    pub fn recover(&self, name: &str, why: &str, again: super::task_force::Again) -> Result<(), Fatal> {
+        super::task_force::fail(self, name, why, Some(again))
     }
 
     /// Ends the run with `reason`.
@@ -273,7 +273,7 @@ impl Flow {
     }
 
     /// A script step (A-27): `script` does the work and gives the verdict. Met, what it wrote is committed and
-    /// the step recorded (kind `tool`); unmet, the step fails, and after triage's repair in place the script
+    /// the step recorded (kind `tool`); unmet, the step fails, and after the task force's repair in place the script
     /// runs again.
     pub fn script_step(&self, name: &str, script: &Judge) -> Result<(), Fatal> {
         if !self.runs(name)? {

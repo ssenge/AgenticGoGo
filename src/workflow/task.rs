@@ -25,7 +25,7 @@ pub struct Task {
     pub first: Option<Judge>,
     /// what the step reads (git pathspecs): a refresh with none of them changed needs no session.
     pub inputs: Option<Vec<String>>,
-    /// an unmet end returns [`Outcome::Unmet`] to the caller, the work kept, instead of failing into triage.
+    /// an unmet end returns [`Outcome::Unmet`] to the caller, the work kept, instead of failing into the task force.
     pub climbs: bool,
 }
 
@@ -86,7 +86,7 @@ impl Task {
     }
 
 
-    /// An unmet end returns to the caller (who climbs to a next attempt) instead of failing into triage.
+    /// An unmet end returns to the caller (who climbs to a next attempt) instead of failing into the task force.
     pub fn climbs(mut self) -> Task {
         self.climbs = true;
         self
@@ -98,7 +98,7 @@ impl Task {
     }
 }
 
-/// What an agent step came to, when it didn't fail (a failed step ends in triage or ends the run).
+/// What an agent step came to, when it didn't fail (a failed step goes to the task force or ends the run).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// the run didn't reach the step (`--from` is later).
