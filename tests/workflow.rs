@@ -359,3 +359,105 @@ fn a_condition_that_flips_between_steps_is_no_regression() {
     assert_eq!(git(d, &["show", "main:work.log"]).lines().count(), 2, "both steps' work landed");
 }
 
+
+/// A-35: re-entered at a step with a decision, a step whose result it doesn't concern changes nothing and is
+/// unchanged, never a note it failed to carry out; it saw the decision as a change to what it reads.
+#[test]
+fn a_decision_a_step_doesnt_need_leaves_it_unchanged() {
+    let tmp = project(1);
+    let d = tmp.path();
+    std::fs::write(d.join("decisions.md"), "- keep the port\n").unwrap();
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "decisions"]);
+    let f = flow(d, Run::default());
+    assert_eq!(f.task(&task("1 Design").inputs(["decisions.md"])).unwrap(), Outcome::Done);
+    f.flush().unwrap();
+    drop(f);
+    std::fs::write(d.join("decisions.md"), "- keep the port\n- test as the clerk\n").unwrap();
+    git(d, &["commit", "-qam", "CP decided"]);
+    std::fs::write(d.join(".git/agg-idle"), "").unwrap();
+    let run = Run { from: Some("1".into()), note: Some("CP decided: test as the clerk".into()), decided: true,
+                    ..Run::default() };
+    let f = flow(d, run);
+    assert_eq!(f.task(&task("1 Design").inputs(["decisions.md"])).unwrap(), Outcome::Unchanged);
+    let brief = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
+    assert!(brief.contains("Since your last result") && brief.contains("test as the clerk"), "{brief}");
+}
+
+/// A-35: a decision with none of the step's inputs changed needs no session at all.
+#[test]
+fn a_decision_outside_a_steps_inputs_needs_no_session() {
+    let tmp = project(1);
+    let d = tmp.path();
+    let f = flow(d, Run::default());
+    assert_eq!(f.task(&task("1 Design").inputs(["design.md"])).unwrap(), Outcome::Done);
+    f.flush().unwrap();
+    drop(f);
+    let sessions = std::fs::read_to_string(d.join("work.log")).unwrap().lines().count();
+    let f = flow(d, Run { from: Some("1".into()), note: Some("decided".into()), decided: true, ..Run::default() });
+    assert_eq!(f.task(&task("1 Design").inputs(["design.md"])).unwrap(), Outcome::Unchanged);
+    assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), sessions);
+}
+
+/// A-35: triage repairs a failed step's cause in place; judged again and met, the step is done and the run
+/// goes on, recorded with what triage changed.
+#[test]
+fn triage_repairs_in_place_and_the_step_judged_again_goes_on() {
+    let tmp = project(2);
+    let d = tmp.path();
+    std::fs::write(d.join("triage.answer"), "outcome: fixed\ncause: a tool was missing\nnote: installed it\n").unwrap();
+    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(triage, 3);
+    assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done, "its check met after triage's session");
+    assert_eq!(f.task(&task("2 Test")).unwrap(), Outcome::Done, "the run went on");
+    f.flush().unwrap();
+    let fixed = f.steps().entries().into_iter().find(|e| e["kind"] == "triage").unwrap();
+    assert_eq!(fixed["met"].as_bool(), Some(true));
+    let why = fixed["rationale"].as_str().unwrap();
+    assert!(why.starts_with("fixed in place (") && why.contains("work.log") && why.ends_with("a tool was missing: installed it"),
+            "{fixed}");
+    assert!(agg::core::asks::open(d).is_empty(), "a repair in place asks no one");
+}
+
+/// A-35: a repair in place the step's judges still don't meet ends the run for a human.
+#[test]
+fn a_repair_in_place_still_unmet_ends_the_run() {
+    let tmp = project(9);
+    let d = tmp.path();
+    std::fs::write(d.join("triage.answer"), "outcome: fixed\ncause: guessed\nnote: changed x\n").unwrap();
+    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(triage, 3);
+    assert!(matches!(f.task(&task("1 Build")).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+    let last = f.steps().entries().last().cloned().unwrap();
+    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("triage"), Some(false)));
+    assert!(last["rationale"].as_str().unwrap().contains("judged again: 2 sessions"), "{last}");
+}
+
+/// A-35: a script step that triage repaired runs its script again, and lands when it is met.
+#[test]
+fn a_script_step_repaired_in_place_runs_its_script_again() {
+    let tmp = project(1);
+    let d = tmp.path();
+    std::fs::write(d.join("triage.answer"), "outcome: fixed\ncause: no log\nnote: wrote one\n").unwrap();
+    let triage = Step::new("triage").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(triage, 3);
+    f.script_step("1 Count", &Judge::script("check", "agg/judges/check.sh")).unwrap();
+    f.flush().unwrap();
+    assert_eq!(kinds(&f, "1 Count"), ["tool", "triage", "tool"]);
+}
+
+/// A-35: a check blocked by another step's result gets no repair round: the step fails at once.
+#[test]
+fn a_blocked_check_fails_without_a_repair_round() {
+    let tmp = project(1);
+    let d = tmp.path();
+    write_exe(&d.join("agg/judges/blocked.sh"),
+              "#!/bin/sh\necho '{\"met\": false, \"blocked_by\": \"bindings.lock.yaml\", \"rationale\": \"no tool\"}'\n");
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "a blocked check"]);
+    let f = flow(d, Run::default());
+    let t = Task::new(Step::new("builder").model("fake").prompt("Do the work.")).named("1 Rules")
+        .check(Judge::script("blocked", "agg/judges/blocked.sh")).repairs(2);
+    assert!(matches!(f.task(&t).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+    assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), 1, "no repair session");
+}

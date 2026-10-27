@@ -15,7 +15,8 @@ use crate::core::model::Judge;
 use crate::driver::{Agg, Fatal, Step};
 use crate::plugin::RunOutcome;
 
-/// Where a run starts and ends: `--from <step> [--note <text>] [--reset] [--until <step>] [--reentries <n>]`.
+/// Where a run starts and ends: `--from <step> [--note <text> [--decided]] [--reset] [--until <step>]
+/// [--reentries <n>]`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Run {
     /// the key of the step the run starts at; the steps before it are skipped.
@@ -28,6 +29,9 @@ pub struct Run {
     pub until: Option<String>,
     /// how often triage already sent this run back.
     pub reentries: u32,
+    /// the note is what humans decided at an approval, not a fault a later step found: the `from` step
+    /// refreshes its result against it, and a result it doesn't concern stays unchanged.
+    pub decided: bool,
 }
 
 impl Run {
@@ -36,9 +40,13 @@ impl Run {
         let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
         let run = Run { from: value("--from"), note: value("--note"), reset: args.iter().any(|a| a == "--reset"),
                         until: value("--until"),
-                        reentries: value("--reentries").and_then(|n| n.parse().ok()).unwrap_or(0) };
+                        reentries: value("--reentries").and_then(|n| n.parse().ok()).unwrap_or(0),
+                        decided: args.iter().any(|a| a == "--decided") };
         if run.note.is_some() && run.from.is_none() {
             anyhow::bail!("--note needs --from");
+        }
+        if run.decided && run.note.is_none() {
+            anyhow::bail!("--decided needs --note");
         }
         Ok(run)
     }
@@ -74,6 +82,8 @@ pub struct Flow {
     hooks: Option<Hooks>,
     on_start: Option<OnStart>,
     pub(crate) triage: Option<(Step, u32)>,
+    /// how often triage repaired a failure in place in this run: with the re-entries, within triage's limit.
+    pub(crate) fixes: Cell<u32>,
     /// which of triage's proposals go ahead without a human's yes: (the failed step, the step to re-enter).
     pub(crate) trusted: Option<Box<Trust>>,
 }
@@ -100,7 +110,7 @@ impl Flow {
         super::scratch::sweep(&std::env::temp_dir());
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
                scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, triage: None,
-               trusted: None, agg }
+               fixes: Cell::new(0), trusted: None, agg }
     }
 
     /// The history in `path` (relative to the project) instead of `agg/private/steps.jsonl`.
@@ -176,7 +186,7 @@ impl Flow {
         self.history.at(name);
         git(&self.project, &["update-ref", &before(key(name)), "HEAD"])?;
         if let Some(Err(why)) = self.on_start.as_ref().map(|f| f(self, name)) {
-            self.fail(name, &why)?;
+            self.recover(name, &why, &|| Ok(self.on_start.as_ref().and_then(|f| f(self, name).err())))?;
         }
         Ok(true)
     }
@@ -222,7 +232,14 @@ impl Flow {
 
     /// The step failed: triage looks for its origin when the run has one (A-30), else the run ends.
     pub fn fail(&self, name: &str, why: &str) -> Result<(), Fatal> {
-        super::triage::fail(self, name, why)
+        super::triage::fail(self, name, why, None)
+    }
+
+    /// The step failed, and `again` judges it again (`None`: met now, else why not): triage may repair the
+    /// cause in place (A-35), and when the step is met then, this returns and the step goes on. Otherwise as
+    /// [`Flow::fail`].
+    pub fn recover(&self, name: &str, why: &str, again: super::triage::Again) -> Result<(), Fatal> {
+        super::triage::fail(self, name, why, Some(again))
     }
 
     /// Ends the run with `reason`.
@@ -256,22 +273,27 @@ impl Flow {
     }
 
     /// A script step (A-27): `script` does the work and gives the verdict. Met, what it wrote is committed and
-    /// the step recorded (kind `tool`); unmet, the step fails.
+    /// the step recorded (kind `tool`); unmet, the step fails, and after triage's repair in place the script
+    /// runs again.
     pub fn script_step(&self, name: &str, script: &Judge) -> Result<(), Fatal> {
         if !self.runs(name)? {
             return Ok(());
         }
         if let Err(why) = self.check(name, When::Before) {
-            return self.fail(name, &why);
+            self.recover(name, &why, &|| Ok(self.check(name, When::Before).err()))?;
         }
-        let verdict = self.agg.judge(script);
-        let why = if verdict.met() { self.check(name, When::After).err() } else { Some(verdict.rationale().into()) };
-        if let Some(why) = why {
+        let said = RefCell::new(String::new());
+        let attempt = || {
+            let verdict = self.agg.judge(script);
+            said.replace(verdict.rationale().to_string());
+            if verdict.met() { self.check(name, When::After).err() } else { Some(verdict.rationale().into()) }
+        };
+        if let Some(why) = attempt() {
             self.record(name, "tool", false, &why);
-            return self.fail(name, &why);
+            self.recover(name, &why, &|| Ok(attempt()))?;
         }
         commit(&self.project, &["."], name)?;
-        self.record(name, "tool", true, verdict.rationale());
+        self.record(name, "tool", true, &said.borrow());
         self.flush()
     }
 

@@ -72,7 +72,7 @@ impl Flow {
             return Ok(Outcome::Unchanged);
         }
         if let Err(why) = self.check(&name, When::Before) {
-            return self.failed(&name, &why);
+            self.recover(&name, &why, &|| Ok(self.check(&name, When::Before).err()))?;
         }
         let step = self.absolute(&t.step);
         let critic = t.critic.as_ref().map(|c| with_task(self, &self.absolute_judge(c), &t.critic_context, &step))
@@ -93,16 +93,20 @@ impl Flow {
             self.record(&name, "unchanged", true, "refreshed: the changes since its last result didn't concern it");
             return Ok(Outcome::Unchanged);
         }
-        if landed == Landing::Nothing && self.run.from.as_deref() == Some(key(&name)) && self.run.note.is_some() {
-            return self.unmet(&name, t.climbs, "the re-entered step changed nothing, so its note wasn't carried out");
+        // a fault a later step found must change the result; a decision may not concern it (then it refreshes)
+        if landed == Landing::Nothing && self.run.from.as_deref() == Some(key(&name)) && self.run.note.is_some()
+            && !self.run.decided {
+            return self.unmet(&name, t.climbs, "the re-entered step changed nothing, so its note wasn't carried out",
+                              Some(&judges));
         }
         self.repaired(&name, &step, (t.repairs, t.climbs), &judges, &cannot)
     }
 
     /// Whether step `name` refreshes an earlier result: the run re-entered before it and keeps the later
-    /// results. The commit its last result stands on, if it has one.
+    /// results, or re-entered at it with a decision. The commit its last result stands on, if it has one.
     pub(crate) fn refreshing(&self, name: &str) -> Option<String> {
-        let reentered = self.run.from.is_some() && !self.run.reset && self.run.from.as_deref() != Some(key(name));
+        let at = self.run.from.as_deref() == Some(key(name));
+        let reentered = self.run.from.is_some() && !self.run.reset && (!at || self.run.decided);
         if reentered { self.steps().last_commit(name, &["done", "unchanged"]) } else { None }
     }
 
@@ -120,6 +124,10 @@ impl Flow {
                  result, change nothing at all and finish."));
         }
         match &self.run.note {
+            Some(note) if self.run.from.as_deref() == Some(key(name)) && self.run.decided => with_lead(step, &format!(
+                "## Decided since your result\n\nYou did this task before, and your result is in place. Since then, \
+                 humans decided what follows. Adjust your result only where it requires, and change nothing else. \
+                 If it doesn't concern your result, change nothing at all and finish.\n\n{note}")),
             Some(note) if self.run.from.as_deref() == Some(key(name)) => with_lead(step, &format!(
                 "## Note from a later step\n\nYou already did this task; a later step found the problem below in \
                  your result. Fix it, and change nothing else.\n\n{note}")),
@@ -177,9 +185,14 @@ impl Flow {
             if verdict.met() || (by_critic && critic_rounds == CRITIC_ROUNDS) {
                 break;
             }
+            // what blocks the check lies in another step's result: no repair round of this worker's can move it
+            if let Some(blocker) = &verdict.blocked_by {
+                return self.unmet(name, climbs, &format!("blocked by {blocker}: {}", verdict.rationale()),
+                                  Some(judges));
+            }
             critic_rounds += usize::from(by_critic);
             if let Some(why) = stuck(cannot, verdict.rationale(), by_critic, previous.as_deref()) {
-                return self.unmet(name, climbs, &why);
+                return self.unmet(name, climbs, &why, Some(judges));
             }
             previous = Some(verdict.rationale().to_string());
             (verdict, by_critic) = self.repair(name, step, round, (&verdict, by_critic), judges)?;
@@ -190,7 +203,7 @@ impl Flow {
             return self.accepted(name, verdict.rationale());
         }
         if !verdict.met() {
-            return self.unmet(name, climbs, verdict.rationale());
+            return self.unmet(name, climbs, verdict.rationale(), Some(judges));
         }
         self.keep(name)?;
         self.record(name, "done", true, verdict.rationale());
@@ -229,20 +242,29 @@ impl Flow {
         }
     }
 
-    /// An unmet end: returned to a caller that climbs, the work kept for its next attempt; else a failure.
-    fn unmet(&self, name: &str, climbs: bool, why: &str) -> Result<Outcome, Fatal> {
+    /// An unmet end: returned to a caller that climbs, the work kept for its next attempt; else a failure,
+    /// which `judges` judge again after a repair in place.
+    fn unmet(&self, name: &str, climbs: bool, why: &str, judges: Option<&Judges>) -> Result<Outcome, Fatal> {
         if !climbs {
-            return self.failed(name, why);
+            return self.failed(name, why, judges);
         }
         self.keep(name)?;
         self.record(name, "unmet", false, why);
         Ok(Outcome::Unmet(why.to_string()))
     }
 
-    /// Fails the step (triage, or the run's end).
-    fn failed(&self, name: &str, why: &str) -> Result<Outcome, Fatal> {
-        self.fail(name, why)?;
-        Ok(Outcome::NotReached)
+    /// Fails the step (triage, or the run's end); repaired in place and met when `judges` judge it again, the
+    /// step is done.
+    fn failed(&self, name: &str, why: &str, judges: Option<&Judges>) -> Result<Outcome, Fatal> {
+        let Some(judges) = judges else {
+            self.fail(name, why)?;
+            return Ok(Outcome::NotReached);
+        };
+        let again = || judges.review(None).map(|(v, _)| (!v.met()).then(|| v.rationale().to_string()));
+        self.recover(name, why, &again)?;
+        self.keep(name)?;
+        self.record(name, "done", true, "met after triage's repair in place");
+        Ok(Outcome::Done)
     }
 }
 

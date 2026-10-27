@@ -2,6 +2,23 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **Triage repairs in place** (A-35, `agg::workflow`): triage's answer has an `outcome`, `fixed`, `reenter`
+  or `escalate`. `fixed`: it repaired the cause itself, and the failed step is judged again (an agent step by
+  its checks and critic, a script step by its script, a failed hook by the hook); met, the step is done and the
+  run goes on, recorded `triage` with the files triage changed. Going back to an earlier step, which refreshes
+  every step after it, stays the answer for an earlier result that is wrong. An answer without `outcome` reads
+  as before. `Flow::recover(name, why, again)` gives a driver's own failure the same repair.
+- **A decision is no fault** (`Run::decided`, `--decided`): `Flow::reenter` re-enters with the humans'
+  decision, and the step it goes back to refreshes against it like a later step: it sees the decision as a
+  change to what it reads, and a result the decision doesn't concern stays unchanged, where before a session
+  that changed nothing failed as a note it hadn't carried out.
+- **`blocked_by` in a verdict:** a check unmet because of another step's result says so; the step gets no
+  repair round for it and goes to triage at once.
+
 ## 0.0.36 (2026-10-26)
 
 ### Changed

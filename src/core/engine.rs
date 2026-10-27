@@ -494,7 +494,7 @@ mod tests {
             rationale: String::new(),
             evidence: vec![],
             error: None,
-            mixed: false, vacuous: false,
+            mixed: false, vacuous: false, blocked_by: None,
         });
         j
     }
@@ -511,7 +511,7 @@ mod tests {
             rationale: rationale.into(),
             evidence: vec![],
             error: None,
-            mixed: false, vacuous: false,
+            mixed: false, vacuous: false, blocked_by: None,
         });
         j
     }
@@ -811,7 +811,7 @@ mod tests {
             rationale: rationale.into(),
             evidence: vec![],
             error: None,
-            mixed: false, vacuous: false,
+            mixed: false, vacuous: false, blocked_by: None,
         });
         j
     }
