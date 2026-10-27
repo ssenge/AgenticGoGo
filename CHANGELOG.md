@@ -2,7 +2,7 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
-## Unreleased
+## 0.0.37 (2026-10-27)
 
 ### Added
 
