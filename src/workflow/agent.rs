@@ -105,11 +105,18 @@ impl Flow {
     }
 
     /// Whether step `name` refreshes an earlier result: the run re-entered before it and keeps the later
-    /// results, or re-entered at it with a decision. The commit its last result stands on, if it has one.
+    /// results, or re-entered at it with a decision. The commit its last result stands on, if it has one. A step
+    /// this run already gave a result of (a loop's step, once per failure) is a new task: what it is called for is new.
     pub(crate) fn refreshing(&self, name: &str) -> Option<String> {
         let at = self.run.from.as_deref() == Some(key(name));
         let reentered = self.run.from.is_some() && !self.run.reset && (!at || self.run.decided);
-        if reentered { self.steps().last_commit(name, &["done", "unchanged"]) } else { None }
+        if reentered && !self.again(name) { self.steps().last_commit(name, &["done", "unchanged"]) } else { None }
+    }
+
+    /// Whether this run already gave a result of step `name`: a call after it is for something new, unlike a
+    /// ladder's next tier, which continues an attempt that ended unmet.
+    fn again(&self, name: &str) -> bool {
+        self.steps().gave(name)
     }
 
     /// The step with what is new leading its brief: the changes to its `inputs` since its result, or the note at
@@ -125,12 +132,13 @@ impl Flow {
                  result only where these changes require it, and change nothing else. If they don't concern your \
                  result, change nothing at all and finish."));
         }
+        let at = self.run.from.as_deref() == Some(key(name)) && !self.again(name);   // the note is the first call's
         match &self.run.note {
-            Some(note) if self.run.from.as_deref() == Some(key(name)) && self.run.decided => with_lead(step, &format!(
+            Some(note) if at && self.run.decided => with_lead(step, &format!(
                 "## Decided since your result\n\nYou did this task before, and your result is in place. Since then, \
                  humans decided what follows. Adjust your result only where it requires, and change nothing else. \
                  If it doesn't concern your result, change nothing at all and finish.\n\n{note}")),
-            Some(note) if self.run.from.as_deref() == Some(key(name)) => with_lead(step, &format!(
+            Some(note) if at => with_lead(step, &format!(
                 "## Note from a later step\n\nYou already did this task; a later step found the problem below in \
                  your result. Fix it, and change nothing else.\n\n{note}")),
             _ => Ok(step.clone()),
