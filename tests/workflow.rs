@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use agg::prelude::*;
-use agg::workflow::{Flow, Outcome, Run, Task};
+use agg::workflow::{Flow, Outcome, Role, Run, Task};
 
 /// The one environment mutation in this binary: the fake agents' `bin/` on PATH and a throwaway HOME.
 static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
@@ -20,7 +20,8 @@ static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     // The worker: one line in work.log per session, unless the project says it is idle; a task force session
-    // writes its proposal to the file its brief names.
+    // writes its proposal to the file its brief names; a voice of a discussion only writes its position, which
+    // disagrees while .git/agg-disagreeing exists, and none while .git/agg-silent does.
     write_exe(&bin.join("claude"), r#"#!/bin/sh
 worker=
 for a in "$@"; do
@@ -29,6 +30,17 @@ for a in "$@"; do
     *INSTRUCTIONS.md*) worker=1 ;;
   esac
 done
+position=$(grep -o 'Write your position to `[^`]*`' agg/private/INSTRUCTIONS.md 2>/dev/null | head -1 | cut -d'`' -f2)
+if [ -n "$position" ]; then
+  printf '%s\n' "$*" | grep -o -- '--model [^ ]*' >> .git/agg-voices.log
+  cp agg/private/INSTRUCTIONS.md .git/agg-voices.brief
+  if [ ! -f .git/agg-silent ]; then
+    if [ -f .git/agg-disagreeing ]; then open=1; else open=0; fi
+    printf '1. a point\n\nDISAGREE: %s\n' $open > "$position"
+  fi
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"fake-'$$'","usage":{"output_tokens":1},"total_cost_usd":0.01}'
+  exit 0
+fi
 if [ -n "$worker" ]; then cat agg/private/INSTRUCTIONS.md >> .git/agg-worker.args; { printf '%s' "$*" | tr '\n' ' '; echo; } >> .git/agg-worker.argv; fi
 answer=$(grep -o '/[^ ]*task-force\.yaml' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1)
 if [ -n "$answer" ] && [ -f task-force.answer ]; then cp task-force.answer "$answer"; rm task-force.answer; fi
@@ -460,4 +472,64 @@ fn a_blocked_check_fails_without_a_repair_round() {
         .check(Judge::script("blocked", "agg/judges/blocked.sh")).repairs(2);
     assert!(matches!(f.task(&t).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
     assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), 1, "no repair session");
+}
+
+/// A voice of a discussion on the fake claude with `model`.
+fn voice(model: &str) -> Role {
+    Role { agent: Agent::Claude, model: Some(model.into()), effort: Effort::Default }
+}
+
+/// The models of the voices' sessions, in order.
+fn voices(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join(".git/agg-voices.log")).unwrap_or_default().lines().map(String::from).collect()
+}
+
+/// A-36: two voices take positions on their own, revise them once and agree; the worker then carries out the
+/// task with their last positions in its brief, in one session.
+#[test]
+fn voices_discuss_the_task_until_they_agree() {
+    let tmp = project(1);
+    let d = tmp.path();
+    let f = flow(d, Run::default());
+    let t = task("1 Build").section("## Inputs\n\nthe plan").voices([voice("fake-a"), voice("fake-b")]);
+    assert_eq!(f.task(&t).unwrap(), Outcome::Done);
+    f.flush().unwrap();
+    assert_eq!(voices(d), ["--model fake-a", "--model fake-b", "--model fake-a", "--model fake-b"]);
+    let heard = std::fs::read_to_string(d.join(".git/agg-voices.brief")).unwrap();
+    assert!(heard.contains("Do the work.") && heard.contains("## Inputs"), "the task with its sections: {heard}");
+    assert!(!heard.contains("Check your result"), "not how it is reviewed: {heard}");
+    assert!(heard.contains("you are voice 2. You wrote") && heard.contains("1-position-2-0.md"), "its own: {heard}");
+    assert!(heard.contains("1-position-1-1.md"), "voice 1's position of this round, not the last: {heard}");
+    let brief = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
+    assert!(brief.contains("The discussion before you") && brief.contains("until they agreed"), "{brief}");
+    assert!(brief.contains("1-position-2-1.md"), "the last round's positions: {brief}");
+    assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), 1, "one worker session");
+    assert_eq!(kinds(&f, "1 Build"), ["discussion", "done"]);
+}
+
+/// A-36: voices that still disagree stop after the last round, and the worker is told so.
+#[test]
+fn a_discussion_that_doesnt_settle_ends_after_its_rounds() {
+    let tmp = project(1);
+    let d = tmp.path();
+    std::fs::write(d.join(".git/agg-disagreeing"), "").unwrap();
+    let f = flow(d, Run::default());
+    f.task(&task("1 Build").voices([voice("fake-a"), voice("fake-b")])).unwrap();
+    f.flush().unwrap();
+    assert_eq!(voices(d).len(), 8, "the positions on their own and three rounds, for each voice");
+    let brief = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
+    assert!(brief.contains("still disagree on some points"), "{brief}");
+    let discussion = f.steps().entries().into_iter().find(|e| e["kind"] == "discussion").unwrap();
+    assert_eq!(discussion["met"], false);
+}
+
+/// A-36: a voice that writes no position fails the step, before any worker session.
+#[test]
+fn a_voice_without_a_position_fails_the_step() {
+    let tmp = project(1);
+    let d = tmp.path();
+    std::fs::write(d.join(".git/agg-silent"), "").unwrap();
+    let f = flow(d, Run::default());
+    assert!(matches!(f.task(&task("1 Build").voices([voice("fake-a")])).unwrap_err(), Fatal::Ended(_)));
+    assert!(!d.join("work.log").exists(), "no worker session");
 }

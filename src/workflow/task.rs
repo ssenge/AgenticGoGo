@@ -1,6 +1,7 @@
 //! An agent step with its judges (A-26): what the worker does, the checks and the critic that judge it, the
 //! repair rounds, a script that does what it can first, and what the step reads.
 
+use super::roles::Role;
 use crate::core::model::Judge;
 use crate::driver::Step;
 
@@ -27,13 +28,15 @@ pub struct Task {
     pub inputs: Option<Vec<String>>,
     /// an unmet end returns [`Outcome::Unmet`] to the caller, the work kept, instead of failing into the task force.
     pub climbs: bool,
+    /// agents that discuss the task before the worker carries it out (A-36); none: no discussion.
+    pub voices: Vec<Role>,
 }
 
 impl Task {
     /// The worker's step, with no judges, no repairs and nothing else.
     pub fn new(step: Step) -> Task {
         Task { name: None, step, sections: vec![], checks: vec![], critic: None, critic_context: String::new(), repairs: 0,
-               first: None, inputs: None, climbs: false }
+               first: None, inputs: None, climbs: false, voices: vec![] }
     }
 
     /// The step's name in the flow, when it isn't the worker step's own (e.g. `"2.2 Derive goals"` for a
@@ -89,6 +92,12 @@ impl Task {
     /// An unmet end returns to the caller (who climbs to a next attempt) instead of failing into the task force.
     pub fn climbs(mut self) -> Task {
         self.climbs = true;
+        self
+    }
+
+    /// Agents that discuss the task before the worker carries it out, until none changes its position.
+    pub fn voices<I: IntoIterator<Item = Role>>(mut self, roles: I) -> Task {
+        self.voices = roles.into_iter().collect();
         self
     }
 

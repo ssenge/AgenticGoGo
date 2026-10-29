@@ -371,7 +371,7 @@ fn drive() -> Result<(), Fatal> {
 | `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails, and after the task force's repair in place the script runs again |
 | `flow.recover(name, why, &again)` | the driver's own failure that `again` can judge again (`Ok(None)`: met now): the task force may repair it in place, and when `again` is met the call returns and the step goes on; `flow.fail(name, why)` for one it can't judge again |
 | `flow.applies(name, &when)` | the step applies when `when` is met; otherwise recorded `skipped` with the reason, no session; a condition that errs fails the step |
-| `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.section(text)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |
+| `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.section(text)` `.voices(roles)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |
 | `flow.approval(name, doc, question, decisions, inputs)` | a human approves `doc`, writing their decisions first; after a re-entry, unchanged inputs (else the document) stand without asking |
 | `flow.reenter(key, note)` | the driver itself sends the run back with a decision: it ends this run and starts it again at a step the run has seen, with `note` and `--decided`, as after a proposal a human said yes to (counts as a re-entry, recorded `reentry`); e.g. a decision taken at an approval that an earlier step's result doesn't carry yet |
 | `workflow::run(drive)` | `driver::run`, then starts the run again at the step the task force or `reenter` chose, with its note |
@@ -392,6 +392,16 @@ repaired the cause in place, and the step's judges (a script step: its script) j
 is done and the run goes on, recorded `task-force` with the files it changed; still unmet, the run ends.
 `reenter`: an approval is never a re-entry point; a yes ends the run, and `workflow::run` starts it again.
 `escalate` (or no step): the run ends for a human. Repairs in place and re-entries share the task force's limit.
+
+A task with `voices` (roles: agent, model, effort) is discussed before the worker's session (A-36): each voice
+writes a position on the task on its own, then in turn each reads the others' latest, agrees or disagrees with
+evidence, keeps, changes or drops its own points (for evidence, not to meet the others halfway) and ends with
+`DISAGREE: <n>`, the others' points it still disputes. The discussion ends when every voice says 0, or after
+three rounds. The voices read the task with its sections but not how it is reviewed, and change nothing in the
+project (their positions are in the flow's scratch folder); the worker then gets their last positions, carries
+out what they agree on and names each point it decided where they don't. Recorded `discussion` (met when they
+agreed); a refresh doesn't discuss again; a voice that writes no position fails the step. Worth its sessions
+where one agent's blind spots cost most, with voices of comparable strength: a weaker voice tends to defer.
 
 The files a brief names (`flow.scratch(file)`, `flow.wrapper(file, command)`) live in the flow's own folder
 outside the project, `agg-flow-<pid>-<n>` in the temp dir. It is removed when the flow is dropped, however the

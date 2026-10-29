@@ -84,6 +84,8 @@ impl Flow {
             First::Rest(rest) => with_section(&base, &rest)?,
             First::None => base,
         };
+        // a refresh adjusts a result the discussion already shaped
+        let base = if since.is_none() { self.discussed(&name, &base, t)? } else { base };
         let cannot = self.scratch(&format!("{}-cannot-fix.md", key(&name)))?;
         let rubric = t.critic.as_ref().map(|c| self.absolute_judge(c));
         let step = self.briefed(&name, &base, t, rubric.as_ref(), &cannot)?;
