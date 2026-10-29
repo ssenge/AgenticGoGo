@@ -2,6 +2,20 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **Agents converge on a task before it is carried out** (A-36, `agg::workflow`): `Task::voices(roles)` has
+  agents on other roles discuss the step's task before the worker's session. Each takes a position on its own
+  first, then in rounds each in turn reads the others' latest positions, agrees or disagrees with evidence,
+  changes a point only for evidence, and ends with `DISAGREE: <n>`, the others' points it still disputes; the
+  discussion ends when all agree, or after three rounds. The voices change no
+  file of the project (their positions are in the run's scratch folder); the worker gets the last positions in
+  its brief, carries out what they agree on and names each point it decided where they don't. The history
+  records `discussion` (met when the voices agreed); a refresh doesn't discuss again, and a voice that writes no
+  position fails the step.
+
 ## 0.0.37 (2026-10-27)
 
 ### Added
