@@ -172,6 +172,20 @@ fn a_climbing_task_that_ends_unmet_returns_why_with_its_work_kept() {
     assert_eq!(kinds(&f, "1 Build"), ["unmet", "repair", "done"]);
 }
 
+/// L8-P2: a ladder's next tier continues an attempt that ended unmet, so it still gets the note at `--from`; only a
+/// call after a result is a new task.
+#[test]
+fn the_next_attempt_after_an_unmet_one_keeps_the_note() {
+    let tmp = project(3);
+    let d = tmp.path();
+    let f = flow(d, Run { from: Some("1".into()), note: Some("the port is wrong".into()), ..Run::default() });
+    assert!(matches!(f.task(&task("1 Build").repairs(0).climbs()).unwrap(), Outcome::Unmet(_)));
+    assert_eq!(f.task(&task("1 Build").repairs(1).climbs()).unwrap(), Outcome::Done);
+    let briefs = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
+    let last = briefs.rsplit("# Session ").next().unwrap();
+    assert!(last.contains("## Note from a later step") && last.contains("the port is wrong"), "{last}");
+}
+
 /// A-27: a script step's changes land on `main`; a step whose condition is unmet is skipped with no session.
 #[test]
 fn a_script_step_commits_and_an_unmet_condition_skips_without_a_session() {
@@ -394,6 +408,33 @@ fn a_decision_a_step_doesnt_need_leaves_it_unchanged() {
     assert_eq!(f.task(&task("1 Design").inputs(["decisions.md"])).unwrap(), Outcome::Unchanged);
     let brief = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
     assert!(brief.contains("Since your last result") && brief.contains("test as the clerk"), "{brief}");
+}
+
+/// L8-P2: a step a re-entered run calls a second time (a loop's fix step, once per failure) is a new task, not a
+/// refresh of the result it gave earlier in the same run.
+#[test]
+fn a_step_called_again_in_a_reentered_run_is_a_new_task() {
+    let tmp = project(1);
+    let d = tmp.path();
+    std::fs::write(d.join("decisions.md"), "- keep the port\n").unwrap();
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "decisions"]);
+    let f = flow(d, Run::default());
+    assert_eq!(f.task(&task("1 Fix").inputs(["decisions.md"])).unwrap(), Outcome::Done);
+    f.flush().unwrap();
+    drop(f);
+    std::fs::write(d.join("decisions.md"), "- keep the port\n- the run failed\n").unwrap();
+    git(d, &["commit", "-qam", "failed"]);
+    std::fs::write(d.join(".git/agg-idle"), "").unwrap();
+    let f = flow(d, Run { from: Some("1".into()), note: Some("failed".into()), decided: true, ..Run::default() });
+    assert_eq!(f.task(&task("1 Fix").inputs(["decisions.md"])).unwrap(), Outcome::Unchanged);
+    let brief = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
+    assert!(brief.contains("Since your last result"), "the first call refreshes: {brief}");
+    std::fs::remove_file(d.join(".git/agg-idle")).unwrap();
+    assert_eq!(f.task(&task("1 Fix").inputs(["decisions.md"])).unwrap(), Outcome::Done);
+    let briefs = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
+    let brief = briefs.rsplit("# Session ").next().unwrap();
+    assert!(!brief.contains("since your") && !brief.contains("Since your"), "the second call is a new task: {brief}");
 }
 
 /// A-35: a decision with none of the step's inputs changed needs no session at all.

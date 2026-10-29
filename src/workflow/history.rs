@@ -25,12 +25,15 @@ pub struct History {
     project: PathBuf,
     path: PathBuf,
     pending: RefCell<Vec<String>>,
+    /// the steps this run recorded a result of
+    given: RefCell<Vec<String>>,
 }
 
 impl History {
     /// The history of `project` in `path` (relative to the project, or absolute).
     pub fn new(project: &Path, path: impl AsRef<Path>) -> History {
-        History { project: project.to_path_buf(), path: project.join(path), pending: RefCell::new(vec![]) }
+        History { project: project.to_path_buf(), path: project.join(path), pending: RefCell::new(vec![]),
+                  given: RefCell::new(vec![]) }
     }
 
     /// Keeps one entry back until the next `flush`: `kind` is what happened (`done`, `tool`, `skipped`, …).
@@ -40,6 +43,14 @@ impl History {
         let line = serde_json::json!({"step": step, "kind": kind, "met": met, "rationale": rationale, "at": at,
                                       "commit": commit});
         self.pending.borrow_mut().push(line.to_string());
+        if matches!(kind, "done" | "unchanged") {
+            self.given.borrow_mut().push(step.to_string());
+        }
+    }
+
+    /// Whether this run recorded a result (`done`, `unchanged`) of step `name`.
+    pub(crate) fn gave(&self, name: &str) -> bool {
+        self.given.borrow().iter().any(|s| s == name)
     }
 
     /// Writes the entries kept back.

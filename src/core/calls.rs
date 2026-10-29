@@ -190,10 +190,11 @@ pub fn load(dir: &Path) -> Result<Vec<CallRecord>> {
     Ok(out)
 }
 
-/// Start a fresh ledger — a run that is NOT resuming must not fast-forward against an old one.
+/// Start a fresh ledger — a run that is NOT resuming must not fast-forward against an old one. The old one
+/// is set aside, not removed: it is the only record of that run's calls (a run profile reads it).
 pub fn truncate(dir: &Path) -> Result<()> {
     let path = crate::paths::calls_jsonl(dir);
-    match std::fs::remove_file(&path) {
+    match std::fs::rename(&path, aside(&path)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
@@ -259,8 +260,17 @@ pub fn truncate_to_base(dir: &Path) -> Result<Vec<CallRecord>> {
         );
     }
     let kept: Vec<CallRecord> = all.into_iter().take(keep).collect();
+    let path = crate::paths::calls_jsonl(dir);
+    // the dropped calls ran, and cost: the record of them stays beside the ledger
+    std::fs::copy(&path, aside(&path)).with_context(|| format!("keeping {}", path.display()))?;
     rewrite(dir, &kept)?;
     Ok(kept)
+}
+
+/// Where a ledger that a new run replaces is kept: `calls.<unix seconds>.jsonl` beside it.
+fn aside(path: &Path) -> std::path::PathBuf {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    path.with_file_name(format!("calls.{secs}.jsonl"))
 }
 
 fn kind_of(r: &CallRecord) -> &'static str {
@@ -445,13 +455,32 @@ mod tests {
         assert_eq!(step(0, "x").spend(), None, "a step's counters are CUMULATIVE — assigned, not added");
     }
 
-    /// A non-resume run must not fast-forward against a previous run's ledger.
+    /// A non-resume run must not fast-forward against a previous run's ledger; the old one is kept aside.
     #[test]
-    fn truncate_clears_the_ledger_and_tolerates_absence() {
+    fn truncate_clears_the_ledger_keeps_it_aside_and_tolerates_absence() {
         let d = tmp("fresh");
         truncate(&d).unwrap(); // no file yet — not an error
         append(&d, &step(0, "a")).unwrap();
         truncate(&d).unwrap();
         assert!(load(&d).unwrap().is_empty());
+        assert_eq!(set_aside(&d), 1, "the old ledger is kept beside it");
+    }
+
+    /// A resume's dropped calls stay on record beside the rewritten ledger.
+    #[test]
+    fn a_resume_keeps_the_calls_it_drops_aside() {
+        let d = tmp("dropaside");
+        append(&d, &step(0, "a")).unwrap();
+        truncate_to_base(&d).unwrap();
+        assert_eq!(set_aside(&d), 1);
+    }
+
+    /// The ledgers kept aside in `d`.
+    fn set_aside(d: &Path) -> usize {
+        let dir = crate::paths::calls_jsonl(d).parent().unwrap().to_path_buf();
+        std::fs::read_dir(dir).unwrap().filter(|e| {
+            let name = e.as_ref().unwrap().file_name().to_string_lossy().to_string();
+            name.starts_with("calls.") && name != "calls.jsonl"
+        }).count()
     }
 }

@@ -2,6 +2,19 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Fixed
+
+- **A step called again after its result in the same run is a new task** (`agg::workflow`, `Flow::task`): a
+  re-entered run took every later call of a step for a refresh of its last result, so a loop's step called once
+  per failure got "Since your last result … change nothing" and the `--from` note again, and changed nothing.
+  The history now knows which steps this run gave a result of (`done`, `unchanged`); a call after one gets the
+  whole task. A ladder's next tier after an attempt that ended unmet still refreshes and keeps the note.
+- **A new run keeps the previous run's call log** (`agg/private/calls.jsonl`): a fresh start sets it aside as
+  `calls.<unix seconds>.jsonl` instead of deleting it, and a resume keeps a copy of the calls it drops beside the
+  rewritten ledger. Every launch's sessions, verdicts and merges stay on record for a run's profile.
+
 ## 0.0.38 (2026-10-29)
 
 ### Added
