@@ -2,6 +2,15 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Fixed
+
+- **A run that reaches its `--until` without having come to its `--from` halts** (`agg::workflow`,
+  `Flow::runs`): it skipped every step up to `--until` and ended there as done, exit 0, having run nothing. A
+  `--from` no step has (a typo, a step the driver doesn't build) passed that way. It now ends `Halt`, with
+  "--from <step>: the run came to no step <step> before its --until <step>".
+
 ## 0.0.39 (2026-10-30)
 
 ### Fixed

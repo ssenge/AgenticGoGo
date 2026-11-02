@@ -202,6 +202,20 @@ fn a_script_step_commits_and_an_unmet_condition_skips_without_a_session() {
     assert!(!d.join(".git/agg-worker.args").exists(), "no session ran");
 }
 
+/// A run ends at its `--until` as done after running up to there; one that never came to its `--from` on the
+/// way (a step that isn't built) ran nothing, and halts there instead.
+#[test]
+fn a_run_ends_at_its_until_and_halts_there_when_it_never_came_to_its_from() {
+    let tmp = project(1);
+    let d = tmp.path();
+    let f = flow(d, Run { from: Some("2".into()), until: Some("2".into()), ..Run::default() });
+    assert_eq!((f.runs("1 Fetch").unwrap(), f.runs("2 Build").unwrap()), (false, true));
+    assert!(matches!(f.runs("3 Test").unwrap_err(), Fatal::Ended(RunOutcome::GoalsMet)));
+    let f = flow(d, Run { from: Some("2.5".into()), until: Some("3".into()), ..Run::default() });
+    assert_eq!((f.runs("2 Build").unwrap(), f.runs("3 Test").unwrap()), (false, false));
+    assert!(matches!(f.runs("4 Ship").unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+}
+
 /// A-28 and A-29: an approval commits the humans' decisions; re-entered at it with the document unchanged,
 /// it stands without asking. Re-entered at a step, the steps before it don't run and it gets the note.
 #[test]

@@ -166,9 +166,16 @@ impl Flow {
 
     /// Whether step `name` runs: the run reached its `from` step and not past its `until` step. A step that
     /// runs marks where the base branch stands (`refs/agg/before/<key>`), so a later `--reset` can go back.
+    /// Past its `until` without having come to its `from`, the run ran nothing and halts.
     pub fn runs(&self, name: &str) -> Result<bool, Fatal> {
         if let Some(until) = &self.run.until {
             if self.seen.borrow().contains(until) && key(name) != until {
+                if !self.started.get() {
+                    // ended as done, a `--from` no step has (a typo, a step not built) would pass having run nothing
+                    let from = self.run.from.as_deref().unwrap_or_default();
+                    return self.halt(format!("--from {from}: the run came to no step {from} before its --until {until}"))
+                        .map(|()| false);
+                }
                 self.flush()?;
                 self.agg.finish_with(RunOutcome::GoalsMet, format!("done up to {until}, as asked (--until)"));
                 return Err(Fatal::Ended(RunOutcome::GoalsMet));
