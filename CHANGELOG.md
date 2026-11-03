@@ -2,6 +2,28 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **A step whose instructions changed since its result is told how** (`agg::workflow`, `Flow::task`; SR-P3):
+  agg keeps what each step was told for the result it gave (`agg/private/instructions/<step>.md`). A later call
+  whose brief differs gets the diff in a section of its own, "Your instructions changed since your result", and
+  "Bring your result in line with what changed, and change nothing else". Such a step is never untouched, even
+  where none of its inputs changed. A `--reset` run compares nothing. Before, a `--from` after a prompt change
+  handed the worker its whole task beside a result that looked done, and it kept the result as it was.
+
+### Fixed
+
+- **A new run withdraws the open asks of the run before** (`core::asks`, `agg answer`; SR-P6): the ledger gets
+  a `withdrawn` row with the reason for each of the driver's asks still open when a run starts ("the run before
+  <run id> ended"), and the run's log says how many. A withdrawn ask is no longer open, and `agg answer` refuses
+  it: nothing would read the answer.
+- **Only the task force's re-entries count against its limit** (`agg::workflow`, the task force's `rerun`;
+  SR-P7): a re-entry for a checkpoint's decision (`--decided`) kept adding to `reentries`, so a run whose
+  approvals carried decisions halted at its first fault after them without the task force. It now keeps the
+  count.
+
 ## 0.0.40 (2026-11-02)
 
 ### Fixed

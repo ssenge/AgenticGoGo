@@ -79,12 +79,16 @@ pub enum Row {
     /// bound and a worker re-reads decisions it acted on twenty sessions ago. A row rather than a
     /// mutation, because the ledger is append-only and "when was the worker told" is worth auditing.
     Delivered { id: String, ts: u64 },
+    /// No one waits on the answer any more: the driver run that asked has ended (SR-P6). Without it a
+    /// stopped run's question stays open for good, and every reader shows a human is needed where no run
+    /// would ever read the answer.
+    Withdrawn { id: String, reason: String, ts: u64 },
 }
 
 impl Row {
     pub fn id(&self) -> &str {
         match self {
-            Row::Open { id, .. } | Row::Answered { id, .. } | Row::Delivered { id, .. } => id,
+            Row::Open { id, .. } | Row::Answered { id, .. } | Row::Delivered { id, .. } | Row::Withdrawn { id, .. } => id,
         }
     }
 }
@@ -107,11 +111,14 @@ pub struct Ask {
     /// the worker has been shown this answer in a brief
     #[serde(default)]
     pub delivered: bool,
+    /// why no one waits on an answer any more; `None` while someone may
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn: Option<String>,
 }
 
 impl Ask {
     pub fn is_open(&self) -> bool {
-        self.answer.is_none()
+        self.answer.is_none() && self.withdrawn.is_none()
     }
     /// How long this ask has been outstanding. `0` once answered — an answered ask is not waiting.
     pub fn age_secs(&self, now_epoch: u64) -> u64 {
@@ -165,6 +172,7 @@ pub fn all(dir: &Path) -> Vec<Ask> {
                         answered_at_epoch: None,
                         by: None,
                         delivered: false,
+                        withdrawn: None,
                     });
                 }
             }
@@ -185,6 +193,11 @@ pub fn all(dir: &Path) -> Vec<Ask> {
                     a.delivered = true;
                 }
             }
+            Ok(Row::Withdrawn { id, reason, .. }) => {
+                if let Some(a) = out.iter_mut().find(|a| a.id == id && a.answer.is_none()) {
+                    a.withdrawn = Some(reason);
+                }
+            }
             Err(_) => continue,
         }
     }
@@ -194,6 +207,20 @@ pub fn all(dir: &Path) -> Vec<Ask> {
 /// The asks still waiting on a human, oldest first.
 pub fn open(dir: &Path) -> Vec<Ask> {
     all(dir).into_iter().filter(Ask::is_open).collect()
+}
+
+/// Withdraws every open ask a driver opened, for `reason`: a driver's ask is a wait of the process that
+/// asked, so a run that starts knows each one left open belongs to a run that ended (SR-P6). A worker's ask
+/// stays: its answer reaches the next session's brief, whichever run that is in. Returns how many it withdrew.
+pub fn withdraw_driver_asks(dir: &Path, reason: &str, now_epoch: u64) -> usize {
+    let stale: Vec<Ask> = open(dir).into_iter().filter(|a| matches!(a.origin, Origin::Driver)).collect();
+    for a in &stale {
+        let row = Row::Withdrawn { id: a.id.clone(), reason: reason.to_string(), ts: now_epoch };
+        if append(dir, &row).is_err() {
+            return 0;
+        }
+    }
+    stale.len()
 }
 
 /// One ask by id.
@@ -387,6 +414,9 @@ pub fn validate_answer(dir: &Path, id: &str, value: &str) -> Result<String, Stri
             )
         });
     };
+    if let Some(why) = &ask.withdrawn {
+        return Err(format!("ask `{id}` was withdrawn: {why}. Nothing would read the answer"));
+    }
     if let Some(prev) = &ask.answer {
         // The run may already have acted on the first answer, so a second is refused rather than
         // silently rewriting a decision.
@@ -492,6 +522,27 @@ mod tests {
     }
 
     /// The driver may already have acted on the first answer, so a later row must not rewrite it.
+    /// A run that starts withdraws the open asks of the drivers before it; a worker's ask, and an answered
+    /// one, stay as they are, and a withdrawn ask takes no answer (SR-P6).
+    #[test]
+    fn a_new_run_withdraws_the_drivers_open_asks() {
+        let d = tempfile::tempdir().unwrap();
+        append(d.path(), &open_row("a1", "CP2?", 10)).unwrap();
+        append(d.path(), &open_row("a2", "CP3?", 11)).unwrap();
+        answer(d.path(), "a2", "yes", "operator", 12).unwrap();
+        let mut worker = open_row("w1", "which instance?", 13);
+        if let Row::Open { origin, .. } = &mut worker {
+            *origin = Origin::Worker;
+        }
+        append(d.path(), &worker).unwrap();
+        assert_eq!(withdraw_driver_asks(d.path(), "the run that asked it ended", 20), 1);
+        assert_eq!(open(d.path()).iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["w1"]);
+        assert_eq!(get(d.path(), "a2").unwrap().answer.as_deref(), Some("yes"));
+        let refused = validate_answer(d.path(), "a1", "yes").unwrap_err();
+        assert!(refused.contains("withdrawn: the run that asked it ended"), "{refused}");
+        assert_eq!(withdraw_driver_asks(d.path(), "again", 30), 0, "nothing left to withdraw");
+    }
+
     #[test]
     fn the_first_answer_wins() {
         let d = tempfile::tempdir().unwrap();

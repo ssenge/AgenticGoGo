@@ -14,6 +14,7 @@ mod discussion;
 mod flow;
 mod git;
 mod history;
+mod instructions;
 mod review;
 mod roles;
 mod scratch;

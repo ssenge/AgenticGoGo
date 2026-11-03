@@ -262,6 +262,35 @@ fn a_later_step_with_unchanged_inputs_refreshes_without_a_session() {
     assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), sessions + 1);
 }
 
+/// SR-P3: a step whose instructions changed since its result is told how, at its own `--from` and as a later step
+/// whose inputs didn't change, which then gets a session instead of refreshing without one.
+#[test]
+fn a_step_whose_instructions_changed_is_told_how() {
+    let tmp = project(1);
+    let d = tmp.path();
+    let docs = |prompt: &str| Task::new(Step::new("writer").model("fake").prompt(prompt)).named("2 Docs")
+        .check(Judge::script("check", "agg/judges/check.sh")).inputs(["docs/"]);
+    let f = flow(d, Run::default());
+    assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done);
+    assert_eq!(f.task(&docs("Write the docs.")).unwrap(), Outcome::Done);
+    f.flush().unwrap();
+    drop(f);
+    let sessions = std::fs::read_to_string(d.join("work.log")).unwrap().lines().count();
+    let f = flow(d, Run { from: Some("1".into()), note: Some("again".into()), ..Run::default() });
+    assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done);
+    assert_eq!(f.task(&docs("Write the docs.\nName every setting.")).unwrap(), Outcome::Done);
+    assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), sessions + 2);
+    let brief = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap();
+    assert!(brief.contains("## Your instructions changed since your result"), "{brief}");
+    assert!(brief.contains("+Name every setting."), "{brief}");
+    f.flush().unwrap();
+    drop(f);
+    // told once: the result now stands on the new instructions, and the same call refreshes without a session
+    let f = flow(d, Run { from: Some("1".into()), note: Some("again".into()), ..Run::default() });
+    assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done);
+    assert_eq!(f.task(&docs("Write the docs.\nName every setting.")).unwrap(), Outcome::Unchanged);
+}
+
 /// A later step that names no inputs can't tell a refresh from a new task: after a re-entry it runs its task
 /// whole, without being told to keep its result.
 #[test]

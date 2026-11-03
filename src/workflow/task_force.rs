@@ -181,9 +181,10 @@ pub fn run(drive: impl FnOnce() -> Result<(), Fatal>) -> ExitCode {
 }
 
 /// The arguments of the re-entered run: the driver's own, `--until` kept, the step and note replaced, and
-/// `--decided` when the note is the humans' decision.
+/// `--decided` when the note is the humans' decision. Only the task force's re-entries count against its limit:
+/// a decision's keeps the count, or approvals with decisions would use up the repairs of the steps after them.
 fn rerun(args: &[String], at: &str, note: &str, decided: bool) -> Vec<String> {
-    let reentries = Run::from_args(args).map(|r| r.reentries).unwrap_or(0) + 1;
+    let reentries = Run::from_args(args).map(|r| r.reentries).unwrap_or(0) + u32::from(!decided);
     let mut kept = vec![];
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -206,7 +207,7 @@ mod tests {
     use super::*;
 
     /// A re-entered run keeps the driver's arguments and `--until`, and replaces step, note and count; a
-    /// decision's re-entry says so, and the next one, the task force's, doesn't.
+    /// decision's re-entry says so and keeps the count, and the next one, the task force's, doesn't.
     #[test]
     fn a_reentered_run_replaces_the_step_and_counts_one_more() {
         let args: Vec<String> = ["proj", "--from", "4.1", "--note", "old", "--reset", "--until", "5.3", "--reentries", "1"]
@@ -215,7 +216,10 @@ mod tests {
                    ["proj", "--until", "5.3", "--from", "2.5", "--note", "fix y", "--reentries", "2"].map(String::from));
         let decided = rerun(&args, "4.2", "CP3 decided x", true);
         assert_eq!(decided.last().map(String::as_str), Some("--decided"));
-        assert!(!rerun(&decided, "2.5", "fix y", false).contains(&"--decided".to_string()));
+        assert_eq!(Run::from_args(&decided).unwrap().reentries, 1);
+        let again = rerun(&decided, "2.5", "fix y", false);
+        assert!(!again.contains(&"--decided".to_string()));
+        assert_eq!(Run::from_args(&again).unwrap().reentries, 2);
     }
 
     /// A driver's own error is recorded against the step running; an ended run's end is not an error.

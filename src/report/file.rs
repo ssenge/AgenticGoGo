@@ -48,6 +48,12 @@ pub fn begin_as(dir: &Path, run_id: Option<String>) -> RunHandle {
     clear(dir);
     let run_id = run_id.unwrap_or_else(mint_run_id);
     log_line(dir, &format!("agg run {run_id} started (pid {})", std::process::id()));
+    // no stale asks either: a driver's open ask was a wait of a process that has ended
+    let stale = crate::core::asks::withdraw_driver_asks(dir, &format!("the run before {run_id} ended"),
+                                                         crate::util::now_epoch());
+    if stale > 0 {
+        log_line(dir, &format!("agg run {run_id} withdrew {stale} open ask(s) of the run before"));
+    }
     RunHandle { dir: dir.to_path_buf(), run_id, started_at: crate::util::now_epoch(), written: Cell::new(false) }
 }
 
