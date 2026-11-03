@@ -60,14 +60,27 @@ enum First {
 
 impl Flow {
     /// Runs an agent step (A-26) and says what it came to; a failed step goes to the task force or ends the run.
+    /// A result it gives keeps what the step was told, so a later call can say how its instructions changed.
     pub fn task(&self, t: &Task) -> Result<Outcome, Fatal> {
+        let told = super::brief::task(&self.absolute(&t.step)).ok();
+        let changed = told.as_deref().filter(|_| !self.run.reset)
+            .and_then(|now| super::instructions::changed(self.project(), key(&t.name()), now));
+        let outcome = self.carried(t, changed.as_deref())?;
+        if let (Outcome::Done | Outcome::Unchanged, Some(now)) = (&outcome, &told) {
+            super::instructions::keep(self.project(), key(&t.name()), now);
+        }
+        Ok(outcome)
+    }
+
+    /// [`Flow::task`] with `changed`, how the step's instructions changed since its result in place.
+    fn carried(&self, t: &Task, changed: Option<&str>) -> Result<Outcome, Fatal> {
         let name = t.name();
         if !self.runs(&name)? {
             return Ok(Outcome::NotReached);
         }
         // only a step that names what it reads can tell a refresh from a new task: one without inputs runs it whole
         let since = t.inputs.as_ref().and_then(|_| self.refreshing(&name));
-        if let Some(why) = since.as_deref().and_then(|c| untouched(self, t, c)) {
+        if let Some(why) = since.as_deref().filter(|_| changed.is_none()).and_then(|c| untouched(self, t, c)) {
             self.record(&name, "unchanged", true, &why);
             return Ok(Outcome::Unchanged);
         }
@@ -78,7 +91,7 @@ impl Flow {
         let critic = t.critic.as_ref().map(|c| with_task(self, &self.absolute_judge(c), &t.critic_context, &step))
             .transpose()?;
         let judges = Judges { flow: self, name: &name, checks: &t.checks, critic: critic.as_ref() };
-        let base = self.lead(&name, &step, since.as_deref(), t.inputs.as_deref().unwrap_or_default())?;
+        let base = self.lead(&name, &step, since.as_deref(), t.inputs.as_deref().unwrap_or_default(), changed)?;
         let base = match self.first(&name, t, &judges)? {
             First::Done => return Ok(Outcome::Done),
             First::Rest(rest) => with_section(&base, &rest)?,
@@ -119,14 +132,23 @@ impl Flow {
         self.steps().gave(name)
     }
 
-    /// The step with what is new leading its brief: the changes to its `inputs` since its result, or the note at
-    /// `--from`.
-    fn lead(&self, name: &str, step: &Step, since: Option<&str>, inputs: &[String]) -> Result<Step, Fatal> {
+    /// The step with what is new leading its brief: how its instructions changed since its result (`changed`),
+    /// then the changes to its `inputs` since its result, or the note at `--from`.
+    fn lead(&self, name: &str, step: &Step, since: Option<&str>, inputs: &[String], changed: Option<&str>)
+            -> Result<Step, Fatal> {
+        let news: Vec<String> = changed.map(super::instructions::section).into_iter()
+            .chain(self.news(name, since, inputs)).collect();
+        if news.is_empty() { Ok(step.clone()) } else { with_lead(step, &news.join("\n\n")) }
+    }
+
+    /// What is new for step `name` besides its instructions: the changes to its `inputs` since its result, or the
+    /// note at `--from`.
+    fn news(&self, name: &str, since: Option<&str>, inputs: &[String]) -> Option<String> {
         if let Some(commit) = since {
             let mut skip = vec!["agg".to_string()];
             skip.extend(self.own.iter().cloned());
             let (stat, diff) = changes_since(self.project(), commit, inputs, &skip, DIFF_LIMIT);
-            return with_lead(step, &format!(
+            return Some(format!(
                 "## Since your last result\n\nYou did this task before, and your result is in place. Since then, \
                  these changes were made to what it reads:\n\n```\n{stat}\n```\n\n```diff\n{diff}\n```\n\nAdjust your \
                  result only where these changes require it, and change nothing else. If they don't concern your \
@@ -134,14 +156,14 @@ impl Flow {
         }
         let at = self.run.from.as_deref() == Some(key(name)) && !self.again(name);   // the note is the first call's
         match &self.run.note {
-            Some(note) if at && self.run.decided => with_lead(step, &format!(
+            Some(note) if at && self.run.decided => Some(format!(
                 "## Decided since your result\n\nYou did this task before, and your result is in place. Since then, \
                  humans decided what follows. Adjust your result only where it requires, and change nothing else. \
                  If it doesn't concern your result, change nothing at all and finish.\n\n{note}")),
-            Some(note) if at => with_lead(step, &format!(
+            Some(note) if at => Some(format!(
                 "## Note from a later step\n\nYou already did this task; a later step found the problem below in \
                  your result. Fix it, and change nothing else.\n\n{note}")),
-            _ => Ok(step.clone()),
+            _ => None,
         }
     }
 
