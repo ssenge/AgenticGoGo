@@ -55,6 +55,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"d
     write_exe(&bin.join("codex"), r#"#!/bin/sh
 for a in "$@"; do [ "$a" = --version ] && { echo "fake-codex 0.0.0"; exit 0; }; done
 for a in "$@"; do echo "$a"; done >> .git/critic.calls
+cat >> .git/critic.calls
 echo "---call" >> .git/critic.calls
 if [ -f critic.ok ]; then v='{\"met\": true, \"rationale\": \"fine\"}'; else v='{\"met\": false, \"rationale\": \"fix A\"}'; fi
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"'"$v"'"}}'
@@ -214,6 +215,18 @@ fn a_run_ends_at_its_until_and_halts_there_when_it_never_came_to_its_from() {
     let f = flow(d, Run { from: Some("2.5".into()), until: Some("3".into()), ..Run::default() });
     assert_eq!((f.runs("2 Build").unwrap(), f.runs("3 Test").unwrap()), (false, false));
     assert!(matches!(f.runs("4 Ship").unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+}
+
+/// A run `--until` a step the driver doesn't build (nor the steps before it) ends before the first step after it
+/// in the driver's order: that step never starts.
+#[test]
+fn a_run_until_a_step_not_built_ends_before_the_next_step_in_order() {
+    let tmp = project(1);
+    let d = tmp.path();
+    let f = flow(d, Run { until: Some("6.12".into()), ..Run::default() })
+        .order(["6.3", "6.8", "6.12", "6.13", "7.1"]);
+    assert!(f.runs("6.3 Transform").unwrap());
+    assert!(matches!(f.runs("6.13 Security audit").unwrap_err(), Fatal::Ended(RunOutcome::GoalsMet)));
 }
 
 /// A-28 and A-29: an approval commits the humans' decisions; re-entered at it with the document unchanged,
@@ -515,18 +528,61 @@ fn the_task_force_repairs_in_place_and_the_step_judged_again_goes_on() {
     assert!(agg::core::asks::open(d).is_empty(), "a repair in place asks no one");
 }
 
-/// A-35: a repair in place the step's judges still don't meet ends the run for a human.
+/// A-35: a repair in place the step's judges still don't meet is a new failure: the task force gets it again (here
+/// it has no answer the second time, and the run ends for a human).
 #[test]
-fn a_repair_in_place_still_unmet_ends_the_run() {
+fn a_repair_in_place_still_unmet_goes_to_the_task_force_again() {
     let tmp = project(9);
     let d = tmp.path();
     std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: guessed\nnote: changed x\n").unwrap();
     let force = Step::new("task-force").model("fake").prompt("Find the cause.");
     let f = flow(d, Run::default()).on_failure(force, 3);
     assert!(matches!(f.task(&task("1 Build")).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
-    let last = f.steps().entries().last().cloned().unwrap();
-    assert_eq!((last["kind"].as_str(), last["met"].as_bool()), (Some("task-force"), Some(false)));
-    assert!(last["rationale"].as_str().unwrap().contains("judged again: 2 sessions"), "{last}");
+    let force: Vec<String> = f.steps().entries().iter().filter(|e| e["kind"] == "task-force")
+        .map(|e| e["rationale"].as_str().unwrap_or_default().to_string()).collect();
+    assert_eq!(force.len(), 2, "{force:?}");
+    assert!(force[0].contains("judged again: 2 sessions"), "{force:?}");
+    assert!(force[1].starts_with("no re-entry: no answer"), "the second round: {force:?}");
+}
+
+/// A-35: past its limit, the task force gets no further round, and the run ends.
+#[test]
+fn a_repair_in_place_still_unmet_past_the_limit_ends_the_run() {
+    let tmp = project(9);
+    let d = tmp.path();
+    std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: guessed\nnote: changed x\n").unwrap();
+    let force = Step::new("task-force").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(force, 1);
+    assert!(matches!(f.task(&task("1 Build")).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+    assert_eq!(kinds(&f, "1 Build").iter().filter(|k| *k == "task-force").count(), 1);
+    let kept = std::fs::read_to_string(d.join(agg::workflow::SPENT)).unwrap();
+    assert!(kept.contains("\"fixes\":1"), "the repair is kept for a restart: {kept}");
+}
+
+/// A step whose judge fails to run is not graded: no repair round (a worker can't fix a judge), and never met.
+#[test]
+fn a_step_whose_judge_fails_to_run_is_not_graded() {
+    let tmp = project(1);
+    let d = tmp.path();
+    let f = flow(d, Run::default());
+    let t = Task::new(Step::new("builder").model("fake").prompt("Do the work.")).named("1 Rules")
+        .check(Judge::script("broken", "agg/judges/missing.sh")).repairs(2);
+    assert!(matches!(f.task(&t).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+    assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), 1, "no repair session");
+    assert!(!kinds(&f, "1 Rules").contains(&"done".to_string()));
+}
+
+/// The task force's brief carries what the failed step must keep to, as the driver says.
+#[test]
+fn the_task_force_brief_names_what_the_failed_step_must_keep_to() {
+    let tmp = project(9);
+    let d = tmp.path();
+    let force = Step::new("task-force").model("fake").prompt("Find the cause.");
+    let f = flow(d, Run::default()).on_failure(force, 3)
+        .constraints(|_, name| (name == "1 Build").then(|| "Only `src/**` is this unit's scope.".to_string()));
+    assert!(f.task(&task("1 Build")).is_err());
+    let briefs = std::fs::read_to_string(d.join(".git/agg-worker.args")).unwrap_or_default();
+    assert!(briefs.contains("## What step 1 Build must keep to") && briefs.contains("Only `src/**`"), "{briefs}");
 }
 
 /// A-35: a script step that the task force repaired runs its script again, and lands when it is met.

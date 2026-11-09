@@ -27,7 +27,7 @@ pub use git::{before, changes_since, commit, take_back, unchanged_since};
 pub use history::{History, DEFAULT as HISTORY};
 pub use roles::{Role, Roles};
 pub use task::{Outcome, Task};
-pub use task_force::run;
+pub use task_force::{run, SPENT};
 
 /// A step's key: the first word of its name.
 pub fn key(name: &str) -> &str {

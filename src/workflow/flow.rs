@@ -67,6 +67,8 @@ type OnStart = Box<dyn Fn(&Flow, &str) -> Result<(), String>>;
 
 /// A rule over the task force's proposals: (the failed step, the step to re-enter) → go ahead without a human's yes.
 pub(crate) type Trust = dyn Fn(&str, &str) -> bool;
+/// What a failed step must keep to, as the driver knows it (its scope, its rubric): the task force's repair too.
+pub(crate) type Constraints = dyn Fn(&Flow, &str) -> Option<String>;
 
 /// A workflow run on agg: what every block of [`super`] works through.
 pub struct Flow {
@@ -86,6 +88,10 @@ pub struct Flow {
     pub(crate) fixes: Cell<u32>,
     /// which of the task force's proposals go ahead without a human's yes: (the failed step, the step to re-enter).
     pub(crate) trusted: Option<Box<Trust>>,
+    /// the keys of every step the driver has, in order, built or not: where `--until` lies among them.
+    order: Vec<String>,
+    /// what a failed step must keep to, for the task force's brief.
+    pub(crate) constraints: Option<Box<Constraints>>,
 }
 
 impl Drop for Flow {
@@ -104,13 +110,16 @@ impl Deref for Flow {
 
 impl Flow {
     /// A run of `agg` in its project, starting and ending as `run` says.
-    pub fn new(agg: Agg, run: Run) -> Flow {
+    /// The task force's count of re-entries and repairs goes on from the processes of the run before this one.
+    pub fn new(agg: Agg, mut run: Run) -> Flow {
         let project = agg.dir().to_path_buf();
         let scratch = super::scratch::folder(&std::env::temp_dir());
         super::scratch::sweep(&std::env::temp_dir());
+        let (reentries, fixes) = super::task_force::spent_before(&project, &run);
+        run.reentries = reentries;
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
                scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, task_force: None,
-               fixes: Cell::new(0), trusted: None, agg }
+               fixes: Cell::new(fixes), trusted: None, order: vec![], constraints: None, agg }
     }
 
     /// The history in `path` (relative to the project) instead of `agg/private/steps.jsonl`.
@@ -130,6 +139,26 @@ impl Flow {
     pub fn hooks(mut self, f: impl Fn(&Flow, &str, When) -> Vec<Judge> + 'static) -> Flow {
         self.hooks = Some(Box::new(f));
         self
+    }
+
+    /// The keys of all the driver's steps in order, those it doesn't build or run included: a run `--until` a
+    /// step ends before the first step after it, though the steps up to it never come (not built, skipped).
+    pub fn order<I: IntoIterator<Item = S>, S: Into<String>>(mut self, keys: I) -> Flow {
+        self.order = keys.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// What failed step `name` must keep to, `f(flow, name)` (the files it may change, the rubric it is reviewed
+    /// by): the task force's brief carries it, so a repair in place doesn't fail on another of the step's rules.
+    pub fn constraints(mut self, f: impl Fn(&Flow, &str) -> Option<String> + 'static) -> Flow {
+        self.constraints = Some(Box::new(f));
+        self
+    }
+
+    /// Whether step `name` comes after step `until` in the driver's order (false when either isn't in it).
+    fn past(&self, name: &str, until: &str) -> bool {
+        let at = |k: &str| self.order.iter().position(|o| o == k);
+        matches!((at(key(name)), at(until)), (Some(n), Some(u)) if n > u)
     }
 
     /// What the driver does when a step starts (e.g. checks between phases); an error fails the step.
@@ -169,7 +198,7 @@ impl Flow {
     /// Past its `until` without having come to its `from`, the run ran nothing and halts.
     pub fn runs(&self, name: &str) -> Result<bool, Fatal> {
         if let Some(until) = &self.run.until {
-            if self.seen.borrow().contains(until) && key(name) != until {
+            if (self.seen.borrow().contains(until) && key(name) != until) || self.past(name, until) {
                 if !self.started.get() {
                     // ended as done, a `--from` no step has (a typo, a step not built) would pass having run nothing
                     let from = self.run.from.as_deref().unwrap_or_default();
@@ -249,10 +278,14 @@ impl Flow {
         super::task_force::fail(self, name, why, Some(again))
     }
 
-    /// Ends the run with `reason`.
+    /// Ends the run with `reason`, which is also the last line the driver prints, to stdout and stderr: a log
+    /// that ends with only an exit code leaves the operator digging in the history for why.
     pub fn halt(&self, reason: impl Into<String>) -> Result<(), Fatal> {
+        let reason = reason.into();
         let _ = self.flush();
-        self.agg.finish_with(RunOutcome::Halt, reason);
+        self.agg.finish_with(RunOutcome::Halt, reason.clone());
+        println!("halt: {reason}");
+        eprintln!("halt: {reason}");
         Err(Fatal::Ended(RunOutcome::Halt))
     }
 

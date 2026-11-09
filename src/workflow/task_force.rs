@@ -60,9 +60,12 @@ impl Flow {
 pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> Result<(), Fatal> {
     let reason = format!("{name}: {why}");
     let spent = flow.run.reentries + flow.fixes.get();
-    let Some((force, _)) = flow.task_force.as_ref().filter(|(_, max)| spent < *max) else {
+    let Some((force, max)) = flow.task_force.as_ref() else {
         return flow.halt(reason);
     };
+    if spent >= *max {
+        return flow.halt(format!("{reason} (the task force's {max} re-entries and repairs of this run are spent)"));
+    }
     let file = flow.scratch("task-force.yaml")?;
     let step = with_section(&flow.absolute(force), &brief(flow, name, why, &file, again.is_some()))?;
     flow.flush()?;
@@ -71,7 +74,7 @@ pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> 
     flow.gate()?;
     let a = answer(&file);
     match (a.outcome.as_str(), again) {
-        ("fixed", Some(again)) => fixed(flow, name, &reason, &a, (again, head.trim())),
+        ("fixed", Some(again)) => fixed(flow, name, &a, (again, head.trim())),
         ("reenter", _) => reentered(flow, name, &reason, a),
         _ => {
             flow.record(name, "task-force", false, &format!("no re-entry: {}", a.cause));
@@ -87,7 +90,11 @@ fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: b
     } else {
         "`fixed` is no answer here: this failure can't be judged again in place"
     };
-    format!("## The failure\n\nStep {name} failed:\n\n{why}\n\n## The steps of this run, in order\n\n{}\n\nThis \
+    let keep = flow.constraints.as_ref().and_then(|f| f(flow, name)).map(|c| format!(
+        "## What step {name} must keep to\n\nA repair in place is judged by all of the step's rules, not only the one \
+         that failed: keep within these. Where the cause can't be repaired within them, answer `reenter` or \
+         `escalate` instead.\n\n{c}\n\n")).unwrap_or_default();
+    format!("## The failure\n\nStep {name} failed:\n\n{why}\n\n{keep}## The steps of this run, in order\n\n{}\n\nThis \
              run was re-entered {} times already.\n\n## Your answer\n\nWrite it to {} as YAML with four keys: \
              `outcome`, one of `fixed`, `reenter` or `escalate` ({fixed}; `reenter`: an earlier step's result is \
              wrong, and the run goes back to it; `escalate`: only a human can decide it); `reenter`, for that \
@@ -96,9 +103,11 @@ fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: b
             flow.seen().join(", "), flow.run.reentries, file.display())
 }
 
-/// The task force repaired the cause in place: the step judged again goes on when met, else the run ends.
-fn fixed(flow: &Flow, name: &str, reason: &str, a: &Answer, (again, head): (Again, &str)) -> Result<(), Fatal> {
+/// The task force repaired the cause in place: the step judged again goes on when met; else what is left is a new
+/// failure, which the task force gets again while its limit lasts (a repair often uncovers the next point).
+fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head): (Again, &str)) -> Result<(), Fatal> {
     flow.fixes.set(flow.fixes.get() + 1);
+    keep_spent(flow.project(), flow.run.reentries, flow.fixes.get());
     let changed = super::git::git_out(flow.project(), &["diff", "--name-only", head, "HEAD"]).unwrap_or_default();
     let changed = changed.split_whitespace().collect::<Vec<_>>().join(", ");
     let what = format!("fixed in place ({changed}): {}: {}", a.cause, a.note);
@@ -109,7 +118,7 @@ fn fixed(flow: &Flow, name: &str, reason: &str, a: &Answer, (again, head): (Agai
         }
         Some(still) => {
             flow.record(name, "task-force", false, &format!("{what}; judged again: {still}"));
-            flow.halt(format!("{reason} (the task force repaired it in place, but: {still})"))
+            fail(flow, name, &format!("{still} (after the task force's repair in place)"), Some(again))
         }
     }
 }
@@ -132,8 +141,33 @@ fn reentered(flow: &Flow, name: &str, reason: &str, a: Answer) -> Result<(), Fat
     }
     let how = if trusted { " (a proposal the driver trusts, no ask)" } else { "" };
     flow.record(name, "task-force", true, &format!("re-enter at {at}{how}: {note}"));
+    keep_spent(flow.project(), flow.run.reentries + 1, flow.fixes.get());
     let _ = REENTRY.set((at.clone(), note, flow.project().to_path_buf(), false));
     flow.halt(format!("{reason}; re-entering at {at}"))
+}
+
+/// Where the task force's re-entries and repairs are kept between the driver's processes: a re-entry starts a new
+/// one, and so does an operator's restart `--from` a step; the limit holds for the run, not for one process.
+pub const SPENT: &str = "agg/private/task-force.json";
+
+/// The re-entries and repairs a run starting as `run` has spent already: none for a run from the start (which
+/// begins the count anew), else what the processes before it kept, and at least the `--reentries` it was given.
+pub(crate) fn spent_before(project: &std::path::Path, run: &Run) -> (u32, u32) {
+    if run.from.is_none() {
+        keep_spent(project, run.reentries, 0);
+        return (run.reentries, 0);
+    }
+    let kept: serde_json::Value = std::fs::read_to_string(project.join(SPENT)).ok()
+        .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let count = |k: &str| kept.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
+    (count("reentries").max(run.reentries), count("fixes"))
+}
+
+/// Keeps the run's count of re-entries and repairs for the next process of it.
+fn keep_spent(project: &std::path::Path, reentries: u32, fixes: u32) {
+    let file = project.join(SPENT);
+    let _ = file.parent().map(std::fs::create_dir_all);
+    let _ = std::fs::write(&file, serde_json::json!({ "reentries": reentries, "fixes": fixes }).to_string());
 }
 
 /// The task force's answer in `file`; a key that is missing is empty, and without `outcome` a step to re-enter means
@@ -232,6 +266,19 @@ mod tests {
         assert!(history.entries().is_empty());
         let _ = run(|| Err(Fatal::Other(anyhow::anyhow!("writing x: no folder"))));
         assert_eq!(history.entries()[0]["rationale"], "writing x: no folder");
+    }
+
+    /// A restart `--from` a step keeps the count of the processes before it; a run from the start begins anew.
+    #[test]
+    fn the_count_of_reentries_and_repairs_outlives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = |n: u32| Run { from: Some("6.3".into()), reentries: n, ..Run::default() };
+        assert_eq!(spent_before(dir.path(), &from(0)), (0, 0));
+        keep_spent(dir.path(), 2, 1);
+        assert_eq!(spent_before(dir.path(), &from(0)), (2, 1), "an operator's restart without --reentries");
+        assert_eq!(spent_before(dir.path(), &from(3)), (3, 1), "a re-entry's own count when it is higher");
+        assert_eq!(spent_before(dir.path(), &Run::default()), (0, 0));
+        assert_eq!(spent_before(dir.path(), &from(0)), (0, 0), "the run from the start began the count anew");
     }
 
     /// The answer's keys, or why there is none; without `outcome`, a step means `reenter` and none `escalate`.
