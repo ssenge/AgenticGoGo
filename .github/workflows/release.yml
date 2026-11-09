@@ -44,7 +44,21 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Linux: linked against glibc 2.17 by zig, so the binary runs on older hosts than the runner (Amazon Linux
+      # 2023 has glibc 2.34; ubuntu-latest builds against 2.39, and `GLIBC_2.3x not found` was the result).
+      # The output path and the asset's name stay those of the plain target.
+      - name: Install zig and cargo-zigbuild (linux)
+        if: runner.os == 'Linux'
+        run: |
+          python3 -m pip install --user ziglang cargo-zigbuild
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build release binary (linux, glibc 2.17)
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --release --target ${{ matrix.target }}.2.17 --bin agg
+
       - name: Build release binary
+        if: runner.os != 'Linux'
         run: cargo build --release --target ${{ matrix.target }} --bin agg
 
       # Name the artifact after the target so each platform asset is distinct.

@@ -2,6 +2,40 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+From the first unattended field run of a driver (two increments, 11 manual restarts).
+
+### Fixed
+
+- **A judge's prompt goes to the agent on stdin** (`backend::claude`, `backend::codex`, `os::proc::run_with_input`):
+  it was one argument, and Linux caps one argument at 128 KiB (`MAX_ARG_STRLEN`) whatever `ARG_MAX` says. Every
+  review over that failed with `spawn: Argument list too long (os error 7)`. Claude gets `-p` with no argument,
+  Codex `exec … -`; stdin is closed after the prompt. A container judge runs with `-i`.
+- **A judge that fails to run is asked once more, and then grades nothing** (`Agg::judge`, `agg::workflow`): its
+  error stood after one try, and an agent step took the critic's error for a point to keep for the next approval
+  and went on. The step is now not graded: no repair round (a worker can't fix a judge), never met; it goes to
+  the task force, or ends the run.
+- **A repair in place that the re-judge still finds unmet goes to the task force again** (`agg::workflow`, the task
+  force): it ended the run, and a plain restart then usually passed. The task force gets the new failure while
+  its limit lasts.
+- **The task force's limit holds for the run, not for one process** (`Flow::new`; `agg/private/task-force.json`):
+  a re-entry or an operator's restart `--from` a step started at the `--reentries` it was given, and the repairs
+  in place at 0. The count is kept between the processes; a run from the start begins it anew.
+- **A halt's reason is the driver's last line** (`Flow::halt`), on stdout and stderr: `halt: <step>: <why>`. A log
+  ended with only the exit code.
+- **`--until` ends the run before the first step after it in the driver's order** (`Flow::order`): with the steps up
+  to it not built, the check never matched, and the next step ran.
+- **The Linux release binary runs on glibc 2.17 and later** (`release.yml`, built by `cargo zigbuild`): it needed
+  the runner's glibc, and failed on Amazon Linux 2023 (2.34).
+
+### Added
+
+- **`Flow::constraints`**: what a failed step must keep to (its scope, its rubric), as the driver says, in the
+  task force's brief, so that a repair in place doesn't fail on another of the step's rules.
+- **`agg doctor` warns when a Codex judge would miss your provider**: `model_provider` in your Codex config, but
+  not in `AGG_CODEX_CONFIG`. `docs/CONFIG.md` shows how to carry a provider of your own there.
+
 ## 0.0.41 (2026-11-03)
 
 ### Added
