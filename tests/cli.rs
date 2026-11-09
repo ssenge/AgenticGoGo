@@ -1583,6 +1583,8 @@ for a in "$@"; do
   prev="$a"
 done
 if [ "$fmt" = "json" ]; then
+  # a judge's prompt comes on stdin (`-p` with no argument): an argument fails over Linux's 128 KiB cap
+  prompt=$(cat)
   printf '%s' "$prompt" > judge_prompt.txt
   if [ -f did_work ]; then
     printf '{"result":"{\\"met\\":true,\\"value\\":1,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"ok\\"}"}\n'

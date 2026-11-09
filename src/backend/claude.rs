@@ -167,16 +167,14 @@ impl AgentBackend for Claude {
     ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command
-            .arg("-p")
-            .arg(prompt)
+            .arg("-p") // no argument: the prompt comes on stdin, which no argument size cap limits
             .arg("--model")
             .arg(model)
             .arg("--output-format")
             .arg("json")
             .arg("--strict-mcp-config")
             .arg("--setting-sources")
-            .arg("user")
-            .stdin(Stdio::null());
+            .arg("user");
         if !effort.is_empty() {
             command.arg("--effort").arg(effort);
         }
@@ -186,7 +184,7 @@ impl AgentBackend for Claude {
         // Confine the judge under `Sandbox` (ISOLATION.md §12). Claude's permission layer already
         // denies tool writes here, but that is not a kernel jail — the OS wrapper is.
         let command = self.confine_one_shot(command, cwd, isolation)?;
-        let out: Captured = proc::run_with_timeout(command, timeout_secs)?;
+        let out: Captured = proc::run_with_input(command, prompt.as_bytes(), timeout_secs)?;
         let usage = self.tally_one_shot(&out.stdout);
         Ok(OneShot { body: unwrap_envelope(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }

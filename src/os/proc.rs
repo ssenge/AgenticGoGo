@@ -150,8 +150,22 @@ pub struct Captured {
 ///
 /// The caller sets `current_dir`/env on `command` before calling (this keeps the runner
 /// policy-free: the judge runs in the project dir, the summarizer wherever it likes).
-pub fn run_with_timeout(mut command: Command, timeout_secs: u64) -> Result<Captured, String> {
+pub fn run_with_timeout(command: Command, timeout_secs: u64) -> Result<Captured, String> {
+    run(command, None, timeout_secs)
+}
+
+/// [`run_with_timeout`], with `input` written to the child's stdin, which is closed after it: how a
+/// prompt of any size reaches an agent CLI. An argument can't carry it: Linux caps ONE argument at
+/// `MAX_ARG_STRLEN` (32 pages, 128 KiB) whatever `ARG_MAX` says, and the spawn fails with E2BIG.
+pub fn run_with_input(command: Command, input: &[u8], timeout_secs: u64) -> Result<Captured, String> {
+    run(command, Some(input), timeout_secs)
+}
+
+fn run(mut command: Command, input: Option<&[u8]>, timeout_secs: u64) -> Result<Captured, String> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -159,6 +173,15 @@ pub fn run_with_timeout(mut command: Command, timeout_secs: u64) -> Result<Captu
     }
     let mut child = command.spawn().map_err(|e| format!("spawn: {e}"))?;
     let pid = child.id();
+
+    // written on a thread of its own, and closed when written: a child that reads its stdin to the end before
+    // it writes (Codex waits for EOF) would block a write larger than the pipe buffer here forever
+    if let (Some(input), Some(mut pipe)) = (input, child.stdin.take()) {
+        let input = input.to_vec();
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut pipe, &input);
+        });
+    }
 
     // drain both pipes concurrently so the child never blocks on a full pipe
     let mut out_pipe = child.stdout.take();
@@ -223,6 +246,18 @@ mod tests {
         c.arg("-c").arg("printf hello; exit 0");
         let out = run_with_timeout(c, 10).expect("should complete");
         assert_eq!(out.stdout, b"hello");
+        assert!(out.success);
+    }
+
+    /// A prompt far over Linux's 128 KiB per-argument cap reaches the child whole through its stdin,
+    /// and the child sees EOF after it.
+    #[test]
+    fn run_with_input_passes_a_large_input_through_stdin() {
+        let input = "x".repeat(200 * 1024);
+        let mut c = Command::new("sh");
+        c.arg("-c").arg("wc -c");
+        let out = run_with_input(c, input.as_bytes(), 10).expect("should complete");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "204800");
         assert!(out.success);
     }
 

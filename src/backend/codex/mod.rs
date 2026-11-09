@@ -368,7 +368,9 @@ impl AgentBackend for Codex {
         for kv in super::overrides::codex_config() {
             command.arg("-c").arg(kv);
         }
-        command.arg(prompt).stdin(Stdio::null()); // positional prompt; stdin nulled or it hangs
+        // `-`: the prompt comes on stdin, closed after it (Codex hangs on an open stdin); an argument would fail
+        // with E2BIG over Linux's 128 KiB cap on one argument
+        command.arg("-");
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
@@ -376,7 +378,7 @@ impl AgentBackend for Codex {
         // that `--sandbox read-only` already confines the judge more tightly. That is Codex's own
         // report of its own flag; agg's outer jail is not conditional on it.
         let command = self.confine_one_shot(command, cwd, isolation)?;
-        let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
+        let out = crate::os::proc::run_with_input(command, prompt.as_bytes(), timeout_secs)?;
         let usage = self.tally_one_shot(&out.stdout);
         Ok(OneShot { body: last_agent_message(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }

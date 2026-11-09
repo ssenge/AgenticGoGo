@@ -41,7 +41,8 @@ pub fn worker(cmd: Command, dir: &Path, denies: &[String], image: &str, env_name
 pub fn one_shot(cmd: Command, dir: &Path, env_names: &[&str], credential_files: &[&str]) -> Result<Command> {
     let image = super::policy::for_dir(dir).judge_image.clone();
     let home = home(dir, "ruler")?;
-    let spec = Spec { image: &image, project_ro: true, home: Some(&home), env_names, credential_files, ..Spec::default() };
+    let spec = Spec { image: &image, project_ro: true, home: Some(&home), env_names, credential_files, stdin: true,
+                      ..Spec::default() };
     containerize_spec(cmd, dir, &spec)
 }
 

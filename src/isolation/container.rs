@@ -106,6 +106,8 @@ pub struct Spec<'a> {
     /// `~`-relative host files mounted read-only at the same place under `home` when they exist (an
     /// agent's credential file). Added to the run's `isolation_policy.credentials`.
     pub credential_files: &'a [&'a str],
+    /// keep the container's stdin open (`-i`): a judge's prompt comes on it.
+    pub stdin: bool,
 }
 
 /// [`containerize`] for a full [`Spec`].
@@ -129,6 +131,9 @@ pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Comman
     let run = super::policy::for_dir(&cwd_resolved);
     let mut out = Command::new(engine().unwrap_or(ENGINES[0]));
     out.arg("run").arg("--rm");
+    if spec.stdin {
+        out.arg("-i");
+    }
     // The network: the host's (open), or — under an allow-list — an `--internal` network whose only
     // reachable address is the relay to agg's proxy ([`super::egress::bridge`]). NET_RAW goes too:
     // a raw socket has nowhere to go there anyway, and nothing an agent does needs one.
