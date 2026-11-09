@@ -2,7 +2,7 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
-## Unreleased
+## 0.0.42 (2026-11-09)
 
 From the first unattended field run of a driver (two increments, 11 manual restarts).
 
