@@ -15,8 +15,8 @@ use crate::core::model::Judge;
 use crate::driver::{Agg, Fatal, Step};
 use crate::plugin::RunOutcome;
 
-/// Where a run starts and ends: `--from <step> [--note <text> [--decided]] [--reset] [--until <step>]
-/// [--reentries <n>]`.
+/// Where a run starts and ends: `--from <step> [--note <text> | --note-file <file> [--decided]] [--reset]
+/// [--until <step>] [--reentries <n>]`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Run {
     /// the key of the step the run starts at; the steps before it are skipped.
@@ -38,7 +38,14 @@ impl Run {
     /// The run's flags among `args` (the program's arguments); other arguments are the driver's.
     pub fn from_args(args: &[String]) -> anyhow::Result<Run> {
         let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
-        let run = Run { from: value("--from"), note: value("--note"), reset: args.iter().any(|a| a == "--reset"),
+        // `--note-file`: a note no shell has to quote (an apostrophe in a quoted `--note` broke a start silently)
+        let note = match (value("--note"), value("--note-file")) {
+            (Some(_), Some(_)) => anyhow::bail!("--note and --note-file: give one"),
+            (None, Some(file)) => Some(std::fs::read_to_string(&file)
+                .map_err(|e| anyhow!("reading --note-file {file}: {e}"))?.trim().to_string()),
+            (note, None) => note,
+        };
+        let run = Run { from: value("--from"), note, reset: args.iter().any(|a| a == "--reset"),
                         until: value("--until"),
                         reentries: value("--reentries").and_then(|n| n.parse().ok()).unwrap_or(0),
                         decided: args.iter().any(|a| a == "--decided") };
@@ -52,7 +59,7 @@ impl Run {
     }
 
     /// The flags that take a value, so a driver can tell its own positional arguments from them.
-    pub const VALUED: [&'static str; 4] = ["--from", "--note", "--until", "--reentries"];
+    pub const VALUED: [&'static str; 5] = ["--from", "--note", "--note-file", "--until", "--reentries"];
 }
 
 /// When a step's checks run: before its work, or after it, before its own judges.
@@ -370,6 +377,13 @@ mod tests {
         assert_eq!((run.from.as_deref(), run.note.as_deref(), run.until.as_deref(), run.reentries, run.reset),
                    (Some("2.5"), Some("fix x"), Some("2.13"), 2, false));
         assert!(Run::from_args(&["--note".into(), "x".into()]).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.md");
+        std::fs::write(&file, "the client's note: don't\n").unwrap();
+        let args = ["--from", "6.13", "--note-file", file.to_str().unwrap()].map(String::from).to_vec();
+        assert_eq!(Run::from_args(&args).unwrap().note.as_deref(), Some("the client's note: don't"));
+        let both = ["--from", "6.13", "--note", "x", "--note-file", file.to_str().unwrap()].map(String::from).to_vec();
+        assert!(Run::from_args(&both).is_err());
         assert_eq!(Run::from_args(&["proj".into()]).unwrap(), Run::default());
     }
 }

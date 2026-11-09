@@ -223,7 +223,7 @@ fn rerun(args: &[String], at: &str, note: &str, decided: bool) -> Vec<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--from" | "--note" | "--reentries" => { it.next(); }
+            "--from" | "--note" | "--note-file" | "--reentries" => { it.next(); }
             "--reset" | "--decided" => {}
             _ => kept.push(a.clone()),
         }
@@ -244,6 +244,9 @@ mod tests {
     /// decision's re-entry says so and keeps the count, and the next one, the task force's, doesn't.
     #[test]
     fn a_reentered_run_replaces_the_step_and_counts_one_more() {
+        let filed: Vec<String> = ["proj", "--from", "6.13", "--note-file", "/n.md"].map(String::from).to_vec();
+        assert_eq!(rerun(&filed, "6.3", "fix z", false),
+                   ["proj", "--from", "6.3", "--note", "fix z", "--reentries", "1"].map(String::from), "the file's note is replaced");
         let args: Vec<String> = ["proj", "--from", "4.1", "--note", "old", "--reset", "--until", "5.3", "--reentries", "1"]
             .map(String::from).to_vec();
         assert_eq!(rerun(&args, "2.5", "fix y", false),

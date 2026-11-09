@@ -33,6 +33,8 @@ From the first unattended field run of a driver (two increments, 11 manual resta
 
 - **`Flow::constraints`**: what a failed step must keep to (its scope, its rubric), as the driver says, in the
   task force's brief, so that a repair in place doesn't fail on another of the step's rules.
+- **`--note-file <file>`** (`Run::from_args`): a driver's note from a file, which no shell has to quote; a
+  re-entry replaces it like `--note`.
 - **`agg doctor` warns when a Codex judge would miss your provider**: `model_provider` in your Codex config, but
   not in `AGG_CODEX_CONFIG`. `docs/CONFIG.md` shows how to carry a provider of your own there.
 
