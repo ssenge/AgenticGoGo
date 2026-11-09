@@ -605,17 +605,18 @@ sec "9e. LLM-backed pieces (llm judge · summarizer) against a stubbed model"
 # A judge with a `.md` extension is an LLM judge (§5.1): the rubric IS the file, inputs come from
 # its own frontmatter. It runs on the RULER (`judge:` block), as does the summarizer.
 LJ="$(mkproj llmjudge)"
-# `--output-format json` marks the judge/summary calls; the worker uses stream-json.
+# `--output-format json` marks the judge/summary calls, whose prompt comes on stdin; the worker uses
+# stream-json.
 cat > "$LJ/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-fmt=""; prompt=""; prev=""
+fmt=""; prev=""
 for a in "$@"; do
   [ "$prev" = "--output-format" ] && fmt="$a"
-  [ "$prev" = "-p" ] && prompt="$a"
   prev="$a"
 done
 if [ "$fmt" = "json" ]; then
+  prompt=$(cat)
   case "$prompt" in
     *cumulative*) printf '{"result":"{\\"cumulative\\":\\"CUMULATIVE_SUMMARY_X\\",\\"windowed\\":\\"WINDOWED_SUMMARY_Y\\"}"}\n' ;;
     # the llm judge must be NOT-met at baseline, else the loop stops before running a session
