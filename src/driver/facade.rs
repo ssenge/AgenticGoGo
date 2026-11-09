@@ -1065,7 +1065,7 @@ impl Agg {
         // an unknown own agent is a failed verdict, recorded like any other (resume counts the call).
         let (verdict, usage, agent) = match judge_ruler(j, run_ruler) {
             Ok((ruler, model, effort, agent)) => {
-                let (verdict, usage) = crate::core::judge::run(
+                let once = || crate::core::judge::run(
                     &kind,
                     &j.name,
                     &self.dir,
@@ -1079,14 +1079,24 @@ impl Agg {
                     src,
                     Some(&iso_base),
                 );
+                // a judge that failed to RUN (a spawn error, a ruler that didn't answer) has graded nothing:
+                // asked once more before its error stands; the second call's spend counts too
+                let (mut verdict, first) = once();
+                let mut usage: Vec<crate::usage::Usage> = first.into_iter().collect();
+                if let Some(error) = verdict.error() {
+                    eprintln!("  judge `{}` failed to run, asked once more: {error}", j.name);
+                    let (again, more) = once();
+                    usage.extend(more);
+                    verdict = again;
+                }
                 (verdict, usage, agent)
             }
-            Err(e) => (Verdict::failed(format!("judge `{}`: {e}", j.name)), None, String::new()),
+            Err(e) => (Verdict::failed(format!("judge `{}`: {e}", j.name)), vec![], String::new()),
         };
         // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
         {
             let mut st = started.st.borrow_mut();
-            st.charge_ruler_as(&agent, usage.as_slice());
+            st.charge_ruler_as(&agent, &usage);
             // …and the VERDICT reaches the snapshot, not just the spend. Charging alone was the whole
             // of this block, which is why a driver run published `judges: []` to every reader while
             // its judges ran. `publish()` leaves `dash.judges` alone when the engine has none, so
@@ -1105,8 +1115,8 @@ impl Agg {
             label: self.label_path(),
             judge: j.name.clone(),
             verdict: verdict.clone(),
-            tokens: usage.as_ref().map(|u| u.tokens.output_or_zero()).unwrap_or(0),
-            cost: usage.as_ref().and_then(|u| u.cost_usd).unwrap_or(0.0),
+            tokens: usage.iter().map(|u| u.tokens.output_or_zero()).sum(),
+            cost: usage.iter().filter_map(|u| u.cost_usd).sum(),
             ts: crate::util::now_epoch(),
         }) {
             eprintln!("  ⚠ could not record judge `{}` in the call ledger — resume will re-run it: {e}", j.name);

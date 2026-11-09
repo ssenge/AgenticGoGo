@@ -47,8 +47,17 @@ impl Judges<'_> {
             Some(e) => focused(self.flow, critic, e)?,
             None => critic.clone(),
         };
-        Ok((self.flow.judge(&critic), true))
+        let verdict = self.flow.judge(&critic);
+        // a critic that failed to run has no point to keep for the next approval: the result is not graded
+        let by_critic = verdict.error().is_none();
+        Ok((verdict, by_critic))
     }
+}
+
+/// Why a verdict grades nothing, if it doesn't: its judge failed to run (agg asked it twice). Never met: a step
+/// nobody graded goes to the task force, not on.
+fn not_graded(verdict: &Verdict) -> Option<String> {
+    verdict.error().map(|e| format!("not graded, its judge failed to run: {e}"))
 }
 
 /// What a step's `first` script left for its worker.
@@ -217,6 +226,10 @@ impl Flow {
             if verdict.met() || (by_critic && critic_rounds == CRITIC_ROUNDS) {
                 break;
             }
+            // a repair round can't fix a judge that doesn't run
+            if let Some(why) = not_graded(&verdict) {
+                return self.unmet(name, climbs, &why, Some(judges));
+            }
             // what blocks the check lies in another step's result: no repair round of this worker's can move it
             if let Some(blocker) = &verdict.blocked_by {
                 return self.unmet(name, climbs, &format!("blocked by {blocker}: {}", verdict.rationale()),
@@ -235,7 +248,8 @@ impl Flow {
             return self.accepted(name, verdict.rationale());
         }
         if !verdict.met() {
-            return self.unmet(name, climbs, verdict.rationale(), Some(judges));
+            let why = not_graded(&verdict).unwrap_or_else(|| verdict.rationale().to_string());
+            return self.unmet(name, climbs, &why, Some(judges));
         }
         self.keep(name)?;
         self.record(name, "done", true, verdict.rationale());
@@ -292,7 +306,8 @@ impl Flow {
             self.fail(name, why)?;
             return Ok(Outcome::NotReached);
         };
-        let again = || judges.review(None).map(|(v, _)| (!v.met()).then(|| v.rationale().to_string()));
+        let again = || judges.review(None)
+            .map(|(v, _)| (!v.met()).then(|| not_graded(&v).unwrap_or_else(|| v.rationale().to_string())));
         self.recover(name, why, &again)?;
         self.keep(name)?;
         self.record(name, "done", true, "met after the task force's repair in place");
