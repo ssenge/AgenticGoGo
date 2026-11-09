@@ -1776,6 +1776,20 @@ switching between environments (a subscription, a cloud provider, another accoun
 Claude Code takes its provider from its own variables (`CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`, …), which
 every agent agg starts inherits.
 
+**A Codex provider of your own** (an OpenAI-compatible gateway) that `~/.codex/config.toml` defines reaches
+your Codex workers but **not your Codex judges**: a judge reads no config file, and calls the default OpenAI
+endpoint instead. Carry the provider in `AGG_CODEX_CONFIG`, the same keys as in the file, one per line:
+
+```sh
+export AGG_CODEX_CONFIG='model_provider="gw"
+model_providers.gw.name="gateway"
+model_providers.gw.base_url="https://gateway.example.com/v1"
+model_providers.gw.env_key="GATEWAY_API_KEY"
+model_providers.gw.wire_api="responses"'
+```
+
+`agg doctor` warns when your Codex config sets a `model_provider` that `AGG_CODEX_CONFIG` doesn't carry.
+
 ## Session isolation (mandatory) and the gate
 
 Every session **always** branches off `base`, does its work, and is gated — there is no master switch.

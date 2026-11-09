@@ -52,6 +52,13 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
         }
     }
 
+    // 2b) a Codex judge reads no config file: a provider only the user's Codex config names is missed (a warning)
+    if agent_names.iter().any(|n| n == "codex") {
+        if let Some(missed) = crate::backend::overrides::codex_provider_missed() {
+            eprintln!("  ⚠ {missed}");
+        }
+    }
+
     // 3) build the run-set engine + parse the sequence exactly as `agg run` does — this resolves
     //    every judge name to a file, validates the sequence, and checks the done/abort expressions.
     if let Some(c) = &cfg {

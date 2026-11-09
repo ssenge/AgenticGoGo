@@ -16,6 +16,31 @@ pub fn codex_config() -> Vec<String> {
     lines(std::env::var("AGG_CODEX_CONFIG").ok().as_deref())
 }
 
+/// The provider a Codex judge would silently miss: `model_provider` set in the operator's own Codex config
+/// (`$CODEX_HOME/config.toml`, else `~/.codex/config.toml`) while `AGG_CODEX_CONFIG` names none. A judge reads no
+/// config file, so it calls the default OpenAI endpoint instead, and hangs or fails where only the gateway is
+/// reachable. A warning for `agg doctor`, with the fix.
+pub fn codex_provider_missed() -> Option<String> {
+    let home = std::env::var("CODEX_HOME").ok().map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".codex")))?;
+    let config = std::fs::read_to_string(home.join("config.toml")).ok()?;
+    provider_missed(&config, std::env::var("AGG_CODEX_CONFIG").ok().as_deref())
+}
+
+/// [`codex_provider_missed`] for a config's text and `AGG_CODEX_CONFIG`'s value.
+fn provider_missed(config: &str, overrides: Option<&str>) -> Option<String> {
+    let provider = config.lines().map(str::trim).take_while(|l| !l.starts_with('['))
+        .filter_map(|l| l.strip_prefix("model_provider")).filter_map(|r| r.trim_start().strip_prefix('='))
+        .map(|v| v.trim().trim_matches('"').to_string()).next()?;
+    if lines(overrides).iter().any(|kv| kv.trim_start().starts_with("model_provider")) {
+        return None;
+    }
+    Some(format!(
+        "your Codex config sets model_provider = \"{provider}\", but a Codex judge reads no config file \
+         (--ignore-user-config) and would call the default OpenAI endpoint: set AGG_CODEX_CONFIG, one key=value \
+         per line, e.g. model_provider=\"{provider}\" and that provider's model_providers.{provider}.* keys"))
+}
+
 /// Claude Code's `--mcp-config` (a file, or its JSON) from `AGG_CLAUDE_MCP_CONFIG`, for a worker that runs without
 /// the user's settings and so without the MCP servers registered there: e.g. a web search where the provider has
 /// none.
@@ -51,6 +76,16 @@ fn lines(raw: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A provider in the user's Codex config that AGG_CODEX_CONFIG doesn't carry is named, with the fix.
+    #[test]
+    fn a_provider_only_the_user_config_names_is_a_warning() {
+        let config = "model = \"gpt-x\"\nmodel_provider = \"gw\"\n\n[model_providers.gw]\nbase_url = \"https://gw\"\n";
+        assert!(provider_missed(config, None).unwrap().contains("model_provider=\"gw\""));
+        assert_eq!(provider_missed(config, Some("model_provider=\"gw\"\nmodel_providers.gw.base_url=\"https://gw\"")), None);
+        assert_eq!(provider_missed("[profiles.x]\nmodel_provider = \"gw\"\n", None), None, "only the top level");
+        assert_eq!(provider_missed("model = \"gpt-x\"\n", None), None);
+    }
 
     /// A model with a stand-in is replaced; any other, and every model without a map, stays.
     #[test]

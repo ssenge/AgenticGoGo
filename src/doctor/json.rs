@@ -108,6 +108,12 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
         }
     }
     let used = v.cfg.as_ref().map(|c| c.agent_names()).unwrap_or_default();
+    let mut warnings = v.warnings.clone();
+    if used.iter().any(|u| u == "codex") {
+        if let Some(missed) = crate::backend::overrides::codex_provider_missed() {
+            warnings.push(Problem::new("judge.agent", missed));
+        }
+    }
     let backends = KNOWN.iter().filter_map(|n| for_name(n).ok()).map(|b| backend_facts(b, used.iter().any(|u| u == b.name()))).collect();
     let container_engine = crate::isolation::container_engine();
     DoctorReport {
@@ -126,7 +132,7 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
         container_images: v.images.clone(),
         network: network_facts(v.cfg.as_ref(), container_engine),
         problems,
-        warnings: v.warnings,
+        warnings,
     }
 }
 
