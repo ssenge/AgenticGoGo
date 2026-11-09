@@ -26,6 +26,11 @@ From the first unattended field run of a driver (two increments, 11 manual resta
   ended with only the exit code.
 - **`--until` ends the run before the first step after it in the driver's order** (`Flow::order`): with the steps up
   to it not built, the check never matched, and the next step ran.
+- **What a driver writes between two steps is no protected-path violation** (`Agg::step`): the check of a
+  change between sessions compared a step's session against the last one of a step with the same `write_deny`,
+  and put back what the driver had written in between (its history), so a second task-force round lost the
+  first round's record. A driver's new step starts from the world the driver left; between the sessions of one
+  step the check holds.
 - **The Linux release binary runs on glibc 2.17 and later** (`release.yml`, built by `cargo zigbuild`): it needed
   the runner's glibc, and failed on Amazon Linux 2023 (2.34).
 

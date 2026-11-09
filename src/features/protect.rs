@@ -32,7 +32,8 @@ pub struct ProtectState {
     pub span_violation: Vec<String>,
     /// how the protected entries looked when the last check finished (restored if need be) — the
     /// reference for catching a change made between two sessions. `None` after a session that
-    /// protected nothing, so a step with a different list never compares against it.
+    /// protected nothing, so a step with a different list never compares against it; and `None` when a
+    /// driver hands agg its next step, the driver's own writes in between being no worker's.
     pub last: Option<LastCheck>,
 }
 

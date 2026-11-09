@@ -545,6 +545,22 @@ fn a_repair_in_place_still_unmet_goes_to_the_task_force_again() {
     assert!(force[1].starts_with("no re-entry: no answer"), "the second round: {force:?}");
 }
 
+/// The history the driver writes between two task-force rounds is the driver's, not a worker's: a task force
+/// that may not write it (`write_deny`) keeps the first round's entry when the second round starts.
+#[test]
+fn the_history_written_between_two_task_force_rounds_is_kept() {
+    let tmp = project(9);
+    let d = tmp.path();
+    std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: guessed\nnote: changed x\n").unwrap();
+    let force = Step::new("task-force").model("fake").prompt("Find the cause.").write_deny(["reports/**"]);
+    let f = flow(d, Run::default()).history("reports/record.jsonl").on_failure(force, 3);
+    assert!(matches!(f.task(&task("1 Build")).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
+    let force: Vec<String> = f.steps().entries().iter().filter(|e| e["kind"] == "task-force")
+        .map(|e| e["rationale"].as_str().unwrap_or_default().to_string()).collect();
+    assert!(force.iter().any(|r| r.contains("judged again")), "the first round's entry survives: {force:?}");
+    assert!(agg::protect::read(d).is_empty(), "no violation: {:?}", agg::protect::read(d));
+}
+
 /// A-35: past its limit, the task force gets no further round, and the run ends.
 #[test]
 fn a_repair_in_place_still_unmet_past_the_limit_ends_the_run() {

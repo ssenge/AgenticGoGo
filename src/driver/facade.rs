@@ -614,6 +614,11 @@ impl Agg {
         }
 
         let mut st = started.st.borrow_mut();
+        // Between two `step()` calls the DRIVER ran — its own code, trusted, writing its history and reports.
+        // The protected-path check's "between sessions" reference can't tell that from a process a worker left
+        // running, and would put the driver's writes back; a new step starts from the world the driver left.
+        // Between the sessions of ONE step (the `NextSession` retry below) the check still applies.
+        st.ext.get::<AGGState>().protect.last = None;
         // The breadcrumb, stamped where the driver's flow ENTERS agg. agg cannot observe the
         // hand-written `for` between two `step()` calls, so this is the only moment the live
         // `PosFrame` stack and the snapshot are in the same place at the same time. `step_once`
