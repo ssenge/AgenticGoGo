@@ -2,6 +2,18 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.43 (2026-11-10)
+
+From two parallel unattended field runs of a driver.
+
+### Changed
+
+- **The task force's limit holds per failed step** (`agg::workflow`, the task force; `agg/private/task-force.json`,
+  its new `steps` map): one limit for the whole run was spent on early repairs, and every later failure halted
+  unrepaired until an operator restarted the run. Each failed step now has its own `max` re-entries and repairs;
+  the count is kept across the driver's processes, and a run from the start begins it anew. The halt names the
+  step whose limit is spent: `(the task force's 3 re-entries and repairs for <step> are spent)`.
+
 ## 0.0.42 (2026-11-09)
 
 From the first unattended field run of a driver (two increments, 11 manual restarts).

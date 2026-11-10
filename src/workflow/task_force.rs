@@ -59,12 +59,13 @@ impl Flow {
 /// a re-entry a human decides, or leaves it to a human; without the task force, or past its limit, the run ends.
 pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> Result<(), Fatal> {
     let reason = format!("{name}: {why}");
-    let spent = flow.run.reentries + flow.fixes.get();
     let Some((force, max)) = flow.task_force.as_ref() else {
         return flow.halt(reason);
     };
-    if spent >= *max {
-        return flow.halt(format!("{reason} (the task force's {max} re-entries and repairs of this run are spent)"));
+    // the limit holds per failed step: one step's early repairs leave a later step its own (a field run spent the
+    // whole run's three on test fixes in Phase 6, and every failure after them halted unrepaired)
+    if spent_on(flow.project(), name) >= *max {
+        return flow.halt(format!("{reason} (the task force's {max} re-entries and repairs for {name} are spent)"));
     }
     let file = flow.scratch("task-force.yaml")?;
     let step = with_section(&flow.absolute(force), &brief(flow, name, why, &file, again.is_some()))?;
@@ -108,6 +109,7 @@ fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: b
 fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head): (Again, &str)) -> Result<(), Fatal> {
     flow.fixes.set(flow.fixes.get() + 1);
     keep_spent(flow.project(), flow.run.reentries, flow.fixes.get());
+    spend_on(flow.project(), name);
     let changed = super::git::git_out(flow.project(), &["diff", "--name-only", head, "HEAD"]).unwrap_or_default();
     let changed = changed.split_whitespace().collect::<Vec<_>>().join(", ");
     let what = format!("fixed in place ({changed}): {}: {}", a.cause, a.note);
@@ -142,18 +144,21 @@ fn reentered(flow: &Flow, name: &str, reason: &str, a: Answer) -> Result<(), Fat
     let how = if trusted { " (a proposal the driver trusts, no ask)" } else { "" };
     flow.record(name, "task-force", true, &format!("re-enter at {at}{how}: {note}"));
     keep_spent(flow.project(), flow.run.reentries + 1, flow.fixes.get());
+    spend_on(flow.project(), name);
     let _ = REENTRY.set((at.clone(), note, flow.project().to_path_buf(), false));
     flow.halt(format!("{reason}; re-entering at {at}"))
 }
 
 /// Where the task force's re-entries and repairs are kept between the driver's processes: a re-entry starts a new
-/// one, and so does an operator's restart `--from` a step; the limit holds for the run, not for one process.
+/// one, and so does an operator's restart `--from` a step; the limit holds for each failed step of the run, not for
+/// one process.
 pub const SPENT: &str = "agg/private/task-force.json";
 
 /// The re-entries and repairs a run starting as `run` has spent already: none for a run from the start (which
 /// begins the count anew), else what the processes before it kept, and at least the `--reentries` it was given.
 pub(crate) fn spent_before(project: &std::path::Path, run: &Run) -> (u32, u32) {
     if run.from.is_none() {
+        let _ = std::fs::remove_file(project.join(SPENT));
         keep_spent(project, run.reentries, 0);
         return (run.reentries, 0);
     }
@@ -165,9 +170,36 @@ pub(crate) fn spent_before(project: &std::path::Path, run: &Run) -> (u32, u32) {
 
 /// Keeps the run's count of re-entries and repairs for the next process of it.
 fn keep_spent(project: &std::path::Path, reentries: u32, fixes: u32) {
+    let mut kept = read_spent(project);
+    kept["reentries"] = reentries.into();
+    kept["fixes"] = fixes.into();
+    write_spent(project, &kept);
+}
+
+/// The re-entries and repairs the task force spent on failures of step `name` in this run.
+fn spent_on(project: &std::path::Path, name: &str) -> u32 {
+    read_spent(project)["steps"][name].as_u64().unwrap_or(0) as u32
+}
+
+/// Counts one more re-entry or repair for a failure of step `name`.
+fn spend_on(project: &std::path::Path, name: &str) {
+    let mut kept = read_spent(project);
+    if !kept["steps"].is_object() {
+        kept["steps"] = serde_json::json!({});
+    }
+    kept["steps"][name] = (spent_on(project, name) + 1).into();
+    write_spent(project, &kept);
+}
+
+fn read_spent(project: &std::path::Path) -> serde_json::Value {
+    std::fs::read_to_string(project.join(SPENT)).ok().and_then(|t| serde_json::from_str(&t).ok())
+        .filter(serde_json::Value::is_object).unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_spent(project: &std::path::Path, kept: &serde_json::Value) {
     let file = project.join(SPENT);
     let _ = file.parent().map(std::fs::create_dir_all);
-    let _ = std::fs::write(&file, serde_json::json!({ "reentries": reentries, "fixes": fixes }).to_string());
+    let _ = std::fs::write(&file, kept.to_string());
 }
 
 /// The task force's answer in `file`; a key that is missing is empty, and without `outcome` a step to re-enter means
@@ -282,6 +314,21 @@ mod tests {
         assert_eq!(spent_before(dir.path(), &from(3)), (3, 1), "a re-entry's own count when it is higher");
         assert_eq!(spent_before(dir.path(), &Run::default()), (0, 0));
         assert_eq!(spent_before(dir.path(), &from(0)), (0, 0), "the run from the start began the count anew");
+    }
+
+    /// Each failed step has its own limit, kept across the driver's processes and begun anew by a run from the start.
+    #[test]
+    fn the_limit_holds_per_failed_step() {
+        let dir = tempfile::tempdir().unwrap();
+        spend_on(dir.path(), "6.3 Transform");
+        spend_on(dir.path(), "6.3 Transform");
+        keep_spent(dir.path(), 1, 1);
+        assert_eq!((spent_on(dir.path(), "6.3 Transform"), spent_on(dir.path(), "7.2 Check")), (2, 0));
+        let from = Run { from: Some("7.2".into()), ..Run::default() };
+        spent_before(dir.path(), &from);
+        assert_eq!(spent_on(dir.path(), "6.3 Transform"), 2, "a restart keeps the count");
+        spent_before(dir.path(), &Run::default());
+        assert_eq!(spent_on(dir.path(), "6.3 Transform"), 0, "a run from the start begins anew");
     }
 
     /// The answer's keys, or why there is none; without `outcome`, a step means `reenter` and none `escalate`.
