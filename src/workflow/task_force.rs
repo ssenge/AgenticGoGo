@@ -14,6 +14,12 @@ use crate::driver::{Fatal, Step};
 /// Where the next run re-enters, its note, the project, and whether the note is the humans' decision: set
 /// by the task force or the driver, read by [`run`] after the run.
 static REENTRY: OnceLock<(String, String, PathBuf, bool)> = OnceLock::new();
+/// Set when the run halts because the task force's limit for the failed step is spent: [`run`] then exits with
+/// [`SPENT_EXIT`], so a supervisor can't take it for a halt a restart of that step mends (a field run restarted a
+/// spent step three times in three minutes).
+static LIMIT_SPENT: OnceLock<()> = OnceLock::new();
+/// The exit code of a halt whose step has no repairs left: only a human's change of what the step works on helps.
+pub const SPENT_EXIT: u8 = 6;
 
 /// How a failed step is judged again after a repair in place: `None` when it is met now, else why not.
 pub type Again<'a> = &'a dyn Fn() -> Result<Option<String>, Fatal>;
@@ -65,6 +71,8 @@ pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> 
     // the limit holds per failed step: one step's early repairs leave a later step its own (a field run spent the
     // whole run's three on test fixes in Phase 6, and every failure after them halted unrepaired)
     if spent_on(flow.project(), name) >= *max {
+        let _ = LIMIT_SPENT.set(());
+        flow.record(name, "task-force", false, &format!("spent: its {max} re-entries and repairs were used"));
         return flow.halt(format!("{reason} (the task force's {max} re-entries and repairs for {name} are spent)"));
     }
     let file = flow.scratch("task-force.yaml")?;
@@ -231,6 +239,9 @@ pub fn run(drive: impl FnOnce() -> Result<(), Fatal>) -> ExitCode {
             super::history::ended_by(&e.to_string());
         }
     }));
+    if LIMIT_SPENT.get().is_some() {
+        return ExitCode::from(SPENT_EXIT);
+    }
     let Some((at, note, project, decided)) = REENTRY.get() else {
         return code;
     };

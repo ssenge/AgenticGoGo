@@ -322,7 +322,9 @@ fn real_main() -> Result<(), Fatal> { /* … */ }
 ```
 
 It maps the ending to the same codes `agg run` uses: **0** goals met · **3** `abort_if` · **4**
-max-sessions · **5** stopped by an operator · **1** a real fault.
+max-sessions · **5** stopped by an operator · **1** a real fault. `agg::workflow::run` adds **6**: a halt
+because the task force's re-entries and repairs for the failed step are spent (a restart of that step halts
+again; something it works on must change first).
 
 A driver run writes the same `agg/private/report.json` as `agg run` (see
 [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson)), when the `Agg` drops. `Drop` cannot see
@@ -367,7 +369,7 @@ fn drive() -> Result<(), Fatal> {
 | block | what it does |
 |---|---|
 | `Flow::new(agg, Run)` | the run: `Run::from_args` reads `--from <key> [--note t | --note-file f [--decided]] [--reset] [--until <key>] [--reentries n]`; a step before `from` doesn't run, the `from` step gets the note leading its brief (`--decided`: the note is the humans' decision, and the `from` step refreshes against it like a later step, unchanged when it doesn't concern it), every later step refreshes; `--until` ends the run after that step |
-| `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` `.trust(rule)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; the task force (at most `max` re-entries and repairs in place per failed step of a run, kept in `agg/private/task-force.json` across the driver's processes, a restart `--from` a step included; a run from the start begins the count anew); which of the task force's proposals go ahead without a human's yes (`rule(failed step, re-enter at)`) |
+| `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` `.trust(rule)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; the task force (at most `max` re-entries and repairs in place per failed step of a run, kept in `agg/private/task-force.json` across the driver's processes, a restart `--from` a step included; a run from the start begins the count anew; past it the run exits 6); which of the task force's proposals go ahead without a human's yes (`rule(failed step, re-enter at)`) |
 | `.order(keys)` `.constraints(f)` | every step key of the driver in order, built or not, so `--until` ends the run before the first step after it even when the steps up to it never run; what a failed step must keep to (`f(flow, step) -> Option<String>`: its scope, its rubric), in the task force's brief |
 | `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails, and after the task force's repair in place the script runs again |
 | `flow.recover(name, why, &again)` | the driver's own failure that `again` can judge again (`Ok(None)`: met now): the task force may repair it in place, and when `again` is met the call returns and the step goes on; `flow.fail(name, why)` for one it can't judge again |

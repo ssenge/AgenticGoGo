@@ -379,6 +379,24 @@ pub fn ensure_agg_excluded(dir: &Path) {
 
 
 
+/// At run end, the base branch checked out again where the run left a session branch: a human's commit after a halt
+/// otherwise lands on that branch, which the next start parks aside, so the base never gets it (a field run lost
+/// a skip that way). The staged work stays on its branch. A message for the operator, or None where nothing moved.
+pub fn back_to_base(dir: &Path, base: &str) -> Option<String> {
+    let here = current_branch(dir)?;
+    if base.is_empty() || here == base {
+        return None;
+    }
+    if !is_clean(dir) {
+        return Some(format!("  ⚠ [iso] still on {here}: uncommitted changes; check out {base} before committing"));
+    }
+    let (ok, _, err) = git(dir, &["checkout", "-q", base]);
+    Some(if ok {
+        format!("  [iso] checked out {base} again; {here} keeps its work")
+    } else {
+        format!("  ⚠ [iso] still on {here}: checking out {base} failed: {err}")
+    })
+}
 
 #[cfg(test)]
 mod tests;

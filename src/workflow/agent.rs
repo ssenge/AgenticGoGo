@@ -120,7 +120,8 @@ impl Flow {
         // a fault a later step found must change the result; a decision may not concern it (then it refreshes)
         if landed == Landing::Nothing && self.run.from.as_deref() == Some(key(&name)) && self.run.note.is_some()
             && !self.run.decided {
-            return self.unmet(&name, t.climbs, "the re-entered step changed nothing, so its note wasn't carried out",
+            return self.unmet(&name, t.climbs, "the re-entered step changed nothing, so its note wasn't carried out (a note that only \
+                              informs, asking for no change, goes with `--decided`)",
                               Some(&judges));
         }
         self.repaired(&name, &step, (t.repairs, t.climbs), &judges, &cannot)

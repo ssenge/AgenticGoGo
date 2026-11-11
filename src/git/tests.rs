@@ -440,3 +440,20 @@ fn save_partial_saves_nothing_from_a_clean_tree_unless_head_is_the_work() {
     assert!(d.join("stray.txt").exists());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A run that ends on a session branch checks the base out again, the session's commit kept on its branch; a dirty
+/// tree stays where it is, and a run on its base moves nothing.
+#[test]
+fn back_to_base_leaves_the_session_branch_at_run_end() {
+    let d = repo_with_session_branch("back-to-base");
+    assert_eq!(back_to_base(&d, "main"), None);
+    git_t(&d, &["checkout", "-q", "agg/p/session-1"]);
+    std::fs::write(d.join("f.txt"), "dirty\n").unwrap();
+    assert!(back_to_base(&d, "main").unwrap().contains("uncommitted"));
+    assert_eq!(current_branch(&d).as_deref(), Some("agg/p/session-1"));
+    git_t(&d, &["checkout", "--", "f.txt"]);
+    assert!(back_to_base(&d, "main").unwrap().contains("checked out main again"));
+    assert_eq!(current_branch(&d).as_deref(), Some("main"));
+    assert_eq!(head_commit_count(&d), 1);
+    let _ = std::fs::remove_dir_all(&d);
+}

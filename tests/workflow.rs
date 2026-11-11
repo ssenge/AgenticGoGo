@@ -570,7 +570,10 @@ fn a_repair_in_place_still_unmet_past_the_limit_ends_the_run() {
     let force = Step::new("task-force").model("fake").prompt("Find the cause.");
     let f = flow(d, Run::default()).on_failure(force, 1);
     assert!(matches!(f.task(&task("1 Build")).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
-    assert_eq!(kinds(&f, "1 Build").iter().filter(|k| *k == "task-force").count(), 1);
+    let force: Vec<String> = f.steps().entries().iter().filter(|e| e["kind"] == "task-force")
+        .map(|e| e["rationale"].as_str().unwrap_or_default().to_string()).collect();
+    assert_eq!(force.len(), 2, "one round, then the record that the limit is spent: {force:?}");
+    assert!(force[1].starts_with("spent"), "the last entry says no restart mends it: {force:?}");
     let kept = std::fs::read_to_string(d.join(agg::workflow::SPENT)).unwrap();
     assert!(kept.contains("\"fixes\":1"), "the repair is kept for a restart: {kept}");
 }

@@ -1895,6 +1895,10 @@ impl Drop for Agg {
         // make a call it was not given) and never auto-rolled-back (discarding an overnight run over a
         // late regression is far worse than keeping it).
         crate::features::finalize::report_stranded_span(&mut st);
+        let base = st.ext.get::<AGGState>().git.iso_base.clone();
+        if let Some(moved) = crate::git::back_to_base(&st.dir, &base) {
+            eprintln!("{moved}");
+        }
 
         // `dash.finished`, not the latch: a `Flow::Stop` that already emitted `Finished` must not be
         // re-recorded, while a latched outcome that never got emitted still must be.
