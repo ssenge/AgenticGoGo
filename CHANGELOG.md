@@ -2,6 +2,19 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.44 (2026-11-11)
+
+From an unattended field run of a driver.
+
+### Changed
+
+- **A driver's run ends on the base branch** (`Agg`'s drop, `git::back_to_base`): after a halt the repo stayed on
+  the halted session's branch, a human's commit landed there, and the next start parked it as
+  `orphaned-<ts>`, so the base branch never got it.
+- **A spent task-force limit exits 6** (`agg::workflow::task_force::SPENT_EXIT`) and adds a run-record entry
+  starting `spent`, so an operator tells it from an escalation (3) without reading the halt line.
+- **The unchanged-note message names `--decided`**: a note the step needn't act on goes there instead.
+
 ## 0.0.43 (2026-11-10)
 
 From two parallel unattended field runs of a driver.

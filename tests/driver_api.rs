@@ -585,7 +585,10 @@ fn a_crashed_head_on_a_session_branch_never_becomes_the_base() {
         agg.step(&work()).unwrap();
     }
     let head = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    assert!(head.starts_with("agg/"), "the span left HEAD on its session branch: {head}");
+    assert_eq!(head, "main", "a run that ends normally goes back to its base");
+    // a crash skips the drop: HEAD stays on the session branch
+    let span = agg_branches(dir).into_iter().find(|b| b.ends_with("session-1")).unwrap();
+    git(dir, &["checkout", "-q", &span]);
 
     let agg = Agg::open(dir).unwrap();
     agg.step(&work()).unwrap();
