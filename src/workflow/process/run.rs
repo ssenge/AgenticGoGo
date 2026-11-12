@@ -204,7 +204,7 @@ fn exec(p: &Proc, step: &Step, item: Option<Item>) -> Result<(), Fatal> {
     if let (Err(_), Some(command)) = (&done, &step.on_fail) {
         // the step ends the run unmet: what it left up (a deployment) is taken down before the error goes on
         let said = p.run(&ctx, command).map_or_else(|e| e.to_string(), |o| o.lines().last().unwrap_or_default().to_string());
-        p.info(&format!("{}: on_fail: {said}", ctx.label));
+        eprintln!("{}: on_fail: {said}", ctx.label);
     }
     done?;
     if reached {
@@ -226,12 +226,22 @@ fn kind(p: &Proc, ctx: &Ctx) -> Result<(), Fatal> {
 
 /// An `each`: its steps once per item, in order.
 fn each(p: &Proc, step: &Step) -> Result<(), Fatal> {
+    // a run that starts after the loop (`--from`) may have no items file yet (a project that never got that far)
+    let before_from = p.run.from.as_deref().is_some_and(|f| !p.seen().iter().any(|s| s == f));
+    if before_from && !items_file(p, step).is_some_and(|f| p.project.join(f).is_file()) {
+        return Ok(());
+    }
     for item in items(p, step)? {
         for child in &step.steps {
             exec(p, child, Some(item.clone()))?;
         }
     }
     Ok(())
+}
+
+/// The file an `each` takes its items from, its names filled in.
+fn items_file(p: &Proc, step: &Step) -> Option<String> {
+    template::render(&step.items.as_ref()?.file, &p.shared.vars).ok()
 }
 
 /// The items of an `each`: in the order its `list` gives, else in file order.

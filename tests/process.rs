@@ -28,8 +28,13 @@ for a in "$@"; do
 done
 if [ -n "$worker" ]; then cat agg/private/INSTRUCTIONS.md >> .git/agg-worker.args; fi
 answer=$(grep -o '/[^ ]*task-force\.yaml' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1)
-if [ -n "$answer" ] && [ -f task-force.answer ]; then cp task-force.answer "$answer"; rm task-force.answer; fi
-if [ -n "$worker" ] && [ ! -f .git/agg-idle ]; then
+if [ -n "$answer" ] && [ -f task-force.answer ]; then cp task-force.answer "$answer"; [ -f .git/agg-keep-answer ] || rm task-force.answer; fi
+# a task force session repairs the cause (the workers are no longer idle) unless the project says it is stubborn
+if grep -q '^## The failure' agg/private/INSTRUCTIONS.md 2>/dev/null && [ ! -f .git/agg-stubborn ]; then rm -f .git/agg-idle; fi
+# an exam's repairer disputes a finding when the project says so
+dispute=$(grep -o 'The disputes file: `[^`]*`' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1 | cut -d'`' -f2)
+if [ -n "$dispute" ] && [ -f .git/agg-dispute ]; then echo "t1 is wrong" > "$dispute"; fi
+if [ -n "$worker" ] && [ ! -f .git/agg-idle ] && [ -z "$dispute" -o ! -f .git/agg-dispute ]; then
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
   git commit -qm "worker: did work" >/dev/null 2>&1
@@ -136,4 +141,258 @@ fn a_process_runs_in_file_order_with_numbers_from_position() {
     let phases = std::fs::read_to_string(d.join(".git/phase-hooks.log")).unwrap();
     assert!(phases.lines().next().unwrap().ends_with("before") && phases.lines().last().unwrap().ends_with("after"), "{phases}");
     assert!(!std::fs::read_to_string(d.join(".git/step-hooks.log")).unwrap().is_empty(), "the step hook ran");
+}
+
+fn read(dir: &Path, file: &str) -> String {
+    std::fs::read_to_string(dir.join(file)).unwrap_or_default()
+}
+
+fn touch(dir: &Path, file: &str) {
+    std::fs::write(dir.join(file), "").unwrap();
+}
+
+fn labels(dir: &Path) -> Vec<String> {
+    steps(dir).into_iter().map(|(s, _)| s).collect()
+}
+
+/// `--from` and `--until` take an id, a number, an instance key or an instance's number; a name no step has halts.
+#[test]
+fn from_and_until_take_an_id_a_number_or_an_instance_key() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    let out = run(d, &["--until", "survey"]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(labels(d).contains(&"1.3 Survey".to_string()) && !labels(d).iter().any(|l| l.contains("CP1")), "{:?}", labels(d));
+    // U1 by its key's end, then U2 by its instance number: only that unit's steps run each time
+    let out = run(d, &["--from", "2.1-U1", "--until", "accept-U1"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let out = run(d, &["--from", "2.1-U2", "--until", "accept-U2"]);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(read(d, "accepted.log"), "U1\nU2\n");
+    assert_eq!(labels(d).iter().filter(|l| l.starts_with("2.1-U1 Construct")).count(), 1, "U1 ran once, in the first run");
+    assert!(labels(d).contains(&"2.1-U2 Construct".to_string()));
+    let out = run(d, &["--from", "bogus"]);
+    assert!(!out.status.success() && said(&out).contains("names no step"), "{}", said(&out));
+    let out = run(d, &["--until", "1.3"]);
+    assert!(out.status.success(), "a number names its step too: {}", said(&out));
+}
+
+/// The run's configuration switches off a step or a whole phase, with the reason in the record; a project's settings can
+/// switch on a step the process skips; a step whose condition is met runs.
+#[test]
+fn skips_come_from_the_run_configuration_and_the_settings_and_a_condition_decides() {
+    let tmp = project("auto_approve: [cp-survey, cp-build]\nskip: []\n");
+    let d = tmp.path();
+    std::fs::write(d.join("run.yaml"), "switched_off:\n  survey: built in the first increment\n  ship: the whole phase\n").unwrap();
+    touch(d, "lint.enabled");
+    let out = run(d, &[]);
+    assert!(out.status.success(), "{}", said(&out));
+    let h = history(d);
+    let skipped = |label: &str| h.iter().find(|e| e["step"] == label && e["kind"] == "skipped").map(|e| e["rationale"].as_str().unwrap().to_string());
+    assert_eq!(skipped("1.3 Survey").as_deref(), Some("switched off by the run's configuration (run.yaml): built in the first increment"));
+    assert!(skipped("3.1 Package").is_some() && skipped("3.2 Docs exam").is_some(), "a phase is switched off as a whole");
+    assert!(labels(d).contains(&"2.3 Lint".to_string()) && skipped("2.3 Lint").is_none(), "its condition is met");
+    assert!(steps(d).contains(&("2.1-U1 Construct".to_string(), "done".to_string())));
+}
+
+/// A checkpoint asks a human; the decision they write in the yes goes back to the step that wrote the document, which
+/// carries it; the approval then stands, the document being the same.
+#[test]
+fn a_checkpoint_asks_a_human_and_a_decision_in_the_yes_goes_back_to_its_owner() {
+    let tmp = project("");
+    let d = tmp.path();
+    let dir = d.to_path_buf();
+    let human = std::thread::spawn(move || {
+        for _ in 0..2400 {
+            if let Some(a) = agg::core::asks::open(&dir).into_iter().next() {
+                std::fs::create_dir_all(dir.join("checkpoints")).unwrap();
+                std::fs::write(dir.join("checkpoints/cp-survey-decisions.md"), "- keep the survey short\n").unwrap();
+                agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
+                return a.question;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("no ask appeared");
+    });
+    let out = run(d, &["--until", "cp-survey"]);
+    let question = human.join().unwrap_or_else(|_| panic!("no ask appeared; the run said:\n{}", said(&out)));
+    assert!(out.status.success(), "{}", said(&out));
+    assert!(question.starts_with("CP1: approve 1.3 Survey?"), "{question}");
+    let h = history(d);
+    assert!(h.iter().any(|e| e["kind"] == "reentry" && e["step"] == "1.3 Survey"
+        && e["rationale"].as_str().unwrap().contains("keep the survey short")), "{h:#?}");
+    let briefs = read(d, ".git/agg-worker.args");
+    assert!(briefs.contains("## Since your last result") && briefs.contains("+- keep the survey short"),
+            "the survey's refresh shows the decision in what it reads: {briefs}");
+    assert_eq!(h.iter().filter(|e| e["kind"] == "approval" && e["step"] == "1.4 CP1 Survey approved").count(), 2,
+               "asked once, then standing: {h:#?}");
+}
+
+/// A failed step goes to the task force, which repairs the cause in place; the step is judged again and met, and the
+/// task force's brief names the step's rubric.
+#[test]
+fn the_task_force_repairs_a_failed_step_in_place() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    touch(d, ".git/agg-idle");
+    std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: the workers were idle\nnote: woke them\n").unwrap();
+    let out = run(d, &["--until", "survey"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let h = history(d);
+    let fixed = h.iter().find(|e| e["kind"] == "task-force" && e["met"] == true).unwrap_or_else(|| panic!("{h:#?}"));
+    assert!(fixed["rationale"].as_str().unwrap().starts_with("fixed in place"), "{fixed}");
+    assert_eq!(fixed["id"], "survey");
+    let briefs = read(d, ".git/agg-worker.args");
+    assert!(briefs.contains("## What step 1.3 Survey must keep to") && briefs.contains("judges/survey-review.md"), "the rubric is in the task force's brief");
+    assert!(briefs.contains("the app lives in `app/`"), "the process's own section is in it");
+    assert!(steps(d).contains(&("1.3 Survey".to_string(), "done".to_string())));
+}
+
+/// A failure the task force can't mend uses up its repairs for that step, and the run exits 6: a supervisor can't take it
+/// for a halt a restart mends.
+#[test]
+fn a_spent_limit_exits_6() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    touch(d, ".git/agg-idle");
+    touch(d, ".git/agg-stubborn");
+    touch(d, ".git/agg-keep-answer");
+    std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: guessed\nnote: changed x\n").unwrap();
+    let out = run(d, &["--until", "survey"]);
+    assert_eq!(out.status.code(), Some(6), "{}", said(&out));
+    let h = history(d);
+    let spent = h.iter().filter(|e| e["kind"] == "task-force" && e["met"] == false).last().unwrap();
+    assert!(spent["rationale"].as_str().unwrap().starts_with("spent:"), "{spent}");
+    assert!(said(&out).contains("are spent"), "{}", said(&out));
+}
+
+/// A proposal the process trusts (`task_force.trust`: a failure in a phase sent back to a step) goes ahead without a
+/// human; the process starts again at that step with the note, and the task force's brief carries the unit's constraints.
+#[test]
+fn a_trusted_proposal_re_enters_without_asking() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    std::fs::write(d.join("accepted.log"), "x\nx\nx\n").unwrap();
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "three units accepted already"]);
+    std::fs::write(d.join("task-force.answer"), "reenter: survey\ncause: the survey missed a unit\nnote: list every unit\n").unwrap();
+    let out = run(d, &["--until", "accept-U1"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let h = history(d);
+    let tf = h.iter().find(|e| e["kind"] == "task-force" && e["met"] == true).unwrap_or_else(|| panic!("{h:#?}"));
+    assert!(tf["rationale"].as_str().unwrap().contains("a proposal the driver trusts, no ask"), "{tf}");
+    assert_eq!(tf["id"], "construct-U1");
+    let briefs = read(d, ".git/agg-worker.args");
+    assert!(briefs.contains("## Note from a later step") && briefs.contains("list every unit"), "the survey got the note");
+    assert!(briefs.contains("Only files matching app/a/**"), "the failed unit's constraints are in the task force's brief");
+    assert!(steps(d).contains(&("2.2-U1 Accept".to_string(), "tool".to_string())), "the run went on after the re-entry");
+}
+
+/// A ladder's tool tier that applies no tool is recorded as `n/a`; the next tier does the step.
+#[test]
+fn a_tool_tier_that_applies_nothing_is_not_an_attempt() {
+    let tmp = project("auto_approve: [cp-survey, cp-build]\nsteps:\n  construct: { ladder: [{ tool: codemod }, { mode: once }] }\n");
+    let d = tmp.path();
+    let out = run(d, &["--until", "accept-U1"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let h = history(d);
+    let of = |kind: &str| h.iter().filter(|e| e["step"] == "2.1-U1 Construct" && e["kind"] == kind).count();
+    assert_eq!((of("n/a"), of("tier"), of("done")), (1, 1, 1), "{h:#?}");
+    let na = h.iter().find(|e| e["kind"] == "n/a").unwrap();
+    assert!(na["rationale"].as_str().unwrap().starts_with("tier 1 of 2 n/a: codemod"), "{na}");
+}
+
+/// The brief of an agent step in an `each` holds its item and the house rules, in the order the process says.
+#[test]
+fn a_units_brief_holds_its_item_and_the_house_rules() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    let out = run(d, &["--until", "accept-U1"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let briefs = read(d, ".git/agg-worker.args");
+    let unit = briefs.rsplit("# Session ").next().unwrap();
+    assert!(unit.contains("## Your unit") && unit.contains("id: U1") && unit.contains("note: first"), "{unit}");
+    assert!(unit.contains("You are working on 2.1-U1 Construct (step id `construct`)"), "{unit}");
+    assert!(unit.contains("## Your input files") && unit.contains("Build the thing."), "the brief's small inputs: {unit}");
+    assert!(unit.contains("## Check your result"), "{unit}");
+}
+
+/// The exam: a repair round that meets the checks passes; a round that finds what the one before found fails the step.
+#[test]
+fn an_exam_passes_after_a_repair_and_fails_on_a_stall() {
+    let exam = |work: usize| {
+        let tmp = project(AUTO);
+        let d = tmp.path();
+        std::fs::create_dir_all(d.join("exam")).unwrap();
+        std::fs::write(d.join("exam/exam.yaml"), "tasks:\n  - { id: t1, task: x }\n").unwrap();
+        std::fs::write(d.join("work.log"), "w\n".repeat(work)).unwrap();
+        git(d, &["add", "-A"]);
+        git(d, &["commit", "-qm", "exam"]);
+        let out = run(d, &["--from", "docs-exam", "--until", "docs-exam"]);
+        (tmp, out)
+    };
+    let (tmp, out) = exam(2);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(kinds_in(tmp.path(), "3.2 Docs exam"), ["repair", "done"], "{}", said(&out));
+    let (tmp, out) = exam(0);
+    assert!(!out.status.success() && said(&out).contains("the repair didn't get past this (round 2)"), "{}", said(&out));
+    assert!(kinds_in(tmp.path(), "3.2 Docs exam").contains(&"repair".to_string()));
+}
+
+fn kinds_in(dir: &Path, label: &str) -> Vec<String> {
+    steps(dir).into_iter().filter(|(s, _)| s == label).map(|(_, k)| k).collect()
+}
+
+/// A repairer that disputes the exam sends the run back to the step that wrote it, once; a second dispute fails the step.
+#[test]
+fn a_dispute_re_enters_the_exams_writer_once() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    std::fs::create_dir_all(d.join("exam")).unwrap();
+    std::fs::write(d.join("exam/exam.yaml"), "tasks:\n  - { id: t1, task: x }\n").unwrap();
+    std::fs::write(d.join("work.log"), "w\n".repeat(3)).unwrap();
+    touch(d, "exam.fails");
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "exam"]);
+    touch(d, ".git/agg-dispute");
+    let out = run(d, &["--from", "docs-exam", "--until", "docs-exam"]);
+    assert!(!out.status.success() && said(&out).contains("after `package` wrote the exam again"), "{}", said(&out));
+    let h = history(d);
+    assert!(h.iter().any(|e| e["kind"] == "reentry" && e["step"] == "3.1 Package"), "{h:#?}");
+}
+
+/// A step that ends the run unmet runs its `on_fail` command first.
+#[test]
+fn on_fail_runs_when_the_step_ends_the_run_unmet() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    touch(d, ".git/agg-idle");
+    let out = run(d, &["--from", "package", "--until", "package"]);
+    assert!(!out.status.success(), "{}", said(&out));
+    assert_eq!(read(d, ".git/on-fail.log"), "package failed\n");
+    assert!(said(&out).contains("on_fail: cleaned up after package"), "{}", said(&out));
+}
+
+/// `--check` prints a verdict JSON and exits 1 on a problem; a process with a problem isn't run; `--list` prints the
+/// numbered steps.
+#[test]
+fn check_and_list_read_only_the_file_and_a_bad_process_is_not_run() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    let bad = tempfile::tempdir().unwrap();
+    std::fs::write(bad.path().join("process.yaml"), "version: 1\nphases:\n- id: p\n  name: P\n  steps:\n  - { id: s, name: S, kind: script, run: nowhere/x.sh }\n").unwrap();
+    let agg = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").args(args).current_dir(d).output().unwrap();
+    let checked = agg(&[bad.path().join("process.yaml").to_str().unwrap(), "--check"]);
+    assert_eq!(checked.status.code(), Some(1));
+    let verdict: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&checked.stdout).lines().last().unwrap()).unwrap();
+    assert_eq!(verdict["met"], false);
+    assert!(verdict["rationale"].as_str().unwrap().contains("nowhere/x.sh"), "{verdict}");
+    let ran = agg(&[bad.path().join("process.yaml").to_str().unwrap(), d.to_str().unwrap()]);
+    assert!(!ran.status.success() && said(&ran).contains("1 problem(s)"), "{}", said(&ran));
+    let listed = agg(&[process_file().to_str().unwrap(), "--list"]);
+    let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let labels: Vec<&str> = list.as_array().unwrap().iter().filter_map(|e| e["label"].as_str()).collect();
+    assert!(labels.contains(&"1.4 CP1 Survey approved") && labels.contains(&"2.4 CP2 Build approved") && labels.contains(&"3.4 Handover"), "{labels:?}");
+    let ok = agg(&[process_file().to_str().unwrap(), "--check"]);
+    assert!(ok.status.success(), "{}", said(&ok));
 }

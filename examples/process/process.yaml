@@ -17,6 +17,7 @@ run:
   judge_cache: { ignore: [notes.md] }
   brief:
     sections: [{ file: prompts/house-rules.md }]
+    inputs: { always: [task.md] }
 settings:
   project: settings.yaml
   defaults: { repairs: 1 }
@@ -46,7 +47,7 @@ phases:
     review: true
     checks: [judges/survey.sh]
     deny: [inputs]
-    settings: { inputs: [task.md], outputs: [survey.md] }
+    settings: { inputs: [task.md, checkpoints/cp-survey-decisions.md], outputs: [survey.md] }
   - { id: cp-survey, name: Survey approved, kind: checkpoint, prepare: scripts/doc.sh survey,
       doc: checkpoints/survey.md, question: "{{ cp.cp-survey }}: approve {{ step.survey }}?", owner: survey }
 - id: build
@@ -68,11 +69,11 @@ phases:
     - { id: accept, name: Accept, kind: script, run: "scripts/accept.sh {{ item }}" }
   - { id: lint, name: Lint, kind: script, run: scripts/lint.sh, when: "judges/has.sh lint" }
   - { id: cp-build, name: Build approved, kind: checkpoint, prepare: scripts/doc.sh build,
-      doc: checkpoints/build.md, question: "{{ cp.cp-build }}: approve the build?", owner: survey, go_live: true }
+      doc: checkpoints/build.md, question: "{{ cp.cp-build }}: approve the build?", go_live: true }
 - id: ship
   name: Ship
   steps:
-  - { id: package, name: Package, kind: agent, checks: [judges/package.sh], repairs: 1 }
+  - { id: package, name: Package, kind: agent, checks: [judges/package.sh], repairs: 1, on_fail: scripts/cleanup.sh }
   - id: docs-exam
     name: Docs exam
     kind: exam

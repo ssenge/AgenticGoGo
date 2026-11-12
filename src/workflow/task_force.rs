@@ -55,7 +55,7 @@ impl Flow {
         if !self.seen().iter().any(|s| s == at) {
             return Err(Fatal::Other(anyhow::anyhow!("re-entering at {at}: no step of this run")));
         }
-        self.record(at, "reentry", true, note);
+        self.record(&self.name_for(at), "reentry", true, note);
         let _ = REENTRY.set((at.to_string(), note.to_string(), self.project().to_path_buf(), true));
         self.halt(format!("re-entering at {at}: {note}"))
     }

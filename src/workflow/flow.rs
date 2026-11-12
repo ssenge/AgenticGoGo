@@ -171,6 +171,11 @@ impl Flow {
         self
     }
 
+    /// The name step `key` was named for, else the key itself.
+    pub(crate) fn name_for(&self, key: &str) -> String {
+        self.history.name_of(key).unwrap_or_else(|| key.to_string())
+    }
+
     /// Names the key of one more step while the run goes on (the instances of a loop come with its items).
     pub fn name_key(&self, name: &str, key: &str) {
         self.history.name_key(name, key);

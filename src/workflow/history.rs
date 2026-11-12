@@ -44,6 +44,11 @@ impl History {
         self.keys.borrow_mut().insert(name.to_string(), key.to_string());
     }
 
+    /// The name a key was named for (a process file's label), if one was: what a record of the step reads best under.
+    pub(crate) fn name_of(&self, key: &str) -> Option<String> {
+        self.keys.borrow().iter().find(|(_, k)| k.as_str() == key).map(|(n, _)| n.clone())
+    }
+
     /// The key of step `name`: the one named for it, else its first word.
     pub(crate) fn key_of(&self, name: &str) -> String {
         self.keys.borrow().get(name).cloned().unwrap_or_else(|| super::key(name).to_string())

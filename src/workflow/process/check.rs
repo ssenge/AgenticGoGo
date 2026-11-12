@@ -178,6 +178,25 @@ impl Ctx<'_> {
         }
         if let Some(owner) = &s.owner {
             self.step_ref(at, "owner", owner);
+            self.owner_reads_decisions(at, s, owner);
+        }
+    }
+
+    /// A decision taken in a checkpoint's yes reaches its owner only as a change to what the owner reads: an owner with
+    /// declared inputs that don't cover the decisions file would be refreshed without a session and never see it.
+    fn owner_reads_decisions(&mut self, at: &str, cp: &Step, owner: &str) {
+        let Some(step) = find(&self.process.phases.iter().flat_map(|p| p.steps.iter()).collect::<Vec<_>>(), owner) else { return };
+        let Some(inputs) = step.settings.as_ref().and_then(|s| s.inputs.as_ref()) else { return };
+        let doc = cp.doc.clone().unwrap_or_default();
+        let dir = Path::new(&doc).parent().map(|p| p.display().to_string()).unwrap_or_default();
+        let decisions = if dir.is_empty() { format!("{}-decisions.md", cp.id) } else { format!("{dir}/{}-decisions.md", cp.id) };
+        let covers = |entry: &str| match entry.split_once('*') {
+            Some((pre, post)) => decisions.starts_with(pre) && decisions.ends_with(post),
+            None => entry == decisions || (entry.ends_with('/') && decisions.starts_with(entry)),
+        };
+        if !inputs.iter().any(|i| template::render(i, &self.vars).is_ok_and(|i| covers(&i))) {
+            self.out.push(format!("{at}: its owner `{owner}` doesn't read `{decisions}` among its `settings.inputs`, so a decision \
+                taken in the yes would never reach it"));
         }
     }
 
@@ -413,6 +432,19 @@ fn short(text: &str) -> String {
     if one.chars().count() > 80 { format!("{}…", one.chars().take(80).collect::<String>()) } else { one }
 }
 
+/// The step `id` among `steps`, children of an `each` included.
+fn find<'a>(steps: &[&'a Step], id: &str) -> Option<&'a Step> {
+    for s in steps {
+        if s.id == id {
+            return Some(s);
+        }
+        if let Some(c) = find(&s.steps.iter().collect::<Vec<_>>(), id) {
+            return Some(c);
+        }
+    }
+    None
+}
+
 /// Calls `f` on every step, children of an `each` included.
 fn collect(steps: &[Step], f: &mut dyn FnMut(&Step)) {
     for s in steps {
@@ -487,6 +519,12 @@ mod tests {
         }
         let dir = home(&[], "version: 1\nphases: []\n");
         assert_eq!(check(&dir.path().join("process.yaml")), ["phases: none"]);
+        let reads = GOOD.replace("kind: agent, review: true,", "kind: agent, settings: { inputs: [task.md] }, review: true,");
+        let dir = home(&files(), &reads);
+        assert!(check(&dir.path().join("process.yaml")).join("\n").contains("its owner `build` doesn't read `cp-build-decisions.md`"));
+        let covered = reads.replace("inputs: [task.md]", "inputs: [task.md, \"*-decisions.md\"]");
+        let dir = home(&files(), &covered);
+        assert_eq!(check(&dir.path().join("process.yaml")), Vec::<String>::new(), "a glob covers it");
         assert!(check(&dir.path().join("none.yaml"))[0].contains("none.yaml"));
     }
 }
