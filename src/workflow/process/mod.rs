@@ -6,10 +6,16 @@
 //!
 //! `agg process <file> --check` validates the file, `--list` prints its numbered steps as JSON.
 
+pub mod bases;
+pub mod cache;
 pub mod check;
 pub mod format;
+pub mod hooks;
+pub mod inputs;
 pub mod ladder;
+pub mod leftovers;
 pub mod number;
+pub mod rerun;
 pub mod settings;
 pub mod template;
 

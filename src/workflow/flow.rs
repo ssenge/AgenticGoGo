@@ -171,6 +171,11 @@ impl Flow {
         self
     }
 
+    /// Names the key of one more step while the run goes on (the instances of a loop come with its items).
+    pub fn name_key(&self, name: &str, key: &str) {
+        self.history.name_key(name, key);
+    }
+
     /// The key of step `name`: the one named for it ([`Flow::keys`]), else its first word.
     pub fn key_of(&self, name: &str) -> String {
         self.history.key_of(name)

@@ -105,6 +105,13 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
+    /// A check through the judge cache: `agg cached [--ignore <path>]... -- <command>...` (what `agg process` wraps its
+    /// script checks in).
+    #[command(hide = true)]
+    Cached {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
     /// Show this project's run history (every `agg run`, newest first) + lifetime totals.
     History {
         /// emit the history ledger as JSON (the full Project record, with each run's usage totals).
@@ -334,6 +341,7 @@ fn run_cli() -> Result<ExitCode> {
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
         Cmd::Process { args } => return agg::workflow::process::command(args),
+        Cmd::Cached { args } => return Ok(agg::workflow::process::cache::command(args)),
         Cmd::Schema => {
             println!("{}", serde_json::to_string_pretty(&agg::schema::config_schema())?);
             Ok(())
