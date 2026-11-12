@@ -15,6 +15,7 @@ mod flow;
 mod git;
 mod history;
 mod instructions;
+pub mod process;
 mod review;
 mod roles;
 mod scratch;

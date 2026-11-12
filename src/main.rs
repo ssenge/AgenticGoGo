@@ -98,6 +98,13 @@ enum Cmd {
         /// the judge name to resolve (agg/judges/<name>.{sh,md} → ~/.agg/judges/<name>.*)
         name: String,
     },
+    /// Run a process file: phases of standard steps (scripts, agents judged by checks and a critic, approvals,
+    /// loops over a list, exams) from YAML. `agg process <file> <project> [--from <step> …]`, `--check`, `--list`.
+    Process {
+        /// the file, the project and the run's flags (`--from`, `--note`, `--until`, `--resume`, …)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
     /// Show this project's run history (every `agg run`, newest first) + lifetime totals.
     History {
         /// emit the history ledger as JSON (the full Project record, with each run's usage totals).
@@ -326,6 +333,7 @@ fn run_cli() -> Result<ExitCode> {
             let ok = agg::wiki::run(&p.dir, path.as_deref(), *json)?;
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
+        Cmd::Process { args } => return agg::workflow::process::command(args),
         Cmd::Schema => {
             println!("{}", serde_json::to_string_pretty(&agg::schema::config_schema())?);
             Ok(())
