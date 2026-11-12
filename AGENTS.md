@@ -56,6 +56,10 @@ other command is re-queued for the next boundary. `wake` outside a wait is a no-
   tokens `input`/`output`/`cache_write`/`cache_read`, `cost_usd` + `cost_source` reported|partial|unknown) and totals.
   Exit codes: 0 done · 3 abort_if · 4 max-sessions · 5 stopped (agg stop / SIGTERM / SIGINT) · 1 error.
   Precedence at one session end: error > stopped > done > aborted. `--project <dir>` = `--dir <dir>` (global).
+- `agg process <file> <project> [--from <step> …]` — run a PROCESS FILE (phases of standard steps: script, agent with checks + critic,
+  checkpoint, `each` over a list, exam; `docs/PROCESS.md`, `examples/process/`). `--check` validates it (verdict JSON, exit 1),
+  `--list` prints its numbered steps. A step is its id; numbers and `CP<k>` names are computed from position. Exit 6 = a step's
+  task-force limit is spent. `agg cached -- <cmd>` is the judge cache it wraps script checks in.
 - `agg status [--json]` — live scoreboard (reads `state.json`; cheap, does NOT re-judge). `--json` = the STABLE
   live document (`docs/schemas/status.v1.json`, `src/report/status.rs`): `running`, `current_step`, `session`,
   judges' `last` + `ratchet`, `detectors`, `open_asks`, `usage`, `waiting` — field names match the report.

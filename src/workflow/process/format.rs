@@ -9,7 +9,7 @@ use serde::Deserialize;
 use super::settings::{Role, StepSettings};
 
 /// The whole file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Process {
     /// the format's version; only 1 exists
@@ -44,7 +44,7 @@ pub struct Process {
 }
 
 /// The roles file: its name in the project and the roles it must have.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RolesSpec {
     pub file: String,
@@ -59,7 +59,7 @@ impl RolesSpec {
 }
 
 /// Where a step's prompt and its rubric are unless it names them (relative to the process home).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Dirs {
     #[serde(default = "Dirs::prompts")]
@@ -84,7 +84,7 @@ impl Default for Dirs {
 }
 
 /// The process's own settings: defaults under the project's file.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessSettings {
     /// the project's overlay file (in the project); absent: none
@@ -106,7 +106,7 @@ pub struct ProcessSettings {
 }
 
 /// The code-quality floor of the steps marked `quality: true`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QualitySpec {
     pub definition: Option<String>,
@@ -121,7 +121,7 @@ pub struct QualitySpec {
 }
 
 /// Options of the agg run itself.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AggSpec {
     /// working memory between sessions (agg's STATE.md, wiki, summary): off by default for a process
@@ -154,7 +154,7 @@ impl Default for AggSpec {
 }
 
 /// How the run goes about its steps.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunSpec {
     /// the step history, relative to the project
@@ -188,7 +188,7 @@ pub struct RunSpec {
 }
 
 /// The standing sections of every agent's brief and the small inputs put into it.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BriefSpec {
     #[serde(default)]
@@ -198,7 +198,7 @@ pub struct BriefSpec {
 }
 
 /// Which small input files go into a brief, and how much of them.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InputsSpec {
     /// files every brief gets when they exist
@@ -220,7 +220,7 @@ impl InputsSpec {
 }
 
 /// A script check's verdict cache: a met verdict is reused on the same content within a run.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JudgeCache {
     /// files whose changes don't change what a check reads (a worker's notes)
@@ -229,7 +229,7 @@ pub struct JudgeCache {
 }
 
 /// Hook files: the process's and the project's.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HooksSpec {
     pub process: Option<String>,
@@ -237,7 +237,7 @@ pub struct HooksSpec {
 }
 
 /// The task force: what looks for a failed step's cause.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskForceSpec {
     pub prompt: String,
@@ -260,7 +260,7 @@ impl TaskForceSpec {
 }
 
 /// A rule over the task force's proposals: a failure in `failed_in` (a phase or step id) that re-enters `reenter`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Trust {
     pub failed_in: String,
@@ -271,7 +271,7 @@ pub struct Trust {
 }
 
 /// How a ladder's tool tiers run.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LadderSpec {
     /// the command of a tool tier: `{{ item }}` the unit, `{tool}` the tier's tool
@@ -285,7 +285,7 @@ pub struct LadderSpec {
 }
 
 /// A phase: a named run of steps.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Phase {
     pub id: String,
@@ -295,12 +295,13 @@ pub struct Phase {
     #[serde(default)]
     pub post: Vec<String>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub meta: Option<serde_yaml::Value>,
     pub steps: Vec<Step>,
 }
 
 /// The kinds of step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Script,
@@ -313,7 +314,7 @@ pub enum Kind {
 }
 
 /// A step. One struct for every kind: `check` refuses a key that doesn't fit the step's kind.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     pub id: String,
@@ -336,6 +337,7 @@ pub struct Step {
     pub constraints: Option<String>,
     /// free-form, ignored by agg, handed through by `--list` (descriptions for docs and slides)
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub meta: Option<serde_yaml::Value>,
     // script
     #[serde(default)]
@@ -392,7 +394,7 @@ pub struct Step {
 }
 
 /// One command or several.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum OneOrMany {
     One(String),
@@ -410,7 +412,7 @@ impl OneOrMany {
 }
 
 /// A script check: a command, or a command with a name and a condition.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Check {
     Command(String),
@@ -418,7 +420,7 @@ pub enum Check {
 }
 
 /// A check with more than its command.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CheckSpec {
     pub run: String,
@@ -446,7 +448,7 @@ impl Check {
 }
 
 /// The critic's rubric: `true` for the conventional file, else its path.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Review {
     On(bool),
@@ -454,7 +456,7 @@ pub enum Review {
 }
 
 /// A section of a brief: a text, a file's text or a command's output; exactly one.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
     pub text: Option<String>,
@@ -463,7 +465,7 @@ pub struct Section {
 }
 
 /// Where an `each` takes its items from.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Items {
     pub file: String,
@@ -476,7 +478,7 @@ pub struct Items {
 }
 
 /// A worker of an exam: its prompt, sections and write limits.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Worker {
     pub prompt: String,
@@ -487,7 +489,7 @@ pub struct Worker {
 }
 
 /// How an exam's rounds are told apart: the ids a verdict names in these lists of a file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FindingsIds {
     pub file: String,
@@ -495,7 +497,7 @@ pub struct FindingsIds {
 }
 
 /// A dispute of the repairer's: the step it sends the run back to, once.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Dispute {
     pub reenter: String,

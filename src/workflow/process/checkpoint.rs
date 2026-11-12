@@ -16,13 +16,15 @@ impl Proc {
     /// The checkpoint of `ctx`: its document is prepared (a script step), then asked about.
     pub fn checkpoint(&self, ctx: &Ctx) -> Result<(), Fatal> {
         let s = ctx.step;
-        let (prepare, doc, question) = (s.prepare.as_deref().unwrap_or_default(), s.doc.as_deref().unwrap_or_default(),
-                                        s.question.as_deref().unwrap_or_default());
-        let prepared = format!("{} document", ctx.label);
-        let key = format!("{}-document", ctx.key);
-        self.register(&prepared, &key, &key, &ctx.num.phase_id);
-        let judge = self.judge(ctx, Some(&key), prepare)?;
-        self.script_step(&prepared, &judge)?;
+        let (doc, question) = (s.doc.as_deref().unwrap_or_default(), s.question.as_deref().unwrap_or_default());
+        // the document is written by `prepare`, a step of its own; without it an earlier step wrote it
+        if let Some(prepare) = &s.prepare {
+            let prepared = format!("{} document", ctx.label);
+            let key = format!("{}-document", ctx.key);
+            self.register(&prepared, &key, &key, &ctx.num.phase_id);
+            let judge = self.judge(ctx, Some(&key), prepare)?;
+            self.script_step(&prepared, &judge)?;
+        }
         // one the run skips weighs nothing: its open points wait for the next checkpoint that asks
         if !self.reaches(ctx) {
             return self.runs(&ctx.label).map(drop);

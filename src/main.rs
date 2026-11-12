@@ -53,8 +53,12 @@ enum Cmd {
     },
     /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
     Plan,
-    /// Print the JSON Schema of agg.yaml, generated from the config types agg parses into.
-    Schema,
+    /// Print the JSON Schema of agg.yaml, generated from the config types agg parses into; `agg schema process` prints the
+    /// schema of a process file.
+    Schema {
+        /// `process`: the schema of a process file (`agg process`), instead of agg.yaml's
+        which: Option<String>,
+    },
     /// Validate agg.yaml and its judges exactly as `agg run` does at startup, listing EVERY
     /// problem at once. Runs no judge and no agent. Exits 1 if there is any problem.
     Check {
@@ -342,8 +346,13 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Process { args } => return agg::workflow::process::command(args),
         Cmd::Cached { args } => return Ok(agg::workflow::process::cache::command(args)),
-        Cmd::Schema => {
-            println!("{}", serde_json::to_string_pretty(&agg::schema::config_schema())?);
+        Cmd::Schema { which } => {
+            let schema = match which.as_deref() {
+                None | Some("agg") => agg::schema::config_schema(),
+                Some("process") => agg::workflow::process::schema(),
+                Some(other) => anyhow::bail!("agg schema: `{other}` is not a schema (agg, process)"),
+            };
+            println!("{}", serde_json::to_string_pretty(&schema)?);
             Ok(())
         }
         Cmd::Plan => {

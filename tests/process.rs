@@ -126,7 +126,7 @@ fn a_process_runs_in_file_order_with_numbers_from_position() {
     let order: Vec<String> = steps(d).into_iter().map(|(s, k)| format!("{s}|{k}")).collect();
     let want = ["1.2 Sources|tool", "1.3 Survey|done", "1.4 CP1 Survey approved document|tool", "1.4 CP1 Survey approved|auto-approval",
                 "2.1-U1 Construct|done", "2.2-U1 Accept|tool", "2.1-U2 Construct|done", "2.2-U2 Accept|tool",
-                "2.3 Lint|skipped", "2.4 CP2 Build approved document|tool", "2.4 CP2 Build approved|auto-approval",
+                "2.3 Lint|skipped", "2.4 CP2 Build approved|auto-approval",
                 "3.1 Package|done"];
     let at = |label: &str| order.iter().position(|e| e.starts_with(label)).unwrap_or_else(|| panic!("{label} not in {order:#?}"));
     for pair in want.windows(2) {
@@ -138,6 +138,10 @@ fn a_process_runs_in_file_order_with_numbers_from_position() {
     assert!(ids.contains(&("2.1-U2 Construct".into(), "construct-U2".into())), "an instance's id: {ids:?}");
     assert!(ids.contains(&("1.3 Survey".into(), "survey".into())));
     assert_eq!(std::fs::read_to_string(d.join("accepted.log")).unwrap(), "U1\nU2\n");
+    let doc = read(d, "checkpoints/build.md");
+    assert!(doc.contains("U1 since refs/agg/before/construct-U1") && doc.contains("U2 since refs/agg/before/construct-U2"),
+            "a sibling step's ref is `{{{{ before.<id> }}}}`: {doc}");
+    assert!(!steps(d).iter().any(|(s, _)| s == "2.4 CP2 Build approved document"), "a checkpoint without `prepare` has no document step");
     let phases = std::fs::read_to_string(d.join(".git/phase-hooks.log")).unwrap();
     assert!(phases.lines().next().unwrap().ends_with("before") && phases.lines().last().unwrap().ends_with("after"), "{phases}");
     assert!(!std::fs::read_to_string(d.join(".git/step-hooks.log")).unwrap().is_empty(), "the step hook ran");
@@ -261,7 +265,7 @@ fn a_spent_limit_exits_6() {
     let out = run(d, &["--until", "survey"]);
     assert_eq!(out.status.code(), Some(6), "{}", said(&out));
     let h = history(d);
-    let spent = h.iter().filter(|e| e["kind"] == "task-force" && e["met"] == false).last().unwrap();
+    let spent = h.iter().rfind(|e| e["kind"] == "task-force" && e["met"] == false).unwrap();
     assert!(spent["rationale"].as_str().unwrap().starts_with("spent:"), "{spent}");
     assert!(said(&out).contains("are spent"), "{}", said(&out));
 }

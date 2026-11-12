@@ -143,7 +143,7 @@ impl Ctx<'_> {
         }
         let needs: &[&str] = match s.kind {
             Kind::Script => &["run"],
-            Kind::Checkpoint => &["prepare", "doc", "question"],
+            Kind::Checkpoint => &["doc", "question"],
             Kind::Each => &["items", "steps"],
             Kind::Exam => &["examinee", "answers", "grader", "repairer"],
             _ => &[],
@@ -411,7 +411,7 @@ impl Ctx<'_> {
     }
 }
 
-/// The `{{ item.<field> }}` names in `text`, each as an empty value.
+/// The `{{ item.<field> }}`, `{{ before.<id> }}` and `{{ base.<id> }}` names in `text`, each as an empty value.
 fn item_fields(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut rest = text;
@@ -419,7 +419,7 @@ fn item_fields(text: &str) -> BTreeMap<String, String> {
         let after = &rest[start + 2..];
         let Some(end) = after.find("}}") else { break };
         let name = after[..end].trim();
-        if name.starts_with("item.") {
+        if ["item.", "before.", "base."].iter().any(|p| name.starts_with(p)) {
             out.insert(name.to_string(), String::new());
         }
         rest = &after[end + 2..];
@@ -508,12 +508,12 @@ mod tests {
     #[test]
     fn keys_files_and_ids_are_held_to_their_kind() {
         let bad = GOOD.replace("kind: script, run:", "kind: script, prompt: p.md, run:").replace("id: cp-build", "id: build")
-            .replace("prepare: scripts/doc.sh, ", "");
+            .replace("doc: a.md, ", "");
         let mut f = files();
         f[0].1 = "uses {{ step.typo }} and {{ nope }}";
         let dir = home(&f, &bad);
         let problems = check(&dir.path().join("process.yaml")).join("\n");
-        for expect in ["`prompt` doesn't belong to a Script step", "a Checkpoint step needs `prepare`", "used twice",
+        for expect in ["`prompt` doesn't belong to a Script step", "a Checkpoint step needs `doc`", "used twice",
                        "uses `{{ step.typo }}`", "uses `{{ nope }}`"] {
             assert!(problems.contains(expect), "missing {expect:?} in:\n{problems}");
         }

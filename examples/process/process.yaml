@@ -66,9 +66,9 @@ phases:
       sections: [{ text: "## Your unit\n\n```yaml\n{{ item.yaml }}```" }]
       constraints: "Only files matching {{ item.scope }} may change."
       deny: [inputs, "{{ app }}-frozen/**"]
-    - { id: accept, name: Accept, kind: script, run: "scripts/accept.sh {{ item }}" }
+    - { id: accept, name: Accept, kind: script, run: "scripts/accept.sh {{ item }} {{ before.construct }}" }
   - { id: lint, name: Lint, kind: script, run: scripts/lint.sh, when: "judges/has.sh lint" }
-  - { id: cp-build, name: Build approved, kind: checkpoint, prepare: scripts/doc.sh build,
+  - { id: cp-build, name: Build approved, kind: checkpoint,
       doc: checkpoints/build.md, question: "{{ cp.cp-build }}: approve the build?", go_live: true }
 - id: ship
   name: Ship

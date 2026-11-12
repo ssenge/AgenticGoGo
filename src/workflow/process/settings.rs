@@ -14,7 +14,7 @@ use crate::core::model::Judge;
 use crate::driver::Step;
 
 /// A role's settings; each one unset falls back to the layer below.
-#[derive(Deserialize, Default, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Role {
     pub agent: Option<String>,
@@ -23,7 +23,7 @@ pub struct Role {
 }
 
 /// A step's critic: `false` for none, `true` for the default one, or a role.
-#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum Critic {
     On(bool),
@@ -31,7 +31,7 @@ pub enum Critic {
 }
 
 /// How one step runs; each setting unset falls back to the layer below.
-#[derive(Deserialize, Default, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StepSettings {
     pub worker: Option<Role>,
@@ -53,7 +53,7 @@ pub struct StepSettings {
 }
 
 /// The code-quality floor, each field optional so a project's file may replace one.
-#[derive(Deserialize, Default, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Default, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Quality {
     pub definition: Option<String>,
@@ -62,7 +62,7 @@ pub struct Quality {
 }
 
 /// One layer of settings: the project's file (the process's own are built from its parts).
-#[derive(Deserialize, Default, Debug)]
+#[derive(Deserialize, Default, Debug, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct File {
     #[serde(default)]

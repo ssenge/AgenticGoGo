@@ -29,6 +29,12 @@ sequence:
 That is a real loop with real convergence conditions, and it needs no compiler. If your flow fits
 this shape, stop here — `examples/workflow.yaml` is a heavily-commented reference.
 
+## A process of standard steps: a process file
+
+When the flow is a **process** — phases of steps, each a script, an agent's work judged by checks and a critic, a human's
+approval, a loop over a list or an exam — it needs no Rust either: write a **process file** and run `agg process <file>
+<project>` ([PROCESS.md](PROCESS.md)). It composes the blocks of [`agg::workflow`](#workflow-building-blocks-aggworkflow); the YAML has no logic of its own.
+
 ## When it is not
 
 Four things YAML deliberately cannot do, each of which is a `for`/`if` in Rust:

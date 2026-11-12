@@ -6,7 +6,7 @@
 use serde::Deserialize;
 
 /// One tier as the config writes it.
-#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum TierSpec {
     /// `agent`: from here, a decider picks the next tiers.
@@ -18,7 +18,7 @@ pub enum TierSpec {
 }
 
 /// An agent tier: how the step's worker runs on it.
-#[derive(Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTier {
     #[serde(default)]
@@ -31,7 +31,7 @@ pub struct AgentTier {
 }
 
 /// How an agent tier is judged and repaired; a step's checks run in every mode.
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Default, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// the checks alone, `repairs` rounds

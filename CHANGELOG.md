@@ -2,6 +2,33 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.45 (unreleased)
+
+A-37: process files. A process of standard steps runs from YAML.
+
+### Added
+
+- **`agg process <file> <project>`** (`agg::workflow::process`, `docs/PROCESS.md`, `examples/process/`): phases of steps,
+  each a `script`, an `agent` (checks, a critic, a ladder), a `checkpoint`, an `each` over a list in a file, an `exam`, or
+  `outside`/`planned` (numbered, not run). It builds each entry into the block agg already has; the YAML has no
+  logic of its own. A step is its **id**; numbers and checkpoint names (`CP<k>`) are computed from position, so
+  rearranging a process is an edit of its file. `--check` validates the file and everything it names (a verdict JSON,
+  exit 1), `--list` prints the numbered steps, `--from`/`--until` take an id, a number or an instance key.
+- Ported from a field driver and generalized: layered step settings (`worker`, `critic`, `repairs`, `inputs`, `outputs`,
+  `first`, `ladder`, `note`) with a project's overlay file; ladders (tool tiers, a decider); the exam kind; checkpoints with
+  decisions files, open points and auto-approval; a step's base (`refs/agg/base/<key>`); hooks around steps and phases;
+  ending processes a step left running; the critic's rerun context; the brief's small input files.
+- **`agg cached [--ignore <path>]… -- <command>…`** (hidden): a check's met verdict answered from an earlier run on exactly
+  the same project content; the process wraps script checks in it.
+- `Flow::keys`, `Flow::name_key`, `Flow::key_of`: a step may have an explicit key (its first word stays the default), so
+  history, `refs/agg/before/<key>`, the task force's count and `--from` go by it. History entries carry the key as `id`.
+- `{{ step.build }}`-style names: a template name with dots and `-` is filled in when the variables have it (a project's own
+  `{{ a.b }}` still stays as it is).
+
+### Changed
+
+- `Flow::reenter` records the re-entry under the step's name (its label in a process), not its bare key.
+
 ## 0.0.44 (2026-11-11)
 
 From an unattended field run of a driver.

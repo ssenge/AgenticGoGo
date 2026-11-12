@@ -72,6 +72,12 @@ impl Proc {
             vars.extend(item.vars.clone());
             vars.insert("before".into(), crate::workflow::before(&ctx.key));
             vars.insert("base".into(), super::bases::base(&ctx.key));
+            // the refs of the item's instances of the `each`'s other steps: `{{ before.<id> }}`
+            for sibling in self.list.iter().filter(|n| n.parent.is_some() && n.parent == ctx.num.parent) {
+                let key = format!("{}-{}", sibling.id, item.key);
+                vars.insert(format!("before.{}", sibling.id), crate::workflow::before(&key));
+                vars.insert(format!("base.{}", sibling.id), super::bases::base(&key));
+            }
         }
         vars
     }
