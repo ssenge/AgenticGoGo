@@ -6,18 +6,27 @@
 //!
 //! `agg process <file> --check` validates the file, `--list` prints its numbered steps as JSON.
 
+pub mod agent;
 pub mod bases;
+pub mod blocks;
 pub mod cache;
 pub mod check;
+pub mod checkpoint;
+pub mod exec;
+pub mod decider;
+pub mod exam;
 pub mod format;
 pub mod hooks;
 pub mod inputs;
 pub mod ladder;
 pub mod leftovers;
 pub mod number;
+pub mod proc;
 pub mod rerun;
+pub mod run;
 pub mod settings;
 pub mod template;
+pub mod tiers;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -44,8 +53,8 @@ pub fn command(args: &[String]) -> Result<ExitCode> {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(ExitCode::SUCCESS);
     }
-    let Some(_project) = positional.get(1) else { bail!("{USAGE}") };
-    Err(anyhow!("agg process: running a process isn't built yet"))
+    let Some(project) = positional.get(1).map(PathBuf::from) else { bail!("{USAGE}") };
+    Ok(run::start(file, project, args.to_vec()))
 }
 
 /// The arguments that aren't flags or flags' values: the file, then the project.
