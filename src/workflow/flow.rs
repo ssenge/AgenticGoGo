@@ -10,7 +10,6 @@ use anyhow::anyhow;
 
 use super::git::{before, commit, git};
 use super::history::{History, DEFAULT};
-use super::key;
 use crate::core::model::Judge;
 use crate::driver::{Agg, Fatal, Step};
 use crate::plugin::RunOutcome;
@@ -162,10 +161,25 @@ impl Flow {
         self
     }
 
+    /// Names the key of each step: `(name, key)` pairs. A step's key is what `--from` and `--until` name, what
+    /// the history, `refs/agg/before/<key>` and the task force's re-entries go by; a step not named here has
+    /// its name's first word. A process file names each step's id.
+    pub fn keys<I: IntoIterator<Item = (S, T)>, S: AsRef<str>, T: AsRef<str>>(self, pairs: I) -> Flow {
+        for (name, key) in pairs {
+            self.history.name_key(name.as_ref(), key.as_ref());
+        }
+        self
+    }
+
+    /// The key of step `name`: the one named for it ([`Flow::keys`]), else its first word.
+    pub fn key_of(&self, name: &str) -> String {
+        self.history.key_of(name)
+    }
+
     /// Whether step `name` comes after step `until` in the driver's order (false when either isn't in it).
     fn past(&self, name: &str, until: &str) -> bool {
         let at = |k: &str| self.order.iter().position(|o| o == k);
-        matches!((at(key(name)), at(until)), (Some(n), Some(u)) if n > u)
+        matches!((at(&self.key_of(name)), at(until)), (Some(n), Some(u)) if n > u)
     }
 
     /// What the driver does when a step starts (e.g. checks between phases); an error fails the step.
@@ -205,7 +219,7 @@ impl Flow {
     /// Past its `until` without having come to its `from`, the run ran nothing and halts.
     pub fn runs(&self, name: &str) -> Result<bool, Fatal> {
         if let Some(until) = &self.run.until {
-            if (self.seen.borrow().contains(until) && key(name) != until) || self.past(name, until) {
+            if (self.seen.borrow().contains(until) && self.key_of(name) != *until) || self.past(name, until) {
                 if !self.started.get() {
                     // ended as done, a `--from` no step has (a typo, a step not built) would pass having run nothing
                     let from = self.run.from.as_deref().unwrap_or_default();
@@ -217,8 +231,9 @@ impl Flow {
                 return Err(Fatal::Ended(RunOutcome::GoalsMet));
             }
         }
-        self.seen.borrow_mut().push(key(name).to_string());
-        if self.run.from.as_deref() == Some(key(name)) {
+        let key = self.key_of(name);
+        self.seen.borrow_mut().push(key.clone());
+        if self.run.from.as_deref() == Some(key.as_str()) {
             self.started.set(true);
         }
         if !self.started.get() {
@@ -227,7 +242,7 @@ impl Flow {
         // a pending entry would count as the next session's change, and a refresh would never be unchanged
         self.flush()?;
         self.history.at(name);
-        git(&self.project, &["update-ref", &before(key(name)), "HEAD"])?;
+        git(&self.project, &["update-ref", &before(&key), "HEAD"])?;
         if let Some(Err(why)) = self.on_start.as_ref().map(|f| f(self, name)) {
             self.recover(name, &why, &|| Ok(self.on_start.as_ref().and_then(|f| f(self, name).err())))?;
         }

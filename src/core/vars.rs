@@ -27,8 +27,9 @@ pub fn apply(text: &str) -> Result<String, String> {
 }
 
 /// `text` with every `{{ name }}` (a name of letters, digits and `_`, spaces inside the braces optional)
-/// filled in from `vars`; a name `vars` lacks is an error. Other `{{` (a template language of the
-/// project's own) stays as it is.
+/// filled in from `vars`; a name `vars` lacks is an error. A dotted name (`step.build`, `cp.review-1`: also
+/// `-` inside) is filled in only when `vars` has it. Other `{{` (a template language of the project's own)
+/// stays as it is.
 pub fn render(text: &str, vars: &BTreeMap<String, String>) -> Result<String, String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -40,6 +41,10 @@ pub fn render(text: &str, vars: &BTreeMap<String, String>) -> Result<String, Str
                 out.push_str(vars.get(name).ok_or_else(|| format!("unknown variable `{{{{ {name} }}}}`"))?);
                 rest = &after[end + 2..];
             }
+            Some((end, name)) if is_dotted(name) && vars.contains_key(name) => {
+                out.push_str(&vars[name]);
+                rest = &after[end + 2..];
+            }
             _ => {
                 out.push_str("{{");
                 rest = after;
@@ -48,6 +53,13 @@ pub fn render(text: &str, vars: &BTreeMap<String, String>) -> Result<String, Str
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// Whether `s` is a dotted variable's name: names joined by `.`, each of letters, digits, `_` and `-`.
+pub fn is_dotted(s: &str) -> bool {
+    s.contains('.') && s.split('.').all(|part| !part.is_empty()
+        && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
 /// Whether `s` is a variable's name: letters, digits and `_`, not starting with a digit.
@@ -71,6 +83,10 @@ mod tests {
         assert_eq!(render("{{ legasy }}", &vars()).unwrap_err(), "unknown variable `{{ legasy }}`");
         let own = "${{ github.sha }} {{ 1x }} {{ a b }} {{ unclosed";
         assert_eq!(render(own, &vars()).unwrap(), own, "not a variable's name: left as it is");
+        let mut dotted = vars();
+        dotted.insert("step.as-is".into(), "3.4 As-is".into());
+        assert_eq!(render("{{ step.as-is }} {{ github.sha }}", &dotted).unwrap(), "3.4 As-is {{ github.sha }}",
+                   "a dotted name is filled in when the map has it, left as it is when not");
     }
 
     /// The variables are process-wide: the tests that set them take turns.

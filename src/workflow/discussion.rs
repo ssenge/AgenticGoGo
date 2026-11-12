@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 
 use super::brief::{with_lead, with_section};
 use super::flow::Flow;
-use super::key;
 use super::roles::Role;
 use super::task::Task;
 use crate::driver::{Fatal, Step};
@@ -49,7 +48,7 @@ impl Flow {
     fn round(&self, name: &str, step: &Step, voices: &[Role], round: usize, latest: &mut Vec<PathBuf>)
              -> Result<(), Fatal> {
         for (i, voice) in voices.iter().enumerate() {
-            let file = self.scratch(&format!("{}-position-{}-{round}.md", key(name), i + 1))?;
+            let file = self.scratch(&format!("{}-position-{}-{round}.md", self.key_of(name), i + 1))?;
             let lead = match latest.get(i) {
                 None => blind(voices.len(), i + 1, &file),
                 Some(own) => {

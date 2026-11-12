@@ -8,7 +8,6 @@ use super::flow::{Flow, When};
 use super::git::{changes_since, unchanged_since};
 use super::review::{cannot_fix, focused, self_checked, stuck, with_rubric, with_task, Earlier};
 use super::task::{Outcome, Task};
-use super::key;
 use crate::core::model::{Judge, Verdict};
 use crate::driver::{Fatal, GateOutcome, Landing, Step};
 
@@ -73,10 +72,10 @@ impl Flow {
     pub fn task(&self, t: &Task) -> Result<Outcome, Fatal> {
         let told = super::brief::task(&self.absolute(&t.step)).ok();
         let changed = told.as_deref().filter(|_| !self.run.reset)
-            .and_then(|now| super::instructions::changed(self.project(), key(&t.name()), now));
+            .and_then(|now| super::instructions::changed(self.project(), &self.key_of(&t.name()), now));
         let outcome = self.carried(t, changed.as_deref())?;
         if let (Outcome::Done | Outcome::Unchanged, Some(now)) = (&outcome, &told) {
-            super::instructions::keep(self.project(), key(&t.name()), now);
+            super::instructions::keep(self.project(), &self.key_of(&t.name()), now);
         }
         Ok(outcome)
     }
@@ -108,7 +107,7 @@ impl Flow {
         };
         // a refresh adjusts a result the discussion already shaped
         let base = if since.is_none() { self.discussed(&name, &base, t)? } else { base };
-        let cannot = self.scratch(&format!("{}-cannot-fix.md", key(&name)))?;
+        let cannot = self.scratch(&format!("{}-cannot-fix.md", self.key_of(&name)))?;
         let rubric = t.critic.as_ref().map(|c| self.absolute_judge(c));
         let step = self.briefed(&name, &base, t, rubric.as_ref(), &cannot)?;
         let landed = self.step(&step)?.landed;
@@ -118,7 +117,7 @@ impl Flow {
             return Ok(Outcome::Unchanged);
         }
         // a fault a later step found must change the result; a decision may not concern it (then it refreshes)
-        if landed == Landing::Nothing && self.run.from.as_deref() == Some(key(&name)) && self.run.note.is_some()
+        if landed == Landing::Nothing && self.run.from.as_deref() == Some(self.key_of(&name).as_str()) && self.run.note.is_some()
             && !self.run.decided {
             return self.unmet(&name, t.climbs, "the re-entered step changed nothing, so its note wasn't carried out (a note that only \
                               informs, asking for no change, goes with `--decided`)",
@@ -131,7 +130,7 @@ impl Flow {
     /// results, or re-entered at it with a decision. The commit its last result stands on, if it has one. A step
     /// this run already gave a result of (a loop's step, once per failure) is a new task: what it is called for is new.
     pub(crate) fn refreshing(&self, name: &str) -> Option<String> {
-        let at = self.run.from.as_deref() == Some(key(name));
+        let at = self.run.from.as_deref() == Some(self.key_of(name).as_str());
         let reentered = self.run.from.is_some() && !self.run.reset && (!at || self.run.decided);
         if reentered && !self.again(name) { self.steps().last_commit(name, &["done", "unchanged"]) } else { None }
     }
@@ -164,7 +163,7 @@ impl Flow {
                  result only where these changes require it, and change nothing else. If they don't concern your \
                  result, change nothing at all and finish."));
         }
-        let at = self.run.from.as_deref() == Some(key(name)) && !self.again(name);   // the note is the first call's
+        let at = self.run.from.as_deref() == Some(self.key_of(name).as_str()) && !self.again(name);   // the note is the first call's
         match &self.run.note {
             Some(note) if at && self.run.decided => Some(format!(
                 "## Decided since your result\n\nYou did this task before, and your result is in place. Since then, \
@@ -261,7 +260,7 @@ impl Flow {
     fn repair(&self, name: &str, step: &Step, round: usize, (verdict, by_critic): (&Verdict, bool), judges: &Judges)
               -> Result<(Verdict, bool), Fatal> {
         self.record(name, "repair", false, verdict.rationale());
-        let disputed = self.scratch(&format!("{}-disputes-{round}.md", key(name)))?;
+        let disputed = self.scratch(&format!("{}-disputes-{round}.md", self.key_of(name)))?;
         self.step(&with_lead(step, &format!(
             "## Review to address\n\nYou already did this task; a reviewer checked your result and found the \
              points below. Fix each point that is right, and change nothing else. If you are sure a point is \

@@ -3,6 +3,7 @@
 //! refresh what came after it.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,7 @@ pub const DEFAULT: &str = "agg/private/steps.jsonl";
 thread_local! {
     /// The history and the step running in it: an error that ends the run past every block (a driver's own,
     /// returned with `?`) is recorded against that step, since nothing else of the run sees it.
-    static AT: RefCell<Option<(PathBuf, PathBuf, String)>> = const { RefCell::new(None) };
+    static AT: RefCell<Option<(PathBuf, PathBuf, String, String)>> = const { RefCell::new(None) };
 }
 
 /// The history file and the entries kept back until the next step boundary: an entry written while a
@@ -25,32 +26,46 @@ pub struct History {
     project: PathBuf,
     path: PathBuf,
     pending: RefCell<Vec<String>>,
-    /// the steps this run recorded a result of
+    /// the keys of the steps this run recorded a result of
     given: RefCell<Vec<String>>,
+    /// the key of each step a driver named explicitly (A-37); a step not named has its name's first word
+    keys: RefCell<HashMap<String, String>>,
 }
 
 impl History {
     /// The history of `project` in `path` (relative to the project, or absolute).
     pub fn new(project: &Path, path: impl AsRef<Path>) -> History {
         History { project: project.to_path_buf(), path: project.join(path), pending: RefCell::new(vec![]),
-                  given: RefCell::new(vec![]) }
+                  given: RefCell::new(vec![]), keys: RefCell::new(HashMap::new()) }
+    }
+
+    /// Names the key of step `name` (a process file's id): what the history, the refs and `--from` go by.
+    pub(crate) fn name_key(&self, name: &str, key: &str) {
+        self.keys.borrow_mut().insert(name.to_string(), key.to_string());
+    }
+
+    /// The key of step `name`: the one named for it, else its first word.
+    pub(crate) fn key_of(&self, name: &str) -> String {
+        self.keys.borrow().get(name).cloned().unwrap_or_else(|| super::key(name).to_string())
     }
 
     /// Keeps one entry back until the next `flush`: `kind` is what happened (`done`, `tool`, `skipped`, …).
     pub fn defer(&self, step: &str, kind: &str, met: bool, rationale: &str) {
         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let commit = git_out(&self.project, &["rev-parse", "HEAD"]).unwrap_or_default();
-        let line = serde_json::json!({"step": step, "kind": kind, "met": met, "rationale": rationale, "at": at,
-                                      "commit": commit});
+        let key = self.key_of(step);
+        let line = serde_json::json!({"step": step, "id": key, "kind": kind, "met": met, "rationale": rationale,
+                                      "at": at, "commit": commit});
         self.pending.borrow_mut().push(line.to_string());
         if matches!(kind, "done" | "unchanged") {
-            self.given.borrow_mut().push(step.to_string());
+            self.given.borrow_mut().push(key);
         }
     }
 
     /// Whether this run recorded a result (`done`, `unchanged`) of step `name`.
     pub(crate) fn gave(&self, name: &str) -> bool {
-        self.given.borrow().iter().any(|s| s == name)
+        let key = self.key_of(name);
+        self.given.borrow().iter().any(|s| *s == key)
     }
 
     /// Writes the entries kept back.
@@ -77,7 +92,8 @@ impl History {
 
     /// Marks step `name` as the one running, for [`ended_by`].
     pub(crate) fn at(&self, name: &str) {
-        AT.with(|at| *at.borrow_mut() = Some((self.project.clone(), self.path.clone(), name.to_string())));
+        let key = self.key_of(name);
+        AT.with(|at| *at.borrow_mut() = Some((self.project.clone(), self.path.clone(), name.to_string(), key)));
     }
 
     /// Every entry, oldest first; none when the file is missing.
@@ -88,21 +104,27 @@ impl History {
 
     /// The commit the last entry of step `name` with one of `kinds` stands on.
     pub fn last_commit(&self, name: &str, kinds: &[&str]) -> Option<String> {
-        self.entries().into_iter().rev().find(|e| e["step"] == name && kinds.iter().any(|k| e["kind"] == *k))
+        let key = self.key_of(name);
+        self.entries().into_iter().rev().find(|e| entry_key(e) == key && kinds.iter().any(|k| e["kind"] == *k))
             .and_then(|e| e["commit"].as_str().map(String::from)).filter(|c| !c.is_empty())
     }
 
     /// Whether the step with key `key` is an approval: what is decided there only humans decide.
     pub fn is_approval(&self, key: &str) -> bool {
-        self.entries().iter()
-            .any(|e| e["kind"] == "approval" && e["step"].as_str().map(super::key) == Some(key))
+        self.entries().iter().any(|e| e["kind"] == "approval" && entry_key(e) == key)
     }
+}
+
+/// The key of the step an entry is of: its `id`, else (an entry written before ids) its step's first word.
+fn entry_key(entry: &serde_json::Value) -> String {
+    entry["id"].as_str().map(String::from).unwrap_or_else(|| super::key(entry["step"].as_str().unwrap_or_default()).to_string())
 }
 
 /// Records `why`, the error that ended the run, as an `error` of the step running then; none ran, nothing.
 pub(crate) fn ended_by(why: &str) {
-    let Some((project, path, name)) = AT.with(|at| at.borrow_mut().take()) else { return };
+    let Some((project, path, name, key)) = AT.with(|at| at.borrow_mut().take()) else { return };
     let history = History::new(&project, path);
+    history.name_key(&name, &key);
     history.defer(&name, "error", false, why);
     // the run ends either way: a history it can't write is no reason to hide the error it ends with
     let _ = history.flush().and_then(|()| history.commit());
@@ -126,6 +148,29 @@ mod tests {
         assert_eq!(h.last_commit("4.1 Gate profile", &["done", "unchanged"]).as_deref(), Some("bbb"));
         assert_eq!(h.last_commit("9.9 Nothing", &["done"]), None);
         assert!(h.is_approval("4.5") && !h.is_approval("4.1"));
+    }
+
+    /// A step named by a key keeps its history when its label changes (a number moved); an entry written
+    /// before ids is matched by its first word.
+    #[test]
+    fn a_steps_history_follows_its_key_not_its_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = History::new(dir.path(), "steps.jsonl");
+        h.name_key("3.4 As-is architecture", "as-is-architecture");
+        h.name_key("3.5 CP1", "cp-assessment");
+        h.defer("3.4 As-is architecture", "done", true, "ok");
+        h.defer("3.5 CP1", "approval", true, "yes");
+        h.flush().unwrap();
+        assert_eq!(h.entries()[0]["id"], "as-is-architecture");
+        assert!(h.is_approval("cp-assessment") && !h.is_approval("as-is-architecture"));
+        // the same steps, one phase later in a rearranged process: the history is found by key
+        let moved = History::new(dir.path(), "steps.jsonl");
+        moved.name_key("4.4 As-is architecture", "as-is-architecture");
+        assert_eq!(moved.key_of("4.4 As-is architecture"), "as-is-architecture");
+        assert!(entry_key(&moved.entries()[0]) == moved.key_of("4.4 As-is architecture"));
+        assert_eq!(moved.key_of("9.9 Unnamed step"), "9.9", "a step not named has its first word");
+        let old = serde_json::json!({"step": "2.5 Bind", "kind": "approval"});
+        assert_eq!(entry_key(&old), "2.5", "an entry without an id is matched by its first word");
     }
 
     /// The error that ends a run lands on the step running then, once; with no step running, nowhere.

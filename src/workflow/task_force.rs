@@ -70,7 +70,7 @@ pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> 
     };
     // the limit holds per failed step: one step's early repairs leave a later step its own (a field run spent the
     // whole run's three on test fixes in Phase 6, and every failure after them halted unrepaired)
-    if spent_on(flow.project(), name) >= *max {
+    if spent_on(flow.project(), &flow.key_of(name)) >= *max {
         let _ = LIMIT_SPENT.set(());
         flow.record(name, "task-force", false, &format!("spent: its {max} re-entries and repairs were used"));
         return flow.halt(format!("{reason} (the task force's {max} re-entries and repairs for {name} are spent)"));
@@ -117,7 +117,7 @@ fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: b
 fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head): (Again, &str)) -> Result<(), Fatal> {
     flow.fixes.set(flow.fixes.get() + 1);
     keep_spent(flow.project(), flow.run.reentries, flow.fixes.get());
-    spend_on(flow.project(), name);
+    spend_on(flow.project(), &flow.key_of(name));
     let changed = super::git::git_out(flow.project(), &["diff", "--name-only", head, "HEAD"]).unwrap_or_default();
     let changed = changed.split_whitespace().collect::<Vec<_>>().join(", ");
     let what = format!("fixed in place ({changed}): {}: {}", a.cause, a.note);
@@ -152,7 +152,7 @@ fn reentered(flow: &Flow, name: &str, reason: &str, a: Answer) -> Result<(), Fat
     let how = if trusted { " (a proposal the driver trusts, no ask)" } else { "" };
     flow.record(name, "task-force", true, &format!("re-enter at {at}{how}: {note}"));
     keep_spent(flow.project(), flow.run.reentries + 1, flow.fixes.get());
-    spend_on(flow.project(), name);
+    spend_on(flow.project(), &flow.key_of(name));
     let _ = REENTRY.set((at.clone(), note, flow.project().to_path_buf(), false));
     flow.halt(format!("{reason}; re-entering at {at}"))
 }
