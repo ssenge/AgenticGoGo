@@ -200,7 +200,13 @@ fn exec(p: &Proc, step: &Step, item: Option<Item>) -> Result<(), Fatal> {
     if reached {
         p.commands(&ctx, &step.pre)?;
     }
-    kind(p, &ctx)?;
+    let done = kind(p, &ctx);
+    if let (Err(_), Some(command)) = (&done, &step.on_fail) {
+        // the step ends the run unmet: what it left up (a deployment) is taken down before the error goes on
+        let said = p.run(&ctx, command).map_or_else(|e| e.to_string(), |o| o.lines().last().unwrap_or_default().to_string());
+        p.info(&format!("{}: on_fail: {said}", ctx.label));
+    }
+    done?;
     if reached {
         p.commands(&ctx, &step.post)?;
     }

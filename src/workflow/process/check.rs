@@ -158,10 +158,10 @@ impl Ctx<'_> {
             self.out.push(format!("{at}: an agent step needs the process's `roles`"));
         }
         let prompt = s.prompt.clone().unwrap_or_else(|| format!("{}/{}.md", self.process.dirs.prompts, s.id));
-        self.file(at, "prompt", &prompt, false);
+        self.file(at, "prompt", &prompt, &[]);
         match &s.review {
-            Some(Review::File(f)) => self.file(at, "review", f, false),
-            Some(Review::On(true)) => self.file(at, "review", &format!("{}/{}-review.md", self.process.dirs.reviews, s.id), false),
+            Some(Review::File(f)) => self.file(at, "review", f, &[]),
+            Some(Review::On(true)) => self.file(at, "review", &format!("{}/{}-review.md", self.process.dirs.reviews, s.id), &[]),
             _ => {}
         }
         self.checks(at, &s.checks, in_each);
@@ -200,11 +200,11 @@ impl Ctx<'_> {
         self.checks(at, &s.checks, in_each);
         self.opt_command(at, s.answers.as_deref(), in_each);
         if let Some(g) = &s.grader {
-            self.file(at, "grader", g, false);
+            self.file(at, "grader", g, &[]);
         }
         for (what, w) in [("examinee", &s.examinee), ("repairer", &s.repairer)] {
             let Some(w) = w else { continue };
-            self.file(at, &format!("{what}.prompt"), &w.prompt, false);
+            self.file(at, &format!("{what}.prompt"), &w.prompt, &[]);
             for section in &w.sections {
                 self.section(at, section, in_each);
             }
@@ -242,7 +242,7 @@ impl Ctx<'_> {
             self.text(at, t, in_each);
         }
         if let Some(f) = &s.file {
-            self.file(at, "section file", f, false);
+            self.file(at, "section file", f, &["this", "item", "before", "base"]);
         }
         self.opt_command(at, s.run.as_deref(), in_each);
     }
@@ -275,28 +275,28 @@ impl Ctx<'_> {
                 self.text(&format!("deny `{name}`"), d, false);
             }
         }
-        let mut files: Vec<(&str, &Option<String>)> = vec![("run.system_prompt", &p.run.system_prompt),
-            ("run.critic_scope", &p.run.critic_scope), ("settings.quality.guide", &p.settings.quality.guide)];
+        let mut files: Vec<(&str, &Option<String>, &[&str])> = vec![("run.system_prompt", &p.run.system_prompt, &[]),
+            ("run.critic_scope", &p.run.critic_scope, &["this", "outputs"]), ("settings.quality.guide", &p.settings.quality.guide, &[])];
         if let Some(h) = &p.run.hooks {
-            files.extend([("run.hooks.process", &h.process)]);
+            files.push(("run.hooks.process", &h.process, &[]));
         }
-        for (what, f) in files {
+        for (what, f, extra) in files {
             if let Some(f) = f {
-                self.file("process", what, f, false);
+                self.file("process", what, f, extra);
             }
         }
         for c in p.run.start.iter().chain(p.run.auto_note.iter()).chain(p.settings.quality.reports.iter()) {
             self.command("process", c, false);
         }
         for s in &p.run.brief.sections {
-            self.section("run.brief", s, false);
+            self.section("run.brief", s, true);
         }
         self.task_force();
     }
 
     fn task_force(&mut self) {
         let Some(tf) = &self.process.task_force else { return };
-        self.file("task_force", "prompt", &tf.prompt, false);
+        self.file("task_force", "prompt", &tf.prompt, &[]);
         for d in &tf.deny {
             self.deny("task_force", d);
         }
@@ -332,6 +332,7 @@ impl Ctx<'_> {
     /// A string of the file: every name in it must be known (`item` names only inside an `each`, as `{{ item }}`).
     fn text(&mut self, at: &str, text: &str, in_each: bool) {
         let mut vars = self.vars.clone();
+        vars.extend(["this", "this.id", "this.key", "this.name", "this.number"].map(|n| (n.to_string(), String::new())));
         if in_each {
             for n in ["item", "item.yaml", "before", "base"] {
                 vars.insert(n.into(), String::new());
@@ -353,6 +354,7 @@ impl Ctx<'_> {
     fn command(&mut self, at: &str, c: &str, in_each: bool) {
         self.text(at, c, in_each);
         let mut vars = self.vars.clone();
+        vars.extend(["this", "this.id", "this.key", "this.name", "this.number"].map(|n| (n.to_string(), String::new())));
         if in_each {
             vars.extend(["item", "item.yaml", "before", "base"].map(|n| (n.to_string(), String::new())));
             vars.extend(item_fields(c));
@@ -364,14 +366,16 @@ impl Ctx<'_> {
     }
 
     /// A file of the process home (or absolute): it exists, and its own `{{ names }}` are known.
-    fn file(&mut self, at: &str, what: &str, path: &str, _optional: bool) {
+    fn file(&mut self, at: &str, what: &str, path: &str, extra: &[&str]) {
         let Ok(rendered) = template::render(path, &self.vars) else {
             self.text(at, path, false);
             return;
         };
         let full = self.exists(at, what, &rendered);
+        let mut vars = self.vars.clone();
+        vars.extend(extra.iter().map(|n| (n.to_string(), String::new())));
         if let Some(text) = full.and_then(|f| std::fs::read_to_string(f).ok()) {
-            for name in template::unknown_in_file(&text, &self.vars) {
+            for name in template::unknown_in_file(&text, &vars) {
                 self.out.push(format!("{at}: {what} `{rendered}` uses `{{{{ {name} }}}}`, which the process doesn't know"));
             }
         }

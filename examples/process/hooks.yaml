@@ -1,0 +1,6 @@
+# Hooks: scripts before and after every step and every phase (docs/PROCESS.md). The process's own, here; a project's go
+# in the file `run.hooks.project` names, in the project.
+step:
+  after: [judges/hook.sh]
+phases:
+  build: { before: [judges/phase-hook.sh before], after: [judges/phase-hook.sh after] }

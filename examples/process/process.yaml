@@ -1,0 +1,89 @@
+# A process file (docs/PROCESS.md): phases of steps, each step one of a closed set of kinds. `agg process
+# examples/process/process.yaml <project>` runs it; `--check` validates it, `--list` prints its numbers. Every path is
+# relative to this folder; scripts run in the project. Numbers (1.1, 2.3) and checkpoint names (CP1, CP2) come from
+# position: reorder or add a phase here and nothing else changes.
+version: 1
+vars: { app: app }
+roles: { file: tools.yaml }
+agg: { judge_timeout: 60 }
+run:
+  history: reports/steps.jsonl
+  own: [task.md, tools.yaml, reports/steps.jsonl]
+  open_points: checkpoints/open-points.md
+  critic_scope: prompts/critic-scope.md
+  config: run.yaml
+  hooks: { process: hooks.yaml, project: hooks.yaml }
+  auto_note: scripts/waiting.sh
+  judge_cache: { ignore: [notes.md] }
+  brief:
+    sections: [{ file: prompts/house-rules.md }]
+settings:
+  project: settings.yaml
+  defaults: { repairs: 1 }
+  skip: [extras]
+  models: { small: fake-small }
+deny:
+  inputs: [task.md, tools.yaml]
+task_force:
+  prompt: prompts/task-force.md
+  max: 2
+  deny: [inputs]
+  sections: [{ text: "## The process\n\nIts steps are listed above; the app lives in `{{ app }}/`." }]
+  trust: [{ failed_in: build, reenter: survey }]
+ladder:
+  tool_run: "scripts/tool-tier.sh {{ item }} {tool}"
+  tool_commits: ["{{ app }}"]
+  tools: [codemod]
+phases:
+- id: prepare
+  name: Prepare
+  steps:
+  - { id: fetch, name: Fetch, kind: outside }
+  - { id: sources, name: Sources, kind: script, run: scripts/sources.sh }
+  - id: survey
+    name: Survey
+    kind: agent
+    review: true
+    checks: [judges/survey.sh]
+    deny: [inputs]
+    settings: { inputs: [task.md], outputs: [survey.md] }
+  - { id: cp-survey, name: Survey approved, kind: checkpoint, prepare: scripts/doc.sh survey,
+      doc: checkpoints/survey.md, question: "{{ cp.cp-survey }}: approve {{ step.survey }}?", owner: survey }
+- id: build
+  name: Build
+  steps:
+  - id: units
+    name: Units
+    kind: each
+    items: { file: plan.yaml, list: order }
+    steps:
+    - id: construct
+      name: Construct
+      kind: agent
+      prompt: prompts/construct.md
+      checks: ["judges/unit.sh {{ item }}", { run: judges/all-built.sh, when: last, name: all-built }]
+      sections: [{ text: "## Your unit\n\n```yaml\n{{ item.yaml }}```" }]
+      constraints: "Only files matching {{ item.scope }} may change."
+      deny: [inputs, "{{ app }}-frozen/**"]
+    - { id: accept, name: Accept, kind: script, run: "scripts/accept.sh {{ item }}" }
+  - { id: lint, name: Lint, kind: script, run: scripts/lint.sh, when: "judges/has.sh lint" }
+  - { id: cp-build, name: Build approved, kind: checkpoint, prepare: scripts/doc.sh build,
+      doc: checkpoints/build.md, question: "{{ cp.cp-build }}: approve the build?", owner: survey, go_live: true }
+- id: ship
+  name: Ship
+  steps:
+  - { id: package, name: Package, kind: agent, checks: [judges/package.sh], repairs: 1 }
+  - id: docs-exam
+    name: Docs exam
+    kind: exam
+    checks: [judges/docs.sh]
+    examinee: { prompt: prompts/examinee.md, sections: [{ run: scripts/exam-copy.sh }] }
+    answers: judges/answers.sh
+    grader: judges/grader.md
+    repairer: { prompt: prompts/repairer.md }
+    rounds: 3
+    fresh: [exam/answers.yaml]
+    findings_ids: { file: exam/exam.yaml, lists: [tasks] }
+    dispute: { reenter: package }
+  - { id: extras, name: Extras, kind: script, run: scripts/extras.sh }
+  - { id: handover, name: Handover, kind: planned }
