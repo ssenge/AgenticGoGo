@@ -65,7 +65,7 @@ impl History {
     /// Whether this run recorded a result (`done`, `unchanged`) of step `name`.
     pub(crate) fn gave(&self, name: &str) -> bool {
         let key = self.key_of(name);
-        self.given.borrow().iter().any(|s| *s == key)
+        self.given.borrow().contains(&key)
     }
 
     /// Writes the entries kept back.
