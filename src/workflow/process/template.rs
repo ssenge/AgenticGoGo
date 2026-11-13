@@ -36,7 +36,8 @@ fn is_name(s: &str) -> bool {
 }
 
 /// The variables of the process file: `vars_file` then `vars` (values may name `{{ home }}` and `{{ env.NAME }}`),
-/// then `home`, `project`, and one `step.<id>`, `step.<id>.number`, `step.<id>.name` per step and `cp.<id>` per checkpoint.
+/// then `home`, `project`, one `step.<id>`, `step.<id>.number`, `step.<id>.name` per step, `cp.<id>` per checkpoint and
+/// `phase.<id>`, `phase.<id>.number`, `phase.<id>.name` per phase.
 pub fn variables(process: &Process, list: &[Numbered], home: &std::path::Path, project: &str) -> Result<BTreeMap<String, String>, String> {
     let mut vars = BTreeMap::new();
     if let Some(file) = &process.vars_file {
@@ -58,6 +59,11 @@ pub fn variables(process: &Process, list: &[Numbered], home: &std::path::Path, p
         out.insert(name, value);
     }
     out.extend(base.into_iter().filter(|(n, _)| !n.starts_with("env.")));
+    for (i, phase) in process.phases.iter().enumerate() {
+        out.insert(format!("phase.{}", phase.id), format!("{} {}", i + 1, phase.name));
+        out.insert(format!("phase.{}.number", phase.id), (i + 1).to_string());
+        out.insert(format!("phase.{}.name", phase.id), phase.name.clone());
+    }
     for s in list {
         let Some(label) = s.label() else { continue };
         let number = s.number.clone().unwrap_or_default();
@@ -100,7 +106,7 @@ pub fn unknown_in_file(text: &str, vars: &BTreeMap<String, String>) -> Vec<Strin
         let Some(end) = after.find("}}") else { break };
         let name = after[..end].trim();
         let plain = is_name(name) && !name.contains('.');
-        let ours = name.starts_with("step.") || name.starts_with("cp.");
+        let ours = ["step.", "cp.", "phase."].iter().any(|p| name.starts_with(p));
         if is_name(name) && (plain || ours) && !vars.contains_key(name) {
             found.push(name.to_string());
         }
@@ -150,5 +156,6 @@ mod tests {
         assert_eq!((v["step.s"].as_str(), v["step.s.number"].as_str(), v["cp.c"].as_str(), v["project"].as_str()),
                    ("1.1 S", "1.1", "CP1", "/proj"));
         assert_eq!(v["step.c"], "1.2 CP1 C");
+        assert_eq!((v["phase.p"].as_str(), v["phase.p.number"].as_str(), v["phase.p.name"].as_str()), ("1 P", "1", "P"));
     }
 }

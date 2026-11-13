@@ -171,10 +171,10 @@ run of the same check on exactly the same project content; unmet verdicts are ne
 ### Templates
 
 `{{ name }}` in the file's strings and in the files it reads is filled in from: `vars`/`vars_file`, `home`, `project`,
-`step.<id>`, `step.<id>.number`, `step.<id>.name`, `cp.<id>`; in a step's strings also `this`, `this.id`, `this.key`,
+`step.<id>`, `step.<id>.number`, `step.<id>.name`, `cp.<id>`, `phase.<id>` (`phase.<id>.number`, `.name`); in a step's strings also `this`, `this.id`, `this.key`,
 `this.name`, `this.number`, and in an `each` `item`, `item.yaml`, `item.<field>`, `before`, `base`; in `vars` values
 `env.NAME`. In the file's own strings an unknown name is an error; a prompt's own template language (`{{ a.b }}`) is
-left alone unless the name is `step.…`/`cp.…`, which `--check` verifies.
+left alone unless the name is `step.…`/`cp.…`/`phase.…`, which `--check` verifies (`phase.…` too).
 
 ### Exit codes and the record
 
