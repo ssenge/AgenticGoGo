@@ -13,6 +13,8 @@ run:
   critic_scope: { append: prompts/critic-scope.md }   # agg's standing text, then this one (`critic_scope: <file>` replaces it)
   notes: notes.md                                      # a notes file between steps; each step's section is at most five lines
   config: run.yaml
+  commit_inputs: { branch: main, message: "Inputs at run start" }   # the inputs a human filled in are committed before the run
+  scripts_runnable: [scripts]                         # a script a step wrote under scripts/ can run
   hooks: { process: hooks.yaml, project: hooks.yaml }
   auto_note: scripts/waiting.sh
   judge_cache: { ignore: [notes.md] }
