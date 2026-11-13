@@ -47,6 +47,8 @@ pub fn variables(process: &Process, list: &[Numbered], home: &std::path::Path, p
         vars.extend(map);
     }
     vars.extend(process.vars.clone());
+    // absolute, so a path built on it (`{{ home }}/../templates`) means the same wherever it is joined or used from
+    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     let mut base: BTreeMap<String, String> = BTreeMap::from([("home".into(), home.display().to_string()),
                                                              ("project".into(), project.to_string())]);
     for (name, value) in std::env::vars() {
