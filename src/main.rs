@@ -116,6 +116,12 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
+    /// A scripted coding agent for `agg process --scenario` (installed as `claude` and `codex`).
+    #[command(hide = true)]
+    ScriptedAgent {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
     /// Show this project's run history (every `agg run`, newest first) + lifetime totals.
     History {
         /// emit the history ledger as JSON (the full Project record, with each run's usage totals).
@@ -346,6 +352,10 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Process { args } => return agg::workflow::process::command(args),
         Cmd::Cached { args } => return Ok(agg::workflow::process::cache::command(args)),
+        #[cfg(unix)]
+        Cmd::ScriptedAgent { args } => return Ok(agg::workflow::process::scripted::command(args)),
+        #[cfg(not(unix))]
+        Cmd::ScriptedAgent { .. } => anyhow::bail!("agg scripted-agent needs Unix"),
         Cmd::Schema { which } => {
             let schema = match which.as_deref() {
                 None | Some("agg") => agg::schema::config_schema(),

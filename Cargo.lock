@@ -14,6 +14,7 @@ dependencies = [
  "jsonschema",
  "nix",
  "ratatui",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

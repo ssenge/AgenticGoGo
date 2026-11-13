@@ -36,6 +36,11 @@ A-37: process files. A process of standard steps runs from YAML.
 - **`run.commit_inputs`**: the project's inputs are committed on a branch before the run, and the run's first record entry
   names the process commit that ran.
 
+- **Scenario mode** (`agg process <file> --scenario <files>… --projects <dir> [--keep]`, hidden `agg scripted-agent`,
+  `docs/PROCESS.md` "Scenarios"): the process runs on a copy of a project with scripted agents and scripted answers to
+  asks; each scenario's `expect` (record, never, sessions, files, exit) is checked. `AGG_SCENARIO`, `AGG_SCENARIO_LOG`,
+  `AGG_SCENARIO_PROMPT` are set for a rule's commands. New dependency: `regex`. Unix only.
+
 ### Changed
 
 - `Flow::reenter` records the re-entry under the step's name (its label in a process), not its bare key.

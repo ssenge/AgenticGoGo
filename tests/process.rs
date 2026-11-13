@@ -74,7 +74,13 @@ fn process_file() -> PathBuf {
 fn project(settings: &str) -> tempfile::TempDir {
     LazyLock::force(&ENV);
     let tmp = tempfile::tempdir().unwrap();
-    let d = tmp.path();
+    project_in(tmp.path(), settings);
+    tmp
+}
+
+/// The project's files in `d`.
+fn project_in(d: &Path, settings: &str) {
+    std::fs::create_dir_all(d).unwrap();
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
         git(d, args);
     }
@@ -84,7 +90,6 @@ fn project(settings: &str) -> tempfile::TempDir {
     std::fs::write(d.join("critic.ok"), "").unwrap();
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "baseline"]);
-    tmp
 }
 
 /// `agg process <example> <project> <args>`.
@@ -498,4 +503,56 @@ fn a_script_that_cannot_run_fails_the_step_that_wrote_it() {
     assert!(!out.status.success(), "{}", said(&out));
     let why = rationales(d, "hook", "1.1 Write").join("\n");
     assert!(why.contains("scripts-out/bad.sh: starts with #! but isn't executable (chmod +x)"), "{why}");
+}
+
+// ---- A-38: scenario mode ---------------------------------------------------------------------------------------
+
+/// A projects folder with the example's project `app`, and the scenario files.
+fn scenario_folder(scenarios: &[(&str, &str)]) -> tempfile::TempDir {
+    LazyLock::force(&ENV);
+    let tmp = tempfile::tempdir().unwrap();
+    project_in(&tmp.path().join("projects/app"), "");
+    for (name, text) in scenarios {
+        std::fs::write(tmp.path().join(name), text).unwrap();
+    }
+    tmp
+}
+
+/// `agg process <example> --scenario <files> --projects <dir>/projects`.
+fn play(dir: &Path, files: &[&str]) -> Output {
+    let (_, home) = &*ENV;
+    Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(process_file()).arg("--scenario")
+        .args(files.iter().map(|f| dir.join(f))).arg("--projects").arg(dir.join("projects")).current_dir(dir)
+        .env("HOME", home).output().unwrap()
+}
+
+/// A scenario plays the example's first steps on a copy of a project with scripted agents: the worker writes what its rule
+/// says, the critic's judges are met by default, and the record and the calls are checked against what it expects.
+const PASSES: &str = "project: app\nargs: [--until, survey]\nagents:\n  - { when: 'Survey', write: { work.log: \"session\\n\", survey.md: surveyed } }\n\
+    expect:\n  record: ['^survey done met']\n  sessions: ['^claude worker', '^codex judge']\n  never: ['task-force']\n  files: { survey.md: 'surveyed' }\n  exit: 0\n";
+/// The same run, expected to show what it doesn't, and a checkpoint's ask nobody foresaw.
+const FAILS: &str = "project: app\nargs: [--until, cp-survey]\nagents:\n  - { when: 'Survey', write: { work.log: \"session\\n\" } }\n\
+    expect:\n  record: ['^survey done met', '^never-happens']\n  exit: 0\n";
+
+#[test]
+fn a_scenario_plays_a_process_with_scripted_agents_and_checks_what_it_shows() {
+    let tmp = scenario_folder(&[("passes.yaml", PASSES), ("fails.yaml", FAILS)]);
+    let ok = play(tmp.path(), &["passes.yaml"]);
+    assert!(ok.status.success(), "{}", said(&ok));
+    let out = said(&ok);
+    assert!(out.contains("PASS passes") && out.contains("\"met\":true"), "{out}");
+    let bad = play(tmp.path(), &["passes.yaml", "fails.yaml"]);
+    assert_eq!(bad.status.code(), Some(1), "{}", said(&bad));
+    let out = said(&bad);
+    assert!(out.contains("PASS passes") && out.contains("FAIL fails: unforeseen ask: "), "{out}");
+    assert!(out.contains("nothing in order matches \"^never-happens\"") && out.contains("exit: "), "{out}");
+    assert!(out.contains("== fails: exit") && out.contains("record:") && out.contains("agents:"), "a failing scenario shows its run: {out}");
+}
+
+/// A scenario file with a key the format doesn't have is refused, naming the file.
+#[test]
+fn a_scenario_with_an_unknown_key_is_refused() {
+    let tmp = scenario_folder(&[("typo.yaml", "project: app\nagnets: []\n")]);
+    let out = play(tmp.path(), &["typo.yaml"]);
+    assert!(!out.status.success() && said(&out).contains("typo.yaml"), "{}", said(&out));
 }

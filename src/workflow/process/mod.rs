@@ -26,6 +26,10 @@ pub mod number;
 pub mod proc;
 pub mod rerun;
 pub mod run;
+#[cfg(unix)]
+pub mod scenario;
+#[cfg(unix)]
+pub mod scripted;
 pub mod settings;
 pub mod template;
 pub mod tiers;
@@ -38,7 +42,8 @@ use anyhow::{anyhow, bail, Result};
 use super::Run;
 
 const USAGE: &str = "usage: agg process <file> <project> [--resume] [--from <step>] [--note <text> | --note-file <file> \
-    [--decided]] [--reset] [--until <step>] [--reentries <n>]\n       agg process <file> --check\n       agg process <file> --list";
+    [--decided]] [--reset] [--until <step>] [--reentries <n>]\n       agg process <file> --check\n       agg process <file> --list\n       \
+    agg process <file> --scenario <scenario.yaml>… [--projects <dir>] [--keep]";
 
 /// `agg process …`: the arguments after the subcommand. `--check` and `--list` read only the file; otherwise the
 /// process runs on the project, and starts again where the task force sent it (`--from`, `--note`).
@@ -55,8 +60,38 @@ pub fn command(args: &[String]) -> Result<ExitCode> {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(ExitCode::SUCCESS);
     }
+    if args.iter().any(|a| a == "--scenario") {
+        return scenarios(&file, args);
+    }
     let Some(project) = positional.get(1).map(PathBuf::from) else { bail!("{USAGE}") };
     Ok(run::start(file, project, args.to_vec()))
+}
+
+/// `agg process <file> --scenario <scenario.yaml>… [--projects <dir>] [--keep]`: plays the scenarios (Unix only).
+#[cfg(unix)]
+fn scenarios(file: &std::path::Path, args: &[String]) -> Result<ExitCode> {
+    let mut files: Vec<PathBuf> = vec![];
+    let (mut projects, mut keep, mut taking) = (None, false, false);
+    let mut rest = args.iter().skip(1);
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "--scenario" => taking = true,
+            "--keep" => keep = true,
+            "--projects" => projects = rest.next().map(PathBuf::from),
+            flag if flag.starts_with("--") => bail!("agg process --scenario: unknown flag {flag}"),
+            path if taking => files.push(PathBuf::from(path)),
+            _ => {}
+        }
+    }
+    if files.is_empty() {
+        bail!("agg process <file> --scenario <scenario.yaml>… [--projects <dir>] [--keep]");
+    }
+    scenario::play(file, &files, projects.as_deref(), keep)
+}
+
+#[cfg(not(unix))]
+fn scenarios(_file: &std::path::Path, _args: &[String]) -> Result<ExitCode> {
+    bail!("agg process --scenario: scenario mode needs Unix (its scripted agents are shell scripts)")
 }
 
 /// The JSON Schema (draft 2020-12) of a process file, derived from the types the file parses into, so it cannot drift

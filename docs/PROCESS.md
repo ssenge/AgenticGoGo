@@ -205,6 +205,18 @@ run of the same check on exactly the same project content; unmet verdicts are ne
 `env.NAME`. In the file's own strings an unknown name is an error; a prompt's own template language (`{{ a.b }}`) is
 left alone unless the name is `step.…`/`cp.…`/`phase.…`, which `--check` verifies (`phase.…` too).
 
+### Scenarios (A-38)
+
+`agg process <file> --scenario <scenario.yaml>… --projects <dir> [--keep]` plays the process with scripted agents, no tokens:
+each scenario names a project of `<dir>` (copied to a scratch folder, git history included), the `args` to run
+(`--from`, `--until`, …), the `agents` (rules: `when` is a regex on the prompt; `write` files, a `run` shell command, an
+`answer` file for a judge or critic) and the `answers` to asks (`ask` regex, `say`, `decisions` appended to the file the
+question names). Agents are the `claude`/`codex` wrappers `agg scripted-agent` serves; a rule's `run` sees
+`$AGG_SCENARIO_PROMPT` (the prompt's file), and `AGG_SCENARIO` / `AGG_SCENARIO_LOG` name the scenario and its call log.
+An ask no answer matches is answered no. `expect` checks the run: `record` (regexes in order over the history lines,
+`{label:<id>}` is a step's label), `never`, `sessions` (`<agent> <role>` lines), `files` (path → regex), `exit`. Prints
+`PASS <name>` or `FAIL <name>: <what>` with the run's record and calls; exit 1 if any failed. Unix only.
+
 ### Exit codes and the record
 
 `0` done, `3` halted (an escalation, a human's no, a failed `--from`), `6` a step's task-force limit is spent, `1` an
