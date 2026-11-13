@@ -302,6 +302,11 @@ impl Ctx<'_> {
         }
         let found = super::declared::problems(p, &self.home);
         self.out.extend(found);
+        for (name, o) in &p.judges {
+            if let Some(template) = &o.template {
+                self.file(&format!("judges.{name}"), "template.from", &template.from, &[]);
+            }
+        }
         if let Some(file) = p.run.hooks.as_ref().and_then(|h| h.process.as_ref()) {
             for name in super::hooks::judge_names(&self.home.join(file)) {
                 if !p.judges.contains_key(&name) {
@@ -309,10 +314,11 @@ impl Ctx<'_> {
                 }
             }
         }
-        let mut files: Vec<(&str, &Option<String>, &[&str])> = vec![("run.system_prompt", &p.run.system_prompt, &[]),
-            ("run.critic_scope", &p.run.critic_scope, &["this", "outputs"]), ("settings.quality.guide", &p.settings.quality.guide, &[])];
+        let mut files: Vec<(&str, Option<&str>, &[&str])> = vec![("run.system_prompt", p.run.system_prompt.as_ref().map(|t| t.file()), &[]),
+            ("run.critic_scope", p.run.critic_scope.as_ref().map(|t| t.file()), &["this", "outputs"]),
+            ("settings.quality.guide", p.settings.quality.guide.as_deref(), &[])];
         if let Some(h) = &p.run.hooks {
-            files.push(("run.hooks.process", &h.process, &[]));
+            files.push(("run.hooks.process", h.process.as_deref(), &[]));
         }
         for (what, f, extra) in files {
             if let Some(f) = f {
@@ -330,7 +336,9 @@ impl Ctx<'_> {
 
     fn task_force(&mut self) {
         let Some(tf) = &self.process.task_force else { return };
-        self.file("task_force", "prompt", &tf.prompt, &[]);
+        if let Some(prompt) = &tf.prompt {
+            self.file("task_force", "prompt", prompt.file(), &[]);
+        }
         for d in &tf.deny {
             self.deny("task_force", d);
         }
@@ -534,12 +542,13 @@ mod tests {
         assert!(!found.contains("names the judge"), "declared judges are known: {found}");
 
         let bad = declared.replace("{ judge: tests }", "{ judge: nobody }").replace("when: last", "when: x")
-            .replace("judges: {", "judges: { empty: {}, both: { command: x, metric: { id: a.b }, max: 1 },");
+            .replace("judges: {", "judges: { empty: {}, both: { command: x, metric: { id: a.b }, max: 1 }, form: { template: { doc: a.md, from: gone.md } },");
         f[6].1 = "step: { after: [{ judge: ghost }], before: [judges/x.py] }\n";
         let dir = home(&f, &bad);
         let found = check(&dir.path().join("process.yaml")).join("\n");
         for expect in ["a check names the judge `nobody`, which `judges:` doesn't declare",
-                       "judges.empty: declares none of `metric`, `score` or `command`", "judges.both: ",
+                       "judges.empty: declares none of `metric`, `score`, `command` or `template`", "judges.both: ",
+                       "judges.form",
                        "`hooks.yaml` names the judge `ghost`, which `judges:` doesn't declare"] {
             assert!(found.contains(expect), "missing {expect:?} in:\n{found}");
         }

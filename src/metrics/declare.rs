@@ -28,6 +28,10 @@ pub struct Declared {
 pub fn declare(cfg: &AggConfig, run_set: &[String], config_base: &Path, probe: bool) -> Declared {
     let mut d = Declared::default();
     for (name, o) in &cfg.judges {
+        if o.template.is_some() {
+            d.problems.push(Problem::new(format!("judges.{name}"), "a `template:` judge is declared in a process file (`judges:` of `agg process`), not in agg.yaml"));
+            continue;
+        }
         let shape = Shape {
             name,
             metric: o.metric.as_ref(),

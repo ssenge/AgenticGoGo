@@ -10,6 +10,7 @@ pub mod agent;
 pub mod bases;
 pub mod builtin;
 pub mod blocks;
+pub mod brief;
 pub mod cache;
 pub mod check;
 pub mod checkpoint;
@@ -17,7 +18,9 @@ pub mod exec;
 pub mod declared;
 pub mod decider;
 pub mod exam;
+pub mod form;
 pub mod format;
+pub mod guide;
 pub mod hooks;
 pub mod inputs;
 pub mod ladder;
@@ -33,6 +36,7 @@ pub mod scenario;
 #[cfg(unix)]
 pub mod scripted;
 pub mod settings;
+pub mod standing;
 pub mod template;
 pub mod tiers;
 
@@ -46,7 +50,7 @@ use super::Run;
 const USAGE: &str = "usage: agg process <file> <project> [--resume] [--from <step>] [--note <text> | --note-file <file> \
     [--decided]] [--reset] [--until <step>] [--reentries <n>]\n       agg process <file> --check\n       agg process <file> --list\n       \
     agg process <file> --scenario <scenario.yaml>… [--projects <dir>] [--keep]\n       \
-    agg process <file> <project> --report map|timeline|profile [--json] [--since <epoch>] [--current <step>] [--stopped] [--log <file>]";
+    agg process <file> <project> --brief <step>\n       agg process <file> <project> --report map|timeline|profile [--json] [--since <epoch>] [--current <step>] [--stopped] [--log <file>]";
 
 /// `agg process …`: the arguments after the subcommand. `--check` and `--list` read only the file; otherwise the
 /// process runs on the project, and starts again where the task force sent it (`--from`, `--note`).
@@ -67,6 +71,9 @@ pub fn command(args: &[String]) -> Result<ExitCode> {
         return scenarios(&file, args);
     }
     let Some(project) = positional.get(1).map(PathBuf::from) else { bail!("{USAGE}") };
+    if let Some(step) = args.iter().position(|a| a == "--brief").and_then(|i| args.get(i + 1)) {
+        return brief::command(&file, &project, step);
+    }
     if args.iter().any(|a| a == "--report") {
         return report::command(&file, &project, args);
     }

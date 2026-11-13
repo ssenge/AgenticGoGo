@@ -597,3 +597,27 @@ fn the_run_report_has_a_map_a_timeline_and_a_profile() {
     assert!(agg::workflow::process::report::of(d, "nonsense").is_none());
     assert!(agg::workflow::process::report::of(tmp.path().join("nowhere").as_path(), "map").is_none());
 }
+
+// ---- A-38: standing texts ---------------------------------------------------------------------------------------------
+
+/// `--brief <step>` prints the process's parts of a worker's brief without running anything: agg's standing texts
+/// (the system prompt, the shared machine, the notes with the project's file), the step's prompt, and the critic's scope
+/// with the file's own text after agg's; `--brief task-force` the task force's prompt (agg's, then the file's).
+#[test]
+fn a_brief_shows_the_standing_texts_and_the_files_that_follow_them() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    let out = run(d, &["--brief", "survey"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let brief = said(&out);
+    let at = |needle: &str| brief.find(needle).unwrap_or_else(|| panic!("{needle} not in the brief:\n{brief}"));
+    assert!(at("Your brief is agg/private/INSTRUCTIONS.md") < at("the worker's prompt (prompts/survey.md)"), "{brief}");
+    assert!(at("the worker's prompt") < at("## Working on a shared machine"), "{brief}");
+    assert!(brief.contains("`notes.md` holds what earlier steps learned") && brief.contains("## survey"), "{brief}");
+    assert!(at("## What you review, and what you never raise") < at("the critic's rubric"), "agg's scope, then the file's: {brief}");
+    let force = said(&run(d, &["--brief", "task-force"]));
+    assert!(force.find("## Goal").unwrap() < force.find("A step failed. Find its cause").unwrap(), "agg's text, then the file's: {force}");
+    assert!(force.contains("**`fixed`**"), "{force}");
+    let script = run(d, &["--brief", "sources"]);
+    assert!(!script.status.success() && said(&script).contains("only an agent step"), "{}", said(&script));
+}

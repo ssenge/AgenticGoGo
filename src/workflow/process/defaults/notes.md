@@ -1,0 +1,3 @@
+## Notes between steps
+
+`{notes}` holds what earlier steps learned that their results don't say: read it before you start, unless the brief holds it. Before you finish, write your own section there, `## {{ this.id }}` (replace it if it exists, keep the others): at most five lines, each a fact a later step needs that your result doesn't say (a surprise, a workaround, a quirk of a tool or the machine) with its evidence (a file, or a command and what it printed). No plans, no guesses; no section when there is nothing; when your result stays as it is, so does your section. You may always write this file, whatever else your task allows.

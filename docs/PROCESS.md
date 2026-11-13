@@ -205,6 +205,38 @@ run of the same check on exactly the same project content; unmet verdicts are ne
 `env.NAME`. In the file's own strings an unknown name is an error; a prompt's own template language (`{{ a.b }}`) is
 left alone unless the name is `step.…`/`cp.…`/`phase.…`, which `--check` verifies (`phase.…` too).
 
+### Standing texts (A-38)
+
+Defaults embedded in the binary apply when the process file sets nothing; a text it names **replaces** the default, and
+`{ append: <file> }` follows it:
+
+| key | default | notes |
+|---|---|---|
+| `run.system_prompt` | the worker's brief is `agg/private/INSTRUCTIONS.md`: read it first, all of it; the final message is one line | `<file>` replaces, `{ append: <file> }` adds |
+| `task_force.prompt` | the goal, how to find the cause (the record, `git log`), what it never changes (checks, process, decisions), the answer's form (`fixed`, `reenter <step id>`, `escalate`), a flaky failure | the task force exists where `task_force:` is set |
+| `run.critic_scope` | review only this step's outputs (`{{ outputs }}`); never an input, a human's approval, or a requirement nobody stated | |
+| `run.notes: <file>` | a brief section: read the notes file first; at the end write your own section `## <step id>` of at most five lines; a check after the step is unmet when it has more (`notes section of <id> has N lines, at most 5`) | no default: off without the key |
+| `run.brief.shared_machine: true` | a section: other runs share this machine: your own temp folder, end only processes you started, by their PID | off by default |
+| `settings.quality.guide` | the guide file's `{table}` is filled with the score definition's hard limits and parts (`swe-metrics score --describe`), as the `score` judge scores | with `{min}`, `{definition}`, `{version}`, `{since}`, `{reports}` |
+
+`agg process <file> <project> --brief <step>` prints the process's parts of what a step's worker and critic get, without
+running anything: the system prompt, the worker's prompt, the standing sections, the step's sections, the quality guide, the
+critic's scope and rubric (a section's command isn't run); `--brief task-force` prints the task force's prompt.
+
+### The template judge (A-38)
+
+```yaml
+judges:
+  report-form: { template: { doc: docs/report.md, from: templates/report.md } }   # `placeholder: <regex>` to change `<…>`
+```
+
+A document filled in from a template (`doc` in the project, `from` in the process file's folder, both with the process's names
+filled in). Met when the document has the template's headings in the template's order (level and text; a placeholder in a
+heading matches any text), no section is empty (a parent holding subsections isn't), and nothing of the template is left: its
+placeholders (`<…>` outside code, or the declaration's `placeholder` pattern; only those the template has), an HTML comment, a
+`> Instruction:` line or a blockquote line the template has. The rationale names the first three problems with their line.
+A process file's `judges:` only (agg.yaml refuses it).
+
 ### The run report (A-38)
 
 `agg process <file> <project> --report map|timeline|profile [--json]` (`--since <epoch>`: only the record from then on; `--current <step>` and `--stopped`: what a caller knows better than `state.json`; `--log <driver log>`: the tool calls of the sessions, for the profile) reads what a run left (the record, `agg/private/calls*.jsonl`,

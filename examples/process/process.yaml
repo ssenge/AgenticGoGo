@@ -10,12 +10,14 @@ run:
   history: reports/steps.jsonl
   own: [task.md, tools.yaml, reports/steps.jsonl]
   open_points: checkpoints/open-points.md
-  critic_scope: prompts/critic-scope.md
+  critic_scope: { append: prompts/critic-scope.md }   # agg's standing text, then this one (`critic_scope: <file>` replaces it)
+  notes: notes.md                                      # a notes file between steps; each step's section is at most five lines
   config: run.yaml
   hooks: { process: hooks.yaml, project: hooks.yaml }
   auto_note: scripts/waiting.sh
   judge_cache: { ignore: [notes.md] }
   brief:
+    shared_machine: true                               # a standing section: this machine is shared with other runs
     sections: [{ file: prompts/house-rules.md }]
     inputs: { always: [task.md] }
 settings:
@@ -25,10 +27,11 @@ settings:
   models: { small: fake-small }
 judges:   # declared judges (A-38): a command met by its exit code (or a `metric:` or `score:` over swe-metrics)
   worked: { command: "test -s work.log" }   # what the worker leaves behind
+  report-form: { template: { doc: reports/summary.md, from: templates/summary.md } }   # a document filled in from a template
 deny:
   inputs: [task.md, tools.yaml]
 task_force:
-  prompt: prompts/task-force.md
+  prompt: { append: prompts/task-force.md }            # agg's default prompt, then this file
   max: 2
   deny: [inputs]
   sections: [{ text: "## The process\n\nIts steps are listed above; the app lives in `{{ app }}/`." }]

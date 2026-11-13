@@ -153,7 +153,7 @@ fn step_hooks(shared: &Shared, f: &Flow, name: &str, when: crate::workflow::When
 
 /// The declared judge of the process file a hooks entry names.
 fn declared_judge(shared: &Shared, name: &str) -> Option<Judge> {
-    super::declared::judge(&shared.spec, &shared.project, name).ok()
+    super::declared::judge(shared, name).ok()
 }
 
 /// The hook commands of `scope`: the process's file's, then the project's.

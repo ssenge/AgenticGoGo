@@ -47,6 +47,11 @@ A-37: process files. A process of standard steps runs from YAML.
   notes its file in `agg/private/process.json`. `agg status --json` is unchanged (its schema is strict; the step is in `current_step`).
 - `--report … --since <epoch> | --current <step> | --stopped | --log <driver log>`; `agg cached --content` (the content hash).
 - Scenario patterns may use look-around (`fancy-regex`).
+- **Standing texts** (`workflow::process::standing`, `defaults/`, `docs/PROCESS.md`): agg's default `run.system_prompt`, `task_force.prompt`,
+  `run.critic_scope`; `{ append: <file> }` after a default; `run.notes: <file>` (a brief section and a check of the section's length);
+  `run.brief.shared_machine`; the quality guide's `{table}` from `swe-metrics score --describe`; `agg process <file> <project> --brief <step>`.
+  A process that set none of these now gets the defaults (the system prompt and the critic's scope).
+- **The `template` judge** (`judges.<name>.template: { doc, from, placeholder? }`, `workflow::process::form`): a document filled in from a template.
 
 ### Changed
 

@@ -290,6 +290,22 @@ pub struct JudgeOverride {
     /// a command judge's `PATH` entries, in front of the rest (relative ones to the project).
     #[serde(default)]
     pub path: Vec<String>,
+    /// a TEMPLATE judge (a process file's `judges:` only): a document filled in from a template.
+    #[serde(default)]
+    pub template: Option<TemplateSel>,
+}
+
+/// A template judge's document and template.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateSel {
+    /// the document, relative to the project
+    pub doc: String,
+    /// the template, relative to the process file's folder
+    pub from: String,
+    /// a regex for the template's placeholders in the document (default `<…>`: `<[^<>\n]{1,120}>`)
+    #[serde(default)]
+    pub placeholder: Option<String>,
 }
 
 /// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_judges` and the

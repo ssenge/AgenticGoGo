@@ -191,6 +191,12 @@ absolute) go in front of `PATH`; `timeout:` is the judge's time limit. It runs a
 confinement. A command judge has no `max:`/`min:` and is not a `metric:` or `score:` judge. The same declarations work in a
 process file's `judges:` (`docs/PROCESS.md`).
 
+## Template judges — `template:` (process files)
+
+A judge declared with `template: { doc, from, placeholder? }` checks that a document was filled in from a template: its
+headings in the template's order, no empty section, nothing of the template left (placeholders, HTML comments, instruction
+lines). It is declared in a process file's `judges:` (`docs/PROCESS.md`, "The template judge"); `agg.yaml` refuses it.
+
 ## Judges built on swe-metrics — `metric:` and `score:`
 
 [swe-metrics](https://github.com/ssenge/swe-metrics) is a separate, stateless measuring tool: it

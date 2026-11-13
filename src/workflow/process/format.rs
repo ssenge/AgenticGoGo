@@ -173,11 +173,14 @@ pub struct RunSpec {
     pub config: Option<String>,
     /// a file whose change drops every step's base and the kept results of the run before
     pub bases_reset_when_changed: Option<String>,
-    pub system_prompt: Option<String>,
+    pub system_prompt: Option<super::standing::Text>,
     #[serde(default)]
     pub brief: BriefSpec,
     /// the critic's scope section, with `{{ outputs }}` filled in
-    pub critic_scope: Option<String>,
+    pub critic_scope: Option<super::standing::Text>,
+    /// a notes file between steps (A-38): each step reads it first and writes its own section `## <step id>` of at most five
+    /// lines at the end; agg's brief section says so and checks the length after the step
+    pub notes: Option<String>,
     /// the file the reviewers' open points are kept in until the next checkpoint
     pub open_points: Option<String>,
     /// end processes a step left running
@@ -226,6 +229,9 @@ impl CommitInputs {
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BriefSpec {
+    /// a section for steps that share the machine with other runs: own temp folder, end only what you started
+    #[serde(default)]
+    pub shared_machine: bool,
     #[serde(default)]
     pub sections: Vec<Section>,
     #[serde(default)]
@@ -275,7 +281,8 @@ pub struct HooksSpec {
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskForceSpec {
-    pub prompt: String,
+    /// agg's default (the goal, how to find the cause, the answer's form), or a file that replaces it, or `{ append: <file> }`
+    pub prompt: Option<super::standing::Text>,
     /// re-entries and repairs per failed step
     #[serde(default = "TaskForceSpec::max")]
     pub max: u32,

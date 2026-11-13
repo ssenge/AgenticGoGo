@@ -11,7 +11,7 @@ use super::format::{Check, Review, Section};
 use super::proc::Proc;
 use super::settings::StepSettings;
 use super::tiers::Ladder;
-use super::{bases, inputs, rerun};
+use super::{bases, inputs, rerun, standing};
 use crate::core::model::Judge;
 use crate::driver::{Fatal, Step};
 use crate::metrics::{Scope, ScoreJudge};
@@ -114,7 +114,7 @@ impl Proc {
     /// A check as a judge: a declared judge of the process file, or a command through the step's names.
     pub fn check_to_judge(&self, ctx: &Ctx, check: &Check) -> Result<Judge, Fatal> {
         match (check.judge(), check.command()) {
-            (Some(name), _) => super::declared::judge(&self.shared.spec, &self.project, name)
+            (Some(name), _) => super::declared::judge(&self.shared, name)
                 .map_err(|e| anyhow!("{}: {e}", ctx.label).into()),
             (_, Some(command)) => self.judge(ctx, check.name(), command),
             _ => Err(anyhow!("{}: a check runs a command or names a judge", ctx.label).into()),
@@ -146,6 +146,12 @@ impl Proc {
         for section in &brief.sections {
             task = task.section(self.section_text(ctx, section)?);
         }
+        if brief.shared_machine {
+            task = task.section(standing::SHARED_MACHINE.to_string());
+        }
+        if let Some(notes) = &self.shared.spec.run.notes {
+            task = task.section(self.render(ctx, &standing::notes_section(notes))?);
+        }
         if let Some(note) = s.note.as_deref().filter(|n| !n.trim().is_empty()) {
             task = task.section(note_section(note));
             if self.reaches(ctx) {
@@ -176,8 +182,8 @@ impl Proc {
 
     /// What a critic reviews and what it never raises (`run.critic_scope`, with `{{ outputs }}` filled in).
     fn scope_text(&self, ctx: &Ctx, outputs: &[String]) -> Result<String, Fatal> {
-        let Some(file) = &self.shared.spec.run.critic_scope else { return Ok(String::new()) };
-        let text = std::fs::read_to_string(self.home.join(file)).map_err(|e| anyhow!("{file}: {e}"))?;
+        let text = standing::text(self.shared.spec.run.critic_scope.as_ref(), standing::CRITIC_SCOPE, &self.home)
+            .map_err(|e| anyhow!("run.critic_scope: {e}"))?;
         let what = if outputs.is_empty() { "the files this step wrote".to_string() }
                    else { outputs.iter().map(|o| format!("`{o}`")).collect::<Vec<_>>().join(", ") };
         self.render(ctx, &text.replace("{{ outputs }}", &what))
@@ -200,6 +206,7 @@ impl Proc {
                 .replace("{since}", &since).replace("{reports}", &reports),
             None => String::new(),
         };
+        let guide = super::guide::fill(&guide, &definition, &version);
         let scope = self.render(ctx, spec.scope.as_deref().unwrap_or("."))?;
         let mut score = ScoreJudge::new(&definition, &version).min(min).scope(Scope::ChangedIn { path: scope, since });
         if !reports.is_empty() {

@@ -39,6 +39,16 @@ pub fn judges(shared: &Shared, key: &str, id: &str, when: When) -> Vec<Judge> {
             }
         }
     }
+    if let (When::After, Some(notes)) = (when, &shared.spec.run.notes) {
+        let (notes, id) = (notes.clone(), id.to_string());
+        out.push(Judge::native("notes", move |ctx| {
+            let text = std::fs::read_to_string(ctx.dir().join(&notes)).unwrap_or_default();
+            match super::standing::notes_problem(&text, &id) {
+                Some(problem) => Verdict::binary(false).with_rationale(problem),
+                None => Verdict::binary(true).with_rationale("the step's notes section is short enough"),
+            }
+        }));
+    }
     if when == When::After && !shared.spec.run.scripts_runnable.is_empty() {
         let folders = shared.spec.run.scripts_runnable.iter().filter_map(|f| render(shared, f)).collect::<Vec<_>>();
         let key = key.to_string();

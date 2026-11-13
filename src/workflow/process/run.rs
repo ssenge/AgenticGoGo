@@ -13,7 +13,7 @@ use super::format::{Kind, Process, Section, Step};
 use super::number::{number, resolve, Numbered};
 use super::proc::{Init, Proc};
 use super::settings::{Base, Settings};
-use super::{bases, check, template};
+use super::{bases, check, standing, template};
 use crate::driver::{Agg, Fatal, OnRegression, Opts};
 use crate::plugin::RunOutcome;
 use crate::workflow::{Roles, Run};
@@ -63,10 +63,8 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
         .vars(vars.clone()).user_settings(spec.agg.user_settings)
         .on_regression(if spec.agg.on_regression == "rollback" { OnRegression::Rollback } else { OnRegression::Annotate })
         .judge_timeout(spec.agg.judge_timeout);
-    if let Some(f) = &spec.run.system_prompt {
-        agg = agg.system_prompt(std::fs::read_to_string(home.join(f)).map_err(|e| anyhow!("{f}: {e}"))?);
-    }
-    let force = task_force(&spec, &home, &vars, roles.as_ref())?;
+    agg = agg.system_prompt(standing::text(spec.run.system_prompt.as_ref(), standing::SYSTEM, &home)?);
+    let force = task_force(&spec, &home, &project, &vars, roles.as_ref())?;
     let pinned = pinned(&home);
     let p = Proc::new(agg, run, Init { spec: spec.clone(), list: list.clone(), home, settings, vars, roles, force });
     p.record("start", "start", true, &pinned);
@@ -196,7 +194,7 @@ fn roles_of(spec: &Process, project: &Path) -> Result<Option<Roles>, Fatal> {
 }
 
 /// The task force's step: its prompt, what it may never change, the sections of its brief.
-fn task_force(spec: &Process, home: &Path, vars: &BTreeMap<String, String>, roles: Option<&Roles>) -> Result<Option<crate::driver::Step>, Fatal> {
+fn task_force(spec: &Process, home: &Path, project: &Path, vars: &BTreeMap<String, String>, roles: Option<&Roles>) -> Result<Option<crate::driver::Step>, Fatal> {
     let (Some(tf), Some(roles)) = (&spec.task_force, roles) else { return Ok(None) };
     let mut deny = vec![];
     for e in &tf.deny {
@@ -205,11 +203,21 @@ fn task_force(spec: &Process, home: &Path, vars: &BTreeMap<String, String>, role
             None => deny.push(template::render(e, vars).map_err(|e| anyhow!("{e}"))?),
         }
     }
-    let mut step = roles.step("worker", "task-force", home.join(&tf.prompt).display().to_string()).write_deny(deny);
+    let prompt = standing::text(tf.prompt.as_ref(), standing::TASK_FORCE, home).map_err(|e| anyhow!("task_force.prompt: {e}"))?;
+    let mut step = roles.step("worker", "task-force", task_force_prompt(project, &prompt)?).write_deny(deny);
     for s in &tf.sections {
         step = crate::workflow::with_section(&step, &plain_section(s, home, vars)?)?;
     }
     Ok(Some(step))
+}
+
+/// The task force's effective prompt as a file the step can name (`agg/private/task-force.md`): agg's default, a file or both.
+fn task_force_prompt(project: &Path, prompt: &str) -> Result<String, Fatal> {
+    let dir = crate::paths::private_dir(project);
+    std::fs::create_dir_all(&dir).map_err(|e| anyhow!("{}: {e}", dir.display()))?;
+    let file = dir.join("task-force.md");
+    std::fs::write(&file, prompt).map_err(|e| anyhow!("{}: {e}", file.display()))?;
+    Ok(file.display().to_string())
 }
 
 /// A section outside any step: its text or file rendered with the process's variables.

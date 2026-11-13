@@ -154,7 +154,7 @@ mod tests {
     fn the_message_is_serdes_wording() {
         let p = &unknown_keys(&yaml("project: p\njudges: { t: { timeot: 1 } }\n"))[0];
         assert_eq!(p.path, "judges.t.timeot");
-        assert_eq!(p.message, "unknown field `timeot`, expected one of `timeout`, `metric`, `score`, `max`, `min`, `command`, `path`");
+        assert_eq!(p.message, "unknown field `timeot`, expected one of `timeout`, `metric`, `score`, `max`, `min`, `command`, `path`, `template`");
         let p = &unknown_keys(&yaml("project: p\nwatchdog: { x: 1 }\n"))[0];
         assert!(p.message.starts_with("unknown field `x`, expected one of "), "{}", p.message);
     }
