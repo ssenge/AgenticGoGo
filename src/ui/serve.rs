@@ -9,6 +9,7 @@
 //!   GET  /api/state    → the live DashboardState (204 when no snapshot exists yet)
 //!   GET  /api/history  → the Project run-history ledger
 //!   GET  /api/health   → { running: bool, pid: number|null }
+//!   GET  /api/process  → ?report=map|timeline|profile: the run report of a process run (A-38)
 //!   POST /api/send     → { cmd: "pause"|"resume"|"wake"|"stop"|"inject"|"budget", ... } → the bus
 //!                        (409 if no loop is running here)
 //!
@@ -44,7 +45,7 @@ pub fn run(cfg: ServeConfig) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("could not bind agg serve on 127.0.0.1:{}: {e}", cfg.port))?;
     eprintln!(
         "agg serve → http://127.0.0.1:{}  (project: {})\n  \
-         endpoints: /api/state  /api/history  /api/health  POST /api/send\n  \
+         endpoints: /api/state  /api/history  /api/health  /api/process  POST /api/send\n  \
          CORS origin: {}{}\n  Ctrl-C to stop.",
         cfg.port,
         cfg.dir.display(),
@@ -73,6 +74,7 @@ pub fn run(cfg: ServeConfig) -> Result<()> {
             (Method::Get, "/api/state") => handle_state(&cfg.dir, &origin),
             (Method::Get, "/api/history") => handle_history(&cfg.dir, &origin),
             (Method::Get, "/api/health") => handle_health(&cfg.dir, &origin),
+            (Method::Get, "/api/process") => handle_process(&cfg.dir, &url, &origin),
             (Method::Post, "/api/send") => handle_send(&mut req, &cfg.dir, &origin),
             (Method::Post, "/api/answer") => handle_answer(&mut req, &cfg.dir, &origin),
             _ => json_resp(404, r#"{"error":"not found"}"#, &origin),
@@ -100,6 +102,16 @@ fn handle_history(dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>
     match serde_json::to_string(&proj) {
         Ok(body) => json_resp(200, &body, origin),
         Err(e) => json_resp(500, &err_json(&e.to_string()), origin),
+    }
+}
+
+/// `GET /api/process?report=map|timeline|profile` — the run report of the process the project runs (A-38); 404
+/// when the project has run none.
+fn handle_process(dir: &Path, url: &str, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let kind = url.split_once('?').map(|(_, q)| q).unwrap_or_default().split('&').find_map(|kv| kv.strip_prefix("report=")).unwrap_or("map");
+    match crate::workflow::process::report::of(dir, kind) {
+        Some(report) => json_resp(200, &report.to_string(), origin),
+        None => json_resp(404, &err_json("the project has no process run, or the report is none of map, timeline, profile"), origin),
     }
 }
 

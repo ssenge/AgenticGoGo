@@ -41,6 +41,12 @@ A-37: process files. A process of standard steps runs from YAML.
   asks; each scenario's `expect` (record, never, sessions, files, exit) is checked. `AGG_SCENARIO`, `AGG_SCENARIO_LOG`,
   `AGG_SCENARIO_PROMPT` are set for a rule's commands. New dependency: `regex`. Unix only.
 
+- **Run report** (`agg process <file> <project> --report map|timeline|profile [--json]`, `workflow::process::report` and `profile`,
+  `docs/PROCESS.md` "The run report"): where the run is, when each step ended, where the time went. `agg serve`:
+  `GET /api/process?report=…`; the web UI: a `/process` page; `agg status` shows the running process step. `agg process`
+  notes its file in `agg/private/process.json`. `agg status --json` is unchanged (its schema is strict; the step is in `current_step`).
+- Scenario patterns may use look-around (`fancy-regex`).
+
 ### Changed
 
 - `Flow::reenter` records the re-entry under the step's name (its label in a process), not its bare key.

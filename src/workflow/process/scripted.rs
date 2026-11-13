@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use fancy_regex::Regex as Pattern;
 use regex::Regex;
 use serde_json::{json, Value};
 
@@ -110,9 +111,9 @@ fn rule_for(rules: &[Rule], prompt: &str, agent: &str, kind: &str, log: &Path) -
         if rule.agent.as_deref().is_some_and(|a| a != agent) || rule.kind.as_deref().unwrap_or("worker") != kind {
             continue;
         }
-        let re = Regex::new(&format!("(?m){}", rule.when)).map_err(|e| format!("rule {i}: `when`: {e}"))?;
+        let re = Pattern::new(&format!("(?m){}", rule.when)).map_err(|e| format!("rule {i}: `when`: {e}"))?;
         let times = used.iter().filter(|u| **u == Some(i as u64)).count();
-        if re.is_match(prompt) && rule.times.is_none_or(|t| times < t) {
+        if super::scenario::hit(&re, prompt) && rule.times.is_none_or(|t| times < t) {
             return Ok(Some(i));
         }
     }

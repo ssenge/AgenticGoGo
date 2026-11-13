@@ -24,6 +24,15 @@ pub fn start(file: PathBuf, project: PathBuf, args: Vec<String>) -> ExitCode {
     crate::workflow::run(move || drive(&file, &project, &args))
 }
 
+/// Notes which process file runs on the project (`agg/private/process.json`), so `agg serve` and `agg status` can report it.
+fn remember(project: &Path, file: &Path) {
+    let dir = crate::paths::private_dir(project);
+    let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(dir.join("process.json"), serde_json::json!({"file": file}).to_string());
+    }
+}
+
 /// One run of the process, from its file to its end.
 fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     let problems = check::check(file);
@@ -35,6 +44,7 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     let list = number(&spec);
     let project = std::fs::canonicalize(project).map_err(|e| anyhow!("{}: {e}", project.display()))?;
     let vars = template::variables(&spec, &list, &home, &project.display().to_string()).map_err(|e| anyhow!("{e}"))?;
+    remember(&project, file);
     let mut run = Run::from_args(args)?;
     run.from = run.from.map(|f| resolve(&list, &f)).transpose().map_err(|e| anyhow!("--from {e}"))?;
     run.until = run.until.map(|f| resolve(&list, &f)).transpose().map_err(|e| anyhow!("--until {e}"))?;
@@ -133,7 +143,7 @@ fn forget_stale_bases(spec: &Process, project: &Path) {
 }
 
 /// The settings: the process's own over the project's file, its names held to the process's steps.
-fn settings_of(spec: &Process, list: &[Numbered], home: &Path, project: &Path, vars: &BTreeMap<String, String>)
+pub(super) fn settings_of(spec: &Process, list: &[Numbered], home: &Path, project: &Path, vars: &BTreeMap<String, String>)
                -> Result<Settings, Fatal> {
     let mut steps = HashMap::new();
     fn walk(steps: &[Step], out: &mut HashMap<String, super::settings::StepSettings>) {

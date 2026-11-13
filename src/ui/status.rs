@@ -12,12 +12,23 @@ use std::path::Path;
 /// snapshot yet (the loop has never run in this dir).
 pub fn render(dir: &Path) -> String {
     match DashboardState::read(dir) {
-        Some(s) => render_state(&s),
+        Some(s) => render_state(&s) + &process_line(dir),
         None => "no run snapshot yet (agg/private/state.json not found).\n  \
                  • `agg run` to start the loop (it publishes state as it goes), or\n  \
                  • `agg plan` to evaluate the judges once now (a dry run — this re-judges)."
             .to_string(),
     }
+}
+
+/// The process run's current phase and step as one line, when the project runs a process (A-38).
+fn process_line(dir: &Path) -> String {
+    let Some(map) = crate::workflow::process::report::of(dir, "map") else { return String::new() };
+    let Some(current) = map["current"].as_str() else { return String::new() };
+    let found = map["phases"].as_array().into_iter().flatten().find_map(|p| {
+        let s = p["steps"].as_array()?.iter().find(|s| s["id"] == current)?;
+        Some(format!("process {} {} · phase {} {}\n", s["n"].as_str()?, s["name"].as_str()?, p["n"], p["name"].as_str()?))
+    });
+    found.unwrap_or_default()
 }
 
 /// The live status document (`docs/schemas/status.v1.json`) as pretty JSON — the STABLE interface

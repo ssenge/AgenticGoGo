@@ -9,6 +9,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use fancy_regex::Regex as Pattern;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
@@ -103,6 +104,8 @@ impl Scenario {
 /// `agg process <file> --scenario <scenario>… [--projects <dir>] [--keep]`: plays each scenario; exit 0 only when all are
 /// as expected.
 pub fn play(file: &Path, scenarios: &[PathBuf], projects: Option<&Path>, keep: bool) -> Result<ExitCode> {
+    // the runs start elsewhere than the caller's folder, and a process's scripts are found from its file's own path
+    let file = &std::fs::canonicalize(file).map_err(|e| anyhow!("{}: {e}", file.display()))?;
     let text = std::fs::read_to_string(file).map_err(|e| anyhow!("{}: {e}", file.display()))?;
     let spec = Process::parse(&text).map_err(|e| anyhow!("{}: {e}", file.display()))?;
     let list = number(&spec);
@@ -211,7 +214,7 @@ fn open_asks(project: &Path) -> Vec<Value> {
 fn reply(project: &Path, question: &str, answers: &[Answer], used: &mut Vec<usize>) -> Result<Option<String>> {
     let target = Regex::new(r"into (\S+)\.$")?;
     for (i, answer) in answers.iter().enumerate() {
-        if used.contains(&i) || !Regex::new(&answer.ask)?.is_match(question) {
+        if used.contains(&i) || !hit(&Pattern::new(&answer.ask)?, question) {
             continue;
         }
         used.push(i);
@@ -277,12 +280,18 @@ fn ran(file: &Path, project: &Path, scenario: &Scenario, env: &[(&str, String)],
     Ok((code, problems))
 }
 
+/// Whether a scenario's pattern finds something in `text` (look-around is allowed; a pattern that exceeds the matcher's
+/// backtracking limit finds nothing).
+pub fn hit(re: &Pattern, text: &str) -> bool {
+    re.is_match(text).unwrap_or(false)
+}
+
 /// The first pattern no line after the previous pattern's line matches; None when all match in order.
 fn in_order(patterns: &[String], found: &[String]) -> Result<Option<String>> {
     let mut i = 0;
     for pattern in patterns {
-        let re = Regex::new(pattern)?;
-        while i < found.len() && !re.is_match(&found[i]) {
+        let re = Pattern::new(pattern)?;
+        while i < found.len() && !hit(&re, &found[i]) {
             i += 1;
         }
         if i == found.len() {
@@ -303,8 +312,8 @@ fn judged(expect: &Expect, record: &[String], sessions: &[String], code: i32) ->
         }
     }
     for pattern in &expect.never {
-        let re = Regex::new(pattern)?;
-        wrong.extend(record.iter().filter(|l| re.is_match(l)).map(|l| format!("never: {l}")));
+        let re = Pattern::new(pattern)?;
+        wrong.extend(record.iter().filter(|l| hit(&re, l)).map(|l| format!("never: {l}")));
     }
     if expect.exit.is_some_and(|e| e != code) {
         wrong.push(format!("exit: {code}, expected {}", expect.exit.unwrap_or_default()));
@@ -317,7 +326,7 @@ fn kept(expect: &Expect, project: &Path) -> Result<Vec<String>> {
     let mut wrong = vec![];
     for (name, pattern) in &expect.files {
         let text = std::fs::read_to_string(project.join(name)).unwrap_or_default();
-        if !Regex::new(pattern)?.is_match(&text) {
+        if !hit(&Pattern::new(pattern)?, &text) {
             wrong.push(format!("files: {name} doesn't match {pattern:?}"));
         }
     }

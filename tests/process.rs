@@ -556,3 +556,44 @@ fn a_scenario_with_an_unknown_key_is_refused() {
     let out = play(tmp.path(), &["typo.yaml"]);
     assert!(!out.status.success() && said(&out).contains("typo.yaml"), "{}", said(&out));
 }
+
+// ---- A-38: the run report -----------------------------------------------------------------------------------------
+
+/// `agg process <file> <project> --report <kind> --json`, parsed.
+fn report(dir: &Path, kind: &str) -> serde_json::Value {
+    let out = run(dir, &["--report", kind, "--json"]);
+    assert!(out.status.success(), "{}", said(&out));
+    serde_json::from_str(String::from_utf8_lossy(&out.stdout).lines().last().unwrap()).unwrap()
+}
+
+/// The report of a finished run: the map has each step in its phase with a state (an `each`'s steps once per item, a
+/// skipped step skipped, a checkpoint answered `auto`), the timeline a row per result with its totals, the profile
+/// the steps with their substeps; `agg serve`'s endpoint isn't needed to read them.
+#[test]
+fn the_run_report_has_a_map_a_timeline_and_a_profile() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    let out = run(d, &[]);
+    assert!(out.status.success(), "{}", said(&out));
+    let map = report(d, "map");
+    let state = |id: &str| map["phases"].as_array().unwrap().iter().flat_map(|p| p["steps"].as_array().unwrap().iter())
+        .find(|s| s["id"] == id).unwrap_or_else(|| panic!("{id} not on the map: {map}")).clone();
+    assert_eq!(state("survey")["state"], "done");
+    assert_eq!(state("construct-U2")["state"], "done");
+    assert_eq!(state("construct-U2")["item"], "U2");
+    assert_eq!(state("extras")["state"], "skipped");
+    assert_eq!(state("cp-survey")["answer"], "auto");
+    assert_eq!(map["ended"], true);
+    let timeline = report(d, "timeline");
+    assert!(timeline["steps"].as_array().unwrap().iter().any(|r| r["step"] == "1.3 Survey"), "{timeline}");
+    assert_eq!(timeline["checkpoints_asked"], 0, "an auto-approval is no human's answer");
+    let profile = report(d, "profile");
+    assert!(profile["steps"].as_array().unwrap().len() > 5 && profile["map"]["phases"].is_array(), "{profile}");
+    let text = run(d, &["--report", "timeline"]);
+    assert!(said(&text).contains("wall ") && said(&text).contains("repairs 0"), "{}", said(&text));
+    assert!(!run(d, &["--report", "nonsense"]).status.success());
+    // what `agg serve` and `agg status` read: the project noted its process file
+    assert_eq!(agg::workflow::process::report::of(d, "map").unwrap()["ended"], true);
+    assert!(agg::workflow::process::report::of(d, "nonsense").is_none());
+    assert!(agg::workflow::process::report::of(tmp.path().join("nowhere").as_path(), "map").is_none());
+}

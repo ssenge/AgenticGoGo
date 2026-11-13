@@ -19,6 +19,7 @@
 
 <div class="app">
   <Header state={s} health={loop.health} />
+  <a class="proc" href="/process">process run →</a>
 
   {#if loop.health.api_offline}
     <div class="card notice">
@@ -109,4 +110,5 @@
     .grid { grid-template-columns: 1fr; }
     .col-side { position: static; }
   }
+  .proc { color: var(--ink-3); text-decoration: none; font-size: 0.85rem; justify-self: end; }
 </style>

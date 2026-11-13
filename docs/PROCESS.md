@@ -205,6 +205,27 @@ run of the same check on exactly the same project content; unmet verdicts are ne
 `env.NAME`. In the file's own strings an unknown name is an error; a prompt's own template language (`{{ a.b }}`) is
 left alone unless the name is `step.…`/`cp.…`/`phase.…`, which `--check` verifies (`phase.…` too).
 
+### The run report (A-38)
+
+`agg process <file> <project> --report map|timeline|profile [--json]` reads what a run left (the record, `agg/private/calls*.jsonl`,
+`asks.jsonl`, `report.json`, `state.json`) and prints it as text, or with `--json` as one JSON document:
+
+- **map**: `{phases: [{n, id, name, off, steps: [{id, n, name, kind, state, runs, failures, repairs, answer, item?, extra: {}}]}], current, ended}`.
+  A step's `state` is `done`, `repaired` (met after a repair), `again` (run again after a re-entry, a second result or a failed
+  attempt), `failed`, `skipped`, `off` (the settings' `skip`, the run configuration's `switched_off`, or `outside`/`planned`),
+  `running`, `ahead` (not yet reached by a live or stopped run), `notrun` (an ended run never reached it); a checkpoint's `answer`
+  is `yes`, `no` or `auto`. An `each`'s steps appear once per item (`<id>-<item>`). A resumed run's replay is not a second run.
+- **timeline**: a row per step result (`minutes` since the result before it, `paused` between launches, `repairs`), and `wall`,
+  `waiting` (for humans), `paused`, `repairs`, `task_force`, `checkpoints_asked`.
+- **profile**: per step the substeps (`parts`: do, check, critique, repair, hooks, task force, human) with their time on the run's
+  axis, verdict and cost; `segments` for the time axis; `used` (agent and model per session, from `report.json`); `files.outputs`
+  (what the step's commit changed); and `tokens`, `cost`, `task_force`, `map`, `pending` (the running step's substeps).
+
+`steps[].extra` is left empty: a caller merges its own facts there (a waived gate's "unmeasured"). `agg serve` answers
+`GET /api/process?report=map|timeline|profile` (404 when the project ran no process: `agg process` notes its file in
+`agg/private/process.json`), the web UI has a page for it (`/process`), and `agg status` prints the running step and phase.
+Not part of it: its proposals estimate, and a step's tool calls (they came from the driver's stdout log, which agg doesn't keep).
+
 ### Scenarios (A-38)
 
 `agg process <file> --scenario <scenario.yaml>… --projects <dir> [--keep]` plays the process with scripted agents, no tokens:

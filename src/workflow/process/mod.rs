@@ -24,6 +24,8 @@ pub mod ladder;
 pub mod leftovers;
 pub mod number;
 pub mod proc;
+pub mod profile;
+pub mod report;
 pub mod rerun;
 pub mod run;
 #[cfg(unix)]
@@ -43,7 +45,8 @@ use super::Run;
 
 const USAGE: &str = "usage: agg process <file> <project> [--resume] [--from <step>] [--note <text> | --note-file <file> \
     [--decided]] [--reset] [--until <step>] [--reentries <n>]\n       agg process <file> --check\n       agg process <file> --list\n       \
-    agg process <file> --scenario <scenario.yaml>… [--projects <dir>] [--keep]";
+    agg process <file> --scenario <scenario.yaml>… [--projects <dir>] [--keep]\n       \
+    agg process <file> <project> --report map|timeline|profile [--json]";
 
 /// `agg process …`: the arguments after the subcommand. `--check` and `--list` read only the file; otherwise the
 /// process runs on the project, and starts again where the task force sent it (`--from`, `--note`).
@@ -64,6 +67,9 @@ pub fn command(args: &[String]) -> Result<ExitCode> {
         return scenarios(&file, args);
     }
     let Some(project) = positional.get(1).map(PathBuf::from) else { bail!("{USAGE}") };
+    if args.iter().any(|a| a == "--report") {
+        return report::command(&file, &project, args);
+    }
     Ok(run::start(file, project, args.to_vec()))
 }
 

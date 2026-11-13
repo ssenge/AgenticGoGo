@@ -33,7 +33,8 @@ nix = { version = "0.31.3", features = ["signal", "process", "fs"] }  # fs: dup/
 signal-hook = "0.4.4"
 serde_path_to_error = "0.1"  # `agg check`: the dotted config path of a parse error
 schemars = "1"            # `agg schema`: the agg.yaml JSON Schema, DERIVED from the config types so it cannot drift
-regex = "1"               # scenario mode: the scenarios' patterns over prompts, questions and record lines
+regex = "1"               # scenario mode: fixed patterns over prompts
+fancy-regex = "0.14"      # scenario mode: the scenarios' own patterns (look-around is used) over prompts, questions and record lines
 
 [dev-dependencies]
 assert_cmd = "2"          # drive the built `agg` binary in integration tests
