@@ -61,7 +61,11 @@ fn parts(spec: &Process, home: &Path, project: &Path, step: &Step, num: &Numbere
         out.push(("a section of the step".into(), section(home, s, &vars)?));
     }
     if let (true, Some(guide)) = (step.quality, &spec.settings.quality.guide) {
-        out.push((format!("the quality guide ({guide})"), file(home, guide, &vars)?));
+        let q = &spec.settings.quality;
+        let (definition, version) = (q.definition.clone().unwrap_or_default(), q.version.clone().unwrap_or_default());
+        let text = file(home, guide, &vars)?.replace("{min}", &q.min.map(|m| m.to_string()).unwrap_or_default())
+            .replace("{definition}", &definition).replace("{version}", &version);
+        out.push((format!("the quality guide ({guide}); `{{since}}` and `{{reports}}` are filled in at run time"), super::guide::fill(&text, &definition, &version)));
     }
     let own = spec.settings.project.as_ref().map(|f| project.join(f));
     if own.as_ref().is_some_and(|f| f.is_file()) {
