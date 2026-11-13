@@ -26,6 +26,11 @@ fn text(v: &Value, key: &str) -> String {
 
 /// The profile's data: the run's steps with their segments and substeps, and its totals.
 pub fn profile(run: &Run) -> Value {
+    profile_with(run, None)
+}
+
+/// The profile, with the tool calls the sessions made when `log` (the driver's stdout log) is given.
+pub fn profile_with(run: &Run, log: Option<&Path>) -> Value {
     let p = &run.project;
     let mut calls: Vec<Value> = std::fs::read_dir(p.join("agg/private")).into_iter().flatten().flatten().map(|e| e.path())
         .filter(|f| f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("calls.") && n.ends_with(".jsonl")))
@@ -40,6 +45,7 @@ pub fn profile(run: &Run) -> Value {
     mark_waits(p, &mut result);
     models(p, &mut result);
     add_files(p, &mut result);
+    add_tools(&mut result, &log.map(|l| tool_calls(l, start, p.file_name().and_then(|n| n.to_str()).unwrap_or_default())).unwrap_or_default());
     for s in &mut result {
         s["parts"] = json!(parts(s["segments"].as_array().map(Vec::as_slice).unwrap_or_default()));
     }
@@ -298,6 +304,75 @@ fn add_files(project: &Path, result: &mut [Value]) {
     }
 }
 
+/// The tool a call ran: the agent's own (read, write, edit, …), or a shell command's program ("mvn" of "$ cd app && mvn
+/// -q test"); "shell" where the log shows only the command's description.
+fn tool_of(text: &str) -> String {
+    let Some(command) = text.strip_prefix("$ ") else { return text.split(' ').next().unwrap_or_default().to_string() };
+    let program = command.split(['&', ';', '|']).map(str::trim).filter(|p| !p.is_empty())
+        .filter(|p| !["cd", "mkdir", "export", "set"].contains(&p.split(' ').next().unwrap_or_default()))
+        .find_map(|p| p.split(' ').find(|w| !w.contains('=')).map(String::from)).unwrap_or_default();
+    let name = program.rsplit('/').next().unwrap_or_default();
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.-".contains(c)) { name.into() } else { "shell".into() }
+}
+
+/// A call as shown: a shell command as logged, another tool's argument alone; paths into the project folder `name` relative.
+fn call_label(text: &str, name: &str) -> String {
+    let shown = if text.starts_with("$ ") { text } else { text.split_once(' ').map_or("", |(_, rest)| rest) };
+    let cut = regex::Regex::new(&format!(r"(?:/[^\s/]+)*/{}/", regex::escape(name))).map_or_else(|_| shown.to_string(), |re| re.replace_all(shown, "").to_string());
+    cut.chars().take(200).collect()
+}
+
+/// The agent sessions' tool calls in the driver's log (`HH:MM:SS | 🔧 <call>`, its result `HH:MM:SS |    ↳ …`), each from
+/// its call to its result; calls in one turn get their results in order, a call a session ended without one takes no time.
+fn tool_calls(log: &Path, start: f64, name: &str) -> Vec<Value> {
+    let (call, result, session) = (regex::Regex::new(r"^(\d\d:\d\d:\d\d) \| 🔧 (.*)$"), regex::Regex::new(r"^(\d\d:\d\d:\d\d) \|    ↳ "),
+                                   regex::Regex::new(r"^\d\d:\d\d:\d\d \| (?:▶ session init|✅ RESULT)"));
+    let (Ok(call), Ok(result), Ok(session)) = (call, result, session) else { return vec![] };
+    // the log's times are the driver's wall clock on the run's day; one well before the run's start is past midnight
+    let zone = jiff::tz::TimeZone::system();
+    let day = jiff::Timestamp::from_second(start as i64).map(|ts| ts.to_zoned(zone.clone()).date()).unwrap_or_default();
+    let at = |hms: &str| -> f64 {
+        let mut p = hms.split(':').filter_map(|p| p.parse::<i8>().ok());
+        let (h, m, s) = (p.next().unwrap_or(0), p.next().unwrap_or(0), p.next().unwrap_or(0));
+        let secs = day.at(h, m, s, 0).to_zoned(zone.clone()).map_or(start, |z| z.timestamp().as_second() as f64);
+        if secs < start - 3600.0 { secs + 86400.0 } else { secs }
+    };
+    let (mut out, mut waiting): (Vec<Value>, Vec<usize>) = (vec![], vec![]);
+    for line in std::fs::read_to_string(log).unwrap_or_default().lines() {
+        if let Some(c) = call.captures(line) {
+            out.push(json!({"tool": tool_of(&c[2]), "label": call_label(&c[2], name), "start": at(&c[1]), "end": null}));
+            waiting.push(out.len() - 1);
+        } else if let (Some(r), false) = (result.captures(line), waiting.is_empty()) {
+            let i = waiting.remove(0);
+            out[i]["end"] = json!(at(&r[1]));
+        } else if session.is_match(line) {
+            waiting.clear();
+        }
+    }
+    for c in &mut out {
+        if c["end"].is_null() {
+            c["end"] = c["start"].clone();
+        }
+    }
+    out
+}
+
+/// Puts each tool call into the step whose time it starts in.
+fn add_tools(result: &mut [Value], calls: &[Value]) {
+    for s in result.iter_mut() {
+        s["tools"] = json!([]);
+    }
+    for c in calls {
+        if let Some(step) = result.iter_mut().find(|s| num(s, "end") >= num(c, "start")) {
+            if num(c, "start") >= num(step, "start") {
+                if let Some(list) = step["tools"].as_array_mut() {
+                    list.push(c.clone());
+                }
+            }
+        }
+    }
+}
+
 /// The segments as substeps, in time order, without the driver's; consecutive hooks as one.
 fn parts(segments: &[Value]) -> Vec<Value> {
     let mut sorted: Vec<&Value> = segments.iter().collect();
@@ -406,6 +481,23 @@ mod tests {
         assert_eq!((h["when"].as_str(), h["name"].as_str(), h["why"].as_str()), (Some("before"), Some("declared inputs"), Some("every input exists")));
         let h = hook(&json!({"rationale": "phase ingest after x: why", "met": false}));
         assert_eq!(h["when"], "phase ingest after");
+    }
+
+    /// A tool call's program and label, and the calls of a driver log with their results.
+    #[test]
+    fn tool_calls_come_from_the_drivers_log() {
+        assert_eq!(tool_of("$ cd app && mvn -q test"), "mvn");
+        assert_eq!(tool_of("$ Run the tests"), "shell");
+        assert_eq!(tool_of("read src/a.rs"), "read");
+        assert_eq!(call_label("read /x/proj/src/a.rs", "proj"), "src/a.rs");
+        let log = std::env::temp_dir().join(format!("agg-toolcalls-{}.log", std::process::id()));
+        std::fs::write(&log, "12:00:01 | 🔧 read a.rs\n12:00:03 |    ↳ 10 lines\n12:00:05 | 🔧 $ mvn test\n12:00:09 | ✅ RESULT\n").unwrap();
+        let start = jiff::civil::date(2026, 1, 1).at(12, 0, 0, 0).to_zoned(jiff::tz::TimeZone::system()).unwrap().timestamp().as_second() as f64;
+        let calls = tool_calls(&log, start, "proj");
+        let _ = std::fs::remove_file(&log);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(num(&calls[0], "end") - num(&calls[0], "start"), 2.0);
+        assert_eq!(calls[1]["end"], calls[1]["start"], "a call a session ended without a result takes no time");
     }
 
     /// A step run again after the task force sent the run back is marked, and an idle tool step is inactive.

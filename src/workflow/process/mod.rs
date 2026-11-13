@@ -46,7 +46,7 @@ use super::Run;
 const USAGE: &str = "usage: agg process <file> <project> [--resume] [--from <step>] [--note <text> | --note-file <file> \
     [--decided]] [--reset] [--until <step>] [--reentries <n>]\n       agg process <file> --check\n       agg process <file> --list\n       \
     agg process <file> --scenario <scenario.yaml>… [--projects <dir>] [--keep]\n       \
-    agg process <file> <project> --report map|timeline|profile [--json]";
+    agg process <file> <project> --report map|timeline|profile [--json] [--since <epoch>] [--current <step>] [--stopped] [--log <file>]";
 
 /// `agg process …`: the arguments after the subcommand. `--check` and `--list` read only the file; otherwise the
 /// process runs on the project, and starts again where the task force sent it (`--from`, `--note`).

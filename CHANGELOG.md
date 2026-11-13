@@ -45,6 +45,7 @@ A-37: process files. A process of standard steps runs from YAML.
   `docs/PROCESS.md` "The run report"): where the run is, when each step ended, where the time went. `agg serve`:
   `GET /api/process?report=…`; the web UI: a `/process` page; `agg status` shows the running process step. `agg process`
   notes its file in `agg/private/process.json`. `agg status --json` is unchanged (its schema is strict; the step is in `current_step`).
+- `--report … --since <epoch> | --current <step> | --stopped | --log <driver log>`; `agg cached --content` (the content hash).
 - Scenario patterns may use look-around (`fancy-regex`).
 
 ### Changed

@@ -354,13 +354,25 @@ fn text(kind: &str, report: &Value) -> String {
 pub fn command(file: &Path, project: &Path, args: &[String]) -> Result<ExitCode> {
     let kind = args.iter().position(|a| a == "--report").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or_default();
     if !["map", "timeline", "profile"].contains(&kind) {
-        bail!("agg process <file> <project> --report map|timeline|profile [--json]");
+        bail!("agg process <file> <project> --report map|timeline|profile [--json] [--since <epoch seconds>] [--current <step>] [--stopped] [--log <driver log>]");
     }
-    let run = Run::open(file, project)?;
+    let mut run = Run::open(file, project)?;
+    if let Some(since) = args.iter().position(|a| a == "--since").and_then(|i| args.get(i + 1)) {
+        // only what the record holds from then on: a smoke run on a copy of an archived project times just its own steps
+        let since: f64 = since.parse().map_err(|_| anyhow!("--since takes epoch seconds"))?;
+        run.record.retain(|e| e["at"].as_f64().unwrap_or(0.0) >= since);
+    }
+    // a caller that knows better than state.json (a console that waits at a checkpoint, a stopped run)
+    if let Some(current) = args.iter().position(|a| a == "--current").and_then(|i| args.get(i + 1)) {
+        (run.current, run.ended) = (Some(current.clone()), false);
+    }
+    if args.iter().any(|a| a == "--stopped") {
+        (run.current, run.ended) = (None, false);
+    }
     let report = match kind {
         "map" => run.map(),
         "timeline" => run.timeline(),
-        _ => super::profile::profile(&run),
+        _ => super::profile::profile_with(&run, args.iter().position(|a| a == "--log").and_then(|i| args.get(i + 1)).map(Path::new)),
     };
     if args.iter().any(|a| a == "--json") {
         println!("{}", serde_json::to_string(&report)?);

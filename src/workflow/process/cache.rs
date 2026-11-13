@@ -81,12 +81,17 @@ pub fn cached(cwd: &Path, command: &[String], ignore: &[String]) -> (i32, String
     (code, printed)
 }
 
-/// The command `agg cached`: its arguments after the subcommand.
+/// The command `agg cached`: its arguments after the subcommand. `--content` prints the project's content hash instead
+/// of running a check (exit 1 where there is none).
 pub fn command(args: &[String]) -> ExitCode {
-    let mut ignore = vec![];
+    let (mut ignore, mut hash_only) = (vec![], false);
     let mut it = args.iter().peekable();
     while let Some(a) = it.peek() {
         match a.as_str() {
+            "--content" => {
+                it.next();
+                hash_only = true;
+            }
             "--ignore" => {
                 it.next();
                 ignore.extend(it.next().cloned());
@@ -97,6 +102,16 @@ pub fn command(args: &[String]) -> ExitCode {
             }
             _ => break,
         }
+    }
+    if hash_only {
+        // for a caller that keeps its own results by the project's content
+        return match content(Path::new("."), &ignore) {
+            Some(tree) => {
+                println!("{tree}");
+                ExitCode::SUCCESS
+            }
+            None => ExitCode::from(1),
+        };
     }
     let command: Vec<String> = it.cloned().collect();
     let (code, printed) = cached(Path::new("."), &command, &ignore);
@@ -122,6 +137,18 @@ mod tests {
     fn check(count: &Path) -> Vec<String> {
         let script = format!("echo x >> {}; echo '{{\"met\": true, \"rationale\": \"ok\"}}'", count.display());
         vec!["sh".to_string(), "-c".to_string(), script]
+    }
+
+    /// The content hash changes with the files and not with the ones `ignore` names.
+    #[test]
+    fn the_content_hash_follows_the_files_but_not_the_ignored_ones() {
+        let dir = repo();
+        let ignore = vec!["notes.md".to_string()];
+        let first = content(dir.path(), &ignore).unwrap();
+        std::fs::write(dir.path().join("notes.md"), "n").unwrap();
+        assert_eq!(content(dir.path(), &ignore).unwrap(), first);
+        std::fs::write(dir.path().join("a.txt"), "changed").unwrap();
+        assert_ne!(content(dir.path(), &ignore).unwrap(), first);
     }
 
     /// A met verdict is answered from the cache on the same content, not on changed content; the files `ignore`

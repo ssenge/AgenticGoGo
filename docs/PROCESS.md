@@ -171,7 +171,7 @@ re-entry (`reenter`, an id) or escalates. The limit holds per failed step and su
 `phases: { <id>: … }`, each `before`/`after`: scripts that run around every step or phase and print a verdict; the project's
 file adds to the process's.
 
-`agg cached [--ignore <path>]… -- <command>…` (the process wraps script checks in it) answers a met verdict from an earlier
+`agg cached [--ignore <path>]… -- <command>…` (`--content` prints the project's content hash instead, for a caller that keeps its own results by content; the process wraps script checks in it) answers a met verdict from an earlier
 run of the same check on exactly the same project content; unmet verdicts are never cached.
 
 ### What every run needs (A-38)
@@ -207,7 +207,7 @@ left alone unless the name is `step.…`/`cp.…`/`phase.…`, which `--check` v
 
 ### The run report (A-38)
 
-`agg process <file> <project> --report map|timeline|profile [--json]` reads what a run left (the record, `agg/private/calls*.jsonl`,
+`agg process <file> <project> --report map|timeline|profile [--json]` (`--since <epoch>`: only the record from then on; `--current <step>` and `--stopped`: what a caller knows better than `state.json`; `--log <driver log>`: the tool calls of the sessions, for the profile) reads what a run left (the record, `agg/private/calls*.jsonl`,
 `asks.jsonl`, `report.json`, `state.json`) and prints it as text, or with `--json` as one JSON document:
 
 - **map**: `{phases: [{n, id, name, off, steps: [{id, n, name, kind, state, runs, failures, repairs, answer, item?, extra: {}}]}], current, ended}`.
@@ -224,7 +224,7 @@ left alone unless the name is `step.…`/`cp.…`/`phase.…`, which `--check` v
 `steps[].extra` is left empty: a caller merges its own facts there (a waived gate's "unmeasured"). `agg serve` answers
 `GET /api/process?report=map|timeline|profile` (404 when the project ran no process: `agg process` notes its file in
 `agg/private/process.json`), the web UI has a page for it (`/process`), and `agg status` prints the running step and phase.
-Not part of it: its proposals estimate, and a step's tool calls (they came from the driver's stdout log, which agg doesn't keep).
+Not part of it: its proposals estimate (a caller's own: it merges the savings into the profile).
 
 ### Scenarios (A-38)
 
