@@ -23,6 +23,8 @@ settings:
   defaults: { repairs: 1 }
   skip: [extras]
   models: { small: fake-small }
+judges:   # declared judges (A-38): a command met by its exit code (or a `metric:` or `score:` over swe-metrics)
+  worked: { command: "test -s work.log" }   # what the worker leaves behind
 deny:
   inputs: [task.md, tools.yaml]
 task_force:
@@ -45,7 +47,7 @@ phases:
     name: Survey
     kind: agent
     review: true
-    checks: [judges/survey.sh]
+    checks: [judges/survey.sh, { judge: worked }]
     deny: [inputs]
     settings: { inputs: [task.md, checkpoints/cp-survey-decisions.md], outputs: [survey.md] }
   - { id: cp-survey, name: Survey approved, kind: checkpoint, prepare: scripts/doc.sh survey,

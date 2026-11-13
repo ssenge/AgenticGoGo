@@ -242,7 +242,13 @@ impl Ctx<'_> {
     fn checks(&mut self, at: &str, checks: &[Check], in_each: bool) {
         let mut names = BTreeSet::new();
         for c in checks {
-            self.command(at, c.command(), in_each);
+            match (c.judge(), c.command()) {
+                (Some(j), _) if !self.process.judges.contains_key(j) => {
+                    self.out.push(format!("{at}: a check names the judge `{j}`, which `judges:` doesn't declare"))
+                }
+                (_, Some(command)) => self.command(at, command, in_each),
+                _ => {}
+            }
             if c.last_only() && !in_each {
                 self.out.push(format!("{at}: `when: last` only means something inside an `each`"));
             }
@@ -292,6 +298,15 @@ impl Ctx<'_> {
         for (name, list) in &p.deny {
             for d in list {
                 self.text(&format!("deny `{name}`"), d, false);
+            }
+        }
+        let found = super::declared::problems(p, &self.home);
+        self.out.extend(found);
+        if let Some(file) = p.run.hooks.as_ref().and_then(|h| h.process.as_ref()) {
+            for name in super::hooks::judge_names(&self.home.join(file)) {
+                if !p.judges.contains_key(&name) {
+                    self.out.push(format!("run.hooks.process: `{file}` names the judge `{name}`, which `judges:` doesn't declare"));
+                }
             }
         }
         let mut files: Vec<(&str, &Option<String>, &[&str])> = vec![("run.system_prompt", &p.run.system_prompt, &[]),
@@ -501,6 +516,32 @@ mod tests {
                        "`reenter: nobody` names no step", "`owner: ghost` names no step", "unknown variable `{{ typo }}`",
                        "step id `Merge`", "deny `inputz` is no list"] {
             assert!(problems.contains(expect), "missing {expect:?} in:\n{problems}");
+        }
+    }
+
+    /// Declared judges (A-38): a check names one the file declares, a hooks entry too; one it doesn't declare, a
+    /// badly shaped declaration and a hooks entry for a judge nobody declared are each listed at where they are.
+    #[test]
+    fn declared_judges_are_held_to_their_declarations() {
+        let declared = GOOD.replace("version: 1\n", "version: 1\njudges: { tests: { command: pytest -q }, parse: { metric: { id: syntax.parse_errors }, max: 0 } }\n")
+            .replace("checks: [scripts/check.sh]", "checks: [scripts/check.sh, { judge: tests }, { judge: parse, when: last }]")
+            .replace("phases:", "run: { hooks: { process: hooks.yaml } }\nphases:");
+        let mut f = files();
+        f.push(("hooks.yaml", "step: { after: [{ judge: parse }] }\n"));
+        let dir = home(&f, &declared);
+        let found = check(&dir.path().join("process.yaml")).join("\n");
+        assert!(found.contains("`when: last` only means something inside an `each`"), "{found}");
+        assert!(!found.contains("names the judge"), "declared judges are known: {found}");
+
+        let bad = declared.replace("{ judge: tests }", "{ judge: nobody }").replace("when: last", "when: x")
+            .replace("judges: {", "judges: { empty: {}, both: { command: x, metric: { id: a.b }, max: 1 },");
+        f[6].1 = "step: { after: [{ judge: ghost }], before: [judges/x.py] }\n";
+        let dir = home(&f, &bad);
+        let found = check(&dir.path().join("process.yaml")).join("\n");
+        for expect in ["a check names the judge `nobody`, which `judges:` doesn't declare",
+                       "judges.empty: declares none of `metric`, `score` or `command`", "judges.both: ",
+                       "`hooks.yaml` names the judge `ghost`, which `judges:` doesn't declare"] {
+            assert!(found.contains(expect), "missing {expect:?} in:\n{found}");
         }
     }
 

@@ -168,7 +168,7 @@ mod tests {
 
     fn shared() -> Shared {
         let spec = super::super::format::Process::parse("version: 1\nphases:\n- id: p\n  name: P\n  steps:\n  - { id: s, name: S, kind: outside }\n").unwrap();
-        Shared { spec, home: "/home".into(), project: "/proj".into(), vars: BTreeMap::new(), hooks: Default::default(),
+        Shared { spec, home: "/home".into(), project: "/proj".into(), vars: BTreeMap::new(), settings: Default::default(), hooks: Default::default(),
                  keys: Default::default(), ids: Default::default(), phases: Default::default(), constraints: Default::default(),
                  phase: Default::default() }
     }

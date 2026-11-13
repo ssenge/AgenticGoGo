@@ -25,6 +25,17 @@ A-37: process files. A process of standard steps runs from YAML.
 - `{{ step.build }}`-style names: a template name with dots and `-` is filled in when the variables have it (a project's own
   `{{ a.b }}` still stays as it is).
 
+### Added (A-38, with the process file)
+
+- **Command judges**: `judges.<name>: { command: "…", path: [dirs] }` in `agg.yaml` and in a process file: a shell command held
+  to its exit code, its last lines as the rationale (`JudgeKind::Command`, `Judge::command`, `CommandJudge`; `docs/CONFIG.md`).
+- **Declared judges in process files**: a top-level `judges:` (the same declarations as `agg.yaml`'s) named by `checks: [{ judge: <name> }]`
+  and by `{ judge: <name> }` entries of the hooks files; `--check` refuses an undeclared name and a declaration of no kind.
+- **`run.declared`**: before a step, its declared inputs that an earlier step wrote exist; after it, its declared outputs.
+- **`run.scripts_runnable`**: scripts a step wrote under the folders can run (`#!` files executable, shell scripts parse).
+- **`run.commit_inputs`**: the project's inputs are committed on a branch before the run, and the run's first record entry
+  names the process commit that ran.
+
 ### Changed
 
 - `Flow::reenter` records the re-entry under the step's name (its label in a process), not its bare key.

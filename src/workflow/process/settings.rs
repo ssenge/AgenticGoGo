@@ -62,7 +62,7 @@ pub struct Quality {
 }
 
 /// One layer of settings: the project's file (the process's own are built from its parts).
-#[derive(Deserialize, Default, Debug, schemars::JsonSchema)]
+#[derive(Deserialize, Default, Clone, Debug, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct File {
     #[serde(default)]
@@ -82,7 +82,7 @@ struct File {
 }
 
 /// The process's settings and the project's overrides.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Settings {
     defaults: StepSettings,
     steps: HashMap<String, StepSettings>,

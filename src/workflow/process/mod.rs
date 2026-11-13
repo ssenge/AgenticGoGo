@@ -8,11 +8,13 @@
 
 pub mod agent;
 pub mod bases;
+pub mod builtin;
 pub mod blocks;
 pub mod cache;
 pub mod check;
 pub mod checkpoint;
 pub mod exec;
+pub mod declared;
 pub mod decider;
 pub mod exam;
 pub mod format;

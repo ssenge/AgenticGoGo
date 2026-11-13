@@ -36,6 +36,10 @@ pub struct Process {
     /// named write-deny lists, referenced by name in `deny:` lists
     #[serde(default)]
     pub deny: BTreeMap<String, Vec<String>>,
+    /// declared judges (A-38): a `metric:` or `score:` over swe-metrics, or a `command:` met by its exit code, by
+    /// name; a step's `checks` and the hooks files name them as `{ judge: <name> }`
+    #[serde(default)]
+    pub judges: BTreeMap<String, crate::core::config::JudgeOverride>,
     #[serde(default)]
     pub task_force: Option<TaskForceSpec>,
     #[serde(default)]
@@ -185,6 +189,37 @@ pub struct RunSpec {
     pub hooks: Option<HooksSpec>,
     /// a command whose stdout is appended to an auto-approval's record entry
     pub auto_note: Option<String>,
+    /// check the inputs and outputs the steps declare (A-38): before a step, every input an earlier step of this run
+    /// declares as an output exists; after it, every output it declares exists
+    #[serde(default)]
+    pub declared: bool,
+    /// commit what the project folder holds (the inputs a human filled in) on a branch before the run (A-38), so
+    /// every run names the inputs it used and its results land on top of them
+    #[serde(default)]
+    pub commit_inputs: Option<CommitInputs>,
+    /// folders in which a script a step wrote or changed must be able to run (A-38): a `#!` file executable, a shell
+    /// script parsing
+    #[serde(default)]
+    pub scripts_runnable: Vec<String>,
+}
+
+/// Where and how the run's inputs are committed.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CommitInputs {
+    #[serde(default = "CommitInputs::branch")]
+    pub branch: String,
+    #[serde(default = "CommitInputs::message")]
+    pub message: String,
+}
+
+impl CommitInputs {
+    fn branch() -> String {
+        "main".into()
+    }
+    fn message() -> String {
+        "Inputs at run start".into()
+    }
 }
 
 /// The standing sections of every agent's brief and the small inputs put into it.
@@ -416,7 +451,17 @@ impl OneOrMany {
 #[serde(untagged)]
 pub enum Check {
     Command(String),
+    /// a judge the process file declares under `judges:`
+    Declared(DeclaredCheck),
     Full(CheckSpec),
+}
+
+/// A check that names a declared judge: `{ judge: <name> }`, optionally `when: last` inside an `each`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredCheck {
+    pub judge: String,
+    pub when: Option<String>,
 }
 
 /// A check with more than its command.
@@ -430,20 +475,29 @@ pub struct CheckSpec {
 }
 
 impl Check {
-    pub fn command(&self) -> &str {
+    /// The command of a check that runs one; none for a declared judge.
+    pub fn command(&self) -> Option<&str> {
         match self {
-            Check::Command(c) => c,
-            Check::Full(f) => &f.run,
+            Check::Command(c) => Some(c),
+            Check::Declared(_) => None,
+            Check::Full(f) => Some(&f.run),
+        }
+    }
+    /// The declared judge a check names, if it does.
+    pub fn judge(&self) -> Option<&str> {
+        match self {
+            Check::Declared(d) => Some(&d.judge),
+            _ => None,
         }
     }
     pub fn name(&self) -> Option<&str> {
         match self {
-            Check::Command(_) => None,
             Check::Full(f) => f.name.as_deref(),
+            _ => None,
         }
     }
     pub fn last_only(&self) -> bool {
-        matches!(self, Check::Full(CheckSpec { when: Some(w), .. }) if w == "last")
+        matches!(self, Check::Full(CheckSpec { when: Some(w), .. }) | Check::Declared(DeclaredCheck { when: Some(w), .. }) if w == "last")
     }
 }
 
@@ -539,8 +593,17 @@ mod tests {
             checks: [x.sh, { run: y.sh, when: last }] }").unwrap();
         assert_eq!(step.when.unwrap().all(), ["a", "b"]);
         assert!(matches!(step.review, Some(Review::On(true))));
-        assert!(!step.checks[0].last_only() && step.checks[1].last_only() && step.checks[1].command() == "y.sh");
+        assert!(!step.checks[0].last_only() && step.checks[1].last_only() && step.checks[1].command() == Some("y.sh"));
         let one: Step = serde_yaml::from_str("{ id: s, name: S, kind: script, when: x, review: judges/r.md }").unwrap();
         assert_eq!(one.when.unwrap().all(), ["x"]);
+    }
+
+    /// A check names a declared judge, alone or with `when: last`; an unknown key of it is refused.
+    #[test]
+    fn a_check_can_name_a_declared_judge() {
+        let step: Step = serde_yaml::from_str("{ id: s, name: S, kind: agent, checks: [{ judge: tests }, { judge: p, when: last }] }").unwrap();
+        assert_eq!((step.checks[0].judge(), step.checks[0].command()), (Some("tests"), None));
+        assert!(step.checks[1].last_only() && !step.checks[0].last_only());
+        assert!(serde_yaml::from_str::<Step>("{ id: s, name: S, kind: agent, checks: [{ judge: t, run: x }] }").is_err());
     }
 }

@@ -2,5 +2,7 @@
 # in the file `run.hooks.project` names, in the project.
 step:
   after: [judges/hook.sh]
+steps:
+  survey: { after: [{ judge: worked }] }   # a declared judge as a hook
 phases:
   build: { before: [judges/phase-hook.sh before], after: [judges/phase-hook.sh after] }

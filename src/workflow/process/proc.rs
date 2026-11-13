@@ -23,6 +23,8 @@ pub struct Shared {
     pub home: PathBuf,
     pub project: PathBuf,
     pub vars: BTreeMap<String, String>,
+    /// the step settings, for the hooks that read what a step declares
+    pub settings: Settings,
     pub hooks: hooks::File,
     /// label → key, for the steps the callbacks are told by label
     pub keys: RefCell<HashMap<String, String>>,
@@ -79,7 +81,7 @@ impl Proc {
         }
         let hooks = spec.run.hooks.as_ref().and_then(|h| h.process.as_ref()).map(|f| hooks::read(&init.home.join(f))).unwrap_or_default();
         let shared = Rc::new(Shared { spec: init.spec.clone(), home: init.home.clone(), project: project.clone(),
-            vars: init.vars, hooks, keys: RefCell::default(), ids: RefCell::default(), phases: RefCell::default(),
+            vars: init.vars, settings: init.settings.clone(), hooks, keys: RefCell::default(), ids: RefCell::default(), phases: RefCell::default(),
             constraints: RefCell::default(), phase: RefCell::default() });
         let mut flow = Flow::new(agg, run);
         if let Some(h) = &spec.run.history {
@@ -144,7 +146,14 @@ fn step_hooks(shared: &Shared, f: &Flow, name: &str, when: crate::workflow::When
     let id = shared.ids.borrow().get(&key).cloned().unwrap_or_else(|| key.clone());
     let scope = Scope::Step { key: &key, id: &id };
     let commands = hook_commands(shared, &scope, when);
-    hooks::judges(f, &commands, &scope, when)
+    let mut judges = hooks::judges(f, &commands, &scope, when, &|n| declared_judge(shared, n));
+    judges.extend(super::builtin::judges(shared, &key, &id, when));
+    judges
+}
+
+/// The declared judge of the process file a hooks entry names.
+fn declared_judge(shared: &Shared, name: &str) -> Option<Judge> {
+    super::declared::judge(&shared.spec, &shared.project, name).ok()
 }
 
 /// The hook commands of `scope`: the process's file's, then the project's.
@@ -171,12 +180,14 @@ fn starting(shared: &Shared, flow: &Flow, name: &str) -> Result<(), String> {
     for c in phase_of(shared, &now).map(|p| p.pre.clone()).unwrap_or_default() {
         super::exec::run_plain(shared, &c, &now)?;
     }
-    hooks::check(flow, name, &hook_commands(shared, &Scope::Phase(&now), When::Before), &Scope::Phase(&now), When::Before)
+    let commands = hook_commands(shared, &Scope::Phase(&now), When::Before);
+    hooks::check(flow, name, &commands, &Scope::Phase(&now), When::Before, &|n| declared_judge(shared, n))
 }
 
 /// The phase `id` leaves: its after-hooks and its `post` commands.
 fn leaving(shared: &Shared, flow: &Flow, name: &str, id: &str) -> Result<(), String> {
-    hooks::check(flow, name, &hook_commands(shared, &Scope::Phase(id), When::After), &Scope::Phase(id), When::After)?;
+    let commands = hook_commands(shared, &Scope::Phase(id), When::After);
+    hooks::check(flow, name, &commands, &Scope::Phase(id), When::After, &|n| declared_judge(shared, n))?;
     for c in phase_of(shared, id).map(|p| p.post.clone()).unwrap_or_default() {
         super::exec::run_plain(shared, &c, id)?;
     }

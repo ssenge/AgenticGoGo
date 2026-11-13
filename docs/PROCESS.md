@@ -66,6 +66,12 @@ run:
   judge_cache: { ignore: [notes.md] }
   hooks: { process: hooks.yaml, project: hooks.yaml }
   auto_note: scripts/waiting.sh       # stdout appended to an auto-approval's record
+  commit_inputs: { branch: main, message: "Inputs at run start" }   # commit what the project folder holds, before the run
+  declared: true                      # check the inputs and outputs steps declare (below)
+  scripts_runnable: [scripts-out]     # scripts a step wrote under these folders can run (below)
+judges:                               # declared judges (below), named by `checks: [{ judge: <name> }]` and hooks entries
+  tests: { command: "pytest -q", path: [.venv/bin] }
+  parse: { metric: { id: syntax.parse_errors, scope: docs }, max: 0 }
 deny: { inputs: [task.md] }           # named write-deny lists
 task_force:
   prompt: prompts/task-force.md
@@ -167,6 +173,29 @@ file adds to the process's.
 
 `agg cached [--ignore <path>]… -- <command>…` (the process wraps script checks in it) answers a met verdict from an earlier
 run of the same check on exactly the same project content; unmet verdicts are never cached.
+
+### What every run needs (A-38)
+
+- **Declared judges** (`judges:`): a check or a hooks entry names one as `{ judge: <name> }`, next to plain commands
+  (`checks: [scripts/check.sh, { judge: tests }]`, in a hooks file `after: [{ judge: parse }]`). A declaration is one of
+  `agg.yaml`'s (`docs/CONFIG.md`): a `metric:` or `score:` over swe-metrics with its `max:`/`min:`, or a **`command:`**, a shell
+  command run in the project and met when it exits 0 (the last four non-blank lines of its output, at most 400
+  characters, are the rationale; `path:` entries go in front of `PATH`, relative to the project). `--check` refuses a
+  `judge:` naming no declaration and a declaration of no kind.
+- **Declared inputs and outputs** (`run.declared: true`): before a step, every input it declares (`settings.inputs`) that an
+  earlier step of this run (a met `done`, `tool` or `unchanged` entry of the record) declares as an output exists; after it,
+  every output it declares exists. Globs and paths with names only a step knows (`{{ item }}`) are left out, an instance of
+  an `each`'s child takes its child's declaration. The verdicts are `declared-inputs` and `declared-outputs`, recorded as
+  hooks are.
+- **Scripts that can run** (`run.scripts_runnable: [<folder>, …]`): after a step, every file it changed or added under
+  those folders (since `refs/agg/before/<key>`; all of them without a mark) that starts with `#!` is executable, and every
+  shell script (`.sh`, or a `#!` line ending in `sh` or `bash`) passes `sh -n` (`bash -n`).
+- **Inputs committed** (`run.commit_inputs`): before agg opens the project, the project is switched to `branch` (a failure
+  stops the run, exit 1, with the reason, as a failing `run.start` command does) and everything its folder holds is
+  committed with `message`, unless nothing changed; once more after the `run.start` commands. The run's first record entry
+  (kind `start`) says which process ran: `process commit <HEAD of the process home>` with ` with uncommitted changes` where
+  its checkout has some, or `process home not in git`; the line is printed too.
+- **History**: `agg history` lists process runs with their usage like any other.
 
 ### Templates
 

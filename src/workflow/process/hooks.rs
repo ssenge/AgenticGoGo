@@ -11,14 +11,39 @@ use serde::Deserialize;
 use crate::core::model::Judge;
 use crate::workflow::Flow;
 
+/// One entry of a hooks list: a script (with its arguments), or a judge the process file declares.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum Entry {
+    Command(String),
+    Judge(Declared),
+}
+
+/// `{ judge: <name> }`: a judge declared under the process file's `judges:`.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct Declared {
+    judge: String,
+}
+
+impl Entry {
+    /// The entry as the command lists the hooks pass around: a declared judge is its marker and name.
+    fn text(&self) -> String {
+        match self {
+            Entry::Command(c) => c.clone(),
+            Entry::Judge(d) => format!("{}{}", super::declared::HOOK, d.judge),
+        }
+    }
+}
+
 /// The scripts before and after one scope.
 #[derive(Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 struct Lists {
     #[serde(default)]
-    before: Vec<String>,
+    before: Vec<Entry>,
     #[serde(default)]
-    after: Vec<String>,
+    after: Vec<Entry>,
 }
 
 /// A hooks file: for every step, per step by its id, per phase by its id.
@@ -46,6 +71,19 @@ pub enum Scope<'a> {
     Phase(&'a str),
 }
 
+/// The names of the declared judges a hooks file's entries use (`{ judge: <name> }`), for `--check`.
+pub fn judge_names(path: &Path) -> Vec<String> {
+    let file = read(path);
+    let lists = std::iter::once(&file.step).chain(file.steps.values()).chain(file.phases.values());
+    lists
+        .flat_map(|l| l.before.iter().chain(&l.after))
+        .filter_map(|e| match e {
+            Entry::Judge(d) => Some(d.judge.clone()),
+            Entry::Command(_) => None,
+        })
+        .collect()
+}
+
 /// A hooks file, or none when it doesn't exist or doesn't parse (a broken project file is reported by the
 /// parse hook, never a reason to skip the process's).
 pub fn read(path: &Path) -> File {
@@ -54,7 +92,10 @@ pub fn read(path: &Path) -> File {
 
 /// The hook commands of `scope` (`when`): the process's, then the project's, each with its script made absolute.
 pub fn commands(process: (&File, &Path), project: (&File, &Path), scope: &Scope, when: When) -> Vec<String> {
-    let pick = |l: &Lists| if when == When::Before { l.before.clone() } else { l.after.clone() };
+    let pick = |l: &Lists| -> Vec<String> {
+        let entries = if when == When::Before { &l.before } else { &l.after };
+        entries.iter().map(Entry::text).collect()
+    };
     let of = |f: &File| -> Vec<String> {
         match scope {
             Scope::Step { key, id } => {
@@ -64,7 +105,10 @@ pub fn commands(process: (&File, &Path), project: (&File, &Path), scope: &Scope,
             Scope::Phase(p) => f.phases.get(*p).map(pick).unwrap_or_default(),
         }
     };
-    let absolute = |base: &Path, entry: &str| format!("{}/{}", base.display(), entry.trim());
+    let absolute = |base: &Path, entry: &str| match entry.starts_with(super::declared::HOOK) {
+        true => entry.to_string(),
+        false => format!("{}/{}", base.display(), entry.trim()),
+    };
     of(process.0).iter().map(|e| absolute(process.1, e)).chain(of(project.0).iter().map(|e| absolute(project.1, e))).collect()
 }
 
@@ -77,26 +121,29 @@ fn label(command: &str) -> String {
 
 /// The hooks of `scope` (`when`) as script judges, each told the step's key (`AGG_STEP`): what the run judges and
 /// what a worker runs to check itself. A wrapper that can't be written is left out.
-pub fn judges(flow: &Flow, commands: &[String], scope: &Scope, when: When) -> Vec<Judge> {
+pub fn judges(flow: &Flow, commands: &[String], scope: &Scope, when: When, declared: &dyn Fn(&str) -> Option<Judge>) -> Vec<Judge> {
     let id = match scope {
         Scope::Step { key, .. } => (*key).to_string(),
         Scope::Phase(p) => format!("phase-{p}"),
     };
     let which = if when == When::Before { "before" } else { "after" };
     commands.iter().enumerate().filter_map(|(i, c)| {
+        if let Some(name) = c.strip_prefix(super::declared::HOOK) {
+            return declared(name);
+        }
         let path = flow.wrapper(&format!("hook-{id}-{which}-{i}.sh"), &format!("env AGG_STEP='{id}' {c}")).ok()?;
         Some(Judge::script(format!("hook-{}", label(c)).replace(' ', "-"), path.as_str()))
     }).collect()
 }
 
 /// Runs the hooks of a phase (`when`) and records each verdict under step `name`; the unmet ones' reasons.
-pub fn check(flow: &Flow, name: &str, commands: &[String], scope: &Scope, when: When) -> Result<(), String> {
+pub fn check(flow: &Flow, name: &str, commands: &[String], scope: &Scope, when: When, declared: &dyn Fn(&str) -> Option<Judge>) -> Result<(), String> {
     let which = if when == When::Before { "before" } else { "after" };
     let which = match scope {
         Scope::Phase(p) => format!("phase {p} {which}"),
         Scope::Step { .. } => which.to_string(),
     };
-    let failed: Vec<String> = judges(flow, commands, scope, when).iter().filter_map(|j| {
+    let failed: Vec<String> = judges(flow, commands, scope, when, declared).iter().filter_map(|j| {
         let verdict = flow.judge(j);
         flow.record(name, "hook", verdict.met(), &format!("{which} {}: {}", j.name, verdict.rationale()));
         (!verdict.met()).then(|| format!("{}: {}", j.name, verdict.rationale()))
@@ -125,5 +172,24 @@ mod tests {
         let phase = commands((&process, home), (&project, dir), &Scope::Phase("verify"), When::Before);
         assert_eq!(phase, ["/home/judges/secrets.py"]);
         assert!(commands((&process, home), (&project, dir), &Scope::Phase("other"), When::After).is_empty());
+    }
+
+    /// A hooks entry `{ judge: <name> }` stays as it is (a marker and the name) next to the scripts, which get their
+    /// paths; the names of the judges a file uses are listed for `--check`.
+    #[test]
+    fn an_entry_can_name_a_declared_judge() {
+        let process = file("step: { before: [judges/a.py], after: [{ judge: parse }, judges/b.py] }\nphases:\n  verify: { after: [{ judge: tests }] }\n");
+        let (home, dir) = (Path::new("/home"), Path::new("/proj"));
+        let none = file("");
+        let step = Scope::Step { key: "x", id: "x" };
+        assert_eq!(commands((&process, home), (&none, dir), &step, When::After), ["@judge:parse", "/home/judges/b.py"]);
+        assert_eq!(commands((&process, home), (&none, dir), &Scope::Phase("verify"), When::After), ["@judge:tests"]);
+        assert!(serde_yaml::from_str::<File>("step: { after: [{ judge: a, run: b }] }\n").is_err(), "an unknown key");
+        let path = std::env::temp_dir().join(format!("agg-hooks-{}.yaml", std::process::id()));
+        std::fs::write(&path, "step: { after: [{ judge: parse }] }\nsteps:\n  build: { before: [{ judge: tests }, x.sh] }\n").unwrap();
+        let mut names = judge_names(&path);
+        names.sort();
+        assert_eq!(names, ["parse", "tests"]);
+        let _ = std::fs::remove_file(&path);
     }
 }

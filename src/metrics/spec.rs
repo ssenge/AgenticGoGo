@@ -336,6 +336,8 @@ pub struct Declared<'a> {
     pub score: Option<&'a ScoreSel>,
     pub max: Option<f64>,
     pub min: Option<f64>,
+    pub command: Option<&'a str>,
+    pub path: &'a [String],
 }
 
 /// Every problem with the SHAPE of one `judges.<name>` entry, each at its own key.
@@ -344,6 +346,13 @@ pub fn problems(d: &Declared<'_>, config_base: &Path) -> Vec<Problem> {
     let mut out = Vec::new();
     if d.metric.is_some() && d.score.is_some() {
         out.push(Problem::new(at(""), "a judge is a `metric:` OR a `score:` judge, not both"));
+    }
+    if d.command.is_some() {
+        out.extend(command_problems(d, &at));
+        return out;
+    }
+    if !d.path.is_empty() {
+        out.push(Problem::new(at(".path"), "`path:` belongs to a `command:` judge — this entry declares none"));
     }
     if d.metric.is_none() && d.score.is_none() {
         if d.max.is_some() || d.min.is_some() {
@@ -357,6 +366,24 @@ pub fn problems(d: &Declared<'_>, config_base: &Path) -> Vec<Problem> {
     }
     if let Some(s) = d.score {
         out.extend(score_problems(s, config_base, &at));
+    }
+    out
+}
+
+/// A `command:` judge is that and nothing else: not a metric or score judge, no threshold.
+fn command_problems(d: &Declared<'_>, at: &dyn Fn(&str) -> String) -> Vec<Problem> {
+    let mut out = Vec::new();
+    if d.metric.is_some() || d.score.is_some() {
+        out.push(Problem::new(at(""), "a judge is a `metric:`, a `score:` OR a `command:` judge, not several"));
+    }
+    if d.max.is_some() || d.min.is_some() {
+        out.push(Problem::new(at(""), "`max:`/`min:` are the threshold of a `metric:` or `score:` judge — a `command:` is met by its exit code"));
+    }
+    if d.command.is_some_and(|c| c.trim().is_empty()) {
+        out.push(Problem::new(at(".command"), "`command` is empty"));
+    }
+    if d.path.iter().any(|p| p.trim().is_empty()) {
+        out.push(Problem::new(at(".path"), "a `path` entry is empty"));
     }
     out
 }
@@ -479,12 +506,28 @@ mod tests {
         assert!(serde_yaml::from_str::<MetricSel>("{ id: a.b, stat: p99 }").is_err(), "an unknown statistic");
     }
 
+    fn command<'a>(c: Option<&'a str>, metric: Option<&'a MetricSel>, max: Option<f64>, path: &'a [String]) -> Declared<'a> {
+        Declared { name: "j", metric, score: None, max, min: None, command: c, path }
+    }
+
+    /// A `command:` judge is its own kind: it takes no metric, score or threshold, and its fields are checked.
+    #[test]
+    fn a_command_judges_shape_is_checked() {
+        let ab = sel("{ id: a.b }");
+        assert!(paths(&command(Some("pytest -q"), None, None, &[".venv/bin".into()])).is_empty());
+        assert_eq!(paths(&command(Some("pytest"), Some(&ab), None, &[])), ["judges.j"], "not a metric judge too");
+        assert_eq!(paths(&command(Some("pytest"), None, Some(1.0), &[])), ["judges.j"], "no threshold");
+        assert_eq!(paths(&command(Some("  "), None, None, &[])), ["judges.j.command"]);
+        assert_eq!(paths(&command(Some("x"), None, None, &["".into()])), ["judges.j.path"]);
+        assert_eq!(paths(&command(None, Some(&ab), Some(1.0), &["tools".into()])), ["judges.j.path"], "path needs a command");
+    }
+
     /// Each shape problem is refused at the key to edit.
     #[test]
     fn shape_problems_are_located() {
         let both = sel("{ id: a.b, tool: x, combine: all }");
         let score = ScoreSel { definition: DEFAULT_DEFINITION.into(), version: "2".into(), scope: None, reports: None };
-        let d = |metric, score, max, min| Declared { name: "j", metric, score, max, min };
+        let d = |metric, score, max, min| Declared { name: "j", metric, score, max, min, command: None, path: &[] };
         assert_eq!(paths(&d(Some(&both), Some(&score), Some(1.0), None)), ["judges.j", "judges.j.metric.combine"]);
         let ab = sel("{ id: a.b }");
         assert_eq!(paths(&d(Some(&ab), None, None, None)), ["judges.j"], "no threshold");

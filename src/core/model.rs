@@ -359,6 +359,29 @@ pub enum JudgeKind {
     /// swe-metrics' quality score of the session's shared report, scored against the incumbent's
     /// report ([`crate::metrics`]). YAML: a `judges.<name>.score:` block, not a file.
     Score(Box<crate::metrics::ScoreJudge>),
+    /// a command held to its exit code: met when it exits 0 ([`CommandJudge`]). YAML: a
+    /// `judges.<name>.command:` entry, not a file.
+    Command(Box<CommandJudge>),
+}
+
+/// A COMMAND judge: a shell command run in the project (the judge's working directory), met when it exits 0. The
+/// last lines of its output are the rationale; `path` entries (relative to the project) go in front of `PATH`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandJudge {
+    pub command: String,
+    pub path: Vec<String>,
+}
+
+impl CommandJudge {
+    pub fn new(command: impl Into<String>) -> CommandJudge {
+        CommandJudge { command: command.into(), path: vec![] }
+    }
+
+    /// Directories (relative to the project) put in front of `PATH` for the command.
+    pub fn path(mut self, dirs: impl IntoIterator<Item = impl Into<String>>) -> CommandJudge {
+        self.path = dirs.into_iter().map(Into::into).collect();
+        self
+    }
 }
 
 impl std::fmt::Debug for JudgeKind {
@@ -371,6 +394,7 @@ impl std::fmt::Debug for JudgeKind {
             JudgeKind::Native { .. } => f.debug_struct("Native").finish_non_exhaustive(),
             JudgeKind::Metric(m) => f.debug_tuple("Metric").field(m).finish(),
             JudgeKind::Score(s) => f.debug_tuple("Score").field(s).finish(),
+            JudgeKind::Command(c) => f.debug_tuple("Command").field(c).finish(),
         }
     }
 }
@@ -384,6 +408,7 @@ impl JudgeKind {
             JudgeKind::Native { .. } => "native",
             JudgeKind::Metric(_) => "metric",
             JudgeKind::Score(_) => "score",
+            JudgeKind::Command(_) => "command",
         }
     }
 }
@@ -467,6 +492,13 @@ impl Judge {
     /// `Judge::score("quality", ScoreJudge::new("swe-default", "2").min(80.0))`.
     pub fn score(name: impl Into<String>, spec: crate::metrics::ScoreJudge) -> Judge {
         Judge::declared(name, JudgeKind::Score(Box::new(spec)))
+    }
+
+    /// A COMMAND judge: met when the shell command exits 0 —
+    /// `Judge::command("tests", CommandJudge::new("pytest -q").path([".venv/bin"]))`. Its output's last lines are the
+    /// rationale, so no wrapper script is needed.
+    pub fn command(name: impl Into<String>, spec: CommandJudge) -> Judge {
+        Judge::declared(name, JudgeKind::Command(Box::new(spec)))
     }
 
     /// Override the run-level `judge.timeout` for this judge alone — `.timeout(45 * 60)` for a load

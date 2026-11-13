@@ -1188,7 +1188,7 @@ impl Agg {
                 )),
                 _ => kind.clone(),
             },
-            JudgeKind::Metric(_) => kind.clone(),
+            JudgeKind::Metric(_) | JudgeKind::Command(_) => kind.clone(),
         }
     }
 }

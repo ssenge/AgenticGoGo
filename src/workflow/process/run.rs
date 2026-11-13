@@ -38,7 +38,9 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     let mut run = Run::from_args(args)?;
     run.from = run.from.map(|f| resolve(&list, &f)).transpose().map_err(|e| anyhow!("--from {e}"))?;
     run.until = run.until.map(|f| resolve(&list, &f)).transpose().map_err(|e| anyhow!("--until {e}"))?;
+    commit_inputs(&spec, &project)?;
     starting_commands(&spec, &home, &project)?;
+    commit_inputs(&spec, &project)?;   // a start command may have written files
     if let (Some(step), true) = (&run.from, run.reset) {
         crate::workflow::take_back(&project, step, &spec.run.own)?;
         bases::drop_stale(&project, false);
@@ -55,7 +57,10 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
         agg = agg.system_prompt(std::fs::read_to_string(home.join(f)).map_err(|e| anyhow!("{f}: {e}"))?);
     }
     let force = task_force(&spec, &home, &vars, roles.as_ref())?;
+    let pinned = pinned(&home);
     let p = Proc::new(agg, run, Init { spec: spec.clone(), list: list.clone(), home, settings, vars, roles, force });
+    p.record("start", "start", true, &pinned);
+    println!("{pinned}");
     for phase in &spec.phases {
         for step in &phase.steps {
             exec(&p, step, None)?;
@@ -89,6 +94,30 @@ fn starting_commands(spec: &Process, home: &Path, project: &Path) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// Switches the project to the branch `run.commit_inputs` names and commits everything its folder holds, unless nothing
+/// changed: the inputs a human filled in become part of the history, and a halted run's session branch is left.
+fn commit_inputs(spec: &Process, project: &Path) -> Result<(), Fatal> {
+    let Some(c) = &spec.run.commit_inputs else { return Ok(()) };
+    let git = |args: &[&str]| std::process::Command::new("git").args(["-C", &project.display().to_string()]).args(args).output();
+    let ok = |args: &[&str]| git(args).map(|o| o.status.success()).unwrap_or(false);
+    if !ok(&["checkout", "-q", &c.branch]) {
+        return Err(anyhow!("switching {} to {} failed", project.display(), c.branch).into());
+    }
+    ok(&["add", "-A"]);
+    if !ok(&["diff", "--cached", "--quiet"]) && !ok(&["commit", "-q", "-m", &c.message]) {
+        return Err(anyhow!("committing the inputs in {} failed", project.display()).into());
+    }
+    Ok(())
+}
+
+/// Which process this run uses: the commit of its home, and whether the checkout has uncommitted changes.
+fn pinned(home: &Path) -> String {
+    let git = |args: &[&str]| std::process::Command::new("git").args(["-C", &home.display().to_string()]).args(args).output();
+    let Some(head) = git(&["rev-parse", "HEAD"]).ok().filter(|o| o.status.success()) else { return "process home not in git".into() };
+    let dirty = git(&["status", "--porcelain"]).map(|o| !o.stdout.is_empty()).unwrap_or(false);
+    format!("process commit {}{}", String::from_utf8_lossy(&head.stdout).trim(), if dirty { " with uncommitted changes" } else { "" })
 }
 
 /// Drops every step's base when the file `run.bases_reset_when_changed` differs from what the last run saw: the bases
@@ -324,5 +353,56 @@ mod tests {
         assert_eq!((vars["item"].as_str(), vars["item.scope"].as_str(), vars["item.owner"].as_str(), vars["item.size"].as_str()),
                    ("U1", "a/**, b/**", "me", "3"));
         assert!(vars["item.yaml"].contains("scope:"));
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").args(["-C", &dir.display().to_string()])
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"]).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn spec(extra: &str) -> Process {
+        Process::parse(&format!("version: 1\nrun:\n  commit_inputs: {extra}\nphases: []\n")).unwrap()
+    }
+
+    /// The inputs a human filled in are committed on the branch the file names; a second call with nothing new
+    /// commits nothing; a branch that doesn't exist halts the run with the reason.
+    #[test]
+    fn the_inputs_are_committed_on_their_branch_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        git(d, &["init", "-q", "-b", "main"]);
+        git(d, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(d, &["checkout", "-q", "-b", "agg/run/session-1"]);
+        std::fs::write(d.join("task.md"), "the task").unwrap();
+        let both = spec("{ branch: main, message: \"Inputs at start\" }");
+        commit_inputs(&both, d).unwrap();
+        assert_eq!(git(d, &["rev-parse", "--abbrev-ref", "HEAD"]), "main", "a halted run's session branch is left");
+        assert_eq!(git(d, &["log", "-1", "--format=%s"]), "Inputs at start");
+        assert_eq!(git(d, &["show", "--name-only", "--format=", "HEAD"]), "task.md");
+        let before = git(d, &["rev-parse", "HEAD"]);
+        commit_inputs(&both, d).unwrap();
+        assert_eq!(git(d, &["rev-parse", "HEAD"]), before, "nothing new, no commit");
+        std::fs::write(d.join("notes.md"), "more").unwrap();
+        commit_inputs(&spec("{}"), d).unwrap();
+        assert_eq!(git(d, &["log", "-1", "--format=%s"]), "Inputs at run start", "the defaults: main and this message");
+        let err = commit_inputs(&spec("{ branch: nowhere }"), d).unwrap_err();
+        assert!(format!("{err:?}").contains("to nowhere failed"), "{err:?}");
+        assert!(commit_inputs(&Process::parse("version: 1\nphases: []\n").unwrap(), d).is_ok(), "without the key: nothing");
+    }
+
+    /// The process commit a run uses, with a note when its checkout has uncommitted changes; none in git says so.
+    #[test]
+    fn the_process_a_run_uses_is_pinned_by_its_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        assert_eq!(pinned(d), "process home not in git");
+        git(d, &["init", "-q", "-b", "main"]);
+        git(d, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let head = git(d, &["rev-parse", "HEAD"]);
+        assert_eq!(pinned(d), format!("process commit {head}"));
+        std::fs::write(d.join("x"), "y").unwrap();
+        assert_eq!(pinned(d), format!("process commit {head} with uncommitted changes"));
     }
 }

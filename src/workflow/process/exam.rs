@@ -75,7 +75,7 @@ impl Proc {
     /// One round's verdict: the checks, then the examinee on a fresh copy, its hooks, the answers, the grader.
     fn exam_judged(&self, ctx: &Ctx) -> Result<Verdict, Fatal> {
         for check in &ctx.step.checks {
-            let verdict = self.judge_now(&self.cached(&self.judge(ctx, check.name(), check.command())?)?);
+            let verdict = self.judge_now(&self.cached(&self.check_to_judge(ctx, check)?)?);
             if !verdict.met() {
                 return Ok(verdict);
             }
@@ -129,7 +129,7 @@ impl Proc {
         let _ = std::fs::remove_file(&disputes);
         let mut judges = vec![];
         for check in &ctx.step.checks {
-            judges.push(self.judge(ctx, check.name(), check.command())?);
+            judges.push(self.check_to_judge(ctx, check)?);
         }
         judges.push(self.judge(ctx, Some(&format!("{}-answers", ctx.key)), ctx.step.answers.as_deref().unwrap_or_default())?);
         let listed: Vec<String> = judges.iter()

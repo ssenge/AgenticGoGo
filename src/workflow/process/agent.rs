@@ -108,7 +108,17 @@ impl Proc {
         if check.last_only() && !ctx.item.as_ref().is_some_and(|i| i.last) {
             return Ok(None);
         }
-        self.judge(ctx, check.name(), check.command()).map(Some)
+        self.check_to_judge(ctx, check).map(Some)
+    }
+
+    /// A check as a judge: a declared judge of the process file, or a command through the step's names.
+    pub fn check_to_judge(&self, ctx: &Ctx, check: &Check) -> Result<Judge, Fatal> {
+        match (check.judge(), check.command()) {
+            (Some(name), _) => super::declared::judge(&self.shared.spec, &self.project, name)
+                .map_err(|e| anyhow!("{}: {e}", ctx.label).into()),
+            (_, Some(command)) => self.judge(ctx, check.name(), command),
+            _ => Err(anyhow!("{}: a check runs a command or names a judge", ctx.label).into()),
+        }
     }
 
     /// A section of a brief as text: its own, a file's (rendered) or a command's output.

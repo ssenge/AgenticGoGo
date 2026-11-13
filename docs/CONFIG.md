@@ -175,6 +175,22 @@ step, so a 45-minute judge costs 45 minutes per step. Short-circuiting an expens
 cheap ones is a Rust-path feature (`agg.judge(&tests).met() && agg.judge(&load).met()`); see
 `examples/workflow.yaml`, which spells out that trade in full.
 
+## Command judges — `command:`
+
+A judge DECLARED with a `command:` is a shell command run in the project, met when it exits 0: no wrapper script to write.
+
+```yaml
+judges:
+  tests: { command: "pytest -q -p no:cacheprovider", path: [.venv/bin] }
+  lint:  { command: "ruff check scripts tests", path: [.venv/bin], timeout: 600 }
+```
+
+The rationale is the last four non-blank lines of the command's combined output, at most 400 characters (`exit code N` for a
+command that printed nothing); the last 40 lines go to the judge's log. `path:` entries (relative to the project, or
+absolute) go in front of `PATH`; `timeout:` is the judge's time limit. It runs as a script judge does, with the same
+confinement. A command judge has no `max:`/`min:` and is not a `metric:` or `score:` judge. The same declarations work in a
+process file's `judges:` (`docs/PROCESS.md`).
+
 ## Judges built on swe-metrics — `metric:` and `score:`
 
 [swe-metrics](https://github.com/ssenge/swe-metrics) is a separate, stateless measuring tool: it

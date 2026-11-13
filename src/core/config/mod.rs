@@ -256,7 +256,7 @@ impl Default for JudgeCfg {
 /// PER-JUDGE config: NAME → `timeout:` (the YAML twin of
 /// [`Judge::timeout`](crate::core::model::Judge::timeout)), and — for a judge that is not a file —
 /// its DECLARATION: a `metric:` or a `score:` block with its `max:`/`min:` threshold
-/// ([`crate::metrics`]).
+/// ([`crate::metrics`]), or a `command:` met by its exit code.
 ///
 /// `timeout` survived the 2026-08-04 owner simplification that cut the judge-level `gate:`/`when:`
 /// because it is neither flow nor gating: a judge that takes longer than the run-level 300s (a load
@@ -283,6 +283,13 @@ pub struct JudgeOverride {
     /// met when the value is at least this (a metric or score judge only).
     #[serde(default)]
     pub min: Option<f64>,
+    /// a COMMAND judge: a shell command run in the project, met when it exits 0; the last lines of its output are the
+    /// rationale.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// a command judge's `PATH` entries, in front of the rest (relative ones to the project).
+    #[serde(default)]
+    pub path: Vec<String>,
 }
 
 /// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_judges` and the

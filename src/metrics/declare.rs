@@ -28,9 +28,17 @@ pub struct Declared {
 pub fn declare(cfg: &AggConfig, run_set: &[String], config_base: &Path, probe: bool) -> Declared {
     let mut d = Declared::default();
     for (name, o) in &cfg.judges {
-        let shape = Shape { name, metric: o.metric.as_ref(), score: o.score.as_ref(), max: o.max, min: o.min };
+        let shape = Shape {
+            name,
+            metric: o.metric.as_ref(),
+            score: o.score.as_ref(),
+            max: o.max,
+            min: o.min,
+            command: o.command.as_deref(),
+            path: &o.path,
+        };
         let found = spec::problems(&shape, config_base);
-        let declared = o.metric.is_some() || o.score.is_some();
+        let declared = o.metric.is_some() || o.score.is_some() || o.command.is_some();
         if declared && found.is_empty() {
             if let Some(file) = judge_file(name, config_base) {
                 d.problems.push(Problem::new(
@@ -38,9 +46,12 @@ pub fn declare(cfg: &AggConfig, run_set: &[String], config_base: &Path, probe: b
                     format!("`{name}` is declared here AND as {} — one judge, one definition", file.display()),
                 ));
             }
-            let kind = match (&o.metric, &o.score) {
-                (Some(m), _) => JudgeKind::Metric(Box::new(spec::metric_judge(m, o.max, o.min))),
-                (_, Some(s)) => JudgeKind::Score(Box::new(spec::score_judge(s, o.max, o.min, config_base))),
+            let kind = match (&o.metric, &o.score, &o.command) {
+                (_, _, Some(c)) => JudgeKind::Command(Box::new(
+                    crate::core::model::CommandJudge::new(c.as_str()).path(o.path.iter().cloned()),
+                )),
+                (Some(m), _, _) => JudgeKind::Metric(Box::new(spec::metric_judge(m, o.max, o.min))),
+                (_, Some(s), _) => JudgeKind::Score(Box::new(spec::score_judge(s, o.max, o.min, config_base))),
                 _ => unreachable!("declared"),
             };
             d.kinds.insert(name.clone(), kind);
@@ -184,6 +195,20 @@ mod tests {
             JudgeKind::Metric(m) => (**m).clone(),
             k => panic!("{k:?}"),
         }
+    }
+
+    /// A `command:` entry declares a command judge, with its `path`; it can't also be another kind or carry a threshold.
+    #[test]
+    fn a_command_entry_declares_a_command_judge() {
+        let j = "  tests: { command: \"pytest -q\", path: [.venv/bin] }\n  both: { command: x, metric: { id: a.b }, max: 1 }\n";
+        let d = declare(&cfg(j, ""), &names(&["tests"]), Path::new("/x"), false);
+        match &d.kinds["tests"] {
+            JudgeKind::Command(c) => assert_eq!((c.command.as_str(), c.path.as_slice()), ("pytest -q", &[".venv/bin".to_string()][..])),
+            k => panic!("{k:?}"),
+        }
+        let at: Vec<&str> = d.problems.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(at, ["judges.both", "judges.both"], "a command is not a metric judge, and has no threshold");
+        assert!(!d.kinds.contains_key("both"), "a judge with a problem isn't declared");
     }
 
     /// A ratchet may leave its direction to its judge: `max:` ⇒ down, `min:` ⇒ up, a score ⇒ up.

@@ -145,6 +145,10 @@ fn a_process_runs_in_file_order_with_numbers_from_position() {
     let phases = std::fs::read_to_string(d.join(".git/phase-hooks.log")).unwrap();
     assert!(phases.lines().next().unwrap().ends_with("before") && phases.lines().last().unwrap().ends_with("after"), "{phases}");
     assert!(!std::fs::read_to_string(d.join(".git/step-hooks.log")).unwrap().is_empty(), "the step hook ran");
+    let declared: Vec<String> = history(d).iter().filter(|e| e["kind"] == "hook" && e["step"] == "1.3 Survey")
+        .map(|e| e["rationale"].as_str().unwrap_or_default().to_string()).filter(|r| r.contains("worked")).collect();
+    assert_eq!(declared.len(), 1, "a declared judge named in the hooks file ran after the step: {:?}", history(d));
+    assert!(declared[0].starts_with("after worked"), "{declared:?}");
 }
 
 fn read(dir: &Path, file: &str) -> String {
@@ -399,4 +403,99 @@ fn check_and_list_read_only_the_file_and_a_bad_process_is_not_run() {
     assert!(labels.contains(&"1.4 CP1 Survey approved") && labels.contains(&"2.4 CP2 Build approved") && labels.contains(&"3.4 Handover"), "{labels:?}");
     let ok = agg(&[process_file().to_str().unwrap(), "--check"]);
     assert!(ok.status.success(), "{}", said(&ok));
+}
+
+// ---- A-38: what every process run needs -----------------------------------------------------------------------
+
+/// A process home with a script-only process and its scripts (a script step prints a verdict JSON, as a judge does): `write` makes `out/result.txt` (and a script under
+/// `scripts-out/` when the project has `.bad-script`, or no output when it has `.no-output`), `drop` removes the
+/// result when the project has `.drop`, `read` reads it.
+fn mini_home() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    std::fs::create_dir_all(d.join("scripts")).unwrap();
+    std::fs::write(d.join("process.yaml"), "version: 1\nrun:\n  history: reports/steps.jsonl\n  declared: true\n  scripts_runnable: [scripts-out]\n  \
+        commit_inputs: { branch: main, message: \"Inputs at run start\" }\nphases:\n- id: one\n  name: One\n  steps:\n  \
+        - { id: write, name: Write, kind: script, run: scripts/write.sh, settings: { outputs: [out/result.txt] } }\n  \
+        - { id: drop, name: Drop, kind: script, run: scripts/drop.sh }\n  \
+        - { id: read, name: Read, kind: script, run: scripts/read.sh, settings: { inputs: [out/result.txt] } }\n").unwrap();
+    for (name, body) in [
+        ("write.sh", "mkdir -p out scripts-out\n[ -f .no-output ] || echo result > out/result.txt\n[ -f .bad-script ] && printf '#!/bin/sh\\necho x\\n' > scripts-out/bad.sh\necho '{\"met\": true, \"rationale\": \"written\"}'\n"),
+        ("drop.sh", "[ -f .drop ] && rm -f out/result.txt\necho '{\"met\": true, \"rationale\": \"dropped\"}'\n"),
+        ("read.sh", "cat out/result.txt > read.log\necho '{\"met\": true, \"rationale\": \"read\"}'\n"),
+    ] {
+        write_exe(&d.join("scripts").join(name), &format!("#!/bin/sh\n{body}"));
+    }
+    tmp
+}
+
+/// `agg process <home>/process.yaml <project>`.
+fn run_mini(home: &Path, dir: &Path) -> Output {
+    let (bin, h) = &*ENV;
+    Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(home.join("process.yaml")).arg(dir).current_dir(dir)
+        .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("HOME", h).output().unwrap()
+}
+
+/// The rationale of the history's entries of `kind` for the step labelled `label`.
+fn rationales(dir: &Path, kind: &str, label: &str) -> Vec<String> {
+    history(dir).iter().filter(|e| e["kind"] == kind && e["step"] == label)
+        .map(|e| e["rationale"].as_str().unwrap_or_default().to_string()).collect()
+}
+
+/// `run.commit_inputs` commits what a human filled in before the run, on `main`; the run's first entry says which
+/// process ran; `run.declared` checks the declared output after `write` and the input before `read`.
+#[test]
+fn the_inputs_are_committed_and_declared_files_are_checked() {
+    let (home, tmp) = (mini_home(), project(""));
+    let d = tmp.path();
+    git(d, &["checkout", "-q", "-b", "agg/session-left-over"]);
+    std::fs::write(d.join("filled-in.md"), "an input").unwrap();
+    let out = run_mini(home.path(), d);
+    assert!(out.status.success(), "{}", said(&out));
+    assert_eq!(git(d, &["log", "--format=%s", "--", "filled-in.md"]), "Inputs at run start",
+               "the file a human filled in came in with the inputs commit: {}", git(d, &["log", "--oneline"]));
+    assert_eq!(git(d, &["rev-parse", "--abbrev-ref", "HEAD"]), "main", "the left-over session branch was left");
+    assert!(said(&out).contains("process home not in git"), "{}", said(&out));
+    let first = &history(d)[0];
+    assert_eq!((first["kind"].as_str(), first["rationale"].as_str()), (Some("start"), Some("process home not in git")));
+    assert_eq!(rationales(d, "hook", "1.1 Write").iter().filter(|r| r.contains("every declared output exists")).count(), 1);
+    assert_eq!(rationales(d, "hook", "1.3 Read").iter().filter(|r| r.contains("every input an earlier step wrote exists")).count(), 1);
+    assert!(std::fs::read_to_string(d.join("read.log")).unwrap().contains("result"));
+}
+
+/// A step that doesn't write what it declares fails after it, naming the file and the advice.
+#[test]
+fn a_declared_output_that_is_missing_fails_the_step() {
+    let (home, tmp) = (mini_home(), project(""));
+    let d = tmp.path();
+    std::fs::write(d.join(".no-output"), "").unwrap();
+    let out = run_mini(home.path(), d);
+    assert!(!out.status.success(), "{}", said(&out));
+    let why = rationales(d, "hook", "1.1 Write").join("\n");
+    assert!(why.contains("declared outputs missing: out/result.txt; write them"), "{why}");
+}
+
+/// An input an earlier step of this run declares as its output must still exist when a later step starts.
+#[test]
+fn an_input_an_earlier_step_wrote_that_is_gone_fails_the_step_before_it_runs() {
+    let (home, tmp) = (mini_home(), project(""));
+    let d = tmp.path();
+    std::fs::write(d.join(".drop"), "").unwrap();
+    let out = run_mini(home.path(), d);
+    assert!(!out.status.success(), "{}", said(&out));
+    let why = rationales(d, "hook", "1.3 Read").join("\n");
+    assert!(why.contains("inputs an earlier step wrote are missing: out/result.txt"), "{why}");
+    assert!(!d.join("read.log").exists(), "the step never started");
+}
+
+/// A script a step wrote under `run.scripts_runnable` must be able to run: a `#!` file executable.
+#[test]
+fn a_script_that_cannot_run_fails_the_step_that_wrote_it() {
+    let (home, tmp) = (mini_home(), project(""));
+    let d = tmp.path();
+    std::fs::write(d.join(".bad-script"), "").unwrap();
+    let out = run_mini(home.path(), d);
+    assert!(!out.status.success(), "{}", said(&out));
+    let why = rationales(d, "hook", "1.1 Write").join("\n");
+    assert!(why.contains("scripts-out/bad.sh: starts with #! but isn't executable (chmod +x)"), "{why}");
 }

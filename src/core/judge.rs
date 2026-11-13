@@ -65,6 +65,7 @@ pub fn run(
         JudgeKind::Script { path } => {
             (run_script(path, cwd, name, session, step, timeout_secs, isolation), None)
         }
+        JudgeKind::Command(c) => (run_command(c, cwd, name, session, step, timeout_secs, isolation), None),
         JudgeKind::Llm { path, inputs } => run_llm(path, inputs, (model, effort), timeout_secs, cwd, ruler, isolation),
         // A native judge is a Rust closure in the DRIVER's own binary — the one judge kind that is
         // not a subprocess, and therefore the one kind that is not crash-safe by construction.
@@ -342,6 +343,73 @@ fn run_script(
     }
 }
 
+// ---------------- command judge ----------------
+
+/// The wrapper a command judge runs as a script: the command in the project, its output's last lines as the
+/// rationale, met when it exits 0. `{PATH}` and `{COMMAND}` are filled in.
+const COMMAND_WRAPPER: &str = r#"#!/bin/sh
+PATH={PATH}"$PATH"; export PATH
+out=$(sh -c {COMMAND} 2>&1); rc=$?
+printf '%s\n' "$out" | tail -n 40 >&2
+met=false; [ "$rc" = 0 ] && met=true
+why=$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -n 4 | tail -c 400 | tr '\011' ' ' | tr -d '\000-\010\013-\037' \
+  | awk 'BEGIN { ORS = "" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); print (NR > 1 ? "\\n" : "") $0 }')
+[ -n "$why" ] || why="exit code $rc"
+printf '{"met": %s, "rationale": "%s"}\n' "$met" "$why"
+"#;
+
+/// `s` as one shell word.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The wrapper script of a command judge, with its `path` entries (relative ones to the project) in front of `PATH`.
+fn command_wrapper(c: &crate::core::model::CommandJudge) -> String {
+    let dirs: String = c
+        .path
+        .iter()
+        .map(|d| match Path::new(d).is_absolute() {
+            true => format!("{}:", shell_quote(d)),
+            false => format!("\"$AGG_PROJECT_DIR\"/{}:", shell_quote(d)),
+        })
+        .collect();
+    COMMAND_WRAPPER.replace("{PATH}", &dirs).replace("{COMMAND}", &shell_quote(&c.command))
+}
+
+/// Runs a command judge: its wrapper goes to the judge's scratch folder and runs as a script judge does (the same
+/// timeout and confinement).
+fn run_command(
+    c: &crate::core::model::CommandJudge,
+    cwd: &Path,
+    name: &str,
+    session: Option<u32>,
+    step: &str,
+    timeout_secs: u64,
+    isolation: crate::isolation::Isolation,
+) -> Verdict {
+    let dir = if isolation == crate::isolation::Isolation::Container {
+        let d = crate::isolation::runtime::judge_scratch(cwd, session);
+        std::fs::create_dir_all(&d).map(|_| d)
+    } else {
+        scratch_dir(cwd, session)
+    };
+    let slug: String = name.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' { ch } else { '_' }).collect();
+    let written = dir.and_then(|d| {
+        let file = d.join(format!("command-{slug}.sh"));
+        std::fs::write(&file, command_wrapper(c))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(file)
+    });
+    match written {
+        Ok(file) => run_script(&file, cwd, name, session, step, timeout_secs, isolation),
+        Err(e) => Verdict::failed(format!("judge `{name}`: {e}")),
+    }
+}
+
 // ---------------- llm judge ----------------
 
 #[allow(clippy::too_many_arguments)]
@@ -530,6 +598,55 @@ fn parse_verdict(text: &str) -> Result<Verdict, String> {
 mod tests {
     use super::*;
     use crate::isolation::Isolation;
+
+    /// A command judge in a fresh project folder: its verdict and the folder.
+    fn command_verdict(c: crate::core::model::CommandJudge) -> Verdict {
+        let proj = std::env::temp_dir().join(format!("agg-command-judge-{}-{}", std::process::id(), c.command.len()));
+        std::fs::create_dir_all(proj.join("tools")).unwrap();
+        std::fs::write(proj.join("tools/shout"), "#!/bin/sh\necho shouted\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(proj.join("tools/shout"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let v = run_command(&c, &proj, "check", Some(1), "step", 30, Isolation::None);
+        let _ = std::fs::remove_dir_all(&proj);
+        v
+    }
+
+    /// A command judge is met when the command exits 0 and unmet when it doesn't; the last lines of its output are
+    /// the rationale, with quotes, backslashes and tabs kept intact in the JSON.
+    #[test]
+    fn a_command_judge_is_met_by_its_exit_code_and_says_what_the_command_said() {
+        use crate::core::model::CommandJudge;
+        let met = command_verdict(CommandJudge::new("echo 'all 5 passed'"));
+        assert!(met.met && met.rationale() == "all 5 passed", "{met:?}");
+        let unmet = command_verdict(CommandJudge::new("echo 'one failed'; exit 3"));
+        assert!(!unmet.met && unmet.rationale() == "one failed", "{unmet:?}");
+        let tricky = command_verdict(CommandJudge::new(r#"printf 'a "quoted" back\slash\ttab\n\nnext line\n'"#));
+        assert!(tricky.met && tricky.rationale().contains(r#"a "quoted" back\slash tab"#), "{tricky:?}");
+        assert!(tricky.rationale().ends_with("next line"), "blank lines are left out: {tricky:?}");
+    }
+
+    /// Only the last four non-blank lines and at most 400 characters are the rationale.
+    #[test]
+    fn a_command_judges_rationale_is_the_last_four_lines_and_at_most_400_characters() {
+        use crate::core::model::CommandJudge;
+        let v = command_verdict(CommandJudge::new("for i in 1 2 3 4 5 6; do echo line$i; done"));
+        assert_eq!(v.rationale(), "line3\nline4\nline5\nline6");
+        let long = command_verdict(CommandJudge::new("head -c 900 /dev/zero | tr '\\0' x; echo"));
+        assert!((399..=400).contains(&long.rationale().len()), "{}", long.rationale().len());
+    }
+
+    /// `path` entries come before `PATH`: relative to the project, or absolute.
+    #[test]
+    fn a_command_judges_path_entries_come_first() {
+        use crate::core::model::CommandJudge;
+        let relative = command_verdict(CommandJudge::new("shout").path(["tools"]));
+        assert!(relative.met && relative.rationale() == "shouted", "{relative:?}");
+        let missing = command_verdict(CommandJudge::new("shout"));
+        assert!(!missing.met, "without the entry the program isn't found: {missing:?}");
+    }
 
     /// The wiring for ISOLATION.md §12: a SANDBOXED script judge — the exact escape a confined
     /// worker would plant by rewriting `agg/judges/*.sh` — cannot write outside the project, yet
