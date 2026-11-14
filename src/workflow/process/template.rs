@@ -153,7 +153,7 @@ mod tests {
         let list = super::super::number::number(&p);
         let v = variables(&p, &list, dir.path(), "/proj").unwrap();
         assert_eq!(v["legacy"], "legacy");
-        assert_eq!(v["tools"], format!("{}/tools", dir.path().display()));
+        assert_eq!(v["tools"], format!("{}/tools", dir.path().canonicalize().unwrap().display()), "{{ home }} is absolute");
         assert_eq!(v["mine"], "x", "an unset env name is empty");
         assert_eq!((v["step.s"].as_str(), v["step.s.number"].as_str(), v["cp.c"].as_str(), v["project"].as_str()),
                    ("1.1 S", "1.1", "CP1", "/proj"));

@@ -2,7 +2,7 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
-## 0.0.45 (unreleased)
+## 0.0.45 (2026-11-14)
 
 A-37: process files. A process of standard steps runs from YAML.
 
