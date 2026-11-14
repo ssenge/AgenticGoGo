@@ -1,0 +1,19 @@
+name: deny-check
+on: [push, pull_request]
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: banned words in the tree
+        env: { DENY_WORDS: "${{ secrets.DENY_WORDS }}" }
+        run: scripts/deny-check.sh --tree
+      - name: banned words in commit messages
+        env: { DENY_WORDS: "${{ secrets.DENY_WORDS }}" }
+        run: |
+          range="${{ github.event.before }}..${{ github.sha }}"
+          [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ] && range="${{ github.sha }}"
+          for c in $(git rev-list "$range" 2>/dev/null | head -200); do
+            git log -1 --format=%B "$c" > /tmp/msg; scripts/deny-check.sh --message /tmp/msg
+          done

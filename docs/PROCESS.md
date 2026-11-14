@@ -256,7 +256,7 @@ A process file's `judges:` only (agg.yaml refuses it).
 `steps[].extra` is left empty: a caller merges its own facts there (a waived gate's "unmeasured"). `agg serve` answers
 `GET /api/process?report=map|timeline|profile` (404 when the project ran no process: `agg process` notes its file in
 `agg/private/process.json`), the web UI has a page for it (`/process`), and `agg status` prints the running step and phase.
-Not part of it: its proposals estimate (a caller's own: it merges the savings into the profile).
+Not part of it: a proposals estimate (a caller's own: it merges the savings into the profile).
 
 ### Scenarios (A-38)
 

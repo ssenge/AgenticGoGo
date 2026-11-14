@@ -1,6 +1,6 @@
 //! The profile of a process run (A-38 3.7): per step where the time went, split into the worker's session, repair
 //! sessions, the critic, checks, hooks, the task force and waits for a human; the models and tools a step's sessions
-//! used and the files it changed. 
+//! used and the files it changed.
 
 use std::path::Path;
 
