@@ -5,14 +5,14 @@ import { aggAnswer } from '$lib/server/agg.js';
 // answer is a durable fact recorded in the ask ledger, not a steering message, so it does NOT
 // require a running workflow — while every /api/send does. agg validates the value against the
 // ask's recorded options and returns 400 with the acceptable ones if it is off the list.
-export async function POST({ request }) {
+export async function POST({ request, url }) {
   let payload;
   try {
     payload = await request.json();
   } catch {
     return json({ error: 'invalid JSON' }, { status: 400 });
   }
-  const { status, body } = await aggAnswer(payload);
+  const { status, body } = await aggAnswer(payload, url.search);
   if (status === 0) return json(body, { status: 502 });
   return json(body ?? {}, { status });
 }

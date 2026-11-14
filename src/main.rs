@@ -142,6 +142,12 @@ enum Cmd {
         /// when exposing the API beyond localhost.
         #[arg(long, default_value = "")]
         token: String,
+        /// a folder of projects: each request names one with `?p=<name>`, and the page lists them
+        #[arg(long)]
+        projects: Option<PathBuf>,
+        /// the process file a project that ran none yet starts with (and whose `ui:` section the page shows)
+        #[arg(long)]
+        process: Option<PathBuf>,
     },
     /// Live TUI dashboard — tails the running loop's state. Quit with q.
     Dashboard {
@@ -487,12 +493,15 @@ fn run_cli() -> Result<ExitCode> {
             let opts = loop_::RunOpts { max_sessions: *max_sessions, resume: *resume };
             return Ok(ExitCode::from(run_reported(&p, opts, *report_json, base_branch.as_deref())));
         }
-        Cmd::Serve { port, cors_origin, token } => {
+        Cmd::Serve { port, cors_origin, token, projects, process } => {
+            let absolute = |p: &Option<PathBuf>| p.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
             agg::ui::serve::run(agg::ui::serve::ServeConfig {
                 dir: p.dir.clone(),
                 port: *port,
                 cors_origin: cors_origin.clone(),
                 token: token.clone(),
+                projects: absolute(projects),
+                process: absolute(process),
             })?;
             Ok(())
         }

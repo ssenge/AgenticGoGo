@@ -50,8 +50,7 @@ impl Proc {
         if let (Some(f), false) = (self.open_points_file(), open.trim().is_empty()) {
             inputs.push(f);
         }
-        let dir = Path::new(&doc).parent().map(|p| p.display().to_string()).unwrap_or_default();
-        let decisions = if dir.is_empty() { format!("{}-decisions.md", ctx.id()) } else { format!("{dir}/{}-decisions.md", ctx.id()) };
+        let decisions = decisions_file(ctx.id(), &doc);
         let before = std::fs::read_to_string(self.project.join(&decisions)).unwrap_or_default();
         self.approval(&ctx.label, &doc, &question, &decisions, &inputs)?;
         if let (Some(f), false) = (self.open_points_file(), open.trim().is_empty()) {
@@ -104,6 +103,12 @@ impl Proc {
         commit(&self.project, &[&file], &format!("{label}: {what}"))?;
         Ok(())
     }
+}
+
+/// The decisions file of checkpoint `id`: beside its document `doc`, which no step writes.
+pub fn decisions_file(id: &str, doc: &str) -> String {
+    let dir = Path::new(doc).parent().map(|p| p.display().to_string()).unwrap_or_default();
+    if dir.is_empty() { format!("{id}-decisions.md") } else { format!("{dir}/{id}-decisions.md") }
 }
 
 /// What the task force repaired in place since the last approval: (step, what it changed and why), oldest first.

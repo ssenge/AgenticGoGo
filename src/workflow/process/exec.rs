@@ -143,9 +143,14 @@ pub fn run_plain(shared: &Shared, command: &str, phase: &str) -> Result<(), Stri
 
 /// `command` with its first word made absolute when it is a relative path (it has a `/`).
 fn absolutize(shared: &Shared, command: &str) -> String {
+    absolutize_in(&shared.home, command)
+}
+
+/// A command of the process file with its script made absolute: a relative path is the process home's.
+pub fn absolutize_in(home: &std::path::Path, command: &str) -> String {
     let first = command.split_whitespace().next().unwrap_or_default();
     if first.contains('/') && !std::path::Path::new(first).is_absolute() {
-        return format!("{}/{}{}", shared.home.display(), first, &command[command.find(first).unwrap_or(0) + first.len()..]);
+        return format!("{}/{}{}", home.display(), first, &command[command.find(first).unwrap_or(0) + first.len()..]);
     }
     command.to_string()
 }

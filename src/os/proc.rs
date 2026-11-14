@@ -57,6 +57,23 @@ pub fn kill_pid(pid: u32) -> bool {
     }
 }
 
+/// SIGTERM a single pid: ask it to end (agg's own runs interrupt their session and unwind). Returns whether the signal
+/// was delivered. On Windows a `taskkill` without `/F`.
+pub fn term_pid(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        kill(Pid::from_raw(pid as i32), Signal::SIGTERM).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+}
+
 /// SIGKILL an entire process group at once (`killpg(2)` on unix). On Windows (no POSIX groups)
 /// `pgid` carries the leader pid and `taskkill /T` tree-kills it.
 ///

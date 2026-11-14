@@ -47,42 +47,12 @@ pub fn spawn_detached(dir: &Path) -> Result<()> {
     }
 
     // Reconstruct the child's argv from our own, dropping the detach flag so the child
-    // runs in the foreground (of its own detached session). argv[0] is replaced with the
-    // resolved current-exe path so a PATH-relative invocation still works after detach.
-    let exe = std::env::current_exe().with_context(|| "resolving current executable")?;
+    // runs in the foreground (of its own detached session).
     let child_args: Vec<String> = std::env::args()
         .skip(1) // drop argv[0]
         .filter(|a| a != "--detach" && a != "-d")
         .collect();
-
-    // Append to the log so successive detached runs accumulate (with a separator).
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(run_log(dir))
-        .with_context(|| format!("opening {}", run_log(dir).display()))?;
-    let log_err = log.try_clone().with_context(|| "duplicating log handle")?;
-
-    let mut cmd = Command::new(&exe);
-    cmd.args(&child_args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-
-    // Detach from the controlling terminal: a new session (setsid) so the child isn't
-    // killed when the launching shell exits or receives SIGHUP. `process_group(0)` makes
-    // the child its own group leader; `pre_exec(setsid)` fully divorces the session.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // new session → no controlling tty → survives terminal close.
-        unsafe {
-            cmd.pre_exec(crate::os::proc::setsid);
-        }
-    }
-
-    let child = cmd.spawn().with_context(|| "spawning detached loop")?;
-    let pid = child.id();
+    let pid = spawn_logged(dir, &child_args)?;
     std::fs::write(run_pid(dir), pid.to_string())
         .with_context(|| format!("writing {}", run_pid(dir).display()))?;
 
@@ -94,6 +64,31 @@ pub fn spawn_detached(dir: &Path) -> Result<()> {
         log = run_log(dir).display(),
     );
     Ok(())
+}
+
+/// Start `agg <args>` in `dir`, in a session of its own (it outlives the caller and the terminal), its stdout and stderr appended
+/// to `agg/private/run.log`; returns its pid. argv[0] is the resolved current executable, so a PATH-relative call works.
+pub fn spawn_logged(dir: &Path, args: &[String]) -> Result<u32> {
+    std::fs::create_dir_all(private_dir(dir)).with_context(|| "creating agg/private dir")?;
+    let exe = std::env::current_exe().with_context(|| "resolving current executable")?;
+    // appended, so successive runs accumulate
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run_log(dir))
+        .with_context(|| format!("opening {}", run_log(dir).display()))?;
+    let log_err = log.try_clone().with_context(|| "duplicating log handle")?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(args).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(log_err));
+    // a new session (setsid): no controlling terminal, so the child isn't killed when the caller's shell exits
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(crate::os::proc::setsid);
+        }
+    }
+    Ok(cmd.spawn().with_context(|| "spawning agg")?.id())
 }
 
 /// Read `agg/private/run.pid` and return the PID iff that process is still alive. A stale

@@ -2687,6 +2687,18 @@ else
   fi
 fi
 
+# ── the process page (A-39), in a real browser: a project made from the form, its checkpoint answered with a decision,
+# a step's overlay facts, the run stopped. Its own projects folder, ports and servers (scripts/web_process.py).
+if [ "$WEB" = "0" ]; then
+  skip "web process page" "--no-web"
+elif ! command -v node >/dev/null 2>&1 || [ ! -d "$ROOT/src/web/node_modules" ]; then
+  skip "web process page" "node/node_modules missing"
+elif python3 "$ROOT/scripts/web_process.py" --root "$ROOT" > "$WS/web_process.log" 2>&1; then
+  ok "a human runs a process from the web UI: new project, checkpoint with a decision, stop (real browser)"
+else
+  bad "a human runs a process from the web UI: new project, checkpoint with a decision, stop (real browser)" "$(tail -3 "$WS/web_process.log")"
+fi
+
 sec "13. agg skills install — the /agg:* skills reach all three agents"
 # The skills used to be a Claude-only plugin. Two things have to hold now, and they are
 # different claims:

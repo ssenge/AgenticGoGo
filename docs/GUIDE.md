@@ -792,7 +792,7 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 | `agg status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no judges) | `--json` the versioned live status (`docs/schemas/status.v1.json`) |
 | `agg history` | This project's run history, newest first, plus lifetime totals | `--json` (each run with its usage totals) |
 | `agg dashboard` | Live TUI | `--once` one-shot text snapshot |
-| `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `POST /api/send`, `POST /api/answer` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` |
+| `agg serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `/api/process`, `/api/checkpoint`, `/api/projects`, `/api/ui`, `POST /api/send`, `POST /api/answer`, `POST /api/run`, `POST /api/projects` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` · `--projects <folder>` · `--process <file>` ([PROCESS.md](PROCESS.md#the-web-ui-of-a-process-a-39)) |
 | `agg spawn` | *(used by the worker, not to start the loop)* track a long child task so the reaper spares it and the next session polls it | `--name <n>` · `--reason <why>` · `-- <cmd…>` |
 | `agg stop [reason]` | Graceful stop at the next session boundary (the one top-level steering alias) | |
 | `agg send <cmd>` | Steering for a **running** workflow, applied at the next session boundary. Refused if none is running | `inject <text>` · `budget [total]` · `pause` · `resume` · `wake` (end a rate-limit wait now) · `stop [reason]` · `note <text>` · `answer <id> <value>` · `approve <id>` · `deny <id>` |

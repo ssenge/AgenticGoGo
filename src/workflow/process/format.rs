@@ -44,7 +44,54 @@ pub struct Process {
     pub task_force: Option<TaskForceSpec>,
     #[serde(default)]
     pub ladder: Option<LadderSpec>,
+    /// what `agg serve --process` shows and offers beyond agg's own report
+    #[serde(default)]
+    pub ui: Option<UiSpec>,
     pub phases: Vec<Phase>,
+}
+
+/// The web UI's parts of the process: the form that makes a new project, and the command that adds the process's own
+/// facts to the run report.
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UiSpec {
+    #[serde(default)]
+    pub new_project: Option<NewProject>,
+    /// a command run in the project with the project's path and the report's kind (`map`, `profile`) as arguments and
+    /// the report's JSON on stdin; it prints `{"steps": {<step id>: {<key>: <value>}}, "run": {<key>: <value>}}`, which
+    /// agg merges into each step's `extra` and the report's `extra`
+    #[serde(default)]
+    pub overlay: Option<String>,
+}
+
+/// The new-project form: its fields, and the command that makes the project from them before agg starts its run.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NewProject {
+    /// run with the new project's path as its argument and each field as `AGG_FIELD_<NAME>` (upper case) in its
+    /// environment; it creates the folder
+    pub command: String,
+    #[serde(default)]
+    pub fields: Vec<Field>,
+}
+
+/// One field of the new-project form.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Field {
+    /// letters, digits and `_`
+    pub name: String,
+    pub label: String,
+    #[serde(default)]
+    pub hint: String,
+    #[serde(default)]
+    pub required: bool,
+    /// `text` (the default), `textarea` or `select`
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// a `select`'s choices
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// The roles file: its name in the project and the roles it must have.

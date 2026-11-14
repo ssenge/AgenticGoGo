@@ -113,6 +113,8 @@ fn commit_inputs(spec: &Process, project: &Path) -> Result<(), Fatal> {
     if !ok(&["checkout", "-q", &c.branch]) {
         return Err(anyhow!("switching {} to {} failed", project.display(), c.branch).into());
     }
+    // agg's own runtime (the process note, a log started before the run) is never an input
+    crate::git::ensure_agg_gitignored(project);
     ok(&["add", "-A"]);
     if !ok(&["diff", "--cached", "--quiet"]) && !ok(&["commit", "-q", "-m", &c.message]) {
         return Err(anyhow!("committing the inputs in {} failed", project.display()).into());
@@ -384,7 +386,7 @@ mod tests {
         Process::parse(&format!("version: 1\nrun:\n  commit_inputs: {extra}\nphases: []\n")).unwrap()
     }
 
-    /// The inputs a human filled in are committed on the branch the file names; a second call with nothing new
+    /// The inputs a human filled in are committed on the branch the file names, agg's runtime ignored; a second call with nothing new
     /// commits nothing; a branch that doesn't exist halts the run with the reason.
     #[test]
     fn the_inputs_are_committed_on_their_branch_once() {
@@ -394,11 +396,13 @@ mod tests {
         git(d, &["commit", "-q", "--allow-empty", "-m", "base"]);
         git(d, &["checkout", "-q", "-b", "agg/run/session-1"]);
         std::fs::write(d.join("task.md"), "the task").unwrap();
+        std::fs::create_dir_all(d.join("agg/private")).unwrap();
+        std::fs::write(d.join("agg/private/run.log"), "a log started before the run").unwrap();
         let both = spec("{ branch: main, message: \"Inputs at start\" }");
         commit_inputs(&both, d).unwrap();
         assert_eq!(git(d, &["rev-parse", "--abbrev-ref", "HEAD"]), "main", "a halted run's session branch is left");
         assert_eq!(git(d, &["log", "-1", "--format=%s"]), "Inputs at start");
-        assert_eq!(git(d, &["show", "--name-only", "--format=", "HEAD"]), "task.md");
+        assert_eq!(git(d, &["show", "--name-only", "--format=", "HEAD"]), ".gitignore\ntask.md", "agg's runtime is no input");
         let before = git(d, &["rev-parse", "HEAD"]);
         commit_inputs(&both, d).unwrap();
         assert_eq!(git(d, &["rev-parse", "HEAD"]), before, "nothing new, no commit");

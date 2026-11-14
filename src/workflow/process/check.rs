@@ -60,6 +60,9 @@ impl Ctx<'_> {
             self.phase(phase);
         }
         self.top_level(list);
+        if let Some(ui) = &self.process.ui {
+            self.out.extend(ui_problems(ui));
+        }
     }
 
     fn id(&mut self, id: &str, what: &str) {
@@ -187,9 +190,7 @@ impl Ctx<'_> {
     fn owner_reads_decisions(&mut self, at: &str, cp: &Step, owner: &str) {
         let Some(step) = find(&self.process.phases.iter().flat_map(|p| p.steps.iter()).collect::<Vec<_>>(), owner) else { return };
         let Some(inputs) = step.settings.as_ref().and_then(|s| s.inputs.as_ref()) else { return };
-        let doc = cp.doc.clone().unwrap_or_default();
-        let dir = Path::new(&doc).parent().map(|p| p.display().to_string()).unwrap_or_default();
-        let decisions = if dir.is_empty() { format!("{}-decisions.md", cp.id) } else { format!("{dir}/{}-decisions.md", cp.id) };
+        let decisions = super::checkpoint::decisions_file(&cp.id, cp.doc.as_deref().unwrap_or_default());
         let covers = |entry: &str| match entry.split_once('*') {
             Some((pre, post)) => decisions.starts_with(pre) && decisions.ends_with(post),
             None => entry == decisions || (entry.ends_with('/') && decisions.starts_with(entry)),
@@ -476,6 +477,29 @@ fn collect(steps: &[Step], f: &mut dyn FnMut(&Step)) {
     }
 }
 
+/// What's wrong with the `ui:` section: a form field whose name isn't letters, digits and `_` (it becomes an environment
+/// variable), is `name` (the project's own) or used twice, an unknown kind, a `select` without options.
+fn ui_problems(ui: &super::format::UiSpec) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for f in ui.new_project.iter().flat_map(|n| n.fields.iter()) {
+        let at = format!("ui.new_project field `{}`", f.name);
+        if f.name.is_empty() || !f.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || f.name == "name" {
+            out.push(format!("{at}: a field name is letters, digits and `_`, and not `name` (the project's own)"));
+        }
+        if !seen.insert(f.name.clone()) {
+            out.push(format!("{at}: used twice"));
+        }
+        match f.kind.as_deref() {
+            None | Some("text" | "textarea") => {}
+            Some("select") if !f.options.is_empty() => {}
+            Some("select") => out.push(format!("{at}: a `select` needs `options`")),
+            Some(other) => out.push(format!("{at}: kind `{other}` is none of text, textarea, select")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,5 +600,18 @@ mod tests {
         let dir = home(&files(), &covered);
         assert_eq!(check(&dir.path().join("process.yaml")), Vec::<String>::new(), "a glob covers it");
         assert!(check(&dir.path().join("none.yaml"))[0].contains("none.yaml"));
+    }
+
+    #[test]
+    fn a_ui_form_field_is_a_plain_name_of_a_known_kind() {
+        let ui: super::super::format::UiSpec = serde_yaml::from_str(
+            "new_project:\n  command: x.sh\n  fields:\n  - { name: task, label: T }\n  - { name: task, label: T }\n\
+             \x20 - { name: name, label: N }\n  - { name: a-b, label: A }\n  - { name: s, label: S, kind: select }\n\
+             \x20 - { name: k, label: K, kind: radio }\n").unwrap();
+        let found = super::ui_problems(&ui).join("\n");
+        for want in ["`task`: used twice", "`name`: a field name", "`a-b`: a field name", "`s`: a `select` needs", "kind `radio`"] {
+            assert!(found.contains(want), "{want} not in:\n{found}");
+        }
+        assert!(super::ui_problems(&Default::default()).is_empty());
     }
 }

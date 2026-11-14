@@ -10,5 +10,6 @@
 
 pub mod dashboard;
 pub mod localtime;
+pub mod runs;
 pub mod serve;
 pub mod status;

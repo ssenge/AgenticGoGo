@@ -2,6 +2,23 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added (A-39, the web UI of a process)
+
+- **`agg serve --projects <folder> --process <file>`**: every endpoint takes `?p=<project>`; `POST /api/run`
+  (`start`, `resume`, `stop`), `GET /api/checkpoint` (the checkpoints waiting for a human with their document, open points
+  and decisions), `POST /api/answer` takes `decisions` (appended to the checkpoint's decisions file before the answer),
+  `GET /api/projects`, `GET /api/ui`, `POST /api/projects` (a new project from the process's form, then its run).
+- **`ui:` in the process file**: `new_project` (a command and its form fields) and `overlay` (a command whose facts agg
+  merges into each step's `extra` and the report's `extra`); `--check` validates the fields.
+- The web UI's `/process` page: projects, the new-project form, Start fresh · Resume · Stop, the checkpoints to answer
+  with a decision, a step's facts on the map. `scripts/web_process.py` checks it in a real browser (`scripts/e2e.sh`).
+
+### Fixed
+
+- `run.commit_inputs` no longer commits agg's own runtime (`agg/private/`) when the project has no `.gitignore` yet.
+
 ## 0.0.46 (2026-11-14)
 
 ### Added

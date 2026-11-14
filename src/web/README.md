@@ -39,6 +39,11 @@ AGG_API=http://127.0.0.1:9000 npm run dev
 - **Steer:** Pause · Resume · Inject an instruction · adjust the token Budget · Stop — the same bus
   control verbs as `agg send`. Controls are disabled when no loop is running (the API returns 409).
 
+- **Process runs** (`/process`): with `agg serve --projects <folder> --process <file>`, the projects of the folder and the
+  process's new-project form; per project Start fresh · Resume · Stop, the checkpoints waiting for you (their document,
+  open points, decisions so far, a box for your decisions, Yes/No), the map (click a step for its facts) and where the
+  time went. See `docs/PROCESS.md` ("The web UI of a process").
+
 ## Remote deploy (later)
 
 - Build: `npm run build` (adapter-node). Swap `svelte.config.js` to `adapter-vercel` for Vercel.

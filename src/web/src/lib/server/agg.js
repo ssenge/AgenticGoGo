@@ -45,12 +45,12 @@ export async function aggSend(cmd) {
  * not a steering message: it is recorded in the ask ledger and works whether or not a workflow is
  * running, while every send requires one.
  */
-export async function aggAnswer(payload) {
-  return aggPost('/api/answer', payload);
+export async function aggAnswer(payload, search = '') {
+  return aggPost(`/api/answer${search}`, payload);
 }
 
 /** POST to an agg endpoint, returning { status, body }. */
-async function aggPost(path, payload) {
+export async function aggPost(path, payload) {
   try {
     const res = await fetch(`${BASE}${path}`, {
       method: 'POST',

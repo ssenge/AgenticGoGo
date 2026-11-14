@@ -254,10 +254,45 @@ A process file's `judges:` only (agg.yaml refuses it).
   axis, verdict and cost; `segments` for the time axis; `used` (agent and model per session, from `report.json`); `files.outputs`
   (what the step's commit changed); and `tokens`, `cost`, `task_force`, `map`, `pending` (the running step's substeps).
 
-`steps[].extra` is left empty: a caller merges its own facts there (a waived gate's "unmeasured"). `agg serve` answers
-`GET /api/process?report=map|timeline|profile` (404 when the project ran no process: `agg process` notes its file in
-`agg/private/process.json`), the web UI has a page for it (`/process`), and `agg status` prints the running step and phase.
-Not part of it: a proposals estimate (a caller's own: it merges the savings into the profile).
+`steps[].extra` is left empty: a caller merges its own facts there (a waived gate's "unmeasured"), or the process's
+`ui.overlay` does (below). `agg serve` answers `GET /api/process?report=map|timeline|profile` (404 when the project ran no
+process: `agg process` notes its file in `agg/private/process.json`), the web UI has a page for it (`/process`), and
+`agg status` prints the running step and phase.
+
+### The web UI of a process (A-39)
+
+`agg serve --projects <folder> --process <file>` serves the projects of a folder (each request names one with `?p=<name>`;
+the projects listed are those that ran a process) and starts new runs with `<file>`; a project's own run keeps the file it
+last ran. The page (`/process`) lists the projects, makes a new one from the process's form, and for one project shows
+the controls (Start fresh, Resume, Stop), the checkpoints waiting for a human with their document, the reviewers' open
+points and the decisions so far, and the map and profile. Each action is what a human does in the terminal:
+
+| Endpoint | Does |
+|---|---|
+| `POST /api/run {action}` | `start`: `agg process <file> <project>` in the background (output in `agg/private/run.log`); `resume`: the same with `--resume`; `stop`: SIGTERM to the run (its session is interrupted, `resume` continues). 409 when a run is alive (start, resume) or none is (stop). |
+| `GET /api/checkpoint` | while a run is alive: each open ask whose question names a checkpoint's decisions file, with `step`, `doc`, `document`, `decisions_file`, `decisions`, `open_points_file`, `open_points` |
+| `POST /api/answer {id, value, decisions?}` | the decisions, one list item per line, are appended to the checkpoint's decisions file, then the ask is answered |
+| `GET /api/projects`, `GET /api/ui`, `POST /api/projects {name, <fields>}` | the projects; the form; a new project made by the form's command, then its run started |
+
+The process file's `ui:` section declares what the page shows beyond agg's own report:
+
+```yaml
+ui:
+  new_project:
+    command: scripts/new-project.sh   # run with the new project's path; each field as AGG_FIELD_<NAME>; it creates the folder
+    fields:
+    - { name: task, label: The task, hint: what the run should build, required: true, kind: textarea }
+    - { name: size, label: Size, kind: select, options: [small, large] }   # kind: text (default), textarea, select
+  overlay: scripts/overlay.sh         # run in the project with <project> <kind>, the report's JSON on stdin
+```
+
+The overlay prints `{"steps": {<step id>: {<key>: <value>}}, "run": {<key>: <value>}}`; agg merges each step's facts into its
+`extra` (the map's and the profile's) and the run's into the report's `extra`, and the page shows them as key and value rows.
+A failing overlay leaves the report as agg made it, with `overlay_error`. Not part of it: what the facts mean (a proposals
+estimate, waived gates, the roles a step ran with) is the process's own.
+
+Limit: a run stopped after a checkpoint decision sent the run back to the decision's owner doesn't resume (`--resume` reports
+a diverged ledger); start it again with `--from <step>` in the terminal.
 
 ### Scenarios (A-38)
 

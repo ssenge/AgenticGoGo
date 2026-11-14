@@ -625,3 +625,123 @@ fn a_brief_shows_the_standing_texts_and_the_files_that_follow_them() {
     let script = run(d, &["--brief", "sources"]);
     assert!(!script.status.success() && said(&script).contains("only an agent step"), "{}", said(&script));
 }
+
+// ---- A-39: the process runs in `agg serve` --------------------------------------------------------------------------
+
+/// `agg serve --projects <root> --process <example>` on a free port, ended when dropped.
+struct Served {
+    child: std::process::Child,
+    port: u16,
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Served {
+    /// The server, once it answers.
+    fn start(root: &Path) -> Served {
+        let (bin, home) = &*ENV;
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let child = Command::new(env!("CARGO_BIN_EXE_agg")).args(["serve", "--port", &port.to_string(), "--projects"])
+            .arg(root).arg("--process").arg(process_file()).current_dir(root)
+            .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("HOME", home)
+            .stderr(std::process::Stdio::null()).spawn().unwrap();
+        let served = Served { child, port };
+        wait_for(20, "agg serve answers", || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+        served
+    }
+
+    /// One request: its status and JSON body.
+    fn call(&self, method: &str, path: &str, body: &str) -> (u16, serde_json::Value) {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        write!(s, "{method} {path} HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+               body.len()).unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let code = out.get(9..12).and_then(|c| c.parse().ok()).unwrap_or(0);
+        (code, serde_json::from_str(out.split_once("\r\n\r\n").map(|x| x.1).unwrap_or_default()).unwrap_or_default())
+    }
+}
+
+/// Polls `ok` every 100 ms for `secs` seconds; panics with `what` when it never holds.
+fn wait_for(secs: u64, what: &str, mut ok: impl FnMut() -> bool) {
+    for _ in 0..secs * 10 {
+        if ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("{what}: not within {secs} s");
+}
+
+/// From the page's API: a run is started and waits at its checkpoint, whose document, decisions file and ask the page
+/// reads; a second start is refused while it runs; the answer writes the humans' decision first, which goes back to its
+/// owner; the run is stopped.
+#[test]
+fn the_web_api_starts_a_run_and_answers_its_checkpoint_with_a_decision() {
+    let root = tempfile::tempdir().unwrap();
+    project_in(&root.path().join("one"), "");
+    let web = Served::start(root.path());
+    assert_eq!(web.call("GET", "/api/projects", "").1["projects"], serde_json::json!([]), "no run yet: not listed");
+    assert_eq!(web.call("GET", "/api/state?p=nope", "").0, 404);
+    assert_eq!(web.call("POST", "/api/run?p=one", r#"{"action":"start"}"#).0, 200);
+    let mut waiting = serde_json::Value::Null;
+    wait_for(120, "the first checkpoint waits", || {
+        waiting = web.call("GET", "/api/checkpoint?p=one", "").1["checkpoints"][0].clone();
+        waiting.is_object()
+    });
+    assert_eq!(waiting["step"], "cp-survey");
+    assert_eq!(waiting["decisions_file"], "checkpoints/cp-survey-decisions.md");
+    assert!(waiting["document"].as_str().unwrap().starts_with("# survey of"), "{waiting}");
+    let listed = web.call("GET", "/api/projects", "").1;
+    assert_eq!((listed["projects"][0]["name"].clone(), listed["projects"][0]["asks"].clone()), ("one".into(), 1.into()), "{listed}");
+    assert_eq!(web.call("POST", "/api/run?p=one", r#"{"action":"start"}"#).0, 409, "a run is alive");
+    assert_eq!(web.call("POST", "/api/run?p=one", r#"{"action":"jump"}"#).0, 400);
+    let ask = waiting["ask"].as_str().unwrap();
+    let answer = format!(r#"{{"id":"{ask}","value":"yes","decisions":"keep the survey short"}}"#);
+    assert_eq!(web.call("POST", "/api/answer?p=one", &answer).0, 200);
+    let d = root.path().join("one");
+    assert_eq!(std::fs::read_to_string(d.join("checkpoints/cp-survey-decisions.md")).unwrap(), "- keep the survey short\n");
+    wait_for(120, "the next checkpoint waits", || web.call("GET", "/api/checkpoint?p=one", "").1["checkpoints"][0]["step"] == "cp-build");
+    assert!(history(&d).iter().any(|e| e["kind"] == "reentry" && e["step"] == "1.3 Survey"), "the decision reached its owner");
+    assert_eq!(web.call("POST", "/api/run?p=one", r#"{"action":"stop"}"#).0, 200);
+    wait_for(60, "the run stops", || web.call("GET", "/api/health?p=one", "").1["running"] == false);
+    assert_eq!(web.call("POST", "/api/run?p=one", r#"{"action":"stop"}"#).0, 409, "nothing to stop");
+}
+
+/// The process's `ui:` section: the page gets the new-project form; a project made from it starts its run; the overlay's
+/// facts are on the map and the profile, the run's in the report's `extra`; the run is stopped and resumed.
+#[test]
+fn the_web_api_makes_a_project_from_the_form_overlays_the_report_stops_and_resumes() {
+    let root = tempfile::tempdir().unwrap();
+    let web = Served::start(root.path());
+    let ui = web.call("GET", "/api/ui", "").1;
+    assert_eq!(ui["new_project"]["fields"][0]["name"], "task", "{ui}");
+    assert_eq!(web.call("POST", "/api/projects", r#"{"name":"Bad Name","task":"x"}"#).0, 400);
+    assert_eq!(web.call("POST", "/api/projects", r#"{"name":"two"}"#).0, 400, "the task is required");
+    let made = web.call("POST", "/api/projects", r#"{"name":"two","task":"Build the thing.","size":"small"}"#);
+    assert_eq!(made, (200, serde_json::json!({"ok": true, "project": "two"})));
+    assert_eq!(std::fs::read_to_string(root.path().join("two/task.md")).unwrap(), "Build the thing.\n");
+    assert_eq!(web.call("POST", "/api/projects", r#"{"name":"two","task":"again"}"#).0, 409);
+    wait_for(120, "the new project's checkpoint waits", || web.call("GET", "/api/checkpoint?p=two", "").1["checkpoints"][0]["step"] == "cp-survey");
+    let map = web.call("GET", "/api/process?p=two&report=map", "").1;
+    let survey = map["phases"].as_array().unwrap().iter().flat_map(|p| p["steps"].as_array().unwrap().iter())
+        .find(|s| s["id"] == "survey").unwrap().clone();
+    assert_eq!(survey["extra"]["does"], "lists the units to build", "{map}");
+    assert_eq!(map["extra"]["kind"], "map");
+    let profile = web.call("GET", "/api/process?p=two&report=profile", "").1;
+    assert_eq!(profile["extra"]["kind"], "profile", "{profile}");
+    // stopped at the checkpoint and resumed, the run asks again
+    assert_eq!(web.call("POST", "/api/run?p=two", r#"{"action":"stop"}"#).0, 200);
+    wait_for(60, "the new project's run stops", || web.call("GET", "/api/health?p=two", "").1["running"] == false);
+    assert_eq!(web.call("GET", "/api/checkpoint?p=two", "").1["checkpoints"], serde_json::json!([]), "no run: nobody waits");
+    assert_eq!(web.call("POST", "/api/run?p=two", r#"{"action":"resume"}"#).0, 200);
+    wait_for(120, "the resumed run asks again", || web.call("GET", "/api/checkpoint?p=two", "").1["checkpoints"][0]["step"] == "cp-survey");
+    web.call("POST", "/api/run?p=two", r#"{"action":"stop"}"#);
+    wait_for(60, "the resumed run stops", || web.call("GET", "/api/health?p=two", "").1["running"] == false);
+}

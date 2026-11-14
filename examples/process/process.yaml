@@ -22,6 +22,13 @@ run:
     shared_machine: true                               # a standing section: this machine is shared with other runs
     sections: [{ file: prompts/house-rules.md }]
     inputs: { always: [task.md] }
+ui:   # what `agg serve --process` adds (A-39): a form that makes a new project, and the process's own facts on the report
+  new_project:
+    command: scripts/new-project.sh
+    fields:
+    - { name: task, label: The task, hint: what the run should build, required: true, kind: textarea }
+    - { name: size, label: Size, kind: select, options: [small, large] }
+  overlay: scripts/overlay.sh
 settings:
   project: settings.yaml
   defaults: { repairs: 1 }

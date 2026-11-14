@@ -9,9 +9,17 @@
 //!   GET  /api/state    → the live DashboardState (204 when no snapshot exists yet)
 //!   GET  /api/history  → the Project run-history ledger
 //!   GET  /api/health   → { running: bool, pid: number|null }
-//!   GET  /api/process  → ?report=map|timeline|profile: the run report of a process run (A-38)
+//!   GET  /api/process  → ?report=map|timeline|profile: the run report of a process run (A-38), with the process's
+//!                        `ui.overlay` facts merged in (A-39)
 //!   POST /api/send     → { cmd: "pause"|"resume"|"wake"|"stop"|"inject"|"budget", ... } → the bus
 //!                        (409 if no loop is running here)
+//!   POST /api/answer   → { id, value, decisions? }: answer an open ask; a checkpoint's decisions are written first
+//!   POST /api/run      → { action: "start"|"resume"|"stop" }: a process run (A-39)
+//!   GET  /api/checkpoint → the checkpoints waiting for a human, with their documents (A-39)
+//!   GET  /api/projects, GET /api/ui, POST /api/projects → the projects folder and the new-project form (A-39)
+//!
+//! With `--projects <folder>` every endpoint takes `?p=<project>`, a folder of it; `--process <file>` is the process a
+//! project that ran none yet starts with (`src/ui/runs.rs`).
 //!
 //! Sync server (tiny_http) — a JSON API for one local reader doesn't need async. CORS is locked to
 //! the configured web origin (not `*`). An `auth` seam is present but a no-op for local use; it
@@ -19,6 +27,7 @@
 
 use crate::bus::{self, Command};
 use crate::state::DashboardState;
+use crate::ui::runs::{self, Site};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use tiny_http::{Header, Method, Response, Server};
@@ -33,6 +42,10 @@ pub struct ServeConfig {
     /// Optional bearer token. When set, every /api request must send `Authorization: Bearer <t>`.
     /// Empty = no auth (the local default). This is the remote-ready seam.
     pub token: String,
+    /// a folder of projects: a request names one with `?p=` (A-39)
+    pub projects: Option<PathBuf>,
+    /// the process file a new run is started with, where the project ran none yet (A-39)
+    pub process: Option<PathBuf>,
 }
 
 pub fn run(cfg: ServeConfig) -> Result<()> {
@@ -45,7 +58,8 @@ pub fn run(cfg: ServeConfig) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("could not bind agg serve on 127.0.0.1:{}: {e}", cfg.port))?;
     eprintln!(
         "agg serve → http://127.0.0.1:{}  (project: {})\n  \
-         endpoints: /api/state  /api/history  /api/health  /api/process  POST /api/send\n  \
+         endpoints: /api/state  /api/history  /api/health  /api/process  /api/checkpoint  /api/projects  /api/ui\n  \
+         POST /api/send  /api/answer  /api/run  /api/projects\n  \
          CORS origin: {}{}\n  Ctrl-C to stop.",
         cfg.port,
         cfg.dir.display(),
@@ -70,13 +84,28 @@ pub fn run(cfg: ServeConfig) -> Result<()> {
             continue;
         }
 
+        let site = Site { dir: cfg.dir.clone(), projects: cfg.projects.clone(), process: cfg.process.clone() };
+        let dir = match site.project(&url) {
+            Ok(d) => d,
+            Err((code, e)) => {
+                let _ = req.respond(json_resp(code, &err_json(&e), &origin));
+                continue;
+            }
+        };
         let resp = match (&method, path.as_str()) {
-            (Method::Get, "/api/state") => handle_state(&cfg.dir, &origin),
-            (Method::Get, "/api/history") => handle_history(&cfg.dir, &origin),
-            (Method::Get, "/api/health") => handle_health(&cfg.dir, &origin),
-            (Method::Get, "/api/process") => handle_process(&cfg.dir, &url, &origin),
-            (Method::Post, "/api/send") => handle_send(&mut req, &cfg.dir, &origin),
-            (Method::Post, "/api/answer") => handle_answer(&mut req, &cfg.dir, &origin),
+            (Method::Get, "/api/state") => handle_state(&dir, &origin),
+            (Method::Get, "/api/history") => handle_history(&dir, &origin),
+            (Method::Get, "/api/health") => handle_health(&dir, &origin),
+            (Method::Get, "/api/process") => handle_process(&site, &dir, &url, &origin),
+            (Method::Post, "/api/send") => handle_send(&mut req, &dir, &origin),
+            (Method::Post, "/api/answer") => handle_answer(&mut req, &site, &dir, &origin),
+            (Method::Get, "/api/checkpoint") => {
+                json_resp(200, &runs::waiting(&dir, site.process_of(&dir).as_deref()).to_string(), &origin)
+            }
+            (Method::Get, "/api/projects") => json_resp(200, &site.projects().to_string(), &origin),
+            (Method::Get, "/api/ui") => json_resp(200, &site.ui().to_string(), &origin),
+            (Method::Post, "/api/run") => handle_run(&mut req, &site, &dir, &origin),
+            (Method::Post, "/api/projects") => handle_create(&mut req, &site, &origin),
             _ => json_resp(404, r#"{"error":"not found"}"#, &origin),
         };
         let _ = req.respond(resp);
@@ -107,10 +136,11 @@ fn handle_history(dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>
 
 /// `GET /api/process?report=map|timeline|profile` — the run report of the process the project runs (A-38); 404
 /// when the project has run none.
-fn handle_process(dir: &Path, url: &str, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    let kind = url.split_once('?').map(|(_, q)| q).unwrap_or_default().split('&').find_map(|kv| kv.strip_prefix("report=")).unwrap_or("map");
-    match crate::workflow::process::report::of(dir, kind) {
-        Some(report) => json_resp(200, &report.to_string(), origin),
+fn handle_process(site: &Site, dir: &Path, url: &str, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let kind = runs::query(url, "report").unwrap_or_else(|| "map".into());
+    let file = site.process_of(dir);
+    match file.as_deref().and_then(|f| crate::workflow::process::report::of_file(f, dir, &kind)) {
+        Some(report) => json_resp(200, &runs::overlaid(report, dir, file.as_deref(), &kind).to_string(), origin),
         None => json_resp(404, &err_json("the project has no process run, or the report is none of map, timeline, profile"), origin),
     }
 }
@@ -158,15 +188,10 @@ fn handle_send(
 /// durable fact recorded in the ask ledger, it outlives the workflow that asked, and it therefore
 /// does not require one to be running. Same validator as `agg answer`, so a value off a closed
 /// option list is refused identically whichever channel you use.
-fn handle_answer(req: &mut tiny_http::Request, dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    let mut body = String::new();
-    if std::io::Read::read_to_string(req.as_reader(), &mut body).is_err() {
-        return json_resp(400, &err_json("could not read request body"), origin);
-    }
-    let body = body.as_str();
-    let v: serde_json::Value = match serde_json::from_str(body) {
+fn handle_answer(req: &mut tiny_http::Request, site: &Site, dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let v = match body_json(req) {
         Ok(v) => v,
-        Err(e) => return json_resp(400, &err_json(&format!("invalid JSON body: {e}")), origin),
+        Err(e) => return json_resp(400, &err_json(&e), origin),
     };
     let (Some(id), Some(value)) = (
         v.get("id").and_then(|x| x.as_str()),
@@ -176,12 +201,45 @@ fn handle_answer(req: &mut tiny_http::Request, dir: &Path, origin: &str) -> Resp
     };
     let by = v.get("by").and_then(|x| x.as_str()).unwrap_or("web");
     match crate::core::asks::validate_answer(dir, id, value) {
-        Ok(canonical) => match crate::core::asks::answer(dir, id, &canonical, by, crate::util::now_epoch()) {
+        Ok(canonical) => match runs::decide(dir, site.process_of(dir).as_deref(), id, v["decisions"].as_str().unwrap_or_default())
+            .and_then(|()| crate::core::asks::answer(dir, id, &canonical, by, crate::util::now_epoch()).map_err(|e| (500, format!("could not record answer: {e}"))))
+        {
             Ok(()) => json_resp(200, r#"{"ok":true}"#, origin),
-            Err(e) => json_resp(500, &err_json(&format!("could not record answer: {e}")), origin),
+            Err((code, e)) => json_resp(code, &err_json(&e), origin),
         },
         Err(e) => json_resp(400, &err_json(&e), origin),
     }
+}
+
+/// `POST /api/run` — `{action: start|resume|stop}` on the project's process run.
+fn handle_run(req: &mut tiny_http::Request, site: &Site, dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let done = body_json(req).map_err(|e| (400, e))
+        .and_then(|v| runs::act(dir, site.process_of(dir).as_deref(), v["action"].as_str().unwrap_or_default()));
+    reply(done, origin)
+}
+
+/// `POST /api/projects` — make a new project from the process's form and start its run.
+fn handle_create(req: &mut tiny_http::Request, site: &Site, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let done = match (&site.projects, &site.process) {
+        (Some(root), Some(file)) => body_json(req).map_err(|e| (400, e)).and_then(|v| runs::create(root, file, &v)),
+        _ => Err((404, "the server takes no new projects (needs --projects and --process)".to_string())),
+    };
+    reply(done, origin)
+}
+
+/// An action's JSON, or its refusal.
+fn reply(done: Result<serde_json::Value, runs::Refused>, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    match done {
+        Ok(v) => json_resp(200, &v.to_string(), origin),
+        Err((code, e)) => json_resp(code, &err_json(&e), origin),
+    }
+}
+
+/// A request's body as JSON.
+fn body_json(req: &mut tiny_http::Request) -> std::result::Result<serde_json::Value, String> {
+    let mut body = String::new();
+    std::io::Read::read_to_string(req.as_reader(), &mut body).map_err(|_| "could not read request body".to_string())?;
+    serde_json::from_str(if body.trim().is_empty() { "{}" } else { &body }).map_err(|e| format!("invalid JSON body: {e}"))
 }
 
 /// Map the web tool's `{cmd, ...}` body to a bus Command. Kept strict so a bad body is a clear 400.

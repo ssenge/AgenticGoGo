@@ -194,11 +194,21 @@ pub fn of_project(project: &Path) -> Option<Run> {
 
 /// What `kind` (`map`, `timeline` or `profile`) says of the project's process run; none for another kind or no run.
 pub fn of(project: &Path, kind: &str) -> Option<Value> {
-    let run = of_project(project)?;
+    kind_of(&of_project(project)?, kind)
+}
+
+/// What `kind` says of the run of `project` under the process in `file` (a project that noted no process file of its
+/// own: `agg serve --process`); none for another kind or a file that doesn't open.
+pub fn of_file(file: &Path, project: &Path, kind: &str) -> Option<Value> {
+    kind_of(&Run::open(file, project).ok()?, kind)
+}
+
+/// The report of `kind` of a run.
+fn kind_of(run: &Run, kind: &str) -> Option<Value> {
     match kind {
         "map" => Some(run.map()),
         "timeline" => Some(run.timeline()),
-        "profile" => Some(super::profile::profile(&run)),
+        "profile" => Some(super::profile::profile(run)),
         _ => None,
     }
 }
