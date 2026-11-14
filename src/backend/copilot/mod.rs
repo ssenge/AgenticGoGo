@@ -338,6 +338,7 @@ impl AgentBackend for Copilot {
         timeout_secs: u64,
         cwd: Option<&Path>,
         isolation: crate::isolation::Isolation,
+        _schema: Option<&str>, // Copilot has no structured output: the verdict parser stays tolerant
     ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command.args(ONE_SHOT_FLAGS).arg("--model").arg(model).arg("-p").arg(prompt).stdin(Stdio::null());

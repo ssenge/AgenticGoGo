@@ -347,6 +347,7 @@ impl AgentBackend for Codex {
         timeout_secs: u64,
         cwd: Option<&Path>,
         isolation: crate::isolation::Isolation,
+        schema: Option<&str>,
     ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command
@@ -368,6 +369,15 @@ impl AgentBackend for Codex {
         for kv in super::overrides::codex_config() {
             command.arg("-c").arg(kv);
         }
+        // the schema goes as a file; shortcut: a containerized judge cannot read a host file, so it goes
+        // without one (the verdict parser stays tolerant) — mount it if Codex judges ever run in containers
+        let schema_file = match schema {
+            Some(text) if isolation != crate::isolation::Isolation::Container => Some(schema_file(text)?),
+            _ => None,
+        };
+        if let Some(file) = &schema_file {
+            command.arg("--output-schema").arg(file);
+        }
         // `-`: the prompt comes on stdin, closed after it (Codex hangs on an open stdin); an argument would fail
         // with E2BIG over Linux's 128 KiB cap on one argument
         command.arg("-");
@@ -377,8 +387,13 @@ impl AgentBackend for Codex {
         // Wrapped like every other backend (§2.4) — this used to no-op for Codex on the grounds
         // that `--sandbox read-only` already confines the judge more tightly. That is Codex's own
         // report of its own flag; agg's outer jail is not conditional on it.
-        let command = self.confine_one_shot(command, cwd, isolation)?;
-        let out = crate::os::proc::run_with_input(command, prompt.as_bytes(), timeout_secs)?;
+        let out = self
+            .confine_one_shot(command, cwd, isolation)
+            .and_then(|command| crate::os::proc::run_with_input(command, prompt.as_bytes(), timeout_secs));
+        if let Some(file) = schema_file {
+            let _ = std::fs::remove_file(file);
+        }
+        let out = out?;
         let usage = self.tally_one_shot(&out.stdout);
         Ok(OneShot { body: last_agent_message(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
@@ -407,6 +422,15 @@ impl AgentBackend for Codex {
         }
         Ok(())
     }
+}
+
+/// The answer's JSON Schema as a temporary file for `--output-schema` (Codex reads a schema only from a
+/// file). The caller removes it after the call.
+fn schema_file(text: &str) -> Result<std::path::PathBuf, String> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("agg-schema-{}-{nanos}.json", std::process::id()));
+    std::fs::write(&path, text).map_err(|e| format!("cannot write the answer's schema {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 /// Map agg's effort level onto Codex's `model_reasoning_effort` value. `None` = pass nothing.

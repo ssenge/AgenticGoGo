@@ -60,7 +60,7 @@ All in `trait AgentBackend` (`src/backend/mod.rs`). "Called by" says where agg u
 | `parse_model(line)` | the model **this line** says ran; default `None` | worker reader (first wins), `tally_one_shot` |
 | `parse_session_id(line)` | the resume handle on **this line** | worker reader (last wins) |
 | `parse_result(line)` | `Some(SessionReport)` only for a **terminal** event: cost, `rate_limited`, `rate_limit_reset` | worker reader, `tally_one_shot` |
-| `one_shot(prompt, model, timeout, cwd, isolation)` | a non-agentic, read-only prompt → text call; returns `OneShot { body, stderr, success, usage }` | LLM judges (`src/core/judge.rs`), summarizer (`src/summary.rs`) |
+| `one_shot(prompt, model, effort, timeout, cwd, isolation, schema)` | a non-agentic, read-only prompt → text call; returns `OneShot { body, stderr, success, usage }`. `schema` (the LLM judge passes the verdict's) is a JSON Schema the answer must match: Claude gets `--json-schema` and the body is its `structured_output`, Codex gets `--output-schema` (not in a container: it can't read the file); Copilot ignores it | LLM judges (`src/core/judge.rs`), summarizer (`src/summary.rs`) |
 | `confine_one_shot` (provided) | wraps a one-shot in the OS sandbox under `isolation: sandbox`; call it on every one-shot `Command` | your `one_shot` |
 | `tally_one_shot` (provided) | sums a one-shot's usage with your own parsers (a single JSON object or a JSON Lines stream) | your `one_shot` |
 | `config_conflict(model, effort)` | explain a pair of individually legal values the CLI rejects together; default `None` | `capability::assess` |
