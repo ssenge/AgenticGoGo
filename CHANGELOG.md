@@ -2,6 +2,19 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.0.46 (2026-11-14)
+
+### Added
+
+- **`agg process <file> --overview [--columns <key>,…] [--only-with <key>]`**: a Markdown table per phase from the steps'
+  `meta` fields (`docs/PROCESS.md`): a row per numbered step with a `meta`, its label first, a column per key (all keys in
+  order of first appearance, or the ones `--columns` names); `--only-with <key>` keeps the steps that have that key.
+
+### Changed
+
+- The sources no longer name a consumer of the process runner; the history was rewritten to match (tags and commit
+  hashes changed).
+
 ## 0.0.45 (2026-11-14)
 
 A-37: process files. A process of standard steps runs from YAML.
