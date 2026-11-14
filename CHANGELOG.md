@@ -2,7 +2,7 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
-## Unreleased
+## 0.0.47 (2026-11-14)
 
 ### Added (A-39, the web UI of a process)
 
