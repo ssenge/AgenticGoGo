@@ -461,7 +461,7 @@ fn run_llm(
     //    live in `backend::one_shot`; `cwd` is passed so the judge sees the project it is judging,
     //    and `isolation` OS-jails the call under Sandbox (defense-in-depth over its permission layer).
     let model = &crate::backend::overrides::model(model);
-    let out = match ruler.one_shot(&prompt, model, effort, timeout_secs, Some(cwd), isolation) {
+    let out = match ruler.one_shot(&prompt, model, effort, timeout_secs, Some(cwd), isolation, Some(VERDICT_SCHEMA)) {
         Ok(o) => o,
         Err(e) => return (Verdict::failed(format!("llm judge: {e}")), None),
     };
@@ -557,6 +557,11 @@ fn read_file(path: std::path::PathBuf) -> String {
 
 // ---------------- shared: verdict parsing ----------------
 
+/// The JSON Schema of an LLM judge's verdict, passed to an agent that can enforce it (`one_shot`'s `schema`),
+/// so the answer is the verdict and not prose around it. Every field required and no others: Codex's
+/// structured output accepts only such a schema.
+pub(crate) const VERDICT_SCHEMA: &str = r#"{"type":"object","additionalProperties":false,"required":["met","value","max","target","rationale"],"properties":{"met":{"type":"boolean"},"value":{"type":"number"},"max":{"type":"number"},"target":{"type":"number"},"rationale":{"type":"string"}}}"#;
+
 /// Parse judge output into a Verdict. Distinguish "the command itself failed" (non-zero exit) from
 /// "the command ran but emitted bad JSON". A non-zero exit WITH valid JSON is still accepted (§5.2).
 fn parse_judge_output(out: &Captured) -> Verdict {
@@ -597,6 +602,16 @@ fn parse_verdict(text: &str) -> Result<Verdict, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The schema an agent enforces asks for exactly the fields the prompt names, and an answer to it is a verdict.
+    #[test]
+    fn the_verdict_schema_matches_the_verdict() {
+        let schema: serde_json::Value = serde_json::from_str(VERDICT_SCHEMA).unwrap();
+        let required: Vec<&str> = schema["required"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(required, ["met", "value", "max", "target", "rationale"]);
+        let answer = r#"{"met":false,"value":0,"max":1,"target":1,"rationale":"fix x"}"#;
+        assert_eq!(parse_verdict(answer).unwrap().rationale, "fix x");
+    }
     use crate::isolation::Isolation;
 
     /// A command judge in a fresh project folder: its verdict and the folder.

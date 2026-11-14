@@ -87,7 +87,7 @@ pub fn summarize(
     // cwd is None (the summarizer runs in agg's own dir, not the project) → never confined; it is
     // a tool-less LLM call over worker thoughts, not a worker-rewritable script.
     let model = &crate::backend::overrides::model(model);
-    let out = ruler.one_shot(&prompt, model, "", timeout_secs, None, crate::isolation::Isolation::None).ok()?;
+    let out = ruler.one_shot(&prompt, model, "", timeout_secs, None, crate::isolation::Isolation::None, None).ok()?;
 
     let raw = parse_summaries(&out.body)?;
     Some((Summaries { cumulative: raw.cumulative, windowed: raw.windowed }, out.usage))

@@ -164,6 +164,7 @@ impl AgentBackend for Claude {
         timeout_secs: u64,
         cwd: Option<&Path>,
         isolation: crate::isolation::Isolation,
+        schema: Option<&str>,
     ) -> Result<OneShot, String> {
         let mut command = Command::new(self.bin());
         command
@@ -177,6 +178,9 @@ impl AgentBackend for Claude {
             .arg("user");
         if !effort.is_empty() {
             command.arg("--effort").arg(effort);
+        }
+        if let Some(schema) = schema {
+            command.arg("--json-schema").arg(schema);
         }
         if let Some(dir) = cwd {
             command.current_dir(dir);
@@ -252,13 +256,15 @@ impl AgentBackend for Claude {
     }
 }
 
-/// `--output-format json` wraps the answer in an envelope; the model's text is in `.result`.
-/// Falls back to the raw bytes when the shape is anything else, so an envelope change degrades to
-/// "pass the text through" rather than to an empty verdict.
+/// `--output-format json` wraps the answer in an envelope: with `--json-schema` the checked answer is in
+/// `.structured_output`, else the model's text is in `.result`. Falls back to the raw bytes when the shape is
+/// anything else, so an envelope change degrades to "pass the text through" rather than to an empty verdict.
 fn unwrap_envelope(stdout: &[u8]) -> String {
-    serde_json::from_slice::<serde_json::Value>(stdout)
-        .ok()
-        .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(str::to_string))
+    let envelope = serde_json::from_slice::<serde_json::Value>(stdout).ok();
+    let structured = envelope.as_ref().and_then(|v| v.get("structured_output")).filter(|s| s.is_object());
+    structured
+        .map(|s| s.to_string())
+        .or_else(|| envelope.as_ref().and_then(|v| v.get("result")?.as_str().map(str::to_string)))
         .unwrap_or_else(|| String::from_utf8_lossy(stdout).into_owned())
 }
 
@@ -274,6 +280,14 @@ mod tests {
         assert_eq!(unwrap_envelope(br#"{"unexpected":true}"#), r#"{"unexpected":true}"#);
         assert_eq!(unwrap_envelope(b"not json at all"), "not json at all");
         assert_eq!(unwrap_envelope(b""), "");
+    }
+
+    /// With `--json-schema` the checked answer is `structured_output`, preferred over the text in `result`.
+    #[test]
+    fn unwrap_envelope_prefers_the_structured_answer() {
+        let envelope = br#"{"result":"Here it is: {\"met\":false}","structured_output":{"met":true}}"#;
+        assert_eq!(unwrap_envelope(envelope), r#"{"met":true}"#);
+        assert_eq!(unwrap_envelope(br#"{"result":"text","structured_output":null}"#), "text");
     }
 
     /// A-33: a fork resumes the session and branches off it.

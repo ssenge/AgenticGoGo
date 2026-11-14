@@ -213,6 +213,9 @@ pub trait AgentBackend: Send + Sync {
     /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
     /// `effort` is the reasoning effort in agg's vocabulary; empty = the agent's own default.
+    /// `schema` is a JSON Schema the answer must match (the judge's verdict), for an agent that can
+    /// enforce one; the answer then comes back as that JSON text. An agent that cannot ignores it.
+    #[allow(clippy::too_many_arguments)] // one call's independent facts; every backend reads each of them
     fn one_shot(
         &self,
         prompt: &str,
@@ -221,6 +224,7 @@ pub trait AgentBackend: Send + Sync {
         timeout_secs: u64,
         cwd: Option<&Path>,
         isolation: crate::isolation::Isolation,
+        schema: Option<&str>,
     ) -> Result<OneShot, String>;
 
     /// Wrap a one-shot's built [`Command`] in the OS sandbox whenever the step is confined — the

@@ -227,3 +227,12 @@ fn codex_declares_what_it_genuinely_cannot_do() {
     let ok = Codex.parse_result(r#"{"type":"turn.completed","usage":{}}"#).unwrap();
     assert!(!ok.rate_limited);
 }
+
+/// `--output-schema` reads the schema from a file: it holds exactly the text, at a fresh path per call.
+#[test]
+fn the_answers_schema_goes_to_a_file_of_its_own() {
+    let (a, b) = (super::schema_file("{}").unwrap(), super::schema_file(r#"{"type":"object"}"#).unwrap());
+    assert_ne!(a, b);
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), r#"{"type":"object"}"#);
+    let _ = (std::fs::remove_file(a), std::fs::remove_file(b));
+}

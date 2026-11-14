@@ -19,6 +19,13 @@ Notable changes to agg. Newest first; each entry names the config keys and inter
 
 - `run.commit_inputs` no longer commits agg's own runtime (`agg/private/`) when the project has no `.gitignore` yet.
 
+### Changed
+
+- **An LLM judge's verdict is enforced by the agent**: the ruler gets the verdict's JSON Schema (Claude `--json-schema`,
+  Codex `--output-schema`), so a judge can no longer answer in prose and fail with "did not emit valid verdict JSON",
+  which cost a repair round. Copilot has no such flag and keeps the tolerant parse. `Backend::one_shot` takes a
+  `schema: Option<&str>` (`docs/BACKENDS.md`).
+
 ## 0.0.46 (2026-11-14)
 
 ### Added
