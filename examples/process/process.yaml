@@ -46,8 +46,8 @@ phases:
 - id: prepare
   name: Prepare
   steps:
-  - { id: fetch, name: Fetch, kind: outside }
-  - { id: sources, name: Sources, kind: script, run: scripts/sources.sh }
+  - { id: fetch, name: Fetch, kind: outside, meta: { desc: "Gets the sources", done: "the sources are there" } }
+  - { id: sources, name: Sources, kind: script, run: scripts/sources.sh, meta: { desc: "Lists them", done: "sources.md names each" } }
   - id: survey
     name: Survey
     kind: agent

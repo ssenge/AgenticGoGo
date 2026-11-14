@@ -26,6 +26,7 @@ pub mod inputs;
 pub mod ladder;
 pub mod leftovers;
 pub mod number;
+pub mod overview;
 pub mod proc;
 pub mod profile;
 pub mod report;
@@ -48,7 +49,7 @@ use anyhow::{anyhow, bail, Result};
 use super::Run;
 
 const USAGE: &str = "usage: agg process <file> <project> [--resume] [--from <step>] [--note <text> | --note-file <file> \
-    [--decided]] [--reset] [--until <step>] [--reentries <n>]\n       agg process <file> --check\n       agg process <file> --list\n       \
+    [--decided]] [--reset] [--until <step>] [--reentries <n>]\n       agg process <file> --check\n       agg process <file> --list\n       agg process <file> --overview [--columns <key>,…] [--only-with <key>]\n       \
     agg process <file> --scenario <scenario.yaml>… [--projects <dir>] [--keep]\n       \
     agg process <file> <project> --brief <step>\n       agg process <file> <project> --report map|timeline|profile [--json] [--since <epoch>] [--current <step>] [--stopped] [--log <file>]";
 
@@ -65,6 +66,10 @@ pub fn command(args: &[String]) -> Result<ExitCode> {
         let process = format::Process::parse(&text).map_err(|e| anyhow!("{}: {e}", file.display()))?;
         let list: Vec<serde_json::Value> = number::number(&process).iter().map(number::Numbered::json).collect();
         println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.iter().any(|a| a == "--overview") {
+        overview::command(&file, args)?;
         return Ok(ExitCode::SUCCESS);
     }
     if args.iter().any(|a| a == "--scenario") {

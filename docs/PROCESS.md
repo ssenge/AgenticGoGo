@@ -14,6 +14,7 @@ agg process <file> <project> [--resume] [--from <step>] [--note <text> | --note-
                              [--reset] [--until <step>] [--reentries <n>]
 agg process <file> --check     # validate the file; a verdict JSON last, exit 1 on any problem
 agg process <file> --list      # the numbered steps as JSON
+agg process <file> --overview [--columns desc,done] [--only-with done]   # a Markdown table per phase from the steps' `meta`
 ```
 
 `examples/process/` is a complete, commented example (it is also what the test suite runs).
@@ -103,7 +104,7 @@ Every step has `id`, `name`, `kind` and optionally:
 | `pre`, `post` | commands before the step and after it is done (neither for a skipped step or one before `--from`); a failure fails the step |
 | `settings` | the step's defaults (below) |
 | `constraints` | text for the task force's brief when this step fails, beside the step's rubric |
-| `meta` | free-form, ignored by agg, handed through by `--list` (descriptions for docs and slides) |
+| `meta` | free-form, ignored by agg, handed through by `--list` (descriptions for docs and slides) and shown by `--overview`: a row per step with a `meta`, a column per key (`--columns` chooses and orders them; `--only-with <key>` keeps the steps that have it) |
 
 ### Kinds
 

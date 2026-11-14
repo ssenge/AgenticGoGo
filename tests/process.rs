@@ -408,6 +408,10 @@ fn check_and_list_read_only_the_file_and_a_bad_process_is_not_run() {
     assert!(labels.contains(&"1.4 CP1 Survey approved") && labels.contains(&"2.4 CP2 Build approved") && labels.contains(&"3.4 Handover"), "{labels:?}");
     let ok = agg(&[process_file().to_str().unwrap(), "--check"]);
     assert!(ok.status.success(), "{}", said(&ok));
+    let table = agg(&[process_file().to_str().unwrap(), "--overview", "--columns", "desc,done"]);
+    let text = String::from_utf8_lossy(&table.stdout);
+    assert!(text.starts_with("## Phase 1: ") && text.contains("| Step | Desc | Done |"), "{text}");
+    assert!(text.contains("| 1.1 Fetch | Gets the sources | the sources are there |"), "{text}");
 }
 
 // ---- A-38: what every process run needs -----------------------------------------------------------------------

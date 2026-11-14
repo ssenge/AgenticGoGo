@@ -58,7 +58,7 @@ impl Run {
     }
 
     /// The flags that take a value, so a driver can tell its own positional arguments from them.
-    pub const VALUED: [&'static str; 6] = ["--from", "--note", "--note-file", "--until", "--reentries", "--brief"];
+    pub const VALUED: [&'static str; 8] = ["--from", "--note", "--note-file", "--until", "--reentries", "--brief", "--columns", "--only-with"];
 }
 
 /// When a step's checks run: before its work, or after it, before its own judges.
