@@ -180,6 +180,14 @@ impl Drop for StopHooks {
     }
 }
 
+/// Removes the project's judge scratch when the run ends, on every exit ([`crate::core::judge::sweep_scratch`]).
+pub(crate) struct SweepScratch(pub(crate) PathBuf);
+impl Drop for SweepScratch {
+    fn drop(&mut self) {
+        crate::core::judge::sweep_scratch(&self.0);
+    }
+}
+
 pub(crate) struct RunPidGuard {
     pub(crate) dir: PathBuf,
 }
@@ -320,6 +328,8 @@ fn run_reported(
     }
     // on_stop moves into the Drop guard so it fires on any exit incl. panic (its dispatcher).
     let _stop_hooks = StopHooks { handlers: std::mem::take(&mut lifecycle.on_stop) };
+    // declared after the stop hooks, so it drops first: the judges' scratch goes before `on_stop` fires.
+    let _sweep = SweepScratch(dir.to_path_buf());
 
     // A queue does not outlive the workflow it was meant for. Anything left in `in/` was sent to a
     // run that has already ended and would otherwise be applied here, by an unrelated workflow,

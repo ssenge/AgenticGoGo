@@ -1586,7 +1586,7 @@ change from you:
 
 | variable | scope | for |
 |---|---|---|
-| `AGG_JUDGE_SCRATCH`, `TMPDIR` | per **session**, shared by that step's judges | your own temp files, and measurement hand-off |
+| `AGG_JUDGE_SCRATCH`, `TMPDIR` | per **session**, shared by that step's judges; removed when the run ends (a verdict's `evidence` is copied out first; `AGG_KEEP_JUDGE_SCRATCH=1` keeps it, for debugging a judge) | your own temp files, and measurement hand-off |
 | `CARGO_TARGET_DIR`, `GOCACHE`, `XDG_CACHE_HOME`, `PYTHONPYCACHEPREFIX`, `npm_config_cache` | per **project**, persistent | build caches — kept across sessions so nothing rebuilds cold |
 | `PYTEST_ADDOPTS=-p no:cacheprovider` | — | pytest insists on a rootdir cache dir and has no variable for it |
 

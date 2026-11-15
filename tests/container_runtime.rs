@@ -85,7 +85,7 @@ const DONE_JUDGE: &str = r#"#!/bin/sh
 } >> "$AGG_JUDGE_SCRATCH/judge.log" 2>&1
 n=$(cat src/sessions.log 2>/dev/null | wc -l | tr -d ' ')
 if [ "${n:-0}" -ge 2 ]; then
-  echo "{\"met\":true,\"value\":$n,\"max\":2,\"target\":2,\"rationale\":\"two sessions\"}"
+  echo "{\"met\":true,\"value\":$n,\"max\":2,\"target\":2,\"rationale\":\"two sessions\",\"evidence\":[\"judge.log\"]}"
 else
   echo "{\"met\":false,\"value\":${n:-0},\"max\":2,\"target\":2,\"rationale\":\"not yet\"}"
 fi
@@ -207,7 +207,12 @@ fn the_worker_and_its_judges_run_in_the_image_with_exactly_what_the_run_grants()
     assert_eq!(w.matches("HOME_FRESH").count(), 2, "a fresh home EVERY session:\n{w}");
     assert!(!w.contains("HOME_SURVIVED"), "nothing survives a session in the worker's home:\n{w}");
 
-    let j = read(&d.join("agg/private/container/judge/scratch-2/judge.log"));
+    // the scratch is gone with the run; its log survives as the verdict's evidence of session 2
+    assert!(!d.join("agg/private/container/judge/scratch-2").exists(), "the judge scratch outlived the run");
+    let mut kept = vec![];
+    files(&d.join("agg/private/evidence"), &mut kept);
+    let log_of_2 = kept.iter().find(|p| p.ends_with("judge.log") && p.components().any(|c| c.as_os_str() == "2"));
+    let j = read(log_of_2.unwrap_or_else(|| panic!("no judge.log kept for session 2: {kept:?}")));
     for want in ["JUDGE_IN_CONTAINER", "JUDGE_PROJECT_WRITE_DENIED", "JUDGE_CONTEXT_SEEN", "JUDGE_SCRATCH_OK"] {
         assert!(j.contains(want), "script judge: `{want}` missing\n{j}");
     }

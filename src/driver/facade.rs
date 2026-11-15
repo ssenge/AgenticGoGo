@@ -1919,6 +1919,7 @@ impl Drop for Agg {
         if let Err(e) = started.report.finish(&report) {
             eprintln!("  ⚠ agg: cannot write {}: {e}", crate::paths::report_json(&st.dir).display());
         }
+        crate::core::judge::sweep_scratch(&st.dir);
     }
 }
 

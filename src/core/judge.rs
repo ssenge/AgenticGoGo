@@ -171,13 +171,10 @@ fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
 /// The project hash keeps two agg runs on one machine (same session number, different projects) from
 /// colliding — the scratch is under a shared `$TMPDIR`, so the path has to carry the project.
 ///
-/// ponytail: NEITHER DIR IS EVER REMOVED. One scratch per session and one cache per project stay in
-/// `$TMPDIR` until the OS sweeps it — measured after one day of development: 1783 scratch dirs and
-/// 646 cache dirs, though the great majority are the test suite's throwaway projects rather than
-/// real runs. The ceiling is untidiness, not growth that matters: the dirs are small, `$TMPDIR` is
-/// exactly where transient state belongs, and keeping them is what makes a failed judge debuggable
-/// after the fact. Upgrade path when it bites: sweep this project's `agg-judges-<key>-*` on run end
-/// (`Agg::drop` / the loop's finalize), keeping the newest few.
+/// The scratch outlives its session but not the run: [`sweep_scratch`] removes it when the run
+/// ends. What a verdict names as evidence was copied out when it was judged (`core::evidence`); the
+/// rest (a copied tree, a rendered deployment holding a secret) must not stay readable on the host.
+/// The CACHE ([`cache_dir`]) is kept: it holds compiled toolchain output, not the project's data.
 pub(crate) fn scratch_dir(cwd: &Path, session: Option<u32>) -> std::io::Result<std::path::PathBuf> {
     let dir = scratch_path(cwd, session, crate::isolation::Isolation::None);
     std::fs::create_dir_all(&dir)?;
@@ -193,6 +190,29 @@ pub fn scratch_path(cwd: &Path, session: Option<u32>, tier: crate::isolation::Is
         return crate::isolation::runtime::judge_scratch(cwd, session);
     }
     std::env::temp_dir().join(format!("agg-judges-{}-{}", project_key(cwd), session.unwrap_or(0)))
+}
+
+/// Removes every session's judge scratch of this project, on the host and in the container dir: run
+/// at run end, when the evidence has been copied out. One run per project at a time (the run guard),
+/// so no live judge loses its files. `AGG_KEEP_JUDGE_SCRATCH` set keeps them, for debugging a judge.
+pub(crate) fn sweep_scratch(cwd: &Path) {
+    if std::env::var_os("AGG_KEEP_JUDGE_SCRATCH").is_some() {
+        return; // debugging a judge: its working files stay where it left them
+    }
+    sweep(&std::env::temp_dir(), &format!("agg-judges-{}-", project_key(cwd)));
+    if let Some(container) = crate::isolation::runtime::judge_scratch(cwd, None).parent() {
+        sweep(container, "scratch-");
+    }
+}
+
+/// Removes the directories in `dir` whose name starts with `prefix`; a failure leaves that one behind.
+fn sweep(dir: &Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        if e.file_name().to_string_lossy().starts_with(prefix) && e.path().is_dir() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// The judges' TOOLCHAIN CACHE — per project, and deliberately **not** per session.
@@ -601,6 +621,23 @@ fn parse_verdict(text: &str) -> Result<Verdict, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_sweep_removes_this_projects_scratch_and_keeps_the_rest() {
+        let project = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let mine = scratch_dir(project.path(), Some(3)).unwrap();
+        std::fs::write(mine.join("cdk.out"), "secret").unwrap();
+        let theirs = scratch_dir(other.path(), Some(3)).unwrap();
+        let cache = cache_dir(project.path()).unwrap();
+        let boxed = crate::isolation::runtime::judge_scratch(project.path(), Some(2));
+        std::fs::create_dir_all(&boxed).unwrap();
+        sweep_scratch(project.path());
+        assert!(!mine.exists() && !boxed.exists());
+        assert!(theirs.exists() && cache.exists());
+        let _ = std::fs::remove_dir_all(theirs);
+        let _ = std::fs::remove_dir_all(cache);
+    }
+
     use super::*;
 
     /// The schema an agent enforces asks for exactly the fields the prompt names, and an answer to it is a verdict.

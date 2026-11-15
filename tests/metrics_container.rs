@@ -135,7 +135,8 @@ impl Ctr {
     /// `(exit code, stdout, stdout + stderr)`.
     fn agg_split(&self, args: &[&str]) -> (Option<i32>, String, String) {
         let mut c = Command::cargo_bin("agg").unwrap();
-        c.args(args).current_dir(&self.dir).env("PATH", &self.path).env("HOME", self.root.0.join("home")).env("TRIVY_CACHE_DIR", &self.trivy);
+        c.args(args).current_dir(&self.dir).env("PATH", &self.path).env("HOME", self.root.0.join("home")).env("TRIVY_CACHE_DIR", &self.trivy)
+            .env("AGG_KEEP_JUDGE_SCRATCH", "1"); // the fake logs into the scratch, read after the run
         // HOME is redirected, which would hide the engine client's config (colima's context).
         if std::env::var_os("DOCKER_CONFIG").is_none() {
             if let Some(h) = std::env::var_os("HOME") {

@@ -2,6 +2,15 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Changed
+
+- **The judges' scratch is removed when the run ends** (`$AGG_JUDGE_SCRATCH`, every session's, on the host and in the
+  container dir). What a verdict names as `evidence` was copied to `agg/private/evidence/` when it was judged; anything
+  else a judge left there (a copied tree, rendered deployment files that can hold secrets) no longer stays readable on
+  the host. The toolchain cache is kept. `AGG_KEEP_JUDGE_SCRATCH=1` keeps the scratch, for debugging a judge.
+
 ## 0.0.48 (2026-11-15)
 
 ### Added
