@@ -97,6 +97,9 @@ try:
         page.locator("textarea").first.fill("keep the survey short")
         page.get_by_text("Yes, approve").click()
         page.get_by_text("Waiting for you · cp-build").wait_for(timeout=120000)
+        page.get_by_text("The critics' last verdicts").wait_for(timeout=20000)
+        check(page.get_by_text("Now", exact=True).count() == 1 and page.locator(".reviews li").count() >= 1,
+              "a running process shows what it does now, its activity and the critics' last verdicts")
         decided = (P / "projects/demo/checkpoints/cp-survey-decisions.md").read_text()
         check(decided == "- keep the survey short\n", "the decision was written before the yes")
         page.locator("button.chip", has_text="1.3").first.click()
@@ -106,6 +109,11 @@ try:
         page.get_by_role("button", name="Resume").wait_for(timeout=60000)
         check(True, "Stop ends the run; Resume is offered")
         shot(page, "stopped")
+        page.get_by_role("button", name="Resume").click()
+        page.get_by_text("Waiting for you · cp-build").wait_for(timeout=120000)
+        check(True, "Resume after the decision's re-entry continues the run: it asks at cp-build again")
+        page.get_by_role("button", name="Stop").click()
+        page.get_by_role("button", name="Resume").wait_for(timeout=60000)
         check(not errors, f"no page errors {errors}")
         browser.close()
 finally:

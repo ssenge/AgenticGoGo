@@ -88,7 +88,8 @@ impl Flow {
         }
         // only a step that names what it reads can tell a refresh from a new task: one without inputs runs it whole
         let since = t.inputs.as_ref().and_then(|_| self.refreshing(&name));
-        if let Some(why) = since.as_deref().filter(|_| changed.is_none()).and_then(|c| untouched(self, t, c)) {
+        let fresh = changed.is_none() && !self.replays_step(t.step.name.as_deref().unwrap_or(&name));
+        if let Some(why) = since.as_deref().filter(|_| fresh).and_then(|c| untouched(self, t, c)) {
             self.record(&name, "unchanged", true, &why);
             return Ok(Outcome::Unchanged);
         }

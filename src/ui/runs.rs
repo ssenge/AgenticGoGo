@@ -296,9 +296,34 @@ pub fn merge(report: &mut Value, facts: &Value) {
     }
 }
 
+/// The critics' last `count` verdicts (agg names a step's critic `<step key>-review`), newest last: they review outside the
+/// session's activity, so the page shows them on their own.
+pub fn reviews(project: &Path, count: usize) -> Value {
+    let text = std::fs::read_to_string(crate::paths::verdicts_jsonl(project)).unwrap_or_default();
+    let rows: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["judge"].as_str().is_some_and(|j| j.ends_with("-review")))
+        .map(|v| json!({"step": v["step"], "judge": v["judge"], "met": v["met"], "rationale": v["rationale"], "ts": v["ts"]}))
+        .collect();
+    json!({"reviews": rows[rows.len().saturating_sub(count)..]})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reviews_are_the_critics_last_verdicts() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(reviews(tmp.path(), 2), json!({"reviews": []}), "no ledger: none");
+        let file = crate::paths::verdicts_jsonl(tmp.path());
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let row = |judge: &str, met: bool| json!({"step": "s", "judge": judge, "met": met, "rationale": judge, "ts": 1}).to_string();
+        let lines = [row("a-review", false), row("hook-x", true), row("b-review", true), row("c-review", false)];
+        std::fs::write(&file, lines.join("\n") + "\nnot json\n").unwrap();
+        let found = reviews(tmp.path(), 2)["reviews"].clone();
+        assert_eq!(found.as_array().unwrap().iter().map(|r| r["judge"].as_str().unwrap()).collect::<Vec<_>>(), ["b-review", "c-review"]);
+        assert_eq!(found[1]["met"], false);
+    }
 
     #[test]
     fn a_query_value_is_found_and_decoded() {

@@ -265,13 +265,15 @@ process: `agg process` notes its file in `agg/private/process.json`), the web UI
 the projects listed are those that ran a process) and starts new runs with `<file>`; a project's own run keeps the file it
 last ran. The page (`/process`) lists the projects, makes a new one from the process's form, and for one project shows
 the controls (Start fresh, Resume, Stop), the checkpoints waiting for a human with their document, the reviewers' open
-points and the decisions so far, and the map and profile. Each action is what a human does in the terminal:
+points and the decisions so far, while it runs what it does now (its step, agent, current activity, how long it has
+been quiet), the session's activity and the critics' last verdicts, and the map and profile. Each action is what a human does in the terminal:
 
 | Endpoint | Does |
 |---|---|
 | `POST /api/run {action}` | `start`: `agg process <file> <project>` in the background (output in `agg/private/run.log`); `resume`: the same with `--resume`; `stop`: SIGTERM to the run (its session is interrupted, `resume` continues). 409 when a run is alive (start, resume) or none is (stop). |
 | `GET /api/checkpoint` | while a run is alive: each open ask whose question names a checkpoint's decisions file, with `step`, `doc`, `document`, `decisions_file`, `decisions`, `open_points_file`, `open_points` |
 | `POST /api/answer {id, value, decisions?}` | the decisions, one list item per line, are appended to the checkpoint's decisions file, then the ask is answered |
+| `GET /api/reviews` | the critics' last eight verdicts (`<step>-review` in `agg/private/verdicts.jsonl`), with `step`, `judge`, `met`, `rationale`, `ts` |
 | `GET /api/projects`, `GET /api/ui`, `POST /api/projects {name, <fields>}` | the projects; the form; a new project made by the form's command, then its run started |
 
 The process file's `ui:` section declares what the page shows beyond agg's own report:

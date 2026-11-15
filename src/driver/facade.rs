@@ -1721,6 +1721,13 @@ impl Agg {
         Ok(Some(rec))
     }
 
+    /// Whether a resume's next recorded call is step `name`'s: the run replays what the step did then instead of
+    /// deciding again on today's files (a refresh that finds its inputs unchanged now ran a session then).
+    pub fn replays_step(&self, name: &str) -> bool {
+        self.resume && self.ready().is_ok_and(|s| matches!(s.replay.get(self.ord.get() as usize),
+            Some(rec @ CallRecord::Step { .. }) if rec.what() == name))
+    }
+
     /// Append a completed call and advance the ordinal. **Not called on a fast-forward** — the
     /// record is already there, and re-appending it would double every ordinal on the next resume.
     fn record(&self, rec: CallRecord) -> Result<(), Fatal> {

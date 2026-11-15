@@ -102,6 +102,7 @@ pub fn run(cfg: ServeConfig) -> Result<()> {
             (Method::Get, "/api/checkpoint") => {
                 json_resp(200, &runs::waiting(&dir, site.process_of(&dir).as_deref()).to_string(), &origin)
             }
+            (Method::Get, "/api/reviews") => json_resp(200, &runs::reviews(&dir, 8).to_string(), &origin),
             (Method::Get, "/api/projects") => json_resp(200, &site.projects().to_string(), &origin),
             (Method::Get, "/api/ui") => json_resp(200, &site.ui().to_string(), &origin),
             (Method::Post, "/api/run") => handle_run(&mut req, &site, &dir, &origin),

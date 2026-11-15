@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import Checkpoints from '$lib/components/process/Checkpoints.svelte';
   import Facts from '$lib/components/process/Facts.svelte';
+  import Live from '$lib/components/process/Live.svelte';
   import Projects from '$lib/components/process/Projects.svelte';
   import RunControls from '$lib/components/process/RunControls.svelte';
 
@@ -11,6 +12,8 @@
   let profile = $state(null);
   let checkpoints = $state([]);
   let running = $state(false);
+  let live = $state(null);       // the running session's state (`/api/state`)
+  let reviews = $state([]);      // the critics' last verdicts
   let projects = $state(null);   // {projects, folder} of a projects folder
   let form = $state(null);       // the process's new-project form
   let chosen = $state(null);     // the step whose details are open
@@ -34,6 +37,11 @@
     const [m, p, c, h] = await Promise.all([get(join('/api/process', 'report=map')), get(join('/api/process', 'report=profile')),
       get(`/api/checkpoint${query}`), get(`/api/health${query}`)]);
     running = !!h.body?.running;
+    if (running) {
+      const [st, rv] = await Promise.all([get(`/api/state${query}`), get(`/api/reviews${query}`)]);
+      live = st.ok && !st.body?.waiting ? st.body : null;
+      reviews = rv.body?.reviews ?? [];
+    }
     checkpoints = c.body?.checkpoints ?? [];
     if (m.status === 404) {
       error = 'This project has run no process yet.';
@@ -93,6 +101,7 @@
   {:else}
     <section class="card"><RunControls {running} {query} onchange={load} /></section>
     <Checkpoints {checkpoints} {query} onchange={load} />
+    {#if running}<Live state={live} {reviews} waiting={checkpoints[0]?.step ?? ''} />{/if}
   {/if}
 
   {#if !listing && map}

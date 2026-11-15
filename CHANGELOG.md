@@ -4,11 +4,18 @@ Notable changes to agg. Newest first; each entry names the config keys and inter
 
 ## Unreleased
 
+### Added
+
+- The `/process` page shows a running process live: what it does now (step, agent and model, the current activity or
+  the checkpoint it waits at, how long it has been quiet), the session's activity, and the critics' last verdicts
+  (`GET /api/reviews`).
+
 ### Fixed
 
 - **`--resume` after a re-entry**: a run stopped after a re-entry (a checkpoint decision's or the task force's) resumed
   from the first step against a ledger that starts at the re-entered step, and stopped with `resume DIVERGED`. A start
-  now records its arguments (`agg/private/started.json`) and a plain `--resume` continues that run with them.
+  now records its arguments (`agg/private/started.json`) and a plain `--resume` continues that run with them; a step the
+  ledger recorded is replayed, not decided again (a refresh whose inputs look unchanged now ran a session then).
 
 ## 0.0.47 (2026-11-14)
 
