@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(continued(project.path(), &restart), (restart.clone(), false));
         let (resumed, replays) = continued(project.path(), &args(&["p.yaml", "proj", "--resume"]));
         assert!(replays && resumed.starts_with(&restart) && resumed.last().map(String::as_str) == Some("--resume"));
-        assert_eq!(continued(project.path(), &args(&["p.yaml", "proj"])).1, false, "a fresh start records itself");
+        assert!(!continued(project.path(), &args(&["p.yaml", "proj"])).1, "a fresh start records itself");
         assert_eq!(continued(project.path(), &args(&["p.yaml", "proj", "--resume"])).0, args(&["p.yaml", "proj", "--resume"]));
     }
 
