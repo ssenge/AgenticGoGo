@@ -45,6 +45,8 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     let project = std::fs::canonicalize(project).map_err(|e| anyhow!("{}: {e}", project.display()))?;
     let vars = template::variables(&spec, &list, &home, &project.display().to_string()).map_err(|e| anyhow!("{e}"))?;
     remember(&project, file);
+    let (args, resume) = continued(&project, args);
+    let args = &args;
     let mut run = Run::from_args(args)?;
     run.from = run.from.map(|f| resolve(&list, &f)).transpose().map_err(|e| anyhow!("--from {e}"))?;
     run.until = run.until.map(|f| resolve(&list, &f)).transpose().map_err(|e| anyhow!("--until {e}"))?;
@@ -59,7 +61,7 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     forget_stale_bases(&spec, &project);
     let settings = settings_of(&spec, &list, &home, &project, &vars)?;
     let roles = roles_of(&spec, &project)?;
-    let mut agg = Agg::open_with(&project, Opts { resume: resumes(args) })?.memory(spec.agg.memory)
+    let mut agg = Agg::open_with(&project, Opts { resume })?.memory(spec.agg.memory)
         .vars(vars.clone()).user_settings(spec.agg.user_settings)
         .on_regression(if spec.agg.on_regression == "rollback" { OnRegression::Rollback } else { OnRegression::Annotate })
         .judge_timeout(spec.agg.judge_timeout);
@@ -84,6 +86,23 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
 /// restart, which keeps the arguments it was started with), where the ledger no longer matches.
 fn resumes(args: &[String]) -> bool {
     args.iter().any(|a| a == "--resume") && !args.iter().any(|a| a == "--from")
+}
+
+/// The arguments of the run and whether it replays the ledger. A start records its arguments
+/// (`agg/private/started.json`); a plain `--resume` continues the run that was started last with them: after a re-entry
+/// that run starts at its step with its note, and its ledger begins there, so walking from the first step would diverge.
+fn continued(project: &Path, args: &[String]) -> (Vec<String>, bool) {
+    let file = crate::paths::private_dir(project).join("started.json");
+    if !resumes(args) {
+        let _ = std::fs::create_dir_all(crate::paths::private_dir(project));
+        let _ = std::fs::write(&file, serde_json::to_string(args).unwrap_or_default());
+        return (args.to_vec(), false);
+    }
+    let started: Vec<String> = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    if !started.iter().any(|a| a == "--from") {
+        return (args.to_vec(), true);
+    }
+    (started.into_iter().filter(|a| a != "--resume").chain(["--resume".to_string()]).collect(), true)
 }
 
 /// The commands `run.start` names, before agg opens the project; the last line each prints is logged.
@@ -363,6 +382,21 @@ mod tests {
         assert!(resumes(&args(&["p.yaml", "proj", "--resume"])));
         assert!(!resumes(&args(&["p.yaml", "proj", "--resume", "--from", "build", "--note", "x"])));
         assert!(!resumes(&args(&["p.yaml", "proj"])));
+    }
+
+    /// A start records its arguments; a plain resume continues the last start, also one a re-entry made at a step,
+    /// and replays its ledger.
+    #[test]
+    fn a_resume_continues_the_run_started_last() {
+        let project = tempfile::tempdir().unwrap();
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(continued(project.path(), &args(&["p.yaml", "proj", "--resume"])), (args(&["p.yaml", "proj", "--resume"]), true));
+        let restart = args(&["p.yaml", "proj", "--from", "survey", "--note", "keep it short", "--reentries", "0", "--decided"]);
+        assert_eq!(continued(project.path(), &restart), (restart.clone(), false));
+        let (resumed, replays) = continued(project.path(), &args(&["p.yaml", "proj", "--resume"]));
+        assert!(replays && resumed.starts_with(&restart) && resumed.last().map(String::as_str) == Some("--resume"));
+        assert_eq!(continued(project.path(), &args(&["p.yaml", "proj"])).1, false, "a fresh start records itself");
+        assert_eq!(continued(project.path(), &args(&["p.yaml", "proj", "--resume"])).0, args(&["p.yaml", "proj", "--resume"]));
     }
 
     /// An item's variables: its key, its YAML, and each field, a list joined.

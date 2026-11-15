@@ -712,6 +712,13 @@ fn the_web_api_starts_a_run_and_answers_its_checkpoint_with_a_decision() {
     assert_eq!(web.call("POST", "/api/run?p=one", r#"{"action":"stop"}"#).0, 200);
     wait_for(60, "the run stops", || web.call("GET", "/api/health?p=one", "").1["running"] == false);
     assert_eq!(web.call("POST", "/api/run?p=one", r#"{"action":"stop"}"#).0, 409, "nothing to stop");
+    // resumed after the decision's re-entry, the run continues the re-entered run: it asks at cp-build again
+    assert_eq!(web.call("POST", "/api/run?p=one", r#"{"action":"resume"}"#).0, 200);
+    wait_for(120, "the resumed run asks at cp-build again", || {
+        web.call("GET", "/api/checkpoint?p=one", "").1["checkpoints"][0]["step"] == "cp-build"
+    });
+    web.call("POST", "/api/run?p=one", r#"{"action":"stop"}"#);
+    wait_for(60, "the resumed run stops", || web.call("GET", "/api/health?p=one", "").1["running"] == false);
 }
 
 /// The process's `ui:` section: the page gets the new-project form; a project made from it starts its run; the overlay's

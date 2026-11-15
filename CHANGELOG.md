@@ -2,6 +2,14 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Fixed
+
+- **`--resume` after a re-entry**: a run stopped after a re-entry (a checkpoint decision's or the task force's) resumed
+  from the first step against a ledger that starts at the re-entered step, and stopped with `resume DIVERGED`. A start
+  now records its arguments (`agg/private/started.json`) and a plain `--resume` continues that run with them.
+
 ## 0.0.47 (2026-11-14)
 
 ### Added (A-39, the web UI of a process)

@@ -291,8 +291,8 @@ The overlay prints `{"steps": {<step id>: {<key>: <value>}}, "run": {<key>: <val
 A failing overlay leaves the report as agg made it, with `overlay_error`. Not part of it: what the facts mean (a proposals
 estimate, waived gates, the roles a step ran with) is the process's own.
 
-Limit: a run stopped after a checkpoint decision sent the run back to the decision's owner doesn't resume (`--resume` reports
-a diverged ledger); start it again with `--from <step>` in the terminal.
+`--resume` continues the run that was started last, with its arguments (`agg/private/started.json`): also one a re-entry
+started at a step with its note.
 
 ### Scenarios (A-38)
 
