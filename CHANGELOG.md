@@ -2,6 +2,24 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **`task_force.checks: [commands]`** in the process file: after the task force answers `fixed` and the failed step is
+  met again, these commands run like a step's checks, with `AGG_STEP` (the failed step's id), `AGG_STEP_KEY`,
+  `AGG_STEP_LABEL`, `AGG_PROCESS_HOME` and `AGG_FIX_BASE` (the commit before the repair; across attempts at one failure,
+  the commit before the first). An unmet verdict means the repair is not accepted: the attempt counts against
+  `task_force.max`, and the verdict goes into the next attempt's brief. `--check` validates the commands. Embedders:
+  `Flow::fix_checks`.
+- **A stopped session's work in the next session's brief.** When an agent step starts or is re-entered and a partial ref
+  or an orphaned session branch holds work of a session of the same step, the brief gets a section "Work a stopped
+  session left": the ref, `git diff --stat` against its base and how to take what holds (at most the three newest refs,
+  40 lines of stat each). agg never merges it itself. To tie a session to its step, agg now notes the step's name in the
+  repository's config when it cuts a session branch (`branch.<name>.agg-step`, which follows the branch when it is
+  parked) and when it saves a partial ref (`agg-partial.<ref>.step`); refs made before this carry no step and are not
+  offered.
+
 ## 0.0.49 (2026-11-15)
 
 ### Changed

@@ -298,7 +298,8 @@ A **rate-limit wait** is the one place a command acts between sessions: the wait
 bus every second, so `wake` (or `resume`) starts the next attempt and `stop` ends the run (exit 5) right
 away. If the agent is still limited, agg notices and waits again. An interrupted run — Ctrl-C, `agg
 stop`, a crash — continues with `agg run --resume`: same run id, the next session number, back to its
-last kept gate; the cut-off session's work waits on `refs/agg/partial/<run>/<session>`.
+last kept gate; the cut-off session's work waits on `refs/agg/partial/<run>/<session>`, and the next session of the same step
+is told of it (a process's agent step: the section "Work a stopped session left", `docs/PROCESS.md`).
 
 ⚠ **Every `agg send` needs a workflow running** — it is refused otherwise, naming the prerequisite.
 A steering message with nothing to steer is not queued, it is a landmine that fires at the startup of

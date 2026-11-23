@@ -340,6 +340,10 @@ pub struct TaskForceSpec {
     /// proposals that go ahead without a human
     #[serde(default)]
     pub trust: Vec<Trust>,
+    /// commands run like a step's checks after a repair in place that met the failed step: `AGG_STEP` (the failed step's
+    /// id) and `AGG_FIX_BASE` (the commit before the repair) are set; an unmet verdict rejects the repair
+    #[serde(default)]
+    pub checks: Vec<String>,
 }
 
 impl TaskForceSpec {

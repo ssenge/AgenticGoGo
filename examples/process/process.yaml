@@ -45,6 +45,7 @@ task_force:
   deny: [inputs]
   sections: [{ text: "## The process\n\nIts steps are listed above; the app lives in `{{ app }}/`." }]
   trust: [{ failed_in: build, reenter: survey }]
+  checks: [scripts/fix-check.sh]                       # a repair in place must pass these, like a step's checks
 ladder:
   tool_run: "scripts/tool-tier.sh {{ item }} {tool}"
   tool_commits: ["{{ app }}"]

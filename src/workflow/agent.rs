@@ -3,7 +3,7 @@
 //! Every session starts fresh: what a step knows is in its brief and the project's files, never in an earlier
 //! session.
 
-use super::brief::{with_lead, with_section};
+use super::brief::{stopped_section, with_lead, with_section};
 use super::flow::{Flow, When};
 use super::git::{changes_since, unchanged_since};
 use super::review::{cannot_fix, focused, self_checked, stuck, with_rubric, with_task, Earlier};
@@ -213,6 +213,7 @@ impl Flow {
         if let Some(critic) = critic {
             step = with_rubric(&step, critic)?;
         }
+        step = with_section(&step, &stopped_section(self.project(), base.name.as_deref().unwrap_or(name)))?;
         let checks: Vec<Judge> = self.hook_judges(name, When::After).into_iter().chain(t.checks.iter().cloned()).collect();
         with_section(&self_checked(&step, &checks)?, &cannot_fix(cannot))
     }

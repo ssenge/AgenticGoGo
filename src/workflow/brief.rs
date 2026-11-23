@@ -20,6 +20,25 @@ pub fn with_lead(step: &Step, section: &str) -> Result<Step, Fatal> {
     Ok(step.clone().prompt(format!("{section}\n\n{}\n", task(step)?)).news(section))
 }
 
+/// The brief's section on the work stopped sessions of step `step` left (none when they left nothing to take): the
+/// refs, what each changed against its base, and how to take what holds. agg never merges it itself.
+pub fn stopped_section(dir: &std::path::Path, step: &str) -> String {
+    let found = crate::git::stopped_work(dir, step);
+    if found.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "## Work a stopped session left\n\nAn earlier session of this step was stopped before its work was judged \
+         or merged. What it did is kept on the refs below, and agg does not merge it: you decide what of it holds. \
+         Look with `git diff <base> <ref>` (all of it) or `git show <ref>:<path>` (a file); take a file as it is with \
+         `git checkout <ref> -- <path>`. Take only what this task needs and is right, and check it like your own \
+         work.\n");
+    for s in found {
+        out.push_str(&format!("\n### {} (changes against {})\n\n```\n{}\n```\n", s.name, s.base, s.stat));
+    }
+    out
+}
+
 /// The step's brief as it stands: its prompt, or its prompt file read now.
 pub fn task(step: &Step) -> Result<String, Fatal> {
     match &step.prompt_file {

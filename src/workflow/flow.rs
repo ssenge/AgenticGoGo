@@ -75,6 +75,9 @@ type OnStart = Box<dyn Fn(&Flow, &str) -> Result<(), String>>;
 pub(crate) type Trust = dyn Fn(&str, &str) -> bool;
 /// What a failed step must keep to, as the driver knows it (its scope, its rubric): the task force's repair too.
 pub(crate) type Constraints = dyn Fn(&Flow, &str) -> Option<String>;
+/// The checks a task force's repair in place must pass, as the driver knows them: given the failed step and the commit
+/// before the repair, the judges that run after it (an unmet one rejects the repair).
+pub(crate) type FixChecks = dyn Fn(&Flow, &str, &str) -> Vec<Judge>;
 
 /// A workflow run on agg: what every block of [`super`] works through.
 pub struct Flow {
@@ -98,6 +101,8 @@ pub struct Flow {
     order: Vec<String>,
     /// what a failed step must keep to, for the task force's brief.
     pub(crate) constraints: Option<Box<Constraints>>,
+    /// the checks a repair in place must pass before the failed step goes on.
+    pub(crate) fix_checks: Option<Box<FixChecks>>,
 }
 
 impl Drop for Flow {
@@ -125,7 +130,7 @@ impl Flow {
         run.reentries = reentries;
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
                scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, task_force: None,
-               fixes: Cell::new(fixes), trusted: None, order: vec![], constraints: None, agg }
+               fixes: Cell::new(fixes), trusted: None, order: vec![], constraints: None, fix_checks: None, agg }
     }
 
     /// The history in `path` (relative to the project) instead of `agg/private/steps.jsonl`.
@@ -158,6 +163,14 @@ impl Flow {
     /// by): the task force's brief carries it, so a repair in place doesn't fail on another of the step's rules.
     pub fn constraints(mut self, f: impl Fn(&Flow, &str) -> Option<String> + 'static) -> Flow {
         self.constraints = Some(Box::new(f));
+        self
+    }
+
+    /// The checks a repair in place must pass, `f(flow, name, base)` (the failed step, the commit before the repair):
+    /// run after the step is judged again and met; an unmet one rejects the repair, which counts against the limit
+    /// and whose verdict goes into the next attempt's brief.
+    pub fn fix_checks(mut self, f: impl Fn(&Flow, &str, &str) -> Vec<Judge> + 'static) -> Flow {
+        self.fix_checks = Some(Box::new(f));
         self
     }
 

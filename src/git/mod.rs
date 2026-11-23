@@ -29,8 +29,10 @@ fn git(dir: &Path, args: &[&str]) -> (bool, String, String) {
 /// Is `dir` inside a git work tree?
 mod partial;
 mod session;
+mod stopped;
 pub use partial::*;
 pub use session::*;
+pub use stopped::*;
 
 pub fn is_repo(dir: &Path) -> bool {
     git(dir, &["rev-parse", "--is-inside-work-tree"]).1 == "true"

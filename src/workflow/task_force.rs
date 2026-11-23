@@ -64,6 +64,12 @@ impl Flow {
 /// Step `name` failed for `why`: the task force repairs it in place (when `again` can judge the step again), proposes
 /// a re-entry a human decides, or leaves it to a human; without the task force, or past its limit, the run ends.
 pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> Result<(), Fatal> {
+    fail_from(flow, name, why, again, None)
+}
+
+/// [`fail`], `base` the commit before the first repair of this failure when an earlier repair was rejected or fell
+/// short: it stays in the tree, so the next repair's checks see the whole change.
+fn fail_from(flow: &Flow, name: &str, why: &str, again: Option<Again>, base: Option<&str>) -> Result<(), Fatal> {
     let reason = format!("{name}: {why}");
     let Some((force, max)) = flow.task_force.as_ref() else {
         return flow.halt(reason);
@@ -83,7 +89,7 @@ pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> 
     flow.gate()?;
     let a = answer(&file);
     match (a.outcome.as_str(), again) {
-        ("fixed", Some(again)) => fixed(flow, name, &a, (again, head.trim())),
+        ("fixed", Some(again)) => fixed(flow, name, &a, (again, head.trim(), base.unwrap_or(head.trim()))),
         ("reenter", _) => reentered(flow, name, &reason, a),
         _ => {
             flow.record(name, "task-force", false, &format!("no re-entry: {}", a.cause));
@@ -114,7 +120,7 @@ fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: b
 
 /// The task force repaired the cause in place: the step judged again goes on when met; else what is left is a new
 /// failure, which the task force gets again while its limit lasts (a repair often uncovers the next point).
-fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head): (Again, &str)) -> Result<(), Fatal> {
+fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head, base): (Again, &str, &str)) -> Result<(), Fatal> {
     flow.fixes.set(flow.fixes.get() + 1);
     keep_spent(flow.project(), flow.run.reentries, flow.fixes.get());
     spend_on(flow.project(), &flow.key_of(name));
@@ -122,15 +128,35 @@ fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head): (Again, &str)) -> R
     let changed = changed.split_whitespace().collect::<Vec<_>>().join(", ");
     let what = format!("fixed in place ({changed}): {}: {}", a.cause, a.note);
     match again()? {
-        None => {
-            flow.record(name, "task-force", true, &what);
-            flow.flush()
-        }
+        None => match rejected(flow, name, base) {
+            None => {
+                flow.record(name, "task-force", true, &what);
+                flow.flush()
+            }
+            Some(why) => {
+                flow.record(name, "task-force", false, &format!("{what}; not accepted: {why}"));
+                let why = format!("the task force's repair in place was not accepted: {why}");
+                fail_from(flow, name, &why, Some(again), Some(base))
+            }
+        },
         Some(still) => {
             flow.record(name, "task-force", false, &format!("{what}; judged again: {still}"));
-            fail(flow, name, &format!("{still} (after the task force's repair in place)"), Some(again))
+            fail_from(flow, name, &format!("{still} (after the task force's repair in place)"), Some(again), Some(base))
         }
     }
+}
+
+/// Why the repair in place is not accepted: the unmet verdicts of the checks the process sets for it (`None`: all met,
+/// or none set). Each verdict is recorded as a hook's is. They run as conditions: an unmet one rejects the repair
+/// and costs an attempt, but is no regression of the work for the gate to roll back.
+fn rejected(flow: &Flow, name: &str, base: &str) -> Option<String> {
+    let judges = flow.fix_checks.as_ref().map(|f| f(flow, name, base)).unwrap_or_default();
+    let failed: Vec<String> = judges.iter().filter_map(|j| {
+        let verdict = flow.condition(j);
+        flow.record(name, "hook", verdict.met(), &format!("task force check {}: {}", j.name, verdict.rationale()));
+        (!verdict.met()).then(|| format!("{}: {}", j.name, verdict.rationale()))
+    }).collect();
+    (!failed.is_empty()).then(|| failed.join("; "))
 }
 
 /// The task force proposes to go back to `a.at`: after a human's yes (or a rule the driver trusts) the run ends for it.

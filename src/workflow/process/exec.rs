@@ -141,6 +141,26 @@ pub fn run_plain(shared: &Shared, command: &str, phase: &str) -> Result<(), Stri
     Err(format!("`{command}` failed ({}): {}", out.status.code().unwrap_or(-1), said.trim().lines().last().unwrap_or_default()))
 }
 
+/// The judges of `task_force.checks` for a repair of failed step `name`: each command run in the project like a step's
+/// check, with `AGG_STEP` (the step's id), `AGG_STEP_KEY`, `AGG_STEP_LABEL`, `AGG_PROCESS_HOME` and `AGG_FIX_BASE`
+/// (the commit before the repair). A command that can't be rendered, or a wrapper that can't be written, is left out.
+pub fn fix_judges(shared: &Shared, flow: &crate::workflow::Flow, name: &str, base: &str) -> Vec<Judge> {
+    let key = flow.key_of(name);
+    let id = shared.ids.borrow().get(&key).cloned().unwrap_or_else(|| key.clone());
+    let mut vars = shared.vars.clone();
+    for (k, v) in [("this", name), ("this.id", &id), ("this.key", &key), ("this.name", name)] {
+        vars.insert(k.into(), v.into());
+    }
+    let env = format!("AGG_STEP={} AGG_STEP_KEY={} AGG_STEP_LABEL={} AGG_PROCESS_HOME={} AGG_FIX_BASE={}", quote(&id), quote(&key),
+                      quote(name), quote(&shared.home.display().to_string()), quote(base));
+    let Some(tf) = &shared.spec.task_force else { return vec![] };
+    tf.checks.iter().enumerate().filter_map(|(i, c)| {
+        let command = absolutize(shared, &template::render(c, &vars).ok()?);
+        let wrapper = flow.wrapper(&format!("fix-check-{i}.sh"), &format!("env {env} {command}")).ok()?;
+        Some(Judge::script(format!("fix-{}", slug(&command)), wrapper.as_str()))
+    }).collect()
+}
+
 /// `command` with its first word made absolute when it is a relative path (it has a `/`).
 fn absolutize(shared: &Shared, command: &str) -> String {
     absolutize_in(&shared.home, command)

@@ -26,6 +26,9 @@ pub fn save_and_reset(ctx: &mut LoopState) -> Option<String> {
     let ahead = branch.as_deref().is_some_and(|b| !crate::git::branch_has_no_new_commits(&ctx.dir, &base, b));
     let dirty = crate::git::has_uncommitted_work(&ctx.dir, keep.as_deref());
     let saved = crate::git::save_partial(&ctx.dir, &ctx.clock.run_id, ctx.session, ahead, keep.as_deref());
+    if let (Some(r), Some(step)) = (&saved, &ctx.cur_step) {
+        crate::git::note_ref_step(&ctx.dir, r, &step.name);
+    }
     if dirty && saved.is_none() {
         // never reset what could not be saved: the work stays in the tree, on its branch.
         eprintln!("  ⚠ [iso] could not save session #{}'s unfinished work to a ref — left in the tree", ctx.session);

@@ -133,13 +133,18 @@ impl PreStart for GitSetup {
 /// which of them the session created. A save that fails REFUSES the resume rather than discarding.
 fn save_crashed_session(dir: &Path) -> Result<()> {
     let run = crate::core::clock::Clock::recorded_run_id(dir).unwrap_or_else(|| "unknown".into());
-    let session = crate::state::DashboardState::read(dir).map(|d| d.session).unwrap_or(0);
+    let state = crate::state::DashboardState::read(dir);
+    let session = state.as_ref().map(|d| d.session).unwrap_or(0);
     let Some(r) = crate::git::save_partial(dir, &run, session, false, None) else {
         anyhow::bail!(
             "--resume: the work tree has uncommitted changes from the interrupted session, and agg \
              could not save them to refs/agg/partial/.\n  fix:  commit or stash them, then resume again"
         );
     };
+    // the state file names the step that was running when the run died
+    if let Some(step) = state.map(|d| d.step).filter(|s| !s.is_empty()) {
+        crate::git::note_ref_step(dir, &r, &step);
+    }
     eprintln!(
         "  ⚠ [iso] RESUME with a dirty work tree — session #{session}'s unfinished work is saved under\n\
          \x20       {r} (NOT judged) and the tracked files are reset; that session's step re-executes."

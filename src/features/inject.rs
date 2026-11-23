@@ -170,6 +170,10 @@ impl Handler for SessionBranchCut {
         crate::git::remove_file(&ctx.dir, &iso.red_file); // clear a stale veto
         ctx.ext.get::<AGGState>().git.session_branch = if crate::git::create_branch(&ctx.dir, &br, &base_ref) {
             eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", ctx.session);
+            // so a later session of this step can be told what a stopped one left (the ledger has no step before it ends)
+            if let Some(step) = &ctx.cur_step {
+                crate::git::note_branch_step(&ctx.dir, &br, &step.name);
+            }
             Some(br)
         } else {
             eprintln!("  [iso] could not create session branch — running on {base_ref}");

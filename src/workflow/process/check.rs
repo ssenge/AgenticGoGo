@@ -346,6 +346,9 @@ impl Ctx<'_> {
         for s in &tf.sections {
             self.section("task_force", s, false);
         }
+        for c in &tf.checks {
+            self.command("task_force.checks", c, false);
+        }
         for t in &tf.trust {
             if !self.ids.contains(&t.failed_in) {
                 self.out.push(format!("task_force.trust: `failed_in: {}` names no phase or step", t.failed_in));
@@ -516,7 +519,7 @@ mod tests {
     }
 
     const GOOD: &str = "version: 1\nvars: { legacy: legacy }\nroles: { file: tools.yaml }\ndeny: { inputs: [task.md] }\n\
-        task_force: { prompt: prompts/tf.md, trust: [{ failed_in: verify, reenter: build }] }\n\
+        task_force: { prompt: prompts/tf.md, checks: [scripts/fix.sh], trust: [{ failed_in: verify, reenter: build }] }\n\
         phases:\n- id: verify\n  name: Verify\n  steps:\n\
         \x20 - { id: build, name: Build, kind: agent, review: true, deny: [inputs, \"{{ legacy }}/**\"], checks: [scripts/check.sh] }\n\
         \x20 - { id: units, name: Units, kind: each, items: { file: plan.yaml }, steps: [\
@@ -525,7 +528,7 @@ mod tests {
 
     fn files() -> Vec<(&'static str, &'static str)> {
         vec![("prompts/build.md", "Do {{ legacy }} for {{ step.build }}. ${{ github.sha }}"), ("judges/build-review.md", "review"),
-             ("prompts/tf.md", "tf"), ("scripts/check.sh", "x"), ("scripts/merge.sh", "x"), ("scripts/doc.sh", "x")]
+             ("prompts/tf.md", "tf"), ("scripts/check.sh", "x"), ("scripts/merge.sh", "x"), ("scripts/doc.sh", "x"), ("scripts/fix.sh", "x")]
     }
 
     /// A sound process has no problem.
@@ -541,12 +544,12 @@ mod tests {
         let bad = GOOD.replace("review: true", "review: judges/nope.md").replace("scripts/check.sh", "scripts/gone.sh")
             .replace("reenter: build", "reenter: nobody").replace("owner: build", "owner: ghost")
             .replace("{{ item.scope }}", "{{ typo }}").replace("id: merge", "id: Merge")
-            .replace("deny: [inputs,", "deny: [inputz,");
+            .replace("deny: [inputs,", "deny: [inputz,").replace("scripts/fix.sh", "scripts/nofix.sh");
         let dir = home(&files(), &bad);
         let problems = check(&dir.path().join("process.yaml")).join("\n");
         for expect in ["review `judges/nope.md` is not a file", "command `scripts/gone.sh` is not a file",
                        "`reenter: nobody` names no step", "`owner: ghost` names no step", "unknown variable `{{ typo }}`",
-                       "step id `Merge`", "deny `inputz` is no list"] {
+                       "step id `Merge`", "deny `inputz` is no list", "task_force.checks: command `scripts/nofix.sh` is not a file"] {
             assert!(problems.contains(expect), "missing {expect:?} in:\n{problems}");
         }
     }
@@ -567,7 +570,7 @@ mod tests {
 
         let bad = declared.replace("{ judge: tests }", "{ judge: nobody }").replace("when: last", "when: x")
             .replace("judges: {", "judges: { empty: {}, both: { command: x, metric: { id: a.b }, max: 1 }, form: { template: { doc: a.md, from: gone.md } },");
-        f[6].1 = "step: { after: [{ judge: ghost }], before: [judges/x.py] }\n";
+        f.last_mut().unwrap().1 = "step: { after: [{ judge: ghost }], before: [judges/x.py] }\n";
         let dir = home(&f, &bad);
         let found = check(&dir.path().join("process.yaml")).join("\n");
         for expect in ["a check names the judge `nobody`, which `judges:` doesn't declare",

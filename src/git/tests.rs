@@ -457,3 +457,49 @@ fn back_to_base_leaves_the_session_branch_at_run_end() {
     assert_eq!(head_commit_count(&d), 1);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A session branch's step is noted when it is cut and survives parking (a rename); a partial ref's step is noted too. A
+/// later session of the same step finds both, newest first and at most [`LIMIT`], with what each changed against its
+/// base; another step's work, and work HEAD already has, are not found.
+#[test]
+fn a_stopped_sessions_work_is_found_again_by_its_step() {
+    let d = repo_with_session_branch("stopped");
+    note_branch_step(&d, "agg/p/session-1", "1.3 Survey");
+    assert!(rename_branch(&d, "agg/p/session-1", "agg/p/orphaned-5/session-1"), "parking keeps the note");
+    let found = stopped_work(&d, "1.3 Survey");
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].name.as_str(), found[0].base.len()), ("agg/p/orphaned-5/session-1", 12));
+    assert!(found[0].stat.contains("f.txt"), "{}", found[0].stat);
+    assert!(stopped_work(&d, "2.1 Other").is_empty(), "another step's work is not offered");
+    // a partial ref of the same step: saved from the tree, its step noted
+    std::fs::write(d.join("new.rs"), "fn wip() {}\n").unwrap();
+    let r = save_partial(&d, "run-7", 3, false, None).unwrap();
+    note_ref_step(&d, &r, "1.3 Survey");
+    let names: Vec<String> = stopped_work(&d, "1.3 Survey").into_iter().map(|s| s.name).collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names.contains(&r) && names.contains(&"agg/p/orphaned-5/session-1".to_string()), "{names:?}");
+    // the newest three of many
+    for n in 0..3 {
+        let to = format!("agg/p/orphaned-{n}/session-9");
+        git_t(&d, &["branch", &to, "agg/p/orphaned-5/session-1"]);
+        git_t(&d, &["config", &format!("branch.{to}.agg-step"), "1.3 Survey"]);
+    }
+    assert_eq!(stopped_work(&d, "1.3 Survey").len(), LIMIT);
+    // taken: once HEAD has the files as the sessions left them, nothing is left to offer
+    git_t(&d, &["checkout", "-q", "agg/p/orphaned-5/session-1", "--", "f.txt"]);
+    git_t(&d, &["commit", "-qam", "took the file"]);
+    git_t(&d, &["checkout", "-q", &r, "--", "new.rs"]);
+    git_t(&d, &["commit", "-qam", "took the other"]);
+    assert!(stopped_work(&d, "1.3 Survey").is_empty(), "{:?}", stopped_work(&d, "1.3 Survey"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A long `git diff --stat` is cut to 40 lines and says how many it left out.
+#[test]
+fn a_long_stat_is_cut() {
+    let long = (0..45).map(|n| format!(" f{n} | 1 +")).collect::<Vec<_>>().join("\n");
+    let cut = truncated(&long);
+    assert_eq!(cut.lines().count(), 41);
+    assert!(cut.ends_with("… (5 more lines)"), "{cut}");
+    assert_eq!(truncated(" a | 1 +"), " a | 1 +");
+}

@@ -261,6 +261,62 @@ fn the_task_force_repairs_a_failed_step_in_place() {
     assert!(steps(d).contains(&("1.3 Survey".to_string(), "done".to_string())));
 }
 
+/// A repair in place must also pass `task_force.checks`: the first repair is rejected (its attempt counts, the verdict is
+/// in the next brief), the second is accepted, and the checks were told the step and the commit before the first repair.
+#[test]
+fn a_repair_in_place_must_pass_the_task_forces_checks() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    touch(d, ".git/agg-idle");
+    touch(d, ".git/agg-fix-reject");
+    touch(d, ".git/agg-keep-answer");
+    std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: the workers were idle\nnote: woke them\n").unwrap();
+    let out = run(d, &["--until", "survey"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let h = history(d);
+    let verdicts: Vec<bool> = h.iter().filter(|e| e["kind"] == "hook" && e["rationale"].as_str().unwrap().starts_with("task force check"))
+        .map(|e| e["met"].as_bool().unwrap()).collect();
+    assert_eq!(verdicts, [false, true], "{h:#?}");
+    let force: Vec<&serde_json::Value> = h.iter().filter(|e| e["kind"] == "task-force").collect();
+    assert_eq!(force.len(), 2, "{h:#?}");
+    assert!(force[0]["rationale"].as_str().unwrap().contains("not accepted: fix-fix-check: the repair broke a gate in survey"), "{}", force[0]);
+    assert_eq!((force[1]["met"].as_bool(), force[1]["id"].as_str()), (Some(true), Some("survey")));
+    let briefs = read(d, ".git/agg-worker.args");
+    assert!(briefs.contains("the task force's repair in place was not accepted: fix-fix-check: the repair broke a gate in survey"),
+            "the verdict is in the next attempt's brief");
+    let told = read(d, ".git/fix-check.log");
+    let told: Vec<(&str, &str)> = told.lines().filter_map(|l| l.split_once(' ')).collect();
+    assert_eq!(told.len(), 2);
+    assert!(told.iter().all(|(step, base)| *step == "survey" && *base == told[0].1), "the same base each time: {told:?}");
+    let base = told[0].1;
+    git(d, &["merge-base", "--is-ancestor", base, "HEAD"]);
+    assert_ne!(base, git(d, &["rev-parse", "HEAD"]), "the base is the commit before the repairs");
+    assert!(steps(d).contains(&("1.3 Survey".to_string(), "done".to_string())));
+}
+
+/// A step that starts while an orphaned session branch holds work of a session of the same step gets a section naming
+/// the branch with what it changed; a branch of another step is not named. agg merges nothing itself.
+#[test]
+fn a_step_is_told_of_the_work_a_stopped_session_left() {
+    let tmp = project(AUTO);
+    let d = tmp.path();
+    for (branch, step) in [("agg/old/orphaned-5/session-2", "survey"), ("agg/old/orphaned-5/session-3", "package")] {
+        git(d, &["checkout", "-q", "-b", branch]);
+        std::fs::write(d.join(format!("{}.txt", &branch[branch.len() - 9..])), "stopped work\n").unwrap();
+        git(d, &["add", "-A"]);
+        git(d, &["commit", "-qm", "a stopped session"]);
+        git(d, &["config", &format!("branch.{branch}.agg-step"), step]);
+        git(d, &["checkout", "-q", "main"]);
+    }
+    let out = run(d, &["--until", "survey"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let briefs = read(d, ".git/agg-worker.args");
+    assert!(briefs.contains("## Work a stopped session left"), "{briefs}");
+    assert!(briefs.contains("### agg/old/orphaned-5/session-2 (changes against ") && briefs.contains("session-2.txt"), "{briefs}");
+    assert!(!briefs.contains("orphaned-5/session-3"), "another step's work is not offered");
+    assert!(!d.join("session-2.txt").exists(), "agg did not merge it");
+}
+
 /// A failure the task force can't mend uses up its repairs for that step, and the run exits 6: a supervisor can't take it
 /// for a halt a restart mends.
 #[test]

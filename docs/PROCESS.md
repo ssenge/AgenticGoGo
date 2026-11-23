@@ -80,6 +80,7 @@ task_force:
   deny: [inputs]
   sections: [{ text: "…" }]
   trust: [{ failed_in: build, reenter: plan, except: [deploy] }]   # proposals that go ahead without a human
+  checks: [scripts/fix-check.sh]      # a repair in place must pass these (below)
 ladder: { tool_run: "scripts/tool.sh {{ item }} {tool}", tool_commits: ["{{ app }}"], tools: [codemod] }
 phases: [ … ]
 ```
@@ -168,12 +169,30 @@ the task force. A re-entry with a note starts one tier higher.
 
 A failed step goes to the task force (`task_force`): an agent that finds the cause, repairs it in place or proposes a
 re-entry (`reenter`, an id) or escalates. The limit holds per failed step and survives restarts; a spent limit exits **6**.
-`trust` rules let a proposal go ahead without a human. A hooks file has `step:`, `steps: { <id>: … }` and
+`trust` rules let a proposal go ahead without a human. **`checks`** are commands run like a step's checks (in the project, a
+verdict JSON as the last line) after a repair in place that met the failed step again; they get `AGG_STEP` (the failed
+step's id), `AGG_STEP_KEY`, `AGG_STEP_LABEL`, `AGG_PROCESS_HOME` and `AGG_FIX_BASE` (the commit before the repair; across
+attempts at one failure, the commit before the first). An unmet verdict means the repair is not accepted: the attempt
+counts against `max`, the verdict is recorded (kind `hook`, `task force check <name>: …`) and goes into the next
+attempt's brief as the failure. The change stays in the tree for the next attempt to correct. A hooks file has `step:`, `steps: { <id>: … }` and
 `phases: { <id>: … }`, each `before`/`after`: scripts that run around every step or phase and print a verdict; the project's
 file adds to the process's.
 
 `agg cached [--ignore <path>]… -- <command>…` (`--content` prints the project's content hash instead, for a caller that keeps its own results by content; the process wraps script checks in it) answers a met verdict from an earlier
 run of the same check on exactly the same project content; unmet verdicts are never cached.
+
+### A stopped session's work
+
+A session cut short (a rate limit, an interrupt, a crash) is never judged or merged, but its work is kept: on a partial ref
+(`refs/agg/partial/<run>/<session>`), or on its session branch, which the next run parks as
+`<prefix>/<project>/orphaned-<ts>/session-<N>`. agg notes which step a session belonged to when it cuts the branch or saves
+the ref (the step's name, the key a `--from` takes) in the repository's config (`branch.<name>.agg-step`,
+`agg-partial.<ref>.step`), since the ledger records a step only once it has ended. When an agent step starts, or is
+re-entered, and such a ref holds work of a session of the same step, its brief gets a section **`## Work a stopped session
+left`**: the ref, the commit it stands on, `git diff --stat` against it (at most 40 lines), and how to take what holds
+(`git diff <base> <ref>`, `git show <ref>:<path>`, `git checkout <ref> -- <path>`). At most the three newest refs are named;
+a ref whose files HEAD already has as the session left them is not. agg never merges it itself; a session branch or
+ref made before agg noted the step is not found.
 
 ### What every run needs (A-38)
 
@@ -214,6 +233,7 @@ Defaults embedded in the binary apply when the process file sets nothing; a text
 | key | default | notes |
 |---|---|---|
 | `run.system_prompt` | the worker's brief is `agg/private/INSTRUCTIONS.md`: read it first, all of it; the final message is one line | `<file>` replaces, `{ append: <file> }` adds |
+| `task_force.checks` | commands that judge a repair in place (above); none by default | optional |
 | `task_force.prompt` | the goal, how to find the cause (the record, `git log`), what it never changes (checks, process, decisions), the answer's form (`fixed`, `reenter <step id>`, `escalate`), a flaky failure | the task force exists where `task_force:` is set |
 | `run.critic_scope` | review only this step's outputs (`{{ outputs }}`); never an input, a human's approval, or a requirement nobody stated | |
 | `run.notes: <file>` | a brief section: read the notes file first; at the end write your own section `## <step id>` of at most five lines; a check after the step is unmet when it has more (`notes section of <id> has N lines, at most 5`) | no default: off without the key |

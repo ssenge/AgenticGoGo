@@ -91,6 +91,10 @@ impl Proc {
         if let (Some(tf), Some(force)) = (&spec.task_force, init.force) {
             flow = flow.on_failure(force, tf.max);
         }
+        let s5 = Rc::clone(&shared);
+        if spec.task_force.as_ref().is_some_and(|tf| !tf.checks.is_empty()) {
+            flow = flow.fix_checks(move |f, name, base| super::exec::fix_judges(&s5, f, name, base));
+        }
         let order: Vec<String> = init.list.iter().filter(|s| s.number.is_some()).map(|s| s.id.clone()).collect();
         flow = flow.order(order);
         let auto = init.settings.auto_approved("task-force", "", false);
