@@ -2,7 +2,7 @@
 //! PATH, a real git repo — as in `tests/cli.rs`.
 //!
 //! Every report a test produces is validated against the PUBLISHED schema
-//! (`docs/schemas/report.v2.json`), with a small validator below that covers exactly the keywords
+//! (`docs/schemas/report.v3.json`), with a small validator below that covers exactly the keywords
 //! the schema uses — and refuses a schema that uses any other, so the check cannot quietly go blind.
 
 #![cfg(unix)]
@@ -107,7 +107,7 @@ fn wait_for(p: &Path) {
 // ── the schema check ─────────────────────────────────────────────────────────────────────────────
 
 fn schema() -> Value {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/report.v2.json");
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/report.v3.json");
     serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap()
 }
 
@@ -115,7 +115,7 @@ fn assert_valid(v: &Value) {
     let s = schema();
     let mut errs = Vec::new();
     validate(&s, &s, v, "$", &mut errs);
-    assert!(errs.is_empty(), "report violates docs/schemas/report.v2.json:\n{}\n{v:#}", errs.join("\n"));
+    assert!(errs.is_empty(), "report violates docs/schemas/report.v3.json:\n{}\n{v:#}", errs.join("\n"));
 }
 
 /// The keywords [`validate`] implements. Annotations are listed so they are not mistaken for gaps.
@@ -260,6 +260,7 @@ fn done_prints_only_the_report_on_stdout_and_logs_to_run_log() {
     assert_eq!(r["outcome"], "done");
     assert_eq!(r["exit_code"], 0);
     assert_eq!(r["error"], Value::Null);
+    assert_eq!(r["session"], serde_json::json!({"agg_version": env!("CARGO_PKG_VERSION"), "setting_sources": "all", "user_env": []}));
     assert_eq!(r["sessions"]["total"], 1);
     assert_eq!(r["sessions"]["merged"], 1);
     assert_eq!(r["judges"]["worked"]["last"]["met"], true);
@@ -552,7 +553,7 @@ fn usage_per_session_matches_what_the_agents_reported() {
     let out = agg(dir, &path).arg("run").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let r = report(dir);
-    assert_eq!(r["schema_version"], 2);
+    assert_eq!(r["schema_version"], agg::report::SCHEMA_VERSION);
 
     let tokens = |i, o, w, rd| serde_json::json!({"input": i, "output": o, "cache_write": w, "cache_read": rd});
     let worker = serde_json::json!({

@@ -181,6 +181,15 @@ pub struct AggSpec {
     /// the operator's own plugins, hooks and connectors in the workers' sessions: off by default
     #[serde(default)]
     pub user_settings: bool,
+    /// the keys of the operator's settings `env` block the Claude workers and judges get without loading the rest of
+    /// those settings: `false` (none, the default), `true` (every key) or a list of key names; the environment of agg
+    /// itself wins over the file
+    #[serde(default)]
+    pub user_env: crate::backend::user_env::UserEnv,
+    /// one tiny call with the worker's agent and model before the first step, so an unreachable agent stops the run
+    /// with its cause before any work (default true)
+    #[serde(default = "AggSpec::on")]
+    pub preflight: bool,
     /// `annotate` (record a regression, keep the work) or `rollback`
     #[serde(default = "AggSpec::annotate")]
     pub on_regression: String,
@@ -196,11 +205,15 @@ impl AggSpec {
     fn timeout() -> u64 {
         3600
     }
+    fn on() -> bool {
+        true
+    }
 }
 
 impl Default for AggSpec {
     fn default() -> AggSpec {
-        AggSpec { memory: false, user_settings: false, on_regression: AggSpec::annotate(), judge_timeout: AggSpec::timeout() }
+        AggSpec { memory: false, user_settings: false, user_env: Default::default(), preflight: true,
+                  on_regression: AggSpec::annotate(), judge_timeout: AggSpec::timeout() }
     }
 }
 

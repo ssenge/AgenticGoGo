@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use super::{JudgeEntry, OpenAsk, Outcome, Paths, Report, RunHandle, RunResult, Sessions, Time, VerdictView};
+use super::{JudgeEntry, OpenAsk, Outcome, Paths, Report, RunHandle, RunResult, Session, Sessions, Time, VerdictView};
 use crate::context::LoopState;
 use crate::core::verdicts::Outcome as Gated;
 use crate::core::model::Verdict;
@@ -40,6 +40,22 @@ pub fn record_gate(ctx: &mut LoopState, fate: Gated, branch: Option<&str>) {
         Gated::NoChanges => t.no_changes += n,
         _ => t.rolled_back += n,
     }
+}
+
+/// The run's session setup, kept in the run's `ext` store until the report is built.
+#[derive(Default)]
+struct SessionSlot(Option<Session>);
+
+/// Record how the run's sessions are set up (see [`Session`]), at the run's start: in the report, and as a line of
+/// `run.log` next to the start line.
+pub fn record_session(ctx: &mut LoopState, run: &RunHandle, user_settings: bool, user_env: Vec<String>) {
+    let session = Session {
+        agg_version: env!("CARGO_PKG_VERSION").to_string(),
+        setting_sources: if user_settings { "all" } else { "project,local" }.to_string(),
+        user_env,
+    };
+    super::log_line(&ctx.dir, &format!("agg run {} sessions: setting_sources={}, user_env=[{}]", run.run_id(), session.setting_sources, session.user_env.join(", ")));
+    ctx.ext.get::<SessionSlot>().0 = Some(session);
 }
 
 /// Record the baseline pass's verdicts — the "before" column of the report's judge table.
@@ -91,6 +107,7 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
         usage: usage.summary(),
         session_log: usage.sessions().to_vec(),
         waiting: st.dash.waiting.clone(),
+        session: st.ext.get::<SessionSlot>().0.take(),
         ..skeleton(&st.dir, &st.cfg.project, run.run_id(), run.started_at(), res, &st.dash.finish_reason)
     }
 }
@@ -136,6 +153,7 @@ fn skeleton(
         usage: crate::usage::Summary::default(),
         session_log: Vec::new(),
         waiting: None,
+        session: None,
     }
 }
 

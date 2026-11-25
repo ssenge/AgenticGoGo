@@ -62,14 +62,18 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     let settings = settings_of(&spec, &list, &home, &project, &vars)?;
     let roles = roles_of(&spec, &project)?;
     let mut agg = Agg::open_with(&project, Opts { resume })?.memory(spec.agg.memory)
-        .vars(vars.clone()).user_settings(spec.agg.user_settings)
+        .vars(vars.clone()).user_settings(spec.agg.user_settings).user_env(spec.agg.user_env.clone())
         .on_regression(if spec.agg.on_regression == "rollback" { OnRegression::Rollback } else { OnRegression::Annotate })
         .judge_timeout(spec.agg.judge_timeout);
     agg = agg.system_prompt(standing::text(spec.run.system_prompt.as_ref(), standing::SYSTEM, &home)?);
+    let reached = if resume { None } else { reachable(&agg, &spec, roles.as_ref())? };
     let force = task_force(&spec, &home, &project, &vars, roles.as_ref())?;
     let pinned = pinned(&home);
     let p = Proc::new(agg, run, Init { spec: spec.clone(), list: list.clone(), home, settings, vars, roles, force });
     p.record("start", "start", true, &pinned);
+    if let Some(said) = reached {
+        p.record("preflight", "preflight", true, &said);
+    }
     println!("{pinned}");
     for phase in &spec.phases {
         for step in &phase.steps {
@@ -212,6 +216,15 @@ fn roles_of(spec: &Process, project: &Path) -> Result<Option<Roles>, Fatal> {
         }
     }
     Ok(Some(roles))
+}
+
+/// The reachability preflight (`agg: { preflight }`, default on): one tiny call with the worker's agent and model before
+/// any step, so a worker that can't be reached stops the run with its cause. What answered; none when it is off, in
+/// scenario mode (scripted agents), or the process has no worker.
+fn reachable(agg: &Agg, spec: &Process, roles: Option<&Roles>) -> Result<Option<String>, Fatal> {
+    let worker = spec.roles.as_ref().is_some_and(|r| r.names.iter().any(|n| n == "worker"));
+    let (true, true, Some(roles)) = (spec.agg.preflight && std::env::var_os("AGG_SCENARIO").is_none(), worker, roles) else { return Ok(None) };
+    agg.reachable(&roles.step("worker", "preflight", "")).map(Some)
 }
 
 /// The task force's step: its prompt, what it may never change, the sections of its brief.

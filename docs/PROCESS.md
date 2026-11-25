@@ -50,7 +50,7 @@ settings:
   skip: [extras]                      # ids of phases or steps kept in the order, not run
   quality: { definition: d, version: "1", min: 90, guide: prompts/quality.md, reports: judges/reports.py, scope: "{{ app }}" }
   models: { small: some-model }       # sizes a ladder's tier may name
-agg: { memory: false, user_settings: false, on_regression: annotate, judge_timeout: 3600 }
+agg: { memory: false, user_settings: false, user_env: false, preflight: true, on_regression: annotate, judge_timeout: 3600 }
 run:
   history: reports/steps.jsonl        # the step history (default agg/private/steps.jsonl)
   own: [task.md]                      # files --reset never takes back
@@ -216,6 +216,39 @@ ref made before agg noted the step is not found.
   (kind `start`) says which process ran: `process commit <HEAD of the process home>` with ` with uncommitted changes` where
   its checkout has some, or `process home not in git`; the line is printed too.
 - **History**: `agg history` lists process runs with their usage like any other.
+
+### The agg run's own settings (`agg:`)
+
+| key | default | meaning |
+|---|---|---|
+| `memory` | `false` | working memory between sessions (agg's `STATE.md`, wiki, summary) |
+| `user_settings` | `false` | the operator's own plugins, hooks and MCP servers in the workers' sessions. Off, Claude workers start with `--setting-sources project,local` and never read the user-scope settings file |
+| `user_env` | `false` | the `env` block of that file, without the rest of it: `false` (nothing), `true` (every key) or a list of key names |
+| `preflight` | `true` | one tiny call with the worker's agent and model before the first step; `false` leaves it out |
+| `on_regression` | `annotate` | `annotate` (record a regression, keep the work) or `rollback` |
+| `judge_timeout` | `3600` | a judge's time limit, seconds |
+
+**`user_env`.** The user-scope settings file (`$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, else
+`~/.claude/settings.json`) holds an `env` object: a model gateway's base URL and token, telemetry and cache switches. A worker
+without the user's settings never reads it, and on a host where the gateway is set only there every session fails with
+"Invalid API key". `user_env` copies the keys it names (string values only) into the environment of every Claude worker and
+one-shot call (judges, summaries), and nothing else of the file. A variable agg's own environment already has wins over the
+file (the operator's shell overrides it), the keys agg manages itself (`AGG_*`) are never taken, and a list naming a key the
+file lacks takes nothing for it. A missing file, or one without an `env` block, is nothing and no error. Only key names are
+ever logged or recorded, never values. Codex and Copilot workers take nothing from it for now.
+
+**The preflight.** Before the first step of a fresh or re-entered run (not for `--resume`, `--check`, `--list`, `--overview`,
+`--brief`, `--report` or a scenario's scripted agents), agg makes one call, "Reply with the single word ok.", with the
+worker's agent, model, setting sources and environment, exactly as a worker's session starts. (Not a judge's one-shot: a judge
+loads the operator's settings, so it would pass where the worker fails.) If it fails, the run stops with the exit code of any
+fatal error before a step starts, naming the agent's error text (its first lines). When that text is an authentication error
+("Invalid API key", 401, "authentication") and the operator's settings `env` holds `ANTHROPIC_*` keys the run does not pass, it
+adds the hint `the operator's settings env has <KEY NAMES>; set agg: { user_env: true } (or a list) in the process file`. A
+rate limit counts as an answer. A call that passes is one entry (kind `preflight`) of the run record.
+
+**What the run reports.** `agg/private/report.json` (schema 3) has a `session` object, recorded when the run starts:
+`{ agg_version, setting_sources: "project,local" | "all", user_env: [key names] }`, and `agg/private/run.log` a line with the
+same. Names only.
 
 ### Templates
 

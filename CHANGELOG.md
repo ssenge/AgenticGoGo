@@ -6,6 +6,23 @@ Notable changes to agg. Newest first; each entry names the config keys and inter
 
 ### Added
 
+- **`agg: { user_env: true | false | [keys] }`** in the process file, and `Agg::user_env(..)` in a driver: the `env` block of the
+  operator's user-scope Claude settings (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`) reaches every
+  Claude worker and one-shot call without the plugins, hooks and MCP servers of the same file. Until now a run with
+  `user_settings: false` (the default of `agg process`) never read the file, so a model gateway, telemetry or cache switch set
+  only there was missing and every session failed with "Invalid API key". Default `false` (nothing); `true` takes every
+  string key, a list the named ones; a variable agg's own environment has wins, `AGG_*` keys are never taken, a missing file
+  or `env` block is nothing, and only key names are logged or recorded. Codex and Copilot: no-op for now. `agg run` still loads
+  the user's settings in full.
+- **A reachability preflight in `agg process`** (`agg: { preflight: true }`, the default; `Agg::reachable`): before the first
+  step of a fresh or re-entered run, one call ("Reply with the single word ok.") with the worker's agent, model, setting
+  sources and environment. A failure stops the run before any step with the agent's error text and, for an authentication
+  error where the operator's settings `env` holds `ANTHROPIC_*` keys the run does not pass, the hint to set `user_env`. A call
+  that passes is one entry (kind `preflight`) of the run record. Not made for `--resume`, `--check`, `--list`, `--overview`,
+  `--brief`, `--report` or a scenario.
+- **`session` in the run report**: `{ agg_version, setting_sources: "project,local" | "all", user_env: [key names] }`, recorded
+  when the run starts (and as a line of `agg/private/run.log`). Report schema 3
+  ([`docs/schemas/report.v3.json`](docs/schemas/report.v3.json)); v2 is superseded and removes nothing.
 - **`scripts/install.sh` upgrades in place and warns about shadowed copies.** Without `AGG_INSTALL_DIR` it installs over the
   `agg` first on `PATH` when its directory is writable, else as before. Afterwards it lists every other `agg` on `PATH` with
   its version, prints a WARNING with the exact `cp` and `rm` for each one older than the copy just installed (it never changes

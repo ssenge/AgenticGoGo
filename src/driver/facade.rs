@@ -93,6 +93,8 @@ pub struct Agg {
     memory: bool,
     /// whether workers load the operator's own agent settings — see [`Agg::user_settings`].
     user_settings: bool,
+    /// the keys of the operator's settings `env` block the Claude workers get — see [`Agg::user_env`].
+    user_env: crate::backend::user_env::UserEnv,
     /// text every worker's agent adds to its system prompt — see [`Agg::system_prompt`].
     system_prompt: Option<String>,
 }
@@ -175,6 +177,7 @@ impl Agg {
             custom_ruler: None,
             memory: true,
             user_settings: true,
+            user_env: Default::default(),
             system_prompt: None,
         })
     }
@@ -239,6 +242,40 @@ impl Agg {
     pub fn user_settings(mut self, on: bool) -> Agg {
         self.user_settings = on;
         self
+    }
+
+    /// Which keys of the operator's settings `env` block (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`)
+    /// the Claude workers and one-shot calls (judges, summaries) get as environment variables, without loading the
+    /// plugins, hooks and MCP servers of the same file: `false` (the default) none, `true` every key, or a list of
+    /// names. A variable agg's own environment already has wins, the keys agg manages (`AGG_*`) are never taken, and
+    /// only string values are. For a host whose model gateway is set only in those settings, while
+    /// [`Agg::user_settings`] is off. Process-wide, like `AGG_MODELS`; other agents take nothing from it.
+    pub fn user_env(mut self, which: impl Into<crate::backend::user_env::UserEnv>) -> Agg {
+        self.user_env = which.into();
+        self
+    }
+
+    /// Whether `step`'s agent can be reached: one tiny call, with the flags and the environment of its worker
+    /// (`user_settings` and `user_env` as this run has them), made without starting the run. `Ok` with what answered,
+    /// or the agent's error text, with the setting that would fix it where the operator's settings hold a gateway.
+    /// Where it comes before the run's first step, an unreachable agent stops the run with its cause.
+    pub fn reachable(&self, step: &Step) -> Result<String, Fatal> {
+        let passed = crate::backend::user_env::take(&self.user_env);
+        let agent: &dyn crate::backend::AgentBackend = match &step.agent {
+            Agent::Custom(b) => &**b,
+            a => crate::backend::for_name(a.name())?,
+        };
+        let model = step.model.clone().or_else(|| self.cfg.defaults.model.clone()).unwrap_or_else(|| agent.default_model().to_string());
+        let user_settings = self.user_settings || !agent.capabilities().supports_project_settings_only;
+        match crate::backend::reach::probe(agent, &model, user_settings, &self.dir) {
+            Ok(()) => Ok(format!("{} ({model}) answered", step.agent.name())),
+            Err(said) => {
+                let missing: Vec<String> = crate::backend::user_env::gateway_keys().into_iter()
+                    .filter(|k| !passed.contains(k) && std::env::var_os(k).is_none()).collect();
+                Err(Fatal::Other(anyhow::anyhow!("the {} agent ({model}) is not reachable:\n  {}",
+                    step.agent.name(), crate::backend::reach::explain(&said, &missing))))
+            }
+        }
     }
 
     /// Text every worker's agent adds to its system prompt (A-34): a rule that must hold for the whole
@@ -547,6 +584,7 @@ impl Agg {
         };
         st.ext.get::<AGGState>().git.iso_base = iso_base;
         crate::features::evidence::begin(&mut st, report.run_id());
+        crate::report::record_session(&mut st, &report, self.user_settings, crate::backend::user_env::take(&self.user_env));
         st.publish();
         st.dash.lifetime_session = lifetime_base;
         // the first span opens here, against the engine's launch truth.

@@ -1798,6 +1798,14 @@ switching between environments (a subscription, a cloud provider, another accoun
 Claude Code takes its provider from its own variables (`CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`, …), which
 every agent agg starts inherits.
 
+A worker that runs without the user's settings (`user_settings: false`, the default of `agg process` and of
+`Agg::user_settings(false)`) does not read the `env` block of the user-scope settings file either, so a gateway
+or a telemetry switch set only there is missing. `agg: { user_env: true }` in a process file (or a list of key names;
+`Agg::user_env(..)` in a driver) passes that block's string keys to every Claude worker and one-shot call, and no
+plugin, hook or MCP server of the file; a variable of agg's own environment wins, `AGG_*` keys are never taken, and only
+key names are ever logged ([PROCESS.md](PROCESS.md#the-agg-runs-own-settings-agg)). `agg run` loads the user's settings in
+full and has no such switch. Codex and Copilot take nothing from it yet.
+
 **A Codex provider of your own** (an OpenAI-compatible gateway) that `~/.codex/config.toml` defines reaches
 your Codex workers but **not your Codex judges**: a judge reads no config file, and calls the default OpenAI
 endpoint instead. Carry the provider in `AGG_CODEX_CONFIG`, the same keys as in the file, one per line:
@@ -2100,11 +2108,13 @@ run; `agg status --json` shows them live.
   So does a panic. If the report cannot be written, `agg run` exits **1** with the reason on stderr.
 - **SIGKILL, an OOM kill or a power cut leave no report.** A consumer MUST treat a missing report as
   `outcome: error`.
-- The schema is published at [`docs/schemas/report.v2.json`](schemas/report.v2.json). Any change to
+- The schema is published at [`docs/schemas/report.v3.json`](schemas/report.v3.json). Any change to
   the shape bumps `schema_version` and ships a new file. `schema_version` 1
-  ([`report.v1.json`](schemas/report.v1.json), agg 0.0.15) is superseded: v2 adds `detectors`,
-  `usage`, `session_log`, `waiting`, each judge's `ratchet` and each open ask's `options`, and
-  removes nothing.
+  ([`report.v1.json`](schemas/report.v1.json), agg 0.0.15) and 2 ([`report.v2.json`](schemas/report.v2.json))
+  are superseded: v2 added `detectors`, `usage`, `session_log`, `waiting`, each judge's `ratchet` and each
+  open ask's `options`; v3 adds `session` (`{agg_version, setting_sources, user_env}`: how the run's agent
+  sessions were set up, `user_env` as key names only; `null` for a run that ended before it started). Neither removes
+  anything.
 
 ## The live status: `agg status --json`
 

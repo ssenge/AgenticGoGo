@@ -100,7 +100,7 @@ fn mint_run_id() -> String {
 
 /// Append one timestamped line to `agg/private/run.log`. Best-effort: the log is for humans, and a
 /// failed log line must never fail a run.
-fn log_line(dir: &Path, line: &str) {
+pub fn log_line(dir: &Path, line: &str) {
     let log = crate::paths::run_log(dir);
     let _ = std::fs::create_dir_all(crate::paths::private_dir(dir));
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {

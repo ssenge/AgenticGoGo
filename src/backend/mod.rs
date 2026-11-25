@@ -83,7 +83,9 @@ pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod overrides;
+pub mod reach;
 pub mod stream;
+pub mod user_env;
 pub mod worker;
 
 mod contract;

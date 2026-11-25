@@ -167,7 +167,7 @@ Build the command, pass it through `self.confine_one_shot(command, cwd, isolatio
 ## Usage and model reporting
 
 What a backend reports ends up in the run report's `session_log` and totals, `agg status --json` and
-`agg history --json` (`src/usage.rs`, `docs/schemas/report.v2.json`):
+`agg history --json` (`src/usage.rs`, `docs/schemas/report.v3.json`):
 
 - **Four token kinds that do not overlap** (`usage::Tokens`): `input` (uncached prompt), `output`,
   `cache_write`, `cache_read`. Map the CLI's fields onto them exactly. If the CLI's input count

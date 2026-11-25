@@ -808,3 +808,106 @@ fn the_web_api_makes_a_project_from_the_form_overlays_the_report_stops_and_resum
     web.call("POST", "/api/run?p=two", r#"{"action":"stop"}"#);
     wait_for(60, "the resumed run stops", || web.call("GET", "/api/health?p=two", "").1["running"] == false);
 }
+
+// ---- the operator's settings `env` and the reachability preflight ---------------------------------------------------
+
+/// The example process in a folder of its own with its `agg:` line replaced by `agg`, a project, a settings folder
+/// (`CLAUDE_CONFIG_DIR`) whose `env` block names a gateway and two more keys, and a `claude` that logs what it was
+/// started with and fails like an unreachable gateway when `ANTHROPIC_BASE_URL` is missing from its environment.
+struct Hosted {
+    root: tempfile::TempDir,
+}
+
+impl Hosted {
+    fn new(agg: &str) -> Hosted {
+        let (bin, _) = &*ENV;
+        let root = tempfile::tempdir().unwrap();
+        let (home, shims, config) = (root.path().join("home"), root.path().join("shims"), root.path().join("config"));
+        let copy = Command::new("cp").arg("-R").arg(process_file().parent().unwrap()).arg(&home).status().unwrap();
+        assert!(copy.success());
+        let file = std::fs::read_to_string(home.join("process.yaml")).unwrap();
+        std::fs::write(home.join("process.yaml"), file.replace("agg: { judge_timeout: 60 }", &format!("agg: {{ judge_timeout: 60{agg} }}"))).unwrap();
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("settings.json"),
+            r#"{"model":"x","env":{"ANTHROPIC_BASE_URL":"https://gw.test","TEST_UE_OTHER":"o","TEST_UE_MINE":"file","TEST_UE_NUM":3}}"#).unwrap();
+        write_exe(&shims.join("claude"), &format!(r#"#!/bin/sh
+for a in "$@"; do [ "$a" = --version ] && {{ echo "fake-claude 0.0.0"; exit 0; }}; done
+echo "base=${{ANTHROPIC_BASE_URL-unset}} other=${{TEST_UE_OTHER-unset}} mine=${{TEST_UE_MINE-unset}} num=${{TEST_UE_NUM-unset}} args=$(echo "$*" | tr '\n' ' ')" >> "$UE_LOG"
+if [ -z "$ANTHROPIC_BASE_URL" ]; then
+  echo '{{"type":"result","subtype":"error","is_error":true,"result":"Invalid API key · Please run /login"}}'
+  exit 1
+fi
+exec {bin}/claude "$@"
+"#, bin = bin.display()));
+        project_in(&root.path().join("project"), AUTO);
+        Hosted { root }
+    }
+
+    fn project(&self) -> PathBuf {
+        self.root.path().join("project")
+    }
+
+    fn log(&self) -> Vec<String> {
+        std::fs::read_to_string(self.root.path().join("ue.log")).unwrap_or_default().lines().map(String::from).collect()
+    }
+
+    /// `agg process <file> <project> <args>` with the shim first on PATH and the settings folder named.
+    fn run(&self, args: &[&str]) -> Output {
+        let (bin, home) = &*ENV;
+        let path = format!("{}:{}:{}", self.root.path().join("shims").display(), bin.display(), std::env::var("PATH").unwrap_or_default());
+        Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(self.root.path().join("home/process.yaml")).arg(self.project()).args(args)
+            .current_dir(self.project()).env("PATH", path).env("HOME", home).env("CLAUDE_CONFIG_DIR", self.root.path().join("config"))
+            .env("UE_LOG", self.root.path().join("ue.log")).env("TEST_UE_MINE", "shell").env_remove("ANTHROPIC_BASE_URL")
+            .output().unwrap()
+    }
+}
+
+/// `user_env: true` hands every string key of the settings' `env` block to the workers and the preflight although the
+/// run leaves the operator's settings out; the shell's own variable wins over the file; a list takes only its names.
+#[test]
+fn the_settings_env_reaches_the_workers_without_their_settings() {
+    let all = Hosted::new(", user_env: true");
+    let out = all.run(&["--until", "1.3"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let log = all.log();
+    assert!(log.len() >= 2 && log[0].contains("args=") && log[0].contains("single word ok"), "the preflight comes first: {log:#?}");
+    for line in &log {
+        assert!(line.starts_with("base=https://gw.test other=o mine=shell num=unset "), "{line}");
+        assert!(line.contains("--setting-sources project,local") || line.contains("--setting-sources user"), "{line}");
+    }
+    let preflight = history(&all.project()).into_iter().filter(|e| e["kind"] == "preflight").count();
+    assert_eq!(preflight, 1, "a preflight that passes is one entry of the record");
+    let report: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(all.project().join("agg/private/report.json")).unwrap()).unwrap();
+    assert_eq!(report["session"]["setting_sources"], "project,local", "{report}");
+    assert_eq!(report["session"]["user_env"], serde_json::json!(["ANTHROPIC_BASE_URL", "TEST_UE_OTHER"]), "{report}");
+    assert!(!report.to_string().contains("gw.test"), "never a value");
+
+    let some = Hosted::new(", user_env: [ANTHROPIC_BASE_URL, NOT_IN_THE_FILE]");
+    assert!(some.run(&["--until", "1.3"]).status.success());
+    assert!(some.log().iter().all(|l| l.starts_with("base=https://gw.test other=unset mine=shell ")), "{:#?}", some.log());
+}
+
+/// Without `user_env` nothing of the block is passed, so an agent that needs it fails the preflight before any step runs,
+/// with its error and the setting that fixes it; `preflight: false` leaves the call out; `--check` never makes it.
+#[test]
+fn an_unreachable_agent_stops_the_run_before_any_step_with_its_cause() {
+    let off = Hosted::new("");
+    let out = off.run(&[]);
+    assert!(!out.status.success(), "{}", said(&out));
+    let text = said(&out);
+    assert!(text.contains("is not reachable") && text.contains("Invalid API key"), "{text}");
+    assert!(text.contains("the operator's settings env has ANTHROPIC_BASE_URL; set agg: { user_env: true } (or a list) in the process file"), "{text}");
+    assert!(off.log()[0].starts_with("base=unset "), "the key of the block was not passed: {:#?}", off.log());
+    assert_eq!(off.log().len(), 1, "one call, then the run was abandoned: {:#?}", off.log());
+    assert!(steps(&off.project()).is_empty(), "no step ran: {:#?}", steps(&off.project()));
+    assert!(!text.contains("gw.test"), "never a value: {text}");
+
+    let skipped = Hosted::new(", preflight: false");
+    skipped.run(&["--until", "1.3"]);
+    assert!(skipped.log().iter().all(|l| !l.contains("single word ok")), "no preflight call: {:#?}", skipped.log());
+
+    let checked = Hosted::new("");
+    let out = checked.run(&["--check"]);
+    assert!(checked.log().is_empty(), "{}", said(&out));
+}

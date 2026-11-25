@@ -100,6 +100,7 @@ impl AgentBackend for Claude {
         if let Some(text) = spec.system_prompt {
             command.arg("--append-system-prompt").arg(text);
         }
+        command.envs(super::user_env::passed());
         // Applied AFTER agg's own flags and BEFORE -p, so an operator can extend the invocation
         // but not clobber its shape.
         for a in spec.extra_args {
@@ -185,6 +186,7 @@ impl AgentBackend for Claude {
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
+        command.envs(super::user_env::passed());
         // Confine the judge under `Sandbox` (ISOLATION.md §12). Claude's permission layer already
         // denies tool writes here, but that is not a kernel jail — the OS wrapper is.
         let command = self.confine_one_shot(command, cwd, isolation)?;
@@ -195,7 +197,7 @@ impl AgentBackend for Claude {
 
     /// `api.anthropic.com`, or the host of `ANTHROPIC_BASE_URL` when a gateway is configured.
     fn api_hosts(&self) -> Vec<String> {
-        let base = std::env::var("ANTHROPIC_BASE_URL").ok().and_then(|u| super::url_host(&u));
+        let base = super::user_env::var("ANTHROPIC_BASE_URL").and_then(|u| super::url_host(&u));
         vec![base.unwrap_or_else(|| "api.anthropic.com".to_string())]
     }
 
