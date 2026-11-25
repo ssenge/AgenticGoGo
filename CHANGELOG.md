@@ -2,6 +2,15 @@
 
 Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
 
+## Unreleased
+
+### Added
+
+- **`scripts/install.sh` upgrades in place and warns about shadowed copies.** Without `AGG_INSTALL_DIR` it installs over the
+  `agg` first on `PATH` when its directory is writable, else as before. Afterwards it lists every other `agg` on `PATH` with
+  its version, prints a WARNING with the exact `cp` and `rm` for each one older than the copy just installed (it never changes
+  another copy) and says which copy `agg` resolves to. `AGG_DOWNLOAD_URL=<url>` downloads from another URL (`file://` works).
+
 ## 0.0.50 (2026-11-23)
 
 ### Added

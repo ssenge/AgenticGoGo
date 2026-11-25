@@ -46,7 +46,12 @@ cargo build --release && sudo cp target/release/agg /usr/local/bin/
 Options for the one-liner:
 
 - `AGG_VERSION=v0.0.11` — pin a specific version (default: latest release).
-- `AGG_INSTALL_DIR=~/bin` — choose the install directory.
+- `AGG_INSTALL_DIR=~/bin` — choose the install directory. Without it, the installer upgrades the `agg`
+  first on your `PATH` in place when you can write there (otherwise `/usr/local/bin`, then `~/.local/bin`), so an
+  older copy earlier on `PATH` doesn't keep winning. It then lists every other `agg` on `PATH` with its version, prints
+  a WARNING with the `cp` or `rm` that fixes it for each one older than the copy just installed (it never changes
+  them itself), and says which copy `agg` resolves to.
+- `AGG_DOWNLOAD_URL=<url>` — download the binary from this URL (a `file://` URL works) instead of GitHub's.
 
 Verify:
 
