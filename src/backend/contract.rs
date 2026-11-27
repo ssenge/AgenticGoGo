@@ -80,6 +80,9 @@ pub struct SessionReport {
     /// fixed `ratelimit_backoff_secs`. Absolute (not a duration) so it survives the gap between the
     /// reader parsing it and the backoff handler acting on it.
     pub rate_limit_reset: Option<u64>,
+    /// the text of the terminal FAILURE event (an `is_error` result), for classifying why the session failed
+    /// ([`AgentBackend::classify`]); `None` when it didn't fail or the agent says nothing
+    pub error: Option<String>,
 }
 
 /// A completed one-shot call: the model's TEXT (envelope already stripped), plus the exit status

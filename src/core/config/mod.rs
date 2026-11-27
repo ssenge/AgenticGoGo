@@ -174,6 +174,13 @@ pub struct Defaults {
     /// a session rollback (the code attempt is thrown away, the advice about it is not).
     #[serde(default = "default_state")]
     pub state: String,
+    /// how a worker session that failed for no fault of the work is tried again ([`crate::retry`]): a policy or `false`;
+    /// default three tries on transient failures, crashes and timeouts
+    #[serde(default)]
+    pub retry: Option<crate::retry::RetrySetting>,
+    /// the longest one try of a worker session may run, e.g. `45m`; none by default
+    #[serde(default)]
+    pub timeout: Option<crate::retry::Dur>,
     /// the generic framing for this step's ROLE (§4) — prepended as its own section above the
     /// step's own `prompt:`. Config-driven, so a role like `reconsider`/`reviewer`/`tester` needs
     /// no Rust (this replaced the hardcoded `enum Role` red-team arm). `None` = no role section.
@@ -212,6 +219,8 @@ impl Default for Defaults {
             effort: None,
             worker_args: vec![],
             state: default_state(),
+            retry: None,
+            timeout: None,
             role_prompt: None,
             role_prompt_file: None,
             isolation: None,
@@ -335,6 +344,12 @@ pub struct StepBody {
     pub worker_args: Option<Vec<String>>,
     #[serde(default)]
     pub state: Option<String>,
+    /// this step's retry policy (over `defaults.retry`)
+    #[serde(default)]
+    pub retry: Option<crate::retry::RetrySetting>,
+    /// this step's time limit per try (over `defaults.timeout`)
+    #[serde(default)]
+    pub timeout: Option<crate::retry::Dur>,
     /// generic ROLE framing for this step (§4) — a config-driven section above `prompt:`. Overrides
     /// `defaults.role_prompt`; `None` inherits it.
     #[serde(default)]
@@ -802,6 +817,10 @@ pub struct ResolvedStep {
     pub effort: Option<String>,
     pub worker_args: Vec<String>,
     pub state: String,
+    /// how a failed session is tried again; `None` = not at all
+    pub retry: Option<crate::retry::Retry>,
+    /// the longest one try may run, seconds; `None` = no limit
+    pub timeout_secs: Option<u64>,
     /// this step's sessions keep the working memory (forward state, wiki, memory log, summary).
     /// Always `true` on the YAML path, where `memory.enabled` governs the log run-wide; a driver
     /// step sets it with `Step::memory`.

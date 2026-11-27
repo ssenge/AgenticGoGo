@@ -50,7 +50,7 @@ settings:
   skip: [extras]                      # ids of phases or steps kept in the order, not run
   quality: { definition: d, version: "1", min: 90, guide: prompts/quality.md, reports: verifiers/reports.py, scope: "{{ app }}" }
   models: { small: some-model }       # sizes a ladder's tier may name
-rlt: { memory: false, user_settings: false, user_env: false, preflight: true, on_regression: annotate, verifier_timeout: 3600 }
+rlt: { memory: false, user_settings: false, user_env: false, preflight: true, on_regression: annotate, verifier_timeout: 3600, min_free_disk: 10GB }
 run:
   history: reports/steps.jsonl        # the step history (default rlt/private/steps.jsonl)
   own: [task.md]                      # files --reset never takes back
@@ -156,7 +156,9 @@ rounds apart by the ids a verdict names (the same set twice is a stall: the step
 
 Per step, highest first: the project's file (`steps.<id>`, then `defaults`), the step's `settings`, the process's
 `settings.defaults`. Fields: `worker {agent, model, effort}`, `critic` (`false`, `true` or a role), `repairs`, `inputs`,
-`outputs`, `tools`, `first` (a command), `ladder`, `note`. The project's file also has `skip` (replacing the process's),
+`outputs`, `tools`, `first` (a command), `ladder`, `note`, `retry` (a policy for a worker session that failed for no
+fault of the work, or `false`; [Retries and timeouts](CONFIG.md#retries-and-timeouts)) and `timeout` (the longest one try may run,
+e.g. `45m`). The project's file also has `skip` (replacing the process's),
 `quality`, `models`, `managed` (tools a ladder's decider may pick besides `ladder.tools`) and `auto_approve`. Unknown keys
 are errors; every id and name it uses must exist in the process.
 
@@ -227,6 +229,7 @@ ref made before rlt noted the step is not found.
 | `preflight` | `true` | one tiny call with the worker's agent and model before the first step; `false` leaves it out |
 | `on_regression` | `annotate` | `annotate` (record a regression, keep the work) or `rollback` |
 | `verifier_timeout` | `3600` | a verifier's time limit, seconds |
+| `min_free_disk` | `10GB` | the least free disk the run needs (a size, a share like `5%`, or `false`), checked before each worker session and each round of verifiers; below it the run stops (exit 7) and `--resume` goes on |
 
 **`user_env`.** The user-scope settings file (`$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, else
 `~/.claude/settings.json`) holds an `env` object: a model gateway's base URL and token, telemetry and cache switches. A worker

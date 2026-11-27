@@ -50,6 +50,12 @@ pub struct StepSettings {
     pub ladder: Option<Vec<TierSpec>>,
     /// What a human tells the step for every run of it: set once in the project's file, unlike a `--note`.
     pub note: Option<String>,
+    /// How a worker session that failed for no fault of the work is tried again (a policy, or `false`): default three
+    /// tries on transient failures, crashes and timeouts. A retry is no work session: one record, with `attempts`.
+    pub retry: Option<crate::retry::RetrySetting>,
+    /// The longest one try of a worker session may run (`45m`); the session is killed after it and the retry policy
+    /// decides. None: no limit.
+    pub timeout: Option<crate::retry::Dur>,
 }
 
 /// The code-quality floor, each field optional so a project's file may replace one.
@@ -162,7 +168,9 @@ impl Settings {
                        tools: layers.iter().find_map(|l| l.tools.clone()),
                        first: layers.iter().find_map(|l| l.first.clone()),
                        ladder: layers.iter().find_map(|l| l.ladder.clone()),
-                       note: layers.iter().find_map(|l| l.note.clone()) }
+                       note: layers.iter().find_map(|l| l.note.clone()),
+                       retry: layers.iter().find_map(|l| l.retry.clone()),
+                       timeout: layers.iter().find_map(|l| l.timeout) }
     }
 
     /// The ids the project's file names under `steps` (to check them against the process).
@@ -211,6 +219,15 @@ impl StepSettings {
     pub fn worker_of(&self, step: Step) -> Result<Step> {
         let step = match &self.tools {
             Some(tools) => step.tools(tools.iter().cloned()),
+            None => step,
+        };
+        let step = match &self.retry {
+            Some(crate::retry::RetrySetting::Flag(false)) => step.no_retry(),
+            Some(crate::retry::RetrySetting::Policy(p)) => step.retry(p.clone()),
+            _ => step,
+        };
+        let step = match self.timeout {
+            Some(t) => step.timeout(t.as_duration()),
             None => step,
         };
         let Some(r) = &self.worker else { return Ok(step) };

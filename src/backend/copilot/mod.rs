@@ -266,6 +266,7 @@ impl AgentBackend for Copilot {
             cost_usd: None,           // AI Credits, not dollars — see capabilities()
             rate_limited: false,      // not detectable today — see capabilities()
             rate_limit_reset: None,   // N/A while rate_limited is always false
+            error: None,
         })
     }
 

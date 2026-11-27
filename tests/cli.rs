@@ -2141,3 +2141,130 @@ fn sessions_and_script_verifiers_get_their_own_short_temp_folder_that_goes_when_
     }
     assert_ne!(worker, verifier);
 }
+
+/// A fake `claude` whose first `fail` tries end with `error` (exit 1) or, with `error` = "hang", hang; the next one
+/// works. `tries` in the project counts them.
+fn flaky_claude(dir: &Path, fail: u32, error: &str) {
+    let bad = if error == "hang" {
+        "sleep 60".to_string()
+    } else {
+        format!("printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"{error}\",\"usage\":{{\"output_tokens\":1}}}}'; exit 1")
+    };
+    write(
+        &dir.join("bin"),
+        "claude",
+        &format!(
+            "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = \"--version\" ]; then echo fake; exit 0; fi; done\n\
+             n=$(cat tries 2>/dev/null || echo 0); n=$((n+1)); echo $n > tries\n\
+             if [ $n -le {fail} ]; then {bad}; fi\n\
+             : > did_work; git add did_work >/dev/null 2>&1; git commit -qm work >/dev/null 2>&1\n\
+             printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"usage\":{{\"output_tokens\":1}}}}'\n"
+        ),
+    );
+    chmod_x(&dir.join("bin/claude"));
+}
+
+/// A project whose worker is `flaky_claude`, its `defaults` as given (the retry policy, a timeout), done when `did_work` is there.
+fn flaky_project(fail: u32, error: &str, defaults: &str) -> (tempfile::TempDir, String) {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    flaky_claude(dir, fail, error);
+    write_verifier(dir, "worked", "#!/bin/sh\nif [ -f did_work ]; then m=true; else m=false; fi\nprintf '{\"met\":%s,\"rationale\":\"w\"}\\n' $m\n");
+    write(dir, "rlt/rlt.yaml", &format!("project: retry\ndefaults: {{ model: fake, {defaults} }}\nsteps:\n  worker: {{}}\nsequence:\n  steps: [worker]\n  done_if: \"worked\"\nsummary: {{ enabled: false }}\n"));
+    write_state_md(dir, "do work\n");
+    (tmp, path)
+}
+
+/// The step records of the call ledger: `(step, attempts)`.
+fn step_attempts(dir: &Path) -> Vec<(String, u64)> {
+    let text = fs::read_to_string(dir.join("rlt/private/calls.jsonl")).unwrap();
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["kind"] == "step")
+        .map(|v| (v["outcome"]["step"].as_str().unwrap().to_string(), v["outcome"]["attempts"].as_u64().unwrap_or(1)))
+        .collect()
+}
+
+/// An overloaded API fails the first two tries; they are tried again inside the same session (one ledger record with
+/// `attempts: 3`, one session branch), the run is done, and what the failed tries spent is charged.
+#[test]
+fn a_transient_failure_is_tried_again_inside_the_same_session() {
+    let (tmp, path) = flaky_project(2, "API Error: 529 overloaded", "retry: { attempts: 3, backoff: { initial: 1s, factor: 1, jitter: false } }");
+    let dir = tmp.path();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 0, &said);
+    assert!(said.contains("try 1 of 3 failed (transient)") && said.contains("[3 tries]"), "{said}");
+    assert_eq!(step_attempts(dir), vec![("worker".to_string(), 3)], "one record for the three tries");
+    assert_eq!(fs::read_to_string(dir.join("tries")).unwrap().trim(), "3");
+    let branches = Command::new("git").args(["branch", "--list", "rlt/*"]).current_dir(dir).output().unwrap();
+    assert!(!String::from_utf8_lossy(&branches.stdout).contains("session-2"), "no second session branch");
+    let report: serde_json::Value = serde_json::from_str(&fs::read_to_string(dir.join("rlt/private/report.json")).unwrap()).unwrap();
+    assert_eq!(report["usage"]["total"]["tokens"]["output"], 3, "the failed tries are charged: {report}");
+}
+
+/// A rejected key is never tried again; `retry: false` turns it all off; exhausted tries leave the failure to the loop.
+#[test]
+fn an_auth_failure_is_not_retried_and_retry_false_and_exhaustion_are_honoured() {
+    let (tmp, path) = flaky_project(5, "Invalid API key", "retry: { attempts: 3, backoff: { initial: 1s, jitter: false } }");
+    let out = rlt(tmp.path(), &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!said.contains("trying again"), "auth is never retried: {said}");
+    assert_eq!(fs::read_to_string(tmp.path().join("tries")).unwrap().trim(), "1");
+
+    let (off, path) = flaky_project(5, "API Error: 529 overloaded", "retry: false");
+    let out = rlt(off.path(), &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("trying again"));
+    assert_eq!(fs::read_to_string(off.path().join("tries")).unwrap().trim(), "1");
+
+    let (spent, path) = flaky_project(5, "API Error: 503", "retry: { attempts: 2, backoff: { initial: 1s, jitter: false } }");
+    let out = rlt(spent.path(), &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_eq!(fs::read_to_string(spent.path().join("tries")).unwrap().trim(), "2", "two tries in all: {said}");
+    assert_exit(&out, 4, &said);
+}
+
+/// A step's `timeout` kills a session that hangs; the policy tries again, and the second try works.
+#[test]
+fn a_timeout_kills_a_hung_session_and_the_retry_goes_on() {
+    let (tmp, path) = flaky_project(1, "hang", "timeout: 2s, retry: { attempts: 2, backoff: { initial: 1s, jitter: false } }");
+    let dir = tmp.path();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 0, &said);
+    assert!(said.contains("TIMEOUT") && said.contains("failed (timeout)"), "{said}");
+    assert_eq!(step_attempts(dir), vec![("worker".to_string(), 2)], "{said}");
+}
+
+/// `rlt stop` ends a retry's backoff wait at once (exit 5), instead of sleeping it out.
+#[test]
+fn a_stop_ends_a_retry_backoff_wait() {
+    let (tmp, path) = flaky_project(9, "API Error: 529 overloaded", "retry: { attempts: 3, backoff: { initial: 300s, jitter: false } }");
+    let dir = tmp.path();
+    let log = dir.join("run.out");
+    let mut child = rlt(dir, &path)
+        .args(["run", "--max-sessions", "2"])
+        .stdout(std::process::Stdio::from(fs::File::create(&log).unwrap()))
+        .stderr(std::process::Stdio::from(fs::File::create(dir.join("run.err")).unwrap()))
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let waiting = |f: &str| fs::read_to_string(dir.join(f)).unwrap_or_default().contains("trying again in 300s");
+    while !waiting("run.err") && started.elapsed() < std::time::Duration::from_secs(60) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(waiting("run.err"), "the run reached its backoff wait");
+    assert!(rlt(dir, &path).arg("stop").output_bounded().unwrap().status.success());
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() > end {
+            let _ = child.kill();
+            panic!("the stop did not end the wait");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    assert_eq!(status.code(), Some(5), "a stop is exit 5");
+}

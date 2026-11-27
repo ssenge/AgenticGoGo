@@ -786,6 +786,8 @@ impl Relentless {
             effort: step.effort.as_str().map(String::from),
             worker_args,
             state: step.state.clone().unwrap_or_else(|| self.cfg.defaults.state.clone()),
+            retry: crate::retry::resolved(step.retry.as_ref().or(self.cfg.defaults.retry.as_ref())),
+            timeout_secs: step.timeout.map(|d| d.as_secs()).or(self.cfg.defaults.timeout.map(|d| d.0)),
             memory: step.memory.unwrap_or(self.memory),
             resume,
             news,

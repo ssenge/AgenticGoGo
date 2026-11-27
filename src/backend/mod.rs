@@ -202,6 +202,13 @@ pub trait AgentBackend: Send + Sync {
     /// not report that number — see [`SessionReport`].
     fn parse_result(&self, line: &str) -> Option<SessionReport>;
 
+    /// Why a session that failed failed, for retrying ([`crate::retry`]). The default reads the terminal failure text the
+    /// agent reported and its exit; a backend that knows its own errors better overrides it. Call it for a failure only:
+    /// a clean session has no class.
+    fn classify(&self, outcome: &worker::SessionOutcome) -> crate::retry::FailureClass {
+        crate::retry::classify(outcome.error.as_deref(), outcome.exit_code, outcome.timed_out, outcome.killed_by_watchdog, outcome.rate_limited)
+    }
+
     /// A single NON-AGENTIC prompt→text call, tools/MCP off, project config ignored. Used by the
     /// rubric verifier and the summarizer.
     ///

@@ -803,8 +803,8 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 
 `rlt run` exit codes, so automation can branch on the outcome: **0** `done_if` met · **1** hard
 error · **3** a guard fired (`abort_if`) · **4** hit `--max-sessions` · **5** an operator stopped it
-(`rlt stop`, SIGTERM, SIGINT). The run report's `outcome` says the same thing and is authoritative —
-see [Embedding rlt](#embedding-rlt).
+(`rlt stop`, SIGTERM, SIGINT) · **7** free disk fell below `min_free_disk` (the run is stopped, not failed: free space and
+`--resume`). The run report's `outcome` says the same thing and is authoritative — see [Embedding rlt](#embedding-rlt).
 
 > ⚠ **5 is new, and it changed.** An operator stop used to report **0**, sharing it with a met goal —
 > so `if rlt run; then ship; fi` shipped on `rlt stop`. A stop is not success. A wrapper that wants
@@ -822,7 +822,7 @@ breaking change, so ignore unknown fields.
 | Interface | Contract |
 |---|---|
 | **`rlt/private/report.json`** | How the run ended: `outcome` (`done` · `aborted` · `stopped` · `error`), the reason, session counts, clock, every verifier's last and baseline verdict (with the paths of its kept evidence) and ratchet, the stop detectors, the result commit, open asks, how the sessions were set up (`session`: setting sources, the names of the settings `env` keys passed), and usage — per session (`session_log`: worker and ruler apart, the model each agent reported, `input`/`output`/`cache_write`/`cache_read` tokens, `cost_usd` + `cost_source`) and in total. Schema: [`docs/schemas/report.v2.json`](schemas/report.v2.json) (v1 superseded). Field reference: [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson). `rlt run --report-json` prints it on stdout. |
-| **`rlt run` exit codes** | 0 done · 3 `abort_if` · 4 session cap · 5 stopped · 1 error. The report's `outcome` is authoritative. |
+| **`rlt run` exit codes** | 0 done · 3 `abort_if` · 4 session cap · 5 stopped · 7 disk below the floor · 1 error. The report's `outcome` is authoritative. |
 | **`rlt status --json`** | Where a run stands now, from another process, without re-verifying: `running`, `phase`, `current_step`, `session`, `time`, `sessions`, each verifier's `last` verdict and `ratchet` reference, `detectors` (`stalled`, `oscillating`, `rollbacks`, `consecutive_rollbacks`, `ratchet_regressed`), `open_asks` with `options`, running `usage` totals, `waiting` (`{reason, agent, until}` during a rate-limit wait, else `null`). Field names match the report. Schema: [`docs/schemas/status.v1.json`](schemas/status.v1.json). Reference: [CONFIG.md](CONFIG.md#the-live-status-rlt-status---json). |
 | **`rlt answer <id> <value> --json`** | `{schema_version, accepted, reason, id, answer}`; exit 0 accepted · 1 refused (unknown id, already answered, a value off the options). The answer reaches the worker's next brief, or the driver waiting on it. Schema: [`docs/schemas/answer.v1.json`](schemas/answer.v1.json). |
 | `rlt check --json` | `{schema_version, ok, config, problems: [{path, message}], warnings: [{path, message}]}`. `path` is dotted (`steps.worker.isolation`, `sequence.steps[1].until`; `""` = the whole file). Exit 0 valid · 1 any problem. Runs nothing. |

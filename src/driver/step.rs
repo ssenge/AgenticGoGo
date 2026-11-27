@@ -77,6 +77,11 @@ pub struct Step {
     /// the agent's own tools this step's worker gets, by the agent's names; its MCP servers' tools come on
     /// top. `None` = all of them. See [`Step::tools`].
     pub tools: Option<Vec<String>>,
+    /// how a session that failed for no fault of the work is tried again. `None` = the default policy (three tries on
+    /// transient failures, crashes and timeouts); `Some(false)` = none. See [`Step::retry`].
+    pub retry: Option<crate::retry::RetrySetting>,
+    /// the longest one try may run; the session is killed after it (and retried by the policy). `None` = no limit.
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl Step {
@@ -119,6 +124,23 @@ impl Step {
     }
     pub fn isolation(mut self, i: Isolation) -> Step {
         self.isolation = i;
+        self
+    }
+    /// How a session that failed for no fault of the work is tried again: the policy's tries, backoff and failure
+    /// classes ([`crate::retry`]). The twin of YAML's `retry:`.
+    pub fn retry(mut self, policy: crate::retry::Retry) -> Step {
+        self.retry = Some(crate::retry::RetrySetting::Policy(policy));
+        self
+    }
+    /// No retry: a failed session is the end of the step's try (YAML's `retry: false`).
+    pub fn no_retry(mut self) -> Step {
+        self.retry = Some(crate::retry::RetrySetting::Flag(false));
+        self
+    }
+    /// The longest one try of this step may run (YAML's `timeout:`); a session that passes it is killed and, by the
+    /// retry policy, tried again.
+    pub fn timeout(mut self, d: std::time::Duration) -> Step {
+        self.timeout = Some(d);
         self
     }
     /// The image this step runs in under [`Isolation::Container`] — one with the step's agent CLI

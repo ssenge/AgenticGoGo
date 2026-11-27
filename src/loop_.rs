@@ -575,6 +575,7 @@ struct StepStaging {
     cost: f64,
     secs: u64,
     exit: i32,
+    attempts: u32,
     agent_session: Option<crate::driver::AgentSession>,
     staged: Option<(String, crate::git::StagedSession)>,
     on_span: bool,
@@ -584,7 +585,7 @@ struct StepStaging {
 impl StepStaging {
     fn capture(st: &mut LoopState) -> StepStaging {
         let agent = st.cur_step.as_ref().map(|s| s.agent.clone()).unwrap_or_default();
-        let (verdicts, staged, secs, exit, agent_session) = {
+        let (verdicts, staged, secs, exit, agent_session, attempts) = {
             let sc = st.scratch.get::<RLTScratch>();
             let (secs, exit) = sc
                 .outcome
@@ -594,7 +595,7 @@ impl StepStaging {
             let session = sc.outcome.as_ref().and_then(|o| o.session_id.clone());
             let agent_session = session.map(|id| crate::driver::AgentSession { agent, id });
             let verdicts = sc.res.as_ref().map(|r| r.fresh_verdicts.clone()).unwrap_or_default();
-            (verdicts, sc.staged.clone(), secs, exit, agent_session)
+            (verdicts, sc.staged.clone(), secs, exit, agent_session, sc.outcome.as_ref().map_or(1, |o| o.attempts.max(1)))
         };
         StepStaging {
             step: st.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
@@ -604,6 +605,7 @@ impl StepStaging {
             cost: st.cost_spent,
             secs,
             exit,
+            attempts,
             agent_session,
             staged,
             on_span: st.ext.get::<RLTState>().git.span_tip.is_some(),
@@ -639,6 +641,7 @@ impl StepStaging {
             secs: self.secs,
             exit: self.exit,
             agent_session: self.agent_session,
+            attempts: self.attempts,
         }
     }
 }

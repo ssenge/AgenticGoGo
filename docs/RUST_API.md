@@ -123,6 +123,11 @@ A step that runs once and hands its result on in its own files can drop rlt's wo
 `Step::new("check").memory(false)`. Its brief then names no `STATE.md`, wiki or memory log, and no memory
 fold or summary runs after it. Memory stays on for steps that loop, where one session advises the next.
 
+`.retry(Retry { attempts: 5, ..Retry::default() })`, `.no_retry()` and `.timeout(Duration::from_secs(2700))` set how a session that
+failed for no fault of the work (an overload, a dropped connection, a crash, a hang) is tried again; a retry is one
+ledger record with `attempts`, not a session ([CONFIG.md](CONFIG.md#retries-and-timeouts)). `rlt.min_free_disk(Floor::Bytes(…))`
+sets the free-disk floor the run stops below (default 10 GB, `Floor::Off` for none).
+
 `.tools(["Bash", "Read", "Edit", "Write"])` limits a worker to these tools of its agent, by the agent's own
 names; its MCP servers' tools come on top. A session then starts with only those tools' descriptions in its
 context. Claude: `--tools`; an agent that can't limit its tools runs with all of them and the step says so.
@@ -330,7 +335,7 @@ fn real_main() -> Result<(), Fatal> { /* … */ }
 ```
 
 It maps the ending to the same codes `rlt run` uses: **0** goals met · **3** `abort_if` · **4**
-max-sessions · **5** stopped by an operator · **1** a real fault. `relentless::workflow::run` adds **6**: a halt
+max-sessions · **5** stopped by an operator · **7** free disk below the floor (resumable) · **1** a real fault. `relentless::workflow::run` adds **6**: a halt
 because the task force's re-entries and repairs for the failed step are spent (a restart of that step halts
 again; something it works on must change first).
 

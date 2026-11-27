@@ -180,6 +180,30 @@ fn wait_out(ctx: &mut LoopState, since: u64, until: u64) -> (WaitEnd, Option<Fin
     end
 }
 
+/// The pause between two tries of one session: until `secs` have passed, a `wake` arrives, or the run ends (a stop or an
+/// interrupt: `Some(outcome)` then). Any other command waits for the next session boundary.
+pub(crate) fn wait_between_tries(ctx: &mut LoopState, secs: u64) -> Option<RunOutcome> {
+    let until = crate::util::now_epoch() + secs;
+    let mut deferred = Vec::new();
+    let end = loop {
+        if crate::os::signals::interrupted() {
+            break Some(ctx.finish_interrupted());
+        }
+        let cmds = ctx.bus.as_ref().map(|b| b.drain()).unwrap_or_default();
+        match sort_commands(cmds, &mut deferred) {
+            Some(Signal::Stop(reason)) => break Some(ctx.stopped_via_bus(reason)),
+            Some(Signal::Wake) => break None,
+            None => {}
+        }
+        if crate::util::now_epoch() >= until {
+            break None;
+        }
+        std::thread::sleep(POLL);
+    };
+    requeue(ctx, deferred);
+    end
+}
+
 /// Put the commands a wait does not act on back on the bus, ahead of anything sent later, so the
 /// next session boundary applies them exactly as if no wait had happened.
 fn requeue(ctx: &LoopState, deferred: Vec<Command>) {

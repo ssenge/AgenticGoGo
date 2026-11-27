@@ -2,6 +2,35 @@
 
 Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; the entries below 0.1.0 keep the old names). Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.2.0 (2026-11-27)
+
+### Added
+
+- **Retries, failure classes and a per-step `timeout`.** A worker session that fails for no fault of the work (an
+  overloaded API, a dropped connection, a crash, a hang) is tried again inside the same step: `defaults.retry` / a step's
+  `retry` / `Step::retry` take `{ attempts: 3, backoff: { initial: 15s, factor: 2, max: 5m, jitter: true }, on: [transient,
+  crash, timeout] }` or `false`, and `timeout: 45m` kills a session that runs longer. A failure is classified
+  ([`AgentBackend::classify`], default in `relentless::retry`): `transient`, `crash`, `timeout` are tried again by default;
+  `rate_limit` waits for its reset as before; `auth` and `unknown` never. A retry is not a work session: one ledger record
+  with `attempts: n` (absent means 1, old ledgers replay unchanged), no new session branch, nothing counted toward
+  `stalled`, the repair budget or the dud streak; the failed tries' tokens and cost are charged; `rlt send stop` ends a
+  backoff wait at once. Process files take `retry` and `timeout` in a step's settings. See `docs/CONFIG.md`, "Retries and
+  timeouts".
+- **`min_free_disk`** (`defaults` of the top level and `rlt: { min_free_disk }` of a process file; `Relentless::min_free_disk`):
+  the least free disk a run needs, a size (`10GB`, the default), a share (`5%`) or `false`. It is checked on the project's and
+  the temp folder's file system before each worker session, each round of verifiers and each driver lap, and in `rlt verify`.
+  Below it the run stops with its cause, exit **7** (`RunOutcome::Disk`), report outcome `stopped`, and `--resume` goes on.
+- **A temp folder per session.** Every worker session, script verifier and process script step gets its own short `TMPDIR`
+  (`/tmp/rlt-<run>/<n>`; short because a unix socket path may have 104 bytes on macOS), removed when it ends
+  (`RLT_KEEP_TMP=1` keeps it). It is writable under the sandbox, bound after bwrap's tmpfs on Linux and mounted in a container.
+
+### Changed
+
+- **The flow scratch moved into the project:** `rlt/state/flow/run-<pid>-<n>/` (was `$TMPDIR/rlt-flow-…`), where a confined or
+  containerised worker can write the file its brief names. The verifier cache moved to the user's cache folder
+  (`~/Library/Caches/rlt/verifier-cache/`, `$XDG_CACHE_HOME`/`~/.cache` or `%LOCALAPPDATA%`), because macOS purges `$TMPDIR`.
+- `rlt verify` fails with the disk message instead of running a verifier on a full disk.
+
 ## 0.1.0 (2026-11-27)
 
 **AgenticGoGo is now Relentless (`rlt`), and judges are now verifiers.** This is a hard rename: there is no compatibility

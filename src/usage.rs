@@ -109,6 +109,17 @@ impl CostSource {
     }
 }
 
+impl Usage {
+    /// Adds what another call reported: tokens, and the price when either side has one. The model stays this call's.
+    pub fn absorb(&mut self, other: &Usage) {
+        self.tokens.add(&other.tokens);
+        self.cost_usd = add_cost(self.cost_usd, other.cost_usd);
+        if self.model.is_none() {
+            self.model = other.model.clone();
+        }
+    }
+}
+
 /// A sum of calls: tokens, price, and how complete the price is.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Totals {

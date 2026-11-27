@@ -101,6 +101,7 @@ heartbeat_secs: 30
 watchdog: { idle_secs: 900, cpu_grace: 180 }
 ratelimit_backoff_secs: 1800       # claude + codex; copilot cannot flag a rate-limit. Used when no reset time is reported
 ratelimit_min_gap_secs: 60         # least time between a rate-limited attempt and the next (`rlt send wake` waits it out)
+min_free_disk: 10GB                # the least free disk a run needs (`10GB`, `5%` or `false`); below it the run stops, exit 7
 summary: { enabled: true, min_interval_secs: 300 }   # runs on the RULER — no model: here
 memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
 session_isolation: {}              # MANDATORY; keys: branch_prefix, base_branch, red_file
@@ -127,6 +128,8 @@ isolation_policy:                  # run-level confinement beyond the tier
 | `role_prompt_file` | none | `role_prompt` read from a **file** ([Prompts from files](#prompts-from-files--prompt_file-role_prompt_file)). An alternative to `role_prompt` — set one. |
 | `isolation` | `none` | `none` \| `sandbox` \| `container` — blast-radius jail (below). Inheritable; a step may override. |
 | `image` | `alpine:3.20` | the image an `isolation: container` step runs in — the step's agent CLI runs inside it, so it must follow the [image contract](#the-container-tier-runs-the-agent) (reference images: `docker/claude`, `docker/codex`). Inert on every other tier. |
+| `retry` | 3 tries | how a worker session that failed for no fault of the work is [tried again](#retries-and-timeouts): `{ attempts, backoff, on }`, or `false`. A step may override. |
+| `timeout` | none | the longest one try of a worker session may run (`45m`); the session is killed after it, and `retry` decides. A step may override. |
 | `write_deny` | `[]` | **protected paths** — globs every step may read but never change. Enforced on **every** tier by the gate's content-hash check, and by the kernel under `sandbox`/`container` ([below](#protected-paths--write_deny-readonly-writable)). A step's own list is ADDED to this one. |
 
 ## `verifier` — THE RULER
@@ -1189,6 +1192,37 @@ disagree about it. Answering is exempt only because it is not a `send` at all �
 > ⚠ **A forgotten ask waits forever.** That is the accepted cost of having no timeout. `notify.cmd`
 > fires when an ask opens, `rlt status` shows it with its age, and `rlt stop` ends a run nobody
 > intends to answer. A worker-opened ask cannot hang anything — it never blocks the loop.
+
+## Retries and timeouts
+
+A worker session can fail for reasons that are not the work's fault: the API is overloaded, a connection drops, the CLI
+crashes, a session hangs. Relentless tries the session again, inside the same step.
+
+```yaml
+defaults:
+  retry:
+    attempts: 3                          # tries in all, the first included; 1 = no retry
+    backoff: { initial: 15s, factor: 2, max: 5m, jitter: true }
+    on: [transient, crash, timeout]      # the classes that are tried again (`empty` is opt-in)
+  timeout: 45m                           # per try; none by default
+```
+
+`retry: false` turns it off; a step may set its own. The classes:
+
+| class | what it is | tried again |
+|---|---|---|
+| `transient` | overloaded (529), a 5xx, a dropped or refused connection, a stream that ended without its end event | by default |
+| `crash` | a non-zero exit with nothing to classify it by | by default |
+| `timeout` | the step's `timeout` fired, or the stall watchdog killed a hung session | by default |
+| `rate_limit` | a quota or limit: waits for its reset ([below](#rate-limits--wait-wake-resume)), never counts as a try | never |
+| `auth` | a rejected key or login | never: the same call fails the same way |
+| `unknown` | anything else | never |
+
+A retry is **not a work session.** It takes no new ledger ordinal and no session branch, and nothing counts toward
+`stalled`, the repair budget or the dud streak; the ledger keeps one `step` record with `attempts: n` (absent means 1),
+so a resumed run replays the same. What the failed tries spent **is** charged to the run's counters. The work a cut-off
+try left stays in the tree, and the next try's opening message says so. `rlt send stop` ends a backoff wait at once.
+Repairs, ladders and the task force are for failures a verifier sees; a retry is for the ones it never gets to see.
 
 ## Rate limits — wait, wake, resume
 

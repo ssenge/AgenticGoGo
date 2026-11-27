@@ -124,6 +124,16 @@ pub fn last_json_object(s: &str) -> Option<&str> {
     None
 }
 
+/// A number in `0.0..1.0` that differs between calls and between processes: jitter for waits, not cryptography.
+pub fn unit_random() -> f64 {
+    use std::hash::{Hash, Hasher};
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    (nanos, std::process::id(), CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)).hash(&mut h);
+    (h.finish() % 10_000) as f64 / 10_000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

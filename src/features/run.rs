@@ -13,6 +13,44 @@ fn is_dud(outcome: &SessionOutcome) -> bool {
     !outcome.rate_limited && outcome.exit_code != Some(0) && outcome.usage.tokens.output_or_zero() == 0
 }
 
+/// A session that did not end well: a non-zero exit, a kill by the watchdog or the step's timeout.
+fn failed(outcome: &SessionOutcome) -> bool {
+    outcome.exit_code != Some(0) || outcome.killed_by_watchdog || outcome.timed_out
+}
+
+/// One try of the step's worker.
+#[allow(clippy::too_many_arguments)]
+fn launch(
+    ctx: &LoopState,
+    agent: &'static dyn crate::backend::AgentBackend,
+    model: &str,
+    effort: &str,
+    step: &crate::core::config::ResolvedStep,
+    prompt: &str,
+    denied: &[String],
+    resume: Option<&(String, bool)>,
+) -> SessionOutcome {
+    worker::run_session(
+        &ctx.cfg,
+        agent,
+        model,
+        effort,
+        &step.worker_args,
+        prompt,
+        &ctx.dir,
+        ctx.session,
+        &ctx.live,
+        step.isolation,
+        denied,
+        &step.write_deny,
+        &step.image,
+        resume,
+        step.user_settings,
+        step.system_prompt.as_deref(),
+        step.timeout_secs,
+    )
+}
+
 pub struct LaunchWorker;
 impl Handler for LaunchWorker {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
@@ -53,33 +91,37 @@ impl Handler for LaunchWorker {
         }
         crate::features::protect::before_worker(ctx, &step)?;
         crate::features::partial::note_untracked_before(ctx);
-        let launch = |resume| {
-            worker::run_session(
-                &ctx.cfg,
-                agent,
-                &model,
-                &effort,
-                &step.worker_args,
-                &prompt,
-                &ctx.dir,
-                ctx.session,
-                &ctx.live,
-                isolation,
-                &denied,
-                &step.write_deny,
-                &step.image,
-                resume,
-                step.user_settings,
-                step.system_prompt.as_deref(),
-            )
-        };
-        let mut outcome = launch(step.resume.as_ref());
+        let mut outcome = launch(ctx, agent, &model, &effort, &step, &prompt, &denied, step.resume.as_ref());
         // A session the agent no longer has fails before any work: the context was only a cache, so
         // the step starts fresh rather than failing (A-33).
         if let Some((id, _)) = step.resume.as_ref().filter(|_| is_dud(&outcome) && !crate::os::signals::interrupted()) {
             eprintln!("  resuming session {id} failed (exit {:?}); starting fresh", outcome.exit_code);
-            outcome = launch(None);
+            outcome = launch(ctx, agent, &model, &effort, &step, &prompt, &denied, None);
         }
+        // A failure that is not the work's fault (an overload, a dropped connection, a crash, a timeout) is tried again
+        // inside this session: one ledger record, no new session branch, nothing counted toward `stalled`, the repair
+        // budget or the dud streak. What the failed tries spent is charged.
+        let mut made = 1;
+        let mut spent = crate::usage::Usage::default();
+        while let Some(policy) = step.retry.as_ref().filter(|_| failed(&outcome) && !crate::os::signals::interrupted()) {
+            let class = agent.classify(&outcome);
+            if !policy.again(class, made) {
+                break;
+            }
+            let wait = policy.backoff.wait(made + 1, crate::util::unit_random());
+            eprintln!("  ↻ try {made} of {} failed ({}): trying again in {}s", policy.attempts, class.word(), wait.as_secs());
+            spent.absorb(&outcome.usage);
+            if let Some(end) = crate::features::backoff::wait_between_tries(ctx, wait.as_secs()) {
+                outcome.usage.absorb(&spent);
+                ctx.charge_usage(crate::usage::Role::Worker, &step.agent, &outcome.usage);
+                return Ok(Flow::Stop(end));
+            }
+            made += 1;
+            let note = format!("{prompt}\n\nAn earlier try was cut off ({}); its work is in place: continue, and change nothing that holds.", class.word());
+            outcome = launch(ctx, agent, &model, &effort, &step, &note, &denied, None);
+        }
+        outcome.usage.absorb(&spent);
+        outcome.attempts = made;
         crate::features::protect::after_worker(ctx, &step)?;
         ctx.charge_usage(crate::usage::Role::Worker, &step.agent, &outcome.usage);
 
@@ -89,12 +131,13 @@ impl Handler for LaunchWorker {
             return Ok(Flow::Stop(ctx.finish_interrupted()));
         }
         eprintln!(
-            "  session #{} exited (code {:?}) after {}s{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
+            "  session #{} exited (code {:?}) after {}s{}{}{}  (+{} out-tok, {} total; +${:.4}, ${:.4} total)",
             ctx.session,
             outcome.exit_code,
             outcome.duration_secs,
             if outcome.rate_limited { "  [RATE-LIMITED]" } else { "" },
             if outcome.killed_by_watchdog { "  [WATCHDOG-KILLED: hung worker]" } else { "" },
+            if outcome.attempts > 1 { format!("  [{} tries]", outcome.attempts) } else { String::new() },
             outcome.usage.tokens.output_or_zero(),
             ctx.tokens_spent,
             outcome.usage.cost_usd.unwrap_or(0.0),

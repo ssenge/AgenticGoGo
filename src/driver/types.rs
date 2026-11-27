@@ -173,6 +173,18 @@ pub struct StepOutcome {
     /// step hands to [`crate::driver::Step::resume`] or [`crate::driver::Step::fork`] (A-33).
     #[serde(default)]
     pub agent_session: Option<AgentSession>,
+    /// tries made in all, the first included ([`crate::retry`]): a worker session that failed for no fault of the work is
+    /// tried again inside the same step, which stays one record. Absent in a ledger written before retries, meaning 1.
+    #[serde(default = "one_try", skip_serializing_if = "is_one_try")]
+    pub attempts: u32,
+}
+
+fn one_try() -> u32 {
+    1
+}
+
+fn is_one_try(n: &u32) -> bool {
+    *n <= 1
 }
 
 /// An agent's own session: which agent ran it and the id that agent gave it. A step can continue

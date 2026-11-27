@@ -325,6 +325,10 @@ impl AgentBackend for Codex {
             cost_usd: None, // Codex reports no cost, anywhere — see capabilities()
             rate_limited: rate_limited(&v, ty),
             rate_limit_reset: None, // Codex 429 JSON carries no reset time — fixed backoff
+            // a failed turn or an error event: its message, for the retry classifier
+            error: matches!(ty, "turn.failed" | "error").then(|| {
+                v.pointer("/error/message").or_else(|| v.get("message")).and_then(|m| m.as_str()).map(str::to_string).unwrap_or_else(|| v.to_string().chars().take(400).collect())
+            }),
         })
     }
 

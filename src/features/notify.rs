@@ -315,6 +315,8 @@ mod tests {
                 model: None,
                 effort: None,
                 worker_args: vec![],
+                retry: None,
+                timeout_secs: None,
                 state: "rlt/state/STATE.md".into(),
                 memory: true,
                 resume: None,

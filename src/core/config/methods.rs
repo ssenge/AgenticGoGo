@@ -43,6 +43,8 @@ impl RelentlessConfig {
             effort: body.effort.clone().or_else(|| self.defaults.effort.clone()),
             worker_args: body.worker_args.clone().unwrap_or_else(|| self.defaults.worker_args.clone()),
             state: body.state.clone().unwrap_or_else(|| self.defaults.state.clone()),
+            retry: crate::retry::resolved(body.retry.as_ref().or(self.defaults.retry.as_ref())),
+            timeout_secs: body.timeout.or(self.defaults.timeout).map(|d| d.0),
             memory: true,
             resume: None,
             news: None,

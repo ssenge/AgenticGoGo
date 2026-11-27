@@ -238,12 +238,16 @@ pub fn parse_result(line: &str) -> Option<crate::backend::SessionReport> {
     } else {
         None
     };
+    // the failure's own words, for `AgentBackend::classify`: only a terminal result that says it is an error
+    let error = (v.get("is_error").and_then(|x| x.as_bool()) == Some(true) || v.get("subtype").and_then(|x| x.as_str()).is_some_and(|s| s.starts_with("error")))
+        .then(|| ["result", "error", "subtype"].iter().filter_map(|k| v.get(*k).and_then(|x| x.as_str())).collect::<Vec<_>>().join(" "));
     Some(crate::backend::SessionReport {
         // Claude prices the session itself — correctly per-model (including the `[1m]` variant),
         // cache-aware, no pricing table needed on our side. We just read it.
         cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
         rate_limited,
         rate_limit_reset,
+        error,
     })
     // The session id comes via `AgentBackend::parse_session_id` (per-line), not from here —
     // Codex puts its resume handle on the FIRST event, not the terminal one.

@@ -46,6 +46,7 @@ pub mod loop_;
 pub mod metrics;
 pub mod paths;
 pub mod plugin;
+pub mod retry;
 pub mod problem;
 pub mod project;
 pub mod protect;

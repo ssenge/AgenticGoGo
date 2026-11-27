@@ -326,6 +326,7 @@ mod tests {
                 secs: 1,
                 exit: 0,
                 agent_session: None,
+                attempts: 1,
             },
             ts: 1,
         }

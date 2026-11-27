@@ -39,6 +39,12 @@ pub struct SessionOutcome {
     pub thoughts: Vec<String>,
     /// this session's claude session_id (for optional `--resume` continuity)
     pub session_id: Option<String>,
+    /// the text of the terminal failure event, when the agent reported one
+    pub error: Option<String>,
+    /// the step's `timeout` fired and the session was killed
+    pub timed_out: bool,
+    /// tries made in all (1 = no retry): [`crate::retry`]
+    pub attempts: u32,
 }
 
 impl SessionOutcome {
@@ -53,6 +59,9 @@ impl SessionOutcome {
             usage: crate::usage::Usage::default(),
             thoughts: vec![],
             session_id: None,
+            error: None,
+            timed_out: false,
+            attempts: 1,
         }
     }
 }
@@ -86,6 +95,7 @@ pub fn run_session(
     resume: Option<&(String, bool)>,
     user_settings: bool,
     system_prompt: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> SessionOutcome {
     let start = Instant::now();
 
@@ -193,6 +203,7 @@ pub fn run_session(
     let reader_rx = spawn_reader(sh.clone(), stdout, live.clone(), agent);
     let heartbeat = spawn_heartbeat(sh.clone(), live.clone(), session, cfg.heartbeat_secs, start);
     let watchdog = spawn_watchdog(sh.clone(), pid, cfg.watchdog.idle_secs, cfg.watchdog.cpu_grace);
+    let timer = timeout_secs.map(|secs| spawn_timeout(sh.clone(), pid, secs));
 
     // ---- wait for the worker, then tear down the helper threads ----
     let status = child.wait().ok();
@@ -233,6 +244,9 @@ pub fn run_session(
         .unwrap_or_default();
     let _ = heartbeat.join();
     let _ = watchdog.join();
+    if let Some(t) = timer {
+        let _ = t.join();
+    }
 
     // Final straggler sweep: the worker is its own process-group leader, so its pid IS the
     // group id. Reap any process still in that group — orphaned `nohup`/`--watch`/detached
@@ -250,6 +264,7 @@ pub fn run_session(
     // copy the usage out of the guard before building the outcome (the MutexGuard temporary can't
     // outlive the returned struct).
     let usage = sh.usage.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let error = sh.error.lock().unwrap_or_else(|e| e.into_inner()).clone();
     SessionOutcome {
         exit_code: status.and_then(|s| s.code()),
         duration_secs: start.elapsed().as_secs(),
@@ -262,6 +277,9 @@ pub fn run_session(
             r => Some(r),
         },
         killed_by_watchdog: sh.killed.load(Ordering::Relaxed),
+        error,
+        timed_out: sh.timed_out.load(Ordering::Relaxed),
+        attempts: 1,
         usage,
         thoughts,
         session_id,
@@ -282,6 +300,10 @@ struct Shared {
     /// the worker's most recent `💬` thought, for the heartbeat line.
     last_thought: std::sync::Mutex<String>,
     rate_limited: AtomicBool,
+    /// the text of the terminal failure event, once it is read
+    error: std::sync::Mutex<Option<String>>,
+    /// the step's timeout killed the worker.
+    timed_out: AtomicBool,
     /// reset epoch (secs) from the terminal event, 0 = unreported. AtomicU64 so the reader thread
     /// can publish it lock-free alongside `rate_limited`.
     rate_limit_reset: AtomicU64,
@@ -307,6 +329,8 @@ impl Shared {
             last_activity: AtomicU64::new(now_epoch()),
             last_thought: std::sync::Mutex::new(String::from("session start")),
             rate_limited: AtomicBool::new(false),
+            error: std::sync::Mutex::new(None),
+            timed_out: AtomicBool::new(false),
             rate_limit_reset: AtomicU64::new(0),
             usage: std::sync::Mutex::new(crate::usage::Usage::default()),
             done: AtomicBool::new(false),
@@ -377,6 +401,9 @@ fn spawn_reader(
             if let Some(report) = agent.parse_result(&line) {
                 if report.rate_limited {
                     sh.rate_limited.store(true, Ordering::Relaxed);
+                }
+                if report.error.is_some() {
+                    *sh.error.lock().unwrap_or_else(|e| e.into_inner()) = report.error.clone();
                 }
                 // when the limit resets, if the terminal event told us — for the smart backoff.
                 if let Some(r) = report.rate_limit_reset {
@@ -493,6 +520,27 @@ fn spawn_watchdog(
                 cpu_flat_since = None; // CPU advanced => real work, reset (last_cpu holds fresh sample)
             }
         }
+    })
+}
+
+/// Timeout thread: SIGKILL the worker's whole group when the step's time is up. It checks every second, so a session
+/// that ends sooner ends it too.
+fn spawn_timeout(sh: Arc<Shared>, pid: u32, secs: u64) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let end = Instant::now() + std::time::Duration::from_secs(secs);
+        while Instant::now() < end {
+            if sh.done.load(Ordering::Relaxed) || sh.reaping.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        // same guard as the watchdog: never kill a pid the main thread has begun to free
+        if sh.done.load(Ordering::Relaxed) || sh.reaping.load(Ordering::Relaxed) {
+            return;
+        }
+        eprintln!("⚠ TIMEOUT: worker pid={pid} ran {secs}s, the step's limit — SIGKILL");
+        proc::kill_group(pid);
+        sh.timed_out.store(true, Ordering::Relaxed);
     })
 }
 
