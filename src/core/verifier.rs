@@ -22,7 +22,7 @@ use crate::usage::Usage;
 use crate::core::model::{VerifierCtx, VerifierKind, VerifierSource, Verdict};
 use crate::os::proc::{self, Captured};
 use crate::util::last_json_object;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Run a resolved verifier and return its verdict plus its ruler spend (§5.6 — an rubric verifier is a real
@@ -229,7 +229,8 @@ fn sweep(dir: &Path, prefix: &str) {
 /// npm are built to detect. A stale *measurement* (`bench.json`) is not detectable by anyone, which
 /// is exactly why that one is per-session and this one is not.
 pub(crate) fn cache_dir(cwd: &Path) -> std::io::Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join(format!("rlt-verifier-cache-{}", project_key(cwd)));
+    // in the user's cache folder, not `$TMPDIR`: macOS purges files unused for three days there, and left a hollow cache
+    let dir = crate::os::tmp::user_cache_dir().join("rlt/verifier-cache").join(project_key(cwd));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -257,7 +258,7 @@ fn project_key(cwd: &Path) -> String {
 /// `$RLT_VERIFIER_SCRATCH`, which is why that variable is published rather than kept internal.
 fn redirect_caches(command: &mut Command, scratch: &Path, cache: &Path) {
     // per SESSION — the verifier's own workspace, and the measure→threshold handoff.
-    command.env("RLT_VERIFIER_SCRATCH", scratch).env("TMPDIR", scratch);
+    command.env("RLT_VERIFIER_SCRATCH", scratch).env("TMPDIR", scratch);   // run_script gives TMPDIR its own folder
     // per PROJECT — toolchain caches, which must survive the session or every verifier rebuilds cold.
     for key in ["XDG_CACHE_HOME", "PYTHONPYCACHEPREFIX", "CARGO_TARGET_DIR", "GOCACHE", "npm_config_cache"] {
         command.env(key, cache);
@@ -326,6 +327,12 @@ fn run_script(
         .env("RLT_VERIFIER", name)
         .env("RLT_PROJECT_DIR", cwd);
     redirect_caches(&mut command, &scratch, &cache);
+    // a short temp folder of its own, gone when the verifier ends (`RLT_VERIFIER_SCRATCH` stays the session's workspace)
+    let tmp = crate::os::tmp::session(cwd).ok();
+    if let Some(t) = &tmp {
+        t.apply(&mut command);
+    }
+    let writable: Vec<PathBuf> = [scratch.clone(), cache.clone()].into_iter().chain(tmp.iter().map(|t| t.path().to_path_buf())).collect();
     if isolation == crate::isolation::Isolation::None {
         // a confining tier exports the run's context dirs itself (`wrap`/`containerize`); an
         // unconfined verifier (`rlt verifier`, a driver's baseline) still finds them by the same names.
@@ -340,7 +347,7 @@ fn run_script(
         // writable (`rlt/private/`, `rlt/verifiers/`) plus every path a step's `readonly:` would have
         // named, so nothing here has to be kept in sync with a step's lists.
         let denies = [".".to_string()];
-        match crate::isolation::wrap(command, cwd, &[scratch.clone(), cache.clone()], &denies) {
+        match crate::isolation::wrap(command, cwd, &writable, &denies) {
             Ok(c) => command = c,
             // Loud, not silent: a verifier that can't be confined must FAIL, never run unconfined and
             // reopen the escape. Mirrors worker.rs's spawn-failure path.
@@ -352,7 +359,7 @@ fn run_script(
         // writing only its scratch + cache — the same rule as the sandbox's `denies = ["."]`. A
         // container worker can rewrite `rlt/verifiers/*.sh` in its bind-mounted tree; run on the host,
         // that rewrite would be an escape (the residual this closes).
-        match crate::isolation::runtime::script_verifier(command, cwd, &abs, &[scratch.clone(), cache.clone()]) {
+        match crate::isolation::runtime::script_verifier(command, cwd, &abs, &writable) {
             Ok(c) => command = c,
             Err(e) => return Verdict::failed(format!("could not containerize verifier {name}: {e}")),
         }

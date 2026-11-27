@@ -106,6 +106,15 @@ pub fn run_session(
         cwd: dir,
         isolation,
     });
+    // The session's own short temp folder: what a test or a tool leaves in it goes when the session ends, and a
+    // unix socket path under it fits (macOS allows 104 bytes). Writable under the sandbox, mounted in a container.
+    let tmp = crate::os::tmp::session(dir).ok();
+    let mut command = command;
+    if let Some(t) = &tmp {
+        t.apply(&mut command);
+    }
+    let mut writable = agent.writable_state_paths();
+    writable.extend(tmp.iter().map(|t| t.path().to_path_buf()));
     // Blast-radius isolation. Both confining tiers reshape the built Command and re-apply the
     // uniform stdio, so the `process_group(0)` below correctly targets the wrapper / engine client.
     // An unavailable mechanism is a LOUD failure here, never a silent direct spawn (and
@@ -131,7 +140,7 @@ pub fn run_session(
         crate::isolation::Isolation::Sandbox => crate::isolation::wrap_protected(
             command,
             dir,
-            &agent.writable_state_paths(),
+            &writable,
             denied,
             write_deny,
         ),

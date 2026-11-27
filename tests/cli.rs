@@ -2059,3 +2059,85 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
     );
     assert_exit(&out, 4, &combined); // `never` never fires, so the session cap is the exit
 }
+
+/// A full disk stops the run before its next session, with the cause and the way on (exit 7, outcome `stopped`), and
+/// resuming once space is back goes on. `RLT_TEST_FREE_DISK=<free>:<total>` stands in for the measurement.
+#[test]
+fn a_full_disk_stops_the_run_before_the_next_session_and_it_resumes() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    write_verifier(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "disk", "worked", "", "");
+    let out = rlt(dir, &path).env("RLT_TEST_FREE_DISK", "1000000:1000000000000").args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 7, &said);
+    assert!(said.contains("below the floor 10.0 GB") && said.contains("then resume"), "{said}");
+    let report: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("rlt/private/report.json")).unwrap()).unwrap();
+    assert_eq!(report["outcome"], "stopped");
+    assert!(report["stop_reason"].as_str().unwrap().contains("free disk"), "{report}");
+    let resumed = rlt(dir, &path).args(["run", "--resume", "--max-sessions", "2"]).output_bounded().unwrap();
+    assert_exit(&resumed, 4, &format!("{}{}", String::from_utf8_lossy(&resumed.stdout), String::from_utf8_lossy(&resumed.stderr)));
+}
+
+/// `min_free_disk: false` turns the check off; a share is held to the disk's size, not to a number of bytes.
+#[test]
+fn the_disk_floor_can_be_off_or_a_share() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    write_verifier(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "disk", "worked", "", "min_free_disk: false\n");
+    let off = rlt(dir, &path).env("RLT_TEST_FREE_DISK", "1:1000000000000").args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    assert_exit(&off, 4, &String::from_utf8_lossy(&off.stderr));
+    write_cfg(dir, "disk", "worked", "", "min_free_disk: \"5%\"\n");
+    // isolation is mandatory: a changed config is committed before the next run
+    for args in [vec!["add", "-A"], vec!["commit", "-qm", "a share"]] {
+        assert!(Command::new("git").args(args).current_dir(dir).output().unwrap().status.success());
+    }
+    let low = rlt(dir, &path).env("RLT_TEST_FREE_DISK", "10:1000").args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    assert_exit(&low, 7, &String::from_utf8_lossy(&low.stderr));
+    assert!(String::from_utf8_lossy(&low.stderr).contains("below the floor 5 %"));
+    let roomy = rlt(dir, &path).env("RLT_TEST_FREE_DISK", "500:1000").args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    assert_exit(&roomy, 4, &String::from_utf8_lossy(&roomy.stderr));
+}
+
+/// `rlt verify` has no run to stop: it fails with the same message.
+#[test]
+fn verify_names_a_full_disk() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    write_verifier(dir, "ok", "#!/bin/sh\necho '{\"met\":true,\"rationale\":\"fine\"}'\n");
+    write_cfg(dir, "disk", "ok", "", "");
+    let out = rlt(dir, &path).env("RLT_TEST_FREE_DISK", "5:1000000000000").args(["verify", "ok"]).output_bounded().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("free disk on"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A worker session and a script verifier each get their own short temp folder, emptied when they end (not the
+/// engine's long `$TMPDIR`, and not the verifier scratch).
+#[test]
+fn sessions_and_script_verifiers_get_their_own_short_temp_folder_that_goes_when_they_end() {
+    let (tmp, path) = project_with_fake_claude();
+    let dir = tmp.path();
+    let claude = dir.join("bin/claude");
+    write(
+        &dir.join("bin"),
+        "claude",
+        "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = \"--version\" ]; then echo fake; exit 0; fi; done\n\
+         printf '%s' \"$TMPDIR\" > worker_tmp.txt; : > \"$TMPDIR/leftover\"\n\
+         git add worker_tmp.txt >/dev/null 2>&1; git commit -qm work >/dev/null 2>&1\n\
+         printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"usage\":{\"output_tokens\":1}}'\n",
+    );
+    chmod_x(&claude);
+    write_verifier(dir, "seen", "#!/bin/sh\nprintf '%s' \"$TMPDIR\" > \"$HOME/verifier_tmp.txt\"; : > \"$TMPDIR/left\"\nif [ -f worker_tmp.txt ]; then m=true; else m=false; fi\nprintf '{\"met\":%s,\"rationale\":\"seen\"}\\n' $m\n");
+    write_cfg(dir, "tmp", "seen", "", "");
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_exit(&out, 0, &said);
+    let worker = std::fs::read_to_string(dir.join("worker_tmp.txt")).unwrap();
+    let verifier = std::fs::read_to_string(dir.join(".home/verifier_tmp.txt")).unwrap();
+    for (what, p) in [("worker", &worker), ("verifier", &verifier)] {
+        assert!(p.starts_with("/tmp/rlt-") && p.len() < 40, "{what}: {p}");
+        assert!(!Path::new(p).exists(), "{what}'s folder is gone: {p}");
+    }
+    assert_ne!(worker, verifier);
+}

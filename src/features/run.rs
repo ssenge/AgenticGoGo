@@ -48,6 +48,9 @@ impl Handler for LaunchWorker {
         // after it — before the interrupt return below, so even a Ctrl-C'd session cannot leave a
         // changed oracle on disk. Done here rather than as separate handlers because a `Flow::Stop`
         // out of this handler would skip a handler registered after it.
+        if let Some(why) = crate::os::disk::run_shortfall(ctx.cfg.min_free_disk, &ctx.dir) {
+            return Ok(Flow::Stop(ctx.disk_halt(&why)));
+        }
         crate::features::protect::before_worker(ctx, &step)?;
         crate::features::partial::note_untracked_before(ctx);
         let launch = |resume| {

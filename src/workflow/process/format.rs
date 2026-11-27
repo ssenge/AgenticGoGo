@@ -196,6 +196,9 @@ pub struct RltSpec {
     /// a verifier's time limit, seconds
     #[serde(default = "RltSpec::timeout")]
     pub verifier_timeout: u64,
+    /// the least free disk space the run needs (`10GB`, `5%` or `false`); below it the run stops, and resumes
+    #[serde(default)]
+    pub min_free_disk: Option<crate::os::disk::Floor>,
 }
 
 impl RltSpec {
@@ -213,7 +216,7 @@ impl RltSpec {
 impl Default for RltSpec {
     fn default() -> RltSpec {
         RltSpec { memory: false, user_settings: false, user_env: Default::default(), preflight: true,
-                  on_regression: RltSpec::annotate(), verifier_timeout: RltSpec::timeout() }
+                  on_regression: RltSpec::annotate(), verifier_timeout: RltSpec::timeout(), min_free_disk: None }
     }
 }
 

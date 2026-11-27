@@ -124,8 +124,10 @@ impl Flow {
     /// The task force's count of re-entries and repairs goes on from the processes of the run before this one.
     pub fn new(rlt: Relentless, mut run: Run) -> Flow {
         let project = rlt.dir().to_path_buf();
-        let scratch = super::scratch::folder(&std::env::temp_dir());
-        super::scratch::sweep(&std::env::temp_dir());
+        // under the project's worker half, where a confined or containerised worker can write what its brief names
+        let base = crate::paths::rlt_dir(&project).join("flow");
+        let scratch = super::scratch::folder(&base);
+        super::scratch::sweep(&base);
         let (reentries, fixes) = super::task_force::spent_before(&project, &run);
         run.reentries = reentries;
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,

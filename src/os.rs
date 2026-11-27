@@ -10,7 +10,9 @@
 //! leak, and nothing it kills was something you wanted.
 
 pub mod detach;
+pub mod disk;
 pub mod proc;
 pub mod reap;
 pub mod signals;
 pub mod spawns;
+pub mod tmp;

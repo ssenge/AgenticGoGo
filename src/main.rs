@@ -442,6 +442,11 @@ fn run_cli() -> Result<ExitCode> {
                 }
                 _ => relentless::core::verifiers::resolve(name, &p.config_base)?,
             };
+            // a full disk fails a verifier in the wrong place; say so first, as a run would
+            let floor = cfg.as_ref().map(|c| c.min_free_disk).unwrap_or_default();
+            if let Some(why) = relentless::os::disk::run_shortfall(floor, &p.dir) {
+                anyhow::bail!("{why}");
+            }
             // run it exactly as the loop would (scripts from the project root, rubric on the RULER).
             let ruler = ruler_for(&p.config)?;
             let (jm, timeout) = match &cfg {

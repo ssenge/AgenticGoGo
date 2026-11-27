@@ -290,6 +290,13 @@ impl LoopState {
         RunOutcome::Stopped
     }
 
+    /// The run ends because free disk space fell below the floor: exit 7, resumable.
+    pub fn disk_halt(&mut self, reason: &str) -> RunOutcome {
+        eprintln!("\n⚠ {reason}");
+        self.emit(LifecycleEvent::Finished { reason: reason.to_string(), ledger_tag: "disk".into() });
+        RunOutcome::Disk
+    }
+
     pub fn abort_now(&mut self, reason: &str) -> RunOutcome {
         eprintln!("\n⚠ {reason}");
         self.emit(LifecycleEvent::Finished {

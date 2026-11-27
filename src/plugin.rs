@@ -22,6 +22,9 @@ pub enum RunOutcome {
     /// its own code (5) since the HiL work, where "a human ended it" is an everyday outcome rather
     /// than a corner case. BREAKING for any wrapper that treated a stop as success — deliberately.
     Stopped,
+    /// Free disk space fell below the floor (`min_free_disk`): the run stopped at a boundary, with the cause, and can
+    /// be resumed once space is back.
+    Disk,
 }
 
 impl RunOutcome {
@@ -31,6 +34,7 @@ impl RunOutcome {
             RunOutcome::Halt => 3,
             RunOutcome::MaxSessions => 4,
             RunOutcome::Stopped => 5,
+            RunOutcome::Disk => 7,
         }
     }
 }

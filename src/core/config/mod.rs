@@ -60,6 +60,10 @@ pub struct RelentlessConfig {
     pub watchdog: Watchdog,
     #[serde(default = "default_backoff")]
     pub ratelimit_backoff_secs: u64,
+    /// The least free disk space a run needs, checked before each worker session and each round of verifiers: a size
+    /// (`10GB`), a share (`5%`) or `false`. Below it the run stops (exit 7) and can be resumed. Default `10GB`.
+    #[serde(default)]
+    pub min_free_disk: crate::os::disk::Floor,
     /// The least time between a rate-limited attempt and the next one, in seconds (A-18.2). An
     /// early `rlt send wake` waits this out instead of hammering the provider. A robustness
     /// interval, not a limit: nothing about the run ends because of it.
@@ -550,6 +554,7 @@ impl Default for RelentlessConfig {
             heartbeat_secs: default_heartbeat(),
             watchdog: Watchdog::default(),
             ratelimit_backoff_secs: default_backoff(),
+            min_free_disk: crate::os::disk::Floor::default(),
             ratelimit_min_gap_secs: default_min_gap(),
             memory: Memory::default(),
             hooks: Hooks::default(),

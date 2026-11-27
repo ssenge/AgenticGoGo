@@ -344,6 +344,15 @@ impl Relentless {
         self
     }
 
+    /// The least free disk space the run needs (YAML's `min_free_disk`): below it [`Relentless::check_limits`] and the
+    /// next worker session end the run (exit 7), which can be resumed. Default 10 GB; [`Floor::Off`] turns it off.
+    ///
+    /// [`Floor::Off`]: crate::os::disk::Floor::Off
+    pub fn min_free_disk(mut self, floor: crate::os::disk::Floor) -> Relentless {
+        self.cfg.min_free_disk = floor;
+        self
+    }
+
     /// The image verifiers run in when a step of the run is containerized — YAML's `verifier.image`.
     /// `None` set = [`Relentless::image`], else the base image.
     pub fn verifier_image(mut self, image: impl Into<String>) -> Relentless {
@@ -1334,6 +1343,10 @@ impl Relentless {
                 return Err(self.end_now(started, RunOutcome::Halt, format!("work_time: {work:.0}s/{max:.0}s"), "abort:work_time"));
             }
         }
+        // not a ceiling of the run's own making: the machine is full. The run stops, and resumes when space is back.
+        if let Some(why) = crate::os::disk::run_shortfall(self.cfg.min_free_disk, &self.dir) {
+            return Err(self.end_now(started, RunOutcome::Disk, why, "disk"));
+        }
         Ok(())
     }
 
@@ -1900,6 +1913,7 @@ fn default_wording(outcome: RunOutcome, n: u32) -> (String, &'static str) {
         RunOutcome::Halt => (format!("driver ended the run after {n} session(s)"), "abort:driver"),
         RunOutcome::MaxSessions => (format!("driver stopped at its session ceiling ({n})"), "max-sessions"),
         RunOutcome::Stopped => (format!("driver stopped the run after {n} session(s)"), "stopped"),
+        RunOutcome::Disk => (format!("driver stopped the run after {n} session(s): free disk below the floor"), "disk"),
     }
 }
 

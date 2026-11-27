@@ -159,6 +159,14 @@ pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Comman
     for r in spec.readonly {
         mount(&mut out, &canonical(r), true)?;
     }
+    // The session temp folder the engine made for this command (`os::tmp`: `/tmp/rlt-<run>/<n>`, set as its `TMPDIR`),
+    // read-write at the same path, so what the command writes there is where its environment says.
+    let made = envs.iter().find(|(k, _)| k == "TMPDIR").and_then(|(_, v)| v.as_ref()).map(Path::new).filter(|p| {
+        p.is_dir() && p.parent().and_then(|r| r.file_name()).is_some_and(|n| n.to_string_lossy().starts_with("rlt-"))
+    });
+    if let Some(tmp) = made {
+        mount(&mut out, &canonical(tmp), false)?;
+    }
     // The DENIES: rlt's private state and this step's `readonly` minus `writable` all sit inside the
     // mounted cwd, so re-mount each of them READ-ONLY on top. The engine applies the more specific
     // mount, and `:ro` is enforced by the kernel inside the container exactly as the Seatbelt deny /

@@ -44,7 +44,9 @@ pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Comm
         // … except the one writable hole: the project cwd (+ all subfolders)
         .arg("--bind").arg(cwd).arg(cwd);
     // …plus the agent's own state dirs (session logs etc.) — already filtered to existing dirs.
-    for w in writable {
+    // (a folder under /tmp is bound after the tmpfs below: it would be hidden behind it otherwise)
+    let (under_tmp, early): (Vec<_>, Vec<_>) = writable.iter().partition(|w| w.starts_with("/tmp"));
+    for w in early {
         cmd.arg("--bind").arg(w).arg(w);
     }
     // The DENIES: rlt's own `rlt/private/` carve-out plus this step's `readonly` minus `writable`,
@@ -76,6 +78,9 @@ pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Comm
     cmd.arg("--tmpfs").arg("/tmp")
         .arg("--proc").arg("/proc")
         .arg("--dev").arg("/dev");
+    for w in under_tmp {
+        cmd.arg("--bind").arg(w).arg(w);
+    }
     // The run's context dirs, re-bound read-only AFTER the `/tmp` tmpfs: the host is already
     // read-only under `--ro-bind / /`, but a directory under `/tmp` would otherwise be hidden by the
     // tmpfs, and one under a writable bind (an agent's state dir) would be writable.

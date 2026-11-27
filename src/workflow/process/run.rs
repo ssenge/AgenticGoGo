@@ -64,7 +64,8 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     let mut rlt = Relentless::open_with(&project, Opts { resume })?.memory(spec.rlt.memory)
         .vars(vars.clone()).user_settings(spec.rlt.user_settings).user_env(spec.rlt.user_env.clone())
         .on_regression(if spec.rlt.on_regression == "rollback" { OnRegression::Rollback } else { OnRegression::Annotate })
-        .verifier_timeout(spec.rlt.verifier_timeout);
+        .verifier_timeout(spec.rlt.verifier_timeout)
+        .min_free_disk(spec.rlt.min_free_disk.unwrap_or_default());
     rlt = rlt.system_prompt(standing::text(spec.run.system_prompt.as_ref(), standing::SYSTEM, &home)?);
     let reached = if resume { None } else { reachable(&rlt, &spec, roles.as_ref())? };
     let force = task_force(&spec, &home, &project, &vars, roles.as_ref())?;

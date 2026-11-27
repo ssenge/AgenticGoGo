@@ -114,8 +114,14 @@ impl Proc {
     /// Runs `command` for `ctx` to its end in the project; its stdout, or why it failed.
     pub fn run(&self, ctx: &Ctx, command: &str) -> Result<String, Fatal> {
         let command = self.command(ctx, command)?;
-        let out = Command::new("sh").arg("-c").arg(format!("env {} {command}", self.env(ctx))).current_dir(&self.project)
-            .output().map_err(|e| anyhow::anyhow!("running `{command}`: {e}"))?;
+        let mut sh = Command::new("sh");
+        sh.arg("-c").arg(format!("env {} {command}", self.env(ctx))).current_dir(&self.project);
+        // its own short temp folder, gone when the script ends
+        let tmp = crate::os::tmp::session(&self.project).ok();
+        if let Some(t) = &tmp {
+            t.apply(&mut sh);
+        }
+        let out = sh.output().map_err(|e| anyhow::anyhow!("running `{command}`: {e}"))?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).to_string());
         }

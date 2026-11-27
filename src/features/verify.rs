@@ -125,6 +125,9 @@ pub struct RunVerifiers;
 impl Handler for RunVerifiers {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
+        if let Some(why) = crate::os::disk::run_shortfall(ctx.cfg.min_free_disk, &ctx.dir) {
+            return Ok(Flow::Stop(ctx.disk_halt(&why)));
+        }
         eprintln!("  running verifiers…");
         ctx.emit(LifecycleEvent::Verify);
         let rs = ctx.run_state();

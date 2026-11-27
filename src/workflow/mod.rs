@@ -18,7 +18,7 @@ mod instructions;
 pub mod process;
 mod review;
 mod roles;
-mod scratch;
+pub(crate) mod scratch;
 mod task;
 mod task_force;
 

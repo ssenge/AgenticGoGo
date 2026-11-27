@@ -84,7 +84,8 @@ impl Outcome {
         match res {
             Ok(R::GoalsMet) => Outcome::Done,
             Ok(R::Halt) | Ok(R::MaxSessions) => Outcome::Aborted,
-            Ok(R::Stopped) => Outcome::Stopped,
+            // a full disk ends the run like a stop: the work is kept and it resumes; its reason names the disk
+            Ok(R::Stopped) | Ok(R::Disk) => Outcome::Stopped,
             Err(_) => Outcome::Error,
         }
     }
@@ -287,6 +288,7 @@ mod tests {
         assert_eq!(Outcome::of(&Ok(RunOutcome::Halt)), Outcome::Aborted);
         assert_eq!(Outcome::of(&Ok(RunOutcome::MaxSessions)), Outcome::Aborted);
         assert_eq!(Outcome::of(&Ok(RunOutcome::Stopped)), Outcome::Stopped);
+        assert_eq!(Outcome::of(&Ok(RunOutcome::Disk)), Outcome::Stopped);
         assert_eq!(Outcome::of(&Err(anyhow::anyhow!("boom"))), Outcome::Error);
     }
 
