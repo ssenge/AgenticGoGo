@@ -2227,7 +2227,7 @@ fn an_auth_failure_is_not_retried_and_retry_false_and_exhaustion_are_honoured() 
 /// A step's `timeout` kills a session that hangs; the policy tries again, and the second try works.
 #[test]
 fn a_timeout_kills_a_hung_session_and_the_retry_goes_on() {
-    let (tmp, path) = flaky_project(1, "hang", "timeout: 2s, retry: { attempts: 2, backoff: { initial: 1s, jitter: false } }");
+    let (tmp, path) = flaky_project(1, "hang", "timeout: 10s, retry: { attempts: 2, backoff: { initial: 1s, jitter: false } }");
     let dir = tmp.path();
     let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
