@@ -1,6 +1,75 @@
 # Changelog
 
-Notable changes to agg. Newest first; each entry names the config keys and interfaces it touches.
+Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; the entries below 0.1.0 keep the old names). Newest first; each entry names the config keys and interfaces it touches.
+
+## 0.1.0 (2026-11-27)
+
+**AgenticGoGo is now Relentless (`rlt`), and judges are now verifiers.** This is a hard rename: there is no compatibility
+window, no alias and no `migrate` command. Nothing reads the old names, so a project created with `agg` does not load
+with `rlt` (its run state, ledgers and branches use the old names). Start such a project fresh, or rename it by hand with
+the table below.
+
+### Changed: the product
+
+| Was | Is |
+|---|---|
+| binary `agg` | `rlt` |
+| Rust package and library `agg` (`use agg::…`), `Agg`, `AggConfig` | `relentless` (`use relentless::…`), `Relentless`, `RelentlessConfig` |
+| variables `AGG_<X>` | `RLT_<X>` |
+| `<project>/agg/`, `agg.yaml`, `AGG.md` | `<project>/rlt/`, `rlt.yaml`, `RLT.md` (`state/`, `private/`, `roles/` keep their names) |
+| `~/.agg/` | `~/.rlt/` |
+| branches `agg/<project>/session-N` (and `…/orphaned-<ts>/…`) | `rlt/<project>/…` |
+| refs `refs/agg/before|base|partial/…` | `refs/rlt/…` |
+| git config `branch.<b>.agg-step`, `agg-partial.<ref>.step` | `rlt-step`, `rlt-partial.<ref>.step` |
+| files in the git dir `agg-processes`, `agg-bases-marker`, `agg-verdicts/`, `agg-partial.index` | `rlt-processes`, `rlt-bases-marker`, `rlt-verdicts/`, `rlt-partial.index` |
+| commit subjects `agg: session N`, `agg: merge session #N` | `rlt: session N`, `rlt: merge session #N` |
+| the process file's key `agg:` | `rlt:` |
+| skills `agg-new`, `agg-status`, `agg-supervise` (`/agg:new`) | `rlt-new`, `rlt-status`, `rlt-supervise` (`/rlt:new`) |
+| marketplace `agenticgogo`, plugin `agg` | marketplace `relentless`, plugin `rlt` |
+| images `agg-claude`, `agg-codex`, `agg-swe-metrics` | `rlt-claude`, `rlt-codex`, `rlt-swe-metrics` |
+| release assets `agg-<target>` | `rlt-<target>` |
+| repository `ssenge/AgenticGoGo` | `ssenge/relentless` (GitHub redirects the old URL) |
+
+### Changed: judges are verifiers
+
+| Was | Is |
+|---|---|
+| `judge:` (the backend for rubric verifiers), `judges:`, `steps.<n>.skip_judges` | `verifier:`, `verifiers:`, `skip_verifiers` |
+| `any_judge_error` | `any_verifier_error` |
+| `agg.judge_timeout`, `run.judge_cache` in a process file | `rlt.verifier_timeout`, `run.verifier_cache` |
+| `{ judge: <name>, when: last }` (checks, hooks) | `{ verifier: <name>, when: last }` |
+| `dirs.reviews` default `judges` | `verifiers` |
+| the folders `agg/judges/`, `~/.agg/judges/`, `plugin/judges/` | `rlt/verifiers/`, `~/.rlt/verifiers/`, `plugin/verifiers/` |
+| `agg judge <name>` | `rlt verify <name>` |
+| `AGG_JUDGE`, `AGG_JUDGE_SCRATCH`, `AGG_KEEP_JUDGE_SCRATCH` | `RLT_VERIFIER`, `RLT_VERIFIER_SCRATCH`, `RLT_KEEP_VERIFIER_SCRATCH` |
+| scenarios: `kind: judge` | `kind: verifier` |
+| `calls.jsonl`: `{"kind":"judge", …, "judge":<name>}` | `{"kind":"verify", …, "verifier":<name>}` |
+| `verdicts.jsonl`, `gate.json`: the field `judge` | `verifier` |
+| `state.json`: `judges[]`, `judged`, `judge_kind` | `verifiers[]`, `verified`, `verifier_kind` |
+| `report.json` schema 3 (`judges`, `agg_version`) | schema 4, [`docs/schemas/report.v4.json`](docs/schemas/report.v4.json) (`verifiers`, `rlt_version`); older schemas stay as history |
+| `status --json` schema 1 | schema 2, [`docs/schemas/status.v2.json`](docs/schemas/status.v2.json) |
+| the web API `/api/reviews` rows `{step, judge, …}` | `{step, verifier, …}` |
+
+`done_if`, `abort_if` and `notify_if` keep their names.
+
+### Added
+
+- **`scripts/readme_check.sh`** runs the README's marked example in a fresh clone; **`examples/hello/`** is a first process
+  (an agent step with a script verifier and a rubric review, then a checkpoint) that runs without tokens under a scenario.
+- **`scripts/install.sh`** names an `agg` still on `PATH`: "the old agg is still at <path>: remove it once no project needs it".
+- A new logo, `scripts/render_assets.sh` (the composed assets) and a favicon for the web UI.
+
+### Changed
+
+- **The README and the docs map** are rewritten: motivation, a first workflow, install, verifiers, then the rest;
+  `docs/README.md` is the index and `docs/CONCEPTS.md` holds the ideas. `docs/CONCEPT.md` (an outline) is removed.
+- **`examples/hello/` is now the process example;** the old smallest-loop example is `examples/hello-loop/`.
+
+### Fixed
+
+- **No test can hang.** One hung for nine hours on 2026-11-24: a helper that waited for an ask panicked in its own thread
+  and left the run under test waiting for ever. Spawns of the binary now have a 900 s bound and end their process group;
+  the ask helpers wait 600 s, then end the test binary failed (exit 101). New tests in `tests/watchdog.rs`.
 
 ## 0.0.51 (2026-11-25)
 

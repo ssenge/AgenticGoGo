@@ -1,0 +1,2 @@
+worker: { agent: claude }
+critic: { agent: codex }       # the reviewer must be another agent than the worker

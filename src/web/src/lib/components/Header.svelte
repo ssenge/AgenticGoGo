@@ -13,7 +13,7 @@
 <header class="hdr card">
   <div class="left">
     <div class="brand">
-      <span class="logo mono">rlt</span>
+      <img class="logo" src="/logo.png" alt="Relentless" width="28" height="28" />
       <span class="name">Relentless</span>
     </div>
     {#if state && !state.waiting}
@@ -62,14 +62,7 @@
   }
   .left { display: flex; align-items: center; gap: 16px; }
   .brand { display: flex; align-items: baseline; gap: 10px; }
-  .logo {
-    background: var(--accent-dim);
-    color: #fff;
-    padding: 2px 8px;
-    border-radius: 6px;
-    font-weight: 700;
-    font-size: 15px;
-  }
+  .logo { width: 28px; height: 28px; align-self: center; }
   .name { font-size: 17px; font-weight: 600; letter-spacing: 0.2px; }
   .proj { color: var(--ink-2); font-size: 14px; }
   .meta { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }

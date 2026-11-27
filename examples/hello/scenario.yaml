@@ -1,0 +1,14 @@
+# Plays examples/hello/process.yaml with scripted agents, no tokens:
+#   rlt process examples/hello/process.yaml --scenario examples/hello/scenario.yaml --projects examples/hello/projects
+project: demo
+setup:   # the scratch copy becomes a git repo: a run needs one
+  - git init -q -b main && git add -A && git -c user.name=demo -c user.email=demo@example.com commit -qm start
+agents:
+  - { when: 'Fix .add.py.', write: { add.py: "print(1 + 2)\n" } }     # the worker's session
+answers:
+  - { ask: 'approve', say: 'yes' }                                     # the human at the checkpoint
+expect:
+  record: ['^fix done met', '^cp-fix']
+  sessions: ['^claude worker', '^codex verifier']
+  files: { add.py: 'print\(1 \+ 2\)' }
+  exit: 0
