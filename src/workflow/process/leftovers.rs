@@ -12,7 +12,7 @@ type Process = (u32, String);
 
 /// The processes the current step started, as noted by the sampler.
 static NOTED: Mutex<Vec<Process>> = Mutex::new(Vec::new());
-const FILE: &str = "agg-processes";
+const FILE: &str = "rlt-processes";
 const EVERY: Duration = Duration::from_secs(2);
 
 /// Every process of this user: pid, parent pid, start time.

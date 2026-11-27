@@ -1,33 +1,33 @@
 //! What the operator's environment changes in every agent call, whichever step or judge makes it: a model the
-//! provider lacks and its stand-in (`AGG_MODELS`), Codex's config overrides (`AGG_CODEX_CONFIG`), and the MCP
-//! servers and settings of a Claude worker (`AGG_CLAUDE_MCP_CONFIG`, `AGG_CLAUDE_SETTINGS`). Switching
+//! provider lacks and its stand-in (`RLT_MODELS`), Codex's config overrides (`RLT_CODEX_CONFIG`), and the MCP
+//! servers and settings of a Claude worker (`RLT_CLAUDE_MCP_CONFIG`, `RLT_CLAUDE_SETTINGS`). Switching
 //! between environments (a subscription, a cloud provider, another account) then changes no config file.
 
-/// The model to call for `model`: its stand-in in `AGG_MODELS` (`<model>=<stand-in>`, comma-separated), else
+/// The model to call for `model`: its stand-in in `RLT_MODELS` (`<model>=<stand-in>`, comma-separated), else
 /// `model` itself. E.g. `claude-fable-5-1=claude-opus-5-5` where the provider has no Fable.
 pub fn model(model: &str) -> String {
-    stand_in(std::env::var("AGG_MODELS").ok().as_deref(), model)
+    stand_in(std::env::var("RLT_MODELS").ok().as_deref(), model)
 }
 
-/// Codex's `-c` overrides from `AGG_CODEX_CONFIG`, one `key=value` per line, e.g.
+/// Codex's `-c` overrides from `RLT_CODEX_CONFIG`, one `key=value` per line, e.g.
 /// `model_provider="amazon-bedrock-runtime"`: passed on every Codex session and one-shot, since a one-shot
 /// reads no config file (`--ignore-user-config`) and so can't take its provider from one.
 pub fn codex_config() -> Vec<String> {
-    lines(std::env::var("AGG_CODEX_CONFIG").ok().as_deref())
+    lines(std::env::var("RLT_CODEX_CONFIG").ok().as_deref())
 }
 
 /// The provider a Codex judge would silently miss: `model_provider` set in the operator's own Codex config
-/// (`$CODEX_HOME/config.toml`, else `~/.codex/config.toml`) while `AGG_CODEX_CONFIG` names none. A judge reads no
+/// (`$CODEX_HOME/config.toml`, else `~/.codex/config.toml`) while `RLT_CODEX_CONFIG` names none. A judge reads no
 /// config file, so it calls the default OpenAI endpoint instead, and hangs or fails where only the gateway is
-/// reachable. A warning for `agg doctor`, with the fix.
+/// reachable. A warning for `rlt doctor`, with the fix.
 pub fn codex_provider_missed() -> Option<String> {
     let home = std::env::var("CODEX_HOME").ok().map(std::path::PathBuf::from)
         .or_else(|| std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".codex")))?;
     let config = std::fs::read_to_string(home.join("config.toml")).ok()?;
-    provider_missed(&config, std::env::var("AGG_CODEX_CONFIG").ok().as_deref())
+    provider_missed(&config, std::env::var("RLT_CODEX_CONFIG").ok().as_deref())
 }
 
-/// [`codex_provider_missed`] for a config's text and `AGG_CODEX_CONFIG`'s value.
+/// [`codex_provider_missed`] for a config's text and `RLT_CODEX_CONFIG`'s value.
 fn provider_missed(config: &str, overrides: Option<&str>) -> Option<String> {
     let provider = config.lines().map(str::trim).take_while(|l| !l.starts_with('['))
         .filter_map(|l| l.strip_prefix("model_provider")).filter_map(|r| r.trim_start().strip_prefix('='))
@@ -37,21 +37,21 @@ fn provider_missed(config: &str, overrides: Option<&str>) -> Option<String> {
     }
     Some(format!(
         "your Codex config sets model_provider = \"{provider}\", but a Codex judge reads no config file \
-         (--ignore-user-config) and would call the default OpenAI endpoint: set AGG_CODEX_CONFIG, one key=value \
+         (--ignore-user-config) and would call the default OpenAI endpoint: set RLT_CODEX_CONFIG, one key=value \
          per line, e.g. model_provider=\"{provider}\" and that provider's model_providers.{provider}.* keys"))
 }
 
-/// Claude Code's `--mcp-config` (a file, or its JSON) from `AGG_CLAUDE_MCP_CONFIG`, for a worker that runs without
+/// Claude Code's `--mcp-config` (a file, or its JSON) from `RLT_CLAUDE_MCP_CONFIG`, for a worker that runs without
 /// the user's settings and so without the MCP servers registered there: e.g. a web search where the provider has
 /// none.
 pub fn claude_mcp_config() -> Option<String> {
-    set("AGG_CLAUDE_MCP_CONFIG")
+    set("RLT_CLAUDE_MCP_CONFIG")
 }
 
-/// Claude Code's `--settings` (a file, or its JSON) from `AGG_CLAUDE_SETTINGS`, for a worker that runs without the
+/// Claude Code's `--settings` (a file, or its JSON) from `RLT_CLAUDE_SETTINGS`, for a worker that runs without the
 /// user's settings: e.g. a hook that shortens its shell commands' output.
 pub fn claude_settings() -> Option<String> {
-    set("AGG_CLAUDE_SETTINGS")
+    set("RLT_CLAUDE_SETTINGS")
 }
 
 /// Variable `name`'s value, unless it is unset or blank.
@@ -77,7 +77,7 @@ fn lines(raw: Option<&str>) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// A provider in the user's Codex config that AGG_CODEX_CONFIG doesn't carry is named, with the fix.
+    /// A provider in the user's Codex config that RLT_CODEX_CONFIG doesn't carry is named, with the fix.
     #[test]
     fn a_provider_only_the_user_config_names_is_a_warning() {
         let config = "model = \"gpt-x\"\nmodel_provider = \"gw\"\n\n[model_providers.gw]\nbase_url = \"https://gw\"\n";

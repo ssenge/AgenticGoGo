@@ -1,4 +1,4 @@
-//! A workflow run (A-27, A-29): agg, plus where the run starts and ends, the steps it reached, its history,
+//! A workflow run (A-27, A-29): rlt, plus where the run starts and ends, the steps it reached, its history,
 //! the checks around every step, and a scratch folder outside the project for the files a step's brief names,
 //! removed when the run ends.
 
@@ -11,7 +11,7 @@ use anyhow::anyhow;
 use super::git::{before, commit, git};
 use super::history::{History, DEFAULT};
 use crate::core::model::Judge;
-use crate::driver::{Agg, Fatal, Step};
+use crate::driver::{Relentless, Fatal, Step};
 use crate::plugin::RunOutcome;
 
 /// Where a run starts and ends: `--from <step> [--note <text> | --note-file <file> [--decided]] [--reset]
@@ -79,9 +79,9 @@ pub(crate) type Constraints = dyn Fn(&Flow, &str) -> Option<String>;
 /// before the repair, the judges that run after it (an unmet one rejects the repair).
 pub(crate) type FixChecks = dyn Fn(&Flow, &str, &str) -> Vec<Judge>;
 
-/// A workflow run on agg: what every block of [`super`] works through.
+/// A workflow run on rlt: what every block of [`super`] works through.
 pub struct Flow {
-    agg: Agg,
+    rlt: Relentless,
     project: PathBuf,
     /// where the run starts and ends.
     pub run: Run,
@@ -113,27 +113,27 @@ impl Drop for Flow {
 }
 
 impl Deref for Flow {
-    type Target = Agg;
-    fn deref(&self) -> &Agg {
-        &self.agg
+    type Target = Relentless;
+    fn deref(&self) -> &Relentless {
+        &self.rlt
     }
 }
 
 impl Flow {
-    /// A run of `agg` in its project, starting and ending as `run` says.
+    /// A run of `rlt` in its project, starting and ending as `run` says.
     /// The task force's count of re-entries and repairs goes on from the processes of the run before this one.
-    pub fn new(agg: Agg, mut run: Run) -> Flow {
-        let project = agg.dir().to_path_buf();
+    pub fn new(rlt: Relentless, mut run: Run) -> Flow {
+        let project = rlt.dir().to_path_buf();
         let scratch = super::scratch::folder(&std::env::temp_dir());
         super::scratch::sweep(&std::env::temp_dir());
         let (reentries, fixes) = super::task_force::spent_before(&project, &run);
         run.reentries = reentries;
         Flow { started: Cell::new(run.from.is_none()), history: History::new(&project, DEFAULT), project, run,
                scratch, seen: RefCell::new(vec![]), own: vec![], hooks: None, on_start: None, task_force: None,
-               fixes: Cell::new(fixes), trusted: None, order: vec![], constraints: None, fix_checks: None, agg }
+               fixes: Cell::new(fixes), trusted: None, order: vec![], constraints: None, fix_checks: None, rlt }
     }
 
-    /// The history in `path` (relative to the project) instead of `agg/private/steps.jsonl`.
+    /// The history in `path` (relative to the project) instead of `rlt/private/steps.jsonl`.
     pub fn history(mut self, path: impl AsRef<Path>) -> Flow {
         self.history = History::new(&self.project, path);
         self
@@ -175,7 +175,7 @@ impl Flow {
     }
 
     /// Names the key of each step: `(name, key)` pairs. A step's key is what `--from` and `--until` name, what
-    /// the history, `refs/agg/before/<key>` and the task force's re-entries go by; a step not named here has
+    /// the history, `refs/rlt/before/<key>` and the task force's re-entries go by; a step not named here has
     /// its name's first word. A process file names each step's id.
     pub fn keys<I: IntoIterator<Item = (S, T)>, S: AsRef<str>, T: AsRef<str>>(self, pairs: I) -> Flow {
         for (name, key) in pairs {
@@ -238,7 +238,7 @@ impl Flow {
     }
 
     /// Whether step `name` runs: the run reached its `from` step and not past its `until` step. A step that
-    /// runs marks where the base branch stands (`refs/agg/before/<key>`), so a later `--reset` can go back.
+    /// runs marks where the base branch stands (`refs/rlt/before/<key>`), so a later `--reset` can go back.
     /// Past its `until` without having come to its `from`, the run ran nothing and halts.
     pub fn runs(&self, name: &str) -> Result<bool, Fatal> {
         if let Some(until) = &self.run.until {
@@ -250,7 +250,7 @@ impl Flow {
                         .map(|()| false);
                 }
                 self.flush()?;
-                self.agg.finish_with(RunOutcome::GoalsMet, format!("done up to {until}, as asked (--until)"));
+                self.rlt.finish_with(RunOutcome::GoalsMet, format!("done up to {until}, as asked (--until)"));
                 return Err(Fatal::Ended(RunOutcome::GoalsMet));
             }
         }
@@ -277,7 +277,7 @@ impl Flow {
         let which = if when == When::Before { "before" } else { "after" };
         let judges = self.hook_judges(name, when);
         let failed: Vec<String> = judges.iter().filter_map(|j| {
-            let verdict = self.agg.judge(j);
+            let verdict = self.rlt.judge(j);
             self.record(name, "hook", verdict.met(), &format!("{which} {}: {}", j.name, verdict.rationale()));
             (!verdict.met()).then(|| format!("{}: {}", j.name, verdict.rationale()))
         }).collect();
@@ -289,18 +289,18 @@ impl Flow {
         self.hooks.as_ref().map(|f| f(self, name, when)).unwrap_or_default()
     }
 
-    /// The step with its prompt file as agg resolves it (relative: under the project's `agg/`), so the blocks
+    /// The step with its prompt file as rlt resolves it (relative: under the project's `rlt/`), so the blocks
     /// can read and extend its task.
     pub(crate) fn absolute(&self, step: &Step) -> Step {
         match &step.prompt_file {
             Some(f) if Path::new(f).is_relative() => {
-                step.clone().prompt_file(self.project.join("agg").join(f).display().to_string())
+                step.clone().prompt_file(self.project.join("rlt").join(f).display().to_string())
             }
             _ => step.clone(),
         }
     }
 
-    /// The rubric judge with its file as agg resolves it (relative: under the project).
+    /// The rubric judge with its file as rlt resolves it (relative: under the project).
     pub(crate) fn absolute_judge(&self, judge: &Judge) -> Judge {
         let mut judge = judge.clone();
         if let crate::core::model::JudgeKind::Llm { path, .. } = &mut judge.kind {
@@ -328,7 +328,7 @@ impl Flow {
     pub fn halt(&self, reason: impl Into<String>) -> Result<(), Fatal> {
         let reason = reason.into();
         let _ = self.flush();
-        self.agg.finish_with(RunOutcome::Halt, reason.clone());
+        self.rlt.finish_with(RunOutcome::Halt, reason.clone());
         println!("halt: {reason}");
         eprintln!("halt: {reason}");
         Err(Fatal::Ended(RunOutcome::Halt))
@@ -369,7 +369,7 @@ impl Flow {
         }
         let said = RefCell::new(String::new());
         let attempt = || {
-            let verdict = self.agg.judge(script);
+            let verdict = self.rlt.judge(script);
             said.replace(verdict.rationale().to_string());
             if verdict.met() { self.check(name, When::After).err() } else { Some(verdict.rationale().into()) }
         };
@@ -384,18 +384,18 @@ impl Flow {
 
     /// Whether step `name` applies (A-27): `when` (a script) is met. One that doesn't is recorded as skipped
     /// with the reason and costs no session; a condition that errs fails the step instead of skipping it. The
-    /// condition is asked as one ([`Agg::condition`]): its flip between runs is no regression of the work.
+    /// condition is asked as one ([`Relentless::condition`]): its flip between runs is no regression of the work.
     pub fn applies(&self, name: &str, when: &Judge) -> Result<bool, Fatal> {
         if !self.runs(name)? {
             return Ok(false);
         }
-        let verdict = self.agg.condition(when);
+        let verdict = self.rlt.condition(when);
         if let Some(error) = verdict.error() {
             self.fail(name, &format!("whether it applies can't be told: {error}"))?;
             return Ok(false);
         }
         if !verdict.met() {
-            self.agg.info(&format!("{name}: skipped, it doesn't apply: {}", verdict.rationale()));
+            self.rlt.info(&format!("{name}: skipped, it doesn't apply: {}", verdict.rationale()));
             self.record(name, "skipped", true, &format!("it doesn't apply: {}", verdict.rationale()));
         }
         Ok(verdict.met())

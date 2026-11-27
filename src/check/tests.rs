@@ -1,19 +1,19 @@
 use super::*;
 
-/// A throwaway `agg/` folder holding `agg.yaml` = `body` and one script judge per name.
+/// A throwaway `rlt/` folder holding `rlt.yaml` = `body` and one script judge per name.
 fn project(body: &str, judges: &[&str]) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("judges")).unwrap();
     for n in judges {
         std::fs::write(tmp.path().join(format!("judges/{n}.sh")), "#!/bin/sh\necho '{\"met\":true}'\n").unwrap();
     }
-    std::fs::write(tmp.path().join("agg.yaml"), body).unwrap();
+    std::fs::write(tmp.path().join("rlt.yaml"), body).unwrap();
     tmp
 }
 
 fn check(body: &str, judges: &[&str]) -> Validation {
     let tmp = project(body, judges);
-    validate(tmp.path(), &tmp.path().join("agg.yaml"))
+    validate(tmp.path(), &tmp.path().join("rlt.yaml"))
 }
 
 fn paths(v: &Validation) -> Vec<&str> {
@@ -23,9 +23,9 @@ fn paths(v: &Validation) -> Vec<&str> {
 #[test]
 fn a_missing_config_is_one_problem_at_the_root() {
     let tmp = tempfile::tempdir().unwrap();
-    let v = validate(tmp.path(), &tmp.path().join("agg.yaml"));
+    let v = validate(tmp.path(), &tmp.path().join("rlt.yaml"));
     assert_eq!(paths(&v), [""]);
-    assert!(v.problems[0].message.contains("agg init"), "{}", v.problems[0].message);
+    assert!(v.problems[0].message.contains("rlt init"), "{}", v.problems[0].message);
     assert!(v.cfg.is_none());
 }
 
@@ -101,15 +101,15 @@ fn a_valid_config_assembles_and_reports_ok_json() {
     // the agent CLI may be absent on this host; that is the ONLY problem a valid config may have.
     assert!(v.problems.iter().all(|p| p.path == "defaults.agent"), "{:?}", v.problems);
     assert_eq!(v.assembly.as_ref().map(|a| a.engine.judges.len()), Some(1));
-    let json = serde_json::to_value(v.report(Path::new("agg/agg.yaml"))).unwrap();
+    let json = serde_json::to_value(v.report(Path::new("rlt/rlt.yaml"))).unwrap();
     assert_eq!(json["schema_version"], SCHEMA_VERSION);
-    assert_eq!(json["config"], "agg/agg.yaml");
+    assert_eq!(json["config"], "rlt/rlt.yaml");
     assert!(json["warnings"].as_array().unwrap().is_empty());
 }
 
 #[test]
 fn agent_sites_name_each_agent_once_at_its_first_key() {
-    let cfg: AggConfig = serde_yaml::from_str(
+    let cfg: RelentlessConfig = serde_yaml::from_str(
         "project: p\ndefaults: { agent: claude }\njudge: { agent: claude }\nsteps: { a: { agent: codex }, b: { agent: codex } }\n",
     )
     .unwrap();

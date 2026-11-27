@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Standard library judge: the project BUILDS. Binary goal — met on a clean build.
-# Rust default (`cargo build`); shadow it in agg/judges/build_ok.sh for another toolchain.
+# Rust default (`cargo build`); shadow it in rlt/judges/build_ok.sh for another toolchain.
 # Takes no parameters (library judges are parameterless — §5.1).
 out="$(cargo build 2>&1)"
 code=$?

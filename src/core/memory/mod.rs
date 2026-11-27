@@ -1,14 +1,14 @@
-//! Institutional memory (#3) — ENFORCED, agg-owned learnings that survive across sessions.
+//! Institutional memory (#3) — ENFORCED, rlt-owned learnings that survive across sessions.
 //!
 //! Four layers, all driven by plain loop code (the worker is NEVER trusted to persist):
 //!   READ  (every prompt, pure code — bounded so it never blows the token budget):
-//!     1. the NEWEST `inject_kb` of the durable file `agg/private/LOG.md`. Capped on the
+//!     1. the NEWEST `inject_kb` of the durable file `rlt/private/LOG.md`. Capped on the
 //!        READ side independently of the on-disk cap, so a large durable file does not balloon
 //!        every prompt's input tokens.
 //!     2. an always-on "LAST SESSION" block carried in a loop-local String (the prior cycle's
 //!        deltas + scoreboard); empty on session 1 of an invocation.
 //!   WRITE (3-tier — first that yields content wins; runs even on crash/kill):
-//!     3a. a worker-written scratch note `agg/state/sessions/session-<N>.md` → SANITIZED, size-capped,
+//!     3a. a worker-written scratch note `rlt/state/sessions/session-<N>.md` → SANITIZED, size-capped,
 //!         fenced, and on a NON-clean session never allowed to stand alone (the failure fact is
 //!         always recorded). Deleted after reading and before each launch so a stale note from a
 //!         prior run can never be folded.
@@ -21,8 +21,8 @@
 //! All I/O is best-effort: a disk error degrades memory, it never breaks the loop. The durable
 //! file is written atomically (`.tmp` + rename), mirroring `state.rs`, so an interrupted write
 //! can never leave a torn file. Both are gitignored, but they sit on OPPOSITE sides of the
-//! write split: the durable `agg/private/LOG.md` is AGG-OWNED (the enforced audit trail), while the
-//! worker's `agg/state/sessions/session-<N>.md` scratch note is worker-authored and sanitized on
+//! write split: the durable `rlt/private/LOG.md` is RLT-OWNED (the enforced audit trail), while the
+//! worker's `rlt/state/sessions/session-<N>.md` scratch note is worker-authored and sanitized on
 //! the way in — which is exactly why the trail itself must be out of the worker's reach.
 //!
 //! SINGLE-WRITER ASSUMPTION: `LOG.md` is mutated by exactly one loop. Parallel workers
@@ -51,10 +51,10 @@ mod tests;
 /// Unique entry separator. An HTML comment so it can never collide with free-text markdown a
 /// worker note or summary might contain (`---`, code fences, YAML front-matter). The cap logic
 /// splits on THIS, never on `---`.
-const ENTRY_SENTINEL: &str = "<!--agg-entry-->";
+const ENTRY_SENTINEL: &str = "<!--rlt-entry-->";
 /// Title line of the durable file (written once, on first append; re-prepended on truncation).
 const FILE_HEADER: &str =
-    "# LOG.md — institutional memory (agg-managed; oldest entries drop when capped)\n";
+    "# LOG.md — institutional memory (rlt-managed; oldest entries drop when capped)\n";
 /// Hard cap on a single worker note (Tier 3a) before folding — a worker cannot blow the budget
 /// or push out all real memory in one shot.
 const WORKER_NOTE_MAX_BYTES: usize = 8 * 1024;
@@ -67,7 +67,7 @@ const BLOCK_MAX_BYTES: usize = 4 * 1024;
 /// memory exists to protect — the prompt never sees more than this, regardless of config.
 const READ_INJECT_HARD_MAX_KB: u64 = 32;
 
-/// True if `line` mimics one of agg's own structural markers — an entry boundary, the file
+/// True if `line` mimics one of rlt's own structural markers — an entry boundary, the file
 /// header, a READ-block banner, the operator-instruction banner (BOTH the `═` glyph form and a
 /// near-miss ASCII `===`/text form), or a forged `## session N (...)` entry header identical to
 /// what `append_entry` emits. Matching by TEXT (not just the leading glyph) closes the near-miss
@@ -77,7 +77,7 @@ fn looks_like_marker(line: &str) -> bool {
     let t = line.trim_start();
     if t.starts_with(ENTRY_SENTINEL)
         || t.starts_with("# LOG.md")
-        || t.starts_with("# AGG_MEMORY.md") // keep de-fanging the pre-rename header a worker might forge
+        || t.starts_with("# RLT_MEMORY.md") // keep de-fanging the pre-rename header a worker might forge
         || t.starts_with("--- INSTITUTIONAL MEMORY")
         || t.starts_with("--- LAST SESSION")
         || t.starts_with('\u{2550}') // ═

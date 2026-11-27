@@ -1,7 +1,7 @@
 //! The container tier as an AGENT RUNTIME — how each kind of process is re-hosted in a container:
 //! which image it runs in, which `HOME` it gets, and which credentials cross into it.
 //!
-//! | process | image | project | `HOME` (under `agg/private/container/home/`) | credentials |
+//! | process | image | project | `HOME` (under `rlt/private/container/home/`) | credentials |
 //! |---|---|---|---|---|
 //! | worker | the step's `image:` | read-write (minus the carve-outs) | `worker`, FRESH every session | its agent's |
 //! | LLM judge (one-shot) | the judges' image | read-only | `ruler` | the ruler's |
@@ -14,8 +14,8 @@
 //! # Why the worker's home is fresh every session
 //! Loop Engineering: a fresh session each cycle. An agent's home holds its settings, hooks, memory
 //! and transcripts; a home that survives the session is a channel from one worker session into the
-//! next that agg neither sees nor controls. The judges' homes are separate and read-only to the
-//! worker (they sit in `agg/private/`), so a worker can never plant a setting its grader then runs
+//! next that rlt neither sees nor controls. The judges' homes are separate and read-only to the
+//! worker (they sit in `rlt/private/`), so a worker can never plant a setting its grader then runs
 //! with.
 //!
 //! # Why swe-metrics' home is fresh every call
@@ -48,7 +48,7 @@ pub fn one_shot(cmd: Command, dir: &Path, env_names: &[&str], credential_files: 
 
 /// Re-host a SCRIPT judge in the judges' image: the project read-only, `writable` (its scratch and
 /// toolchain cache, both under [`crate::paths::container_dir`]) read-write, and the judge file's own
-/// directory read-only when it lives outside the project (the standard library in `~/.agg/judges`).
+/// directory read-only when it lives outside the project (the standard library in `~/.rlt/judges`).
 pub fn script_judge(cmd: Command, dir: &Path, script: &Path, writable: &[PathBuf]) -> Result<Command> {
     let image = super::policy::for_dir(dir).judge_image.clone();
     let home = home(dir, "judge")?;
@@ -68,7 +68,7 @@ pub fn metrics_judge(cmd: Command, dir: &Path, writable: &[PathBuf], readonly: &
     containerize_spec(cmd, dir, &spec)
 }
 
-/// A judge's per-session scratch when it runs in a container — what `$AGG_JUDGE_SCRATCH` and
+/// A judge's per-session scratch when it runs in a container — what `$RLT_JUDGE_SCRATCH` and
 /// `$TMPDIR` point at, and what evidence resolves against ([`crate::core::judge::scratch_path`]).
 pub fn judge_scratch(dir: &Path, session: Option<u32>) -> PathBuf {
     crate::paths::container_dir(dir).join("judge").join(format!("scratch-{}", session.unwrap_or(0)))
@@ -79,7 +79,7 @@ pub fn judge_cache(dir: &Path) -> PathBuf {
     crate::paths::container_dir(dir).join("judge").join("cache")
 }
 
-/// The home `label` gets: `agg/private/container/home/<label>`, created when missing. Canonical,
+/// The home `label` gets: `rlt/private/container/home/<label>`, created when missing. Canonical,
 /// because it is a bind source.
 fn home(dir: &Path, label: &str) -> Result<PathBuf> {
     let p = crate::paths::container_dir(dir).join("home").join(label);
@@ -135,18 +135,18 @@ mod tests {
     #[test]
     fn a_worker_gets_a_home_and_its_credentials_by_name_never_by_value() {
         let tmp = tempfile::tempdir().unwrap();
-        let key = "AGG_TEST_RUNTIME_SECRET_KEY";
+        let key = "RLT_TEST_RUNTIME_SECRET_KEY";
         std::env::set_var(key, "s3cr3t-value");
-        let cmd = worker(Command::new("claude"), tmp.path(), &[], "img:1", &[key, "AGG_TEST_RUNTIME_UNSET"], &[]).unwrap();
+        let cmd = worker(Command::new("claude"), tmp.path(), &[], "img:1", &[key, "RLT_TEST_RUNTIME_UNSET"], &[]).unwrap();
         let args = argv(&cmd);
         let canon = std::fs::canonicalize(tmp.path()).unwrap();
         assert!(args.contains(&format!("{p}:{p}", p = canon.display())), "project read-write: {args:?}");
         let home = args.iter().find_map(|a| a.strip_prefix("HOME=")).expect("HOME exported").to_string();
-        assert!(home.starts_with(&canon.join("agg/private/container/home/worker-").display().to_string()), "{home}");
+        assert!(home.starts_with(&canon.join("rlt/private/container/home/worker-").display().to_string()), "{home}");
         assert!(args.contains(&format!("{home}:{home}")), "home mounted: {args:?}");
         assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == key), "passed by name: {args:?}");
         assert!(!args.iter().any(|a| a.contains("s3cr3t-value")), "the VALUE never reaches the argv: {args:?}");
-        assert!(!args.iter().any(|a| a.contains("AGG_TEST_RUNTIME_UNSET")), "an unset name is not passed: {args:?}");
+        assert!(!args.iter().any(|a| a.contains("RLT_TEST_RUNTIME_UNSET")), "an unset name is not passed: {args:?}");
         assert!(args.windows(2).any(|w| w[0] == "--user"), "runs as the project owner: {args:?}");
         std::env::remove_var(key);
     }
@@ -167,6 +167,6 @@ mod tests {
         assert!(args.contains(&format!("{p}:{p}", p = s.display())), "scratch writable: {args:?}");
         let l = std::fs::canonicalize(lib.path()).unwrap();
         assert!(args.contains(&format!("{p}:{p}:ro", p = l.display())), "a library judge's dir, read-only: {args:?}");
-        assert!(scratch.ends_with("agg/private/container/judge/scratch-3"));
+        assert!(scratch.ends_with("rlt/private/container/judge/scratch-3"));
     }
 }

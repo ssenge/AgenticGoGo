@@ -1,4 +1,4 @@
-//! Metric and score judges (A-20) on the container tier (A-11), end to end: the real `agg` binary, a
+//! Metric and score judges (A-20) on the container tier (A-11), end to end: the real `rlt` binary, a
 //! REAL container engine, the worker in the fake-agent image and swe-metrics in a judges' test image
 //! with a FAKE `swe-metrics` baked in (`tests/fixtures/container/fake-metrics`).
 //!
@@ -8,12 +8,12 @@
 //! - the project is READ-ONLY to it, its home is fresh, it writes the session's judge scratch;
 //! - ONE measurement per judged tree, shared by a metric and a score judge;
 //! - a score is taken against the incumbent's report, which the container reads from
-//!   `agg/private/metrics/incumbent/`, and agg keeps it as before;
+//!   `rlt/private/metrics/incumbent/`, and rlt keeps it as before;
 //! - the host's trivy database is mounted READ-ONLY, with updates off;
-//! - startup refuses a judges' image without swe-metrics at `judge.image`, once, and `agg doctor
+//! - startup refuses a judges' image without swe-metrics at `judge.image`, once, and `rlt doctor
 //!   --json` reports swe-metrics under `container_images`.
 //!
-//! Skipped LOUDLY without a running engine. Projects live under `target/`, which every engine agg
+//! Skipped LOUDLY without a running engine. Projects live under `target/`, which every engine rlt
 //! supports can see.
 
 #![cfg(unix)]
@@ -48,17 +48,17 @@ fn images() -> Option<(&'static str, &'static str)> {
     static IMAGES: OnceLock<Option<(String, String)>> = OnceLock::new();
     IMAGES
         .get_or_init(|| {
-            if !agg::isolation::container_available() {
+            if !relentless::isolation::container_available() {
                 return None;
             }
-            let engine = agg::isolation::container_engine().unwrap_or("docker");
+            let engine = relentless::isolation::container_engine().unwrap_or("docker");
             let build = |tag: &str, dir: &str| {
                 let ctx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/container").join(dir);
                 let out = Command::new(engine).args(["build", "-q", "-t", tag]).arg(&ctx).output_bounded().unwrap();
                 assert!(out.status.success(), "building {tag}: {}", String::from_utf8_lossy(&out.stderr));
                 tag.to_string()
             };
-            Some((build("agg-test-fake-agent:1", "fake-agent"), build("agg-test-fake-metrics:1", "fake-metrics")))
+            Some((build("rlt-test-fake-agent:1", "fake-agent"), build("rlt-test-fake-metrics:1", "fake-metrics")))
         })
         .as_ref()
         .map(|(w, j)| (w.as_str(), j.as_str()))
@@ -75,7 +75,7 @@ impl Drop for Root {
 }
 
 fn root(name: &str) -> Root {
-    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/agg-ctr-test/metrics-{name}-{}", std::process::id()));
+    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/rlt-ctr-test/metrics-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&r);
     fs::create_dir_all(&r).unwrap();
     Root(fs::canonicalize(&r).unwrap())
@@ -107,10 +107,10 @@ impl Ctr {
         git(&root.0, &["init", "-q", "-b", "main", d.to_str().unwrap()]);
         git(&d, &["config", "user.email", "t@t"]);
         git(&d, &["config", "user.name", "t"]);
-        write(&d, ".gitignore", "agg/state/\nagg/private/\n");
+        write(&d, ".gitignore", "rlt/state/\nagg/private/\n");
         write(
             &d,
-            "agg/agg.yaml",
+            "rlt/rlt.yaml",
             &format!(
                 "project: \"mctr\"\n\
                  defaults: {{ model: \"fake\", isolation: \"container\", image: \"{worker}\" }}\n\
@@ -123,23 +123,23 @@ impl Ctr {
                  summary: {{ enabled: false }}\n"
             ),
         );
-        write(&d, "agg/state/STATE.md", "work\n");
+        write(&d, "rlt/state/STATE.md", "work\n");
         git(&d, &["add", "-A"]);
         git(&d, &["commit", "-qm", "init"]);
         let path = format!("{}:{}", root.0.join("hostbin").display(), std::env::var("PATH").unwrap_or_default());
         Ctr { root, dir: d, path, trivy }
     }
 
-    fn agg(&self, args: &[&str]) -> (Option<i32>, String) {
-        let (code, _, all) = self.agg_split(args);
+    fn rlt(&self, args: &[&str]) -> (Option<i32>, String) {
+        let (code, _, all) = self.rlt_split(args);
         (code, all)
     }
 
     /// `(exit code, stdout, stdout + stderr)`.
-    fn agg_split(&self, args: &[&str]) -> (Option<i32>, String, String) {
-        let mut c = Command::cargo_bin("agg").unwrap();
+    fn rlt_split(&self, args: &[&str]) -> (Option<i32>, String, String) {
+        let mut c = Command::cargo_bin("rlt").unwrap();
         c.args(args).current_dir(&self.dir).env("PATH", &self.path).env("HOME", self.root.0.join("home")).env("TRIVY_CACHE_DIR", &self.trivy)
-            .env("AGG_KEEP_JUDGE_SCRATCH", "1"); // the fake logs into the scratch, read after the run
+            .env("RLT_KEEP_JUDGE_SCRATCH", "1"); // the fake logs into the scratch, read after the run
         // HOME is redirected, which would hide the engine client's config (colima's context).
         if std::env::var_os("DOCKER_CONFIG").is_none() {
             if let Some(h) = std::env::var_os("HOME") {
@@ -157,7 +157,7 @@ impl Ctr {
 
     /// The fake's log of one session's scratch (`0` = the baseline pass).
     fn log(&self, session: u32) -> String {
-        let p = self.dir.join(format!("agg/private/container/judge/scratch-{session}/swe-metrics.log"));
+        let p = self.dir.join(format!("rlt/private/container/judge/scratch-{session}/swe-metrics.log"));
         fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
     }
 }
@@ -169,7 +169,7 @@ fn metric_and_score_judges_measure_in_the_judges_image_never_on_the_host() {
         return;
     };
     let p = Ctr::new("run", worker, judges);
-    let (code, out) = p.agg(&["run", "--max-sessions", "3"]);
+    let (code, out) = p.rlt(&["run", "--max-sessions", "3"]);
     assert_eq!(code, Some(0), "two sessions meet `sessions AND quality`:\n{out}");
     assert!(!p.host_called(), "swe-metrics ran on the HOST:\n{out}");
 
@@ -188,7 +188,7 @@ fn metric_and_score_judges_measure_in_the_judges_image_never_on_the_host() {
             "TRIVY_DB_SEEN",
             "TRIVY_DB_WRITE_DENIED",
             &format!("uid={uid} "),
-            &format!("home={}", p.dir.join("agg/private/container/home/metrics-").display()),
+            &format!("home={}", p.dir.join("rlt/private/container/home/metrics-").display()),
         ] {
             assert!(log.contains(want), "scratch-{s}: `{want}` missing\n{log}\n{out}");
         }
@@ -196,23 +196,23 @@ fn metric_and_score_judges_measure_in_the_judges_image_never_on_the_host() {
     assert!(p.log(0).contains("score baseline=none"), "the baseline pass has no incumbent:\n{}", p.log(0));
     for s in 1..=2 {
         let log = p.log(s);
-        let incumbent = p.dir.join("agg/private/metrics/incumbent/target.json");
+        let incumbent = p.dir.join("rlt/private/metrics/incumbent/target.json");
         assert!(log.contains(&format!("score baseline={}", incumbent.display())), "scored against the incumbent:\n{log}");
         assert!(log.contains("BASELINE_READ"), "the container reads the incumbent's report:\n{log}");
     }
-    // the incumbent agg kept is the last kept tree's report — two sessions in
-    let kept = fs::read_to_string(p.dir.join("agg/private/metrics/incumbent/target.json")).unwrap();
+    // the incumbent rlt kept is the last kept tree's report — two sessions in
+    let kept = fs::read_to_string(p.dir.join("rlt/private/metrics/incumbent/target.json")).unwrap();
     assert!(kept.contains("\"value\":2"), "{kept}");
     // the project stayed clean: nothing the container tried to write landed
     assert!(!p.dir.join("MEASURE_probe").exists() && !p.dir.join("SCORE_probe").exists());
     // evidence: the shared report, kept from the container's scratch
-    let ev = fs::read_dir(p.dir.join("agg/private/evidence")).unwrap().flatten().next().unwrap().path();
+    let ev = fs::read_dir(p.dir.join("rlt/private/evidence")).unwrap().flatten().next().unwrap().path();
     assert!(ev.join("2/sessions/swe-metrics/target/report.json").is_file(), "the report is kept as evidence: {}", ev.display());
 
-    // `agg judge` on a container run measures in the image too — the host need not have swe-metrics
-    let (code, out) = p.agg(&["judge", "sessions"]);
+    // `rlt judge` on a container run measures in the image too — the host need not have swe-metrics
+    let (code, out) = p.rlt(&["judge", "sessions"]);
     assert!(code == Some(0) && out.contains("work.sessions"), "{out}");
-    assert!(!p.host_called(), "`agg judge` ran swe-metrics on the host:\n{out}");
+    assert!(!p.host_called(), "`rlt judge` ran swe-metrics on the host:\n{out}");
 }
 
 #[test]
@@ -223,21 +223,21 @@ fn startup_refuses_a_judges_image_without_swe_metrics_and_doctor_reports_it() {
     };
     // the worker's image has no swe-metrics: refused at the key that chose the judges' image, once
     let bad = Ctr::new("refuse", worker, worker);
-    let (code, json, out) = bad.agg_split(&["check", "--json"]);
+    let (code, json, out) = bad.rlt_split(&["check", "--json"]);
     assert_eq!(code, Some(1), "{out}");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}\n{out}"));
     let missing: Vec<&serde_json::Value> =
         v["problems"].as_array().unwrap().iter().filter(|p| p["message"].as_str().unwrap_or("").contains("has no `swe-metrics` on PATH")).collect();
     assert_eq!(missing.len(), 1, "listed exactly once: {v:#}");
     assert_eq!(missing[0]["path"], "judge.image", "{v:#}");
-    let (code, out) = bad.agg(&["run", "--max-sessions", "1"]);
+    let (code, out) = bad.rlt(&["run", "--max-sessions", "1"]);
     assert_ne!(code, Some(0), "the run must not start:\n{out}");
     assert!(out.contains("has no `swe-metrics` on PATH"), "{out}");
     assert!(!bad.host_called(), "the probe asked the HOST:\n{out}");
 
     // the image that has it passes, and doctor says so under container_images
     let good = Ctr::new("doctor", worker, judges);
-    let (_, json, out) = good.agg_split(&["doctor", "--json"]);
+    let (_, json, out) = good.rlt_split(&["doctor", "--json"]);
     let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}\n{out}"));
     let img = v["container_images"].as_array().unwrap().iter().find(|i| i["image"] == judges).unwrap_or_else(|| panic!("{v:#}"));
     assert_eq!(img["clis"]["swe-metrics"], "fake-swe-metrics 1.0.0", "{v:#}");

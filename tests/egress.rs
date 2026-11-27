@@ -8,7 +8,7 @@
 //! | plain DNS | no `mDNSResponder` | the engine's DNS answers no outside name |
 //! | a raw socket / UDP from a child process | EPERM | NET_RAW dropped, no route |
 //! | a proxy the WORKER names (its own `HTTPS_PROXY`) | EPERM | no route |
-//! | a name on no list, through agg's proxy | 403 | 403 |
+//! | a name on no list, through rlt's proxy | 403 | 403 |
 //!
 //! …while the one allowed destination works THROUGH the proxy. Every destination used is either a
 //! local test server or refused before a packet leaves, so this needs no internet. Skipped LOUDLY
@@ -20,8 +20,8 @@
 mod common;
 
 use common::Bounded;
-use agg::isolation::egress::{allow::AllowList, Egress};
-use agg::isolation::policy::{self, RunPolicy};
+use relentless::isolation::egress::{allow::AllowList, Egress};
+use relentless::isolation::policy::{self, RunPolicy};
 use assert_cmd::cargo::CommandCargoExt;
 use std::io::{BufRead, Write};
 use std::net::TcpListener;
@@ -76,7 +76,7 @@ fn kernel_sandbox_usable() -> bool {
             .unwrap_or(false)
 }
 
-/// THE SANDBOX TIER (macOS Seatbelt): only TCP to agg's proxy leaves the jail.
+/// THE SANDBOX TIER (macOS Seatbelt): only TCP to rlt's proxy leaves the jail.
 #[test]
 fn under_the_macos_sandbox_only_the_proxy_gets_out() {
     if !kernel_sandbox_usable() {
@@ -104,7 +104,7 @@ t localhost_resolves "python3 -c 'import socket; socket.getaddrinfo(\"localhost\
     );
     let mut inner = Command::new("/bin/sh");
     inner.arg("-c").arg(&script);
-    let out = agg::isolation::wrap(inner, tmp.path(), &[], &[]).unwrap().output_bounded().unwrap();
+    let out = relentless::isolation::wrap(inner, tmp.path(), &[], &[]).unwrap().output_bounded().unwrap();
     let text = outcomes(&out);
     assert_outcomes(
         &text,
@@ -142,22 +142,22 @@ t own_server "python3 -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\
         let _g = register(tmp.path(), &entries);
         let mut inner = Command::new("/bin/sh");
         inner.arg("-c").arg(&script);
-        let text = outcomes(&agg::isolation::wrap(inner, tmp.path(), &[], &[]).unwrap().output_bounded().unwrap());
+        let text = outcomes(&relentless::isolation::wrap(inner, tmp.path(), &[], &[]).unwrap().output_bounded().unwrap());
         assert!(text.contains(want), "{entries:?} ⇒ {want}:\n{text}");
     }
 }
 
 /// THE CONTAINER TIER (the reference): an `--internal` network whose only reachable address is the
-/// relay to agg's proxy.
+/// relay to rlt's proxy.
 #[test]
 fn in_a_container_only_the_relay_to_the_proxy_gets_out() {
-    if !agg::isolation::container_available() {
+    if !relentless::isolation::container_available() {
         eprintln!("SKIPPED: no container engine");
         return;
     }
     let srv = server();
     // under target/: a VM-backed engine cannot see $TMPDIR
-    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/agg-egress-test");
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/rlt-egress-test");
     std::fs::create_dir_all(&base).unwrap();
     let tmp = tempfile::tempdir_in(&base).unwrap();
     let g = register(tmp.path(), &[format!("127.0.0.1:{srv}")]);
@@ -178,7 +178,7 @@ t worker_set_proxy "http_proxy=http://1.1.1.1:3128 wget -q -T 3 -O /dev/null htt
     );
     let mut inner = Command::new("/bin/sh");
     inner.arg("-c").arg(&script);
-    let out = agg::isolation::containerize(inner, tmp.path(), &[], &[], agg::isolation::DEFAULT_IMAGE).unwrap().output_bounded().unwrap();
+    let out = relentless::isolation::containerize(inner, tmp.path(), &[], &[], relentless::isolation::DEFAULT_IMAGE).unwrap().output_bounded().unwrap();
     let text = outcomes(&out);
     drop(g); // removes the relay and the internal network
     assert_outcomes(
@@ -193,11 +193,11 @@ t worker_set_proxy "http_proxy=http://1.1.1.1:3128 wget -q -T 3 -O /dev/null htt
 fn check_problems(yaml: &str) -> Vec<(String, String)> {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
-    std::fs::create_dir_all(d.join("agg/judges")).unwrap();
-    std::fs::create_dir_all(d.join("agg/state")).unwrap();
-    std::fs::write(d.join("agg/agg.yaml"), yaml).unwrap();
-    std::fs::write(d.join("agg/judges/ok.sh"), "#!/bin/sh\necho '{\"met\":true}'\n").unwrap();
-    let out = Command::cargo_bin("agg").unwrap().args(["check", "--json"]).current_dir(d).env("HOME", d).output_bounded().unwrap();
+    std::fs::create_dir_all(d.join("rlt/judges")).unwrap();
+    std::fs::create_dir_all(d.join("rlt/state")).unwrap();
+    std::fs::write(d.join("rlt/rlt.yaml"), yaml).unwrap();
+    std::fs::write(d.join("rlt/judges/ok.sh"), "#!/bin/sh\necho '{\"met\":true}'\n").unwrap();
+    let out = Command::cargo_bin("rlt").unwrap().args(["check", "--json"]).current_dir(d).env("HOME", d).output_bounded().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     v["problems"].as_array().unwrap().iter().map(|p| (p["path"].as_str().unwrap().into(), p["message"].as_str().unwrap().into())).collect()
 }

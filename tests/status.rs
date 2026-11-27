@@ -1,7 +1,7 @@
-//! The LIVE interfaces, end to end (A-17): `agg status --json` read from another process while a
-//! real run is in progress, and `agg answer --json` delivering an answer into the worker's next
+//! The LIVE interfaces, end to end (A-17): `rlt status --json` read from another process while a
+//! real run is in progress, and `rlt answer --json` delivering an answer into the worker's next
 //! brief. Every document is validated against its PUBLISHED schema by an independent validator
-//! (the `jsonschema` crate) — the claim under test is that the schema says what agg prints.
+//! (the `jsonschema` crate) — the claim under test is that the schema says what rlt prints.
 
 #![cfg(unix)]
 
@@ -53,22 +53,22 @@ fn assert_valid(file: &str, doc: &Value) {
 /// The worker for the live run. Session N marks `ctl/started_N`, copies its brief to `ctl/brief_N`,
 /// and waits for `ctl/go_N` — so the test reads the status mid-session. Session 1 asks a human a
 /// `choose` question; session 3 does the work. It reports a model and known token counts.
-fn worker(ctl: &Path, agg_bin: &Path) -> String {
+fn worker(ctl: &Path, rlt_bin: &Path) -> String {
     format!(
         r#"#!/bin/sh
 for a in "$@"; do [ "$a" = --version ] && {{ echo fake-claude 0.0.0; exit 0; }}; done
 ctl='{ctl}'
 n=1; while [ -f "$ctl/started_$n" ]; do n=$((n+1)); done
-cp agg/private/INSTRUCTIONS.md "$ctl/brief_$n"
+cp rlt/private/INSTRUCTIONS.md "$ctl/brief_$n"
 printf '%s\n' '{{"type":"system","subtype":"init","model":"reported-model-1","session_id":"s"}}'
-[ "$n" = 1 ] && '{agg}' hil choose "Which database?" --option postgres --option sqlite >/dev/null
+[ "$n" = 1 ] && '{rlt}' hil choose "Which database?" --option postgres --option sqlite >/dev/null
 : > "$ctl/started_$n"
 while [ ! -f "$ctl/go_$n" ]; do sleep 0.05; done
 if [ "$n" = 3 ]; then : > did_work; git add did_work >/dev/null 2>&1; git commit -qm w >/dev/null 2>&1; fi
 printf '%s\n' '{{"type":"result","subtype":"success","result":"ok","usage":{{"input_tokens":10,"output_tokens":50,"cache_creation_input_tokens":200,"cache_read_input_tokens":3000}},"total_cost_usd":0.25}}'
 "#,
         ctl = ctl.display(),
-        agg = agg_bin.display()
+        rlt = rlt_bin.display()
     )
 }
 
@@ -78,16 +78,16 @@ fn live_project() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
     let (dir, ctl) = (tmp.path().join("proj"), tmp.path().join("ctl"));
     fs::create_dir_all(&ctl).unwrap();
     let claude = tmp.path().join("bin/claude");
-    write(&claude, &worker(&ctl, Path::new(env!("CARGO_BIN_EXE_agg"))));
+    write(&claude, &worker(&ctl, Path::new(env!("CARGO_BIN_EXE_rlt"))));
     chmod_x(&claude);
-    let judge = dir.join("agg/judges/worked.sh");
+    let judge = dir.join("rlt/judges/worked.sh");
     write(&judge, "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1}'\n");
     chmod_x(&judge);
     write(
-        &dir.join("agg/agg.yaml"),
+        &dir.join("rlt/rlt.yaml"),
         "project: \"live\"\ndefaults: { model: \"configured-model\" }\nsteps:\n  worker: {}\nsequence:\n  steps: [\"worker\"]\n  done_if: \"worked\"\nsummary: { enabled: false }\n",
     );
-    write(&agg::paths::agg_dir(&dir).join("STATE.md"), "work\n");
+    write(&relentless::paths::rlt_dir(&dir).join("STATE.md"), "work\n");
     git(&dir, &["init", "-q", "-b", "main"]);
     git(&dir, &["config", "user.email", "t@t"]);
     git(&dir, &["config", "user.name", "t"]);
@@ -96,10 +96,10 @@ fn live_project() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
     (tmp, dir, ctl, path)
 }
 
-/// `agg <args> --project <dir>`, run from a DIFFERENT directory, as a watching program would.
-fn agg_from_outside(dir: &Path, path: &str, args: &[&str]) -> Output {
+/// `rlt <args> --project <dir>`, run from a DIFFERENT directory, as a watching program would.
+fn rlt_from_outside(dir: &Path, path: &str, args: &[&str]) -> Output {
     let elsewhere = dir.parent().unwrap();
-    Command::cargo_bin("agg")
+    Command::cargo_bin("rlt")
         .unwrap()
         .current_dir(elsewhere)
         .env("PATH", path)
@@ -113,7 +113,7 @@ fn agg_from_outside(dir: &Path, path: &str, args: &[&str]) -> Output {
 }
 
 fn status(dir: &Path, path: &str) -> Value {
-    let out = agg_from_outside(dir, path, &["status", "--json"]);
+    let out = rlt_from_outside(dir, path, &["status", "--json"]);
     assert!(out.status.success(), "status --json failed: {}", String::from_utf8_lossy(&out.stderr));
     let v: Value = serde_json::from_slice(&out.stdout).expect("status --json prints one JSON document");
     assert_valid("status.v1.json", &v);
@@ -121,7 +121,7 @@ fn status(dir: &Path, path: &str) -> Value {
 }
 
 fn answer(dir: &Path, path: &str, id: &str, value: &str) -> (Option<i32>, Value) {
-    let out = agg_from_outside(dir, path, &["answer", id, value, "--json"]);
+    let out = rlt_from_outside(dir, path, &["answer", id, value, "--json"]);
     let v: Value = serde_json::from_slice(&out.stdout).expect("answer --json prints one JSON document");
     assert_valid("answer.v1.json", &v);
     (out.status.code(), v)
@@ -133,7 +133,7 @@ fn answer(dir: &Path, path: &str, id: &str, value: &str) -> (Option<i32>, Value)
 #[test]
 fn status_follows_a_live_run_and_an_answer_reaches_the_next_brief() {
     let (_tmp, dir, ctl, path) = live_project();
-    let mut run = Command::cargo_bin("agg")
+    let mut run = Command::cargo_bin("rlt")
         .unwrap()
         .current_dir(&dir)
         .env("PATH", &path)
@@ -149,7 +149,7 @@ fn status_follows_a_live_run_and_an_answer_reaches_the_next_brief() {
     let s = status(&dir, &path);
     assert_eq!((s["running"].as_bool(), s["finished"].as_bool(), s["session"].as_u64()), (Some(true), Some(false), Some(1)));
     assert_eq!(s["current_step"]["name"], "worker");
-    assert_eq!(s["current_step"]["model"], "configured-model", "the step names what agg asked for");
+    assert_eq!(s["current_step"]["model"], "configured-model", "the step names what rlt asked for");
     assert_eq!(s["stop_reason"], Value::Null);
     assert_eq!(s["judges"]["worked"]["last"]["met"], false, "the baseline verdict is the latest so far");
     assert!(s["run_id"].as_str().is_some_and(|r| r.starts_with("run-")), "{s}");
@@ -195,7 +195,7 @@ fn status_follows_a_live_run_and_an_answer_reaches_the_next_brief() {
 #[test]
 fn status_json_without_a_run_is_an_error() {
     let (_tmp, dir, _ctl, path) = live_project();
-    let out = agg_from_outside(&dir, &path, &["status", "--json"]);
+    let out = rlt_from_outside(&dir, &path, &["status", "--json"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no run snapshot yet"));
 }

@@ -1,10 +1,10 @@
-//! `agg run --report-json` — the headless contract: logs go to `agg/private/run.log`, stdout carries
+//! `rlt run --report-json` — the headless contract: logs go to `rlt/private/run.log`, stdout carries
 //! the report and nothing else.
 //!
 //! The redirect is done at the FILE-DESCRIPTOR level, not by threading a writer through the code:
-//! log lines come from the loop, from the worker's stream-reader thread, and from every child agg
+//! log lines come from the loop, from the worker's stream-reader thread, and from every child rlt
 //! spawns (judges, hooks, the agent CLI's own stderr). Pointing fd 1 and fd 2 at the log catches all
-//! of them, including output agg does not know it produces. The ORIGINAL descriptors are kept, so the
+//! of them, including output rlt does not know it produces. The ORIGINAL descriptors are kept, so the
 //! report still reaches the caller's stdout and a fatal reason still reaches its stderr.
 
 use std::io::Write as _;
@@ -19,7 +19,7 @@ pub struct Headless {
 }
 
 impl Headless {
-    /// Send this process's stdout and stderr to `agg/private/run.log` (appending), keeping the
+    /// Send this process's stdout and stderr to `rlt/private/run.log` (appending), keeping the
     /// originals for [`Headless::emit_report`] / [`Headless::emit_error`].
     #[cfg(unix)]
     pub fn redirect(dir: &Path) -> std::io::Result<Headless> {
@@ -82,7 +82,7 @@ impl Headless {
     }
 }
 
-/// Settle a finished `agg run`: report any error, make sure a report exists, print it for
+/// Settle a finished `rlt run`: report any error, make sure a report exists, print it for
 /// `--report-json`, and return the exit code — which is the report's.
 ///
 /// `may_write` is false when another run is live in the project (its report file is not ours).

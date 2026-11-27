@@ -6,7 +6,7 @@
 //! One cheap agent call per cycle returns BOTH (as JSON) to minimize cost. It goes through
 //! [`AgentBackend::one_shot`] — the same call the LLM judge makes; this module used to carry a
 //! near-verbatim clone of it, envelope-unwrap included. And like the judge, it runs on the RULER,
-//! which is handed in rather than read off a global (see `core::config::AggConfig::ruler_backend`).
+//! which is handed in rather than read off a global (see `core::config::RelentlessConfig::ruler_backend`).
 
 use crate::backend::AgentBackend;
 use crate::usage::Usage;
@@ -84,7 +84,7 @@ pub fn summarize(
     // unwrap included). `cwd: None` — the summarizer only reads text it was handed, so unlike
     // the judge it has no business looking at the project.
     // Best-effort: any failure (spawn/timeout) → None, never breaks the loop.
-    // cwd is None (the summarizer runs in agg's own dir, not the project) → never confined; it is
+    // cwd is None (the summarizer runs in rlt's own dir, not the project) → never confined; it is
     // a tool-less LLM call over worker thoughts, not a worker-rewritable script.
     let model = &crate::backend::overrides::model(model);
     let out = ruler.one_shot(&prompt, model, "", timeout_secs, None, crate::isolation::Isolation::None, None).ok()?;

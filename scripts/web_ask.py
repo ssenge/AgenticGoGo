@@ -1,7 +1,7 @@
 """Isolated browser check: can a human ANSWER an open ask from the web UI?
 
-Self-contained — it builds its own project, mints a real ask through `agg hil`, starts its own
-`agg serve` and SvelteKit app on free ports, and drives Chromium. Nothing is shared with the other
+Self-contained — it builds its own project, mints a real ask through `rlt hil`, starts its own
+`rlt serve` and SvelteKit app on free ports, and drives Chromium. Nothing is shared with the other
 web fixtures, so it cannot perturb them (an earlier version of the API check did exactly that).
 
     scripts/web_ask.py [--root <repo>]      exit 0 = every check passed
@@ -19,16 +19,16 @@ import argparse
 _ap = argparse.ArgumentParser()
 _ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent))
 ROOT = Path(_ap.parse_args().root)
-AGG  = ROOT / "target/debug/agg"
-P    = Path(os.environ.get("TMPDIR", "/tmp")) / f"agg-webask.{os.getpid()}"; subprocess.run(["rm","-rf",str(P)]); (P/"agg/judges").mkdir(parents=True)
+RLT  = ROOT / "target/debug/rlt"
+P    = Path(os.environ.get("TMPDIR", "/tmp")) / f"rlt-webask.{os.getpid()}"; subprocess.run(["rm","-rf",str(P)]); (P/"rlt/judges").mkdir(parents=True)
 (P/"bin").mkdir()
 
 def port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
 # a project whose goal never closes, so a session always runs
-(P/"agg/judges/never.sh").write_text('#!/bin/sh\nprintf %s \'{"met":false}\'\n'); os.chmod(P/"agg/judges/never.sh", 0o755)
-(P/"agg/agg.yaml").write_text(
+(P/"rlt/judges/never.sh").write_text('#!/bin/sh\nprintf %s \'{"met":false}\'\n'); os.chmod(P/"rlt/judges/never.sh", 0o755)
+(P/"rlt/rlt.yaml").write_text(
     "project: webask\ndefaults: { model: fake }\nsteps: { worker: {} }\n"
     "sequence: { steps: [worker], done_if: \"never\" }\nsummary: { enabled: false }\n")
 (P/"bin/claude").write_text('#!/bin/sh\nfor a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done\n'
@@ -39,20 +39,20 @@ for c in (["git","init","-q","."],["git","config","user.email","t@t.t"],["git","
     subprocess.run(c, cwd=P, check=False)
 
 env = {**os.environ, "PATH": f"{P}/bin:{os.environ['PATH']}"}
-run = lambda *a: subprocess.run([str(AGG), *a], cwd=P, env=env, capture_output=True, text=True)
+run = lambda *a: subprocess.run([str(RLT), *a], cwd=P, env=env, capture_output=True, text=True)
 
 # the worker asks; the loop promotes it
 run("hil", "choose", "Which store for billing?", "--option", "postgres", "--option", "sqlite")
 run("run", "--max-sessions", "1")
-ledger = (P/"agg/private/asks.jsonl").read_text()
+ledger = (P/"rlt/private/asks.jsonl").read_text()
 ask_id = re.search(r'"id":"([a-f0-9]+)"', ledger).group(1)
 print(f"open ask: {ask_id}")
 
 aport, wport = port(), port()
-srv = subprocess.Popen([str(AGG), "serve", "--port", str(aport)], cwd=P, env=env,
+srv = subprocess.Popen([str(RLT), "serve", "--port", str(aport)], cwd=P, env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 web = subprocess.Popen(["node", "build/index.js"], cwd=ROOT/"src/web",
-                       env={**os.environ, "AGG_API": f"http://127.0.0.1:{aport}", "PORT": str(wport)},
+                       env={**os.environ, "RLT_API": f"http://127.0.0.1:{aport}", "PORT": str(wport)},
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 fails = []
 def check(cond, what):
@@ -78,7 +78,7 @@ try:
 
         pg.get_by_role("button", name="sqlite").click()
         pg.wait_for_timeout(2500)
-        led = (P/"agg/private/asks.jsonl").read_text()
+        led = (P/"rlt/private/asks.jsonl").read_text()
         check('"answer":"sqlite"' in led, "clicking an option ANSWERS the ask in the ledger")
         check('"by":"web"' in led, "…attributed to the web")
         check("Waiting on you" not in pg.content(), "…and the panel clears once the loop republishes")

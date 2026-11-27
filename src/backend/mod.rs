@@ -8,14 +8,14 @@
 //! # Why there is no `active()` singleton
 //! There was one: a `OnceLock` that latched on FIRST READ and **silently defaulted to Claude**.
 //! The config's `model` / `effort` / `summary.model` / LLM-judge `model` defaults resolved
-//! THROUGH it — so `agg.yaml` could not be PARSED without already knowing the agent, and any
+//! THROUGH it — so `rlt.yaml` could not be PARSED without already knowing the agent, and any
 //! parse in the wrong order pinned the wrong agent, silently, first-wins. It shipped that bug
-//! three times: `agg init --agent codex` (fixed by using `for_name` locally), `agg doctor` on a
-//! `copilot` project (reported `claude`), and `agg judge <id>`, which never selected a backend at
+//! three times: `rlt init --agent codex` (fixed by using `for_name` locally), `rlt doctor` on a
+//! `copilot` project (reported `claude`), and `rlt judge <id>`, which never selected a backend at
 //! all and so ran the LLM judge on Claude for every non-Claude project.
 //!
 //! Those defaults are now `Option`s, resolved at **use time** against the backend actually doing
-//! that piece of work (see [`crate::core::config::AggConfig::model`]). Which also means the
+//! that piece of work (see [`crate::core::config::RelentlessConfig::model`]). Which also means the
 //! worker and the **ruler** — the backend that runs LLM judges and the summarizer — are separate
 //! values that can differ, instead of one latched global that cannot.
 //!
@@ -77,7 +77,7 @@
 //!    loop already does.
 //!
 //! # seam
-//! `agg run --sandbox` (ROADMAP P2) wraps what [`AgentBackend::session_command`] returns.
+//! `rlt run --sandbox` (ROADMAP P2) wraps what [`AgentBackend::session_command`] returns.
 
 pub mod claude;
 pub mod codex;
@@ -115,18 +115,18 @@ use std::process::Command;
 ///    hangs waiting on stdin EOF when spawned as a non-TTY child, and Copilot ignores piped stdin
 ///    when `-p` is given. [`worker`] already nulls stdin; keep it that way.
 pub trait AgentBackend: Send + Sync {
-    /// the `agent:` value in agg.yaml that selects this backend.
+    /// the `agent:` value in rlt.yaml that selects this backend.
     fn name(&self) -> &'static str;
     /// the CLI binary, resolved via PATH (so a fake can be shimmed in tests).
     fn bin(&self) -> &'static str;
     fn capabilities(&self) -> Capabilities;
-    /// default worker model (agg.yaml `model:`).
+    /// default worker model (rlt.yaml `model:`).
     fn default_model(&self) -> &'static str;
     /// default cheap model for the summarizer / LLM judge.
     fn default_summary_model(&self) -> &'static str;
 
     /// Build the `Command` for one interactive worker session. The caller spawns and supervises
-    /// it — process groups, the stream reader, the heartbeat and the watchdog are agg's
+    /// it — process groups, the stream reader, the heartbeat and the watchdog are rlt's
     /// process-management concerns, not the backend's.
     fn session_command(&self, spec: &SessionSpec) -> Command;
 
@@ -185,10 +185,10 @@ pub trait AgentBackend: Send + Sync {
     /// also declare `supports_resume: false`.
     fn parse_session_id(&self, line: &str) -> Option<String>;
 
-    /// The `effort:` agg.yaml defaults to for THIS agent. Empty = don't pass an effort at all.
+    /// The `effort:` rlt.yaml defaults to for THIS agent. Empty = don't pass an effort at all.
     ///
     /// Backend-specific because the vocabulary is: Claude and Copilot both take
-    /// `low|medium|high|xhigh|max`, and Codex takes no effort flag whatsoever. Without this, agg's
+    /// `low|medium|high|xhigh|max`, and Codex takes no effort flag whatsoever. Without this, rlt's
     /// blanket default of `max` would be a demand no Codex config could satisfy, and
     /// [`crate::capability::check`] would refuse EVERY Codex run out of the box — for an effort the
     /// user never actually asked for.
@@ -214,7 +214,7 @@ pub trait AgentBackend: Send + Sync {
     ///
     /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
-    /// `effort` is the reasoning effort in agg's vocabulary; empty = the agent's own default.
+    /// `effort` is the reasoning effort in rlt's vocabulary; empty = the agent's own default.
     /// `schema` is a JSON Schema the answer must match (the judge's verdict), for an agent that can
     /// enforce one; the answer then comes back as that JSON text. An agent that cannot ignores it.
     #[allow(clippy::too_many_arguments)] // one call's independent facts; every backend reads each of them
@@ -234,9 +234,9 @@ pub trait AgentBackend: Send + Sync {
     /// returned unwrapped.
     ///
     /// **Applied to EVERY backend, including one that confines itself.** A judge that runs under
-    /// the agent's own `--sandbox read-only` is confined by the agent's promise; agg's carve-out
-    /// (`agg/private/`, the verdict ledger it is about to append to) exists precisely because that
-    /// promise is not agg's to make. The two layers compose — the outer one is ours.
+    /// the agent's own `--sandbox read-only` is confined by the agent's promise; rlt's carve-out
+    /// (`rlt/private/`, the verdict ledger it is about to append to) exists precisely because that
+    /// promise is not rlt's to make. The two layers compose — the outer one is ours.
     fn confine_one_shot(
         &self,
         command: Command,
@@ -246,7 +246,7 @@ pub trait AgentBackend: Send + Sync {
         match cwd {
             Some(dir) if isolation == crate::isolation::Isolation::Sandbox => {
                 // `&[]`: a one-shot is not a step, so there is no per-step `readonly` list to
-                // deliver — only the derived `agg/private/` carve-out, which `wrap` adds itself.
+                // deliver — only the derived `rlt/private/` carve-out, which `wrap` adds itself.
                 crate::isolation::wrap(command, dir, &self.writable_state_paths(), &[])
                     .map_err(|e| e.to_string())
             }
@@ -307,7 +307,7 @@ pub trait AgentBackend: Send + Sync {
     ///
     /// Every worker session then dies in ~4s with exit 1 and zero tokens, while the loop happily
     /// runs sessions, judges them, and halts on `over_iterations` having achieved nothing. Before
-    /// this hook, `agg doctor` printed "✔ agent `copilot` can do everything this config asks" for
+    /// this hook, `rlt doctor` printed "✔ agent `copilot` can do everything this config asks" for
     /// exactly that config — a green light on a run that cannot work.
     ///
     /// Checked at startup by [`crate::capability::check`], so it is a loud refusal, never a silent
@@ -324,24 +324,24 @@ pub trait AgentBackend: Send + Sync {
     /// [`crate::capability::check`] will put it in the error.
     ///
     /// Copilot, for example, takes `--max-ai-credits <n>` (it bills in GitHub AI Credits, not
-    /// dollars) — passable through agg.yaml's `worker_args`. Claude returns `None`: agg's own cost
+    /// dollars) — passable through rlt.yaml's `worker_args`. Claude returns `None`: rlt's own cost
     /// guard works, so there is nothing to fall back to.
     fn spend_ceiling_hint(&self) -> Option<&'static str> {
         None
     }
 
-    /// Can this agent ADDITIONALLY confine itself, on top of agg's jail?
+    /// Can this agent ADDITIONALLY confine itself, on top of rlt's jail?
     ///
-    /// ⛔ **This does NOT gate the OS wrapper.** Under `isolation: sandbox` agg wraps EVERY agent
+    /// ⛔ **This does NOT gate the OS wrapper.** Under `isolation: sandbox` rlt wraps EVERY agent
     /// unconditionally ([`worker::run_session`], [`Self::confine_one_shot`]) — an agent's own
-    /// sandbox is the agent's promise, and agg's moat does not rest on promises. It used to mean
+    /// sandbox is the agent's promise, and rlt's moat does not rest on promises. It used to mean
     /// "skip the wrapper for this agent"; that rule is deleted.
     ///
     /// What survives is REPORTING: `true` says the agent has a second, inner kernel jail of its own
     /// (only Codex — `sandbox_mode=workspace-write`, Seatbelt/Landlock under the hood), which its
     /// [`Self::session_command`] switches on by reading `spec.isolation`. Claude and Copilot have
     /// permission layers, not kernel jails, so they return `false`. Nothing in the confinement path
-    /// branches on it; `agg doctor` and diagnostics may.
+    /// branches on it; `rlt doctor` and diagnostics may.
     fn self_sandboxes(&self) -> bool {
         false
     }
@@ -356,8 +356,8 @@ pub trait AgentBackend: Send + Sync {
     }
 
     /// The environment variables that carry this agent's credentials and endpoint, passed into a
-    /// CONTAINER by name when set in agg's environment (`-e NAME`, so the value never appears on a
-    /// command line). A container starts from the image's environment, not agg's, so an agent whose
+    /// CONTAINER by name when set in rlt's environment (`-e NAME`, so the value never appears on a
+    /// command line). A container starts from the image's environment, not rlt's, so an agent whose
     /// key is not listed here cannot authenticate in one. Default: none.
     fn container_env(&self) -> &'static [&'static str] {
         &[]
@@ -371,9 +371,9 @@ pub trait AgentBackend: Send + Sync {
     }
 
     /// The API host(s) this agent must reach to work at all, as configured right now (an endpoint
-    /// override in the environment counts). Under a network allow-list agg refuses to start unless
+    /// override in the environment counts). Under a network allow-list rlt refuses to start unless
     /// EVERY host returned here is allowed — a worker that cannot reach its model is not confined,
-    /// it is broken. Default: none declared, which a run with an allow-list REFUSES (agg cannot
+    /// it is broken. Default: none declared, which a run with an allow-list REFUSES (rlt cannot
     /// verify a backend it knows no endpoint for).
     fn api_hosts(&self) -> Vec<String> {
         Vec::new()
@@ -469,7 +469,7 @@ pub fn looks_rate_limited(text: &str) -> bool {
     PATS.iter().any(|p| h.contains(p))
 }
 
-/// Every backend agg knows how to drive. Adding one = a new `claude.rs`-shaped module + one arm.
+/// Every backend rlt knows how to drive. Adding one = a new `claude.rs`-shaped module + one arm.
 pub const KNOWN: &[&str] = &["claude", "codex", "copilot"];
 
 /// Resolve an `agent:` name to its backend.
@@ -479,7 +479,7 @@ pub fn for_name(name: &str) -> Result<&'static dyn AgentBackend> {
         "codex" => Ok(&codex::Codex),
         "copilot" => Ok(&copilot::Copilot),
         other => anyhow::bail!(
-            "unknown agent `{other}` in agg.yaml.\n  known agents: {}\n  \
+            "unknown agent `{other}` in rlt.yaml.\n  known agents: {}\n  \
              (adding one means implementing `trait AgentBackend` — see docs/BACKENDS.md)",
             KNOWN.join(", ")
         ),

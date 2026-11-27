@@ -3,8 +3,8 @@
 //!
 //! A worker that runs without the user's settings (`--setting-sources project,local`) never reads that file, and a
 //! host whose model gateway or telemetry switches are set only there then fails every session. `user_env` names what
-//! to take from the block: nothing, every key, or a list of keys. A variable agg's own environment already has wins,
-//! and the keys agg manages itself (`AGG_*`) are never taken. Only key NAMES are ever shown, never values.
+//! to take from the block: nothing, every key, or a list of keys. A variable rlt's own environment already has wins,
+//! and the keys rlt manages itself (`RLT_*`) are never taken. Only key NAMES are ever shown, never values.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -61,13 +61,13 @@ pub fn file_env() -> Vec<(String, String)> {
     settings_file().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| parse(&t)).unwrap_or_default()
 }
 
-/// What `which` takes of `block`, in the block's order: not a key agg's environment has (`set`), not one agg manages.
+/// What `which` takes of `block`, in the block's order: not a key rlt's environment has (`set`), not one rlt manages.
 pub fn select(block: Vec<(String, String)>, which: &UserEnv, set: impl Fn(&str) -> bool) -> Vec<(String, String)> {
     let wanted = |k: &str| match which {
         UserEnv::Flag(on) => *on,
         UserEnv::Keys(keys) => keys.iter().any(|w| w == k),
     };
-    block.into_iter().filter(|(k, _)| wanted(k) && !k.starts_with("AGG_") && !set(k)).collect()
+    block.into_iter().filter(|(k, _)| wanted(k) && !k.starts_with("RLT_") && !set(k)).collect()
 }
 
 /// Takes `which` from the settings file, makes it what the Claude backend passes from now on, and returns the key names.
@@ -83,7 +83,7 @@ pub fn passed() -> Vec<(String, String)> {
     PASSED.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// `name` from agg's environment, else from what the run passes: what a Claude process would see.
+/// `name` from rlt's environment, else from what the run passes: what a Claude process would see.
 pub fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().or_else(|| passed().into_iter().find(|(k, _)| k == name).map(|(_, v)| v))
 }
@@ -97,7 +97,7 @@ pub fn gateway_keys() -> Vec<String> {
 mod tests {
     use super::*;
 
-    const FILE: &str = r#"{"model":"x","env":{"ANTHROPIC_BASE_URL":"https://gw","ANTHROPIC_AUTH_TOKEN":"t","N":3,"FLAG":true,"AGG_X":"1"}}"#;
+    const FILE: &str = r#"{"model":"x","env":{"ANTHROPIC_BASE_URL":"https://gw","ANTHROPIC_AUTH_TOKEN":"t","N":3,"FLAG":true,"RLT_X":"1"}}"#;
 
     fn names(p: &[(String, String)]) -> Vec<&str> {
         p.iter().map(|(k, _)| k.as_str()).collect()
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn the_block_has_its_string_values_only() {
         let all = parse(FILE);
-        assert_eq!(names(&all), ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "AGG_X"], "{all:?}");
+        assert_eq!(names(&all), ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "RLT_X"], "{all:?}");
         assert!(parse(r#"{"model":"x"}"#).is_empty());
         assert!(parse(r#"{"env":"no"}"#).is_empty());
         assert!(parse("not json").is_empty());
@@ -124,12 +124,12 @@ mod tests {
         assert_eq!(names(&select(parse(FILE), &list, none)), ["ANTHROPIC_BASE_URL"]);
     }
 
-    /// A variable agg's own environment has wins over the file; the keys agg manages are never taken, even when named.
+    /// A variable rlt's own environment has wins over the file; the keys rlt manages are never taken, even when named.
     #[test]
-    fn the_environment_and_agg_s_own_keys_win() {
+    fn the_environment_and_rlt_s_own_keys_win() {
         let set = |k: &str| k == "ANTHROPIC_BASE_URL";
         assert_eq!(names(&select(parse(FILE), &UserEnv::Flag(true), set)), ["ANTHROPIC_AUTH_TOKEN"]);
-        let named = UserEnv::Keys(vec!["AGG_X".into()]);
+        let named = UserEnv::Keys(vec!["RLT_X".into()]);
         assert!(select(parse(FILE), &named, |_| false).is_empty());
     }
 
@@ -139,11 +139,11 @@ mod tests {
     fn the_file_follows_claude_config_dir_and_what_a_run_takes_is_passed() {
         let dir = tempfile::tempdir().unwrap();
         let old_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::fs::write(dir.path().join("settings.json"), r#"{"env":{"AGG_UE_TEST_A":"a","UE_TEST_B":"b","UE_TEST_SET":"c"}}"#).unwrap();
+        std::fs::write(dir.path().join("settings.json"), r#"{"env":{"RLT_UE_TEST_A":"a","UE_TEST_B":"b","UE_TEST_SET":"c"}}"#).unwrap();
         std::env::set_var("CLAUDE_CONFIG_DIR", dir.path());
         std::env::set_var("UE_TEST_SET", "mine");
         assert_eq!(settings_file(), Some(dir.path().join("settings.json")));
-        assert_eq!(take(&UserEnv::Flag(true)), ["UE_TEST_B"], "the environment's UE_TEST_SET wins, AGG_* never");
+        assert_eq!(take(&UserEnv::Flag(true)), ["UE_TEST_B"], "the environment's UE_TEST_SET wins, RLT_* never");
         assert_eq!(passed(), [("UE_TEST_B".to_string(), "b".to_string())]);
         assert_eq!(var("UE_TEST_B").as_deref(), Some("b"));
         assert_eq!(var("UE_TEST_SET").as_deref(), Some("mine"));

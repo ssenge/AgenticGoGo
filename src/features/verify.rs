@@ -2,15 +2,15 @@
 
 use anyhow::Result;
 use crate::backend::worker::SessionOutcome;
-use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LifecycleEvent, LoopState, indent};
+use crate::loop_::{RLTScratch, RLTState, Flow, Handler, LifecycleEvent, LoopState, indent};
 
 /// The early ENFORCED memory floor — FIRST on on_verify, BEFORE any judging, so the session's facts
 /// survive a later panic (R1). Sets `scratch.mem_folded` for the post-judge refine fold in GATE.
 pub struct FloorFold;
 impl Handler for FloorFold {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let outcome = ctx.scratch.get::<AGGScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
-        ctx.scratch.get::<AGGScratch>().mem_folded = fold_memory_floor(ctx, &outcome);
+        let outcome = ctx.scratch.get::<RLTScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
+        ctx.scratch.get::<RLTScratch>().mem_folded = fold_memory_floor(ctx, &outcome);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -22,7 +22,7 @@ impl Handler for FloorFold {
 
 /// Snapshot the pre-step (base) judge truth so a GATE rollback can restore it (W5). Runs only past
 /// the rate-limit exit — exactly like the old `pre_cycle_goals` snapshot after the rate-limit return.
-/// Auto-commit the worker's tracked edits on the session branch (GIT_REDESIGN: agg owns git, the
+/// Auto-commit the worker's tracked edits on the session branch (GIT_REDESIGN: rlt owns git, the
 /// worker never runs git). Runs after the worker (on_run) and the rate-limit check, BEFORE staging
 /// (StageSpan/StageMerge) — the session branch is still checked out here, so the commit lands on it
 /// and the subsequent merge picks it up. Best-effort → Continue; skipped cleanly when isolation
@@ -30,11 +30,11 @@ impl Handler for FloorFold {
 pub struct GitAutoCommit;
 impl Handler for GitAutoCommit {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if let Some(br) = ctx.ext.get::<AGGState>().git.session_branch.clone() {
+        if let Some(br) = ctx.ext.get::<RLTState>().git.session_branch.clone() {
             let step = ctx.cur_step.clone().expect("PickStep set cur_step");
-            let msg = format!("agg: session {} ({}) on {}", ctx.session, step.name, step.agent);
+            let msg = format!("rlt: session {} ({}) on {}", ctx.session, step.name, step.agent);
             if crate::git::auto_commit_tracked(&ctx.dir, &msg) {
-                eprintln!("  [git] agg committed the worker's edits on {br}");
+                eprintln!("  [git] rlt committed the worker's edits on {br}");
             }
         }
         Ok(Flow::Continue)
@@ -47,7 +47,7 @@ impl Handler for GitAutoCommit {
 pub struct SnapshotGoals;
 impl Handler for SnapshotGoals {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        ctx.scratch.get::<AGGScratch>().pre_cycle_goals = ctx.eng.snapshot_goal_state();
+        ctx.scratch.get::<RLTScratch>().pre_cycle_goals = ctx.eng.snapshot_goal_state();
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -61,14 +61,14 @@ impl Handler for SnapshotGoals {
 pub struct StageSpan;
 impl Handler for StageSpan {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if !ctx.scratch.get::<AGGScratch>().skip_judges {
+        if !ctx.scratch.get::<RLTScratch>().skip_judges {
             return Ok(Flow::Continue);
         }
         ctx.emit(LifecycleEvent::Staging);
         let iso = &ctx.cfg.session_isolation;
         let vetoed = ctx.dir.join(&iso.red_file).exists();
         let red_file = iso.red_file.clone();
-        let sb = ctx.ext.get::<AGGState>().git.session_branch.clone();
+        let sb = ctx.ext.get::<RLTState>().git.session_branch.clone();
         if vetoed {
             eprintln!("  [span] session #{} VETOED (red_file) → work discarded, not staged", ctx.session);
             crate::git::remove_file(&ctx.dir, &red_file);
@@ -76,10 +76,10 @@ impl Handler for StageSpan {
         } else if let Some(br) = sb {
             let base = crate::features::inject::base_ref(ctx);
             let empty = crate::git::branch_has_no_new_commits(&ctx.dir, &base, &br);
-            ctx.scratch.get::<AGGScratch>().span_empty = empty;
+            ctx.scratch.get::<RLTScratch>().span_empty = empty;
             let what = if empty { "changed nothing; " } else { "" };
             eprintln!("  [span] session #{} {what}staged on {br} (skip_judges) — nothing merged yet", ctx.session);
-            let git = &mut ctx.ext.get::<AGGState>().git;
+            let git = &mut ctx.ext.get::<RLTState>().git;
             git.span_tip = Some(br.clone());
             git.span_branches.push(br);
         }
@@ -87,8 +87,8 @@ impl Handler for StageSpan {
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         let rs = ctx.run_state();
         let res = ctx.eng.run_step(&ctx.dir, &rs, ctx.ruler, &ctx.judge_model, ctx.judge_timeout, &step.name, Some(ctx.session), true, ctx.cfg.run_isolation());
-        ctx.scratch.get::<AGGScratch>().res = Some(res);
-        ctx.scratch.get::<AGGScratch>().staged = None;
+        ctx.scratch.get::<RLTScratch>().res = Some(res);
+        ctx.scratch.get::<RLTScratch>().staged = None;
         ctx.publish();
         Ok(Flow::Continue)
     }
@@ -103,12 +103,12 @@ pub struct StageMerge;
 impl Handler for StageMerge {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         let red_file = ctx.cfg.session_isolation.red_file.clone();
-        let iso_base = ctx.ext.get::<AGGState>().git.iso_base.clone();
-        let staged = ctx.ext.get::<AGGState>().git.session_branch.clone().map(|br| {
+        let iso_base = ctx.ext.get::<RLTState>().git.iso_base.clone();
+        let staged = ctx.ext.get::<RLTState>().git.session_branch.clone().map(|br| {
             let s = crate::git::stage_session(&ctx.dir, &iso_base, &br, &red_file);
             (br, s)
         });
-        ctx.scratch.get::<AGGScratch>().staged = staged;
+        ctx.scratch.get::<RLTScratch>().staged = staged;
         Ok(Flow::Continue)
     }
     fn runs_on_skip(&self) -> bool {
@@ -129,7 +129,7 @@ impl Handler for RunJudges {
         ctx.emit(LifecycleEvent::Verify);
         let rs = ctx.run_state();
         // §12: judges run in a kernel jail — a confined worker could otherwise rewrite
-        // agg/judges/*.sh (in its writable cwd) and escape through agg's unconfined run.
+        // rlt/judges/*.sh (in its writable cwd) and escape through rlt's unconfined run.
         // §2.5: the tier is the RUN's, never `step.isolation`. A judge is an evaluator, not the
         // worker: taking the step's tier let a judge fired from an `isolation: none` step run
         // unconfined inside a run that sandboxes elsewhere, and dragged the step's `readonly:` list
@@ -140,7 +140,7 @@ impl Handler for RunJudges {
         eprint!("{}", indent(&ctx.eng.scoreboard()));
         let tier = ctx.cfg.run_isolation();
         crate::features::evidence::keep(ctx, Some(ctx.session), &res.fresh_verdicts, tier);
-        ctx.scratch.get::<AGGScratch>().res = Some(res);
+        ctx.scratch.get::<RLTScratch>().res = Some(res);
         ctx.publish();
         Ok(Flow::Continue)
     }

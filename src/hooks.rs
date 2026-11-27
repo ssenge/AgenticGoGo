@@ -1,9 +1,9 @@
 //! Generic lifecycle hooks + prompt-include composition.
 //!
-//! agg is TOOL-AGNOSTIC: it never references engram / graphify / rtk / any specific tool. It
+//! rlt is TOOL-AGNOSTIC: it never references engram / graphify / rtk / any specific tool. It
 //! just (a) runs the user's shell commands at lifecycle moments and (b) prepends the user's
 //! text files to the worker prompt. Whatever cross-session machinery a user wants — a code
-//! graph, a memory cache, a linter — they wire in via these hooks in `agg.yaml`. A user with
+//! graph, a memory cache, a linter — they wire in via these hooks in `rlt.yaml`. A user with
 //! no such tools leaves them empty and nothing happens.
 
 use std::path::Path;
@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 /// auxiliary tooling, not the loop's core job). `label` names the phase for the log line.
 ///
 /// Under `isolation: Sandbox` each hook command runs in the OS jail (ISOLATION.md §13) — an
-/// `agg.yaml` hook like `sh ./notify.sh` invokes a file inside the worker-writable cwd, so a
+/// `rlt.yaml` hook like `sh ./notify.sh` invokes a file inside the worker-writable cwd, so a
 /// confined worker could rewrite that file and escape through the hook exactly as it once could
 /// through a judge. A hook that CANNOT be confined is SKIPPED (loud), never run unconfined: hooks
 /// are best-effort, so refusing to run one is safe, but reopening the escape is not.
@@ -24,7 +24,7 @@ pub fn run(label: &str, cmds: &[String], dir: &Path, isolation: crate::isolation
         let mut command = shell(cmd, dir);
         if isolation == crate::isolation::Isolation::Sandbox {
             // `&[]`: a hook is not a step and carries no `readonly` list of its own; the derived
-            // `agg/private/` carve-out still applies, which is the escape this wrapping is for.
+            // `rlt/private/` carve-out still applies, which is the escape this wrapping is for.
             match crate::isolation::wrap(command, dir, &[], &[]) {
                 Ok(c) => command = c,
                 Err(e) => {
@@ -46,7 +46,7 @@ pub fn run(label: &str, cmds: &[String], dir: &Path, isolation: crate::isolation
     }
 }
 
-/// Spawn long-lived `background` hooks detached from the foreground but INSIDE the agg loop's
+/// Spawn long-lived `background` hooks detached from the foreground but INSIDE the rlt loop's
 /// process group, so the straggler reaper (and a group kill on stop) cleans them up — a
 /// `--watch` can't leak. Returns nothing; lifetimes are bounded by the loop's group.
 ///
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn gather_concatenates_in_order_and_skips_missing() {
-        let dir = std::env::temp_dir().join(format!("agg-hooks-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rlt-hooks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.md"), "AAA").unwrap();
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn run_executes_commands_and_tolerates_failure() {
-        let dir = std::env::temp_dir().join(format!("agg-hooks-run-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rlt-hooks-run-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // a hook that writes a marker file, and one that fails — neither should panic.
@@ -129,7 +129,7 @@ mod tests {
     }
 
     /// The wiring for ISOLATION.md §13: a SANDBOXED hook — the escape a confined worker plants by
-    /// rewriting a script an `agg.yaml` hook execs — can write its own cwd but NOT outside it.
+    /// rewriting a script an `rlt.yaml` hook execs — can write its own cwd but NOT outside it.
     /// `#[ignore]`d like its isolation/judge twins: nested Seatbelt is refused in CI. Run on a real
     /// host: `cargo test -- --ignored sandboxed_hook`.
     #[test]
@@ -137,9 +137,9 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sandboxed_hook_cannot_write_outside_cwd() {
         assert!(crate::isolation::available(), "no OS sandbox on this host — cannot prove confinement");
-        let proj = std::env::temp_dir().join(format!("agg-hook-jail-{}", std::process::id()));
+        let proj = std::env::temp_dir().join(format!("rlt-hook-jail-{}", std::process::id()));
         std::fs::create_dir_all(&proj).unwrap();
-        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/agg-hook-escape-probe.txt");
+        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/rlt-hook-escape-probe.txt");
         let inside = proj.join("inside.txt");
         let _ = std::fs::remove_file(&outside);
 

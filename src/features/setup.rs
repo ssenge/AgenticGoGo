@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::time::{Duration, Instant};
 
 use crate::bus::Bus;
-use crate::loop_::{AGGState, Flow, Handler, LoopState, RunOutcome, indent};
+use crate::loop_::{RLTState, Flow, Handler, LoopState, RunOutcome, indent};
 use crate::state::Phase;
 use crate::util::now_epoch;
 
@@ -16,9 +16,9 @@ use crate::util::now_epoch;
 pub struct Setup;
 impl Handler for Setup {
     fn run(&self, st: &mut LoopState) -> Result<Flow> {
-        st.ext.get::<AGGState>().inject.prompt_prefix =
+        st.ext.get::<RLTState>().inject.prompt_prefix =
             crate::hooks::gather_prompt_includes(&st.cfg.prompt_includes, &st.dir);
-        st.ext.get::<AGGState>().summary.last_summary =
+        st.ext.get::<RLTState>().summary.last_summary =
             Some(Instant::now() - Duration::from_secs(st.cfg.summary.min_interval_secs));
         if st.cfg.memory.enabled {
             crate::core::memory::ensure_scratch_dir(&st.dir);
@@ -52,8 +52,8 @@ impl Handler for Baseline {
         //
         // The old rationale here was "baseline runs on the clean committed tree, so the judges
         // cannot have been tampered with yet". That is false ACROSS RUNS, and was demonstrated: the
-        // carve-out covers `agg/private/`, but `agg/judges/` is committed BY DESIGN (the moat), so a
-        // confined worker in run 1 rewrites a judge, agg commits it, and run 2's baseline executes
+        // carve-out covers `rlt/private/`, but `rlt/judges/` is committed BY DESIGN (the moat), so a
+        // confined worker in run 1 rewrites a judge, rlt commits it, and run 2's baseline executes
         // it — unconfined, before any jail exists — forging `merged` rows straight into the ledger.
         // `stalled` then reports met and an `abort_if: "stalled"` project has its worker end its own
         // run. Clean-and-committed is not the same as untampered.
@@ -92,7 +92,7 @@ impl Handler for Baseline {
         if pre.halt && !pre.stop {
             eprintln!("⚠ ABORT at baseline — abort_if already true: {}", pre.halt_reason.clone().unwrap_or_default());
             // The "stop + notify" policy has to hold HERE too, and this is its likeliest trigger:
-            // a stale `agg/state/BLOCKED.md` survives a crash, a reboot and a rollback, so the run
+            // a stale `rlt/state/BLOCKED.md` survives a crash, a reboot and a rollback, so the run
             // an operator kicked off remotely can die at t=0. Without this the config written
             // expressly to page them on a stop stops and pages nobody.
             crate::features::notify::halt_ping(ctx, pre.halt_reason.as_deref());
@@ -142,10 +142,10 @@ impl Handler for BackgroundSpawn {
 mod tests {
     /// The baseline pass must confine its judges with the RUN-level tier, not `Isolation::None`.
     ///
-    /// This pins a real, reproduced bypass: `agg/judges/` is committed by design (the moat), so a
-    /// sandboxed worker in run 1 can rewrite a judge, agg commits it, and run 2's baseline — which
+    /// This pins a real, reproduced bypass: `rlt/judges/` is committed by design (the moat), so a
+    /// sandboxed worker in run 1 can rewrite a judge, rlt commits it, and run 2's baseline — which
     /// used to hardcode `Isolation::None` on the premise that a clean committed tree is untampered —
-    /// executed it before any jail existed, forging `merged` rows into `agg/private/verdicts.jsonl`.
+    /// executed it before any jail existed, forging `merged` rows into `rlt/private/verdicts.jsonl`.
     /// `stalled` then reported met and an `abort_if: "stalled"` project ended its own run.
     ///
     /// Asserted on the CONFIG→tier mapping rather than by spawning a sandbox (that lives in the
@@ -153,9 +153,9 @@ mod tests {
     /// pinning is that the tier is DERIVED and non-`None` whenever any step asks for confinement.
     #[test]
     fn a_sandboxed_config_gives_the_baseline_pass_a_confining_tier() {
-        use crate::core::config::AggConfig;
+        use crate::core::config::RelentlessConfig;
         use crate::isolation::Isolation;
-        let load = |iso: &str| -> AggConfig {
+        let load = |iso: &str| -> RelentlessConfig {
             serde_yaml::from_str(&format!(
                 "project: p\nsteps:\n  worker:\n    isolation: {iso}\nsequence:\n  steps: [worker]\n  done_if: \"ok\"\n"
             ))

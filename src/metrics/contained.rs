@@ -4,8 +4,8 @@
 //! | | |
 //! |---|---|
 //! | image | `judge.image` |
-//! | project | read-only — the incumbent's report under `agg/private/metrics/` is read from there |
-//! | writes | the session's judge scratch (`agg/private/container/judge/scratch-<n>/`), a FRESH home, the container's own `/tmp` (`TMPDIR`) |
+//! | project | read-only — the incumbent's report under `rlt/private/metrics/` is read from there |
+//! | writes | the session's judge scratch (`rlt/private/container/judge/scratch-<n>/`), a FRESH home, the container's own `/tmp` (`TMPDIR`) |
 //! | network, context dirs, `pass_env` | the run's, exactly as a script judge gets them |
 //! | trivy's database | the host's, READ-ONLY, never updated in there ([`trivy_env`]) |
 //!
@@ -18,7 +18,7 @@
 //!
 //! # Why `TMPDIR` is the container's `/tmp`, not the scratch
 //! Tools put unix sockets there (tflint talks to its ruleset plugin over one), and a socket path is
-//! limited to ~108 bytes: under a project's `agg/private/container/judge/scratch-<n>/` it overflows
+//! limited to ~108 bytes: under a project's `rlt/private/container/judge/scratch-<n>/` it overflows
 //! and the tool fails as if it were not installed. The container's `/tmp` is as private and is gone
 //! with the container; the report and the details still go to the scratch (`--out`, `--details`).
 //!
@@ -132,13 +132,13 @@ mod tests {
     fn only_a_file_outside_the_project_needs_a_mount() {
         let proj = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
-        assert_eq!(outside_project(proj.path(), &proj.path().join("agg/scoring.py")), None);
+        assert_eq!(outside_project(proj.path(), &proj.path().join("rlt/scoring.py")), None);
         let outside = outside_project(proj.path(), &other.path().join("scoring.py")).unwrap();
         assert_eq!(outside, std::fs::canonicalize(other.path()).unwrap());
     }
 
     /// The argv: the judges' image, the project read-only, the session scratch writable, a fresh home
-    /// under `agg/private/container/home/`, and the inner command intact at the end.
+    /// under `rlt/private/container/home/`, and the inner command intact at the end.
     #[test]
     fn swe_metrics_runs_in_the_judges_image_on_a_read_only_project() {
         let tmp = tempfile::tempdir().unwrap();
@@ -147,13 +147,13 @@ mod tests {
         let cmd = command(&c, &["schema".into(), "report".into()], &[]).unwrap();
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.contains(&format!("{p}:{p}:ro", p = d.display())), "project read-only: {args:?}");
-        let scratch = d.join("agg/private/container/judge/scratch-4");
+        let scratch = d.join("rlt/private/container/judge/scratch-4");
         assert!(args.contains(&format!("{p}:{p}", p = scratch.display())), "scratch writable: {args:?}");
-        assert!(args.contains(&format!("AGG_JUDGE_SCRATCH={}", scratch.display())), "{args:?}");
+        assert!(args.contains(&format!("RLT_JUDGE_SCRATCH={}", scratch.display())), "{args:?}");
         assert!(args.contains(&"TMPDIR=/tmp".to_string()) && !args.contains(&format!("TMPDIR={}", scratch.display())), "{args:?}");
         assert!(args.contains(&"PYTHONDONTWRITEBYTECODE=1".to_string()) && args.contains(&"TRIVY_SKIP_DB_UPDATE=true".to_string()), "{args:?}");
         let home = args.iter().find_map(|a| a.strip_prefix("HOME=")).expect("HOME").to_string();
-        assert!(home.starts_with(&d.join("agg/private/container/home/metrics-").display().to_string()), "{home}");
+        assert!(home.starts_with(&d.join("rlt/private/container/home/metrics-").display().to_string()), "{home}");
         assert!(!args.iter().any(|a| a.contains("PYTHONPYCACHEPREFIX") || a.contains("judge/cache")), "no persistent cache: {args:?}");
         assert_eq!(args[args.len() - 4..], [crate::isolation::DEFAULT_IMAGE, PROGRAM, "schema", "report"]);
     }

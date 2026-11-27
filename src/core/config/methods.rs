@@ -1,4 +1,4 @@
-//! `impl AggConfig` behaviour: the ruler/worker backend resolution, the per-step merge into a
+//! `impl RelentlessConfig` behaviour: the ruler/worker backend resolution, the per-step merge into a
 //! [`ResolvedStep`], the agent-name collection, `load` + its CI-friendly env overrides, plus the
 //! partial-parse agent reader and the `env_u64`/`env_f64` parse helpers. Pure behaviour — the serde
 //! shape and the `default_*` fns live in the parent module.
@@ -7,7 +7,7 @@ use super::*;
 use anyhow::anyhow;
 use std::path::Path;
 
-impl AggConfig {
+impl RelentlessConfig {
     /// The **RULER**: the backend that runs the LLM judges and the summarizer. Reads `judge.agent`.
     pub fn ruler_backend(&self) -> Result<&'static dyn AgentBackend> {
         for_name(&self.judge.agent)
@@ -62,7 +62,7 @@ impl AggConfig {
                 .or_else(|| self.defaults.image.clone())
                 .unwrap_or_else(|| crate::isolation::DEFAULT_IMAGE.to_string()),
             // Normalised HERE, on the way in, exactly as the driver's builder does it — `writable`
-            // subtracts by string, so `writable: [agg/judges]` against `readonly: [agg/judges/]`
+            // subtracts by string, so `writable: [rlt/judges]` against `readonly: [rlt/judges/]`
             // would otherwise subtract nothing while reading like it worked. There is no
             // `defaults.readonly`: the YAML path has one defaults block and repeating the list per
             // step is the shape `sample_workflow.yaml` documents (the Rust path's templates are the
@@ -123,7 +123,7 @@ impl AggConfig {
         }
     }
 
-    /// Every distinct agent named anywhere (defaults + judge + each step) — so `agg doctor` and the
+    /// Every distinct agent named anywhere (defaults + judge + each step) — so `rlt doctor` and the
     /// capability check can cover EVERY agent the sequence names (§7.3), not just one.
     pub fn agent_names(&self) -> Vec<String> {
         let mut names = vec![self.defaults.agent.clone(), self.judge.agent.clone()];
@@ -138,14 +138,14 @@ impl AggConfig {
     }
 
     /// Read ONLY the worker agent (`defaults.agent`), tolerating a missing / unparseable / partial
-    /// config — for `doctor` / `skills install`, which must name an agent when agg.yaml may be
+    /// config — for `doctor` / `skills install`, which must name an agent when rlt.yaml may be
     /// absent or broken. Missing → `"claude"`.
     pub fn agent_name(path: &Path) -> String {
         read_agent(path, false)
     }
 
     /// Read ONLY the ruler agent (`judge.agent`, else `defaults.agent`) — for `plan` / `judge`,
-    /// which run judges on the RULER off agg.yaml alone.
+    /// which run judges on the RULER off rlt.yaml alone.
     pub fn ruler_name(path: &Path) -> String {
         read_agent(path, true)
     }
@@ -155,13 +155,13 @@ impl AggConfig {
         // and the reader would "fix" it by renaming — which is the one migration that silently
         // breaks. Checked on the RAW text so it catches the key AND the condition term in one pass.
         Self::reject_removed_keys(path)?;
-        let mut cfg: AggConfig = crate::util::load_yaml(path)?;
+        let mut cfg: RelentlessConfig = crate::util::load_yaml(path)?;
         cfg.finish_load();
         Ok(cfg)
     }
 
     /// What [`Self::load`] does after serde: the env overrides, then the clock-unit warning. Shared
-    /// with `agg check`, which parses the text itself so it can collect every problem.
+    /// with `rlt check`, which parses the text itself so it can collect every problem.
     pub(crate) fn finish_load(&mut self) {
         self.apply_env_overrides();
         self.warn_suspicious_clock_bounds();
@@ -211,7 +211,7 @@ impl AggConfig {
     ///
     /// A fresh config has no old key to catch, so this is the only guard against the trap the rename
     /// creates. `work_time >= 8` is legal — a smoke test may want eight seconds — and is nearly
-    /// always somebody thinking in hours. A warning, never an error: agg does not overrule a bound
+    /// always somebody thinking in hours. A warning, never an error: rlt does not overrule a bound
     /// its operator actually meant.
     fn warn_suspicious_clock_bounds(&self) {
         const FLOOR: f64 = 60.0;
@@ -259,40 +259,40 @@ impl AggConfig {
         }
     }
 
-    /// CI-friendly env overrides, re-homed under the new shape (§4.1). `AGG_MODEL` → defaults.model,
-    /// `AGG_COST_TOTAL` → sequence.limits.cost, `AGG_TOKEN_BUDGET` → sequence.limits.tokens.
+    /// CI-friendly env overrides, re-homed under the new shape (§4.1). `RLT_MODEL` → defaults.model,
+    /// `RLT_COST_TOTAL` → sequence.limits.cost, `RLT_TOKEN_BUDGET` → sequence.limits.tokens.
     pub(super) fn apply_env_overrides(&mut self) {
-        if let Ok(v) = std::env::var("AGG_MODEL") {
+        if let Ok(v) = std::env::var("RLT_MODEL") {
             self.defaults.model = Some(v);
         }
-        if let Some(v) = env_u64("AGG_HEARTBEAT_SECS") {
+        if let Some(v) = env_u64("RLT_HEARTBEAT_SECS") {
             self.heartbeat_secs = v;
         }
-        if let Some(v) = env_u64("AGG_WATCHDOG_IDLE_SECS") {
+        if let Some(v) = env_u64("RLT_WATCHDOG_IDLE_SECS") {
             self.watchdog.idle_secs = v;
         }
-        if let Some(v) = env_u64("AGG_WATCHDOG_CPU_GRACE") {
+        if let Some(v) = env_u64("RLT_WATCHDOG_CPU_GRACE") {
             self.watchdog.cpu_grace = v;
         }
-        if let Some(v) = env_u64("AGG_RATELIMIT_BACKOFF") {
+        if let Some(v) = env_u64("RLT_RATELIMIT_BACKOFF") {
             self.ratelimit_backoff_secs = v;
         }
-        if let Some(v) = env_f64("AGG_COST_TOTAL") {
+        if let Some(v) = env_f64("RLT_COST_TOTAL") {
             self.sequence.limits.cost = Some(v);
         }
-        if let Some(v) = env_u64("AGG_TOKEN_BUDGET") {
+        if let Some(v) = env_u64("RLT_TOKEN_BUDGET") {
             self.sequence.limits.tokens = Some(v);
         }
-        if let Some(v) = env_u64("AGG_MEMORY_MAX_KB") {
+        if let Some(v) = env_u64("RLT_MEMORY_MAX_KB") {
             self.memory.max_kb = if v == 0 { None } else { Some(v) };
         }
-        if let Some(v) = env_u64("AGG_MEMORY_INJECT_KB") {
+        if let Some(v) = env_u64("RLT_MEMORY_INJECT_KB") {
             self.memory.inject_kb = if v == 0 { None } else { Some(v) };
         }
     }
 }
 
-/// Partial-parse the agent name(s) from agg.yaml without the deny_unknown_fields full parse, so it
+/// Partial-parse the agent name(s) from rlt.yaml without the deny_unknown_fields full parse, so it
 /// survives a config that is missing / broken / half-written. `ruler` picks `judge.agent`.
 fn read_agent(path: &Path, ruler: bool) -> String {
     #[derive(Deserialize, Default)]

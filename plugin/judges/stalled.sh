@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Standard library judge: STALL detector (§5.9). Its input is agg/private/verdicts.jsonl — the
-# AGG-OWNED half of the runtime state, unwritable by a confined worker. That is the whole point:
+# Standard library judge: STALL detector (§5.9). Its input is rlt/private/verdicts.jsonl — the
+# RLT-OWNED half of the runtime state, unwritable by a confined worker. That is the whole point:
 # this judge decides "is the loop making progress", projects wire it to abort_if, so a worker able
 # to append forged `merged` rows could end its own run.
 #
@@ -9,7 +9,7 @@
 #   window are ignored; `stalled` ignores its OWN rows. Fewer than K qualifying steps ⇒ met:false.
 #
 # K is hardcoded (library judges are parameterless — §5.1); a project overrides K by shadowing
-# this file in agg/judges/stalled.sh. Only `merged` rows count — a rolled-back step's churn was
+# this file in rlt/judges/stalled.sh. Only `merged` rows count — a rolled-back step's churn was
 # undone and must not read as progress-or-stall — with TWO exceptions, both steps in which NOTHING
 # MOVED by the gate's own verdict:
 #   - a `no_improvement` step (`sequence.merge_requires_improvement` refused it) joins the window
@@ -18,8 +18,8 @@
 #     was merged or discarded, so they are a reading of base itself, like a merged step's.
 # So K sessions in a row that improve nothing, or that change nothing, read as a stall.
 set -u
-DIR="${AGG_PROJECT_DIR:-.}"
-LOG="$DIR/agg/private/verdicts.jsonl"
+DIR="${RLT_PROJECT_DIR:-.}"
+LOG="$DIR/rlt/private/verdicts.jsonl"
 
 python3 - "$LOG" <<'PY'
 import json, sys

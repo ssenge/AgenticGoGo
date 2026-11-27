@@ -1,16 +1,16 @@
-# A process file (docs/PROCESS.md): phases of steps, each step one of a closed set of kinds. `agg process
+# A process file (docs/PROCESS.md): phases of steps, each step one of a closed set of kinds. `rlt process
 # examples/process/process.yaml <project>` runs it; `--check` validates it, `--list` prints its numbers. Every path is
 # relative to this folder; scripts run in the project. Numbers (1.1, 2.3) and checkpoint names (CP1, CP2) come from
 # position: reorder or add a phase here and nothing else changes.
 version: 1
 vars: { app: app }
 roles: { file: tools.yaml }
-agg: { judge_timeout: 60 }
+rlt: { judge_timeout: 60 }
 run:
   history: reports/steps.jsonl
   own: [task.md, tools.yaml, reports/steps.jsonl]
   open_points: checkpoints/open-points.md
-  critic_scope: { append: prompts/critic-scope.md }   # agg's standing text, then this one (`critic_scope: <file>` replaces it)
+  critic_scope: { append: prompts/critic-scope.md }   # rlt's standing text, then this one (`critic_scope: <file>` replaces it)
   notes: notes.md                                      # a notes file between steps; each step's section is at most five lines
   config: run.yaml
   commit_inputs: { branch: main, message: "Inputs at run start" }   # the inputs a human filled in are committed before the run
@@ -22,7 +22,7 @@ run:
     shared_machine: true                               # a standing section: this machine is shared with other runs
     sections: [{ file: prompts/house-rules.md }]
     inputs: { always: [task.md] }
-ui:   # what `agg serve --process` adds (A-39): a form that makes a new project, and the process's own facts on the report
+ui:   # what `rlt serve --process` adds (A-39): a form that makes a new project, and the process's own facts on the report
   new_project:
     command: scripts/new-project.sh
     fields:
@@ -40,7 +40,7 @@ judges:   # declared judges (A-38): a command met by its exit code (or a `metric
 deny:
   inputs: [task.md, tools.yaml]
 task_force:
-  prompt: { append: prompts/task-force.md }            # agg's default prompt, then this file
+  prompt: { append: prompts/task-force.md }            # rlt's default prompt, then this file
   max: 2
   deny: [inputs]
   sections: [{ text: "## The process\n\nIts steps are listed above; the app lives in `{{ app }}/`." }]

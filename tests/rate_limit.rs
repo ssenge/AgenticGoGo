@@ -1,12 +1,12 @@
 //! A-18 end to end: the rate-limit wait is visible, wakeable and stoppable, an interrupted run exits
-//! 5, and `agg run --resume` continues it with the next session while the interrupted session's work
+//! 5, and `rlt run --resume` continues it with the next session while the interrupted session's work
 //! waits on its partial ref.
 //!
 //! The worker is a FAKE `claude` on PATH that follows a per-invocation PLAN (one line per session):
 //! `limit` prints a subscription rate-limit message with a reset time one hour ahead and exits 1;
 //! `partial` first leaves half-finished work in the tree, then does the same; `hang` leaves work and
 //! sleeps; any other word does that session's work. The plan, the counter and the stub live OUTSIDE
-//! the project, so agg's auto-commit never picks them up.
+//! the project, so rlt's auto-commit never picks them up.
 
 #![cfg(unix)]
 
@@ -87,14 +87,14 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
 
     let steps: String = seq.iter().map(|s| format!("  {s}: {{}}\n")).collect();
     write(
-        &dir.join("agg/agg.yaml"),
+        &dir.join("rlt/rlt.yaml"),
         &format!(
             "project: rl\ndefaults: {{ model: fake }}\nsteps:\n{steps}sequence:\n  steps: [{}]\n  done_if: \"finished\"\nsummary: {{ enabled: false }}\n{extra_cfg}",
             seq.join(", ")
         ),
     );
-    write(&dir.join("agg/state/STATE.md"), "do work\n");
-    let judge = dir.join("agg/judges/finished.sh");
+    write(&dir.join("rlt/state/STATE.md"), "do work\n");
+    let judge = dir.join("rlt/judges/finished.sh");
     write(
         &judge,
         "#!/bin/sh\nif [ -f finished ]; then echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"y\"}'; \
@@ -117,15 +117,15 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
 }
 
 impl Project {
-    fn agg(&self) -> Command {
-        let mut c = Command::cargo_bin("agg").unwrap();
+    fn rlt(&self) -> Command {
+        let mut c = Command::cargo_bin("rlt").unwrap();
         c.current_dir(&self.dir).env("PATH", &self.path).env("HOME", self.dir.join(".home"));
         c
     }
 
     fn spawn_run(&self, extra: &[&str]) -> Child {
         let log = fs::File::create(self.bin.join(format!("run{}.log", extra.len()))).unwrap();
-        self.agg()
+        self.rlt()
             .arg("run")
             .args(extra)
             .stdout(Stdio::null())
@@ -143,21 +143,21 @@ impl Project {
     }
 
     fn status(&self) -> serde_json::Value {
-        let out = self.agg().args(["status", "--json"]).output_bounded().unwrap();
+        let out = self.rlt().args(["status", "--json"]).output_bounded().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null)
     }
 
     fn send(&self, args: &[&str]) {
-        let out = self.agg().arg("send").args(args).output_bounded().unwrap();
-        assert!(out.status.success(), "agg send {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = self.rlt().arg("send").args(args).output_bounded().unwrap();
+        assert!(out.status.success(), "rlt send {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
     fn report(&self) -> serde_json::Value {
-        serde_json::from_str(&fs::read_to_string(agg::paths::report_json(&self.dir)).unwrap()).unwrap()
+        serde_json::from_str(&fs::read_to_string(relentless::paths::report_json(&self.dir)).unwrap()).unwrap()
     }
 
     fn wait_rows(&self) -> Vec<serde_json::Value> {
-        fs::read_to_string(agg::paths::waits_jsonl(&self.dir))
+        fs::read_to_string(relentless::paths::waits_jsonl(&self.dir))
             .unwrap_or_default()
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
@@ -190,21 +190,21 @@ fn wait_exit(child: &mut Child, secs: u64) -> i32 {
         if let Some(s) = child.try_wait().unwrap() {
             return s.code().unwrap_or(-1);
         }
-        assert!(Instant::now() < deadline, "agg run did not exit");
+        assert!(Instant::now() < deadline, "rlt run did not exit");
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// A-18.1 + A-18.2: the wait is visible in `agg status --json` with its reset time; `agg send wake`
+/// A-18.1 + A-18.2: the wait is visible in `rlt status --json` with its reset time; `rlt send wake`
 /// starts the next session within seconds; a still-limited agent is detected and waited for again;
-/// `agg send resume` wakes too. Every wait is on the ledger, start and end.
+/// `rlt send resume` wakes too. Every wait is on the ledger, start and end.
 #[test]
 fn a_wait_is_visible_and_wake_or_resume_start_the_next_session() {
     let p = project(&["worker"], &["limit", "limit", "finish"], "ratelimit_min_gap_secs: 1\n");
     let mut child = p.spawn_run(&[]);
 
     let w = until_waiting(&p, 1);
-    let now = agg::util::now_epoch();
+    let now = relentless::util::now_epoch();
     assert_eq!(w["reason"], "rate_limit");
     assert_eq!(w["agent"], "claude");
     let until_at = w["until"].as_u64().unwrap();
@@ -225,13 +225,13 @@ fn a_wait_is_visible_and_wake_or_resume_start_the_next_session() {
     assert_eq!(events, [("wait", ""), ("wait_end", "woken"), ("wait", ""), ("wait_end", "woken")], "{rows:?}");
     assert!(p.status()["waiting"].is_null(), "a run that finished working is not waiting");
     assert!(rows[0]["partial"].is_null(), "a limited session that changed nothing saves nothing");
-    assert_eq!(git(&p.dir, &["for-each-ref", "refs/agg/partial/"]), "");
+    assert_eq!(git(&p.dir, &["for-each-ref", "refs/rlt/partial/"]), "");
     let report = p.report();
     assert_eq!(report["outcome"], "done");
     assert!(report["waiting"].is_null(), "only a run that ENDED waiting reports a wait: {report}");
 }
 
-/// A-18.2: `agg stop` during the wait ends the run as stopped (exit 5), and the ledger says how.
+/// A-18.2: `rlt stop` during the wait ends the run as stopped (exit 5), and the ledger says how.
 #[test]
 fn stop_during_the_wait_exits_5() {
     let p = project(&["worker"], &["limit"], "");
@@ -244,8 +244,8 @@ fn stop_during_the_wait_exits_5() {
 }
 
 /// A-18.3 + A-18.4, the acceptance path: the rate-limited session's half-finished work goes to
-/// `refs/agg/partial/<run>/<n>` and the tree is reset; SIGINT during the wait exits 5 with
-/// `outcome: stopped`; `agg run --resume` continues the SAME run with session n+1, at the step after
+/// `refs/rlt/partial/<run>/<n>` and the tree is reset; SIGINT during the wait exits 5 with
+/// `outcome: stopped`; `rlt run --resume` continues the SAME run with session n+1, at the step after
 /// the last kept gate, and finishes.
 #[test]
 fn sigint_during_the_wait_exits_5_and_resume_continues_with_the_next_session() {
@@ -262,11 +262,11 @@ fn sigint_during_the_wait_exits_5_and_resume_continues_with_the_next_session() {
     assert_eq!(first["exit_code"], 5);
     assert_eq!(first["waiting"]["reason"], "rate_limit", "the report says it ended waiting: {first}");
     let run_id = first["run_id"].as_str().unwrap().to_string();
-    let r = format!("refs/agg/partial/{run_id}/2");
+    let r = format!("refs/rlt/partial/{run_id}/2");
     assert_eq!(git(&p.dir, &["show", &format!("{r}:wip.txt")]), "half done", "the partial work is on {r}");
     assert_eq!(git(&p.dir, &["show", &format!("{r}:tracked.txt")]), "base\nedited");
 
-    let out = p.agg().args(["run", "--resume"]).output_bounded().unwrap();
+    let out = p.rlt().args(["run", "--resume"]).output_bounded().unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "the resumed run finishes:\n{err}");
     assert!(err.contains("session #3") && err.contains("step `second`"), "session n+1, same step:\n{err}");
@@ -286,7 +286,7 @@ fn sigint_during_a_session_saves_its_work_to_a_partial_ref() {
     Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
     assert_eq!(wait_exit(&mut child, 20), 5, "{}", p.log(0));
     let run_id = p.report()["run_id"].as_str().unwrap().to_string();
-    assert_eq!(git(&p.dir, &["show", &format!("refs/agg/partial/{run_id}/1:wip.txt")]), "half done");
+    assert_eq!(git(&p.dir, &["show", &format!("refs/rlt/partial/{run_id}/1:wip.txt")]), "half done");
     assert_eq!(git(&p.dir, &["status", "--porcelain", "--untracked-files=no"]), "", "the tracked edit is reset");
     assert!(!p.dir.join("wip.txt").exists(), "the session's new file left the tree");
     assert_eq!(git(&p.dir, &["branch", "--show-current"]), "main", "HEAD is back on the base branch");
@@ -296,7 +296,7 @@ fn sigint_during_a_session_saves_its_work_to_a_partial_ref() {
 #[test]
 fn resume_without_a_previous_run_is_refused() {
     let p = project(&["worker"], &["finish"], "");
-    let out = p.agg().args(["run", "--resume"]).output_bounded().unwrap();
+    let out = p.rlt().args(["run", "--resume"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no previous run"), "{}", String::from_utf8_lossy(&out.stderr));
 }

@@ -9,7 +9,7 @@
 //! pid until its last member exits, and an empty group makes `kill(-pgid)` a harmless no-op.)
 
 use crate::backend;
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::os::proc;
 use crate::state::{ActivityEvent, LiveState};
 use crate::backend::stream::ActivityTracker;
@@ -70,7 +70,7 @@ impl SessionOutcome {
 /// [`crate::features::protect`].
 #[allow(clippy::too_many_arguments)]
 pub fn run_session(
-    cfg: &AggConfig,
+    cfg: &RelentlessConfig,
     agent: &'static dyn backend::AgentBackend,
     model: &str,
     effort: &str,
@@ -92,7 +92,7 @@ pub fn run_session(
     // WHAT to run is the backend's business (binary, flags, prompt placement); HOW to supervise
     // it is ours (process group, stream reader, heartbeat, watchdog, reaping). A resume comes only
     // from a driver step, already checked against this agent (A-33); otherwise the context is fresh.
-    // a model the operator's environment stands in for (AGG_MODELS) is called as its stand-in
+    // a model the operator's environment stands in for (RLT_MODELS) is called as its stand-in
     let model = &backend::overrides::model(model);
     let command = agent.session_command(&backend::SessionSpec {
         prompt,
@@ -111,11 +111,11 @@ pub fn run_session(
     // An unavailable mechanism is a LOUD failure here, never a silent direct spawn (and
     // capability::check already refuses it at startup).
     //
-    //   sandbox   → the OS jail, applied to EVERY agent unconditionally. agg never delegates its
+    //   sandbox   → the OS jail, applied to EVERY agent unconditionally. rlt never delegates its
     //               jail to an agent that vouches for itself: an agent's own sandbox is the agent's
-    //               promise, and agg's moat does not rest on promises. Codex still adds its own
+    //               promise, and rlt's moat does not rest on promises. Codex still adds its own
     //               kernel-sandbox flags above (`spec.isolation`) — those are now the INNER of two
-    //               layers, and agg owns the outer one. Practically it is also what makes per-path
+    //               layers, and rlt owns the outer one. Practically it is also what makes per-path
     //               denies work at all for Codex, whose native `workspace-write` is
     //               workspace-granular with no deny list.
     //   container → the command is re-hosted inside `image` with `dir` bind-mounted. Also every
@@ -173,7 +173,7 @@ pub fn run_session(
 
     let pid = child.id();
     // Register the worker's process group (pgid == pid, since we set process_group(0)) so a
-    // SIGINT/SIGTERM on `agg run` kills the worker's whole tree instead of orphaning it, and lets
+    // SIGINT/SIGTERM on `rlt run` kills the worker's whole tree instead of orphaning it, and lets
     // the loop unwind through its Drop guards. Cleared right after child.wait() below.
     crate::os::signals::set_worker_pgid(pid);
 
@@ -204,7 +204,7 @@ pub fn run_session(
     // is already gone.) Then collect the reader with a BOUNDED join so a stuck pipe can
     // never wedge the loop — the exact production-hang class this harness guards against.
     //
-    // EXCEPTION: if a registered `agg spawn` long task is still inside the worker's group
+    // EXCEPTION: if a registered `rlt spawn` long task is still inside the worker's group
     // (it didn't detach into its own group), a blind group SIGKILL would kill legitimate
     // background work. Spare protected pgids — a properly-spawned task has its OWN group
     // and its own log (not the worker pipe), so this only matters for the edge case, and
@@ -230,7 +230,7 @@ pub fn run_session(
     // grandchildren that survived the one-shot `kill(pid)` above. Env-free + cross-platform
     // (pgid is queryable everywhere, unlike a hardened process's environment on macOS).
     //
-    // BUT spare registered `agg spawn` long tasks: a worker may have deliberately left a
+    // BUT spare registered `rlt spawn` long tasks: a worker may have deliberately left a
     // multi-hour sim running to poll next session. Their pgids are PROTECTED so the sweep
     // kills real leaks but not intentional background work. (`protected` computed above.)
     let reaped = crate::os::reap::reap_pgid_except(pid, &protected);

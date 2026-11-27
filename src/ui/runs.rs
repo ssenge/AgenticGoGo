@@ -1,9 +1,9 @@
-//! The process runs' part of `agg serve` (A-39): which project a request is about (`?p=` in a projects folder), start,
+//! The process runs' part of `rlt serve` (A-39): which project a request is about (`?p=` in a projects folder), start,
 //! resume and stop a run, make a new project from the process file's form, the checkpoints waiting for a human with
 //! their documents, the decisions written with an answer, and the process's own facts merged into the run report.
 //!
-//! Each action is what a human does in the terminal (`agg process <file> <project> [--resume]`, SIGTERM to the run,
-//! the decisions file, `agg answer`), so the page and the terminal can be used side by side.
+//! Each action is what a human does in the terminal (`rlt process <file> <project> [--resume]`, SIGTERM to the run,
+//! the decisions file, `rlt answer`), so the page and the terminal can be used side by side.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -171,7 +171,7 @@ pub fn create(root: &Path, file: &Path, body: &Value) -> Result<Value, Refused> 
         if f.required && value.is_empty() {
             return Err((400, format!("{} is needed", f.label)));
         }
-        cmd.env(format!("AGG_FIELD_{}", f.name.to_uppercase()), value);
+        cmd.env(format!("RLT_FIELD_{}", f.name.to_uppercase()), value);
     }
     let out = crate::os::proc::run_with_timeout(cmd, 300).map_err(|e| (500, e))?;
     if !out.success || !root.join(name).is_dir() {
@@ -182,7 +182,7 @@ pub fn create(root: &Path, file: &Path, body: &Value) -> Result<Value, Refused> 
 }
 
 /// The checkpoints waiting for a human while a run is alive: each open ask whose question names a checkpoint's decisions
-/// file (agg's approval question does), with the checkpoint's document, decisions so far and the open points.
+/// file (rlt's approval question does), with the checkpoint's document, decisions so far and the open points.
 pub fn waiting(project: &Path, file: Option<&Path>) -> Value {
     if crate::os::detach::live_pid(project).is_none() {
         return json!({"checkpoints": []});
@@ -245,7 +245,7 @@ pub fn decide(project: &Path, file: Option<&Path>, ask: &str, text: &str) -> Res
 }
 
 /// The report with the process's own facts (its `ui.overlay`) merged in: each step's into its `extra`, the run's into
-/// the report's `extra`; a failing overlay leaves the report as agg made it, with `overlay_error` saying why.
+/// the report's `extra`; a failing overlay leaves the report as rlt made it, with `overlay_error` saying why.
 pub fn overlaid(mut report: Value, project: &Path, file: Option<&Path>, kind: &str) -> Value {
     let Some((file, ui)) = file.and_then(|f| Some((f, spec(f).ok()?.ui?))) else { return report };
     let UiSpec { overlay: Some(command), .. } = ui else { return report };
@@ -296,7 +296,7 @@ pub fn merge(report: &mut Value, facts: &Value) {
     }
 }
 
-/// The critics' last `count` verdicts (agg names a step's critic `<step key>-review`), newest last: they review outside the
+/// The critics' last `count` verdicts (rlt names a step's critic `<step key>-review`), newest last: they review outside the
 /// session's activity, so the page shows them on their own.
 pub fn reviews(project: &Path, count: usize) -> Value {
     let text = std::fs::read_to_string(crate::paths::verdicts_jsonl(project)).unwrap_or_default();

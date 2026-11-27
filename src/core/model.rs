@@ -100,7 +100,7 @@ impl Verdict {
     }
 
     /// A BINARY verdict: `met` and nothing else. `value` stays `None` — a binary judge emits no
-    /// number, and flattening that to `0` is a bug agg has already shipped once (`verdicts.rs` is
+    /// number, and flattening that to `0` is a bug rlt has already shipped once (`verdicts.rs` is
     /// deliberately careful to keep absent absent).
     pub fn binary(met: bool) -> Self {
         Verdict {
@@ -155,7 +155,7 @@ impl Verdict {
     // ---- readers ----
     //
     // The fields are `pub` and stay `pub` (this crate has no facade); these exist because a driver
-    // reads a verdict inline — `if agg.judge(&x).met()` — where a field access on a temporary reads
+    // reads a verdict inline — `if rlt.judge(&x).met()` — where a field access on a temporary reads
     // worse, and because `value_or` has no field twin.
 
     /// Did the judge say GOOD? On the driver path `met` ALWAYS means good — `gate()`'s regression
@@ -172,7 +172,7 @@ impl Verdict {
     }
 
     /// The ONE flattening helper. `d` is the DRIVER's stated fallback, at the call site, instead of
-    /// a fabrication buried in the library: `if agg.judge(&survey).value_or(0.0) >= 85.0 { … }`.
+    /// a fabrication buried in the library: `if rlt.judge(&survey).value_or(0.0) >= 85.0 { … }`.
     pub fn value_or(&self, d: f64) -> f64 {
         self.value.unwrap_or(d)
     }
@@ -200,14 +200,14 @@ impl Verdict {
 /// ⛔ **The clock, randomness, the network and the environment are DELIBERATELY EXCLUDED, and this
 /// type definition is where that decision lives.** A native judge that reads the wall clock returns
 /// a different verdict on replay, and Phase 1's fast-forward would then silently diverge from the
-/// run it claims to reproduce. `JudgeCtx` is a pure function of committed repo state plus agg's own
+/// run it claims to reproduce. `JudgeCtx` is a pure function of committed repo state plus rlt's own
 /// ledger. A judge that genuinely needs the clock is a [`Judge::script`], where the impurity lives
 /// in a separate file a reviewer can see.
 ///
 /// # What it can reach
 ///
-/// Committed repo state (`dir`, `read`, `diff`) and agg's own ledger (`previous`, `history`), plus
-/// the other judges — through the SAME lazy per-step cache `agg.judge()` uses, so asking for an
+/// Committed repo state (`dir`, `read`, `diff`) and rlt's own ledger (`previous`, `history`), plus
+/// the other judges — through the SAME lazy per-step cache `rlt.judge()` uses, so asking for an
 /// unconsulted judge RUNS it, memoized, with its spend charged exactly as a direct ask would be.
 /// That is the price of `met`/`verdict` returning non-`Option` values, and it is the right price:
 /// the alternative is fabricating a verdict. Recursion (a judge asking for itself, directly or
@@ -247,7 +247,7 @@ impl<'a> JudgeCtx<'a> {
         JudgeCtx { source, session, step, dir, diff, scratch, _borrow: PhantomData }
     }
 
-    /// The directory judges may WRITE this session — the same `$AGG_JUDGE_SCRATCH` a script judge
+    /// The directory judges may WRITE this session — the same `$RLT_JUDGE_SCRATCH` a script judge
     /// gets, so a native closure and a script can hand a measurement to each other.
     ///
     /// A native judge is a Rust closure running IN-PROCESS, so nothing stops it writing wherever it
@@ -283,7 +283,7 @@ impl<'a> JudgeCtx<'a> {
     }
 
     /// `j`'s last `n` recorded verdicts, OLDEST FIRST — every outcome, not just the landed ones,
-    /// because "the test count must never shrink" is a statement about the series agg observed.
+    /// because "the test count must never shrink" is a statement about the series rlt observed.
     pub fn history(&self, j: &Judge, n: usize) -> Vec<Verdict> {
         let rows = crate::core::verdicts::rows_for(self.dir, &j.name, false);
         rows[rows.len().saturating_sub(n)..].iter().map(|r| r.verdict()).collect()
@@ -458,7 +458,7 @@ impl Judge {
     /// An LLM RUBRIC judge: the `.md` file IS the prompt, graded by the RULER. Costs a model call.
     ///
     /// `path_md` is taken verbatim and resolved against the project dir when the judge RUNS, not
-    /// here — a driver constructs its judges above `Agg::open(dir)` (the builder chain is
+    /// here — a driver constructs its judges above `Relentless::open(dir)` (the builder chain is
     /// self-consuming, so it must), and a constructor therefore cannot know the project root. The
     /// rubric's own `inputs:` frontmatter is read at that same point, which is why `inputs` starts
     /// empty rather than being filled from a path this call cannot yet resolve.
@@ -531,7 +531,7 @@ impl Judge {
     /// The shared body of the three constructors.
     ///
     /// `invariant`/`in_dod` are BOTH false, and that is correct rather than a gap: on the driver
-    /// path nothing is declared to agg (no `abort_if`, no `notify_if`, no `invariants`, no
+    /// path nothing is declared to rlt (no `abort_if`, no `notify_if`, no `invariants`, no
     /// `done_if`), so there is no run-set and no DoD-set for a judge to be a member of. Judges are
     /// lazy and the driver asks.
     fn declared(name: impl Into<String>, kind: JudgeKind) -> Judge {
@@ -668,16 +668,16 @@ mod tests {
         assert_eq!(v.error(), Some("spawn: no such file"));
     }
 
-    /// The three driver constructors, and the one thing they must NOT do: join agg's run-set.
+    /// The three driver constructors, and the one thing they must NOT do: join rlt's run-set.
     #[test]
     fn a_driver_judge_is_in_no_declared_set() {
         let judges = [
-            Judge::rubric("survey_good", "agg/judges/survey_good.md"),
-            Judge::script("builds", "agg/judges/build.sh"),
+            Judge::rubric("survey_good", "rlt/judges/survey_good.md"),
+            Judge::script("builds", "rlt/judges/build.sh"),
             Judge::native("p99_ok", |_| Verdict::binary(true)),
         ];
         for j in &judges {
-            assert!(!j.in_dod, "`{}` must not join the DoD-set — nothing is declared to agg here", j.name);
+            assert!(!j.in_dod, "`{}` must not join the DoD-set — nothing is declared to rlt here", j.name);
             assert!(!j.invariant, "`{}` must not become an invariant", j.name);
             assert_eq!(j.state, Lifecycle::Pending);
             assert_eq!(j.timeout, None, "absent = the run-level judge.timeout");
@@ -689,7 +689,7 @@ mod tests {
     /// A per-judge timeout overrides the 300s run default — a 40-minute load test needs it.
     #[test]
     fn timeout_is_a_consuming_setter() {
-        let load = Judge::script("load_ok", "agg/judges/loadtest.sh").timeout(45 * 60);
+        let load = Judge::script("load_ok", "rlt/judges/loadtest.sh").timeout(45 * 60);
         assert_eq!(load.timeout, Some(2700));
     }
 
@@ -725,7 +725,7 @@ mod tests {
         let src = FixedSource(Verdict::binary(true).with_value(7.0));
         let ctx =
             JudgeCtx::new(&src, 4, "implement", tmp.path(), "diff --git a/x".into(), std::env::temp_dir());
-        let other = Judge::script("builds", "agg/judges/build.sh");
+        let other = Judge::script("builds", "rlt/judges/build.sh");
 
         assert!(ctx.met(&other));
         assert_eq!(ctx.value(&other), Some(7.0));
@@ -760,7 +760,7 @@ mod tests {
 
         let src = FixedSource(Verdict::binary(false));
         let ctx = JudgeCtx::new(&src, 3, "w", d, String::new(), std::env::temp_dir());
-        let cov = Judge::script("cov", "agg/judges/cov.sh");
+        let cov = Judge::script("cov", "rlt/judges/cov.sh");
 
         assert_eq!(ctx.previous(&cov).and_then(|v| v.value()), Some(50.0), "the rolled-back 20 never landed");
         let series: Vec<_> = ctx.history(&cov, 10).iter().filter_map(|v| v.value()).collect();
@@ -773,9 +773,9 @@ mod tests {
     /// went through the derive before.
     #[test]
     fn the_hand_written_debug_still_names_the_paths() {
-        let s = format!("{:?}", Judge::script("builds", "agg/judges/build.sh").kind);
+        let s = format!("{:?}", Judge::script("builds", "rlt/judges/build.sh").kind);
         assert!(s.contains("Script") && s.contains("build.sh"), "got: {s}");
-        let l = format!("{:?}", Judge::rubric("good", "agg/judges/good.md").kind);
+        let l = format!("{:?}", Judge::rubric("good", "rlt/judges/good.md").kind);
         assert!(l.contains("Llm") && l.contains("good.md"), "got: {l}");
         let n = format!("{:?}", Judge::native("n", |_| Verdict::binary(true)).kind);
         assert!(n.contains("Native"), "got: {n}");

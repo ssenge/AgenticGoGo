@@ -27,7 +27,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// The persisted run clock. Agg-owned (`agg/private/clock.json`).
+/// The persisted run clock. Relentless-owned (`rlt/private/clock.json`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Clock {
     /// epoch seconds at which this run — including everything it has resumed from — began.

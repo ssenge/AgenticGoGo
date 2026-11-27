@@ -1,8 +1,8 @@
 /target
 **/*.rs.bk
 examples/**/.progress
-examples/**/AGG_RESUME.md
-.agg/
+examples/**/RLT_RESUME.md
+.rlt/
 # internal scratch / working notes, never public — all live under internal/
 internal/
 

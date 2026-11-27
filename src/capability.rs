@@ -24,7 +24,7 @@
 //! [`Capabilities`], and a mismatch is a hard error naming the config key, the agent, and the fix.
 //! **A capability the agent lacks must never degrade into a quiet no-op.**
 
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::core::model::{Judge, JudgeKind};
 use crate::problem::{self, Problem};
 use anyhow::Result;
@@ -40,7 +40,7 @@ pub struct Assessment {
     /// guards that are inert on an agent which still caps itself: loud, not fatal (§7.3).
     pub warnings: Vec<Problem>,
     /// what the startup probe learned about each container image the run uses (empty without a
-    /// container tier or an engine) — `agg doctor --json` reports it.
+    /// container tier or an engine) — `rlt doctor --json` reports it.
     pub images: Vec<crate::isolation::probe::ImageFacts>,
 }
 
@@ -50,7 +50,7 @@ pub struct Assessment {
 ///
 /// A capability the agent lacks must never degrade into a quiet no-op: a guard that never fires is
 /// worse than no guard.
-pub fn check(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Result<()> {
+pub fn check(cfg: &RelentlessConfig, judges: &[Judge], dir: &Path) -> Result<()> {
     let a = assess(cfg, judges, dir);
     if !a.unknown_agents.is_empty() {
         anyhow::bail!(problem::render(&a.unknown_agents));
@@ -75,10 +75,10 @@ pub fn check(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Result<()> {
     anyhow::bail!(msg)
 }
 
-/// [`check`]'s findings, collected rather than rendered — what `agg check` and `agg doctor --json`
+/// [`check`]'s findings, collected rather than rendered — what `rlt check` and `rlt doctor --json`
 /// report. Never fails: an agent that does not resolve is itself a finding. `dir` is the PROJECT
 /// dir, which relative `context:` paths resolve against.
-pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Assessment {
+pub fn assess(cfg: &RelentlessConfig, judges: &[Judge], dir: &Path) -> Assessment {
     let mut a = Assessment::default();
     // ── the run-level confinement policy: context dirs, credentials, the judges' image ──
     a.problems.extend(crate::isolation::run::resolve(cfg, dir).1);
@@ -126,7 +126,7 @@ pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> Assessment {
 
 /// The run's parsed allow-list, when it has a valid one (a malformed one is reported by
 /// `isolation::run::resolve`).
-fn allow_list(cfg: &AggConfig) -> Option<crate::isolation::egress::allow::AllowList> {
+fn allow_list(cfg: &RelentlessConfig) -> Option<crate::isolation::egress::allow::AllowList> {
     match &cfg.isolation_policy.network {
         crate::isolation::egress::Network::Allow(e) => crate::isolation::egress::allow::AllowList::parse(e).ok(),
         crate::isolation::egress::Network::Open => None,
@@ -135,7 +135,7 @@ fn allow_list(cfg: &AggConfig) -> Option<crate::isolation::egress::allow::AllowL
 
 /// Warnings for the processes an allow-list does not reach: hooks on a container run (host
 /// tooling, unconfined), and `background` hooks on every tier (never confined).
-fn uncovered_by_allow_list(cfg: &AggConfig, warnings: &mut Vec<Problem>) {
+fn uncovered_by_allow_list(cfg: &RelentlessConfig, warnings: &mut Vec<Problem>) {
     let h = &cfg.hooks;
     let foreground = !(h.on_start.is_empty() && h.on_session_start.is_empty() && h.on_session_end.is_empty() && h.on_stop.is_empty())
         || cfg.sequence.notify.as_ref().is_some_and(|n| !n.cmd.is_empty());
@@ -156,7 +156,7 @@ fn uncovered_by_allow_list(cfg: &AggConfig, warnings: &mut Vec<Problem>) {
 /// agent of a step that does not run in a container, and the ruler when anything it runs stays on
 /// the host (the summarizer always does; LLM judges do unless the run's judges are containerized).
 /// A container step's agent is the image's business instead ([`crate::isolation::probe`]).
-pub fn host_agents(cfg: &AggConfig, judges: &[Judge]) -> Vec<(String, String)> {
+pub fn host_agents(cfg: &RelentlessConfig, judges: &[Judge]) -> Vec<(String, String)> {
     use crate::isolation::Isolation::Container;
     let llm = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
     let ruler_on_host = cfg.summary.enabled || (llm && cfg.run_isolation() != Container);
@@ -172,7 +172,7 @@ pub fn host_agents(cfg: &AggConfig, judges: &[Judge]) -> Vec<(String, String)> {
 }
 
 /// The demands ONE step makes of its worker agent.
-fn step_demands(cfg: &AggConfig, step_name: &str, a: &mut Assessment) {
+fn step_demands(cfg: &RelentlessConfig, step_name: &str, a: &mut Assessment) {
     let named = |p: &str| {
         cfg.sequence.done_if.contains(p) || cfg.sequence.abort_if.as_deref().unwrap_or("").contains(p)
     };
@@ -233,7 +233,7 @@ fn step_demands(cfg: &AggConfig, step_name: &str, a: &mut Assessment) {
         problems.push(Problem::new(effort_at, format!("step `{step_name}` (agent `{agent}`): model + effort — {c}")));
     }
     // Blast-radius isolation: `sandbox` needs an OS wrapper (bwrap / sandbox-exec) for EVERY
-    // agent — §2.4, agg never delegates its jail — so this is no longer gated on
+    // agent — §2.4, rlt never delegates its jail — so this is no longer gated on
     // `self_sandboxes()`. If no wrapper is available on this host, refuse at startup rather
     // than let the run discover it: `worker.rs` would fail every session at spawn, and the
     // alternative (a silent downgrade to `none`) is a worker that thinks it is confined and is
@@ -262,7 +262,7 @@ fn step_demands(cfg: &AggConfig, step_name: &str, a: &mut Assessment) {
         problems.push(Problem::new(iso_at.clone(), format!(
             "step `{step_name}` (agent `{agent}`): `isolation: sandbox` is set, but no OS \
              wrapper (bubblewrap on Linux, sandbox-exec on macOS) is available on this host — \
-             the worker could not be confined, and agg confines every agent itself rather than \
+             the worker could not be confined, and rlt confines every agent itself rather than \
              trusting the agent's own sandbox.\n      \
              fix: install the wrapper (`apt install bubblewrap` on Linux), use `isolation: none`, \
              or run on a supported OS."
@@ -295,7 +295,7 @@ fn step_demands(cfg: &AggConfig, step_name: &str, a: &mut Assessment) {
 
 /// Where a step's `key` comes from: its own body, else `defaults`, else (a backend default) the
 /// step's agent choice — the key an operator would edit.
-fn origin(cfg: &AggConfig, step: &str, key: &str, in_body: bool, in_defaults: bool) -> String {
+fn origin(cfg: &RelentlessConfig, step: &str, key: &str, in_body: bool, in_defaults: bool) -> String {
     if in_body {
         format!("steps.{step}.{key}")
     } else if in_defaults {
@@ -306,7 +306,7 @@ fn origin(cfg: &AggConfig, step: &str, key: &str, in_body: bool, in_defaults: bo
 }
 
 /// Where a spend guard is switched on: its `limits:` key when set, else the expression naming it.
-fn guard_at(cfg: &AggConfig, limit_set: bool, key: &str, term: &str) -> String {
+fn guard_at(cfg: &RelentlessConfig, limit_set: bool, key: &str, term: &str) -> String {
     if limit_set {
         format!("sequence.limits.{key}")
     } else if cfg.sequence.done_if.contains(term) {
@@ -321,7 +321,7 @@ mod tests {
     use super::*;
     use crate::core::model::{Judge, JudgeKind, Lifecycle};
 
-    fn cfg_yaml(body: &str) -> AggConfig {
+    fn cfg_yaml(body: &str) -> RelentlessConfig {
         serde_yaml::from_str(body).expect("test config parse")
     }
 
@@ -474,7 +474,7 @@ mod tests {
         assert!(!err.contains("step `plan`"), "the claude step reports dollars — it must NOT be flagged:\n{err}");
     }
 
-    fn problem_paths(cfg: &AggConfig) -> Vec<String> {
+    fn problem_paths(cfg: &RelentlessConfig) -> Vec<String> {
         assess(cfg, &[script_judge("g")], Path::new(".")).problems.into_iter().map(|p| p.path).collect()
     }
 

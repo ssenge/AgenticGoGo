@@ -24,13 +24,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
-use agg::core::config::Limits;
-use agg::prelude::*;
+use relentless::core::config::Limits;
+use relentless::prelude::*;
 
 /// The one environment mutation in this binary: a shared `bin/` holding the fake `claude`, and a
-/// throwaway `HOME` so `ensure_library` never writes the developer's real `~/.agg/judges`.
+/// throwaway `HOME` so `ensure_library` never writes the developer's real `~/.rlt/judges`.
 static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
-    let root = std::env::temp_dir().join(format!("agg-driver-env-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("rlt-driver-env-{}", std::process::id()));
     let bin = root.join("bin");
     let home = root.join("home");
     std::fs::create_dir_all(&bin).unwrap();
@@ -54,8 +54,8 @@ for a in "$@"; do
   [ "$prev" = --resume ] && [ "$a" = gone ] && exit 1
   prev=$a
 done
-if [ -n "$worker" ]; then for a in "$@"; do echo "$a"; done >> .git/agg-worker.args; fi
-if [ -n "$worker" ] && [ ! -f .git/agg-idle ]; then
+if [ -n "$worker" ]; then for a in "$@"; do echo "$a"; done >> .git/rlt-worker.args; fi
+if [ -n "$worker" ] && [ ! -f .git/rlt-idle ]; then
   if [ -f attack.sh ]; then sh attack.sh; fi
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
@@ -103,7 +103,7 @@ fn project() -> tempfile::TempDir {
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
-    g(&["commit", "-q", "--allow-empty", "-m", "agg baseline"]);
+    g(&["commit", "-q", "--allow-empty", "-m", "rlt baseline"]);
     tmp
 }
 
@@ -112,17 +112,17 @@ fn work() -> Step {
     Step::new("implement").model("fake").prompt("do a chunk")
 }
 
-/// Write an executable script judge at `agg/judges/<name>.sh` that APPENDS one line to `<name>.runs`
+/// Write an executable script judge at `rlt/judges/<name>.sh` that APPENDS one line to `<name>.runs`
 /// every time it executes, then reports `met`. The marker file is how "did this judge actually run"
-/// is observed — a count, not a flag agg set.
+/// is observed — a count, not a flag rlt set.
 fn marker_judge(dir: &Path, name: &str, met: bool) -> Judge {
-    let rel = format!("agg/judges/{name}.sh");
+    let rel = format!("rlt/judges/{name}.sh");
     let p = dir.join(&rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(
         &p,
         format!(
-            "#!/bin/sh\necho ran >> \"$AGG_PROJECT_DIR/{name}.runs\"\nprintf '%s\\n' '{{\"met\":{met}}}'\n"
+            "#!/bin/sh\necho ran >> \"$RLT_PROJECT_DIR/{name}.runs\"\nprintf '%s\\n' '{{\"met\":{met}}}'\n"
         ),
     )
     .unwrap();
@@ -143,9 +143,9 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// Every `agg/*` branch that still exists — the span's refs, seen from outside agg.
-fn agg_branches(dir: &Path) -> Vec<String> {
-    let out = git(dir, &["branch", "--list", "agg/*", "--format=%(refname:short)"]);
+/// Every `rlt/*` branch that still exists — the span's refs, seen from outside rlt.
+fn rlt_branches(dir: &Path) -> Vec<String> {
+    let out = git(dir, &["branch", "--list", "rlt/*", "--format=%(refname:short)"]);
     out.lines().map(str::to_string).collect()
 }
 
@@ -168,19 +168,19 @@ fn work_landed_on_main(dir: &Path) -> usize {
 /// left. `landed_met` is what the regression rule compares against, so without this a first-ever
 /// failing judge is not a regression, it is just news.
 fn seed_landed_met(dir: &Path, name: &str) {
-    agg::core::verdicts::append(
+    relentless::core::verdicts::append(
         dir,
         Some(0),
         "baseline",
         &[(name.to_string(), Verdict::binary(true))],
-        agg::core::verdicts::Outcome::Merged,
+        relentless::core::verdicts::Outcome::Merged,
     )
     .unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------
 
-/// THE PIPELINE IS SHARED. A driver step runs the same hook dispatch a YAML lap does, so agg's own
+/// THE PIPELINE IS SHARED. A driver step runs the same hook dispatch a YAML lap does, so rlt's own
 /// artefacts appear without the facade writing any of them itself.
 ///
 /// ⚠ `verdicts.jsonl` is asserted NOWHERE here: with `step()` always staging, `verdicts::append` is
@@ -190,8 +190,8 @@ fn a_driver_step_runs_the_real_pipeline() {
     let tmp = project();
     let dir = tmp.path();
 
-    let agg = Agg::open(dir).unwrap();
-    let out = agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
+    let out = rlt.step(&work()).unwrap();
 
     assert_eq!(out.session, 1);
     assert_eq!(out.step, "implement");
@@ -199,13 +199,13 @@ fn a_driver_step_runs_the_real_pipeline() {
     assert!(out.tokens >= 1, "the worker's reported tokens reached the run counters: {out:?}");
     assert!(out.verdicts.is_empty(), "the run-set is EMPTY on the driver path — judges are lazy");
 
-    assert!(agg::paths::state_json(dir).exists(), "the dashboard snapshot is published");
-    let status = agg::ui::status::render(dir);
-    assert!(status.contains("session"), "`agg status` renders this run:\n{status}");
-    assert!(agg::paths::run_pid(dir).exists(), "the double-run guard is armed while the run is live");
+    assert!(relentless::paths::state_json(dir).exists(), "the dashboard snapshot is published");
+    let status = relentless::ui::status::render(dir);
+    assert!(status.contains("session"), "`rlt status` renders this run:\n{status}");
+    assert!(relentless::paths::run_pid(dir).exists(), "the double-run guard is armed while the run is live");
 
-    drop(agg);
-    assert!(!agg::paths::run_pid(dir).exists(), "…and released when the Agg is dropped");
+    drop(rlt);
+    assert!(!relentless::paths::run_pid(dir).exists(), "…and released when the Relentless is dropped");
 }
 
 /// A session that commits nothing lands NOTHING, even inside a span an earlier session opened —
@@ -214,13 +214,13 @@ fn a_driver_step_runs_the_real_pipeline() {
 fn a_session_that_changes_nothing_lands_nothing() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
 
-    assert_eq!(agg.step(&work()).unwrap().landed, Landing::Span);
-    std::fs::write(dir.join(".git/agg-idle"), "").unwrap();
-    assert_eq!(agg.step(&work()).unwrap().landed, Landing::Nothing, "the idle session staged nothing");
+    assert_eq!(rlt.step(&work()).unwrap().landed, Landing::Span);
+    std::fs::write(dir.join(".git/rlt-idle"), "").unwrap();
+    assert_eq!(rlt.step(&work()).unwrap().landed, Landing::Nothing, "the idle session staged nothing");
 
-    agg.gate().unwrap();
+    rlt.gate().unwrap();
     assert_eq!(work_landed_on_main(dir), 1, "the first session's work landed");
 }
 
@@ -232,24 +232,24 @@ fn a_session_that_changes_nothing_lands_nothing() {
 #[test]
 fn after_a_ceiling_every_further_step_launches_no_worker() {
     let tmp = project();
-    let agg = Agg::open(tmp.path()).unwrap().limits(Limits { sessions: Some(1), ..Limits::default() });
+    let rlt = Relentless::open(tmp.path()).unwrap().limits(Limits { sessions: Some(1), ..Limits::default() });
 
-    agg.step(&work()).expect("the first step is under the ceiling");
-    assert_eq!(agg.sessions(), 1);
+    rlt.step(&work()).expect("the first step is under the ceiling");
+    assert_eq!(rlt.sessions(), 1);
 
-    let breach = agg.check_limits().expect_err("session 1 of 1 is the ceiling");
+    let breach = rlt.check_limits().expect_err("session 1 of 1 is the ceiling");
     assert!(matches!(breach, Fatal::Ended(RunOutcome::MaxSessions)), "got {breach:?}");
 
     // the driver ignores it and ploughs on, exactly as a careless one would.
     for _ in 0..5 {
-        let _ = agg.step(&work());
+        let _ = rlt.step(&work());
     }
-    assert_eq!(agg.sessions(), 1, "the latch must make every later call a no-op that spends nothing");
-    assert_eq!(agg.ended(), Some(RunOutcome::MaxSessions));
+    assert_eq!(rlt.sessions(), 1, "the latch must make every later call a no-op that spends nothing");
+    assert_eq!(rlt.ended(), Some(RunOutcome::MaxSessions));
 
     // …and a judge asked after the latch reports NOT MET with no number — never a fabricated pass.
     let j = marker_judge(tmp.path(), "always", true);
-    let v = agg.judge(&j);
+    let v = rlt.judge(&j);
     assert!(!v.met() && v.value().is_none(), "a latched judge is not-met and numberless: {v:?}");
     assert_eq!(runs(tmp.path(), "always"), 0, "…and it did not RUN");
 }
@@ -262,15 +262,15 @@ fn a_judge_asked_twice_in_one_step_runs_once_and_again_next_step() {
     let dir = tmp.path();
     let tests = marker_judge(dir, "tests_pass", true);
 
-    let agg = Agg::open(dir).unwrap();
-    agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
+    rlt.step(&work()).unwrap();
 
-    assert!(agg.judge(&tests).met());
-    assert!(agg.judge(&tests).met());
+    assert!(rlt.judge(&tests).met());
+    assert!(rlt.judge(&tests).met());
     assert_eq!(runs(dir, "tests_pass"), 1, "memoized for the step — two asks, one execution");
 
-    agg.step(&work()).unwrap();
-    assert!(agg.judge(&tests).met());
+    rlt.step(&work()).unwrap();
+    assert!(rlt.judge(&tests).met());
     assert_eq!(runs(dir, "tests_pass"), 2, "a new step clears the cache — the judge runs again");
 }
 
@@ -283,16 +283,16 @@ fn a_failed_first_judge_short_circuits_the_expensive_one() {
     let build = marker_judge(dir, "builds", false);
     let load = marker_judge(dir, "load_test", true);
 
-    let agg = Agg::open(dir).unwrap();
-    agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
+    rlt.step(&work()).unwrap();
 
-    assert!(!(agg.judge(&build).met() && agg.judge(&load).met()));
+    assert!(!(rlt.judge(&build).met() && rlt.judge(&load).met()));
     assert_eq!(runs(dir, "builds"), 1);
     assert_eq!(runs(dir, "load_test"), 0, "Rust's `&&` never reached the 40-minute judge");
 
     // …and it is genuinely reachable — the same expression with a passing first judge runs both.
     let ok = marker_judge(dir, "lint_clean", true);
-    assert!(agg.judge(&ok).met() && agg.judge(&load).met());
+    assert!(rlt.judge(&ok).met() && rlt.judge(&load).met());
     assert_eq!(runs(dir, "load_test"), 1);
 }
 
@@ -303,65 +303,65 @@ fn a_failed_first_judge_short_circuits_the_expensive_one() {
 fn check_limits_is_opt_in_in_both_directions() {
     // (a) never called ⇒ no ceiling: the run sails past `limits.sessions`.
     let unchecked = project();
-    let agg = Agg::open(unchecked.path())
+    let rlt = Relentless::open(unchecked.path())
         .unwrap()
         .limits(Limits { sessions: Some(2), ..Limits::default() });
     for _ in 0..4 {
-        agg.step(&work()).expect("a driver that never checks has no ceilings");
+        rlt.step(&work()).expect("a driver that never checks has no ceilings");
     }
-    assert_eq!(agg.sessions(), 4, "limits.sessions must not be enforced from the step path");
-    assert_eq!(agg.ended(), None);
+    assert_eq!(rlt.sessions(), 4, "limits.sessions must not be enforced from the step path");
+    assert_eq!(rlt.ended(), None);
 
     // (b) called ⇒ it stops at exactly the ceiling.
     let checked = project();
-    let agg = Agg::open(checked.path())
+    let rlt = Relentless::open(checked.path())
         .unwrap()
         .limits(Limits { sessions: Some(2), ..Limits::default() });
     let mut done = 0;
     for _ in 0..4 {
-        if agg.check_limits().is_err() {
+        if rlt.check_limits().is_err() {
             break;
         }
-        agg.step(&work()).unwrap();
+        rlt.step(&work()).unwrap();
         done += 1;
     }
     assert_eq!(done, 2, "the same limits, checked, stop the run at the ceiling");
-    assert_eq!(agg.ended(), Some(RunOutcome::MaxSessions));
+    assert_eq!(rlt.ended(), Some(RunOutcome::MaxSessions));
 }
 
-/// ⛔ A STRAY `agg.yaml` IS IGNORED — not merged, not a fallback.
+/// ⛔ A STRAY `rlt.yaml` IS IGNORED — not merged, not a fallback.
 ///
 /// The project below declares a token ceiling of 1 in YAML; the driver declares a far larger one in
-/// Rust and runs past the YAML number. The second half is the sharper one: the `agg.yaml` is
+/// Rust and runs past the YAML number. The second half is the sharper one: the `rlt.yaml` is
 /// **malformed**, and the run does not care — a file that is never parsed cannot be malformed.
 ///
 /// The policy half of the rule (`on_regression`) is asserted with the `gate()` tests, since a policy
 /// about what happens to a span is only observable once a span is closed.
 #[test]
-fn a_stray_and_even_malformed_agg_yaml_changes_nothing() {
+fn a_stray_and_even_malformed_rlt_yaml_changes_nothing() {
     let tmp = project();
     let dir = tmp.path();
-    std::fs::create_dir_all(dir.join("agg")).unwrap();
+    std::fs::create_dir_all(dir.join("rlt")).unwrap();
     std::fs::write(
-        dir.join("agg/agg.yaml"),
+        dir.join("rlt/rlt.yaml"),
         "project: [this is not\n  valid: yaml at all\nsequence: { limits: { tokens: 1 } }\n",
     )
     .unwrap();
 
-    let agg = Agg::open(dir)
+    let rlt = Relentless::open(dir)
         .unwrap()
         .limits(Limits { tokens: Some(1_000_000), ..Limits::default() })
         .on_regression(OnRegression::Annotate);
 
     let mut last = None;
     for _ in 0..3 {
-        agg.check_limits().expect("the RUST ceiling is 1,000,000 tokens — nowhere near");
-        last = Some(agg.step(&work()).unwrap());
+        rlt.check_limits().expect("the RUST ceiling is 1,000,000 tokens — nowhere near");
+        last = Some(rlt.step(&work()).unwrap());
     }
     let last = last.unwrap();
-    assert_eq!(agg.sessions(), 3, "the YAML `limits.tokens: 1` never applied");
+    assert_eq!(rlt.sessions(), 3, "the YAML `limits.tokens: 1` never applied");
     assert!(last.tokens > 1, "…and the run really did spend past it: {} tokens", last.tokens);
-    assert_eq!(agg.ended(), None, "a malformed agg.yaml cannot fail a run that never reads it");
+    assert_eq!(rlt.ended(), None, "a malformed rlt.yaml cannot fail a run that never reads it");
 }
 
 // ── the gate ─────────────────────────────────────────────────────────────────────────────────
@@ -383,13 +383,13 @@ fn gate_weighs_a_lazily_asked_verdict_under_both_policies() {
         let build = marker_judge(dir, "builds", false);
         seed_landed_met(dir, "builds"); // it WAS met as of the last gate — so this is a regression.
 
-        let agg = Agg::open(dir).unwrap().on_regression(policy);
-        agg.step(&work()).unwrap();
-        agg.step(&work()).unwrap();
+        let rlt = Relentless::open(dir).unwrap().on_regression(policy);
+        rlt.step(&work()).unwrap();
+        rlt.step(&work()).unwrap();
         assert_eq!(runs(dir, "builds"), 0, "{policy:?}: nothing asked yet — judges are LAZY");
 
-        assert!(!agg.judge(&build).met(), "{policy:?}: the judge is red");
-        assert_eq!(agg.gate().unwrap(), expected, "{policy:?}");
+        assert!(!rlt.judge(&build).met(), "{policy:?}: the judge is red");
+        assert_eq!(rlt.gate().unwrap(), expected, "{policy:?}");
         assert_eq!(work_landed_on_main(dir), landed, "{policy:?}: sessions on `main`");
     }
 }
@@ -405,33 +405,33 @@ fn gate_lands_the_whole_span_and_the_rollback_twin_clears_every_branch() {
     // (a) keep.
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
     for _ in 0..3 {
-        agg.step(&work()).unwrap();
+        rlt.step(&work()).unwrap();
     }
     assert_eq!(work_landed_on_main(dir), 0, "nothing lands until the gate says so");
 
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     assert_eq!(work_landed_on_main(dir), 3, "ALL THREE sessions merged, not just the tip's");
-    assert!(agg_branches(dir).is_empty(), "every span branch is gone: {:?}", agg_branches(dir));
-    drop(agg);
+    assert!(rlt_branches(dir).is_empty(), "every span branch is gone: {:?}", rlt_branches(dir));
+    drop(rlt);
 
     // (b) roll back.
     let tmp = project();
     let dir = tmp.path();
     let build = marker_judge(dir, "builds", false);
     seed_landed_met(dir, "builds");
-    let agg = Agg::open(dir).unwrap().on_regression(OnRegression::Rollback);
-    agg.step(&work()).unwrap();
-    agg.step(&work()).unwrap();
-    assert!(!agg.judge(&build).met());
+    let rlt = Relentless::open(dir).unwrap().on_regression(OnRegression::Rollback);
+    rlt.step(&work()).unwrap();
+    rlt.step(&work()).unwrap();
+    assert!(!rlt.judge(&build).met());
 
-    assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack);
     assert_eq!(work_landed_on_main(dir), 0, "`main` is untouched");
-    let left = agg_branches(dir);
+    let left = rlt_branches(dir);
     assert_eq!(left.len(), 1, "only the tip survives, for inspection: {left:?}");
     assert!(left[0].ends_with("session-2"), "…and it is the TIP, holding the whole span: {left:?}");
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing, "the span is CLOSED — nothing is left open");
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Nothing, "the span is CLOSED — nothing is left open");
 }
 
 /// A PROTECTED-PATH VIOLATION ROLLS THE WHOLE SPAN BACK. `write_deny` binds on the driver path
@@ -444,29 +444,29 @@ fn a_protected_path_violation_rolls_the_whole_span_back() {
     let dir = tmp.path();
     std::fs::create_dir_all(dir.join("oracles")).unwrap();
     std::fs::write(dir.join("oracles/x.json"), "orig").unwrap();
-    // committed, as in a real project: this fake agent `git add -A`s, so an ignore file agg
+    // committed, as in a real project: this fake agent `git add -A`s, so an ignore file rlt
     // created would ride the span and vanish with its rollback.
-    std::fs::write(dir.join(".gitignore"), "agg/state/\nagg/private/\n").unwrap();
+    std::fs::write(dir.join(".gitignore"), "rlt/state/\nagg/private/\n").unwrap();
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "oracle"]);
 
-    let agg = Agg::open(dir).unwrap().on_regression(OnRegression::Annotate);
+    let rlt = Relentless::open(dir).unwrap().on_regression(OnRegression::Annotate);
     let guarded = Step::template().model("fake").prompt("do a chunk").write_deny(["oracles/"]);
-    agg.step(&guarded.create("honest")).unwrap();
+    rlt.step(&guarded.create("honest")).unwrap();
     // the fake agent runs `attack.sh` if it finds one — the next session tampers.
     std::fs::write(dir.join("attack.sh"), "echo evil > oracles/x.json\n").unwrap();
-    agg.step(&guarded.create("tamper")).unwrap();
+    rlt.step(&guarded.create("tamper")).unwrap();
     assert_eq!(std::fs::read_to_string(dir.join("oracles/x.json")).unwrap(), "orig", "restored at once");
 
-    assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack, "even under `Annotate`");
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "even under `Annotate`");
     assert_eq!(work_landed_on_main(dir), 0, "the whole span is discarded");
-    let rows = agg::protect::read(dir);
+    let rows = relentless::protect::read(dir);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!((rows[0].step.as_str(), rows[0].paths.as_slice()), ("tamper", ["oracles/x.json".to_string()].as_slice()));
     // the violation belonged to that span: the next one is gated on its own merits.
     std::fs::remove_file(dir.join("attack.sh")).ok();
-    agg.step(&guarded.create("honest_again")).unwrap();
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    rlt.step(&guarded.create("honest_again")).unwrap();
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
 }
 
 /// A pattern the step's tier cannot enforce is refused when the step is RESOLVED — the driver path
@@ -474,8 +474,8 @@ fn a_protected_path_violation_rolls_the_whole_span_back() {
 #[test]
 fn a_driver_step_with_an_unparseable_write_deny_is_refused() {
     let tmp = project();
-    let agg = Agg::open(tmp.path()).unwrap();
-    let err = agg.step(&work().write_deny(["../outside"])).unwrap_err();
+    let rlt = Relentless::open(tmp.path()).unwrap();
+    let err = rlt.step(&work().write_deny(["../outside"])).unwrap_err();
     assert!(format!("{err:?}").contains(".."), "{err:?}");
 }
 
@@ -485,13 +485,13 @@ fn a_driver_step_with_an_unparseable_write_deny_is_refused() {
 fn gate_with_nothing_staged_touches_no_ref() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
     let before = git(dir, &["rev-parse", "main"]);
 
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing, "…and it is idempotent");
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Nothing);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Nothing, "…and it is idempotent");
     assert_eq!(git(dir, &["rev-parse", "main"]), before, "no ref moved");
-    assert!(agg_branches(dir).is_empty());
+    assert!(rlt_branches(dir).is_empty());
 }
 
 /// A CONFLICTED SPAN IS `Failed(Conflict)`, NEVER `RolledBack` — and the span SURVIVES.
@@ -504,8 +504,8 @@ fn gate_with_nothing_staged_touches_no_ref() {
 fn a_conflicted_span_fails_without_discarding_it() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap();
-    agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
+    rlt.step(&work()).unwrap();
 
     // Move base under the span, in a SEPARATE worktree — the primary tree must stay where the run
     // left it (on the span tip), or the test would be measuring its own `git checkout`.
@@ -519,12 +519,12 @@ fn a_conflicted_span_fails_without_discarding_it() {
     git(dir, &["worktree", "remove", "--force", base_str]);
 
     let before = git(dir, &["rev-parse", "main"]);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Failed(GateFailure::Conflict));
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Failed(GateFailure::Conflict));
     assert_eq!(git(dir, &["rev-parse", "main"]), before, "a conflict leaves base exactly as it was");
-    let left = agg_branches(dir);
+    let left = rlt_branches(dir);
     assert_eq!(left.len(), 1, "the span tip is KEPT — the work is still there: {left:?}");
     assert_eq!(
-        agg.gate().unwrap(),
+        rlt.gate().unwrap(),
         GateOutcome::Failed(GateFailure::Conflict),
         "the span is still OPEN and still gateable"
     );
@@ -544,31 +544,31 @@ fn a_previous_runs_stranded_span_is_parked_aside_not_deleted() {
     let tmp = project();
     let dir = tmp.path();
 
-    // run 1: two sessions, never gated. The `Agg` is dropped, which is the whole of "run 1 ended".
+    // run 1: two sessions, never gated. The `Relentless` is dropped, which is the whole of "run 1 ended".
     {
-        let agg = Agg::open(dir).unwrap();
-        agg.step(&work()).unwrap();
-        agg.step(&work()).unwrap();
+        let rlt = Relentless::open(dir).unwrap();
+        rlt.step(&work()).unwrap();
+        rlt.step(&work()).unwrap();
     }
-    let after_run_1 = agg_branches(dir);
+    let after_run_1 = rlt_branches(dir);
     assert_eq!(after_run_1.len(), 2, "run 1 left its span: {after_run_1:?}");
     let tip = after_run_1.iter().find(|b| b.ends_with("session-2")).unwrap().clone();
     assert_eq!(work_on(dir, &tip), 2, "both of run 1's sessions are on its tip");
 
     // run 2 starts in exactly the state run 1 left behind.
-    let agg = Agg::open(dir).unwrap();
-    agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
+    rlt.step(&work()).unwrap();
 
-    let parked: Vec<String> = agg_branches(dir).into_iter().filter(|b| b.contains("/orphaned-")).collect();
+    let parked: Vec<String> = rlt_branches(dir).into_iter().filter(|b| b.contains("/orphaned-")).collect();
     assert_eq!(parked.len(), 2, "run 1's whole span was parked, not eaten: {parked:?}");
     let parked_tip = parked.iter().find(|b| b.ends_with("session-2")).expect("the tip keeps its number");
     assert_eq!(work_on(dir, parked_tip), 2, "…and it still carries run 1's two sessions' commits");
 
     // and run 2 really did reuse the numbering the parking freed up.
     assert!(
-        agg_branches(dir).iter().any(|b| !b.contains("/orphaned-") && b.ends_with("session-1")),
+        rlt_branches(dir).iter().any(|b| !b.contains("/orphaned-") && b.ends_with("session-1")),
         "run 2 cut its own session-1: {:?}",
-        agg_branches(dir)
+        rlt_branches(dir)
     );
 }
 
@@ -584,26 +584,26 @@ fn a_crashed_head_on_a_session_branch_never_becomes_the_base() {
     let tmp = project();
     let dir = tmp.path();
     {
-        let agg = Agg::open(dir).unwrap();
-        agg.step(&work()).unwrap();
+        let rlt = Relentless::open(dir).unwrap();
+        rlt.step(&work()).unwrap();
     }
     let head = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
     assert_eq!(head, "main", "a run that ends normally goes back to its base");
     // a crash skips the drop: HEAD stays on the session branch
-    let span = agg_branches(dir).into_iter().find(|b| b.ends_with("session-1")).unwrap();
+    let span = rlt_branches(dir).into_iter().find(|b| b.ends_with("session-1")).unwrap();
     git(dir, &["checkout", "-q", &span]);
 
-    let agg = Agg::open(dir).unwrap();
-    agg.step(&work()).unwrap();
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    let rlt = Relentless::open(dir).unwrap();
+    rlt.step(&work()).unwrap();
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
 
     assert_eq!(
-        agg::state::DashboardState::read(dir).unwrap().iso_base,
+        relentless::state::DashboardState::read(dir).unwrap().iso_base,
         "main",
         "the base is the RECORDED one, never the dead session branch"
     );
     assert_eq!(work_landed_on_main(dir), 1, "run 2's session landed on `main` — the gate merged there");
-    let parked: Vec<String> = agg_branches(dir).into_iter().filter(|b| b.contains("/orphaned-")).collect();
+    let parked: Vec<String> = rlt_branches(dir).into_iter().filter(|b| b.contains("/orphaned-")).collect();
     assert_eq!(parked.len(), 1, "run 1's dead span is parked, not merged: {parked:?}");
 }
 
@@ -617,18 +617,18 @@ fn a_crashed_head_on_a_session_branch_never_becomes_the_base() {
 fn a_run_that_never_gates_names_the_branch_and_the_merge_that_lands_it() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
     for _ in 0..3 {
-        agg.step(&work()).unwrap();
+        rlt.step(&work()).unwrap();
     }
-    let tip = agg_branches(dir).into_iter().find(|b| b.ends_with("session-3")).unwrap();
+    let tip = rlt_branches(dir).into_iter().find(|b| b.ends_with("session-3")).unwrap();
 
-    // the sentence agg is about to print, taken from the run's OWN git state.
+    // the sentence rlt is about to print, taken from the run's OWN git state.
     assert_eq!(
-        agg.ungated_span().expect("three sessions staged, no gate"),
+        rlt.ungated_span().expect("three sessions staged, no gate"),
         format!("⚠ 3 session(s) staged on {tip}, never gated — main is unchanged.\n  Merge with: git merge {tip}")
     );
-    drop(agg);
+    drop(rlt);
 
     assert_eq!(work_landed_on_main(dir), 0, "`main` really is unchanged");
     assert_eq!(work_on(dir, &tip), 3, "…and all three sessions really are on the branch it named");
@@ -636,11 +636,11 @@ fn a_run_that_never_gates_names_the_branch_and_the_merge_that_lands_it() {
 
 /// ⛔ THE RESUME PATH SAVES A DIRTY TREE ASIDE AND RESETS IT; A FRESH START STILL REFUSES.
 ///
-/// A power cut mid-worker leaves uncommitted tracked changes by construction — agg commits a session's
+/// A power cut mid-worker leaves uncommitted tracked changes by construction — rlt commits a session's
 /// work only after it ends — so a resume that refused to start would make the flagship resume scenario
 /// the one scenario that cannot start. Both directions, because the refusal is the moat for everyone
 /// who is NOT resuming: a dirty tree there means the operator's own uncommitted work. And the edit is
-/// not thrown away (A-18.3): it is on a `refs/agg/partial/…` ref, never judged.
+/// not thrown away (A-18.3): it is on a `refs/rlt/partial/…` ref, never judged.
 #[test]
 fn a_dirty_tree_refuses_a_fresh_start_and_is_set_aside_on_a_resume() {
     let tmp = project();
@@ -652,20 +652,20 @@ fn a_dirty_tree_refuses_a_fresh_start_and_is_set_aside_on_a_resume() {
     let dirty = || std::fs::write(dir.join("seed.txt"), "a crashed worker's half-finished edit\n").unwrap();
 
     dirty();
-    let refused = Agg::open(dir).unwrap().step(&work()).expect_err("a fresh start must refuse a dirty tree");
+    let refused = Relentless::open(dir).unwrap().step(&work()).expect_err("a fresh start must refuse a dirty tree");
     assert!(format!("{refused}").contains("uncommitted tracked changes"), "got {refused:?}");
     assert_eq!(std::fs::read_to_string(dir.join("seed.txt")).unwrap(), "a crashed worker's half-finished edit\n");
 
     dirty();
-    let agg = Agg::open_with(dir, Opts { resume: true }).unwrap();
-    agg.step(&work()).expect("a resume starts, and says loudly what it discarded");
+    let rlt = Relentless::open_with(dir, Opts { resume: true }).unwrap();
+    rlt.step(&work()).expect("a resume starts, and says loudly what it discarded");
     assert_eq!(
         std::fs::read_to_string(dir.join("seed.txt")).unwrap(),
         "committed\n",
         "the dead session's edit was reset, not carried into the new run's baseline"
     );
     let refs = std::process::Command::new("git")
-        .args(["for-each-ref", "--format=%(refname)", "refs/agg/partial/"])
+        .args(["for-each-ref", "--format=%(refname)", "refs/rlt/partial/"])
         .current_dir(dir)
         .output_bounded()
         .unwrap();
@@ -683,12 +683,12 @@ fn a_dirty_tree_refuses_a_fresh_start_and_is_set_aside_on_a_resume() {
 /// time the sample ran for more than one cycle: its `<name>.runs` marker lands in the project dir,
 /// the worker's `git add -A` commits it on the NEXT session, and the judge's next append then leaves
 /// a DIRTY TRACKED file — which is enough to make `gate()`'s `git checkout <base>` refuse, so the
-/// gate returns `Failed(CheckoutFailed)` and the span stays open. agg is being loud and correct
+/// gate returns `Failed(CheckoutFailed)` and the span stays open. rlt is being loud and correct
 /// there (it will not clobber a local change it did not make), but the consequence is worth knowing:
 /// **a judge that scribbles into a tracked path can wedge a span.** Real projects gitignore judge
 /// scratch output; this one simply produces none.
 fn quiet_judge(dir: &Path, name: &str, met: bool) -> Judge {
-    let rel = format!("agg/judges/{name}.sh");
+    let rel = format!("rlt/judges/{name}.sh");
     let p = dir.join(&rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(&p, format!("#!/bin/sh\nprintf '%s\\n' '{{\"met\":{met}}}'\n")).unwrap();
@@ -699,7 +699,7 @@ fn quiet_judge(dir: &Path, name: &str, met: bool) -> Judge {
 /// `examples/workflow.rs`, cut to its skeleton: one cycle is
 /// **survey (bounded retry) → implement → `&&`-gated lazy judges → `gate()`**.
 ///
-/// This is a REAL driver, not a test body: `&Agg` in, `Result<_, Fatal>` out, `?` on every spending
+/// This is a REAL driver, not a test body: `&Relentless` in, `Result<_, Fatal>` out, `?` on every spending
 /// call — the shape a compiled driver's `main` has. `check` and `gate` are the two lines whose
 /// ABSENCE is the interesting case (`check_limits()` is opt-in; a driver that never gates must be
 /// told its work is stranded), so the three tests below differ by those flags and nothing else.
@@ -710,7 +710,7 @@ fn quiet_judge(dir: &Path, name: &str, met: bool) -> Judge {
 /// jail — the `#[ignore]`d isolation tests own that). Everything else is the sample's own flow.
 ///
 /// Returns how many cycles closed a span.
-fn sample_driver(agg: &Agg, dir: &Path, cycles: u64, check: bool, gate: bool) -> Result<usize, Fatal> {
+fn sample_driver(rlt: &Relentless, dir: &Path, cycles: u64, check: bool, gate: bool) -> Result<usize, Fatal> {
     // Two scripts and one native cover every judge dispatch arm reachable without a model.
     let builds = quiet_judge(dir, "builds", true);
     let tests = quiet_judge(dir, "tests_pass", true);
@@ -723,34 +723,34 @@ fn sample_driver(agg: &Agg, dir: &Path, cycles: u64, check: bool, gate: bool) ->
     // The sample's template family, minus the tier. ⚠ NO `.readonly()` either: it binds to nothing
     // under `Isolation::None`, and a sample that relied on that would be teaching the lie.
     let harness = Step::template().agent(Agent::Claude).model("fake").effort(Effort::High);
-    let survey = harness.create("survey").prompt("Survey the approaches. Write agg/state/wiki/survey.md.");
+    let survey = harness.create("survey").prompt("Survey the approaches. Write rlt/state/wiki/survey.md.");
     let implement = harness.create("implement").prompt("Implement the spec. Add tests alongside.");
 
-    let cycle = agg.pos("cycle", cycles);
+    let cycle = rlt.pos("cycle", cycles);
     let mut gated = 0usize;
     for c in 0..cycles {
         cycle.update(c);
         // THE CEILINGS, ENFORCED WHERE THIS DRIVER SAYS. Never called ⇒ never enforced.
         if check {
-            agg.check_limits()?;
+            rlt.check_limits()?;
         }
 
         // ── DISCOVER — the sample's bounded attempt loop, and its nested `pos` frame ──
-        let attempt = agg.pos("attempt", 2);
+        let attempt = rlt.pos("attempt", 2);
         for a in 0..2 {
             attempt.update(a);
-            agg.step(&survey)?;
-            assert_eq!(agg.label_path(), format!("cycle {c}/{cycles} › attempt {a}/2"));
-            if agg.judge(&builds).met() {
+            rlt.step(&survey)?;
+            assert_eq!(rlt.label_path(), format!("cycle {c}/{cycles} › attempt {a}/2"));
+            if rlt.judge(&builds).met() {
                 break;
             }
-            agg.info("survey still thin — trying a different angle");
+            rlt.info("survey still thin — trying a different angle");
         }
         drop(attempt);
 
         // ── BUILD ──
-        let r = agg.step(&implement)?;
-        agg.log(&format!("implement: {} tokens, landed={:?}", r.tokens, r.landed));
+        let r = rlt.step(&implement)?;
+        rlt.log(&format!("implement: {} tokens, landed={:?}", r.tokens, r.landed));
         assert_eq!(r.landed, Landing::Span, "step() STAGES; only gate() lands anything");
         assert_eq!(
             work_landed_on_main(dir),
@@ -759,14 +759,14 @@ fn sample_driver(agg: &Agg, dir: &Path, cycles: u64, check: bool, gate: bool) ->
         );
 
         // ── HARDEN — `&&` short-circuits, and it is the only judge gating in the design ──
-        if !(agg.judge(&tests).met() && agg.judge(&load).met() && agg.judge(&worked).met()) {
-            agg.ask("performance gate failed — ship anyway, or keep tuning?");
+        if !(rlt.judge(&tests).met() && rlt.judge(&load).met() && rlt.judge(&worked).met()) {
+            rlt.ask("performance gate failed — ship anyway, or keep tuning?");
             continue;
         }
 
         // ── SHIP ──
         if gate {
-            assert_eq!(agg.gate()?, GateOutcome::Kept);
+            assert_eq!(rlt.gate()?, GateOutcome::Kept);
             gated += 1;
         }
     }
@@ -781,47 +781,47 @@ fn sample_driver(agg: &Agg, dir: &Path, cycles: u64, check: bool, gate: bool) ->
 fn the_sample_drivers_cycle_runs_end_to_end_and_lands_every_span() {
     let tmp = project();
     let dir = tmp.path();
-    // the `agg/` scaffold a real driver project has. `instructions()` only POINTS at this file —
-    // agg never reads its bytes — so its content is irrelevant and its existence is not.
-    std::fs::create_dir_all(dir.join("agg")).unwrap();
-    std::fs::write(dir.join("agg/AGG.md"), "# house rules\n").unwrap();
+    // the `rlt/` scaffold a real driver project has. `instructions()` only POINTS at this file —
+    // rlt never reads its bytes — so its content is irrelevant and its existence is not.
+    std::fs::create_dir_all(dir.join("rlt")).unwrap();
+    std::fs::write(dir.join("rlt/RLT.md"), "# house rules\n").unwrap();
 
-    let agg = Agg::open(dir)
+    let rlt = Relentless::open(dir)
         .unwrap()
         .limits(Limits { tokens: Some(40_000_000), cost: None, sessions: Some(400), wall_time: Some(43200.0), work_time: None })
         .on_regression(OnRegression::Annotate)
-        .instructions("agg/AGG.md");
+        .instructions("rlt/RLT.md");
 
-    assert_eq!(sample_driver(&agg, dir, 2, true, true).unwrap(), 2, "both cycles closed their span");
+    assert_eq!(sample_driver(&rlt, dir, 2, true, true).unwrap(), 2, "both cycles closed their span");
 
     // sessions really ran, and the loop published itself as it went.
-    assert_eq!(agg.sessions(), 4, "two cycles × (one survey + one implement)");
-    assert!(agg::paths::state_json(dir).exists(), "the dashboard snapshot is published");
-    assert!(agg.summary().contains("session"), "`agg status` renders this run:\n{}", agg.summary());
-    assert!(agg::paths::run_pid(dir).exists(), "the double-run guard is armed while the run is live");
+    assert_eq!(rlt.sessions(), 4, "two cycles × (one survey + one implement)");
+    assert!(relentless::paths::state_json(dir).exists(), "the dashboard snapshot is published");
+    assert!(rlt.summary().contains("session"), "`rlt status` renders this run:\n{}", rlt.summary());
+    assert!(relentless::paths::run_pid(dir).exists(), "the double-run guard is armed while the run is live");
 
     // the work LANDED — all of it — and no span is left open.
     assert_eq!(work_landed_on_main(dir), 4, "every gated session is on `main`");
-    assert!(agg_branches(dir).is_empty(), "every span branch is gone: {:?}", agg_branches(dir));
-    assert!(agg.ungated_span().is_none(), "nothing is stranded — both spans were gated");
+    assert!(rlt_branches(dir).is_empty(), "every span branch is gone: {:?}", rlt_branches(dir));
+    assert!(rlt.ungated_span().is_none(), "nothing is stranded — both spans were gated");
 
     // ⚠ ONE `verdicts.jsonl` ROW PER GATE, never per step — `verdicts::append` is the gate's call.
     // Both gates kept, so both rows say `merged`, which is what `landed_met` reads back next run.
-    let rows = agg::core::verdicts::rows_for(dir, "tests_pass", false);
+    let rows = relentless::core::verdicts::rows_for(dir, "tests_pass", false);
     assert_eq!(rows.len(), 2, "one row per gate, not one per step: {rows:?}");
-    assert!(rows.iter().all(|r| r.met && r.outcome == agg::core::verdicts::Outcome::Merged), "{rows:?}");
+    assert!(rows.iter().all(|r| r.met && r.outcome == relentless::core::verdicts::Outcome::Merged), "{rows:?}");
     // the NATIVE judge is in there too: a closure in the driver's own binary reaches the same
     // durable ledger a script judge does.
-    assert_eq!(agg::core::verdicts::rows_for(dir, "worked", true).len(), 2);
+    assert_eq!(relentless::core::verdicts::rows_for(dir, "worked", true).len(), 2);
     // …and a judge the driver never asked for appears in NO row. Laziness is visible from the ledger.
-    assert!(agg::core::verdicts::rows_for(dir, "spec_sound", false).is_empty());
+    assert!(relentless::core::verdicts::rows_for(dir, "spec_sound", false).is_empty());
 
     // THE SNAPSHOT CARRIES THEM TOO, not just the ledger. Charging spend was once the whole of
     // `run_judge`, and `publish()` rebuilt `dash.judges` from an engine that a driver leaves empty —
     // so the TUI showed `(no judges in snapshot)`, the web BFF served `judges: []` and Progress read
     // `0/0 · 0%`, all while the rows above were being written. Read from the FILE, not the facade.
     let snap: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(agg::paths::state_json(dir)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(relentless::paths::state_json(dir)).unwrap()).unwrap();
     let names: Vec<&str> =
         snap["judges"].as_array().expect("state.json carries a judges array").iter().map(|j| j["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"tests_pass"), "a SCRIPT judge reaches the readers: {names:?}");
@@ -831,14 +831,14 @@ fn the_sample_drivers_cycle_runs_end_to_end_and_lands_every_span() {
     // driver actually ASKED rather than reporting a vacuous zero that reads as "nothing to do".
     assert_eq!(snap["goals_total"].as_u64().unwrap() as usize, names.len(), "{snap:#}");
 
-    drop(agg);
-    assert!(!agg::paths::run_pid(dir).exists(), "…and released when the run ends");
+    drop(rlt);
+    assert!(!relentless::paths::run_pid(dir).exists(), "…and released when the run ends");
 
     // HOW THE LEDGER SAYS IT ENDED. `driver-returned`, never `goals-met`: a driver declares no DoD —
-    // it decides it is done by RETURNING — so "goals met" printed beside `0/0` in `agg history` read
+    // it decides it is done by RETURNING — so "goals met" printed beside `0/0` in `rlt history` read
     // as a claim about goals rather than as the absence of any. Both are exit 0; only the word differs.
     let proj: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(agg::paths::project_json(dir)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(relentless::paths::project_json(dir)).unwrap()).unwrap();
     let last = proj["runs"].as_array().unwrap().last().unwrap();
     assert_eq!(last["end_reason"].as_str().unwrap(), "driver-returned", "{last:#}");
     assert!(last["goals_total"].as_u64().unwrap() > 0, "…and the tally is the judges it ASKED: {last:#}");
@@ -853,13 +853,13 @@ fn the_sample_drivers_cycle_runs_end_to_end_and_lands_every_span() {
 fn the_sample_driver_without_its_gate_strands_the_span_and_says_so() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
 
-    assert_eq!(sample_driver(&agg, dir, 2, true, false).unwrap(), 0, "no cycle closed a span");
+    assert_eq!(sample_driver(&rlt, dir, 2, true, false).unwrap(), 0, "no cycle closed a span");
 
-    let tip = agg_branches(dir).into_iter().find(|b| b.ends_with("session-4")).expect("the span tip");
+    let tip = rlt_branches(dir).into_iter().find(|b| b.ends_with("session-4")).expect("the span tip");
     assert_eq!(
-        agg.ungated_span().expect("four sessions staged, never gated"),
+        rlt.ungated_span().expect("four sessions staged, never gated"),
         format!("⚠ 4 session(s) staged on {tip}, never gated — main is unchanged.\n  Merge with: git merge {tip}")
     );
     assert_eq!(work_landed_on_main(dir), 0, "`main` really is unchanged");
@@ -872,18 +872,18 @@ fn the_sample_driver_without_its_gate_strands_the_span_and_says_so() {
 fn the_sample_drivers_ceiling_binds_only_because_the_cycle_checks_it() {
     // (a) the line is there: `limits.sessions: 2` ends the run at the top of cycle 2.
     let tmp = project();
-    let agg = Agg::open(tmp.path()).unwrap().limits(Limits { sessions: Some(2), ..Limits::default() });
-    let stopped = sample_driver(&agg, tmp.path(), 2, true, true).expect_err("cycle 2 is over the ceiling");
+    let rlt = Relentless::open(tmp.path()).unwrap().limits(Limits { sessions: Some(2), ..Limits::default() });
+    let stopped = sample_driver(&rlt, tmp.path(), 2, true, true).expect_err("cycle 2 is over the ceiling");
     assert!(matches!(stopped, Fatal::Ended(RunOutcome::MaxSessions)), "got {stopped:?}");
-    assert_eq!(agg.sessions(), 2, "it landed BEFORE cycle 2 spent anything");
+    assert_eq!(rlt.sessions(), 2, "it landed BEFORE cycle 2 spent anything");
     assert_eq!(work_landed_on_main(tmp.path()), 2, "…and cycle 1's gated work is still on `main`");
 
     // (b) the line is gone: the identical ceiling never binds.
     let tmp = project();
-    let agg = Agg::open(tmp.path()).unwrap().limits(Limits { sessions: Some(2), ..Limits::default() });
-    assert_eq!(sample_driver(&agg, tmp.path(), 2, false, true).unwrap(), 2, "both cycles ran to their gate");
-    assert_eq!(agg.sessions(), 4, "a driver that never checks has no ceilings");
-    assert_eq!(agg.ended(), None);
+    let rlt = Relentless::open(tmp.path()).unwrap().limits(Limits { sessions: Some(2), ..Limits::default() });
+    assert_eq!(sample_driver(&rlt, tmp.path(), 2, false, true).unwrap(), 2, "both cycles ran to their gate");
+    assert_eq!(rlt.sessions(), 4, "a driver that never checks has no ceilings");
+    assert_eq!(rlt.ended(), None);
 }
 
 /// `pos` is RAII and removes ITS OWN frame — never the top one. A non-LIFO drop is legal Rust
@@ -891,40 +891,40 @@ fn the_sample_drivers_ceiling_binds_only_because_the_cycle_checks_it() {
 #[test]
 fn a_pos_frame_is_removed_by_id_not_by_popping() {
     let tmp = project();
-    let agg = Agg::open(tmp.path()).unwrap();
+    let rlt = Relentless::open(tmp.path()).unwrap();
 
-    let outer = agg.pos("cycle", 20);
-    let inner = agg.pos("attempt", 3);
+    let outer = rlt.pos("cycle", 20);
+    let inner = rlt.pos("attempt", 3);
     outer.update(7);
     inner.update(2);
-    assert_eq!(agg.label_path(), "cycle 7/20 › attempt 2/3");
+    assert_eq!(rlt.label_path(), "cycle 7/20 › attempt 2/3");
 
     drop(outer); // NOT the top of the stack
-    assert_eq!(agg.label_path(), "attempt 2/3", "the wrong frame would have been popped");
+    assert_eq!(rlt.label_path(), "attempt 2/3", "the wrong frame would have been popped");
     drop(inner);
-    assert_eq!(agg.label_path(), "");
+    assert_eq!(rlt.label_path(), "");
 }
 
 /// …AND THE BREADCRUMB REACHES A READER. `label_path()` used to have zero callers in the entire tree
-/// and `state.json` had no `pos` key, so `agg.pos("cycle", 20)` recorded frames that nothing on earth
+/// and `state.json` had no `pos` key, so `rlt.pos("cycle", 20)` recorded frames that nothing on earth
 /// could observe — the sample documented it as "this is how `cycle 7/20` reaches the TUI" and it
 /// reached nothing. Asserted from the published FILE, because that is the only thing the TUI, the
-/// web BFF and `agg status` actually read.
+/// web BFF and `rlt status` actually read.
 #[test]
 fn the_pos_breadcrumb_is_published_where_the_readers_look() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { tokens: None, cost: None, sessions: Some(9), wall_time: None, work_time: None });
+    let rlt = Relentless::open(dir).unwrap().limits(Limits { tokens: None, cost: None, sessions: Some(9), wall_time: None, work_time: None });
 
-    let cycle = agg.pos("cycle", 4);
+    let cycle = rlt.pos("cycle", 4);
     cycle.update(2);
-    let attempt = agg.pos("attempt", 3);
+    let attempt = rlt.pos("attempt", 3);
     attempt.update(1);
-    // a real step: `Agg` boots LAZILY, so nothing is published at all until work happens.
-    agg.step(&Step::new("worker").prompt("work")).unwrap();
+    // a real step: `Relentless` boots LAZILY, so nothing is published at all until work happens.
+    rlt.step(&Step::new("worker").prompt("work")).unwrap();
 
     let snap: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(agg::paths::state_json(dir)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(relentless::paths::state_json(dir)).unwrap()).unwrap();
     assert_eq!(snap["pos"].as_str().unwrap(), "cycle 2/4 › attempt 1/3", "{snap:#}");
 }
 
@@ -939,7 +939,7 @@ fn the_pos_breadcrumb_is_published_where_the_readers_look() {
 /// The count would read 0 for a reason that has nothing to do with fast-forwarding, which is exactly
 /// the kind of false green this test exists to avoid.
 fn resume_marker_judge(dir: &Path, name: &str, tally: &Path) -> Judge {
-    let rel = format!("agg/judges/{name}.sh");
+    let rel = format!("rlt/judges/{name}.sh");
     let p = dir.join(&rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(
@@ -969,19 +969,19 @@ fn a_resumed_driver_fast_forwards_recorded_calls_and_re_executes_the_rest() {
     let tmp = project();
     let dir = tmp.path();
     let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_time: None, work_time: None };
-    let tally = std::env::temp_dir().join(format!("agg-resume-tally-{}", std::process::id()));
+    let tally = std::env::temp_dir().join(format!("rlt-resume-tally-{}", std::process::id()));
     let _ = std::fs::remove_file(&tally);
 
     // ── RUN 1: step, judge, gate(Kept), step ── the last step lands AFTER the kept gate, so OD-12
     //    must drop it: its work is parked on a per-run span branch the ledger cannot carry.
     let sessions_run1 = {
-        let agg = Agg::open(dir).unwrap().limits(lim());
+        let rlt = Relentless::open(dir).unwrap().limits(lim());
         let j = resume_marker_judge(dir, "checked", &tally);
-        agg.step(&work()).unwrap();
-        assert!(agg.judge(&j).met());
-        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
-        agg.step(&work()).unwrap(); // ← after the boundary
-        agg.sessions()
+        rlt.step(&work()).unwrap();
+        assert!(rlt.judge(&j).met());
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
+        rlt.step(&work()).unwrap(); // ← after the boundary
+        rlt.sessions()
     };
     assert_eq!(sessions_run1, 2, "two real worker sessions ran");
     assert_eq!(tally_of(&tally), 1, "the judge ran once, for real");
@@ -990,31 +990,31 @@ fn a_resumed_driver_fast_forwards_recorded_calls_and_re_executes_the_rest() {
 
     // ── RUN 2: the SAME flow, resumed.
     {
-        let agg = Agg::open_with(dir, Opts { resume: true }).unwrap().limits(lim());
+        let rlt = Relentless::open_with(dir, Opts { resume: true }).unwrap().limits(lim());
         let j = resume_marker_judge(dir, "checked", &tally);
 
         // ord 0 — recorded: no worker launches, and the session counter is RESTORED rather than
         // restarted. A resume that reset it would hand `over_iterations` the whole budget again.
-        agg.step(&work()).unwrap();
-        assert_eq!(agg.sessions(), 1, "the recorded step restored its counter, it did not re-run");
+        rlt.step(&work()).unwrap();
+        assert_eq!(rlt.sessions(), 1, "the recorded step restored its counter, it did not re-run");
 
         // ord 1 — recorded: the judge is answered from the ledger, so its marker does NOT grow.
-        assert!(agg.judge(&j).met());
+        assert!(rlt.judge(&j).met());
         assert_eq!(tally_of(&tally), 1, "a fast-forwarded judge must not EXECUTE");
 
         // …and asking a SECOND time in the same step still costs nothing and, crucially, consumes no
         // second ordinal — memoization and the ledger have to agree on what counts as one call.
-        assert!(agg.judge(&j).met());
+        assert!(rlt.judge(&j).met());
         assert_eq!(tally_of(&tally), 1);
 
         // ord 2 — recorded: the gate returns its recorded outcome WITHOUT performing the merge
         // again. Re-running it would merge against a base that already has it.
-        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
 
         // ord 3 — the ledger is exhausted here: the post-gate step was truncated by OD-12, so this
         // is REAL work again, and the counter continues from the restored value.
-        agg.step(&work()).unwrap();
-        assert_eq!(agg.sessions(), 2, "the truncated step re-executed");
+        rlt.step(&work()).unwrap();
+        assert_eq!(rlt.sessions(), 2, "the truncated step re-executed");
     }
 
     // main is unchanged by the replay: the recorded gate did not merge a second time.
@@ -1032,27 +1032,27 @@ fn a_non_resume_run_starts_from_an_empty_ledger() {
     let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_time: None, work_time: None };
 
     {
-        let agg = Agg::open(dir).unwrap().limits(lim());
+        let rlt = Relentless::open(dir).unwrap().limits(lim());
         let j = marker_judge(dir, "fresh", true);
-        agg.step(&work()).unwrap();
-        assert!(agg.judge(&j).met());
-        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+        rlt.step(&work()).unwrap();
+        assert!(rlt.judge(&j).met());
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     }
     assert_eq!(runs(dir, "fresh"), 1);
 
     {
-        let agg = Agg::open(dir).unwrap().limits(lim()); // NOT a resume
+        let rlt = Relentless::open(dir).unwrap().limits(lim()); // NOT a resume
         let j = marker_judge(dir, "fresh", true);
-        agg.step(&work()).unwrap();
-        assert!(agg.judge(&j).met());
-        assert_eq!(agg.sessions(), 1, "a fresh run counts its OWN sessions from zero");
+        rlt.step(&work()).unwrap();
+        assert!(rlt.judge(&j).met());
+        assert_eq!(rlt.sessions(), 1, "a fresh run counts its OWN sessions from zero");
     }
     assert_eq!(runs(dir, "fresh"), 2, "the judge really ran again — nothing was fast-forwarded");
 }
 
 /// A RESUME WHOSE DRIVER HAS CHANGED IS A HARD ERROR, NEVER A WRONG ANSWER.
 ///
-/// Ordinals alone would happily answer `agg.judge(&security)` with a recorded `agg.judge(&lint)`
+/// Ordinals alone would happily answer `rlt.judge(&security)` with a recorded `rlt.judge(&lint)`
 /// verdict, and the run would proceed on a fabricated result. The label path plus the call's own
 /// name is the consistency check that makes that impossible.
 #[test]
@@ -1062,24 +1062,24 @@ fn a_resume_that_diverges_from_the_ledger_refuses_to_guess() {
     let lim = || Limits { tokens: None, cost: None, sessions: Some(50), wall_time: None, work_time: None };
 
     {
-        let agg = Agg::open(dir).unwrap().limits(lim());
+        let rlt = Relentless::open(dir).unwrap().limits(lim());
         let a = marker_judge(dir, "alpha", true);
-        agg.step(&work()).unwrap();
-        assert!(agg.judge(&a).met());
-        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+        rlt.step(&work()).unwrap();
+        assert!(rlt.judge(&a).met());
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     }
 
     // the resumed driver asks for a DIFFERENT judge at the same ordinal.
-    let agg = Agg::open_with(dir, Opts { resume: true }).unwrap().limits(lim());
+    let rlt = Relentless::open_with(dir, Opts { resume: true }).unwrap().limits(lim());
     let b = marker_judge(dir, "beta", true);
-    agg.step(&work()).unwrap();
-    let v = agg.judge(&b);
+    rlt.step(&work()).unwrap();
+    let v = rlt.judge(&b);
     assert!(!v.met(), "a divergent resume must not report a fabricated met");
     assert!(v.rationale().contains("DIVERGED"), "…and must say so plainly: {}", v.rationale());
     assert_eq!(runs(dir, "beta"), 0, "…without running the judge it could not answer");
 }
 
-/// `Agg::open` IS INERT — it must not touch the call ledger.
+/// `Relentless::open` IS INERT — it must not touch the call ledger.
 ///
 /// Deciding the ledger means WRITING it: a resume truncates it, a fresh run clears it. That decision
 /// therefore has to sit behind the double-run guard, and it did not — `open()` cleared the file
@@ -1088,7 +1088,7 @@ fn a_resume_that_diverges_from_the_ledger_refuses_to_guess() {
 /// rejected, and the running driver would keep appending from its current ordinal into a file whose
 /// earlier records were gone. A later resume would then answer call 0 with the record of call 11.
 ///
-/// ⚠ The guard itself compares PIDs, so it cannot fire between two `Agg`s in one process and the
+/// ⚠ The guard itself compares PIDs, so it cannot fire between two `Relentless`s in one process and the
 /// two-process race is not reachable from a unit test. What IS reachable is the property that fixes
 /// it, and it is the sharper one anyway: **opening writes nothing.**
 #[test]
@@ -1096,20 +1096,20 @@ fn opening_a_driver_does_not_touch_the_call_ledger() {
     let tmp = project();
     let dir = tmp.path();
 
-    let a = Agg::open(dir).unwrap();
+    let a = Relentless::open(dir).unwrap();
     a.step(&work()).unwrap();
     assert_eq!(a.gate().unwrap(), GateOutcome::Kept);
-    let ledger = agg::paths::calls_jsonl(dir);
+    let ledger = relentless::paths::calls_jsonl(dir);
     let before = std::fs::read_to_string(&ledger).unwrap();
     assert!(before.lines().count() >= 2, "the live run recorded its step and its gate: {before}");
 
     // merely opening a second handle on the same project must change nothing on disk.
-    let _b = Agg::open(dir).unwrap();
+    let _b = Relentless::open(dir).unwrap();
     let after = std::fs::read_to_string(&ledger).unwrap();
     assert_eq!(after, before, "`open()` truncated a live ledger:\n--- before\n{before}\n--- after\n{after}");
 
     // …and the same for a RESUME handle, whose truncate is the more destructive of the two.
-    let _c = Agg::open_with(dir, Opts { resume: true }).unwrap();
+    let _c = Relentless::open_with(dir, Opts { resume: true }).unwrap();
     assert_eq!(std::fs::read_to_string(&ledger).unwrap(), before, "a resume `open()` truncated a live ledger");
 }
 
@@ -1117,8 +1117,8 @@ fn opening_a_driver_does_not_touch_the_call_ledger() {
 ///
 /// `cfg.run_isolation()` reads `cfg.steps`, which a DRIVER never populates — its steps are values in
 /// its own binary. So the run tier resolved to `None` on this path and every judge ran unconfined,
-/// which is precisely the escape §2.5 exists to close: a confined worker rewrites `agg/judges/*.sh`
-/// in its writable cwd and agg then executes it with no jail at all.
+/// which is precisely the escape §2.5 exists to close: a confined worker rewrites `rlt/judges/*.sh`
+/// in its writable cwd and rlt then executes it with no jail at all.
 ///
 /// Real kernel, so `#[ignore]`d like its siblings:
 /// `cargo test --test driver_api -- --ignored a_drivers_judges_are_confined --nocapture`
@@ -1127,14 +1127,14 @@ fn opening_a_driver_does_not_touch_the_call_ledger() {
 fn a_drivers_judges_are_confined_when_a_step_declared_a_tier() {
     let tmp = project();
     let dir = tmp.path();
-    assert!(agg::isolation::available(), "no OS sandbox on this host — cannot prove confinement");
+    assert!(relentless::isolation::available(), "no OS sandbox on this host — cannot prove confinement");
 
     // the judge tries to write OUTSIDE the project. Confined, that is EPERM; unconfined it succeeds.
     // ⚠ NOT under $TMPDIR — the jail GRANTS cwd + $TMPDIR + /tmp, so a write there proves nothing.
     // The repo's own target/ is outside all three, which is what the sibling kernel tests use.
-    let escape = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/agg-driver-judge-escape.txt");
+    let escape = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/rlt-driver-judge-escape.txt");
     let _ = std::fs::remove_file(&escape);
-    let rel = "agg/judges/escaper.sh";
+    let rel = "rlt/judges/escaper.sh";
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(
@@ -1144,10 +1144,10 @@ fn a_drivers_judges_are_confined_when_a_step_declared_a_tier() {
     .unwrap();
     chmod_x(&p);
 
-    let agg = Agg::open(dir).unwrap();
+    let rlt = Relentless::open(dir).unwrap();
     // a SANDBOXED step — the driver's declaration of the tier this run works at.
-    agg.step(&Step::new("implement").model("fake").isolation(Isolation::Sandbox).prompt("go")).unwrap();
-    assert!(agg.judge(&Judge::script("escaper", rel)).met(), "the judge still runs and returns its verdict");
+    rlt.step(&Step::new("implement").model("fake").isolation(Isolation::Sandbox).prompt("go")).unwrap();
+    assert!(rlt.judge(&Judge::script("escaper", rel)).met(), "the judge still runs and returns its verdict");
 
     let escaped = escape.exists();
     let _ = std::fs::remove_file(&escape);
@@ -1175,16 +1175,16 @@ fn answer_from_outside(dir: &Path, want_case: &str, value: &str) -> std::thread:
         let id = a.id.clone();
         assert_eq!(
             match a.case {
-                agg::core::asks::AskCase::Bool => "bool",
-                agg::core::asks::AskCase::Choose => "choose",
-                agg::core::asks::AskCase::Input => "input",
+                relentless::core::asks::AskCase::Bool => "bool",
+                relentless::core::asks::AskCase::Choose => "choose",
+                relentless::core::asks::AskCase::Input => "input",
             },
             want_case
         );
-        // Straight to the ledger, which is what `agg answer` and `POST /api/answer` both
+        // Straight to the ledger, which is what `rlt answer` and `POST /api/answer` both
         // do. An answer is a durable fact, not a bus message — the driver's wait loop polls
         // the ledger, so there is nothing for a queue to carry.
-        agg::core::asks::answer(&dir, &id, &value, "test", agg::util::now_epoch()).unwrap();
+        relentless::core::asks::answer(&dir, &id, &value, "test", relentless::util::now_epoch()).unwrap();
         id
     })
 }
@@ -1194,25 +1194,25 @@ fn answer_from_outside(dir: &Path, want_case: &str, value: &str) -> std::thread:
 #[test]
 fn a_hil_call_blocks_until_an_answer_arrives_on_the_bus_and_returns_it() {
     let tmp = project();
-    let agg = Agg::open(tmp.path()).unwrap();
+    let rlt = Relentless::open(tmp.path()).unwrap();
 
     let h = answer_from_outside(tmp.path(), "bool", "yes");
-    assert!(agg.hil_bool("ship it?").unwrap(), "an answered `yes` is a true");
+    assert!(rlt.hil_bool("ship it?").unwrap(), "an answered `yes` is a true");
     let id = h.join().unwrap();
 
     // The ledger is the audit trail: who was asked what, and what came back.
-    let a = agg::core::asks::get(tmp.path(), &id).unwrap();
+    let a = relentless::core::asks::get(tmp.path(), &id).unwrap();
     assert_eq!(a.question, "ship it?");
     assert_eq!(a.answer.as_deref(), Some("yes"));
     assert_eq!(a.by.as_deref(), Some("test"), "the answerer is recorded, not just the answer");
     assert!(!a.is_open(), "an answered ask stops being open");
 
     let h = answer_from_outside(tmp.path(), "choose", "sqlite");
-    assert_eq!(agg.hil_choose("which store?", &["postgres", "sqlite"]).unwrap(), 1);
+    assert_eq!(rlt.hil_choose("which store?", &["postgres", "sqlite"]).unwrap(), 1);
     h.join().unwrap();
 
     let h = answer_from_outside(tmp.path(), "input", "db-prod-eu1");
-    assert_eq!(agg.hil_input("which instance?").unwrap(), "db-prod-eu1");
+    assert_eq!(rlt.hil_input("which instance?").unwrap(), "db-prod-eu1");
     h.join().unwrap();
 }
 
@@ -1220,25 +1220,25 @@ fn a_hil_call_blocks_until_an_answer_arrives_on_the_bus_and_returns_it() {
 #[test]
 fn a_denial_returns_false_rather_than_failing_the_run() {
     let tmp = project();
-    let agg = Agg::open(tmp.path()).unwrap();
+    let rlt = Relentless::open(tmp.path()).unwrap();
     let h = answer_from_outside(tmp.path(), "bool", "no");
-    assert!(!agg.hil_bool("deploy to prod?").unwrap());
+    assert!(!rlt.hil_bool("deploy to prod?").unwrap());
     h.join().unwrap();
 }
 
-/// `agg stop` interrupts a wait — the reason no timeout is needed. Verified on the wire by hand
+/// `rlt stop` interrupts a wait — the reason no timeout is needed. Verified on the wire by hand
 /// first; this is that check, automated, so it cannot silently regress.
 #[test]
-fn a_blocked_hil_call_is_interruptible_by_agg_stop() {
+fn a_blocked_hil_call_is_interruptible_by_rlt_stop() {
     let tmp = project();
     let dir = tmp.path().to_path_buf();
     let stopper = std::thread::spawn(move || {
         common::wait_open_ask(&dir);
-        agg::bus::queue_command(&dir, &agg::bus::Command::Stop { reason: "test".into() }).unwrap();
+        relentless::bus::queue_command(&dir, &relentless::bus::Command::Stop { reason: "test".into() }).unwrap();
     });
 
-    let agg = Agg::open(tmp.path()).unwrap();
-    let err = agg.hil_bool("will anyone answer this?").unwrap_err();
+    let rlt = Relentless::open(tmp.path()).unwrap();
+    let err = rlt.hil_bool("will anyone answer this?").unwrap_err();
     stopper.join().unwrap();
 
     assert!(
@@ -1249,7 +1249,7 @@ fn a_blocked_hil_call_is_interruptible_by_agg_stop() {
     // share exit 0 with a met goal.
     assert_eq!(err.exit_code(), 5, "a stopped run is not a successful one");
     assert!(
-        agg::core::asks::open(tmp.path()).len() == 1,
+        relentless::core::asks::open(tmp.path()).len() == 1,
         "the ask stays OPEN — nobody answered it, and pretending otherwise would fake a decision"
     );
 }
@@ -1261,14 +1261,14 @@ fn a_blocked_hil_call_is_interruptible_by_agg_stop() {
 fn an_answer_off_the_recorded_option_list_is_refused_and_the_ask_stays_open() {
     let tmp = project();
     let dir = tmp.path();
-    agg::core::asks::append(
+    relentless::core::asks::append(
         dir,
-        &agg::core::asks::Row::Open {
+        &relentless::core::asks::Row::Open {
             id: "z1".into(),
-            case: agg::core::asks::AskCase::Choose,
+            case: relentless::core::asks::AskCase::Choose,
             question: "which store?".into(),
             options: Some(vec!["postgres".into(), "sqlite".into()]),
-            origin: agg::core::asks::Origin::Driver,
+            origin: relentless::core::asks::Origin::Driver,
             session: 1,
             step: None,
             ts: 100,
@@ -1277,7 +1277,7 @@ fn an_answer_off_the_recorded_option_list_is_refused_and_the_ask_stays_open() {
     .unwrap();
 
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_agg"))
+        Command::new(env!("CARGO_BIN_EXE_rlt"))
             .args(["--dir", dir.to_str().unwrap()])
             .args(args)
             .env("PATH", format!("{}:{}", ENV.join("bin").display(), std::env::var("PATH").unwrap()))
@@ -1289,16 +1289,16 @@ fn an_answer_off_the_recorded_option_list_is_refused_and_the_ask_stays_open() {
     assert!(!out.status.success(), "an unlisted answer must be refused");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("postgres") && err.contains("sqlite"), "it re-prints the options: {err}");
-    assert!(agg::core::asks::get(dir, "z1").unwrap().is_open(), "a refused answer is not recorded");
+    assert!(relentless::core::asks::get(dir, "z1").unwrap().is_open(), "a refused answer is not recorded");
 
     // A 1-based number is accepted too — an operator answering from a phone should not have to
     // retype an exact option string.
     assert!(run(&["answer", "z1", "2"]).status.success());
     // The LEDGER carries the resolved option, not the number the operator typed — and the bus
     // carries nothing at all, because an answer is a durable fact rather than a steering message.
-    let queued = std::fs::read_to_string(agg::paths::asks_jsonl(dir)).unwrap();
+    let queued = std::fs::read_to_string(relentless::paths::asks_jsonl(dir)).unwrap();
     // A MISSING inbox is the strongest form of the assertion: answering never even opened the bus.
-    let queued_files = std::fs::read_dir(agg::paths::bus_dir(dir).join("in"))
+    let queued_files = std::fs::read_dir(relentless::paths::bus_dir(dir).join("in"))
         .map(|rd| rd.flatten().count())
         .unwrap_or(0);
     assert_eq!(queued_files, 0, "answering must not queue a bus command");
@@ -1311,13 +1311,13 @@ fn an_answer_off_the_recorded_option_list_is_refused_and_the_ask_stays_open() {
 }
 
 /// The worker's front-end RECORDS AND EXITS. It must not wait, and it must not be able to write the
-/// private ledger directly — only agg promotes a request into an ask.
+/// private ledger directly — only rlt promotes a request into an ask.
 #[test]
 fn the_workers_hil_command_records_a_request_and_returns_immediately() {
     let tmp = project();
     let dir = tmp.path();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_agg"))
+    let out = Command::new(env!("CARGO_BIN_EXE_rlt"))
         .args(["--dir", dir.to_str().unwrap(), "hil", "bool", "Is the firewall open?"])
         .output_bounded()
         .unwrap();
@@ -1325,21 +1325,21 @@ fn the_workers_hil_command_records_a_request_and_returns_immediately() {
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(said.contains("Do NOT wait"), "the worker must be told to end its session: {said}");
 
-    // Request in the WORKER's directory; nothing in the agg-owned ledger yet.
-    assert_eq!(std::fs::read_dir(agg::paths::worker_asks_dir(dir)).unwrap().count(), 1);
-    assert!(agg::core::asks::all(dir).is_empty(), "a request is not yet an ask");
+    // Request in the WORKER's directory; nothing in the rlt-owned ledger yet.
+    assert_eq!(std::fs::read_dir(relentless::paths::worker_asks_dir(dir)).unwrap().count(), 1);
+    assert!(relentless::core::asks::all(dir).is_empty(), "a request is not yet an ask");
 
-    // Promotion is agg's: it mints the id, so a worker cannot choose one that collides with a real
+    // Promotion is rlt's: it mints the id, so a worker cannot choose one that collides with a real
     // ask and answer it.
-    let minted = agg::core::asks::promote_worker_requests(dir, 7, 500);
+    let minted = relentless::core::asks::promote_worker_requests(dir, 7, 500);
     assert_eq!(minted.len(), 1);
     assert_eq!(minted[0].question, "Is the firewall open?");
-    assert!(matches!(minted[0].origin, agg::core::asks::Origin::Worker));
+    assert!(matches!(minted[0].origin, relentless::core::asks::Origin::Worker));
     assert_eq!(minted[0].session, 7);
 
     // Consumed exactly once — a second boundary must not re-ask the same question.
-    assert!(agg::core::asks::promote_worker_requests(dir, 8, 600).is_empty());
-    assert_eq!(agg::core::asks::all(dir).len(), 1);
+    assert!(relentless::core::asks::promote_worker_requests(dir, 8, 600).is_empty());
+    assert_eq!(relentless::core::asks::all(dir).len(), 1);
 }
 
 /// A backstop that ends a wait nobody is going to answer.
@@ -1351,7 +1351,7 @@ fn stop_after(dir: &Path, secs: u64) -> std::thread::JoinHandle<()> {
     let dir = dir.to_path_buf();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(secs));
-        let _ = agg::bus::queue_command(&dir, &agg::bus::Command::Stop { reason: "watchdog".into() });
+        let _ = relentless::bus::queue_command(&dir, &relentless::bus::Command::Stop { reason: "watchdog".into() });
     })
 }
 
@@ -1367,19 +1367,19 @@ fn a_resumed_run_replays_an_answer_recorded_before_a_kept_gate() {
     let tmp = project();
 
     {
-        let agg = Agg::open(tmp.path()).unwrap();
+        let rlt = Relentless::open(tmp.path()).unwrap();
         let h = answer_from_outside(tmp.path(), "input", "eu-west-1");
-        assert_eq!(agg.hil_input("which region?").unwrap(), "eu-west-1");
+        assert_eq!(rlt.hil_input("which region?").unwrap(), "eu-west-1");
         h.join().unwrap();
         // Land a span so the ask is BEHIND a kept gate and survives truncation.
-        agg.step(&work()).unwrap();
-        assert!(matches!(agg.gate().unwrap(), GateOutcome::Kept), "the ask needs a kept gate behind it");
+        rlt.step(&work()).unwrap();
+        assert!(matches!(rlt.gate().unwrap(), GateOutcome::Kept), "the ask needs a kept gate behind it");
     }
 
     // Nothing answers this time. Without replay the call would block until the watchdog stops the
     // run, and the assertion below names exactly that.
     let watchdog = stop_after(tmp.path(), 45);
-    let resumed = Agg::open_with(tmp.path(), Opts { resume: true }).unwrap();
+    let resumed = Relentless::open_with(tmp.path(), Opts { resume: true }).unwrap();
     let got = resumed.hil_input("which region?");
     assert_eq!(
         got.as_deref().ok(),
@@ -1390,28 +1390,28 @@ fn a_resumed_run_replays_an_answer_recorded_before_a_kept_gate() {
 }
 
 /// `open_asks()` is how a driver sees a question the WORKER asked — it never learns that id
-/// otherwise, because `agg hil` mints it in another process.
+/// otherwise, because `rlt hil` mints it in another process.
 #[test]
 fn a_driver_can_see_the_asks_its_worker_opened() {
     let tmp = project();
     let dir = tmp.path();
-    agg::core::asks::write_worker_request(
+    relentless::core::asks::write_worker_request(
         dir,
-        &agg::core::asks::WorkerRequest {
-            case: agg::core::asks::AskCase::Input,
+        &relentless::core::asks::WorkerRequest {
+            case: relentless::core::asks::AskCase::Input,
             question: "which licence key?".into(),
             options: None,
             ts: 1,
         },
     )
     .unwrap();
-    agg::core::asks::promote_worker_requests(dir, 3, 100);
+    relentless::core::asks::promote_worker_requests(dir, 3, 100);
 
-    let agg = Agg::open(dir).unwrap();
-    let seen = agg.open_asks();
+    let rlt = Relentless::open(dir).unwrap();
+    let seen = rlt.open_asks();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].question, "which licence key?");
-    assert!(matches!(seen[0].origin, agg::core::asks::Origin::Worker));
+    assert!(matches!(seen[0].origin, relentless::core::asks::Origin::Worker));
 }
 
 /// An indefinite block is only survivable because the waiting does not count against an EFFORT
@@ -1419,19 +1419,19 @@ fn a_driver_can_see_the_asks_its_worker_opened() {
 #[test]
 fn time_spent_blocked_is_banked_as_human_wait_not_as_work() {
     let tmp = project();
-    let agg = Agg::open(tmp.path()).unwrap();
+    let rlt = Relentless::open(tmp.path()).unwrap();
 
     // Answer only after the wait has had to poll at least once, so a chunk of wait is banked.
     let dir = tmp.path().to_path_buf();
     let h = std::thread::spawn(move || {
         let a = common::wait_open_ask(&dir);
         std::thread::sleep(std::time::Duration::from_millis(5_200));
-        agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
+        relentless::core::asks::answer(&dir, &a.id, "yes", "test", relentless::util::now_epoch()).unwrap();
     });
-    assert!(agg.hil_bool("waiting on purpose?").unwrap());
+    assert!(rlt.hil_bool("waiting on purpose?").unwrap());
     h.join().unwrap();
 
-    let clock = agg::core::clock::Clock::open(tmp.path(), 0, false);
+    let clock = relentless::core::clock::Clock::open(tmp.path(), 0, false);
     assert!(
         clock.human_wait_secs >= 5.0,
         "the wait must be banked as human time (got {}s) — otherwise `work_time` charges the run \
@@ -1443,20 +1443,20 @@ fn time_spent_blocked_is_banked_as_human_wait_not_as_work() {
 // ── the run report (A-1) ─────────────────────────────────────────────────────────────────────
 
 fn read_report(dir: &Path) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(agg::paths::report_json(dir)).unwrap()).unwrap()
+    serde_json::from_str(&std::fs::read_to_string(relentless::paths::report_json(dir)).unwrap()).unwrap()
 }
 
-/// A driver run leaves the same `report.json` `agg run` does, written when the `Agg` drops; and
+/// A driver run leaves the same `report.json` `rlt run` does, written when the `Relentless` drops; and
 /// `driver::run` corrects it to `error` when the driver returns one, which `Drop` cannot see.
 #[test]
 fn a_driver_run_leaves_a_report_and_driver_run_corrects_an_err() {
     let tmp = project();
     let dir = tmp.path();
     {
-        let agg = Agg::open(dir).unwrap();
-        agg.step(&work()).unwrap();
-        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
-        agg.step(&work()).unwrap(); // staged, never gated
+        let rlt = Relentless::open(dir).unwrap();
+        rlt.step(&work()).unwrap();
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
+        rlt.step(&work()).unwrap(); // staged, never gated
     }
     let r = read_report(dir);
     assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("done"), Some(0)));
@@ -1466,9 +1466,9 @@ fn a_driver_run_leaves_a_report_and_driver_run_corrects_an_err() {
     assert!(r["result"]["staged_branch"].is_string(), "the ungated span is named: {r}");
     let first = r["run_id"].clone();
 
-    let code = agg::driver::run(|| {
-        let agg = Agg::open(dir)?;
-        agg.step(&work())?;
+    let code = relentless::driver::run(|| {
+        let rlt = Relentless::open(dir)?;
+        rlt.step(&work())?;
         Err(Fatal::Other(anyhow::anyhow!("driver bug")))
     });
     assert_eq!(code, std::process::ExitCode::from(1));
@@ -1490,21 +1490,21 @@ fn a_driver_judge_evidence_is_kept_when_judged_and_named_at_the_gate() {
         std::fs::write(c.scratch().join("bench.json"), "{\"p99\":12}").unwrap();
         Verdict::binary(true).with_evidence(["bench.json"])
     });
-    let agg = Agg::open(dir).unwrap();
-    agg.step(&work()).unwrap();
-    assert!(agg.judge(&bench).met());
-    agg.step(&work()).unwrap();
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
-    drop(agg);
+    let rlt = Relentless::open(dir).unwrap();
+    rlt.step(&work()).unwrap();
+    assert!(rlt.judge(&bench).met());
+    rlt.step(&work()).unwrap();
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
+    drop(rlt);
 
     let report: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(agg::paths::report_json(dir)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(relentless::paths::report_json(dir)).unwrap()).unwrap();
     let ev_dir = PathBuf::from(report["paths"]["evidence_dir"].as_str().expect("evidence was kept"));
     assert_eq!(std::fs::read_to_string(ev_dir.join("1/bench/bench.json")).unwrap(), "{\"p99\":12}");
-    let ledger = std::fs::read_to_string(agg::paths::verdicts_jsonl(dir)).unwrap();
+    let ledger = std::fs::read_to_string(relentless::paths::verdicts_jsonl(dir)).unwrap();
     let row: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
     let saved = row["evidence_saved"][0].as_str().unwrap();
-    assert!(saved.starts_with("agg/private/evidence/run-") && saved.ends_with("/1/bench/bench.json"), "{saved}");
+    assert!(saved.starts_with("rlt/private/evidence/run-") && saved.ends_with("/1/bench/bench.json"), "{saved}");
     assert_eq!(row["session"], 2, "the row is the gate's, the copy the judging session's");
 }
 
@@ -1514,41 +1514,41 @@ fn a_driver_judge_evidence_is_kept_when_judged_and_named_at_the_gate() {
 fn a_driver_step_prompt_file_is_read_hashed_and_checked() {
     let tmp = project();
     let dir = tmp.path();
-    std::fs::create_dir_all(dir.join("agg/steps")).unwrap();
-    std::fs::write(dir.join("agg/steps/impl.md"), "Implement the parser from the file.\n").unwrap();
-    let agg = Agg::open(dir).unwrap();
+    std::fs::create_dir_all(dir.join("rlt/steps")).unwrap();
+    std::fs::write(dir.join("rlt/steps/impl.md"), "Implement the parser from the file.\n").unwrap();
+    let rlt = Relentless::open(dir).unwrap();
 
     let mut both = Step::new("implement").model("fake").prompt_file("steps/impl.md");
     both.prompt = Some("inline too".into());
-    let err = agg.step(&both).unwrap_err().to_string();
+    let err = rlt.step(&both).unwrap_err().to_string();
     assert!(err.contains("are alternatives"), "{err}");
     let missing = Step::new("implement").model("fake").prompt_file("steps/gone.md");
-    assert!(agg.step(&missing).unwrap_err().to_string().contains("cannot read"));
+    assert!(rlt.step(&missing).unwrap_err().to_string().contains("cannot read"));
 
-    agg.step(&Step::new("implement").model("fake").prompt_file("steps/impl.md")).unwrap();
-    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
+    rlt.step(&Step::new("implement").model("fake").prompt_file("steps/impl.md")).unwrap();
+    let brief = std::fs::read_to_string(relentless::paths::instructions_md(dir)).unwrap();
     assert!(brief.contains("Implement the parser from the file."), "{brief}");
-    let rows = agg::core::prompts::read_ledger(dir);
+    let rows = relentless::core::prompts::read_ledger(dir);
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].session, rows[0].step.as_str()), (1, "implement"));
 }
 
-/// `finish_with`: the driver's own stop condition lands where `agg run` puts the `abort_if` term
+/// `finish_with`: the driver's own stop condition lands where `rlt run` puts the `abort_if` term
 /// that fired — the report's `stop_reason` and the run ledger's end reason, worded identically.
 #[test]
 fn finish_with_names_the_drivers_stop_condition_in_the_report_and_the_ledger() {
     let tmp = project();
     let dir = tmp.path();
     {
-        let agg = Agg::open(dir).unwrap();
-        agg.step(&work()).unwrap();
-        agg.finish_with(RunOutcome::Halt, "rollbacks >= 2");
-        assert!(matches!(agg.step(&work()), Err(Fatal::Ended(RunOutcome::Halt))), "the latch holds");
+        let rlt = Relentless::open(dir).unwrap();
+        rlt.step(&work()).unwrap();
+        rlt.finish_with(RunOutcome::Halt, "rollbacks >= 2");
+        assert!(matches!(rlt.step(&work()), Err(Fatal::Ended(RunOutcome::Halt))), "the latch holds");
     }
     let r = read_report(dir);
     assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("aborted"), Some(3)));
     assert_eq!(r["stop_reason"], "ABORT: rollbacks >= 2");
-    let runs = agg::project::Project::load(dir).runs;
+    let runs = relentless::project::Project::load(dir).runs;
     assert_eq!(runs.last().unwrap().end_reason, "abort:rollbacks >= 2");
 }
 
@@ -1558,13 +1558,13 @@ fn finish_with_names_the_drivers_stop_condition_in_the_report_and_the_ledger() {
 fn a_driver_step_role_prompt_file_reaches_the_brief() {
     let tmp = project();
     let dir = tmp.path();
-    std::fs::create_dir_all(dir.join("agg/roles")).unwrap();
-    std::fs::write(dir.join("agg/roles/tester.md"), "You are the tester of this parser.\n").unwrap();
-    let agg = Agg::open(dir).unwrap();
-    agg.step(&work().role_prompt_file("roles/tester.md")).unwrap();
-    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
+    std::fs::create_dir_all(dir.join("rlt/roles")).unwrap();
+    std::fs::write(dir.join("rlt/roles/tester.md"), "You are the tester of this parser.\n").unwrap();
+    let rlt = Relentless::open(dir).unwrap();
+    rlt.step(&work().role_prompt_file("roles/tester.md")).unwrap();
+    let brief = std::fs::read_to_string(relentless::paths::instructions_md(dir)).unwrap();
     assert!(brief.contains("You are the tester of this parser."), "{brief}");
-    let rows = agg::core::prompts::read_ledger(dir);
+    let rows = relentless::core::prompts::read_ledger(dir);
     assert_eq!(rows.len(), 1);
 }
 
@@ -1574,37 +1574,37 @@ fn a_driver_step_role_prompt_file_reaches_the_brief() {
 fn a_driver_step_without_memory_gets_no_state_wiki_or_fold() {
     let tmp = project();
     let dir = tmp.path();
-    std::fs::create_dir_all(dir.join("agg/state/wiki")).unwrap();
-    std::fs::write(dir.join("agg/state/STATE.md"), "advice from before\n").unwrap();
-    std::fs::write(dir.join("agg/state/wiki/index.md"), "# Concepts\n").unwrap();
-    let log = dir.join("agg/private/LOG.md");
-    let agg = Agg::open(dir).unwrap();
+    std::fs::create_dir_all(dir.join("rlt/state/wiki")).unwrap();
+    std::fs::write(dir.join("rlt/state/STATE.md"), "advice from before\n").unwrap();
+    std::fs::write(dir.join("rlt/state/wiki/index.md"), "# Concepts\n").unwrap();
+    let log = dir.join("rlt/private/LOG.md");
+    let rlt = Relentless::open(dir).unwrap();
 
-    agg.step(&work().memory(false)).unwrap();
-    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
+    rlt.step(&work().memory(false)).unwrap();
+    let brief = std::fs::read_to_string(relentless::paths::instructions_md(dir)).unwrap();
     assert!(!brief.contains("STATE.md") && !brief.contains("wiki/"), "{brief}");
     assert!(brief.contains("keeps no working memory"), "{brief}");
     assert!(!log.exists(), "no memory fold after a step without memory");
-    assert_eq!(std::fs::read_to_string(dir.join("agg/state/STATE.md")).unwrap(), "advice from before\n");
+    assert_eq!(std::fs::read_to_string(dir.join("rlt/state/STATE.md")).unwrap(), "advice from before\n");
 
-    agg.step(&work()).unwrap();
-    let brief = std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap();
-    assert!(brief.contains("agg/state/STATE.md") && brief.contains("wiki/index.md"), "{brief}");
+    rlt.step(&work()).unwrap();
+    let brief = std::fs::read_to_string(relentless::paths::instructions_md(dir)).unwrap();
+    assert!(brief.contains("rlt/state/STATE.md") && brief.contains("wiki/index.md"), "{brief}");
     assert!(log.exists(), "the memory fold runs again");
 }
 
-/// `Agg::memory(false)` is the run's default; a step's own `memory(true)` wins over it.
+/// `Relentless::memory(false)` is the run's default; a step's own `memory(true)` wins over it.
 #[test]
 fn the_runs_memory_default_yields_to_the_steps_own() {
     let tmp = project();
     let dir = tmp.path();
-    std::fs::create_dir_all(dir.join("agg/state")).unwrap();
-    std::fs::write(dir.join("agg/state/STATE.md"), "advice\n").unwrap();
-    let agg = Agg::open(dir).unwrap().memory(false);
-    agg.step(&work()).unwrap();
-    assert!(!std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap().contains("STATE.md"));
-    agg.step(&work().memory(true)).unwrap();
-    assert!(std::fs::read_to_string(agg::paths::instructions_md(dir)).unwrap().contains("agg/state/STATE.md"));
+    std::fs::create_dir_all(dir.join("rlt/state")).unwrap();
+    std::fs::write(dir.join("rlt/state/STATE.md"), "advice\n").unwrap();
+    let rlt = Relentless::open(dir).unwrap().memory(false);
+    rlt.step(&work()).unwrap();
+    assert!(!std::fs::read_to_string(relentless::paths::instructions_md(dir)).unwrap().contains("STATE.md"));
+    rlt.step(&work().memory(true)).unwrap();
+    assert!(std::fs::read_to_string(relentless::paths::instructions_md(dir)).unwrap().contains("rlt/state/STATE.md"));
 }
 
 /// A-25: an LLM judge with its own agent, model and effort asks that agent — here Codex, while the
@@ -1613,12 +1613,12 @@ fn the_runs_memory_default_yields_to_the_steps_own() {
 fn an_llm_judge_asks_its_own_agent_with_its_model_and_effort() {
     let tmp = project();
     let dir = tmp.path();
-    std::fs::create_dir_all(dir.join("agg/judges")).unwrap();
-    std::fs::write(dir.join("agg/judges/review.md"), "Review the work; list every point to fix.\n").unwrap();
-    let agg = Agg::open(dir).unwrap();
-    agg.step(&work()).unwrap();
-    let review = Judge::rubric("review", "agg/judges/review.md").agent(Agent::Codex).model("m-review").effort(Effort::Low);
-    let verdict = agg.judge(&review);
+    std::fs::create_dir_all(dir.join("rlt/judges")).unwrap();
+    std::fs::write(dir.join("rlt/judges/review.md"), "Review the work; list every point to fix.\n").unwrap();
+    let rlt = Relentless::open(dir).unwrap();
+    rlt.step(&work()).unwrap();
+    let review = Judge::rubric("review", "rlt/judges/review.md").agent(Agent::Codex).model("m-review").effort(Effort::Low);
+    let verdict = rlt.judge(&review);
     assert!(!verdict.met());
     assert_eq!(verdict.rationale(), "fix A; fix B");
     let args: Vec<String> = std::fs::read_to_string(dir.join("codex.args")).unwrap().lines().map(String::from).collect();
@@ -1628,7 +1628,7 @@ fn an_llm_judge_asks_its_own_agent_with_its_model_and_effort() {
 
 /// The worker's argv across the run's sessions, one argument per line (the fake `claude` appends).
 fn worker_args(dir: &Path) -> String {
-    std::fs::read_to_string(dir.join(".git/agg-worker.args")).unwrap_or_default()
+    std::fs::read_to_string(dir.join(".git/rlt-worker.args")).unwrap_or_default()
 }
 
 /// A-33: a step reports its agent session; a later step resumes or forks it, on the same agent only.
@@ -1636,25 +1636,25 @@ fn worker_args(dir: &Path) -> String {
 fn a_step_resumes_or_forks_an_earlier_steps_agent_session() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
-    let first = agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    let first = rlt.step(&work()).unwrap();
     let session = first.agent_session.clone().expect("the fake claude reports its session");
     assert_eq!(session.agent, "claude");
     assert!(session.id.starts_with("fake-"), "got {}", session.id);
     assert!(!worker_args(dir).contains("--resume"), "the first step starts fresh");
 
-    agg.step(&work().resume(&session)).unwrap();
+    rlt.step(&work().resume(&session)).unwrap();
     let args = worker_args(dir);
     assert!(args.contains(&format!("--resume\n{}\n", session.id)), "{args}");
     assert!(!args.contains("--fork-session"), "a resume appends to the session");
 
-    agg.step(&work().fork(&session)).unwrap();
+    rlt.step(&work().fork(&session)).unwrap();
     assert!(worker_args(dir).contains("--fork-session"));
 
     // a session another agent ran is not this agent's to continue
-    std::fs::remove_file(dir.join(".git/agg-worker.args")).unwrap();
+    std::fs::remove_file(dir.join(".git/rlt-worker.args")).unwrap();
     let foreign = AgentSession { agent: "codex".into(), id: "t-1".into() };
-    agg.step(&work().resume(&foreign)).unwrap();
+    rlt.step(&work().resume(&foreign)).unwrap();
     assert!(!worker_args(dir).contains("--resume"), "a foreign session starts fresh");
 }
 
@@ -1663,27 +1663,27 @@ fn a_step_resumes_or_forks_an_earlier_steps_agent_session() {
 fn a_session_the_agent_no_longer_has_starts_the_step_fresh() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    let rlt = Relentless::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
     let gone = AgentSession { agent: "claude".into(), id: "gone".into() };
-    let outcome = agg.step(&work().resume(&gone)).unwrap();
+    let outcome = rlt.step(&work().resume(&gone)).unwrap();
     assert_eq!(outcome.exit, 0, "the fresh session ran");
     assert!(outcome.agent_session.is_some_and(|s| s.id != "gone"));
     assert_eq!(std::fs::read_to_string(dir.join("work.log")).unwrap().lines().count(), 1);
 }
 
-/// A-33: `Agg::user_settings(false)` starts Claude workers with the project's settings only.
+/// A-33: `Relentless::user_settings(false)` starts Claude workers with the project's settings only.
 #[test]
 fn a_run_without_user_settings_starts_workers_on_the_projects_settings_only() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
-    agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    rlt.step(&work()).unwrap();
     assert!(!worker_args(dir).contains("--setting-sources"), "on by default: the operator's settings load");
-    drop(agg);
+    drop(rlt);
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() }).user_settings(false);
-    agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() }).user_settings(false);
+    rlt.step(&work()).unwrap();
     assert!(worker_args(dir).contains("--setting-sources\nproject,local\n"), "{}", worker_args(dir));
 }
 
@@ -1692,10 +1692,10 @@ fn a_run_without_user_settings_starts_workers_on_the_projects_settings_only() {
 fn a_steps_tools_limit_its_worker() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
-    agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    rlt.step(&work()).unwrap();
     assert!(!worker_args(dir).contains("--tools"), "every tool by default");
-    agg.step(&work().tools(["Bash", "Read"])).unwrap();
+    rlt.step(&work().tools(["Bash", "Read"])).unwrap();
     assert!(worker_args(dir).contains("--tools\nBash,Read\n"), "{}", worker_args(dir));
 }
 
@@ -1704,14 +1704,14 @@ fn a_steps_tools_limit_its_worker() {
 fn a_system_prompt_reaches_the_worker_as_its_own_flag() {
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
-    agg.step(&work()).unwrap();
+    let rlt = Relentless::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    rlt.step(&work()).unwrap();
     assert!(!worker_args(dir).contains("--append-system-prompt"), "none by default");
-    drop(agg);
+    drop(rlt);
     let tmp = project();
     let dir = tmp.path();
-    let agg = Agg::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() })
+    let rlt = Relentless::open(dir).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() })
         .system_prompt("End with one line.");
-    agg.step(&work()).unwrap();
+    rlt.step(&work()).unwrap();
     assert!(worker_args(dir).contains("--append-system-prompt\nEnd with one line.\n"), "{}", worker_args(dir));
 }

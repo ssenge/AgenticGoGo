@@ -1,6 +1,6 @@
 // Live loop state — polls the BFF endpoints (/api/state, /api/health) on an interval and exposes
 // reactive Svelte 5 state. The browser only ever talks to these SvelteKit routes, which proxy to
-// `agg serve`. A single shared instance drives the whole UI.
+// `rlt serve`. A single shared instance drives the whole UI.
 
 class LoopStore {
   state = $state(null); // DashboardState | { waiting: true } | null
@@ -19,7 +19,7 @@ class LoopStore {
       if (s.status === 200) this.state = s.b;
       else if (s.b?.waiting) this.state = { waiting: true };
       this.connected = true;
-      this.lastError = h.api_offline ? 'agg serve is not reachable' : '';
+      this.lastError = h.api_offline ? 'rlt serve is not reachable' : '';
     } catch (e) {
       this.connected = false;
       this.lastError = String(e?.message ?? e);

@@ -94,10 +94,10 @@ impl Proc {
 
     /// The environment every script of a step gets.
     fn env(&self, ctx: &Ctx) -> String {
-        let mut env = vec![format!("AGG_STEP={}", quote(&ctx.key)), format!("AGG_STEP_LABEL={}", quote(&ctx.label)),
-                           format!("AGG_PROCESS_HOME={}", quote(&self.home.display().to_string()))];
+        let mut env = vec![format!("RLT_STEP={}", quote(&ctx.key)), format!("RLT_STEP_LABEL={}", quote(&ctx.label)),
+                           format!("RLT_PROCESS_HOME={}", quote(&self.home.display().to_string()))];
         if let Some(i) = &ctx.item {
-            env.push(format!("AGG_ITEM={}", quote(&i.key)));
+            env.push(format!("RLT_ITEM={}", quote(&i.key)));
         }
         env.join(" ")
     }
@@ -132,7 +132,7 @@ pub fn run_plain(shared: &Shared, command: &str, phase: &str) -> Result<(), Stri
     vars.insert("this".into(), phase.to_string());
     let command = template::render(command, &vars).map_err(|e| format!("phase `{phase}`: {e}"))?;
     let command = absolutize(shared, &command);
-    let out = Command::new("sh").arg("-c").arg(format!("env AGG_PHASE={} AGG_PROCESS_HOME={} {command}", quote(phase),
+    let out = Command::new("sh").arg("-c").arg(format!("env RLT_PHASE={} RLT_PROCESS_HOME={} {command}", quote(phase),
         quote(&shared.home.display().to_string()))).current_dir(&shared.project).output().map_err(|e| format!("`{command}`: {e}"))?;
     if out.status.success() {
         return Ok(());
@@ -142,7 +142,7 @@ pub fn run_plain(shared: &Shared, command: &str, phase: &str) -> Result<(), Stri
 }
 
 /// The judges of `task_force.checks` for a repair of failed step `name`: each command run in the project like a step's
-/// check, with `AGG_STEP` (the step's id), `AGG_STEP_KEY`, `AGG_STEP_LABEL`, `AGG_PROCESS_HOME` and `AGG_FIX_BASE`
+/// check, with `RLT_STEP` (the step's id), `RLT_STEP_KEY`, `RLT_STEP_LABEL`, `RLT_PROCESS_HOME` and `RLT_FIX_BASE`
 /// (the commit before the repair). A command that can't be rendered, or a wrapper that can't be written, is left out.
 pub fn fix_judges(shared: &Shared, flow: &crate::workflow::Flow, name: &str, base: &str) -> Vec<Judge> {
     let key = flow.key_of(name);
@@ -151,7 +151,7 @@ pub fn fix_judges(shared: &Shared, flow: &crate::workflow::Flow, name: &str, bas
     for (k, v) in [("this", name), ("this.id", &id), ("this.key", &key), ("this.name", name)] {
         vars.insert(k.into(), v.into());
     }
-    let env = format!("AGG_STEP={} AGG_STEP_KEY={} AGG_STEP_LABEL={} AGG_PROCESS_HOME={} AGG_FIX_BASE={}", quote(&id), quote(&key),
+    let env = format!("RLT_STEP={} RLT_STEP_KEY={} RLT_STEP_LABEL={} RLT_PROCESS_HOME={} RLT_FIX_BASE={}", quote(&id), quote(&key),
                       quote(name), quote(&shared.home.display().to_string()), quote(base));
     let Some(tf) = &shared.spec.task_force else { return vec![] };
     tf.checks.iter().enumerate().filter_map(|(i, c)| {

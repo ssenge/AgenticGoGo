@@ -1,4 +1,4 @@
-//! [`Step`] — what a driver hands to `agg.step(&s)`, and the TEMPLATE mechanism that keeps a
+//! [`Step`] — what a driver hands to `rlt.step(&s)`, and the TEMPLATE mechanism that keeps a
 //! family of steps from repeating its own protections.
 //!
 //! # The merge rules, in one place
@@ -13,7 +13,7 @@
 //! | `write_deny` | **ACCUMULATES**, and nothing subtracts from it — not even `writable` |
 //!
 //! That asymmetry is the whole reason templates are worth having. A YAML project repeats
-//! `isolation: sandbox` + `readonly: [tests/, agg/judges/]` on every step that needs it, and the
+//! `isolation: sandbox` + `readonly: [tests/, rlt/judges/]` on every step that needs it, and the
 //! fourth such step, added six months later, quietly forgets the line. A template makes the
 //! protection the default of the family and the re-grant the exception a reader can see.
 
@@ -35,15 +35,15 @@ pub struct Step {
     pub name: Option<String>,
     pub agent: Agent,
     /// `None` = the backend's own default model. A `String` and not an enum: new models arrive
-    /// weekly and an enum would need an agg release for each one.
+    /// weekly and an enum would need an rlt release for each one.
     pub model: Option<String>,
     pub effort: Effort,
     /// ⚠ [`Isolation::None`] (the default) means `readonly`/`writable` bind to NOTHING — the deny
     /// list is delivered by the OS wrapper and the wrapper only runs under `sandbox`/`container`.
-    /// agg warns when it sees a list on an unconfined step; it does not silently pretend.
+    /// rlt warns when it sees a list on an unconfined step; it does not silently pretend.
     pub isolation: Isolation,
     /// the image this step runs in under [`Isolation::Container`]. `None` = the run's
-    /// ([`crate::driver::Agg::image`], else the base image). Inert on every other tier.
+    /// ([`crate::driver::Relentless::image`], else the base image). Inert on every other tier.
     pub image: Option<String>,
     /// paths this step may read but not write, normalised and accumulated. See [`Step::readonly`].
     pub readonly: Vec<String>,
@@ -54,19 +54,19 @@ pub struct Step {
     /// the step's ROLE — who the worker is — opening the composed brief. `None` (with
     /// [`Self::role_prompt_file`] also `None`) = the run's defaults. See [`Step::role_prompt`].
     pub role_prompt: Option<String>,
-    /// [`Self::role_prompt`] read from a FILE at every session start — relative to `agg/`, or
+    /// [`Self::role_prompt`] read from a FILE at every session start — relative to `rlt/`, or
     /// absolute. See [`Step::role_prompt_file`].
     pub role_prompt_file: Option<String>,
     /// ADDITIVE to the composed brief, never replacing it.
     pub prompt: Option<String>,
-    /// [`Self::prompt`] read from a FILE at every session start — relative to `agg/`, or absolute.
+    /// [`Self::prompt`] read from a FILE at every session start — relative to `rlt/`, or absolute.
     /// See [`Step::prompt_file`].
     pub prompt_file: Option<String>,
     /// the forward-state file this step's worker rewrites. `None` = `"state/STATE.md"` under the
     /// config base, as YAML's `defaults.state` resolves it.
     pub state: Option<String>,
-    /// whether this step's sessions keep agg's working memory. `None` = the run's
-    /// ([`crate::driver::Agg::memory`], on by default). See [`Step::memory`].
+    /// whether this step's sessions keep rlt's working memory. `None` = the run's
+    /// ([`crate::driver::Relentless::memory`], on by default). See [`Step::memory`].
     pub memory: Option<bool>,
     /// the agent session this step's session continues, and whether it branches off it (`true`)
     /// instead of appending to it. `None` = a fresh session. See [`Step::resume`] and [`Step::fork`].
@@ -89,7 +89,7 @@ impl Step {
     /// An UNNAMED step — a family's shared shape. This is YAML's `defaults:` block, except YAML has
     /// exactly one and a driver can have as many families as its workflow has kinds of step.
     ///
-    /// A template is never runnable: `agg.step()` takes a named step, and the way to name one is
+    /// A template is never runnable: `rlt.step()` takes a named step, and the way to name one is
     /// [`Step::create`].
     pub fn template() -> Step {
         Step::default()
@@ -135,10 +135,10 @@ impl Step {
         self
     }
 
-    /// The step's role text, from a FILE (relative to `agg/`, or absolute) — the twin of YAML's
+    /// The step's role text, from a FILE (relative to `rlt/`, or absolute) — the twin of YAML's
     /// per-step `role_prompt_file:`. Read at EVERY session start and hashed into
-    /// `agg/private/prompts.jsonl`, like [`Step::prompt_file`]. Replaces a [`Step::role_prompt`]
-    /// the template set; `agg.step()` refuses a step with both, or an unreadable file.
+    /// `rlt/private/prompts.jsonl`, like [`Step::prompt_file`]. Replaces a [`Step::role_prompt`]
+    /// the template set; `rlt.step()` refuses a step with both, or an unreadable file.
     pub fn role_prompt_file(mut self, rel: impl Into<String>) -> Step {
         self.role_prompt_file = Some(rel.into());
         self.role_prompt = None;
@@ -152,10 +152,10 @@ impl Step {
         self
     }
 
-    /// The step's task text, from a FILE (relative to `agg/`, or absolute) — the twin of YAML's
+    /// The step's task text, from a FILE (relative to `rlt/`, or absolute) — the twin of YAML's
     /// `prompt_file:`. Read at EVERY session start, so an edit applies from the next session, and
-    /// its SHA-256 is recorded per session in `agg/private/prompts.jsonl`. Replaces a
-    /// [`Step::prompt`] the template set; `agg.step()` refuses a step with both, or an unreadable file.
+    /// its SHA-256 is recorded per session in `rlt/private/prompts.jsonl`. Replaces a
+    /// [`Step::prompt`] the template set; `rlt.step()` refuses a step with both, or an unreadable file.
     pub fn prompt_file(mut self, rel: impl Into<String>) -> Step {
         self.prompt_file = Some(rel.into());
         self.prompt = None;
@@ -163,22 +163,22 @@ impl Step {
     }
 
     /// The forward-state file this step's worker rewrites, relative to the config base
-    /// (`agg/`) — the twin of YAML's `state:` key, and a field rather than prose because four
+    /// (`rlt/`) — the twin of YAML's `state:` key, and a field rather than prose because four
     /// consumers a `.prompt()` cannot reach read it: the `{{STATE}}` footer, the staleness snapshot,
     /// the "worker did not update its forward state" warning, and the exit brief.
     ///
-    /// ⚠ It can escape `agg/` (`"../docs/STATE.md"`). True of the YAML key today; inherited here,
+    /// ⚠ It can escape `rlt/` (`"../docs/STATE.md"`). True of the YAML key today; inherited here,
     /// not created, and deliberately not validated.
     pub fn state(mut self, rel: impl Into<String>) -> Step {
         self.state = Some(rel.into());
         self
     }
 
-    /// Whether this step's sessions keep agg's WORKING MEMORY: the forward state, the wiki, the
+    /// Whether this step's sessions keep rlt's WORKING MEMORY: the forward state, the wiki, the
     /// memory log and the summary. On by default; it pays off where one step runs session after
     /// session. Off suits a step that runs once and hands its result on in its own files: its brief
     /// then names no state, wiki or memory, and no fold or summary runs after it. Off never deletes
-    /// memory — a later step with it on sees what earlier sessions left. Overrides [`crate::driver::Agg::memory`].
+    /// memory — a later step with it on sees what earlier sessions left. Overrides [`crate::driver::Relentless::memory`].
     pub fn memory(mut self, on: bool) -> Step {
         self.memory = Some(on);
         self
@@ -227,7 +227,7 @@ impl Step {
     /// ADD paths this step may read but not write. Accumulates over whatever a template already set.
     ///
     /// Every entry is normalised on the way in ([`crate::isolation::normalize_path`]), so
-    /// `"agg/judges/"`, `"agg/judges"` and `"./agg/judges"` are one path and [`Step::writable`]'s
+    /// `"rlt/judges/"`, `"rlt/judges"` and `"./rlt/judges"` are one path and [`Step::writable`]'s
     /// subtraction cannot miss by a trailing slash. An entry with no canonical form (one that climbs
     /// above the project root, or names the root itself) is dropped with a warning.
     pub fn readonly<I, S>(mut self, paths: I) -> Step
@@ -271,7 +271,7 @@ impl Step {
     }
 
     /// The paths this step may NOT write: `readonly` minus `writable`. What the OS wrapper is
-    /// handed, beside — never instead of — its derived `agg/private/` carve-out.
+    /// handed, beside — never instead of — its derived `rlt/private/` carve-out.
     pub fn denied(&self) -> Vec<String> {
         denied_paths(&self.readonly, &self.writable)
     }
@@ -320,7 +320,7 @@ mod tests {
         let sandboxed = Step::template()
             .agent(Agent::Claude)
             .isolation(Isolation::Sandbox)
-            .readonly(["tests/", "agg/judges/"]);
+            .readonly(["tests/", "rlt/judges/"]);
 
         let a = sandboxed.create("implement");
         let b = sandboxed.create("fix");
@@ -329,8 +329,8 @@ mod tests {
         assert_eq!(b.name.as_deref(), Some("fix"));
         assert_eq!(sandboxed.name, None, "a template stays unnamed and reusable");
         assert_eq!(a.isolation, Isolation::Sandbox);
-        assert_eq!(a.readonly, ["tests", "agg/judges"]);
-        assert_eq!(b.readonly, ["tests", "agg/judges"]);
+        assert_eq!(a.readonly, ["tests", "rlt/judges"]);
+        assert_eq!(b.readonly, ["tests", "rlt/judges"]);
     }
 
     /// Scalars OVERRIDE: the derived step wins, and the template is untouched.
@@ -349,30 +349,30 @@ mod tests {
     /// `readonly` ACCUMULATES: a derived step cannot silently drop a deny its template set.
     #[test]
     fn readonly_accumulates_down_a_template_chain() {
-        let tmpl = Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "agg/judges/"]);
+        let tmpl = Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/judges/"]);
         let derived = tmpl.create("author_judge").readonly(["src/"]);
 
-        assert_eq!(derived.readonly, ["tests", "agg/judges", "src"]);
-        assert_eq!(tmpl.readonly, ["tests", "agg/judges"], "the template keeps its own list");
+        assert_eq!(derived.readonly, ["tests", "rlt/judges", "src"]);
+        assert_eq!(tmpl.readonly, ["tests", "rlt/judges"], "the template keeps its own list");
         // repeating a path the template already denies is not a second deny
-        assert_eq!(tmpl.create("x").readonly(["tests"]).readonly(["tests/"]).readonly, ["tests", "agg/judges"]);
+        assert_eq!(tmpl.create("x").readonly(["tests"]).readonly(["tests/"]).readonly, ["tests", "rlt/judges"]);
     }
 
     /// `writable` SUBTRACTS from what accumulated — re-grant one deny, keep the rest.
     #[test]
     fn writable_subtracts_from_what_readonly_accumulated() {
-        let sandboxed = Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "agg/judges/"]);
+        let sandboxed = Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/judges/"]);
 
-        // the step that SHOULD add tests re-grants exactly that one; `agg/judges/` stays denied.
+        // the step that SHOULD add tests re-grants exactly that one; `rlt/judges/` stays denied.
         let implement = sandboxed.create("implement").writable(["tests/"]);
-        assert_eq!(implement.denied(), ["agg/judges"]);
+        assert_eq!(implement.denied(), ["rlt/judges"]);
 
         // the only step that may write graders — and `src/` is denied on top.
-        let author = sandboxed.create("author_judge").readonly(["src/"]).writable(["agg/judges/"]);
+        let author = sandboxed.create("author_judge").readonly(["src/"]).writable(["rlt/judges/"]);
         assert_eq!(author.denied(), ["tests", "src"]);
 
         // a sibling that re-grants nothing keeps both.
-        assert_eq!(sandboxed.create("fix").denied(), ["tests", "agg/judges"]);
+        assert_eq!(sandboxed.create("fix").denied(), ["tests", "rlt/judges"]);
     }
 
     /// ⚠ THE TRAILING SLASH. Subtraction compares strings; without normalisation on input, this
@@ -381,11 +381,11 @@ mod tests {
     fn a_trailing_slash_cannot_break_the_subtraction() {
         let s = Step::template()
             .isolation(Isolation::Sandbox)
-            .readonly(["agg/judges/", "src"])   // WITH the slash
+            .readonly(["rlt/judges/", "src"])   // WITH the slash
             .create("author_judge")
-            .writable(["agg/judges", "./src/"]); // WITHOUT it, and with a `./`
+            .writable(["rlt/judges", "./src/"]); // WITHOUT it, and with a `./`
 
-        assert_eq!(s.writable, ["agg/judges", "src"]);
+        assert_eq!(s.writable, ["rlt/judges", "src"]);
         assert!(s.denied().is_empty(), "both denies were re-granted: {:?}", s.denied());
     }
 
@@ -393,8 +393,8 @@ mod tests {
     /// deny list that no `writable` spelling can ever subtract.
     #[test]
     fn an_uncanonical_path_is_dropped() {
-        let s = Step::new("x").readonly(["../escape", "src/", ".", "agg/judges/../judges"]);
-        assert_eq!(s.readonly, ["src", "agg/judges"]);
+        let s = Step::new("x").readonly(["../escape", "src/", ".", "rlt/judges/../judges"]);
+        assert_eq!(s.readonly, ["src", "rlt/judges"]);
     }
 
     /// `write_deny` ACCUMULATES and `writable` cannot touch it — the one list a derived step can

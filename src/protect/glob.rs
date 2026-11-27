@@ -15,7 +15,7 @@
 //! itself — so replacing it with a symlink, or deleting and recreating it, is a change too.
 //!
 //! Everything else that looks like glob syntax (`[…]`, `{…}`, a leading `!`, a `\` escape) is
-//! REFUSED rather than read literally: a pattern its author believed was a character class and agg
+//! REFUSED rather than read literally: a pattern its author believed was a character class and rlt
 //! matched as the literal text `[ab]` would protect nothing while reading like it did.
 
 use anyhow::{bail, Result};
@@ -44,7 +44,7 @@ pub enum Shape {
 /// A parsed, normalised `write_deny` pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glob {
-    /// the normalised spelling — what agg prints and what two spellings dedupe on.
+    /// the normalised spelling — what rlt prints and what two spellings dedupe on.
     pub text: String,
     comps: Vec<Comp>,
 }

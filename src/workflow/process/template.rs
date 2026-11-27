@@ -148,7 +148,7 @@ mod tests {
     fn the_variables_hold_the_builtins_and_the_numbered_steps() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("layout.yaml"), "legacy: legacy\n").unwrap();
-        let p = Process::parse("version: 1\nvars_file: layout.yaml\nvars: { tools: \"{{ home }}/tools\", mine: \"{{ env.AGG_NO_SUCH_VAR }}x\" }\n\
+        let p = Process::parse("version: 1\nvars_file: layout.yaml\nvars: { tools: \"{{ home }}/tools\", mine: \"{{ env.RLT_NO_SUCH_VAR }}x\" }\n\
             phases:\n- id: p\n  name: P\n  steps:\n  - { id: s, name: S, kind: script, run: x }\n  - { id: c, name: C, kind: checkpoint, prepare: p, doc: d, question: q }\n").unwrap();
         let list = super::super::number::number(&p);
         let v = variables(&p, &list, dir.path(), "/proj").unwrap();

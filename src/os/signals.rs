@@ -1,6 +1,6 @@
-//! SIGINT / SIGTERM handling for `agg run` (unix).
+//! SIGINT / SIGTERM handling for `rlt run` (unix).
 //!
-//! Without this, a terminal Ctrl-C on `agg run` (a) orphans the live `claude` worker — it runs
+//! Without this, a terminal Ctrl-C on `rlt run` (a) orphans the live `claude` worker — it runs
 //! in its OWN process group (`process_group(0)` in worker.rs), so the terminal's SIGINT never
 //! reaches it — and (b) skips every Drop-based cleanup (run.pid, on_stop hooks, the run ledger),
 //! because a default-disposition signal death does not unwind the stack.
@@ -34,7 +34,7 @@ static WORKER_PGID: AtomicU32 = AtomicU32::new(0);
 /// set once a SIGINT/SIGTERM has been received; the loop checks it at phase boundaries.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-/// Install the SIGINT/SIGTERM handling. Call once at the start of `agg run`; safe to call again
+/// Install the SIGINT/SIGTERM handling. Call once at the start of `rlt run`; safe to call again
 /// (the `Once` makes repeat calls no-ops rather than stacking a second listener thread).
 /// No-op on non-unix.
 pub fn install() {
@@ -102,7 +102,7 @@ mod tests {
         install();
     }
 
-    // The end-to-end contract — a real SIGINT to a real `agg run` sets the flag, kills the worker
+    // The end-to-end contract — a real SIGINT to a real `rlt run` sets the flag, kills the worker
     // GROUP, and unwinds through the Drop guards — is covered by
     // `tests/cli.rs::interrupt_during_run_skips_verify_and_the_exit_log`, which signals an actual
     // process. It is deliberately not unit-tested here: raising SIGINT inside the test binary

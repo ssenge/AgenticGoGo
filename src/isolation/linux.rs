@@ -28,7 +28,7 @@ pub fn available() -> bool {
 }
 
 /// Build the `bwrap` wrapper command around `prog args…`, writable = cwd + tmpfs /tmp + `writable`,
-/// minus `denied` (agg's own private state plus this step's `readonly` set — see
+/// minus `denied` (rlt's own private state plus this step's `readonly` set — see
 /// [`super::deny_set`]), which lives inside cwd.
 /// `jail.rules` are Seatbelt rules — macOS only; bwrap's protected paths arrive in `denied` instead.
 pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Command> {
@@ -47,7 +47,7 @@ pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Comm
     for w in writable {
         cmd.arg("--bind").arg(w).arg(w);
     }
-    // The DENIES: agg's own `agg/private/` carve-out plus this step's `readonly` minus `writable`,
+    // The DENIES: rlt's own `rlt/private/` carve-out plus this step's `readonly` minus `writable`,
     // re-bound READ-ONLY on top of the writable cwd. bwrap applies binds in argv ORDER, so this must
     // come AFTER `--bind <cwd>` — reversing them lets the later writable bind win and silently
     // reopens the hole.

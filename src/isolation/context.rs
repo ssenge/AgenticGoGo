@@ -1,7 +1,7 @@
 //! READ-ONLY CONTEXT DIRECTORIES (`context:`) — knowledge that lives outside the project, which the
 //! worker and its judges read every session and must never change.
 //!
-//! agg does not interpret the contents. It resolves each entry, refuses one it cannot enforce, and
+//! rlt does not interpret the contents. It resolves each entry, refuses one it cannot enforce, and
 //! hands the run's confining tiers the list ([`super::policy::RunPolicy::contexts`]):
 //!
 //! | tier | where the worker sees it | what keeps it read-only |
@@ -12,7 +12,7 @@
 //! | `none` | — | nothing, so a run with a context and an unconfined step is **refused** |
 //!
 //! Refused at startup: a path that does not exist or is not a directory; one that overlaps the
-//! project (which also covers `agg/private/`) — inside it, a worker-writable copy would shadow the
+//! project (which also covers `rlt/private/`) — inside it, a worker-writable copy would shadow the
 //! read-only one, and containing it, the deny would take the whole project with it; a malformed or
 //! duplicate `as:`.
 
@@ -57,7 +57,7 @@ fn bad_name(name: &str) -> Option<String> {
     }
     Some(format!(
         "context name `{name}` is not a short name — use lowercase letters, digits, `-` and `_` \
-         (at most 64, starting with a letter or digit); it becomes `/context/<as>` and `AGG_CONTEXT_<AS>`"
+         (at most 64, starting with a letter or digit); it becomes `/context/<as>` and `RLT_CONTEXT_<AS>`"
     ))
 }
 
@@ -75,8 +75,8 @@ fn host_dir(raw: &str, project: &Path) -> Result<PathBuf, String> {
     if host.starts_with(project) || project.starts_with(&host) {
         return Err(format!(
             "context `{raw}` overlaps the project ({}) — a context is read-only material from OUTSIDE \
-             it: inside, the worker could shadow it with a writable copy (and `agg/private/` is \
-             agg's); containing it, the read-only rule would take the project with it",
+             it: inside, the worker could shadow it with a writable copy (and `rlt/private/` is \
+             rlt's); containing it, the read-only rule would take the project with it",
             project.display()
         ));
     }
@@ -97,7 +97,7 @@ pub(super) fn expand(raw: &str, project: &Path) -> PathBuf {
 }
 
 /// The brief's `## Context` section for a worker on `tier`, or "" when the run has none. Points at
-/// each directory's `index.md` when it has one — agg never reads the contents.
+/// each directory's `index.md` when it has one — rlt never reads the contents.
 pub fn brief_section(contexts: &[ContextMount], tier: super::Isolation) -> String {
     if contexts.is_empty() {
         return String::new();
@@ -144,7 +144,7 @@ mod tests {
     fn every_unenforceable_entry_is_refused_where_it_is_written() {
         let proj = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(proj.path().join("docs")).unwrap();
-        std::fs::create_dir_all(proj.path().join("agg/private")).unwrap();
+        std::fs::create_dir_all(proj.path().join("rlt/private")).unwrap();
         let brain = tempfile::tempdir().unwrap();
         let file = brain.path().join("f.txt");
         std::fs::write(&file, "x").unwrap();
@@ -154,7 +154,7 @@ mod tests {
             entry(&brain.path().join("nope"), "missing"),         // does not exist
             entry(&file, "file"),                                 // not a directory
             entry(&proj.path().join("docs"), "inside"),           // inside the project
-            entry(&proj.path().join("agg/private"), "private"),   // agg's own state (inside)
+            entry(&proj.path().join("rlt/private"), "private"),   // rlt's own state (inside)
             entry(proj.path().parent().unwrap(), "around"),       // contains the project
             entry(brain.path(), "Bad Name"),                      // malformed `as`
         ];
@@ -168,7 +168,7 @@ mod tests {
         assert!(p[4].message.contains("overlaps the project"), "{}", p[4].message);
     }
 
-    /// `a-b` and `a_b` would both be `AGG_CONTEXT_A_B` — one variable for two directories.
+    /// `a-b` and `a_b` would both be `RLT_CONTEXT_A_B` — one variable for two directories.
     #[test]
     fn names_that_collide_as_env_vars_are_duplicates() {
         let proj = tempfile::tempdir().unwrap();

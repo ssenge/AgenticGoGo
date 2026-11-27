@@ -1,5 +1,5 @@
-//! Each step's base (A-37): the commit where it first started in this increment (`refs/agg/base/<key>`),
-//! kept across its re-entries. `refs/agg/before/<key>` moves with every start, so a step re-entered after a failure
+//! Each step's base (A-37): the commit where it first started in this increment (`refs/rlt/base/<key>`),
+//! kept across its re-entries. `refs/rlt/before/<key>` moves with every start, so a step re-entered after a failure
 //! that left its work in place would count nothing it changed before (a quality floor saw no changed file). What a
 //! step changed counts from its base.
 
@@ -8,7 +8,7 @@ use std::process::Command;
 
 /// The ref that holds step `key`'s base.
 pub fn base(key: &str) -> String {
-    format!("refs/agg/base/{key}")
+    format!("refs/rlt/base/{key}")
 }
 
 /// Marks HEAD as step `key`'s base unless it has one: a re-entry keeps the first.
@@ -20,7 +20,7 @@ pub fn mark(project: &Path, key: &str) {
 /// Drops the bases that went stale: after a reset, every one HEAD no longer contains (the steps the reset took
 /// back start anew); when the file `run.bases_reset_when_changed` changed (`all`), every one.
 pub fn drop_stale(project: &Path, all: bool) {
-    let Some(refs) = git(project, &["for-each-ref", "--format=%(refname)", "refs/agg/base/"]) else { return };
+    let Some(refs) = git(project, &["for-each-ref", "--format=%(refname)", "refs/rlt/base/"]) else { return };
     for name in refs.lines().filter(|l| !l.is_empty()) {
         if all || git(project, &["merge-base", "--is-ancestor", name, "HEAD"]).is_none() {
             let _ = git(project, &["update-ref", "-d", name]);

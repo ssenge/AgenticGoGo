@@ -31,7 +31,7 @@ pub fn commit(dir: &Path, paths: &[&str], message: &str) -> anyhow::Result<bool>
 
 /// The ref that holds where the base branch stood before the step with key `key` ran.
 pub fn before(key: &str) -> String {
-    format!("refs/agg/before/{key}")
+    format!("refs/rlt/before/{key}")
 }
 
 /// Whether nothing under `paths` changed between `commit` and HEAD.

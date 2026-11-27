@@ -1,7 +1,7 @@
 //! Workflow building blocks on the driver API (A-26 to A-31, A-36): a process of named steps, each a script, an
 //! agent's work (discussed first by other agents, if asked) judged by checks and a critic and repaired, a
 //! condition, or a human's approval; with a step history, re-entry at a step with a note, and the task force when
-//! a step fails. A library over `agg.step`, `agg.judge`, `agg.gate` and `agg.hil_bool`: no second execution
+//! a step fails. A library over `rlt.step`, `rlt.judge`, `rlt.gate` and `rlt.hil_bool`: no second execution
 //! model.
 //!
 //! A step's key is the first word of its name (`"2.5"` of `"2.5 Resolve bindings"`): what `--from` and

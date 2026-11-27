@@ -1,8 +1,8 @@
-//! [`Agg`] — the facade a Rust driver holds, and the eleven calls it makes on it.
+//! [`Relentless`] — the facade a Rust driver holds, and the eleven calls it makes on it.
 //!
 //! # The load-bearing premise
 //!
-//! `agg.step(&s)?` **IS** one iteration of `agg run`'s loop body — the same hook dispatch, in the
+//! `rlt.step(&s)?` **IS** one iteration of `rlt run`'s loop body — the same hook dispatch, in the
 //! same order, hooks and all. It calls [`crate::loop_::step_once`]; it does not re-implement a loop.
 //! Any other answer would mean re-plumbing git session isolation, keep/rollback, memory, the
 //! summariser, notify, rate-limit backoff, per-agent accounting, `verdicts.jsonl`, `state.json`, the
@@ -22,13 +22,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::core::calls::{CallRecord, NoteLevel};
-use crate::core::config::{AggConfig, CustomBackend, Limits, ResolvedStep};
+use crate::core::config::{RelentlessConfig, CustomBackend, Limits, ResolvedStep};
 use crate::core::engine::GoalRuntime;
 use crate::core::model::{Judge, JudgeKind, JudgeSource, Verdict};
 use crate::driver::{Agent, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, OnRegression, Opts, Step, StepOutcome};
 use crate::git::StagedSession;
 use crate::loop_::{
-    run_hook, AGGState, End, Flow, Handler, Lifecycle, LoopState, RunPidGuard, RunOutcome, StopHooks,
+    run_hook, RLTState, End, Flow, Handler, Lifecycle, LoopState, RunPidGuard, RunOutcome, StopHooks,
 };
 
 /// How long `block()` naps between re-evaluating the ceilings. Short for the reason
@@ -38,18 +38,18 @@ const BLOCK_CHUNK_SECS: u64 = 5;
 
 /// The Rust driver's handle on a run.
 ///
-/// Built by [`Agg::open`], configured by the self-consuming builder chain
-/// ([`Agg::limits`] / [`Agg::on_regression`] / [`Agg::instructions`]), then used through `&self`.
+/// Built by [`Relentless::open`], configured by the self-consuming builder chain
+/// ([`Relentless::limits`] / [`Relentless::on_regression`] / [`Relentless::instructions`]), then used through `&self`.
 ///
-/// ⛔ **A stray `agg.yaml` in the project is IGNORED** — not merged, not a fallback.
-/// [`AggConfig::load`] is never called on this path. The two entry points share FILES
-/// (`agg/judges/`, the instructions file, `agg/state/`), never configuration.
+/// ⛔ **A stray `rlt.yaml` in the project is IGNORED** — not merged, not a fallback.
+/// [`RelentlessConfig::load`] is never called on this path. The two entry points share FILES
+/// (`rlt/judges/`, the instructions file, `rlt/state/`), never configuration.
 ///
-/// Fields are private, against this crate's no-facade convention, because `Agg` *is* the facade and
+/// Fields are private, against this crate's no-facade convention, because `Relentless` *is* the facade and
 /// its invariants are not expressible as field types: `started` must be filled exactly once and
 /// only after the chain, and `cfg` must stop being writable the moment it has been.
-pub struct Agg {
-    cfg: AggConfig,
+pub struct Relentless {
+    cfg: RelentlessConfig,
     dir: PathBuf,
     /// this run CONTINUES a previous one. Today it reaches exactly one decision — `GitSetup`
     /// discards a crashed session's dirty tree instead of refusing to start (§3.9 rule 2).
@@ -60,7 +60,7 @@ pub struct Agg {
     ended: Cell<Option<RunOutcome>>,
     /// the ledger cursor (Phase 1).
     ord: Cell<u64>,
-    /// the per-STEP lazy verdict cache — what makes `agg.judge(&x)` memoized and `&&` a gate.
+    /// the per-STEP lazy verdict cache — what makes `rlt.judge(&x)` memoized and `&&` a gate.
     verdicts: RefCell<HashMap<String, Verdict>>,
     /// every verdict consulted since the last `gate()`; `gate()` reads and clears it.
     span: RefCell<HashMap<String, Verdict>>,
@@ -84,18 +84,18 @@ pub struct Agg {
     /// all" — every driver judge ran unconfined, which is the exact escape §2.5 exists to close.
     /// Proven by a real-kernel test that watched a driver's judge write outside the project.
     iso_seen: Cell<crate::isolation::Isolation>,
-    /// the label path — see [`Agg::pos`].
+    /// the label path — see [`Relentless::pos`].
     pos: RefCell<Vec<PosItem>>,
-    /// the name of an [`Agent::Custom`] handed to [`Agg::judge_agent`], refused when the run boots:
+    /// the name of an [`Agent::Custom`] handed to [`Relentless::judge_agent`], refused when the run boots:
     /// the builder chain cannot fail, and the ruler is resolved BY NAME (`judge.agent`).
     custom_ruler: Option<String>,
-    /// the working-memory default of a step that doesn't set its own — see [`Agg::memory`].
+    /// the working-memory default of a step that doesn't set its own — see [`Relentless::memory`].
     memory: bool,
-    /// whether workers load the operator's own agent settings — see [`Agg::user_settings`].
+    /// whether workers load the operator's own agent settings — see [`Relentless::user_settings`].
     user_settings: bool,
-    /// the keys of the operator's settings `env` block the Claude workers get — see [`Agg::user_env`].
+    /// the keys of the operator's settings `env` block the Claude workers get — see [`Relentless::user_env`].
     user_env: crate::backend::user_env::UserEnv,
-    /// text every worker's agent adds to its system prompt — see [`Agg::system_prompt`].
+    /// text every worker's agent adds to its system prompt — see [`Relentless::system_prompt`].
     system_prompt: Option<String>,
 }
 
@@ -109,23 +109,23 @@ struct Started {
     lc: Lifecycle,
     /// the recorded calls a resume fast-forwards through, already truncated to the last KEPT gate.
     ///
-    /// Empty on a fresh run. Indexed by ORDINAL: `replay[n]` answers the run's n-th agg call, and
+    /// Empty on a fresh run. Indexed by ORDINAL: `replay[n]` answers the run's n-th rlt call, and
     /// the driver walks itself back to the interruption point by *running* — identical inputs
     /// produce identical branches, so its position never has to be serialized.
     ///
-    /// ⚠ It lives HERE, not on `Agg`, because deciding it means WRITING the ledger (truncating it,
+    /// ⚠ It lives HERE, not on `Relentless`, because deciding it means WRITING the ledger (truncating it,
     /// or clearing it for a fresh run) and that must happen behind the double-run guard. Doing it in
     /// `open()` meant a second driver opening a live project wiped the RUNNING driver's ledger before
     /// failing the guard a moment later.
     replay: Vec<CallRecord>,
-    /// the Drop guards live HERE, so dropping the `Agg` fires them on return, early return AND
+    /// the Drop guards live HERE, so dropping the `Relentless` fires them on return, early return AND
     /// panic-unwind.
     _stop: StopHooks,
     /// the run's confinement policy — AFTER `_stop`, so it is still registered while the `on_stop`
     /// hooks fire (fields drop in declaration order).
     _policy: crate::isolation::policy::PolicyGuard,
     _pid: RunPidGuard,
-    /// this run's report handle (`run_id`, the write latch). `Drop for Agg` writes the report.
+    /// this run's report handle (`run_id`, the write latch). `Drop for Relentless` writes the report.
     report: crate::report::RunHandle,
 }
 
@@ -133,20 +133,20 @@ struct Started {
 // construction + the builder chain
 // ---------------------------------------------------------------------------------------------
 
-impl Agg {
+impl Relentless {
     /// Open `dir` as a driver project. Validates the directory and nothing else — the config is
     /// filled by the chain that follows, and the run-level setup is deferred to the first
     /// `step()`/`judge()`/`gate()`/`check_limits()`.
-    pub fn open(dir: impl AsRef<Path>) -> Result<Agg, Fatal> {
-        Agg::open_with(dir, Opts::default())
+    pub fn open(dir: impl AsRef<Path>) -> Result<Relentless, Fatal> {
+        Relentless::open_with(dir, Opts::default())
     }
 
-    /// [`Agg::open`] with the run-level options that must be known before any config is applied.
-    pub fn open_with(dir: impl AsRef<Path>, opts: Opts) -> Result<Agg, Fatal> {
+    /// [`Relentless::open`] with the run-level options that must be known before any config is applied.
+    pub fn open_with(dir: impl AsRef<Path>, opts: Opts) -> Result<Relentless, Fatal> {
         let dir = dir.as_ref();
         if !dir.is_dir() {
             return Err(Fatal::Other(anyhow::anyhow!(
-                "`{}` is not a directory — Agg::open takes the PROJECT ROOT",
+                "`{}` is not a directory — Relentless::open takes the PROJECT ROOT",
                 dir.display()
             )));
         }
@@ -156,11 +156,11 @@ impl Agg {
         // The project NAME is what branch names, the run ledger and the dashboard are keyed on.
         // There is no `.project()` builder call: the directory already names the project, and a
         // second spelling is a second thing to get wrong.
-        let cfg = AggConfig {
+        let cfg = RelentlessConfig {
             project: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "driver".into()),
-            ..AggConfig::default()
+            ..RelentlessConfig::default()
         };
-        Ok(Agg {
+        Ok(Relentless {
             cfg,
             dir,
             resume: opts.resume,
@@ -183,19 +183,19 @@ impl Agg {
     }
 
     /// The run-level ceilings. **Opt-in**: they are enforced where the driver calls
-    /// [`Agg::check_limits`], and nowhere else. A driver that never calls it has no ceilings.
-    pub fn limits(mut self, limits: Limits) -> Agg {
+    /// [`Relentless::check_limits`], and nowhere else. A driver that never calls it has no ceilings.
+    pub fn limits(mut self, limits: Limits) -> Relentless {
         self.cfg.sequence.limits = limits;
         self
     }
 
     /// What a regression across a span MEANS to this project — the policy `gate()` applies.
-    pub fn on_regression(mut self, policy: OnRegression) -> Agg {
+    pub fn on_regression(mut self, policy: OnRegression) -> Relentless {
         self.cfg.sequence.gate_regressions = policy == OnRegression::Rollback;
         self
     }
 
-    /// Hold `judge`'s `value` to a numeric RATCHET at every [`Agg::gate`]: it may not get worse than
+    /// Hold `judge`'s `value` to a numeric RATCHET at every [`Relentless::gate`]: it may not get worse than
     /// at the last kept gate by more than the tolerance, or the gate counts a regression (and, under
     /// [`OnRegression::Rollback`], discards the span).
     ///
@@ -203,33 +203,33 @@ impl Agg {
     /// the driver asks for BEFORE its first `step()` — the driver's baseline pass. Like the boolean
     /// rule, it applies to the judges asked since the last gate; a ratcheted judge that errored or
     /// emitted no number never passes.
-    pub fn ratchet(mut self, judge: impl Into<String>, spec: crate::core::ratchet::Ratchet) -> Agg {
+    pub fn ratchet(mut self, judge: impl Into<String>, spec: crate::core::ratchet::Ratchet) -> Relentless {
         self.cfg.sequence.ratchet.insert(judge.into(), spec.into());
         self
     }
 
-    /// The most judge evidence (MiB) this run copies into `agg/private/evidence/` — the twin of
+    /// The most judge evidence (MiB) this run copies into `rlt/private/evidence/` — the twin of
     /// YAML's `judge.evidence_max_mb` (default 100). A disk bound, not a run limit: a file that does
     /// not fit is skipped and recorded on its verdict's ledger row, and the run goes on.
-    pub fn evidence_max_mb(mut self, mb: u64) -> Agg {
+    pub fn evidence_max_mb(mut self, mb: u64) -> Relentless {
         self.cfg.judge.evidence_max_mb = mb;
         self
     }
 
-    /// Merge a span at [`Agg::gate`] only if something IMPROVED — a judge asked since the last gate
-    /// went unmet→met (a group asked through [`Agg::group`]: gained ground net), or a ratcheted value
+    /// Merge a span at [`Relentless::gate`] only if something IMPROVED — a judge asked since the last gate
+    /// went unmet→met (a group asked through [`Relentless::group`]: gained ground net), or a ratcheted value
     /// moved the good way beyond its tolerance. Otherwise the span is discarded as
     /// [`GateOutcome::NoImprovement`]: not a regression, so it never counts for `rollbacks`. The
     /// driver's spelling of `sequence.merge_requires_improvement`; off by default.
-    pub fn merge_requires_improvement(mut self, on: bool) -> Agg {
+    pub fn merge_requires_improvement(mut self, on: bool) -> Relentless {
         self.cfg.sequence.merge_requires_improvement = on;
         self
     }
 
-    /// The run's default for [`Step::memory`]: whether a step's sessions keep agg's working memory
+    /// The run's default for [`Step::memory`]: whether a step's sessions keep rlt's working memory
     /// (forward state, wiki, memory log, summary). On by default; a step's own setting wins. The
     /// driver's twin of YAML's `memory.enabled`.
-    pub fn memory(mut self, on: bool) -> Agg {
+    pub fn memory(mut self, on: bool) -> Relentless {
         self.memory = on;
         self
     }
@@ -239,7 +239,7 @@ impl Agg {
     /// what the operator set up for their own sessions (a memory plugin, a command-rewriting hook, a mail
     /// connector) neither changes nor reads the run's work. Claude: `--setting-sources project,local`; an
     /// agent that can't leave them out runs with them and says so.
-    pub fn user_settings(mut self, on: bool) -> Agg {
+    pub fn user_settings(mut self, on: bool) -> Relentless {
         self.user_settings = on;
         self
     }
@@ -247,10 +247,10 @@ impl Agg {
     /// Which keys of the operator's settings `env` block (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`)
     /// the Claude workers and one-shot calls (judges, summaries) get as environment variables, without loading the
     /// plugins, hooks and MCP servers of the same file: `false` (the default) none, `true` every key, or a list of
-    /// names. A variable agg's own environment already has wins, the keys agg manages (`AGG_*`) are never taken, and
+    /// names. A variable rlt's own environment already has wins, the keys rlt manages (`RLT_*`) are never taken, and
     /// only string values are. For a host whose model gateway is set only in those settings, while
-    /// [`Agg::user_settings`] is off. Process-wide, like `AGG_MODELS`; other agents take nothing from it.
-    pub fn user_env(mut self, which: impl Into<crate::backend::user_env::UserEnv>) -> Agg {
+    /// [`Relentless::user_settings`] is off. Process-wide, like `RLT_MODELS`; other agents take nothing from it.
+    pub fn user_env(mut self, which: impl Into<crate::backend::user_env::UserEnv>) -> Relentless {
         self.user_env = which.into();
         self
     }
@@ -281,17 +281,17 @@ impl Agg {
     /// Text every worker's agent adds to its system prompt (A-34): a rule that must hold for the whole
     /// session, where a brief is read once in its first turn and fades over a long session (say, "end with
     /// one line"). Claude: `--append-system-prompt`; an agent that can't runs without it and says so.
-    pub fn system_prompt(mut self, text: impl Into<String>) -> Agg {
+    pub fn system_prompt(mut self, text: impl Into<String>) -> Relentless {
         self.system_prompt = Some(text.into());
         self
     }
 
     /// The standing project-instructions file the worker's brief POINTS AT, relative to the project
-    /// dir. Default `agg/AGG.md`.
+    /// dir. Default `rlt/RLT.md`.
     ///
-    /// agg never reads its bytes — it checks that the file exists and emits "Read `<path>`" into the
+    /// rlt never reads its bytes — it checks that the file exists and emits "Read `<path>`" into the
     /// brief. A missing file produces no pointer at all.
-    pub fn instructions(mut self, rel: impl Into<String>) -> Agg {
+    pub fn instructions(mut self, rel: impl Into<String>) -> Relentless {
         self.cfg.instructions = rel.into();
         self
     }
@@ -299,7 +299,7 @@ impl Agg {
     /// The image every [`Isolation::Container`](crate::isolation::Isolation::Container) step runs in
     /// unless it names its own ([`Step::image`]) — YAML's `defaults.image`. It must follow the
     /// image contract (`docs/CONFIG.md`): the step's agent CLI on PATH for any uid, `/bin/sh`.
-    pub fn image(mut self, image: impl Into<String>) -> Agg {
+    pub fn image(mut self, image: impl Into<String>) -> Relentless {
         self.cfg.defaults.image = Some(image.into());
         self
     }
@@ -309,9 +309,9 @@ impl Agg {
     ///
     /// ⛔ [`Agent::Custom`] is REFUSED when the run boots (the first `step()`/`judge()`/`gate()`/
     /// `check_limits()` returns the error): the ruler is resolved by NAME, exactly as YAML's
-    /// `judge.agent` is, and a custom backend has no name agg could resolve — a custom backend
+    /// `judge.agent` is, and a custom backend has no name rlt could resolve — a custom backend
     /// that called itself `claude` would otherwise silently become the real Claude.
-    pub fn judge_agent(mut self, agent: Agent) -> Agg {
+    pub fn judge_agent(mut self, agent: Agent) -> Relentless {
         match &agent {
             Agent::Custom(b) => self.custom_ruler = Some(b.name().to_string()),
             a => {
@@ -324,7 +324,7 @@ impl Agg {
 
     /// The model the ruler runs the LLM judges and the summarizer on — YAML's `judge.model`.
     /// Unset = the ruler's own cheap default.
-    pub fn judge_model(mut self, model: impl Into<String>) -> Agg {
+    pub fn judge_model(mut self, model: impl Into<String>) -> Relentless {
         self.cfg.judge.model = Some(model.into());
         self
     }
@@ -332,21 +332,21 @@ impl Agg {
     /// The workflow's variables: `{{ name }}` in every step's prompt file (the role prompt's too) and every
     /// LLM judge's rubric (its `inputs:` too) is filled in from `vars`; a name it lacks fails the step or
     /// the judge. Inline prompts are not templates. One map per process: the last call wins.
-    pub fn vars(self, vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Agg {
+    pub fn vars(self, vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Relentless {
         crate::core::vars::set(vars.into_iter().map(|(k, v)| (k.into(), v.into())).collect());
         self
     }
 
     /// EVERY judge's timeout in seconds, script and LLM alike — YAML's `judge.timeout` (default
     /// 300). A single judge overrides it with [`Judge::timeout`].
-    pub fn judge_timeout(mut self, secs: u64) -> Agg {
+    pub fn judge_timeout(mut self, secs: u64) -> Relentless {
         self.cfg.judge.timeout = secs;
         self
     }
 
     /// The image judges run in when a step of the run is containerized — YAML's `judge.image`.
-    /// `None` set = [`Agg::image`], else the base image.
-    pub fn judge_image(mut self, image: impl Into<String>) -> Agg {
+    /// `None` set = [`Relentless::image`], else the base image.
+    pub fn judge_image(mut self, image: impl Into<String>) -> Relentless {
         self.cfg.judge.image = Some(image.into());
         self
     }
@@ -354,7 +354,7 @@ impl Agg {
     /// Environment variables passed INTO every container of the run by NAME — YAML's
     /// `isolation_policy.pass_env`. The values come from this process's environment and never
     /// appear on a command line. Each agent's own credential variables need not be listed.
-    pub fn pass_env<I, S>(mut self, names: I) -> Agg
+    pub fn pass_env<I, S>(mut self, names: I) -> Relentless
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -365,7 +365,7 @@ impl Agg {
 
     /// Host files or directories mounted READ-ONLY into every container of the run — YAML's
     /// `isolation_policy.credentials` (under the container's `HOME` when they live under `~`).
-    pub fn credentials<I, S>(mut self, paths: I) -> Agg
+    pub fn credentials<I, S>(mut self, paths: I) -> Relentless
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -375,10 +375,10 @@ impl Agg {
     }
 
     /// The run's network EGRESS policy — YAML's `isolation_policy.network`. `Network::Allow(hosts)`
-    /// confines every confined process to those `host[:port]` destinations through agg's proxy;
+    /// confines every confined process to those `host[:port]` destinations through rlt's proxy;
     /// every step must then run on a tier that enforces it, and its agent's endpoint must be listed
     /// (`step()` refuses otherwise).
-    pub fn network(mut self, network: crate::isolation::egress::Network) -> Agg {
+    pub fn network(mut self, network: crate::isolation::egress::Network) -> Relentless {
         self.cfg.isolation_policy.network = network;
         self
     }
@@ -386,9 +386,9 @@ impl Agg {
     /// A READ-ONLY context directory from outside the project, seen by every step and judge of the
     /// run — the driver's spelling of a YAML `context:` entry. `path` is absolute, `~/`-relative or
     /// relative to the project; `name` is the short `as:` (`/context/<name>` in a container,
-    /// `AGG_CONTEXT_<NAME>` everywhere). Validated when the run boots; every step must then be
+    /// `RLT_CONTEXT_<NAME>` everywhere). Validated when the run boots; every step must then be
     /// confined (`Isolation::Sandbox` or `Container`), or `step()` refuses it.
-    pub fn context(mut self, path: impl Into<String>, name: impl Into<String>) -> Agg {
+    pub fn context(mut self, path: impl Into<String>, name: impl Into<String>) -> Relentless {
         self.cfg.context.push(crate::core::config::ContextDir {
             path: path.into(),
             name: name.into(),
@@ -402,7 +402,7 @@ impl Agg {
 // the deferred run-level setup
 // ---------------------------------------------------------------------------------------------
 
-impl Agg {
+impl Relentless {
     /// The started run, performing the run-level setup on first use.
     ///
     /// Both latch checks are needed: one for a run already ended, one for a setup that ended it —
@@ -452,8 +452,8 @@ impl Agg {
             if pid != std::process::id() {
                 return Err(Fatal::Other(anyhow::anyhow!(
                     "a loop is already running in this project (pid {pid}).\n  \
-                     watch it:   agg dashboard\n  stop it:    agg stop\n  \
-                     (if you're sure it's dead, remove agg/private/run.pid and retry.)"
+                     watch it:   rlt dashboard\n  stop it:    rlt stop\n  \
+                     (if you're sure it's dead, remove rlt/private/run.pid and retry.)"
                 )));
             }
         }
@@ -517,10 +517,10 @@ impl Agg {
         clock.save(&dir);
         eprintln!(
             "════════════════════════════════════════════════════════════\n\
-             AgenticGoGo — project {} (rust driver)\n\
+             Relentless — project {} (rust driver)\n\
              ════════════════════════════════════════════════════════════\n\
-             ▶ watch live:  run `agg dashboard` in another terminal\n\
-             ⏹ stop anytime: `agg stop`",
+             ▶ watch live:  run `rlt dashboard` in another terminal\n\
+             ⏹ stop anytime: `rlt stop`",
             cfg.project
         );
 
@@ -582,7 +582,7 @@ impl Agg {
             ext: crate::plugin::Extensions::default(),
             scratch: crate::plugin::Extensions::default(),
         };
-        st.ext.get::<AGGState>().git.iso_base = iso_base;
+        st.ext.get::<RLTState>().git.iso_base = iso_base;
         crate::features::evidence::begin(&mut st, report.run_id());
         crate::report::record_session(&mut st, &report, self.user_settings, crate::backend::user_env::take(&self.user_env));
         st.publish();
@@ -613,7 +613,7 @@ impl Agg {
 // step
 // ---------------------------------------------------------------------------------------------
 
-impl Agg {
+impl Relentless {
     /// Run ONE worker session for `step` — the same hook dispatch a YAML lap runs.
     ///
     /// The work is COMMITTED on the session branch and STAGED on the open span; nothing merges
@@ -656,8 +656,8 @@ impl Agg {
         // The protected-path check's "between sessions" reference can't tell that from a process a worker left
         // running, and would put the driver's writes back; a new step starts from the world the driver left.
         // Between the sessions of ONE step (the `NextSession` retry below) the check still applies.
-        st.ext.get::<AGGState>().protect.last = None;
-        // The breadcrumb, stamped where the driver's flow ENTERS agg. agg cannot observe the
+        st.ext.get::<RLTState>().protect.last = None;
+        // The breadcrumb, stamped where the driver's flow ENTERS rlt. rlt cannot observe the
         // hand-written `for` between two `step()` calls, so this is the only moment the live
         // `PosFrame` stack and the snapshot are in the same place at the same time. `step_once`
         // publishes several times below and every one of them carries it.
@@ -697,7 +697,7 @@ impl Agg {
     fn resolve(&self, step: &Step) -> Result<ResolvedStep, Fatal> {
         let Some(name) = step.name.clone() else {
             return Err(Fatal::Other(anyhow::anyhow!(
-                "agg.step() was handed a TEMPLATE (an unnamed Step). Name it first: \
+                "rlt.step() was handed a TEMPLATE (an unnamed Step). Name it first: \
                  `template.create(\"implement\")`"
             )));
         };
@@ -758,7 +758,7 @@ impl Agg {
             Ok(Some(warning)) => eprintln!("  ⚠ {warning}"),
             Ok(None) => {}
         }
-        // the role pair inherits AS A PAIR, as `AggConfig::resolve_step` does for YAML: a step naming
+        // the role pair inherits AS A PAIR, as `RelentlessConfig::resolve_step` does for YAML: a step naming
         // either form replaces both of the defaults'.
         let role = if step.role_prompt.is_some() || step.role_prompt_file.is_some() {
             (&step.role_prompt, &step.role_prompt_file)
@@ -812,7 +812,7 @@ impl Agg {
 // gate — close the span, apply the policy
 // ---------------------------------------------------------------------------------------------
 
-impl Agg {
+impl Relentless {
     /// CLOSE the open span: merge everything `step()` staged since the last gate into the base
     /// branch, or discard it, according to [`OnRegression`].
     ///
@@ -862,15 +862,15 @@ impl Agg {
         // 3. nothing staged ⇒ nothing to decide. No ref is touched, no record is appended and no
         //    ordinal is consumed — a gate on an empty span must be free to call unconditionally at
         //    the bottom of a driver's `for`.
-        let Some(tip) = st.ext.get::<AGGState>().git.span_tip.clone() else {
+        let Some(tip) = st.ext.get::<RLTState>().git.span_tip.clone() else {
             // no span means nothing to roll back; a violation recorded without one (its paths were
             // restored already) must not poison the NEXT span's gate.
-            st.ext.get::<AGGState>().protect.span_violation.clear();
+            st.ext.get::<RLTState>().protect.span_violation.clear();
             return Ok(GateOutcome::Nothing);
         };
 
         // 4. FIVE results, and four of them are not `Staged`.
-        let iso_base = st.ext.get::<AGGState>().git.iso_base.clone();
+        let iso_base = st.ext.get::<RLTState>().git.iso_base.clone();
         let red_file = st.cfg.session_isolation.red_file.clone();
         let staged = crate::git::stage_session(&st.dir, &iso_base, &tip, &red_file);
 
@@ -963,7 +963,7 @@ impl Agg {
     /// The gate's own state: the ratchet references, the rollback counts and the oscillation
     /// history — the driver's reading of what `ratchet_regressed`, `<judge>.ref`, `rollbacks`,
     /// `consecutive_rollbacks` and `oscillating` mean on the YAML path. Branch on it in Rust:
-    /// `if agg.gate_state().consecutive_rollbacks >= 2 { … }`, `agg.gate_state().oscillating(4)`.
+    /// `if rlt.gate_state().consecutive_rollbacks >= 2 { … }`, `rlt.gate_state().oscillating(4)`.
     ///
     /// Before the run has started it is the configured seeds and nothing else.
     pub fn gate_state(&self) -> crate::core::ratchet::GateState {
@@ -992,15 +992,15 @@ impl Agg {
 // judge — lazy, memoized per step
 // ---------------------------------------------------------------------------------------------
 
-impl Agg {
+impl Relentless {
     /// This step's verdict for `j`, running it if this step has not asked for it yet.
     ///
     /// Memoized per step, which is what makes `&&` a cost gate:
-    /// `agg.judge(&build).met() && agg.judge(&load_test).met()` never reaches the 40-minute load
+    /// `rlt.judge(&build).met() && rlt.judge(&load_test).met()` never reaches the 40-minute load
     /// test on a cycle where the build is red.
     ///
     /// ⚠ Returns a [`Verdict`], not a `Result` — deliberately. `Result` is `#[must_use]`, so
-    /// `if agg.judge(&x).met()` would become `if agg.judge(&x)?.met()` at every site in every
+    /// `if rlt.judge(&x).met()` would become `if rlt.judge(&x)?.met()` at every site in every
     /// driver. After the latch this returns a NOT-MET verdict naming the outcome; never a
     /// fabricated `met: true`.
     pub fn judge(&self, j: &Judge) -> Verdict {
@@ -1008,7 +1008,7 @@ impl Agg {
     }
 
     /// A condition's verdict: whether something applies (a step of a workflow, a branch of a driver), not a
-    /// quality the gate guards. Run, recorded and memoized exactly like [`Agg::judge`], so a resumed run
+    /// quality the gate guards. Run, recorded and memoized exactly like [`Relentless::judge`], so a resumed run
     /// replays it; but it never enters the gate's regression set. A condition flips with the world (a tag
     /// that exists now and didn't when the last gate landed), and the gate would take that flip for a
     /// regression and roll back the work that follows it. A judge the span also asked by name stays held.
@@ -1022,10 +1022,10 @@ impl Agg {
     }
 
     /// This step's verdict for every member of `g`, each through the same lazy, memoized cache as
-    /// [`Agg::judge`] — so a member already asked this step is not run again. Count over the result:
-    /// `agg.group(&quality).at_least(2)` is "two of three".
+    /// [`Relentless::judge`] — so a member already asked this step is not run again. Count over the result:
+    /// `rlt.group(&quality).at_least(2)` is "two of three".
     ///
-    /// At the next [`Agg::gate`], a member asked ONLY through a group is judged with the group, net:
+    /// At the next [`Relentless::gate`], a member asked ONLY through a group is judged with the group, net:
     /// one member flipping met→unmet while another goes unmet→met is not a regression. A member the
     /// driver also asked by name is held one by one. After the latch every member reads not-met.
     pub fn group(&self, g: &Group) -> GroupVerdict {
@@ -1046,7 +1046,7 @@ impl Agg {
         if by_name {
             self.span_direct.borrow_mut().insert(j.name.clone());
         }
-        let lazy = Lazy { agg: self, asking: RefCell::new(Vec::new()) };
+        let lazy = Lazy { rlt: self, asking: RefCell::new(Vec::new()) };
         lazy.verdict_for(j)
     }
 
@@ -1094,7 +1094,7 @@ impl Agg {
             // otherwise a judge asked after a `Isolation::None` step runs unconfined, and one asked
             // after a hardened step inherits deny paths it exists to read and execute.
             let isolation = st.cfg.run_isolation().strongest(self.iso_seen.get());
-            let base = st.ext.get::<AGGState>().git.iso_base.clone();
+            let base = st.ext.get::<RLTState>().git.iso_base.clone();
             (
                 (st.ruler, st.judge_model.clone(), st.cfg.judge.agent.clone()),
                 j.timeout.unwrap_or(st.judge_timeout),
@@ -1169,7 +1169,7 @@ impl Agg {
 
     /// Upsert one driver verdict into the published judge scoreboard, keeping the run-lifetime LATEST
     /// per judge — the same shape `judges_from_engine` produces for the YAML path, so every reader
-    /// (TUI, web BFF, `agg status`) renders both paths through one code path and one wire format.
+    /// (TUI, web BFF, `rlt status`) renders both paths through one code path and one wire format.
     ///
     /// `delta` is computed against the value this judge published last, which is why the row is
     /// updated in place rather than pushed: a driver asks the same judge many times across a run.
@@ -1212,7 +1212,7 @@ impl Agg {
     /// A driver-constructed [`JudgeKind`] with its paths resolved against the project dir.
     ///
     /// The constructors (`Judge::rubric`/`script`) take the path VERBATIM, because a driver builds
-    /// its judges above `Agg::open` (the chain is self-consuming, so it must) and cannot yet know
+    /// its judges above `Relentless::open` (the chain is self-consuming, so it must) and cannot yet know
     /// the project root. A rubric's `inputs:` frontmatter is read here, at the same point.
     fn resolve_kind(&self, kind: &JudgeKind) -> JudgeKind {
         match kind {
@@ -1231,20 +1231,20 @@ impl Agg {
     }
 }
 
-/// The lazy per-step verdict store, shared by `Agg::judge()` and by every `JudgeCtx` a native judge
+/// The lazy per-step verdict store, shared by `Relentless::judge()` and by every `JudgeCtx` a native judge
 /// receives — one memoization, one answer.
 ///
-/// It owns the recursion stack rather than `Agg` because a nested ask goes through the SAME
+/// It owns the recursion stack rather than `Relentless` because a nested ask goes through the SAME
 /// instance: the ctx holds `&dyn JudgeSource`, so `ctx.met(&other)` re-enters here with the stack
 /// intact.
 struct Lazy<'a> {
-    agg: &'a Agg,
+    rlt: &'a Relentless,
     asking: RefCell<Vec<String>>,
 }
 
 impl JudgeSource for Lazy<'_> {
     fn verdict_for(&self, j: &Judge) -> Verdict {
-        if let Some(v) = self.agg.verdicts.borrow().get(&j.name) {
+        if let Some(v) = self.rlt.verdicts.borrow().get(&j.name) {
             return v.clone();
         }
         // ⛔ Recursion is REFUSED, not overflowed: a judge that asks for itself (directly or round
@@ -1255,17 +1255,17 @@ impl JudgeSource for Lazy<'_> {
             return Verdict::failed(format!("judge recursion: {}", path.join(" → ")));
         }
         self.asking.borrow_mut().push(j.name.clone());
-        let verdict = self.agg.run_judge(j, self);
+        let verdict = self.rlt.run_judge(j, self);
         self.asking.borrow_mut().pop();
-        self.agg.observe_pre_step(&j.name, &verdict);
+        self.rlt.observe_pre_step(&j.name, &verdict);
         // ⚠ THE CACHE IS POPULATED WHETHER THE VERDICT WAS RUN OR REPLAYED. A ledger hit that skipped
         // the cache would let a second ask in the same step reach the ledger AGAIN and consume a
         // second ordinal — every later call would then answer from the wrong record, silently, by
         // one. Memoization and the ledger have to agree on what counts as ONE call.
-        self.agg.verdicts.borrow_mut().insert(j.name.clone(), verdict.clone());
+        self.rlt.verdicts.borrow_mut().insert(j.name.clone(), verdict.clone());
         // …and into the span, so `gate()` sees every verdict asked for since the last gate — which
         // is the whole reason `gate()` exists (a gate inside `step()` could not see a lazy ask).
-        self.agg.span.borrow_mut().insert(j.name.clone(), verdict.clone());
+        self.rlt.span.borrow_mut().insert(j.name.clone(), verdict.clone());
         verdict
     }
 }
@@ -1274,20 +1274,20 @@ impl JudgeSource for Lazy<'_> {
 // ceilings, the operator bus, and the three notification levels
 // ---------------------------------------------------------------------------------------------
 
-impl Agg {
+impl Relentless {
     /// Enforce the run's ceilings HERE. **Opt-in**: a driver that never calls this has none.
     ///
     /// # Why opt-in does not weaken the moat
     ///
-    /// The moat is about the **worker**, which cannot reach any of this — `agg/private/` is carved
+    /// The moat is about the **worker**, which cannot reach any of this — `rlt/private/` is carved
     /// out of its writable set, so it can neither forge a verdict nor raise its own budget. The
     /// driver is a binary the operator compiled; it could always have written different `.limits()`
-    /// or not run agg at all.
+    /// or not run rlt at all.
     ///
     /// Cheap by construction (it reads counters already in memory), so calling it every cycle costs
-    /// nothing. Idempotent: after the latch is set every `agg.*` call is already a no-op.
+    /// nothing. Idempotent: after the latch is set every `rlt.*` call is already a no-op.
     ///
-    /// On EVERY call, breach or not, it also drains the operator bus (so `agg stop` is seen) and
+    /// On EVERY call, breach or not, it also drains the operator bus (so `rlt stop` is seen) and
     /// checks for Ctrl-C — both end the run exactly as the shipped loop does.
     pub fn check_limits(&self) -> Result<(), Fatal> {
         let started = self.ready()?;
@@ -1350,7 +1350,7 @@ impl Agg {
 
     /// Ctrl-C and the operator bus, on every ceiling check and every notification call.
     ///
-    /// The bus is drained through the SHIPPED `BusDrain` handler, so `agg send inject|budget|pause|
+    /// The bus is drained through the SHIPPED `BusDrain` handler, so `rlt send inject|budget|pause|
     /// stop|resume` cannot come to mean one thing on the YAML path and another here.
     fn operator_check(&self, started: &Started) -> Result<(), Fatal> {
         if crate::os::signals::interrupted() {
@@ -1390,7 +1390,7 @@ impl Agg {
     ///
     /// ⚠ These return `()`, so they can SET the latch but cannot RETURN the ceiling: the stop lands
     /// at the next `step()`/`gate()`/`check_limits()`/`block()`. That is still strictly better than
-    /// nothing — the bus is drained and `agg stop` is *seen* — but it does not interrupt a driver
+    /// nothing — the bus is drained and `rlt stop` is *seen* — but it does not interrupt a driver
     /// that logs and then sleeps for an hour. Only a returning call could.
     fn note(&self, level: &str, msg: &str) {
         if self.ended.get().is_some() {
@@ -1398,7 +1398,7 @@ impl Agg {
         }
         let Ok(started) = self.ready() else { return };
         // A recorded note replays as a NO-OP: it consumes its ordinal and delivers nothing. Not
-        // re-notifying is the point — the driver contract tells authors that an `agg.*` call is a
+        // re-notifying is the point — the driver contract tells authors that an `rlt.*` call is a
         // safe place for a once-only side effect, which is exactly why `log` is recorded like the
         // rest. A `Result`-less signature means a divergence here cannot be returned, so it is
         // reported and the note is delivered again; the next returning call raises it properly.
@@ -1440,26 +1440,26 @@ impl Agg {
     //
     // THREE calls, one behaviour: **block until a human answers.** No timeout, no default, no
     // ending the run. The stopping in an earlier design existed only to avoid holding a process
-    // open, which is an aesthetic worry rather than a cost — an idle agg process spends no tokens
+    // open, which is an aesthetic worry rather than a cost — an idle rlt process spends no tokens
     // and no money, and waiting is cheaper than the machinery that avoids waiting.
     //
-    // ⛔ THE WORKER CANNOT REACH THESE. `agg hil` records an ask and exits; only a driver author,
+    // ⛔ THE WORKER CANNOT REACH THESE. `rlt hil` records an ask and exits; only a driver author,
     // at a call site they wrote, can make the loop wait. With no bound on the wait that asymmetry
-    // is the ONLY thing standing between this feature and the interactive agent agg replaces — so
-    // do not add a `--wait` to `agg hil`, and do not give `agg.yaml` a `hil` key.
+    // is the ONLY thing standing between this feature and the interactive agent rlt replaces — so
+    // do not add a `--wait` to `rlt hil`, and do not give `rlt.yaml` a `hil` key.
     //
     // Two things make an indefinite wait safe rather than reckless:
-    //   · `agg stop` / Ctrl-C interrupt it — the bus is drained on every poll (verified on the wire);
+    //   · `rlt stop` / Ctrl-C interrupt it — the bus is drained on every poll (verified on the wire);
     //   · `work_time` excludes the waiting, so a ceiling meant to measure the agent's effort is not
     //     consumed by a human who was asleep. `wall_time` still fires: a deadline is a deadline.
     // ═════════════════════════════════════════════════════════════════════════════════════════
 
     /// Ask a human to pick one of `options`; returns the INDEX chosen.
     ///
-    /// The base form. `options` is a **closed set**: it is recorded with the ask, so `agg send
+    /// The base form. `options` is a **closed set**: it is recorded with the ask, so `rlt send
     /// answer` refuses anything not on the list and re-prints it, and this call cannot hand you a
     /// value you did not offer. That boundary check is the reason `hil_choose` exists next to
-    /// [`Agg::hil_input`], which cannot have one.
+    /// [`Relentless::hil_input`], which cannot have one.
     pub fn hil_choose(&self, question: &str, options: &[&str]) -> Result<usize, Fatal> {
         if options.len() < 2 {
             return Err(Fatal::Other(anyhow::anyhow!(
@@ -1476,7 +1476,7 @@ impl Agg {
         })
     }
 
-    /// Ask a human a yes/no question. Sugar for a two-option [`Agg::hil_choose`].
+    /// Ask a human a yes/no question. Sugar for a two-option [`Relentless::hil_choose`].
     ///
     /// Carries most real usage, which is why it has a name: authorize a deploy, confirm a real-world
     /// change was made, hand a failed task over. A `false` is a legitimate outcome, not an error —
@@ -1487,20 +1487,20 @@ impl Agg {
 
     /// Ask a human for a value. Returns what they typed, verbatim.
     ///
-    /// ⚠ An OPEN answer set: agg cannot validate free text, so **pair it with a judge** — ask, check,
+    /// ⚠ An OPEN answer set: rlt cannot validate free text, so **pair it with a judge** — ask, check,
     /// re-ask with the failure in the question. `examples/` shows the loop.
     ///
     /// ⛔ **Never route a secret through this.** The value would land in `asks.jsonl`, in the next
     /// session's `INSTRUCTIONS.md`, in `run.log`, and — because the bus is files on disk — in
-    /// `agg/private/bus/in/`. Ask the human to put the credential where credentials go and confirm
-    /// with [`Agg::hil_bool`] instead: **an answer may NAME a secret, never CONTAIN one.**
+    /// `rlt/private/bus/in/`. Ask the human to put the credential where credentials go and confirm
+    /// with [`Relentless::hil_bool`] instead: **an answer may NAME a secret, never CONTAIN one.**
     pub fn hil_input(&self, question: &str) -> Result<String, Fatal> {
         self.hil(AskCase::Input, question, None)
     }
 
     /// The open asks a human still owes an answer to, oldest first.
     ///
-    /// Exists for the WORKER's asks, which a driver cannot otherwise see: `agg hil` records and
+    /// Exists for the WORKER's asks, which a driver cannot otherwise see: `rlt hil` records and
     /// exits, so the id is minted somewhere this driver never was. Without a reader, a question the
     /// worker asked is invisible to the flow that has to react to it.
     ///
@@ -1552,9 +1552,9 @@ impl Agg {
 
         // ⚠ THE ONE PLACEMENT RULE. `step()` only STAGES — work sits on a session branch until a
         // gate lands it — so a human who edits the tree while a span is open collides with staged
-        // work. agg knows when that is, so it warns; it does not refuse, because most asks (a
+        // work. rlt knows when that is, so it warns; it does not refuse, because most asks (a
         // decision, a choice) touch nothing at all.
-        let span_open = started.st.borrow_mut().ext.get::<AGGState>().git.span_tip.is_some();
+        let span_open = started.st.borrow_mut().ext.get::<RLTState>().git.span_tip.is_some();
         if span_open {
             eprintln!(
                 "  ⚠ blocking with STAGED work on a session branch. If the human is going to touch \
@@ -1568,13 +1568,13 @@ impl Agg {
         }
         eprintln!("  [hil {id}] {question}");
         match &options {
-            Some(o) => eprintln!("      answer: `agg answer {id} <{}>`", o.join("|")),
-            None => eprintln!("      answer: `agg answer {id} \"<value>\"`"),
+            Some(o) => eprintln!("      answer: `rlt answer {id} <{}>`", o.join("|")),
+            None => eprintln!("      answer: `rlt answer {id} \"<value>\"`"),
         }
-        eprintln!("      or end the run with `agg stop` — a block is interruptible.");
+        eprintln!("      or end the run with `rlt stop` — a block is interruptible.");
 
         // ⚠ PUBLISH, and keep publishing. Found on the wire, not in a test: without this the ask is
-        // in `asks.jsonl` but NOT in `state.json`, so `agg status`, the TUI and `agg serve` all show
+        // in `asks.jsonl` but NOT in `state.json`, so `rlt status`, the TUI and `rlt serve` all show
         // nothing at the one moment a human is needed — which defeats the entire mitigation for "a
         // forgotten ask hangs the run forever" (`internal/HUMAN_LOOP.md` §5.7). The age has to keep
         // moving too, or a reader shows "waiting 0s" for twenty minutes.
@@ -1619,7 +1619,7 @@ impl Agg {
     }
 
     /// Cannot proceed without a human: deliver `msg` and WAIT on the operator bus until
-    /// `agg send resume` (or `agg stop`) arrives.
+    /// `rlt send resume` (or `rlt stop`) arrives.
     ///
     /// ⛔ **The worker cannot reach this.** The opt-in is the driver author's, in source, at one
     /// call site — which is what makes stop-and-wait legitimate here and never a mechanism.
@@ -1643,13 +1643,13 @@ impl Agg {
             let mut st = started.st.borrow_mut();
             crate::features::notify::driver_ping(&mut st, "block", msg);
             // a stale Resume from before the block is not this block's answer.
-            st.ext.get::<AGGState>().operator.resumed = false;
+            st.ext.get::<RLTState>().operator.resumed = false;
         }
-        eprintln!("  [block] {msg}\n    answer with `agg send resume`, or end the run with `agg stop`.");
+        eprintln!("  [block] {msg}\n    answer with `rlt send resume`, or end the run with `rlt stop`.");
         loop {
             // the ceilings + Ctrl-C + the bus drain (which records the Resume), then the nap.
             self.check_limits()?;
-            if std::mem::take(&mut started.st.borrow_mut().ext.get::<AGGState>().operator.resumed) {
+            if std::mem::take(&mut started.st.borrow_mut().ext.get::<RLTState>().operator.resumed) {
                 eprintln!("  [block] resumed by the operator.");
                 // recorded only once ANSWERED — a block that never got its answer did not complete,
                 // so a resume must ask again rather than walk past a human decision nobody made.
@@ -1681,7 +1681,7 @@ struct PosItem {
 
 /// An RAII breadcrumb: "cycle 7/20". Declared once, dropped when its scope ends.
 ///
-/// agg cannot see a hand-written `for`, so this is how a bound reaches the reader at all. A loop
+/// rlt cannot see a hand-written `for`, so this is how a bound reaches the reader at all. A loop
 /// with no `pos` shows NO counter — never a wrong one.
 pub struct PosFrame<'a> {
     id: u64,
@@ -1709,7 +1709,7 @@ impl Drop for PosFrame<'_> {
 /// Frame ids. A plain counter: ids only need to be distinct within one process.
 static NEXT_POS_ID: AtomicU64 = AtomicU64::new(1);
 
-impl Agg {
+impl Relentless {
     /// Declare where the driver is: a label and its DECLARED bound. Spends nothing, and is
     /// unaffected by the latch.
     pub fn pos(&self, label: impl Into<String>, max: u64) -> PosFrame<'_> {
@@ -1732,10 +1732,10 @@ impl Agg {
     ///
     /// ⚠ It also enforces the CONSISTENCY CHECK, which is the whole reason a record carries a label
     /// path. Fast-forward is sound only if the resumed driver is the same driver in the same place:
-    /// ordinals alone would happily answer `agg.judge(&security)` with a recorded `agg.judge(&lint)`
+    /// ordinals alone would happily answer `rlt.judge(&security)` with a recorded `rlt.judge(&lint)`
     /// verdict if the flow had changed, and the run would proceed on a fabricated result. A mismatch
     /// is therefore a HARD error naming both sides — never a silent re-execution, because "the
-    /// driver changed" and "the ledger is stale" are the operator's call, not agg's.
+    /// driver changed" and "the ledger is stale" are the operator's call, not rlt's.
     fn replayed(&self, started: &Started, want: &str) -> Result<Option<CallRecord>, Fatal> {
         let Some(rec) = started.replay.get(self.ord.get() as usize).cloned() else {
             return Ok(None);
@@ -1779,7 +1779,7 @@ impl Agg {
         self.ord.set(self.ord.get() + 1);
     }
 
-    /// The run's human-readable status — the same view `agg status` renders, from the same
+    /// The run's human-readable status — the same view `rlt status` renders, from the same
     /// published `state.json`. Spends nothing and works before the run has started.
     pub fn summary(&self) -> String {
         crate::ui::status::render(&self.dir)
@@ -1810,7 +1810,7 @@ impl Agg {
     pub fn ungated_span(&self) -> Option<String> {
         let started = self.started.get()?;
         let mut st = started.st.borrow_mut();
-        let git = &mut st.ext.get::<AGGState>().git;
+        let git = &mut st.ext.get::<RLTState>().git;
         crate::features::finalize::stranded_span_message(
             &git.span_branches,
             git.span_tip.as_deref(),
@@ -1827,8 +1827,8 @@ impl Agg {
         self.end(outcome, None);
     }
 
-    /// [`Agg::finish`], saying WHY — the stop condition the driver's own code saw fire
-    /// (`"rollbacks >= 2"`, `"stalled"`). It lands where `agg run` puts the `abort_if` term that
+    /// [`Relentless::finish`], saying WHY — the stop condition the driver's own code saw fire
+    /// (`"rollbacks >= 2"`, `"stalled"`). It lands where `rlt run` puts the `abort_if` term that
     /// fired: for [`RunOutcome::Halt`], `ABORT: <reason>` in the report's `stop_reason` (and
     /// `state.json`'s `finish_reason`) and `abort:<reason>` as the run ledger's end reason, word for
     /// word the YAML path's. Any other outcome records the reason as given under its usual ledger
@@ -1837,7 +1837,7 @@ impl Agg {
         self.end(outcome, Some(reason.into()));
     }
 
-    /// The body of [`Agg::finish`] / [`Agg::finish_with`].
+    /// The body of [`Relentless::finish`] / [`Relentless::finish_with`].
     fn end(&self, outcome: RunOutcome, reason: Option<String>) {
         if self.ended.get().is_some() {
             return;
@@ -1854,7 +1854,7 @@ impl Agg {
     /// How many worker sessions this run has launched. `0` before the first `step()`.
     ///
     /// Deliberately NOT one of the eleven calls: a driver reads per-step numbers off
-    /// [`StepOutcome`] and the run's own view off [`Agg::summary`]. It exists because "did the latch
+    /// [`StepOutcome`] and the run's own view off [`Relentless::summary`]. It exists because "did the latch
     /// really stop the pipeline" is a question only the counter can answer.
     pub fn sessions(&self) -> u32 {
         self.started.get().map(|s| s.st.borrow().session).unwrap_or(0)
@@ -1867,7 +1867,7 @@ impl Agg {
 
 /// Stamp the run's end into `state.json` (`dash.finished` + the reason) and the run ledger
 /// (`ledger.finish`), through the SAME `emit(Finished)` every `Flow::Stop` on the YAML path uses —
-/// so `agg status`, the dashboard and `agg history` cannot come to mean one thing per entry point.
+/// so `rlt status`, the dashboard and `rlt history` cannot come to mean one thing per entry point.
 fn record_end(st: &mut LoopState, outcome: RunOutcome, why: Option<&str>) {
     let (reason, ledger_tag) = end_wording(outcome, st.session, why);
     st.emit(crate::plugin::LifecycleEvent::Finished { reason, ledger_tag });
@@ -1887,13 +1887,13 @@ fn end_wording(outcome: RunOutcome, n: u32, why: Option<&str>) -> (String, Strin
     }
 }
 
-/// [`Agg::finish`]'s fixed wording, per outcome.
+/// [`Relentless::finish`]'s fixed wording, per outcome.
 fn default_wording(outcome: RunOutcome, n: u32) -> (String, &'static str) {
     match outcome {
         // ⚠ NOT "goals-met". A driver declares no DoD — it decides it is done by RETURNING — so
         // claiming its goals were met is a statement about something that does not exist, and
-        // `agg history` rendered it beside `goals_met: 0, goals_total: 0`: vacuously true and read by
-        // a human as "it finished having achieved nothing". `driver-returned` says the one thing agg
+        // `rlt history` rendered it beside `goals_met: 0, goals_total: 0`: vacuously true and read by
+        // a human as "it finished having achieved nothing". `driver-returned` says the one thing rlt
         // actually knows. The OUTCOME stays `GoalsMet` (exit 0, the success path); only the recorded
         // wording changes, because the ledger is the human-facing artefact.
         RunOutcome::GoalsMet => (format!("driver returned after {n} session(s)"), "driver-returned"),
@@ -1906,27 +1906,27 @@ fn default_wording(outcome: RunOutcome, n: u32) -> (String, &'static str) {
 /// RUN END. For a driver, "run end" is `main` returning or panicking — there is no post-loop
 /// finalize to inherit, because on the YAML path all of it happens inside `CheckRunStop`.
 ///
-/// Order is load-bearing: this body runs FIRST, then `Agg`'s fields drop, which fires `StopHooks`
+/// Order is load-bearing: this body runs FIRST, then `Relentless`'s fields drop, which fires `StopHooks`
 /// (the `on_stop` shell hook) and `RunPidGuard` (releases the double-run guard). So the run is
 /// recorded as ended before anything the operator wired to `on_stop` observes it.
 ///
-/// | how the driver ends | how agg learns | recorded |
+/// | how the driver ends | how rlt learns | recorded |
 /// |---|---|---|
 /// | a ceiling fired | the latch | the latched [`RunOutcome`] |
 /// | panic | `std::thread::panicking()` | the ledger's own pessimistic `crashed` |
 /// | clean drop, no latch | `Drop` | [`RunOutcome::GoalsMet`] |
 ///
 /// The last row's `Err`-return ambiguity is ACCEPTED: `Drop` cannot see whether `main` returned
-/// `Ok` or `Err`. [`Agg::finish`] is the explicit form for a driver that wants the distinction.
-impl Drop for Agg {
+/// `Ok` or `Err`. [`Relentless::finish`] is the explicit form for a driver that wants the distinction.
+impl Drop for Relentless {
     fn drop(&mut self) {
         // ⚠ ONE `eprintln!` AND NOTHING ELSE while unwinding. A panic inside `Drop` aborts the
         // process, and the frame that panicked may well have been holding the `RefCell` — so a
         // `borrow_mut()` here would BE that second panic. The ledger already carries a pessimistic
         // `crashed` end_reason from `RunLedger::begin` and stamps the end time in its own `Drop`, so
-        // the run is still recorded as failed without agg touching anything.
+        // the run is still recorded as failed without rlt touching anything.
         if std::thread::panicking() {
-            eprintln!("  ⚠ agg: the driver PANICKED — any staged span is left on its branch, un-merged.");
+            eprintln!("  ⚠ rlt: the driver PANICKED — any staged span is left on its branch, un-merged.");
             return;
         }
         let Some(started) = self.started.get() else {
@@ -1936,11 +1936,11 @@ impl Drop for Agg {
         // that silently skips a report, and nothing else can be holding this borrow here.
         let Ok(mut st) = started.st.try_borrow_mut() else { return };
 
-        // the ungated span, named, with the command that lands it. ⛔ Never auto-merged (agg must not
+        // the ungated span, named, with the command that lands it. ⛔ Never auto-merged (rlt must not
         // make a call it was not given) and never auto-rolled-back (discarding an overnight run over a
         // late regression is far worse than keeping it).
         crate::features::finalize::report_stranded_span(&mut st);
-        let base = st.ext.get::<AGGState>().git.iso_base.clone();
+        let base = st.ext.get::<RLTState>().git.iso_base.clone();
         if let Some(moved) = crate::git::back_to_base(&st.dir, &base) {
             eprintln!("{moved}");
         }
@@ -1955,7 +1955,7 @@ impl Drop for Agg {
         // A driver that returns `Err` reads as `done` here; `driver::run` amends it to `error`.
         let report = crate::report::from_state(&mut st, &started.report, &Ok(outcome));
         if let Err(e) = started.report.finish(&report) {
-            eprintln!("  ⚠ agg: cannot write {}: {e}", crate::paths::report_json(&st.dir).display());
+            eprintln!("  ⚠ rlt: cannot write {}: {e}", crate::paths::report_json(&st.dir).display());
         }
         crate::core::judge::sweep_scratch(&st.dir);
     }
@@ -2046,10 +2046,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    fn open() -> (tempfile::TempDir, Agg) {
+    fn open() -> (tempfile::TempDir, Relentless) {
         let tmp = tempfile::tempdir().unwrap();
-        let agg = Agg::open(tmp.path()).unwrap();
-        (tmp, agg)
+        let rlt = Relentless::open(tmp.path()).unwrap();
+        (tmp, rlt)
     }
 
     /// A-25: an LLM judge without its own ruler asks the run's; with its own model the run's agent;
@@ -2072,48 +2072,48 @@ mod tests {
     }
 
     /// The ruler builders set exactly the fields YAML's `judge:` block sets, and nothing is set
-    /// until asked: the defaults stay `AggConfig::default()`'s.
+    /// until asked: the defaults stay `RelentlessConfig::default()`'s.
     #[test]
     fn the_ruler_builders_set_the_judge_block() {
-        let (_tmp, agg) = open();
-        let untouched = AggConfig::default().judge;
-        assert_eq!((agg.cfg.judge.agent.as_str(), agg.cfg.judge.model.as_deref()), (untouched.agent.as_str(), None));
-        assert_eq!(agg.cfg.judge.timeout, untouched.timeout);
+        let (_tmp, rlt) = open();
+        let untouched = RelentlessConfig::default().judge;
+        assert_eq!((rlt.cfg.judge.agent.as_str(), rlt.cfg.judge.model.as_deref()), (untouched.agent.as_str(), None));
+        assert_eq!(rlt.cfg.judge.timeout, untouched.timeout);
 
-        let agg = agg.judge_agent(Agent::Codex).judge_model("gpt-cheap").judge_timeout(900);
-        assert_eq!(agg.cfg.judge.agent, "codex");
-        assert_eq!(agg.cfg.judge.model.as_deref(), Some("gpt-cheap"));
-        assert_eq!(agg.cfg.judge.timeout, 900);
-        assert_eq!(agg.custom_ruler, None);
+        let rlt = rlt.judge_agent(Agent::Codex).judge_model("gpt-cheap").judge_timeout(900);
+        assert_eq!(rlt.cfg.judge.agent, "codex");
+        assert_eq!(rlt.cfg.judge.model.as_deref(), Some("gpt-cheap"));
+        assert_eq!(rlt.cfg.judge.timeout, 900);
+        assert_eq!(rlt.custom_ruler, None);
     }
 
     /// A custom ruler is refused when the run boots — even one that NAMES a built-in agent, which
     /// would otherwise silently become that agent — and a later built-in ruler withdraws the refusal.
     #[test]
     fn a_custom_ruler_is_refused_at_boot_and_a_built_in_one_clears_it() {
-        let (_tmp, agg) = open();
+        let (_tmp, rlt) = open();
         let custom = Agent::Custom(Arc::new(crate::backend::claude::Claude));
-        let agg = agg.judge_agent(Agent::Codex).judge_agent(custom.clone());
-        assert_eq!(agg.cfg.judge.agent, "codex", "the refused agent never reaches the config");
-        let err = agg.check_limits().unwrap_err().to_string();
+        let rlt = rlt.judge_agent(Agent::Codex).judge_agent(custom.clone());
+        assert_eq!(rlt.cfg.judge.agent, "codex", "the refused agent never reaches the config");
+        let err = rlt.check_limits().unwrap_err().to_string();
         assert!(err.contains("Agent::Custom(`claude`)") && err.contains("built-in agent"), "{err}");
-        assert!(agg.started.get().is_none(), "nothing booted");
+        assert!(rlt.started.get().is_none(), "nothing booted");
 
-        let (_tmp, agg) = open();
-        let agg = agg.judge_agent(custom).judge_agent(Agent::Copilot);
-        assert_eq!((agg.custom_ruler.as_deref(), agg.cfg.judge.agent.as_str()), (None, "copilot"));
+        let (_tmp, rlt) = open();
+        let rlt = rlt.judge_agent(custom).judge_agent(Agent::Copilot);
+        assert_eq!((rlt.custom_ruler.as_deref(), rlt.cfg.judge.agent.as_str()), (None, "copilot"));
     }
 
     /// The resolved step's role pair: the step's own when it sets either form, else the defaults' —
-    /// AS A PAIR, exactly as `AggConfig::resolve_step` merges a YAML step.
+    /// AS A PAIR, exactly as `RelentlessConfig::resolve_step` merges a YAML step.
     #[test]
     fn a_steps_role_prompt_replaces_the_defaults_as_a_pair() {
-        let (tmp, mut agg) = open();
-        std::fs::create_dir_all(tmp.path().join("agg/roles")).unwrap();
-        std::fs::write(tmp.path().join("agg/roles/tester.md"), "you are a tester\n").unwrap();
-        agg.cfg.defaults.role_prompt = Some("you are the default".into());
+        let (tmp, mut rlt) = open();
+        std::fs::create_dir_all(tmp.path().join("rlt/roles")).unwrap();
+        std::fs::write(tmp.path().join("rlt/roles/tester.md"), "you are a tester\n").unwrap();
+        rlt.cfg.defaults.role_prompt = Some("you are the default".into());
         let role = |s: &Step| {
-            let r = agg.resolve(s).unwrap();
+            let r = rlt.resolve(s).unwrap();
             (r.role_prompt, r.role_prompt_file)
         };
 
@@ -2125,12 +2125,12 @@ mod tests {
     /// A step carrying both role forms, or a role file that cannot be read, is refused before it runs.
     #[test]
     fn a_bad_step_role_prompt_is_refused() {
-        let (_tmp, agg) = open();
+        let (_tmp, rlt) = open();
         let mut both = Step::new("a").role_prompt("inline");
         both.role_prompt_file = Some("roles/r.md".into());
-        let err = agg.resolve(&both).unwrap_err().to_string();
+        let err = rlt.resolve(&both).unwrap_err().to_string();
         assert!(err.contains("are alternatives"), "{err}");
-        let err = agg.resolve(&Step::new("b").role_prompt_file("roles/gone.md")).unwrap_err().to_string();
+        let err = rlt.resolve(&Step::new("b").role_prompt_file("roles/gone.md")).unwrap_err().to_string();
         assert!(err.contains("cannot read"), "{err}");
     }
 
@@ -2150,10 +2150,10 @@ mod tests {
     /// `finish_with` latches like `finish`, and once latched neither records again.
     #[test]
     fn finish_with_latches_and_is_idempotent() {
-        let (_tmp, agg) = open();
-        agg.finish_with(RunOutcome::Halt, "stalled");
-        assert_eq!(agg.ended(), Some(RunOutcome::Halt));
-        agg.finish(RunOutcome::GoalsMet);
-        assert_eq!(agg.ended(), Some(RunOutcome::Halt), "the first end wins");
+        let (_tmp, rlt) = open();
+        rlt.finish_with(RunOutcome::Halt, "stalled");
+        assert_eq!(rlt.ended(), Some(RunOutcome::Halt));
+        rlt.finish(RunOutcome::GoalsMet);
+        assert_eq!(rlt.ended(), Some(RunOutcome::Halt), "the first end wins");
     }
 }

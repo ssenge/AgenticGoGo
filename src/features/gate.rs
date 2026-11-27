@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use crate::loop_::{AGGState, AGGScratch, Flow, Handler, LoopState, LifecycleEvent, RunOutcome, indent};
+use crate::loop_::{RLTState, RLTScratch, Flow, Handler, LoopState, LifecycleEvent, RunOutcome, indent};
 use crate::core::engine::{CycleResult, GoalRuntime};
 use crate::core::model::Verdict;
 use crate::core::ratchet::{GateDecision, RatchetRegression};
@@ -20,7 +20,7 @@ impl Handler for CeilingPoisonGuard {
     // judges at all cannot express a notify condition worth delivering. Upgrade path if a real run
     // ever lands here: `notify::halt_ping(ctx, res.halt_reason.as_deref())` before the Stop.
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let sc = ctx.scratch.get::<AGGScratch>();
+        let sc = ctx.scratch.get::<RLTScratch>();
         let res = sc.res.as_ref().expect("an on_verify handler set scratch.res");
         if sc.skip_judges
             && res.halt
@@ -50,12 +50,12 @@ pub struct GateKeepRollback;
 impl Handler for GateKeepRollback {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         ctx.emit(LifecycleEvent::Gate);
-        if ctx.scratch.get::<AGGScratch>().skip_judges {
+        if ctx.scratch.get::<RLTScratch>().skip_judges {
             return Ok(Flow::Continue); // a skip step: the span was staged in VERIFY; nothing to gate.
         }
-        let mut res = ctx.scratch.get::<AGGScratch>().res.take().expect("an on_verify handler set scratch.res");
-        let staged = ctx.scratch.get::<AGGScratch>().staged.take();
-        let pre_cycle_goals = std::mem::take(&mut ctx.scratch.get::<AGGScratch>().pre_cycle_goals);
+        let mut res = ctx.scratch.get::<RLTScratch>().res.take().expect("an on_verify handler set scratch.res");
+        let staged = ctx.scratch.get::<RLTScratch>().staged.take();
+        let pre_cycle_goals = std::mem::take(&mut ctx.scratch.get::<RLTScratch>().pre_cycle_goals);
 
         // the regression gate: a DoD-set judge MET before (durable, §5.7) that now fails. Scope to
         // the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs `scope` →
@@ -121,9 +121,9 @@ impl Handler for GateKeepRollback {
                 judge_usage: Vec::new(),
             };
         }
-        ctx.scratch.get::<AGGScratch>().res = Some(res);
-        ctx.scratch.get::<AGGScratch>().rolled_back = matches!(gated, Gated::RolledBack | Gated::NoImprovement);
-        ctx.scratch.get::<AGGScratch>().no_improvement = gated == Gated::NoImprovement;
+        ctx.scratch.get::<RLTScratch>().res = Some(res);
+        ctx.scratch.get::<RLTScratch>().rolled_back = matches!(gated, Gated::RolledBack | Gated::NoImprovement);
+        ctx.scratch.get::<RLTScratch>().no_improvement = gated == Gated::NoImprovement;
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -168,7 +168,7 @@ pub(crate) enum Gated {
 ///
 /// ⚠ **Two call sites, not one lifted out.** [`GateKeepRollback`] runs it on the YAML path; on the
 /// driver path every step is `skip_judges`, so that handler returns at its guard and never gets
-/// here, and [`crate::driver::Agg::gate`] calls this directly instead. Keeping the body inline in
+/// here, and [`crate::driver::Relentless::gate`] calls this directly instead. Keeping the body inline in
 /// the handler would have left the driver free to grow a second, drifting copy of the one decision
 /// in the loop that can lose the worker's commits.
 ///
@@ -190,8 +190,8 @@ pub(crate) fn keep_or_rollback(
     // policy, and regardless of it: `gate_regressions: false` relaxes what a REGRESSION means, it
     // does not license a session that rewrote an oracle. Taken (cleared) on every arm, because
     // every arm closes the span.
-    let violated = std::mem::take(&mut ctx.ext.get::<AGGState>().protect.span_violation);
-    // the copies agg kept of each verdict's evidence, stamped on its ledger row.
+    let violated = std::mem::take(&mut ctx.ext.get::<RLTState>().protect.span_violation);
+    // the copies rlt kept of each verdict's evidence, stamped on its ledger row.
     let kept = crate::features::evidence::for_ledger(ctx, fresh);
     // The `verdicts::append` `?` below is a HARD disk Err that bubbles out to the caller (R7) — the
     // gate's "was met" reads this file, so a swallowed write would silently un-arm the next gate.
@@ -257,16 +257,16 @@ pub(crate) fn keep_or_rollback(
         // so base is byte-for-byte the tree the judges just graded and their verdicts describe it
         // EXACTLY. Restoring the pre-step state overwrites a true reading with a stale one.
         //
-        // It bites the moment a step's whole output is worker-state rather than source. `agg/state/`
+        // It bites the moment a step's whole output is worker-state rather than source. `rlt/state/`
         // is gitignored BY DESIGN — the OKF wiki and STATE.md are durable, multi-session and
         // first-class — so a `survey`/`spec`/`plan` step produces zero commits EVERY time, and such a
         // step could therefore never satisfy an `until:`. A real run of examples/workflow.yaml
-        // surfaced it: `spec` wrote agg/state/wiki/spec.md, the judge read it and scored 100/100, the
+        // surfaced it: `spec` wrote rlt/state/wiki/spec.md, the judge read it and scored 100/100, the
         // restore put 75 back, `until: spec_sound` read the stale 75 and re-dispatched — twice, then
         // aborted on `max: 2` reporting that a condition which HAD held "never held".
         //
         // Note the fixture comment in tests/cli.rs that says "a worker that means its work commits
-        // it": that is true of a FAKE worker, which runs git itself. A real one never does — agg owns
+        // it": that is true of a FAKE worker, which runs git itself. A real one never does — rlt owns
         // all git — so "commit it" is not a lever the worker has.
         //
         // And it is a STEP, with its own ledger tag `no_changes`: a session in which nothing moved.
@@ -330,11 +330,11 @@ pub(crate) fn keep_or_rollback(
 /// and the stale-span detection has no way to tell a merged leftover from a stranded span. The
 /// shipped loop got away with `span_branches.clear()` because it only ever held ONE branch.
 fn clear_span(ctx: &mut LoopState, spoken_for: Option<&str>) {
-    let branches = std::mem::take(&mut ctx.ext.get::<AGGState>().git.span_branches);
+    let branches = std::mem::take(&mut ctx.ext.get::<RLTState>().git.span_branches);
     for br in &branches {
         if Some(br.as_str()) != spoken_for {
             crate::git::delete_branch(&ctx.dir, br);
         }
     }
-    ctx.ext.get::<AGGState>().git.span_tip = None;
+    ctx.ext.get::<RLTState>().git.span_tip = None;
 }

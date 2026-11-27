@@ -1,10 +1,10 @@
 //! Evidence persistence: keep the files a verdict names as `evidence`, after the judge that wrote
 //! them is gone.
 //!
-//! A judge's working files live in its per-session scratch (`$AGG_JUDGE_SCRATCH`, under `$TMPDIR`),
+//! A judge's working files live in its per-session scratch (`$RLT_JUDGE_SCRATCH`, under `$TMPDIR`),
 //! which nothing keeps: by the time a human asks why a gate passed, the SARIF file or the diff report
-//! the verdict pointed at may already be swept. So after judging, agg copies each declared file to
-//! `agg/private/evidence/<run>/<session>/<judge>/` — agg-private, because it is part of what agg
+//! the verdict pointed at may already be swept. So after judging, rlt copies each declared file to
+//! `rlt/private/evidence/<run>/<session>/<judge>/` — rlt-private, because it is part of what rlt
 //! believes happened.
 //!
 //! # What may be copied
@@ -12,7 +12,7 @@
 //! path is taken as is). The CANONICAL path — every symlink resolved — must lie inside one of those
 //! two roots, and must be a regular file. Anything else is refused and recorded, never followed: a
 //! verdict is judge output, and a judge reads worker-written content, so `"../../.ssh/id_rsa"` or a
-//! scratch symlink to `/etc` must not become a copy agg makes on its behalf.
+//! scratch symlink to `/etc` must not become a copy rlt makes on its behalf.
 //!
 //! # The size cap
 //! A run-wide byte budget ([`Budget`]) bounds the copies. It is a robustness bound against filling
@@ -141,7 +141,7 @@ mod tests {
         let roots = Roots { scratch: tmp.path().join("scratch"), project: tmp.path().join("proj") };
         std::fs::create_dir_all(&roots.scratch).unwrap();
         std::fs::create_dir_all(&roots.project).unwrap();
-        let dest = tmp.path().join("proj/agg/private/evidence/r/1/lint");
+        let dest = tmp.path().join("proj/rlt/private/evidence/r/1/lint");
         (tmp, roots, dest)
     }
 

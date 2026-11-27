@@ -2,16 +2,16 @@
 
 use std::path::Path;
 use anyhow::Result;
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::plugin::{Bootstrap, End, Flow, Handler, PreStart};
 use crate::context::LoopState;
-use crate::features::state::AGGScratch;
+use crate::features::state::RLTScratch;
 
 /// Dispatch one hook point's handlers in order, honoring `Flow`. A handler's hard `Err` bubbles out
 /// (it is NOT a `RunOutcome` — e.g. `verdicts::append`, or the worker-broken guard). §3.1.
 pub fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End>> {
     for h in hooks {
-        if st.scratch.get::<AGGScratch>().skip_judges && !h.runs_on_skip() {
+        if st.scratch.get::<RLTScratch>().skip_judges && !h.runs_on_skip() {
             continue;
         }
         match h.run(st)? {
@@ -52,7 +52,7 @@ pub(crate) fn run_pre_start(hs: &[Box<dyn PreStart>], boot: &mut Bootstrap) -> R
     Ok(())
 }
 
-/// The hook registry: one ordered plugin list per lifecycle point. `default_pipeline` is agg's OWN
+/// The hook registry: one ordered plugin list per lifecycle point. `default_pipeline` is rlt's OWN
 /// registration (its features are plugins, no different from a third party's). Fields are `pub` so a
 /// host can `lifecycle.on_verify.push(Box::new(MyPlugin))` before the loop — config-in-code, no yaml
 /// (HOOK_REDESIGN §5). This is the OQ5 registration seam.
@@ -70,11 +70,11 @@ pub struct Lifecycle {
     pub on_stop: Vec<Box<dyn Handler>>,
 }
 impl Lifecycle {
-    pub fn default_pipeline(cfg: &AggConfig, dir: &Path) -> Self {
+    pub fn default_pipeline(cfg: &RelentlessConfig, dir: &Path) -> Self {
         Self::with_hooks(&cfg.hooks, dir, cfg.run_isolation())
     }
     /// Split out from `default_pipeline` so the registration ORDER is testable without a full
-    /// `AggConfig` (`Hooks: Default`). `run_isolation` is the tier for RUN-LEVEL hooks that fire
+    /// `RelentlessConfig` (`Hooks: Default`). `run_isolation` is the tier for RUN-LEVEL hooks that fire
     /// without a step context — only `on_stop` uses it (post-worker teardown); the per-session
     /// hooks resolve their tier from the live step, and `on_start` is pre-worker so it stays `None`.
     pub(crate) fn with_hooks(hooks: &crate::core::config::Hooks, dir: &Path, run_isolation: crate::isolation::Isolation) -> Self {

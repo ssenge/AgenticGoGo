@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
-import { aggAnswer } from '$lib/server/agg.js';
+import { rltAnswer } from '$lib/server/rlt.js';
 
-// Proxy: POST /api/answer → agg serve POST /api/answer. Separate from /api/send on purpose: an
+// Proxy: POST /api/answer → rlt serve POST /api/answer. Separate from /api/send on purpose: an
 // answer is a durable fact recorded in the ask ledger, not a steering message, so it does NOT
-// require a running workflow — while every /api/send does. agg validates the value against the
+// require a running workflow — while every /api/send does. rlt validates the value against the
 // ask's recorded options and returns 400 with the acceptable ones if it is off the list.
 export async function POST({ request, url }) {
   let payload;
@@ -12,7 +12,7 @@ export async function POST({ request, url }) {
   } catch {
     return json({ error: 'invalid JSON' }, { status: 400 });
   }
-  const { status, body } = await aggAnswer(payload, url.search);
+  const { status, body } = await rltAnswer(payload, url.search);
   if (status === 0) return json(body, { status: 502 });
   return json(body ?? {}, { status });
 }

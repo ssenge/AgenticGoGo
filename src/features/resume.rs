@@ -1,6 +1,6 @@
-//! `agg run --resume` — the YAML path continues an interrupted run (A-18.3, decision 5).
+//! `rlt run --resume` — the YAML path continues an interrupted run (A-18.3, decision 5).
 //!
-//! It REUSES the driver's call ledger (`agg/private/calls.jsonl`) instead of adding a mechanism: the
+//! It REUSES the driver's call ledger (`rlt/private/calls.jsonl`) instead of adding a mechanism: the
 //! YAML loop writes one `step` record per session and one `gate` record per judged session, and a
 //! resume truncates to the last KEPT gate — the same OD-12 rule, for the same reason: only work that
 //! landed on base is sound to skip. What it restores:
@@ -12,7 +12,7 @@
 //! | session counter, tokens, cost | `state.json` as the run left it — never laundered: work after the last kept gate re-executes, but its spend stays spent and its session numbers stay used |
 //! | the run id, the clock | `clock.json` |
 //!
-//! An interrupted session's work is never judged: it was saved under `refs/agg/partial/<run>/<n>`
+//! An interrupted session's work is never judged: it was saved under `refs/rlt/partial/<run>/<n>`
 //! when it stopped (or by `GitSetup` on the resume, after a crash), and the resume starts session
 //! n+1 from the gated tree.
 
@@ -24,7 +24,7 @@ use anyhow::{bail, Result};
 use crate::core::calls::CallRecord;
 use crate::core::ratchet::GateState;
 use crate::driver::{GateOutcome, Landing, StepOutcome};
-use crate::loop_::{AGGScratch, LoopState};
+use crate::loop_::{RLTScratch, LoopState};
 use crate::state::AgentUsage;
 
 /// What a resumed YAML run restores, read before this run writes anything.
@@ -52,7 +52,7 @@ pub struct Ledger {
 pub fn load(dir: &Path) -> Result<Resume> {
     let last = crate::project::Project::load(dir).runs.pop();
     let Some(last) = last else {
-        bail!("--resume: this project has no previous run to continue — start one with `agg run`")
+        bail!("--resume: this project has no previous run to continue — start one with `rlt run`")
     };
     if last.end_reason == "goals-met" {
         bail!("--resume: the last run (#{}) already met done_if — there is nothing to continue", last.run);
@@ -128,7 +128,7 @@ pub fn restore_position(st: &mut LoopState, r: &Resume) -> Result<()> {
 /// the `gate` that decided it. A `skip_judges` session is staged, not gated: its gate is the next
 /// judged session's.
 pub fn record(st: &mut LoopState, outcome: &StepOutcome) -> Result<()> {
-    let judged = !st.scratch.get::<AGGScratch>().skip_judges;
+    let judged = !st.scratch.get::<RLTScratch>().skip_judges;
     let (idx, reps) = st.cursor.position();
     let ts = crate::util::now_epoch();
     let mut ord = st.ext.get::<Ledger>().ord;

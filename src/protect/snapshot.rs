@@ -38,9 +38,9 @@ pub struct Snapshot {
 /// are also kept in that content-addressed directory (once per distinct hash) so a violation can be
 /// undone even for a file git never knew about.
 ///
-/// Skipped, always: `.git/` (agg owns git; nothing a worker should touch, and not a place a pattern
-/// means) and `agg/private/` (agg itself writes there while the worker runs — `state.json`, the
-/// log — so covering it would flag agg's own writes).
+/// Skipped, always: `.git/` (rlt owns git; nothing a worker should touch, and not a place a pattern
+/// means) and `rlt/private/` (rlt itself writes there while the worker runs — `state.json`, the
+/// log — so covering it would flag rlt's own writes).
 pub fn take(root: &Path, set: &PatternSet, store: Option<&Path>) -> Result<Snapshot> {
     let canon_root = std::fs::canonicalize(root).with_context(|| format!("resolving {}", root.display()))?;
     let mut w = Walker { root: canon_root, set, store, snap: Snapshot::default(), seen: BTreeSet::new() };
@@ -136,7 +136,7 @@ impl Walker<'_> {
     }
 }
 
-/// `agg/private` as a project-relative string, from [`crate::paths`] rather than restated.
+/// `rlt/private` as a project-relative string, from [`crate::paths`] rather than restated.
 fn private_rel() -> String {
     crate::paths::private_dir(Path::new("")).to_string_lossy().into_owned()
 }
@@ -225,8 +225,8 @@ pub fn restore(root: &Path, before: &Snapshot, changed: &[String], store: &Path)
 fn put_file(p: &Path, store: &Path, sha: &str, mode: u32) -> Result<()> {
     let blob = store.join(sha);
     let got = sha256::file_hex(&blob).with_context(|| format!("reading the kept copy of {}", p.display()))?;
-    // The store sits under `agg/private/`, which a worker under `isolation: none` can write. The
-    // hash in agg's MEMORY is the authority; a blob that no longer matches it is not restored.
+    // The store sits under `rlt/private/`, which a worker under `isolation: none` can write. The
+    // hash in rlt's MEMORY is the authority; a blob that no longer matches it is not restored.
     if got != sha {
         bail!("the kept copy of {} was tampered with (hash {got}, expected {sha})", p.display());
     }
@@ -234,7 +234,7 @@ fn put_file(p: &Path, store: &Path, sha: &str, mode: u32) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = p.with_file_name(format!(".{name}.agg-restore.{}", std::process::id()));
+    let tmp = p.with_file_name(format!(".{name}.rlt-restore.{}", std::process::id()));
     std::fs::copy(&blob, &tmp)?;
     set_mode(&tmp, mode)?;
     std::fs::rename(&tmp, p).with_context(|| format!("restoring {}", p.display()))?;

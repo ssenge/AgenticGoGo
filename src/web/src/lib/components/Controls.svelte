@@ -50,7 +50,7 @@
   <div class="phead">
     <h2>Controls</h2>
     {#if !live}
-      <span class="offhint">{health.api_offline ? 'agg serve offline' : 'no loop running'}</span>
+      <span class="offhint">{health.api_offline ? 'rlt serve offline' : 'no loop running'}</span>
     {/if}
   </div>
 

@@ -1,4 +1,4 @@
-//! The standing texts of every process brief (A-38 3.8): agg's defaults, embedded in the binary, that apply when the
+//! The standing texts of every process brief (A-38 3.8): rlt's defaults, embedded in the binary, that apply when the
 //! process file sets nothing. A text the file names **replaces** the default; `{ append: <file> }` adds to it.
 
 use std::path::Path;
@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 
-/// The worker's system prompt: its brief is `agg/private/INSTRUCTIONS.md`.
+/// The worker's system prompt: its brief is `rlt/private/INSTRUCTIONS.md`.
 pub const SYSTEM: &str = include_str!("defaults/system.md");
 /// What a critic reviews and what it never raises (`{{ outputs }}` is the step's outputs).
 pub const CRITIC_SCOPE: &str = include_str!("defaults/critic-scope.md");

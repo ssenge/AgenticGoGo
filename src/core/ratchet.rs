@@ -6,7 +6,7 @@
 //!
 //! `stalled` is a judge that reads `verdicts.jsonl`, and that file sits in the worker's writable cwd
 //! under `isolation: none` — a PROTOCOL boundary, not a permission one. Everything here is computed
-//! from what the GATE decided, in the loop's own memory, and only PERSISTED (to `agg/private/`) so a
+//! from what the GATE decided, in the loop's own memory, and only PERSISTED (to `rlt/private/`) so a
 //! resume can pick it up. So, like `over_iterations`, these terms are unfakeable on every tier and
 //! may sit in `abort_if`.
 //!
@@ -33,7 +33,7 @@ pub enum Direction {
     Down,
 }
 
-/// One judge's ratchet: `sequence.ratchet.<judge>` in YAML, [`crate::driver::Agg::ratchet`] in Rust.
+/// One judge's ratchet: `sequence.ratchet.<judge>` in YAML, [`crate::driver::Relentless::ratchet`] in Rust.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Ratchet {
@@ -199,7 +199,7 @@ pub const DEFAULT_OSCILLATION_WINDOW: usize = 4;
 /// How many signatures are kept. Far above any sane window; it only bounds the persisted file.
 const HISTORY_CAP: usize = 64;
 
-/// The gate's persisted state — everything the terms read. `agg/private/gate.json`, and a copy on
+/// The gate's persisted state — everything the terms read. `rlt/private/gate.json`, and a copy on
 /// every driver `Gate` call record so a resume restores it as of the last kept gate.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GateState {
@@ -509,7 +509,7 @@ pub fn describe(regs: &[RatchetRegression]) -> Vec<String> {
     regs.iter().map(|r| format!("ratchet `{}`: {} → {}", r.judge, num(r.from), num(r.to))).collect()
 }
 
-/// Persist the state to `agg/private/gate.json`. A hard error, like `verdicts::append`: a resume
+/// Persist the state to `rlt/private/gate.json`. A hard error, like `verdicts::append`: a resume
 /// reads it back, and a silently stale file would hand the run a clean rollback count.
 pub fn save(dir: &Path, state: &GateState) -> Result<()> {
     let path = crate::paths::gate_json(dir);

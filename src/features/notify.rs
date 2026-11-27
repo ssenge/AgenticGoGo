@@ -5,12 +5,12 @@
 //!     running; the human is a side-channel, never a gate. That is the whole reason the feature is
 //!     not just "put the detector in `abort_if`".
 //!  2. **A worker-authored reason must not become worker-authored CODE.** `{{reason}}` is routinely
-//!     written by the worker (the `blocked` detector reads `agg/state/BLOCKED.md`), and delivery runs
+//!     written by the worker (the `blocked` detector reads `rlt/state/BLOCKED.md`), and delivery runs
 //!     through `sh -c`, so every substituted value is POSIX-shell-quoted — see [`shq`].
 
 use anyhow::Result;
 
-use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LoopState};
+use crate::loop_::{RLTScratch, RLTState, Flow, Handler, LoopState};
 
 /// POSIX-quote a value so the shell parses it as exactly ONE argv element, whatever it contains
 /// (`;`, `$(…)`, backticks, newlines, `&&`). Nothing inside `'…'` is special to `sh`, so there is no
@@ -20,7 +20,7 @@ use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LoopState};
 /// `sh -c "<string>"`, so there is no argv to substitute into and the string IS re-parsed after
 /// substitution. Quoting gets the same guarantee without writing a shell splitter.
 ///
-/// ponytail: POSIX only. The `cmd /C` path in `hooks.rs` would need its own quoting rules; agg's
+/// ponytail: POSIX only. The `cmd /C` path in `hooks.rs` would need its own quoting rules; rlt's
 /// isolation and e2e suite are already unix-only. Upgrade when Windows is actually supported.
 fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -64,7 +64,7 @@ pub struct NotifyOnStuck;
 impl Handler for NotifyOnStuck {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         // `res` is still in scratch here — only `CheckRunStop` (on_session_end) takes it.
-        let res = ctx.scratch.get::<AGGScratch>().res.as_ref().expect("an on_verify handler set scratch.res");
+        let res = ctx.scratch.get::<RLTScratch>().res.as_ref().expect("an on_verify handler set scratch.res");
         let halting = res.halt;
         // read before `ctx` is re-borrowed mutably below
         let stopping = res.stop;
@@ -92,7 +92,7 @@ impl Handler for NotifyOnStuck {
             Some(r) if !stopping && self.cooled_down(ctx, cfg.cooldown_sessions) => r,
             _ => return Ok(Flow::Continue),
         };
-        ctx.ext.get::<AGGState>().notify.last_notify_session = Some(ctx.session);
+        ctx.ext.get::<RLTState>().notify.last_notify_session = Some(ctx.session);
         deliver(ctx, &cfg, &reason, "stuck");
 
         // ALWAYS Continue — notify is pure signal. A halt still stops the run, but via
@@ -110,7 +110,7 @@ impl Handler for NotifyOnStuck {
 /// A free fn because there are TWO halt paths that can reach a configured `notify:` — the gate
 /// (`NotifyOnStuck`, a mid-run abort) and the baseline pass (`setup::Baseline`, `abort_if` already
 /// true at launch). The baseline one is the likelier of the two in practice: a stale
-/// `agg/state/BLOCKED.md` survives a crash, a reboot and a rollback, so the very config a user
+/// `rlt/state/BLOCKED.md` survives a crash, a reboot and a rollback, so the very config a user
 /// writes to be paged when the loop stops would have stopped and paged nobody. Owning the reason
 /// composition here is what keeps the two paths from drifting.
 pub(crate) fn halt_ping(ctx: &mut LoopState, halt_reason: Option<&str>) {
@@ -138,7 +138,7 @@ pub(crate) fn halt_ping(ctx: &mut LoopState, halt_reason: Option<&str>) {
     deliver(ctx, &cfg, &reason, "abort");
 }
 
-/// A DRIVER's own message — `agg.info` / `agg.ask` / `agg.block` — through the SAME `notify.cmd`
+/// A DRIVER's own message — `rlt.info` / `rlt.ask` / `rlt.block` — through the SAME `notify.cmd`
 /// channel, templating and shell-quoting as everything else (§4.5 rule 1). Not a second channel: a
 /// second notification path is exactly the divergence the shared pipeline exists to prevent.
 ///
@@ -147,7 +147,7 @@ pub(crate) fn halt_ping(ctx: &mut LoopState, halt_reason: Option<&str>) {
 /// one call site in compiled source that its author wrote because THAT condition warranted a
 /// message; swallowing it is the failure mode the debounce was invented to prevent, pointed the
 /// wrong way. And a `block` that waits for a human without telling one is a hang. Leaving
-/// `AGGState.notify.last_notify_session` untouched is the other half: a chatty driver must not
+/// `RLTState.notify.last_notify_session` untouched is the other half: a chatty driver must not
 /// silence the run's real stuck detector.
 pub(crate) fn driver_ping(ctx: &mut LoopState, level: &str, msg: &str) {
     let Some(cfg) = ctx.cfg.sequence.notify.clone() else {
@@ -172,19 +172,19 @@ fn deliver(ctx: &mut LoopState, cfg: &crate::core::config::NotifyCfg, reason: &s
     ];
     let cmds: Vec<String> = cfg.cmd.iter().map(|c| template(c, &vars)).collect();
 
-    // Same jail as the step that just ran (ISOLATION.md §14): `notify.cmd` lives in agg.yaml and
+    // Same jail as the step that just ran (ISOLATION.md §14): `notify.cmd` lives in rlt.yaml and
     // typically execs a project script — both inside the worker's writable cwd. `hooks::run`
     // SKIPS a command it cannot confine rather than running it unconfined. At baseline there is no
     // step yet, and none has run, so `None` is both the fallback and the correct tier.
     let tier = ctx.cur_step.as_ref().map(|s| s.isolation).unwrap_or(crate::isolation::Isolation::None);
     let dir = ctx.dir.to_path_buf();
-    // Surface it to the TUI / `agg status` / the web app BEFORE running the command: delivery is
+    // Surface it to the TUI / `rlt status` / the web app BEFORE running the command: delivery is
     // foreground and a slow `curl` must not delay the operator's own dashboard learning about it.
     ctx.dash.notify_session = Some(ctx.session);
     ctx.dash.notify_reason = reason.to_string();
     ctx.publish();
     eprintln!("  [notify:{kind}] {reason}");
-    // ponytail: foreground and untimed, exactly like every other agg hook — a notification you
+    // ponytail: foreground and untimed, exactly like every other rlt hook — a notification you
     // want DELIVERED before the loop moves on. The ceiling is a delivery command that hangs (a
     // `curl` to a dead host with no `--max-time`), which stalls the loop until the watchdog or the
     // operator intervenes; the docs tell users to bound their own command. Upgrade path if that
@@ -195,7 +195,7 @@ fn deliver(ctx: &mut LoopState, cfg: &crate::core::config::NotifyCfg, reason: &s
 impl NotifyOnStuck {
     /// `cooldown_sessions` = the MINIMUM gap between two fires. `0` ⇒ every qualifying cycle.
     fn cooled_down(&self, ctx: &mut LoopState, cooldown: u32) -> bool {
-        match ctx.ext.get::<AGGState>().notify.last_notify_session {
+        match ctx.ext.get::<RLTState>().notify.last_notify_session {
             None => true,
             Some(last) => ctx.session.saturating_sub(last) >= cooldown,
         }
@@ -207,11 +207,11 @@ mod tests {
     use super::*;
 
     /// The security property, asserted on what the SHELL actually does — not on the composed string.
-    /// A worker writing this into `agg/state/BLOCKED.md` must get a notification containing the text,
+    /// A worker writing this into `rlt/state/BLOCKED.md` must get a notification containing the text,
     /// never an execution of it.
     #[test]
     fn a_hostile_reason_is_one_argv_element_not_code() {
-        let dir = std::env::temp_dir().join(format!("agg-notify-shq-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rlt-notify-shq-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pwned = dir.join("PWNED");
@@ -258,7 +258,7 @@ mod tests {
     //    that a REAL `sh -c` wrote through the REAL `hooks::run`, i.e. what was DELIVERED, never a
     //    flag the handler set. ─────────────────────────────────────────────────────────────────────
 
-    use crate::core::config::AggConfig;
+    use crate::core::config::RelentlessConfig;
     use crate::core::engine::{CycleResult, Engine};
     use crate::core::model::{Judge, JudgeKind, Lifecycle, Verdict};
     use crate::isolation::Isolation;
@@ -266,18 +266,18 @@ mod tests {
 
     /// A project dir whose `notify:` block runs ONE command appending to a file in the project root.
     /// That file is the delivery sink for every test below.
-    fn project(cooldown: u32, cmd: &str) -> (tempfile::TempDir, AggConfig) {
+    fn project(cooldown: u32, cmd: &str) -> (tempfile::TempDir, RelentlessConfig) {
         let tmp = tempfile::tempdir().unwrap();
         // both runtime roots — the step's STATE.md is worker-writable, the run ledger the probe
-        // `LoopState` opens is AGG-OWNED under `private/`.
-        std::fs::create_dir_all(crate::paths::agg_dir(tmp.path())).unwrap();
+        // `LoopState` opens is RLT-OWNED under `private/`.
+        std::fs::create_dir_all(crate::paths::rlt_dir(tmp.path())).unwrap();
         std::fs::create_dir_all(crate::paths::private_dir(tmp.path())).unwrap();
         let yaml = format!(
             "project: probe\nsequence:\n  steps: []\n  notify:\n    cooldown_sessions: {cooldown}\n    cmd:\n      - '{cmd}'\n"
         );
-        let path = tmp.path().join("agg.yaml");
+        let path = tmp.path().join("rlt.yaml");
         std::fs::write(&path, yaml).unwrap();
-        let cfg = AggConfig::load(&path).unwrap();
+        let cfg = RelentlessConfig::load(&path).unwrap();
         (tmp, cfg)
     }
 
@@ -295,7 +295,7 @@ mod tests {
 
     /// A `LoopState` a handler can run against, mirroring `tests/plugin_api.rs::probe_state`.
     /// `tier` is the CURRENT step's isolation — the value `deliver` must resolve the jail from.
-    fn state(cfg: &AggConfig, dir: &Path, eng: Engine, tier: Isolation) -> LoopState {
+    fn state(cfg: &RelentlessConfig, dir: &Path, eng: Engine, tier: Isolation) -> LoopState {
         let loop_start = std::time::Instant::now();
         let dash = crate::state::DashboardState::default();
         LoopState {
@@ -315,7 +315,7 @@ mod tests {
                 model: None,
                 effort: None,
                 worker_args: vec![],
-                state: "agg/state/STATE.md".into(),
+                state: "rlt/state/STATE.md".into(),
                 memory: true,
                 resume: None,
                 news: None,
@@ -356,7 +356,7 @@ mod tests {
     /// Plant the cycle an on_verify handler would have left in scratch, then run ONE session's gate.
     fn cycle(st: &mut LoopState, session: u32, notify: Option<&str>, stop: bool, halt: Option<&str>) {
         st.session = session;
-        st.scratch.get::<AGGScratch>().res = Some(CycleResult {
+        st.scratch.get::<RLTScratch>().res = Some(CycleResult {
             stop,
             halt: halt.is_some(),
             halt_reason: halt.map(str::to_string),
@@ -417,7 +417,7 @@ mod tests {
         cycle(&mut st, 1, Some("the detector is still shouting"), true, None);
         assert!(pings(tmp.path()).is_empty(), "done_if satisfied — a finished run is not a cry for help");
         assert!(
-            st.ext.get::<AGGState>().notify.last_notify_session.is_none(),
+            st.ext.get::<RLTState>().notify.last_notify_session.is_none(),
             "…and the suppressed cycle must not start a debounce it never used"
         );
         // proof the suppression is about `stop` and not about the fixture being unable to deliver:
@@ -469,7 +469,7 @@ mod tests {
     fn delivery_runs_in_the_current_steps_jail() {
         let home = std::env::var("HOME").expect("a unix test host has $HOME");
         let escapes = |tier: Isolation| {
-            let probe = Path::new(&home).join(format!(".agg-notify-jail-probe.{}.{tier:?}", std::process::id()));
+            let probe = Path::new(&home).join(format!(".rlt-notify-jail-probe.{}.{tier:?}", std::process::id()));
             let _ = std::fs::remove_file(&probe);
             let (tmp, cfg) = project(0, &format!("printf x > {}", probe.display()));
             let mut st = state(&cfg, tmp.path(), quiet_engine(), tier);
@@ -488,7 +488,7 @@ mod tests {
     /// entry, so what is under test is the shipped order, not a hand-assembled list.
     ///
     /// The scenario is a gate that discards the session (nothing staged ⇒ the `_` arm restores base
-    /// truth and rebuilds `res`). Notifying before that pages a human about work agg is about to throw
+    /// truth and rebuilds `res`). Notifying before that pages a human about work rlt is about to throw
     /// away AND consumes the debounce, so the genuine signal N sessions later is silenced too.
     #[test]
     fn the_gate_pings_about_kept_truth_never_about_work_it_just_discarded() {
@@ -519,7 +519,7 @@ mod tests {
         let mut st = state(&cfg, tmp.path(), eng, Isolation::None);
         // … while the pre-gate cycle carries a reason derived from the session about to be discarded.
         st.session = 1;
-        st.scratch.get::<AGGScratch>().res = Some(CycleResult {
+        st.scratch.get::<RLTScratch>().res = Some(CycleResult {
             notify: Some("DISCARDED — from the rolled-back session".into()),
             ..CycleResult::default()
         });

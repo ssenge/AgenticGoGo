@@ -1,9 +1,9 @@
-//! Judges built on swe-metrics (A-20), end to end through the real `agg` binary.
+//! Judges built on swe-metrics (A-20), end to end through the real `rlt` binary.
 //!
 //! Most tests put a FAKE `swe-metrics` on PATH: a shell stub that logs every invocation, answers the
 //! schema probes, "measures" by copying `fake-report.json` out of the measured directory and
 //! "scores" by copying `fake-score.json` — so a fake worker changes the measurement by rewriting a
-//! tracked file, and the log proves how often agg measured. One test runs the REAL swe-metrics on a
+//! tracked file, and the log proves how often rlt measured. One test runs the REAL swe-metrics on a
 //! fixture with known complexity and duplication, and skips (saying so) when it is not installed.
 //!
 //! Unix-only (the fakes are shell scripts), like the rest of the suite.
@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use agg::core::verdicts::{rows_for, Outcome, RatchetMark};
+use relentless::core::verdicts::{rows_for, Outcome, RatchetMark};
 
 fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
     let p = dir.join(name);
@@ -64,7 +64,7 @@ exit 2
 "#;
 
 /// The fake worker: runs one line of `plan` per session (the plan sits outside the project, so a
-/// rollback cannot replay it). agg commits the worker's tracked edits.
+/// rollback cannot replay it). rlt commits the worker's tracked edits.
 const CLAUDE: &str = r#"#!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
 line=$(head -n 1 '{BIN}/plan')
@@ -112,14 +112,14 @@ impl Project {
     fn config(&self, judges: &str, seq: &str) {
         write(
             &self.dir,
-            "agg/agg.yaml",
+            "rlt/rlt.yaml",
             &format!(
                 "project: metrics\ndefaults: {{ model: fake }}\njudges:\n{judges}steps:\n  worker: {{}}\n\
                  sequence:\n  steps: [worker]\n{seq}summary: {{ enabled: false }}\nmemory: {{ enabled: false }}\n"
             ),
         );
         // a never-met DoD goal, so a run goes to its session cap.
-        chmod_x(&write(&self.dir, "agg/judges/feature.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1}'\n"));
+        chmod_x(&write(&self.dir, "rlt/judges/feature.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1}'\n"));
     }
 
     /// A report the next sessions' plan lines can copy over `fake-report.json`.
@@ -128,13 +128,13 @@ impl Project {
     }
 
     fn commit(&self) {
-        write(&self.dir, ".gitignore", "agg/state/\nagg/private/\n");
+        write(&self.dir, ".gitignore", "rlt/state/\nagg/private/\n");
         git(&self.dir, &["add", "-A"]);
         git(&self.dir, &["commit", "-qm", "base"]);
     }
 
-    fn agg(&self, args: &[&str]) -> (Option<i32>, String) {
-        let out = Command::cargo_bin("agg")
+    fn rlt(&self, args: &[&str]) -> (Option<i32>, String) {
+        let out = Command::cargo_bin("rlt")
             .unwrap()
             .current_dir(&self.dir)
             .env("PATH", &self.path)
@@ -223,7 +223,7 @@ fn five_metric_judges_share_one_measurement_per_session() {
     p.config(FIVE, "  done_if: \"feature\"\n  invariants: [cc_p95, cog, dup, secrets, vulns]\n");
     p.commit();
 
-    let (code, out) = p.agg(&["run", "--max-sessions", "1"]);
+    let (code, out) = p.rlt(&["run", "--max-sessions", "1"]);
     assert_eq!(code, Some(4), "the never-met DoD runs to the cap:\n{out}");
     assert_eq!(p.calls_of("measure").len(), 2, "baseline + session 1, five judges each: {:?}", p.calls());
     assert_eq!(p.calls_of("schema report").len(), 1, "probed once, at startup");
@@ -246,7 +246,7 @@ fn five_metric_judges_share_one_measurement_per_session() {
     assert!(kept.iter().any(|f| f.ends_with("swe-metrics/target/report.json")), "{kept:?}");
     assert!(kept.iter().any(|f| f.ends_with("details/gitleaks.sarif")), "{kept:?}");
     assert!(kept.iter().all(|f| p.dir.join(f).is_file()), "{kept:?}");
-    assert!(p.dir.join("agg/private/metrics/incumbent/target.json").is_file(), "the incumbent's report is kept");
+    assert!(p.dir.join("rlt/private/metrics/incumbent/target.json").is_file(), "the incumbent's report is kept");
 }
 
 /// ACCEPTANCE: a RATCHETED metric judge rolls back a session that makes the p95 worse — its ratchet
@@ -261,7 +261,7 @@ fn a_ratcheted_metric_judge_rolls_back_a_worse_p95() {
     p.config(FIVE, "  done_if: \"feature\"\n  ratchet:\n    cc_p95: { tolerance: 0.5 }\n");
     p.commit();
 
-    let (code, out) = p.agg(&["run", "--max-sessions", "2"]);
+    let (code, out) = p.rlt(&["run", "--max-sessions", "2"]);
     assert_eq!(code, Some(4), "{out}");
     let rows: Vec<_> = rows_for(&p.dir, "cc_p95", false).into_iter().map(|r| (r.session, r.outcome, r.ratchet)).collect();
     assert_eq!(
@@ -274,7 +274,7 @@ fn a_ratcheted_metric_judge_rolls_back_a_worse_p95() {
         "{out}"
     );
     assert!(out.contains("ratchet `cc_p95`: 6 → 9"), "{out}");
-    assert_eq!(agg::core::ratchet::load(&p.dir).unwrap().reference("cc_p95"), Some(5.0));
+    assert_eq!(relentless::core::ratchet::load(&p.dir).unwrap().reference("cc_p95"), Some(5.0));
 }
 
 /// ACCEPTANCE: a SKIPPED analyzer makes the judge ERROR with the analyzer's reason — never pass. The
@@ -289,7 +289,7 @@ fn a_skipped_analyzer_makes_the_judge_error_not_pass() {
     p.config(FIVE, "  done_if: \"vulns\"\n");
     p.commit();
 
-    let (code, out) = p.agg(&["run", "--max-sessions", "1"]);
+    let (code, out) = p.rlt(&["run", "--max-sessions", "1"]);
     assert_eq!(code, Some(4), "never done — an unmeasured metric is not a met one:\n{out}");
     let rows = p.rows("vulns");
     assert_eq!(rows.len(), 2);
@@ -298,8 +298,8 @@ fn a_skipped_analyzer_makes_the_judge_error_not_pass() {
         assert!(err.as_deref().unwrap_or_default().contains("trivy skipped: no applicable files"), "{err:?}");
     }
 
-    // and by hand: `agg judge` gives the same error.
-    let (_, out) = p.agg(&["judge", "vulns"]);
+    // and by hand: `rlt judge` gives the same error.
+    let (_, out) = p.rlt(&["judge", "vulns"]);
     assert!(out.contains("trivy skipped: no applicable files") && out.contains("\"error\""), "{out}");
 }
 
@@ -310,25 +310,25 @@ fn a_skipped_analyzer_makes_the_judge_error_not_pass() {
 fn metric_judges_refuse_at_startup_without_a_compatible_swe_metrics() {
     let p = Project::new(&["true"], false);
     p.config("  slow: { timeout: 900 }\n", "  done_if: \"feature\"\n");
-    let (code, out) = p.agg(&["check"]);
+    let (code, out) = p.rlt(&["check"]);
     assert_eq!(code, Some(0), "no metric judge, no swe-metrics needed:\n{out}");
 
     p.config(FIVE, "  done_if: \"feature AND cc_p95\"\n");
-    let (code, out) = p.agg(&["check", "--json"]);
+    let (code, out) = p.rlt(&["check", "--json"]);
     assert_eq!(code, Some(1), "{out}");
     assert!(out.contains("\"path\": \"judges.cc_p95\"") && out.contains("not on PATH"), "{out}");
 
     let p = Project::new(&["true"], true);
     write(&p.bin, "schema-id-report", "swe-metrics/report/v2");
     p.config(FIVE, "  done_if: \"feature AND cc_p95\"\n");
-    let (code, out) = p.agg(&["check"]);
+    let (code, out) = p.rlt(&["check"]);
     assert_eq!(code, Some(1), "{out}");
     assert!(out.contains("swe-metrics/report/v2") && out.contains("swe-metrics/report/v1"), "{out}");
 
     let p = Project::new(&["true"], true);
     write(&p.bin, "default-score.json", &score(json!(null), "1", json!([]), &[]).to_string());
     p.config("  q: { score: { definition: \"swe-default\", version: \"2\" }, min: 80 }\n", "  done_if: \"q\"\n");
-    let (code, out) = p.agg(&["check", "--json"]);
+    let (code, out) = p.rlt(&["check", "--json"]);
     assert_eq!(code, Some(1), "{out}");
     assert!(out.contains("judges.q.score") && out.contains("version \\\"1\\\""), "{out}");
 }
@@ -346,12 +346,12 @@ fn a_score_judge_scores_against_the_incumbent_and_fails_closed() {
     p.config("  quality: { score: { definition: \"swe-default\", version: \"2\" }, min: 80 }\n", "  done_if: \"feature\"\n  invariants: [quality]\n");
     p.commit();
 
-    let (code, out) = p.agg(&["run", "--max-sessions", "1"]);
+    let (code, out) = p.rlt(&["run", "--max-sessions", "1"]);
     assert_eq!(code, Some(4), "{out}");
     let judged: Vec<String> = p.calls_of("score").into_iter().filter(|c| c.contains("--out")).collect();
     assert_eq!(judged.len(), 2, "the baseline pass and session 1: {:?}", p.calls());
     assert!(!judged[0].contains("--baseline"), "the pass before session 1 IS the incumbent: {}", judged[0]);
-    assert!(judged[1].contains("--baseline") && judged[1].contains("agg/private/metrics/incumbent/target.json"), "{}", judged[1]);
+    assert!(judged[1].contains("--baseline") && judged[1].contains("rlt/private/metrics/incumbent/target.json"), "{}", judged[1]);
     assert!(!judged[0].contains("--definition"), "swe-metrics takes no `--definition` for its default");
 
     let rows = rows_for(&p.dir, "quality", false);
@@ -374,7 +374,7 @@ fn a_changed_scope_measures_since_the_base_branch() {
         "  done_if: \"feature\"\n  invariants: [cc, new_cc]\n",
     );
     p.commit();
-    let (code, out) = p.agg(&["run", "--max-sessions", "1"]);
+    let (code, out) = p.rlt(&["run", "--max-sessions", "1"]);
     assert_eq!(code, Some(4), "{out}");
     let measures = p.calls_of("measure");
     assert_eq!(measures.len(), 4, "two scopes × (baseline + session 1): {measures:?}");
@@ -407,7 +407,7 @@ fn a_vacuous_changed_scope_pass_is_met_but_no_improvement() {
     p.stage_report("docs-only.json", &changed_report(1, ("skipped", "no applicable files"), None));
     p.config(NEW_CC, "  done_if: \"feature AND new_cc\"\n  merge_requires_improvement: true\n");
     p.commit();
-    let (code, out) = p.agg(&["run", "--max-sessions", "1"]);
+    let (code, out) = p.rlt(&["run", "--max-sessions", "1"]);
     assert_eq!(code, Some(4), "{out}");
     let rows = rows_for(&p.dir, "new_cc", false);
     assert_eq!((rows[0].value, rows[0].met, rows[0].vacuous), (Some(9.0), false, false), "baseline: measured, unmet");
@@ -427,7 +427,7 @@ fn a_failed_or_otherwise_skipped_analyzer_in_the_changed_scope_still_errors() {
         write(&p.dir, "fake-changed.json", &changed_report(files, (status, reason), None).to_string());
         p.config(NEW_CC, "  done_if: \"feature\"\n  invariants: [new_cc]\n");
         p.commit();
-        let (_, out) = p.agg(&["run", "--max-sessions", "1"]);
+        let (_, out) = p.rlt(&["run", "--max-sessions", "1"]);
         for (_, _, value, met, err) in p.rows("new_cc") {
             assert!(!met && value.is_none(), "{status}: {out}");
             assert!(err.as_deref().unwrap_or_default().contains(reason), "{status}: {err:?}");
@@ -459,7 +459,7 @@ fn tools_disagreeing_under_combine_all_are_no_improvement() {
             "  done_if: \"feature\"\n  merge_requires_improvement: true\n  ratchet:\n    cc: {}\n",
         );
         p.commit();
-        let (_, out) = p.agg(&["run", "--max-sessions", "1"]);
+        let (_, out) = p.rlt(&["run", "--max-sessions", "1"]);
         let s1 = rows_for(&p.dir, "cc", false).into_iter().find(|r| r.session == Some(1)).expect("session 1 judged");
         assert_eq!((s1.value, s1.outcome), (Some(8.0), outcome), "combine: {combine}\n{out}");
         assert_eq!(s1.rationale.contains("different directions"), combine == "all", "{}", s1.rationale);
@@ -474,7 +474,7 @@ fn a_ratchet_against_the_metrics_direction_errors() {
     write(&p.dir, "fake-report.json", &report(6.0).to_string());
     p.config("  dup: { metric: { id: \"duplication.percent\" }, min: 0 }\n", "  done_if: \"feature\"\n  ratchet:\n    dup: {}\n");
     p.commit();
-    let (code, out) = p.agg(&["run", "--max-sessions", "1"]);
+    let (code, out) = p.rlt(&["run", "--max-sessions", "1"]);
     assert_eq!(code, Some(1), "the baseline pass errors and there is no seed — refused before session 1:\n{out}");
     assert!(out.contains("ratcheted `up`") && out.contains("lower_better"), "{out}");
 }
@@ -490,9 +490,9 @@ fn real_swe_metrics() -> bool {
     ok
 }
 
-/// Run `agg run --max-sessions <n>` with the REAL swe-metrics on PATH (the fake worker first).
+/// Run `rlt run --max-sessions <n>` with the REAL swe-metrics on PATH (the fake worker first).
 fn run_real(p: &Project, sessions: &str) -> (Option<i32>, String) {
-    let out = Command::cargo_bin("agg")
+    let out = Command::cargo_bin("rlt")
         .unwrap()
         .current_dir(&p.dir)
         .env("PATH", format!("{}:{}", p.bin.display(), std::env::var("PATH").unwrap_or_default()))

@@ -1,7 +1,7 @@
-//! `agg serve` — a thin JSON HTTP API over a project's `agg/private/` state, for the standalone web UI.
+//! `rlt serve` — a thin JSON HTTP API over a project's `rlt/private/` state, for the standalone web UI.
 //!
 //! This is deliberately UI-free: no HTML, no embedded assets. It exposes exactly the read/control
-//! surface `agg dashboard` + `agg send` already use (state.json, project.json, run.pid liveness,
+//! surface `rlt dashboard` + `rlt send` already use (state.json, project.json, run.pid liveness,
 //! the bus), so a separate web tool (the SvelteKit app in `web/`) can monitor and steer a running
 //! loop over HTTP — locally now, remotely later. The loop keeps running whether or not this is up.
 //!
@@ -55,9 +55,9 @@ pub fn run(cfg: ServeConfig) -> Result<()> {
         cfg.cors_origin.clone()
     };
     let server = Server::http(("127.0.0.1", cfg.port))
-        .map_err(|e| anyhow::anyhow!("could not bind agg serve on 127.0.0.1:{}: {e}", cfg.port))?;
+        .map_err(|e| anyhow::anyhow!("could not bind rlt serve on 127.0.0.1:{}: {e}", cfg.port))?;
     eprintln!(
-        "agg serve → http://127.0.0.1:{}  (project: {})\n  \
+        "rlt serve → http://127.0.0.1:{}  (project: {})\n  \
          endpoints: /api/state  /api/history  /api/health  /api/process  /api/checkpoint  /api/projects  /api/ui\n  \
          POST /api/send  /api/answer  /api/run  /api/projects\n  \
          CORS origin: {}{}\n  Ctrl-C to stop.",
@@ -169,7 +169,7 @@ fn handle_send(
         Err(e) => return json_resp(400, &err_json(&e), origin),
     };
     // ANSWERS validate against the ask ledger before they are queued — one validator shared with
-    // `agg answer`, so a value off a closed option list is refused identically from both sides
+    // `rlt answer`, so a value off a closed option list is refused identically from both sides
     // and the ask stays open instead of resolving to something the driver never offered.
     // NO liveness check here any more, and no per-command exemption: `bus::queue_command` owns that
     // rule for every channel. `NotConnected` is its "no workflow is running" — the 409 the UI has
@@ -187,7 +187,7 @@ fn handle_send(
 ///
 /// A SEPARATE endpoint from `/api/send`, because an answer is not a steering message: it is a
 /// durable fact recorded in the ask ledger, it outlives the workflow that asked, and it therefore
-/// does not require one to be running. Same validator as `agg answer`, so a value off a closed
+/// does not require one to be running. Same validator as `rlt answer`, so a value off a closed
 /// option list is refused identically whichever channel you use.
 fn handle_answer(req: &mut tiny_http::Request, site: &Site, dir: &Path, origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     let v = match body_json(req) {

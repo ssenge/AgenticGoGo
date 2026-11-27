@@ -1,4 +1,4 @@
-//! The RUN REPORT and the headless contract, end to end: the real `agg` binary, a fake `claude` on
+//! The RUN REPORT and the headless contract, end to end: the real `rlt` binary, a fake `claude` on
 //! PATH, a real git repo — as in `tests/cli.rs`.
 //!
 //! Every report a test produces is validated against the PUBLISHED schema
@@ -44,7 +44,7 @@ const WORKS: &str = ": > started\n: > did_work\ngit add did_work >/dev/null 2>&1
 const HANGS: &str = ": > started\nsleep 30\n";
 
 /// A project: a git repo on `main`, a fake `claude` running `worker_body`, a `worked` judge (met
-/// once `did_work` exists) and an `agg.yaml` with the given `sequence:` lines.
+/// once `did_work` exists) and an `rlt.yaml` with the given `sequence:` lines.
 fn project(worker_body: &str, sequence: &str) -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -58,7 +58,7 @@ fn project(worker_body: &str, sequence: &str) -> (tempfile::TempDir, String) {
         ),
     );
     chmod_x(&claude);
-    let judge = dir.join("agg/judges/worked.sh");
+    let judge = dir.join("rlt/judges/worked.sh");
     write(
         &judge,
         "#!/bin/sh\nif [ -f did_work ]; then echo '{\"met\":true,\"value\":1,\"max\":1,\"rationale\":\"worked\"}'; \
@@ -66,12 +66,12 @@ fn project(worker_body: &str, sequence: &str) -> (tempfile::TempDir, String) {
     );
     chmod_x(&judge);
     write(
-        &dir.join("agg/agg.yaml"),
+        &dir.join("rlt/rlt.yaml"),
         &format!(
             "project: \"rep\"\ndefaults: {{ model: \"fake\" }}\nsteps:\n  worker: {{}}\nsequence:\n  steps: [\"worker\"]\n{sequence}summary: {{ enabled: false }}\n"
         ),
     );
-    write(&agg::paths::agg_dir(dir).join("STATE.md"), "work\n");
+    write(&relentless::paths::rlt_dir(dir).join("STATE.md"), "work\n");
     git(dir, &["init", "-q", "-b", "main"]);
     git(dir, &["config", "user.email", "t@t"]);
     git(dir, &["config", "user.name", "t"]);
@@ -80,15 +80,15 @@ fn project(worker_body: &str, sequence: &str) -> (tempfile::TempDir, String) {
     (tmp, path)
 }
 
-/// `agg` with the fake on PATH and HOME inside the temp dir. No TTY: stdin is null.
-fn agg(dir: &Path, path: &str) -> Command {
-    let mut c = Command::cargo_bin("agg").unwrap();
-    c.current_dir(dir).env("PATH", path).env("HOME", dir.join(".home")).env_remove("AGG_TEST_FAULT").stdin(Stdio::null());
+/// `rlt` with the fake on PATH and HOME inside the temp dir. No TTY: stdin is null.
+fn rlt(dir: &Path, path: &str) -> Command {
+    let mut c = Command::cargo_bin("rlt").unwrap();
+    c.current_dir(dir).env("PATH", path).env("HOME", dir.join(".home")).env_remove("RLT_TEST_FAULT").stdin(Stdio::null());
     c
 }
 
 fn report(dir: &Path) -> Value {
-    let p = agg::paths::report_json(dir);
+    let p = relentless::paths::report_json(dir);
     let text = fs::read_to_string(&p).unwrap_or_else(|e| panic!("no report at {}: {e}", p.display()));
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_valid(&v);
@@ -226,10 +226,10 @@ fn assert_supported(s: &Value, at: &str) {
 fn the_published_schema_is_versioned_complete_and_strict() {
     let s = schema();
     assert_supported(&s, "$");
-    assert_eq!(s["properties"]["schema_version"]["const"], agg::report::SCHEMA_VERSION);
+    assert_eq!(s["properties"]["schema_version"]["const"], relentless::report::SCHEMA_VERSION);
 
     let tmp = tempfile::tempdir().unwrap();
-    let (rep, _) = agg::report::write_fallback(tmp.path(), "p", "x", false);
+    let (rep, _) = relentless::report::write_fallback(tmp.path(), "p", "x", false);
     let good = serde_json::to_value(&rep).unwrap();
     assert_valid(&good);
 
@@ -252,7 +252,7 @@ fn the_published_schema_is_versioned_complete_and_strict() {
 fn done_prints_only_the_report_on_stdout_and_logs_to_run_log() {
     let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
     let dir = tmp.path();
-    let out = agg(dir, &path).args(["run", "--report-json"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--report-json"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
 
     // the WHOLE of stdout parses as one JSON document: no banner, no worker stream around it.
@@ -263,7 +263,7 @@ fn done_prints_only_the_report_on_stdout_and_logs_to_run_log() {
     assert_eq!(r["outcome"], "done");
     assert_eq!(r["exit_code"], 0);
     assert_eq!(r["error"], Value::Null);
-    assert_eq!(r["session"], serde_json::json!({"agg_version": env!("CARGO_PKG_VERSION"), "setting_sources": "all", "user_env": []}));
+    assert_eq!(r["session"], serde_json::json!({"rlt_version": env!("CARGO_PKG_VERSION"), "setting_sources": "all", "user_env": []}));
     assert_eq!(r["sessions"]["total"], 1);
     assert_eq!(r["sessions"]["merged"], 1);
     assert_eq!(r["judges"]["worked"]["last"]["met"], true);
@@ -271,8 +271,8 @@ fn done_prints_only_the_report_on_stdout_and_logs_to_run_log() {
     assert_eq!(r["result"]["base_branch"], "main");
     assert_eq!(r["result"]["final_commit"], git(dir, &["rev-parse", "main"]));
 
-    let log = fs::read_to_string(agg::paths::run_log(dir)).unwrap();
-    assert!(log.contains("AgenticGoGo — project rep"), "the banner belongs in run.log:\n{log}");
+    let log = fs::read_to_string(relentless::paths::run_log(dir)).unwrap();
+    assert!(log.contains("Relentless — project rep"), "the banner belongs in run.log:\n{log}");
     assert!(log.contains(r["run_id"].as_str().unwrap()), "run.log must carry the run id:\n{log}");
 }
 
@@ -282,16 +282,16 @@ fn done_prints_only_the_report_on_stdout_and_logs_to_run_log() {
 fn abort_if_reports_aborted_and_loses_to_done_in_the_same_session() {
     let (tmp, path) = project(WORKS, "  done_if: \"never_met\"\n  abort_if: \"worked\"\n");
     let dir = tmp.path();
-    write(&dir.join("agg/judges/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
-    chmod_x(&dir.join("agg/judges/never_met.sh"));
-    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
+    write(&dir.join("rlt/judges/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
+    chmod_x(&dir.join("rlt/judges/never_met.sh"));
+    let out = rlt(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     let r = report(dir);
     assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("aborted"), Some(3)));
     assert!(r["stop_reason"].as_str().unwrap().contains("worked"), "name the term that fired: {r}");
 
     let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n  abort_if: \"worked\"\n");
-    let out = agg(tmp.path(), &path).arg("run").output_bounded().unwrap();
+    let out = rlt(tmp.path(), &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "done must beat aborted:\n{}", text(&out));
     assert_eq!(report(tmp.path())["outcome"], "done");
 }
@@ -300,7 +300,7 @@ fn abort_if_reports_aborted_and_loses_to_done_in_the_same_session() {
 #[test]
 fn the_session_cap_reports_aborted_with_exit_4() {
     let (tmp, path) = project(": > started\n", "  done_if: \"worked\"\n");
-    let out = agg(tmp.path(), &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out = rlt(tmp.path(), &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(4), "{}", text(&out));
     let r = report(tmp.path());
     assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("aborted"), Some(4)));
@@ -315,7 +315,7 @@ fn sigterm_without_a_tty_reports_stopped_and_exits_5() {
     use std::os::unix::process::CommandExt;
     let (tmp, path) = project(HANGS, "  done_if: \"worked\"\n");
     let dir = tmp.path();
-    let child = agg(dir, &path)
+    let child = rlt(dir, &path)
         .args(["run", "--report-json"])
         .process_group(0)
         .stdout(Stdio::piped())
@@ -334,18 +334,18 @@ fn sigterm_without_a_tty_reports_stopped_and_exits_5() {
     assert_eq!(serde_json::from_slice::<Value>(&out.stdout).unwrap(), r);
 }
 
-/// `agg stop --project <dir>` from ANOTHER directory stops the run, and a stop beats `done` in the
+/// `rlt stop --project <dir>` from ANOTHER directory stops the run, and a stop beats `done` in the
 /// session it lands in — the session below meets the DoD after the stop was queued.
 #[test]
-fn agg_stop_from_another_process_beats_done_in_the_same_session() {
+fn rlt_stop_from_another_process_beats_done_in_the_same_session() {
     let worker = ": > started\nwhile [ ! -f go ]; do sleep 0.1; done\n: > did_work\ngit add did_work >/dev/null 2>&1\ngit commit -qm w >/dev/null 2>&1\n";
     let (tmp, path) = project(worker, "  done_if: \"worked\"\n");
     let dir = tmp.path();
-    let child = agg(dir, &path).arg("run").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let child = rlt(dir, &path).arg("run").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     wait_for(&dir.join("started"));
     let elsewhere = tempfile::tempdir().unwrap();
-    let stop = agg(elsewhere.path(), &path).args(["stop", "--project"]).arg(dir).output_bounded().unwrap();
-    assert!(stop.status.success(), "agg stop --project failed: {}", text(&stop));
+    let stop = rlt(elsewhere.path(), &path).args(["stop", "--project"]).arg(dir).output_bounded().unwrap();
+    assert!(stop.status.success(), "rlt stop --project failed: {}", text(&stop));
     fs::write(dir.join("go"), "").unwrap();
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(5), "{}", text(&out));
@@ -354,13 +354,13 @@ fn agg_stop_from_another_process_beats_done_in_the_same_session() {
     assert_eq!(r["judges"]["worked"]["last"]["met"], true, "the DoD held, and the stop still won");
 }
 
-/// ERROR from inside agg during VERIFY — both a returned error and a panic — is caught, reported
+/// ERROR from inside rlt during VERIFY — both a returned error and a panic — is caught, reported
 /// with its message, and exits 1.
 #[test]
 fn an_internal_fault_during_verify_reports_error() {
     for (fault, needle) in [("verify-error", "injected fault at verify"), ("verify-panic", "injected panic at verify")] {
         let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
-        let out = agg(tmp.path(), &path).env("AGG_TEST_FAULT", fault).args(["run", "--report-json"]).output_bounded().unwrap();
+        let out = rlt(tmp.path(), &path).env("RLT_TEST_FAULT", fault).args(["run", "--report-json"]).output_bounded().unwrap();
         assert_eq!(out.status.code(), Some(1), "{fault}: {}", text(&out));
         let r = report(tmp.path());
         assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("error"), Some(1)), "{fault}");
@@ -377,10 +377,10 @@ fn an_internal_fault_during_verify_reports_error() {
 fn a_refused_start_replaces_the_previous_report_with_an_error() {
     let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
     let dir = tmp.path();
-    assert_eq!(agg(dir, &path).arg("run").status().unwrap().code(), Some(0));
+    assert_eq!(rlt(dir, &path).arg("run").status().unwrap().code(), Some(0));
     let first = report(dir);
 
-    let out = agg(dir, &path).args(["run", "--report-json", "--base-branch", "no-such-branch"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--report-json", "--base-branch", "no-such-branch"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     let r = report(dir);
     assert_eq!(r["outcome"], "error");
@@ -394,25 +394,25 @@ fn a_refused_start_replaces_the_previous_report_with_an_error() {
 fn a_sigkilled_run_leaves_no_report_at_all() {
     let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
     let dir = tmp.path();
-    assert_eq!(agg(dir, &path).arg("run").status().unwrap().code(), Some(0));
-    assert!(agg::paths::report_json(dir).exists());
+    assert_eq!(rlt(dir, &path).arg("run").status().unwrap().code(), Some(0));
+    assert!(relentless::paths::report_json(dir).exists());
 
     // a second run whose worker hangs, against a DoD the merged work does not meet.
     let claude = fs::read_to_string(dir.join("bin/claude")).unwrap().replace(WORKS, HANGS);
     write(&dir.join("bin/claude"), &claude);
-    let cfg = fs::read_to_string(dir.join("agg/agg.yaml")).unwrap().replace("done_if: \"worked\"", "done_if: \"never_met\"");
-    write(&dir.join("agg/agg.yaml"), &cfg);
-    write(&dir.join("agg/judges/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
-    chmod_x(&dir.join("agg/judges/never_met.sh"));
+    let cfg = fs::read_to_string(dir.join("rlt/rlt.yaml")).unwrap().replace("done_if: \"worked\"", "done_if: \"never_met\"");
+    write(&dir.join("rlt/rlt.yaml"), &cfg);
+    write(&dir.join("rlt/judges/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
+    chmod_x(&dir.join("rlt/judges/never_met.sh"));
     let _ = fs::remove_file(dir.join("started"));
     // the edits above touch files the first run's merge committed: commit them, the tree must be clean.
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "second run"]);
-    let mut child = agg(dir, &path).arg("run").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let mut child = rlt(dir, &path).arg("run").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     wait_for(&dir.join("started"));
     child.kill().unwrap();
     child.wait().unwrap();
-    assert!(!agg::paths::report_json(dir).exists(), "a stale or partial report survived a SIGKILL");
+    assert!(!relentless::paths::report_json(dir).exists(), "a stale or partial report survived a SIGKILL");
 }
 
 /// `--base-branch` overrides the config: the run bases on and merges into that branch, and the
@@ -423,7 +423,7 @@ fn base_branch_flag_overrides_the_config() {
     let dir = tmp.path();
     git(dir, &["branch", "release"]);
     let main_before = git(dir, &["rev-parse", "main"]);
-    let out = agg(dir, &path).args(["run", "--base-branch", "release"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--base-branch", "release"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let r = report(dir);
     assert_eq!(r["result"]["base_branch"], "release");
@@ -437,7 +437,7 @@ fn a_run_without_limits_runs_until_done() {
     // the third session's work is the first that meets the judge.
     let worker = ": > started\necho x >> tally\nif [ \"$(wc -l < tally)\" -ge 3 ]; then : > did_work; git add did_work >/dev/null 2>&1; git commit -qm w >/dev/null 2>&1; fi\n";
     let (tmp, path) = project(worker, "  done_if: \"worked\"\n");
-    let out = agg(tmp.path(), &path).arg("run").output_bounded().unwrap();
+    let out = rlt(tmp.path(), &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let r = report(tmp.path());
     assert_eq!((r["outcome"].as_str(), r["sessions"]["total"].as_u64()), (Some("done"), Some(3)));
@@ -450,8 +450,8 @@ fn two_parallel_runs_in_different_directories_do_not_interfere() {
     let slow = ": > started\nsleep 1\n: > did_work\ngit add did_work >/dev/null 2>&1\ngit commit -qm w >/dev/null 2>&1\n";
     let (a, pa) = project(slow, "  done_if: \"worked\"\n");
     let (b, pb) = project(slow, "  done_if: \"worked\"\n");
-    let ca = agg(a.path(), &pa).args(["run", "--report-json"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-    let cb = agg(b.path(), &pb).args(["run", "--report-json"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let ca = rlt(a.path(), &pa).args(["run", "--report-json"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let cb = rlt(b.path(), &pb).args(["run", "--report-json"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let (oa, ob) = (ca.wait_with_output().unwrap(), cb.wait_with_output().unwrap());
     assert_eq!(oa.status.code(), Some(0), "{}", text(&oa));
     assert_eq!(ob.status.code(), Some(0), "{}", text(&ob));
@@ -463,41 +463,41 @@ fn two_parallel_runs_in_different_directories_do_not_interfere() {
 }
 
 /// `--report-json` outside any project still answers on stdout with an `error` report, and writes
-/// no `agg/` directory into a directory that is not a project.
+/// no `rlt/` directory into a directory that is not a project.
 #[test]
 fn report_json_outside_a_project_prints_an_error_report() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = agg(tmp.path(), "/usr/bin:/bin").args(["run", "--report-json"]).output_bounded().unwrap();
+    let out = rlt(tmp.path(), "/usr/bin:/bin").args(["run", "--report-json"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_valid(&v);
     assert_eq!(v["outcome"], "error");
-    assert!(!tmp.path().join("agg").exists(), "agg must not scaffold state into a non-project");
+    assert!(!tmp.path().join("rlt").exists(), "rlt must not scaffold state into a non-project");
 }
 
 /// A judge that writes `cc.sarif` in its scratch and cites it as evidence has the file KEPT under
-/// `agg/private/evidence/<run>/<session>/<judge>/`, named on its ledger row and in the report (for
+/// `rlt/private/evidence/<run>/<session>/<judge>/`, named on its ledger row and in the report (for
 /// the baseline verdict and the last one) — while a path outside the scratch and the project, and a
 /// scratch symlink pointing out of them, are refused and recorded rather than copied.
 #[test]
 fn a_judge_evidence_file_is_kept_and_referenced() {
     let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
     let dir = tmp.path();
-    let judge = dir.join("agg/judges/worked.sh");
+    let judge = dir.join("rlt/judges/worked.sh");
     write(
         &judge,
-        "#!/bin/sh\necho '<sarif/>' > \"$AGG_JUDGE_SCRATCH/cc.sarif\"\nln -sf /etc/hosts \"$AGG_JUDGE_SCRATCH/link\"\n\
+        "#!/bin/sh\necho '<sarif/>' > \"$RLT_JUDGE_SCRATCH/cc.sarif\"\nln -sf /etc/hosts \"$RLT_JUDGE_SCRATCH/link\"\n\
          if [ -f did_work ]; then m=true; else m=false; fi\n\
          echo \"{\\\"met\\\":$m,\\\"value\\\":1,\\\"max\\\":1,\\\"rationale\\\":\\\"r\\\",\\\"evidence\\\":[\\\"cc.sarif\\\",\\\"/etc/hosts\\\",\\\"link\\\"]}\"\n",
     );
     chmod_x(&judge);
-    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
+    let out = rlt(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
 
     let r = report(dir);
     let run = r["run_id"].as_str().unwrap();
     let ev_dir = r["paths"]["evidence_dir"].as_str().expect("evidence was kept, so the dir is named");
-    assert!(ev_dir.ends_with(&format!("agg/private/evidence/{run}")), "{ev_dir}");
+    assert!(ev_dir.ends_with(&format!("rlt/private/evidence/{run}")), "{ev_dir}");
     let last = r["judges"]["worked"]["last"]["evidence"].as_array().expect("the last verdict lists its evidence");
     assert_eq!(last.len(), 1, "only the scratch file is kept: {last:?}");
     let kept = last[0].as_str().unwrap();
@@ -506,9 +506,9 @@ fn a_judge_evidence_file_is_kept_and_referenced() {
     let base = r["judges"]["worked"]["baseline"]["evidence"][0].as_str().unwrap();
     assert!(base.ends_with(&format!("{run}/baseline/worked/cc.sarif")), "{base}");
 
-    let ledger = fs::read_to_string(agg::paths::verdicts_jsonl(dir)).unwrap();
+    let ledger = fs::read_to_string(relentless::paths::verdicts_jsonl(dir)).unwrap();
     let row: Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
-    assert_eq!(row["evidence_saved"][0], format!("agg/private/evidence/{run}/1/worked/cc.sarif"));
+    assert_eq!(row["evidence_saved"][0], format!("rlt/private/evidence/{run}/1/worked/cc.sarif"));
     let skipped: Vec<&str> = row["evidence_skipped"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
     assert_eq!(skipped.len(), 2, "{skipped:?}");
     assert!(skipped.iter().all(|s| s.contains("refused")), "{skipped:?}");
@@ -540,23 +540,23 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"ok","usage":{"inpu
 
 /// Per session and in total, the report states exactly what the agent reported — split four ways,
 /// worker and ruler apart, the price `reported` — and names the model the agent REPORTED, not the
-/// configured one. `agg history --json` carries the same totals.
+/// configured one. `rlt history --json` carries the same totals.
 #[test]
 fn usage_per_session_matches_what_the_agents_reported() {
     let (tmp, path) = project("", "  done_if: \"worked AND rubric\"\n");
     let dir = tmp.path();
     write(&dir.join("bin/claude"), USAGE_FAKE);
     chmod_x(&dir.join("bin/claude"));
-    write(&dir.join("agg/judges/rubric.md"), "Grade the work.\n");
-    let cfg = fs::read_to_string(dir.join("agg/agg.yaml")).unwrap();
-    write(&dir.join("agg/agg.yaml"), &format!("{cfg}judge: {{ agent: \"claude\", model: \"configured-ruler\" }}\n"));
+    write(&dir.join("rlt/judges/rubric.md"), "Grade the work.\n");
+    let cfg = fs::read_to_string(dir.join("rlt/rlt.yaml")).unwrap();
+    write(&dir.join("rlt/rlt.yaml"), &format!("{cfg}judge: {{ agent: \"claude\", model: \"configured-ruler\" }}\n"));
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "judges"]);
 
-    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
+    let out = rlt(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let r = report(dir);
-    assert_eq!(r["schema_version"], agg::report::SCHEMA_VERSION);
+    assert_eq!(r["schema_version"], relentless::report::SCHEMA_VERSION);
 
     let tokens = |i, o, w, rd| serde_json::json!({"input": i, "output": o, "cache_write": w, "cache_read": rd});
     let worker = serde_json::json!({
@@ -583,7 +583,7 @@ fn usage_per_session_matches_what_the_agents_reported() {
     let text = r.to_string();
     assert!(!text.contains("configured-ruler") && !text.contains("\"fake\""), "only reported models are named: {r:#}");
 
-    let hist = agg(dir, &path).args(["history", "--json"]).output_bounded().unwrap();
+    let hist = rlt(dir, &path).args(["history", "--json"]).output_bounded().unwrap();
     let h: Value = serde_json::from_slice(&hist.stdout).unwrap();
     assert_eq!(h["runs"][0]["usage"], r["usage"], "history carries the run's totals");
 }

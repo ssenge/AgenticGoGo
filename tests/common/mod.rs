@@ -22,10 +22,10 @@ pub fn give_up(what: &str) -> ! {
 }
 
 /// The first open ask, waiting up to `ASK_PATIENCE` for it; ends the test binary when none appears.
-pub fn wait_open_ask(dir: &Path) -> agg::core::asks::Ask {
+pub fn wait_open_ask(dir: &Path) -> relentless::core::asks::Ask {
     let end = Instant::now() + ASK_PATIENCE;
     while Instant::now() < end {
-        if let Some(a) = agg::core::asks::open(dir).into_iter().next() {
+        if let Some(a) = relentless::core::asks::open(dir).into_iter().next() {
             return a;
         }
         std::thread::sleep(Duration::from_millis(50));

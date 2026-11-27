@@ -68,7 +68,7 @@ fn the_rate_limit_detector_matches_what_each_agent_really_sends() {
     assert!(looks_rate_limited(r#"{"type":"result","result":"rate_limit_error: slow down"}"#));
     assert!(looks_rate_limited("Usage limit reached — resets at 5pm"));
     // Codex SUBSCRIPTION exhaustion — prose, no 429, no "reached". Captured verbatim on the wire
-    // during a real `agg run` on 2026-08-05, where it matched nothing: the loop scored a 4-second
+    // during a real `rlt run` on 2026-08-05, where it matched nothing: the loop scored a 4-second
     // 0-token failure as ordinary work and burned one of that step's two `max:` attempts on it.
     assert!(looks_rate_limited(
         "You've hit your usage limit. To continue using Codex and get access to GPT-5.3-Codex, \
@@ -94,7 +94,7 @@ fn the_rate_limit_detector_matches_what_each_agent_really_sends() {
 /// therefore killed EVERY worker session in 4s with exit 1 and zero tokens, while the loop
 /// happily ran its sessions and halted on `over_iterations` having achieved nothing.
 ///
-/// Only a live `agg run` caught it, because the contradiction lives in the agent's own argv
+/// Only a live `rlt run` caught it, because the contradiction lives in the agent's own argv
 /// validation, not in ours. This test cannot re-run the CLI, so it enforces the invariant that
 /// makes the trap impossible: `auto` means "you pick", and an agent picking its own model
 /// cannot also be told how hard to think. If a backend defaults to `auto`, it must not also
@@ -117,7 +117,7 @@ fn no_backend_defaults_to_an_effort_its_default_model_cannot_accept() {
 /// REGRESSION — the successor to `the_agent_key_is_readable_without_latching_the_backend`, and
 /// the test for the whole class of bug that killed `active()`.
 ///
-/// The old shape: agg.yaml's `model` / `summary.model` defaults were BACKEND-SPECIFIC, so
+/// The old shape: rlt.yaml's `model` / `summary.model` defaults were BACKEND-SPECIFIC, so
 /// resolving one read the `active()` OnceLock — which LATCHED, silently, on Claude. A config
 /// parse before the agent was selected therefore pinned the WRONG agent for the whole process
 /// (first-wins), and the loop drove an agent the user never asked for. The old test worked
@@ -126,25 +126,25 @@ fn no_backend_defaults_to_an_effort_its_default_model_cannot_accept() {
 /// `None` — "ask the backend at USE time" — rather than a value baked in at PARSE time.
 #[test]
 fn config_parses_without_a_backend_and_defaults_resolve_at_use_time() {
-    use crate::core::config::AggConfig;
-    let dir = std::env::temp_dir().join(format!("agg-agentkey-{}", std::process::id()));
+    use crate::core::config::RelentlessConfig;
+    let dir = std::env::temp_dir().join(format!("rlt-agentkey-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
     // The exact shape that triggered the bug: names copilot under `defaults:`, and OMITS
     // `model:` — the missing key is what used to force a backend-specific default to resolve
     // mid-parse. (`resume_prompt` is gone; `deny_unknown_fields` would now reject it outright.)
-    let p = dir.join("agg.yaml");
+    let p = dir.join("rlt.yaml");
     let copilot_cfg = "project: x\ndefaults: { agent: copilot }\nsteps: { work: {} }\nsequence: { steps: [work] }\n";
     std::fs::write(&p, copilot_cfg).unwrap();
-    let cfg = AggConfig::load(&p).expect("a full parse must not need a backend");
+    let cfg = RelentlessConfig::load(&p).expect("a full parse must not need a backend");
     assert_eq!(cfg.defaults.agent, "copilot");
     assert!(cfg.defaults.model.is_none(), "an absent `model:` must stay None, not bake in a default");
     // BOTH readers must see the SAME key. `agent_name` parses its own private partial, and it —
     // not `load()` — is what picks the backend for `judge`, `plan`, `doctor` and `skills
-    // install`. Let the two drift (a `#[serde(rename)]` on one, say) and `agg judge` silently
+    // install`. Let the two drift (a `#[serde(rename)]` on one, say) and `rlt judge` silently
     // runs the LLM judge on Claude for a copilot project: the exact bug this test is named for,
     // back again, with the full-parse assertion above still green.
-    assert_eq!(AggConfig::agent_name(&p), "copilot", "agent_name must read the real key");
+    assert_eq!(RelentlessConfig::agent_name(&p), "copilot", "agent_name must read the real key");
 
     // …and the WORKER model resolves against the agent the CONFIG names — not whichever backend
     // was touched first. Absent `model:` means "ask the step's backend at USE time". This is the
@@ -155,16 +155,16 @@ fn config_parses_without_a_backend_and_defaults_resolve_at_use_time() {
     assert_ne!(step.model(copilot), claude().default_model(), "…and it is NOT claude's");
     // an EXPLICIT model wins over any backend default, on every backend.
     std::fs::write(&p, "project: x\ndefaults: { agent: copilot, model: pinned }\nsteps: { work: {} }\nsequence: { steps: [work] }\n").unwrap();
-    let cfg = AggConfig::load(&p).unwrap();
+    let cfg = RelentlessConfig::load(&p).unwrap();
     let step = cfg.resolve_step("work").unwrap();
     assert_eq!(step.model(copilot), "pinned");
     assert_eq!(step.model(claude()), "pinned");
 
-    // `agent_name` survives for the paths where agg.yaml may not exist or may not parse
+    // `agent_name` survives for the paths where rlt.yaml may not exist or may not parse
     // (doctor / plan / judge / skills install): absent or agent-less → the default.
     std::fs::write(&p, "project: x\nsequence: { steps: [work] }\n").unwrap();
-    assert_eq!(AggConfig::agent_name(&p), "claude");
-    assert_eq!(AggConfig::agent_name(&dir.join("nope.yaml")), "claude");
+    assert_eq!(RelentlessConfig::agent_name(&p), "claude");
+    assert_eq!(RelentlessConfig::agent_name(&dir.join("nope.yaml")), "claude");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

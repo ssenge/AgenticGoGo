@@ -6,15 +6,15 @@ use std::path::{Path, PathBuf};
 
 use super::Report;
 
-/// Where the report lives: `agg/private/report.json`. Private because the worker forging it could
-/// change "what agg believes happened" — the classification rule in `paths.rs`.
+/// Where the report lives: `rlt/private/report.json`. Private because the worker forging it could
+/// change "what rlt believes happened" — the classification rule in `paths.rs`.
 pub fn path(dir: &Path) -> PathBuf {
     crate::paths::report_json(dir)
 }
 
 thread_local! {
     /// The report this THREAD last wrote. `driver::run` reads it to turn a driver's `Err` return
-    /// into `outcome: error` after `Drop for Agg` already wrote the report — thread-local because a
+    /// into `outcome: error` after `Drop for Relentless` already wrote the report — thread-local because a
     /// test binary runs many drivers on parallel threads, and a process-wide slot would cross them.
     static LAST: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
 }
@@ -33,7 +33,7 @@ pub struct RunHandle {
 }
 
 /// START a run's reporting: delete any previous report, mint a fresh `run_id`, and stamp it into
-/// `agg/private/run.log`.
+/// `rlt/private/run.log`.
 ///
 /// ⚠ Call it only behind the double-run guard: the report it deletes would otherwise be a LIVE
 /// run's. Deleting first is the "no stale reports" rule — a consumer that finds a report after
@@ -42,17 +42,17 @@ pub fn begin(dir: &Path) -> RunHandle {
     begin_as(dir, None)
 }
 
-/// [`begin`] for a run that CONTINUES an earlier one (`agg run --resume`): it reports under the
+/// [`begin`] for a run that CONTINUES an earlier one (`rlt run --resume`): it reports under the
 /// earlier run's id, so both halves of one run carry one `run_id`. `None` mints a fresh one.
 pub fn begin_as(dir: &Path, run_id: Option<String>) -> RunHandle {
     clear(dir);
     let run_id = run_id.unwrap_or_else(mint_run_id);
-    log_line(dir, &format!("agg run {run_id} started (pid {})", std::process::id()));
+    log_line(dir, &format!("rlt run {run_id} started (pid {})", std::process::id()));
     // no stale asks either: a driver's open ask was a wait of a process that has ended
     let stale = crate::core::asks::withdraw_driver_asks(dir, &format!("the run before {run_id} ended"),
                                                          crate::util::now_epoch());
     if stale > 0 {
-        log_line(dir, &format!("agg run {run_id} withdrew {stale} open ask(s) of the run before"));
+        log_line(dir, &format!("rlt run {run_id} withdrew {stale} open ask(s) of the run before"));
     }
     RunHandle { dir: dir.to_path_buf(), run_id, started_at: crate::util::now_epoch(), written: Cell::new(false) }
 }
@@ -78,7 +78,7 @@ impl RunHandle {
         self.written.set(true);
         log_line(
             &self.dir,
-            &format!("agg run {} finished: {:?} (exit {})", self.run_id, report.outcome, report.exit_code),
+            &format!("rlt run {} finished: {:?} (exit {})", self.run_id, report.outcome, report.exit_code),
         );
         Ok(())
     }
@@ -98,7 +98,7 @@ fn mint_run_id() -> String {
     format!("run-{}-{}-{}", crate::util::now_epoch(), std::process::id(), N.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Append one timestamped line to `agg/private/run.log`. Best-effort: the log is for humans, and a
+/// Append one timestamped line to `rlt/private/run.log`. Best-effort: the log is for humans, and a
 /// failed log line must never fail a run.
 pub fn log_line(dir: &Path, line: &str) {
     let log = crate::paths::run_log(dir);
@@ -153,7 +153,7 @@ pub fn amend_to_error(error: &str) -> std::io::Result<()> {
     rep.exit_code = 1;
     rep.error = Some(error.to_string());
     rep.stop_reason = format!("error: {error}");
-    // `report.json` lives at `<dir>/agg/private/report.json`, so the project dir is three up.
+    // `report.json` lives at `<dir>/rlt/private/report.json`, so the project dir is three up.
     let dir = p.ancestors().nth(3).map(Path::to_path_buf).unwrap_or_default();
     write(&dir, &rep)
 }

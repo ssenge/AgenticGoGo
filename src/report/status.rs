@@ -1,4 +1,4 @@
-//! The LIVE STATUS document — `agg status --json`, schema `docs/schemas/status.v1.json` (A-17).
+//! The LIVE STATUS document — `rlt status --json`, schema `docs/schemas/status.v1.json` (A-17).
 //!
 //! The report answers "how did it end"; this answers "where is it now", for a program watching a run
 //! from another process. Its field names are the report's wherever the two say the same thing
@@ -28,7 +28,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub schema_version: u32,
-    pub agg_version: String,
+    pub rlt_version: String,
     /// the report's `run_id` for this run; `null` for a snapshot written before run ids existed.
     pub run_id: Option<String>,
     pub project: String,
@@ -64,7 +64,7 @@ pub struct Status {
 pub struct CurrentStep {
     pub name: String,
     pub agent: String,
-    /// the model agg asked for; `null` = the agent's own default. What actually ran is in the
+    /// the model rlt asked for; `null` = the agent's own default. What actually ran is in the
     /// report's `session_log`.
     pub model: Option<String>,
 }
@@ -84,7 +84,7 @@ pub struct LiveJudge {
 pub fn document(dir: &Path) -> anyhow::Result<Status> {
     let Some(s) = DashboardState::read(dir) else {
         anyhow::bail!(
-            "no run snapshot yet (agg/private/state.json not found) — run `agg run` first \
+            "no run snapshot yet (rlt/private/state.json not found) — run `rlt run` first \
              (it publishes state as it goes)."
         );
     };
@@ -117,7 +117,7 @@ pub fn build(s: &DashboardState, running: bool, now: u64, paths: Paths) -> Statu
         .collect();
     Status {
         schema_version: SCHEMA_VERSION,
-        agg_version: env!("CARGO_PKG_VERSION").to_string(),
+        rlt_version: env!("CARGO_PKG_VERSION").to_string(),
         run_id: Some(s.run_id.clone()).filter(|r| !r.is_empty()),
         project: s.project.clone(),
         running,

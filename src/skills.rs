@@ -1,7 +1,7 @@
-//! `agg skills install` — put the `/agg:*` skills where the chosen agent will actually LOOK.
+//! `rlt skills install` — put the `/rlt:*` skills where the chosen agent will actually LOOK.
 //!
 //! # Why the binary is the installer
-//! Everyone driving a loop already has `agg`. Making it the installer buys ONE code path that e2e
+//! Everyone driving a loop already has `rlt`. Making it the installer buys ONE code path that e2e
 //! can drive, instead of three sets of README instructions that rot silently. The skill files are
 //! [`include_str!`]d from `plugin/skills/`, so a released binary installs them with no repo
 //! checkout — and `plugin/` stays the single source of truth that also feeds the Claude plugin
@@ -23,27 +23,27 @@
 //! two directories cover all three agents. No agent reads every location, so one shared directory
 //! is not possible.
 //!
-//! # Naming: the `name:` frontmatter key, and why the directory ALSO says `agg-`
-//! Each SKILL.md carries `name: agg-new`. That key is what stops the skill being called plain
+//! # Naming: the `name:` frontmatter key, and why the directory ALSO says `rlt-`
+//! Each SKILL.md carries `name: rlt-new`. That key is what stops the skill being called plain
 //! `new` — Copilot's plugin loader ignores the plugin namespace entirely, so without it the skill
 //! surfaces as `new`, which is both useless and a collision. Verified on all three:
 //!
 //! | | via this installer | via the plugin marketplace |
 //! |---|---|---|
-//! | claude | `/agg-new` | **`/agg:new`** — the plugin namespace WINS over `name:` |
-//! | codex | `agg-new` | `agg-new` |
-//! | copilot | `agg-new` | `agg-new` (plain `new` without the key) |
+//! | claude | `/rlt-new` | **`/rlt:new`** — the plugin namespace WINS over `name:` |
+//! | codex | `rlt-new` | `rlt-new` |
+//! | copilot | `rlt-new` | `rlt-new` (plain `new` without the key) |
 //!
-//! So `name:` is safe for Claude — its `/agg:new` is unchanged — and necessary for Copilot.
-//! The DIRECTORY is named `agg-new` too, belt-and-braces: Codex and Copilot both fall back to the
+//! So `name:` is safe for Claude — its `/rlt:new` is unchanged — and necessary for Copilot.
+//! The DIRECTORY is named `rlt-new` too, belt-and-braces: Codex and Copilot both fall back to the
 //! directory name when a skill has no `name:` key.
 //!
 //! # How a user INVOKES the skill — the PREFIX is not the same on all three
 //! | agent | invoke with | |
 //! |---|---|---|
-//! | claude | `/agg-new` | `/agg:new` when installed from the plugin marketplace instead — the `agg:` namespace is the PLUGIN's, not the file's |
-//! | copilot | `/agg-new` | every skill is a slash command. Its SDK: `userInvocable` = *"whether the skill can be invoked by the user as a slash command"*, and it is `true` for ours (verified on a live `session.skills_loaded`) |
-//! | codex | **`$agg-new`** | Codex uses `$`, **not** `/`. A `/agg-new` is "Unrecognized command" — requested and closed as not planned (openai/codex#11817). `/skills` opens a picker. |
+//! | claude | `/rlt-new` | `/rlt:new` when installed from the plugin marketplace instead — the `rlt:` namespace is the PLUGIN's, not the file's |
+//! | copilot | `/rlt-new` | every skill is a slash command. Its SDK: `userInvocable` = *"whether the skill can be invoked by the user as a slash command"*, and it is `true` for ours (verified on a live `session.skills_loaded`) |
+//! | codex | **`$rlt-new`** | Codex uses `$`, **not** `/`. A `/rlt-new` is "Unrecognized command" — requested and closed as not planned (openai/codex#11817). `/skills` opens a picker. |
 //!
 //! On all three, the skill is ALSO selected by matching the request against its `description:` —
 //! which is the only route that works headlessly. So the description is load-bearing, not decoration.
@@ -51,19 +51,19 @@
 //! # This installer is not the only route
 //! Codex and Copilot BOTH have plugin marketplaces, and both accept this repo's existing
 //! `.claude-plugin/marketplace.json` verbatim (`codex plugin marketplace add` / `copilot plugin
-//! marketplace add ssenge/AgenticGoGo`). That path needs no code here at all. This command exists
+//! marketplace add ssenge/relentless`). That path needs no code here at all. This command exists
 //! for the project-local install, which a marketplace cannot do.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// The `/agg:*` skills, embedded at compile time from the same files the Claude plugin ships.
+/// The `/rlt:*` skills, embedded at compile time from the same files the Claude plugin ships.
 /// The tuple is (destination directory name, file body) — see the module doc for why the directory
-/// name carries the `agg-` namespace.
+/// name carries the `rlt-` namespace.
 pub const SKILLS: &[(&str, &str)] = &[
-    ("agg-new", include_str!("../plugin/skills/new/SKILL.md")),
-    ("agg-status", include_str!("../plugin/skills/status/SKILL.md")),
-    ("agg-supervise", include_str!("../plugin/skills/supervise/SKILL.md")),
+    ("rlt-new", include_str!("../plugin/skills/new/SKILL.md")),
+    ("rlt-status", include_str!("../plugin/skills/status/SKILL.md")),
+    ("rlt-supervise", include_str!("../plugin/skills/supervise/SKILL.md")),
 ];
 
 /// The skills directory `agent` discovers, relative to a project root.
@@ -82,8 +82,8 @@ fn relative_root(agent: &str) -> &'static str {
 /// shell. `None` when we are not inside any of them (a plain terminal).
 ///
 /// # Why this exists
-/// `agg skills install` is run at SETUP time — before `agg.yaml` exists. Falling back to
-/// `AggConfig::agent_name`, which returns `claude` for a missing file, meant a Codex user running
+/// `rlt skills install` is run at SETUP time — before `rlt.yaml` exists. Falling back to
+/// `RelentlessConfig::agent_name`, which returns `claude` for a missing file, meant a Codex user running
 /// the documented first step got the skills written to `.claude/skills/` — a directory Codex never
 /// reads. They then saw no skill, with no error, and nothing to tell them why.
 ///
@@ -104,7 +104,7 @@ pub fn host_agent() -> Option<&'static str> {
     }
 }
 
-/// Where the `/agg:*` skills belong for `agent`: under `dir` for a project install, or under
+/// Where the `/rlt:*` skills belong for `agent`: under `dir` for a project install, or under
 /// `$HOME` for a user-wide one.
 pub fn skills_root(agent: &str, dir: &Path, user: bool) -> Result<PathBuf> {
     let base = if user {
@@ -135,7 +135,7 @@ pub fn install(agent: &str, dir: &Path, user: bool) -> Result<PathBuf> {
     Ok(root)
 }
 
-/// Are all three skills present where `agent` would look? Used by `agg doctor` to report the
+/// Are all three skills present where `agent` would look? Used by `rlt doctor` to report the
 /// install as a fact, not to fail the run — the skills are optional, the loop runs without them.
 pub fn installed(agent: &str, dir: &Path, user: bool) -> bool {
     let Ok(root) = skills_root(agent, dir, user) else {
@@ -149,7 +149,7 @@ mod tests {
     use super::*;
 
     /// The skills are `include_str!`'d into the binary, so stale content compiles cleanly and the
-    /// green build never notices — that already shipped a `/agg:new` scaffold generating retired
+    /// green build never notices — that already shipped a `/rlt:new` scaffold generating retired
     /// keys, and prose references (e.g. a `status` skill citing `budget.total`) slipped past several
     /// hand sweeps. The scaffold-parse guard (config.rs) covers the config block; this covers the
     /// PROSE. Every token here is unambiguously retired and has no live homonym (`over_budget`,
@@ -164,8 +164,8 @@ mod tests {
             "sequence.budget", // → sequence.limits
             "sequence.cost",   // → sequence.limits
             "max_sessions:",   // → sequence.limits.sessions (the --max-sessions FLAG survives)
-            "AGG_STATE.md",    // → agg/AGG.md (stable) + agg/state/STATE.md (forward) — STATE_REDESIGN
-            "AGG_MEMORY.md",   // → agg/private/LOG.md (the `AGG_MEMORY_MAX_KB` env var is a NON-match)
+            "RLT_STATE.md",    // → rlt/RLT.md (stable) + rlt/state/STATE.md (forward) — STATE_REDESIGN
+            "RLT_MEMORY.md",   // → rlt/private/LOG.md (the `RLT_MEMORY_MAX_KB` env var is a NON-match)
             // NB: `goals.yaml` is deliberately NOT here — the skills legitimately say "there is no
             // goals.yaml", which is correct prose, not a stale reference.
         ];
@@ -181,7 +181,7 @@ mod tests {
     }
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("agg-skills-{}-{tag}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("rlt-skills-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -219,14 +219,14 @@ mod tests {
     }
 
     /// Installing must land a real SKILL.md, with real frontmatter, in a directory named so that
-    /// Codex/Copilot derive the `agg-` namespace from it.
+    /// Codex/Copilot derive the `rlt-` namespace from it.
     #[test]
     fn install_writes_all_three_skills_where_the_agent_looks() {
         let d = tmpdir("install");
         let root = install("codex", &d, false).unwrap();
         assert_eq!(root, d.join(".agents/skills"));
 
-        for name in ["agg-new", "agg-status", "agg-supervise"] {
+        for name in ["rlt-new", "rlt-status", "rlt-supervise"] {
             let f = root.join(name).join("SKILL.md");
             let body = std::fs::read_to_string(&f)
                 .unwrap_or_else(|_| panic!("{} must exist", f.display()));
@@ -261,18 +261,18 @@ mod tests {
     #[test]
     fn the_embedded_skills_are_the_real_ones() {
         let (_, new) = SKILLS[0];
-        assert!(new.contains("AgenticGoGo"), "agg-new must be the real skill");
+        assert!(new.contains("Relentless"), "rlt-new must be the real skill");
         assert!(
             new.contains("agent: \"<claude|codex|copilot>\""),
-            "agg-new must carry the capability-aware agg.yaml template — that is the whole point"
+            "rlt-new must carry the capability-aware rlt.yaml template — that is the whole point"
         );
         assert_eq!(SKILLS.len(), 3);
     }
 
-    /// REGRESSION: every skill must declare `name: agg-*` in its frontmatter. Without it, Copilot's
+    /// REGRESSION: every skill must declare `name: rlt-*` in its frontmatter. Without it, Copilot's
     /// PLUGIN loader (which ignores the plugin namespace) surfaces `plugin/skills/new/` as a skill
     /// literally called `new` — a generic name that collides with anything. Claude is unaffected:
-    /// its plugin namespace still wins, so `/agg:new` keeps its name. All three verified on the
+    /// its plugin namespace still wins, so `/rlt:new` keeps its name. All three verified on the
     /// wire. If this ever drops, Copilot users get `new`/`status`/`supervise` in their skill list.
     #[test]
     fn every_skill_declares_its_namespaced_name() {
@@ -281,7 +281,7 @@ mod tests {
             assert!(
                 body.contains(&want),
                 "{dir}/SKILL.md must declare `name: {dir}` — without it Copilot names it `{}`",
-                dir.strip_prefix("agg-").unwrap_or(dir)
+                dir.strip_prefix("rlt-").unwrap_or(dir)
             );
         }
     }

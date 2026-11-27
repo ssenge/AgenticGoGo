@@ -12,7 +12,7 @@ fn project() -> tempfile::TempDir {
     let r = t.path();
     fs::create_dir_all(r.join("tests/oracles/deep")).unwrap();
     fs::create_dir_all(r.join("src")).unwrap();
-    fs::create_dir_all(r.join("agg/private")).unwrap();
+    fs::create_dir_all(r.join("rlt/private")).unwrap();
     fs::write(r.join("tests/oracles/x.json"), "orig").unwrap();
     fs::write(r.join("tests/oracles/deep/y.json"), "deep").unwrap();
     fs::write(r.join("tests/oracles/cache.gen"), "generated").unwrap();
@@ -57,16 +57,16 @@ fn the_snapshot_covers_exactly_the_protected_tree_including_the_directory_itself
     assert!(matches!(snap.entries["tests/oracles"], Entry::Dir { .. }));
 }
 
-/// agg writes `agg/private/` while the worker runs, and `.git/` is agg's; neither may ever be read
+/// rlt writes `rlt/private/` while the worker runs, and `.git/` is rlt's; neither may ever be read
 /// as the worker's doing, even under a pattern that covers everything.
 #[test]
-fn agg_private_and_git_are_never_part_of_the_snapshot() {
+fn rlt_private_and_git_are_never_part_of_the_snapshot() {
     let t = project();
     fs::create_dir_all(t.path().join(".git")).unwrap();
     fs::write(t.path().join(".git/HEAD"), "ref").unwrap();
-    fs::write(t.path().join("agg/private/state.json"), "{}").unwrap();
+    fs::write(t.path().join("rlt/private/state.json"), "{}").unwrap();
     let snap = snapshot::take(t.path(), &set(t.path(), &["**"]), None).unwrap();
-    assert!(snap.entries.keys().all(|k| !k.starts_with(".git") && !k.starts_with("agg/private")), "{:?}", snap.entries.keys());
+    assert!(snap.entries.keys().all(|k| !k.starts_with(".git") && !k.starts_with("rlt/private")), "{:?}", snap.entries.keys());
     assert!(snap.entries.contains_key("src/lib.txt"));
 }
 
@@ -242,7 +242,7 @@ fn changes_outside_the_patterns_are_not_violations() {
     .is_empty());
 }
 
-/// Under `isolation: none` the worker can write `agg/private/`, so a planted copy must not be what
+/// Under `isolation: none` the worker can write `rlt/private/`, so a planted copy must not be what
 /// the restore writes back.
 #[test]
 fn a_tampered_kept_copy_is_refused_not_restored() {

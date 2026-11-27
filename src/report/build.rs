@@ -7,7 +7,7 @@ use super::{JudgeEntry, OpenAsk, Outcome, Paths, Report, RunHandle, RunResult, S
 use crate::context::LoopState;
 use crate::core::verdicts::Outcome as Gated;
 use crate::core::model::Verdict;
-use crate::features::state::AGGState;
+use crate::features::state::RLTState;
 use crate::plugin::RunOutcome;
 
 /// The report's per-run counters, kept in the run's `ext` store like any feature's state.
@@ -29,7 +29,7 @@ pub struct Tally {
 /// merged for lack of improvement, or nothing to merge at all. A span carries every session staged
 /// on it, and they all share its fate.
 pub fn record_gate(ctx: &mut LoopState, fate: Gated, branch: Option<&str>) {
-    let git = &ctx.ext.get::<AGGState>().git;
+    let git = &ctx.ext.get::<RLTState>().git;
     // the span's other branches, plus the one gated — which IS in the list on the driver path (the
     // tip) and is not on the YAML path (a judged session cut off the tip).
     let n = git.span_branches.iter().filter(|b| Some(b.as_str()) != branch).count() as u32 + 1;
@@ -50,11 +50,11 @@ struct SessionSlot(Option<Session>);
 /// `run.log` next to the start line.
 pub fn record_session(ctx: &mut LoopState, run: &RunHandle, user_settings: bool, user_env: Vec<String>) {
     let session = Session {
-        agg_version: env!("CARGO_PKG_VERSION").to_string(),
+        rlt_version: env!("CARGO_PKG_VERSION").to_string(),
         setting_sources: if user_settings { "all" } else { "project,local" }.to_string(),
         user_env,
     };
-    super::log_line(&ctx.dir, &format!("agg run {} sessions: setting_sources={}, user_env=[{}]", run.run_id(), session.setting_sources, session.user_env.join(", ")));
+    super::log_line(&ctx.dir, &format!("rlt run {} sessions: setting_sources={}, user_env=[{}]", run.run_id(), session.setting_sources, session.user_env.join(", ")));
     ctx.ext.get::<SessionSlot>().0 = Some(session);
 }
 
@@ -83,7 +83,7 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
     st.publish();
     let now = crate::util::now_epoch();
     let (iso_base, span_tip, staged) = {
-        let git = &st.ext.get::<AGGState>().git;
+        let git = &st.ext.get::<RLTState>().git;
         (git.iso_base.clone(), git.span_tip.clone(), git.span_branches.len() as u32)
     };
     let tally = std::mem::take(st.ext.get::<Tally>());
@@ -134,7 +134,7 @@ fn skeleton(
     };
     Report {
         schema_version: super::SCHEMA_VERSION,
-        agg_version: env!("CARGO_PKG_VERSION").to_string(),
+        rlt_version: env!("CARGO_PKG_VERSION").to_string(),
         run_id: run_id.to_string(),
         project: project.to_string(),
         outcome: Outcome::of(res),
@@ -227,14 +227,14 @@ mod tests {
     /// and zeroes/nulls rather than invented facts.
     #[test]
     fn a_fallback_reports_the_error_and_invents_nothing() {
-        let r = fallback(Path::new("/proj"), "p", "run-1", 7, "no agg.yaml here");
+        let r = fallback(Path::new("/proj"), "p", "run-1", 7, "no rlt.yaml here");
         assert_eq!(r.outcome, Outcome::Error);
         assert_eq!(r.exit_code, 1);
-        assert_eq!(r.error.as_deref(), Some("no agg.yaml here"));
-        assert_eq!(r.stop_reason, "error: no agg.yaml here");
+        assert_eq!(r.error.as_deref(), Some("no rlt.yaml here"));
+        assert_eq!(r.stop_reason, "error: no rlt.yaml here");
         assert_eq!(r.sessions, Sessions::default());
         assert_eq!(r.result, RunResult::default());
-        assert_eq!(r.paths.report, "/proj/agg/private/report.json");
+        assert_eq!(r.paths.report, "/proj/rlt/private/report.json");
         assert_eq!(r.schema_version, super::super::SCHEMA_VERSION);
     }
 
@@ -282,7 +282,7 @@ mod tests {
         use crate::state::JudgeView;
         let kept_v = Verdict { met: true, value: Some(1.0), max: Some(1.0), target: 1.0, rationale: "r".into(), evidence: vec!["cc.sarif".into()], error: None, mixed: false, vacuous: false, blocked_by: None };
         let mut kept = HashMap::new();
-        kept.insert("a".to_string(), (kept_v.clone(), vec![std::path::PathBuf::from("/p/agg/private/evidence/r/1/a/cc.sarif")]));
+        kept.insert("a".to_string(), (kept_v.clone(), vec![std::path::PathBuf::from("/p/rlt/private/evidence/r/1/a/cc.sarif")]));
         kept.insert("b".to_string(), (kept_v, vec![std::path::PathBuf::from("/p/x")]));
         let view = |name: &str, met: bool| JudgeView {
             name: name.into(),
@@ -296,7 +296,7 @@ mod tests {
             ..Default::default()
         };
         let out = judges(&[view("a", true), view("b", false)], BTreeMap::new(), &BTreeMap::new(), &kept);
-        assert_eq!(out["a"].last.as_ref().unwrap().evidence, ["/p/agg/private/evidence/r/1/a/cc.sarif"]);
+        assert_eq!(out["a"].last.as_ref().unwrap().evidence, ["/p/rlt/private/evidence/r/1/a/cc.sarif"]);
         assert!(out["b"].last.as_ref().unwrap().evidence.is_empty(), "b shows a restored verdict, not the kept one");
     }
 }

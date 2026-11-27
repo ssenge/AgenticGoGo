@@ -1,6 +1,6 @@
 # Adding an agent backend
 
-A **backend** is how agg drives one coding-agent CLI: Claude Code, OpenAI Codex and GitHub Copilot
+A **backend** is how rlt drives one coding-agent CLI: Claude Code, OpenAI Codex and GitHub Copilot
 today. This guide is for adding another one (Gemini CLI, OpenHands, Kiro, …). It covers the
 `AgentBackend` contract, the capability flags, how the event stream and the one-shot call are parsed,
 usage and rate-limit reporting, the recorded fixtures, the tests a backend must ship, and a checklist.
@@ -13,7 +13,7 @@ The code is the authority. Read these first, in this order:
 | `src/backend/contract.rs` | the data types: `Capabilities`, `SessionSpec`, `SessionReport`, `OneShot` |
 | `src/backend/claude.rs` + `stream.rs` | the reference backend and its wire-format parser |
 | `src/backend/codex/`, `src/backend/copilot/` | two backends whose wire formats differ from Claude's in every way that matters |
-| `src/backend/worker.rs` | how agg spawns, supervises and reads a worker session |
+| `src/backend/worker.rs` | how rlt spawns, supervises and reads a worker session |
 | `src/capability.rs` | the startup refusals that the capability flags feed |
 | `src/usage.rs` | `Tokens` and `Usage`, what a backend reports |
 | `tests/fixtures/agent-streams/` | the recorded streams every parser test runs against |
@@ -31,10 +31,10 @@ worked example of that verdict).
 ## What a backend is
 
 One unit struct implementing `AgentBackend` (`src/backend/mod.rs`), selected by the `agent:` value in
-`agg.yaml`. It is always a **subprocess**: agg builds a `Command`, the OS sandbox or container wraps
-it, agg spawns it in its own process group, reads its stdout line by line, and supervises it with a
+`rlt.yaml`. It is always a **subprocess**: rlt builds a `Command`, the OS sandbox or container wraps
+it, rlt spawns it in its own process group, reads its stdout line by line, and supervises it with a
 heartbeat and a watchdog (`src/backend/worker.rs`). The backend decides *what* to run and *how to
-read* what comes back; agg owns process management, git, isolation and judging.
+read* what comes back; rlt owns process management, git, isolation and judging.
 
 It is used in two roles, possibly by two different backends in one run:
 
@@ -45,15 +45,15 @@ It is used in two roles, possibly by two different backends in one run:
 
 ## The contract, method by method
 
-All in `trait AgentBackend` (`src/backend/mod.rs`). "Called by" says where agg uses each.
+All in `trait AgentBackend` (`src/backend/mod.rs`). "Called by" says where rlt uses each.
 
 | method | must do | called by |
 |---|---|---|
-| `name()` | the `agg.yaml` `agent:` value; must equal the `KNOWN` entry | everywhere (banner, report, per-agent usage) |
+| `name()` | the `rlt.yaml` `agent:` value; must equal the `KNOWN` entry | everywhere (banner, report, per-agent usage) |
 | `bin()` | the CLI binary, resolved via `PATH` so tests can shim a fake | `session_command`, doctor |
-| `capabilities()` | the honest `Capabilities` (next section) | `capability::assess` at startup, `agg doctor --json` |
-| `default_model()` / `default_summary_model()` | the worker / ruler model when `agg.yaml` names none. `""` = pass no model flag (Codex: a named model can be a hard 400) | config resolution at use time, `agg init` |
-| `default_effort()` | the effort when `agg.yaml` names none; `""` = pass none | config resolution, `agg init` |
+| `capabilities()` | the honest `Capabilities` (next section) | `capability::assess` at startup, `rlt doctor --json` |
+| `default_model()` / `default_summary_model()` | the worker / ruler model when `rlt.yaml` names none. `""` = pass no model flag (Codex: a named model can be a hard 400) | config resolution at use time, `rlt init` |
+| `default_effort()` | the effort when `rlt.yaml` names none; `""` = pass none | config resolution, `rlt init` |
 | `session_command(&SessionSpec)` | build the whole worker `Command`: auto-approval, the event-stream flag, model, effort, `extra_args` (operator `worker_args`, placed **before** the prompt), the prompt, `cwd`, **stdin `/dev/null`**, stdout+stderr piped. Returns a whole `Command` so a backend can reshape argv (Codex resume is a subcommand) | `worker::run_session` |
 | `parse_event(line)` | one stream line → a display `stream::Event` (💬 think, 🔧 tool, ↳ tool result, ✅ result, ▶ init) or `None` | worker reader thread → log, TUI, summarizer |
 | `parse_usage(line)` | the tokens on **this line**, as an increment | worker reader (summed), `tally_one_shot` |
@@ -65,9 +65,9 @@ All in `trait AgentBackend` (`src/backend/mod.rs`). "Called by" says where agg u
 | `tally_one_shot` (provided) | sums a one-shot's usage with your own parsers (a single JSON object or a JSON Lines stream) | your `one_shot` |
 | `config_conflict(model, effort)` | explain a pair of individually legal values the CLI rejects together; default `None` | `capability::assess` |
 | `spend_ceiling_hint()` | how the CLI caps its own spend when it cannot report dollars; default `None` | `capability::assess` |
-| `self_sandboxes()` | `true` only if the CLI has its own kernel jail; reporting only, it never exempts the CLI from agg's wrapper | `agg doctor --json` |
+| `self_sandboxes()` | `true` only if the CLI has its own kernel jail; reporting only, it never exempts the CLI from rlt's wrapper | `rlt doctor --json` |
 | `writable_state_paths()` | the `~/…` dirs and files the CLI must write while confined (`~/.claude` + `~/.claude.json`, `~/.codex`, …); use `state_paths_that_exist` | the sandbox and container wrappers |
-| `is_installed()` / `preflight()` | `--version` probe; `preflight` bails with install + login + a headless check command | `agg doctor`, `agg check`, run startup |
+| `is_installed()` / `preflight()` | `--version` probe; `preflight` bails with install + login + a headless check command | `rlt doctor`, `rlt check`, run startup |
 
 Three traps, each of which shipped once (`src/backend/mod.rs`, "Three traps"):
 
@@ -80,17 +80,17 @@ Three traps, each of which shipped once (`src/backend/mod.rs`, "Three traps"):
 
 And one more that is not a trap but a rule: **stdin is `/dev/null`**. `codex exec` blocks forever on
 stdin EOF as a non-TTY child; Copilot ignores piped stdin when `-p` is given. The prompt goes on argv.
-(agg keeps the argv short: the worker's prompt is a fixed pointer at `agg/private/INSTRUCTIONS.md`,
+(rlt keeps the argv short: the worker's prompt is a fixed pointer at `rlt/private/INSTRUCTIONS.md`,
 `loop_::INSTRUCTIONS_POINTER`, and the backend does not need to care how long the brief is.)
 
 ## The capability flags: refuse rather than degrade
 
 `Capabilities` (`src/backend/contract.rs`) says what the CLI can **report** or **support**. A `false`
 is not a defect to work around. It turns a config that needs the capability into a **startup
-refusal** (`src/capability.rs`, run by `agg run`, `agg plan`, `agg check` and `agg doctor`), because
+refusal** (`src/capability.rs`, run by `rlt run`, `rlt plan`, `rlt check` and `rlt doctor`), because
 the alternative is a guard that silently never fires: an `over_cost` that reads a cost nobody reports
 stays `0.0` forever, and an autonomous loop spends real money with no ceiling. The flags are also
-serialized as-is into `agg doctor --json`, so their names are a stable interface.
+serialized as-is into `rlt doctor --json`, so their names are a stable interface.
 
 | flag | true means | a config that needs it | when `false` | Claude / Codex / Copilot |
 |---|---|---|---|---|
@@ -98,13 +98,13 @@ serialized as-is into `agg doctor --json`, so their names are a stable interface
 | `reports_cost_usd` | `parse_result` yields `cost_usd` in **dollars** (a credit multiplier is not dollars) | `sequence.limits.cost`, `over_cost` | **warning** if `spend_ceiling_hint()` names a self-cap (the guard is inert, the run is still bounded), else refused | ✅ / ❌ / ❌ (hint: `--max-ai-credits`) |
 | `supports_effort` | `session_command` passes `spec.effort` | a non-empty `effort:` | refused at startup | ✅ / ✅ (`-c model_reasoning_effort=`, `max` clamps to `high`) / ✅ |
 | `supports_one_shot` | `one_shot` is a read-only call: tools that write are denied, MCP off, **worker-writable repo config ignored** | an LLM judge, or `summary.enabled`, on the **ruler** | refused at startup (your `one_shot` may then be `unreachable!()`) | ✅ / ✅ / ✅ |
-| `detects_rate_limits` | `parse_result` can tell a rate/usage limit from an ordinary failure | nothing refuses on it | reported (`agg doctor --json`, the agent table in `docs/GUIDE.md`); a limit is then scored as an ordinary failed session | ✅ / ✅ / ❌ |
+| `detects_rate_limits` | `parse_result` can tell a rate/usage limit from an ordinary failure | nothing refuses on it | reported (`rlt doctor --json`, the agent table in `docs/GUIDE.md`); a limit is then scored as an ordinary failed session | ✅ / ✅ / ❌ |
 | `supports_resume` | `parse_session_id` yields a handle and `session_command` honours `spec.resume_id` | nothing today: every worker session is fresh (`worker::run_session` passes `resume_id: None`) | reported only | ✅ / ✅ / ✅ |
 
 "Refuse rather than degrade" in each case:
 
 - **Tokens and cost.** Say `false` when the CLI does not report the number. Never return `Some(0)`
-  for "not reported": `None` is what lets agg tell the two apart (`SessionReport`, `usage::Tokens`).
+  for "not reported": `None` is what lets rlt tell the two apart (`SessionReport`, `usage::Tokens`).
 - **Effort.** If the CLI has fewer levels than `low|medium|high|xhigh|max`, map them in
   `session_command` (Codex clamps `xhigh`/`max` to `high`: asking for more thinking than the model
   offers gives its most). If two settings conflict, say so in `config_conflict` (Copilot rejects
@@ -120,7 +120,7 @@ serialized as-is into `agg doctor --json`, so their names are a stable interface
   limit anywhere you can see it, say `false`, as Copilot does, rather than guess a field path.
 
 Adding a **new** flag is a stable-interface change: the field, its consumer in `capability.rs`, the
-`agg doctor --json` row in `docs/GUIDE.md` ("Embedding agg"), and the flag list in `tests/check.rs`.
+`rlt doctor --json` row in `docs/GUIDE.md` ("Embedding rlt"), and the flag list in `tests/check.rs`.
 
 ## Parsing a worker session
 
@@ -152,7 +152,7 @@ that is how a CLI rejecting its own argv shows up, so make sure a real session r
 ## Parsing a one-shot
 
 `one_shot` returns the model's **text** in `OneShot.body` with the envelope removed, plus `stderr`,
-`success` (the exit status) and `usage`. agg's judge parser then looks for the verdict JSON in the
+`success` (the exit status) and `usage`. rlt's judge parser then looks for the verdict JSON in the
 body. Two rules:
 
 - **Fall back to the raw stdout** when the envelope is not the expected shape (`claude.rs`
@@ -166,8 +166,8 @@ Build the command, pass it through `self.confine_one_shot(command, cwd, isolatio
 
 ## Usage and model reporting
 
-What a backend reports ends up in the run report's `session_log` and totals, `agg status --json` and
-`agg history --json` (`src/usage.rs`, `docs/schemas/report.v3.json`):
+What a backend reports ends up in the run report's `session_log` and totals, `rlt status --json` and
+`rlt history --json` (`src/usage.rs`, `docs/schemas/report.v3.json`):
 
 - **Four token kinds that do not overlap** (`usage::Tokens`): `input` (uncached prompt), `output`,
   `cache_write`, `cache_read`. Map the CLI's fields onto them exactly. If the CLI's input count
@@ -186,9 +186,9 @@ What a backend reports ends up in the run report's `session_log` and totals, `ag
 
 ## Rate-limit detection
 
-A rate-limited session is not judged. agg saves its partial work under
-`refs/agg/partial/<run>/<session>`, waits until the reset (or `ratelimit_backoff_secs`, default 1800,
-when no reset is known), and lets `agg send wake` end the wait no sooner than `ratelimit_min_gap_secs`
+A rate-limited session is not judged. rlt saves its partial work under
+`refs/rlt/partial/<run>/<session>`, waits until the reset (or `ratelimit_backoff_secs`, default 1800,
+when no reset is known), and lets `rlt send wake` end the wait no sooner than `ratelimit_min_gap_secs`
 (default 60) after the limited attempt (`src/features/backoff.rs`). The backend's part:
 
 1. In `parse_result`, set `rate_limited` from the **terminal** event only. Pass its error text to the
@@ -200,8 +200,8 @@ when no reset is known), and lets `agg send wake` end the wait no sooner than `r
    been widened three times for wording no one had seen yet.
 3. If the message says when the limit resets, return it as an **absolute** epoch in
    `rate_limit_reset` (Claude: `resets 12:50pm`, parsed by `stream::parse_reset_epoch`, bounded to
-   25 h). Otherwise `None`, and agg uses the fixed backoff.
-4. agg counts a limit only when the process also **exits non-zero** (`worker.rs`: "a clean exit 0 is
+   25 h). Otherwise `None`, and rlt uses the fixed backoff.
+4. rlt counts a limit only when the process also **exits non-zero** (`worker.rs`: "a clean exit 0 is
    never a rate-limit"), so a CLI that exits 0 after a limit is not detected.
 
 ## Recorded fixtures
@@ -264,7 +264,7 @@ and the unknown-agent error listing. `src/doctor/json.rs` asserts doctor reports
 End to end: the suites shim a fake CLI on `PATH` (`tests/cli.rs` `project_with_fake_claude`,
 `scripts/e2e.sh` §9k shims a fake `codex` for a per-step agent override). Add a fake for the new
 binary where a test exercises agent selection. `scripts/e2e_real.sh` runs the real Claude CLI against
-a real model; a real run of the new CLI through `agg run` is the final check before shipping, and it
+a real model; a real run of the new CLI through `rlt run` is the final check before shipping, and it
 is what caught Copilot's `auto` + `effort` conflict, which no unit test could.
 
 ## Checklist
@@ -291,7 +291,7 @@ is what caught Copilot's `auto` + `effort` conflict, which no unit test could.
 - [ ] Docs: the agent table in `docs/GUIDE.md` ("Choosing an agent"), the `agent:` values in
       `docs/CONFIG.md`, `AGENTS.md`, the README, and a CHANGELOG entry.
 - [ ] Gate: `cargo build` with 0 warnings, `cargo test`, `cargo clippy --all-targets -- -D warnings`,
-      `scripts/e2e.sh`, and one real `agg run` against the new CLI.
+      `scripts/e2e.sh`, and one real `rlt run` against the new CLI.
 
 ## Investigated, not implemented
 

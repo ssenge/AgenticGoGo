@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the reference swe-metrics judge image from a swe-metrics git checkout.
 #
-#   docker/swe-metrics/build.sh <swe-metrics checkout> [tag]      # tag: agg-swe-metrics
+#   docker/swe-metrics/build.sh <swe-metrics checkout> [tag]      # tag: rlt-swe-metrics
 #   SWE_METRICS_REF=v0.1 docker/swe-metrics/build.sh ~/src/swe-metrics
 #
 # The context is `git archive` of ONE commit (SWE_METRICS_REF, default HEAD) plus the Dockerfile:
@@ -12,7 +12,7 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 src=${1:-}
-tag=${2:-agg-swe-metrics}
+tag=${2:-rlt-swe-metrics}
 ref=${SWE_METRICS_REF:-HEAD}
 [ -n "$src" ] || { sed -n '2,10p' "$0" >&2; exit 2; }
 engine=${ENGINE:-$(command -v docker || command -v podman || true)}

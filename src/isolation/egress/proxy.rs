@@ -1,4 +1,4 @@
-//! The egress PROXY: a small threaded HTTP proxy in the agg process that every confined process of
+//! The egress PROXY: a small threaded HTTP proxy in the rlt process that every confined process of
 //! an allow-listed run must go through — the only network destination its jail leaves open.
 //!
 //! It speaks the two forms clients use with `HTTPS_PROXY`/`HTTP_PROXY`: `CONNECT host:port` (TLS,
@@ -12,7 +12,7 @@
 //!   allowed name into a door to the host or the metadata service. The proxy connects to the
 //!   address it resolved itself, so a later re-resolution elsewhere changes nothing.
 //!
-//! Sync and std-only by design (agg has no async runtime): one accept thread, two threads per
+//! Sync and std-only by design (rlt has no async runtime): one accept thread, two threads per
 //! tunnel. Bounded where it matters — a 16 KiB request head read within 30 s, a 10 s connect.
 
 use super::allow::AllowList;
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 const HEAD_MAX: usize = 16 * 1024;
 /// The name [`super::bridge`]'s readiness probe asks for — on no allow-list, so always a `403`.
-pub(super) const SELFTEST_HOST: &str = "agg-egress-selftest.invalid";
+pub(super) const SELFTEST_HOST: &str = "rlt-egress-selftest.invalid";
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -41,14 +41,14 @@ impl Proxy {
         let addr = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        std::thread::Builder::new().name("agg-egress".into()).spawn(move || {
+        std::thread::Builder::new().name("rlt-egress".into()).spawn(move || {
             for conn in listener.incoming() {
                 if flag.load(Ordering::Relaxed) {
                     break;
                 }
                 let Ok(client) = conn else { continue };
                 let allow = allow.clone();
-                let _ = std::thread::Builder::new().name("agg-egress-conn".into()).spawn(move || serve(client, &allow));
+                let _ = std::thread::Builder::new().name("rlt-egress-conn".into()).spawn(move || serve(client, &allow));
             }
         })?;
         Ok(Proxy { addr, stop })
@@ -83,7 +83,7 @@ fn serve(mut client: TcpStream, allow: &AllowList) {
             if req.host != SELFTEST_HOST {
                 eprintln!("  [egress] DENIED {} {}:{} — {why}", req.method, req.host, req.port);
             }
-            return refuse(&mut client, 403, &format!("agg egress: {}:{} — {why}", req.host, req.port));
+            return refuse(&mut client, 403, &format!("rlt egress: {}:{} — {why}", req.host, req.port));
         }
     };
     // the audit trail: every destination a confined process actually reached
@@ -232,7 +232,7 @@ fn refuse(client: &mut TcpStream, code: u16, why: &str) {
     let body = format!("{why}\n");
     let _ = write!(
         client,
-        "HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\nX-Agg-Egress: denied\r\n\r\n{body}",
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\nX-Relentless-Egress: denied\r\n\r\n{body}",
         body.len()
     );
 }

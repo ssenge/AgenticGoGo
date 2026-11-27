@@ -1,5 +1,5 @@
 //! Judges built on **swe-metrics** — a separate, stateless measuring tool that turns a project into a
-//! JSON report of metrics (and the tools' SARIF details) and never judges them. agg does the
+//! JSON report of metrics (and the tools' SARIF details) and never judges them. rlt does the
 //! judging: a metric judge holds one number of the report to a threshold, a score judge holds
 //! swe-metrics' quality score to one, and both feed the ratchet like any judge with a `value`.
 //!

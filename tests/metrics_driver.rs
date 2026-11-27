@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
-use agg::prelude::*;
+use relentless::prelude::*;
 
 fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
     let p = dir.join(name);
@@ -33,7 +33,7 @@ fn git(dir: &Path, args: &[&str]) {
 /// The fakes: a worker that makes p95 worse (9) by rewriting the tracked report, and a swe-metrics
 /// that logs its calls to `$CALLS` in the project and "measures" `fake-report.json`.
 static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
-    let root = std::env::temp_dir().join(format!("agg-metrics-driver-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("rlt-metrics-driver-{}", std::process::id()));
     let bin = root.join("bin");
     fs::create_dir_all(root.join("home")).unwrap();
     chmod_x(&write(
@@ -49,7 +49,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"d
         &bin,
         "swe-metrics",
         r#"#!/bin/sh
-echo "$*" >> "$AGG_PROJECT_DIR/../calls.log"
+echo "$*" >> "$RLT_PROJECT_DIR/../calls.log"
 cmd=$1; shift
 case "$cmd" in
   measure)
@@ -88,7 +88,7 @@ fn project() -> (tempfile::TempDir, PathBuf) {
         git(&dir, args);
     }
     write(&dir, "fake-report.json", REPORT);
-    write(&dir, ".gitignore", "agg/state/\nagg/private/\n");
+    write(&dir, ".gitignore", "rlt/state/\nagg/private/\n");
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "base"]);
     (tmp, dir)
@@ -106,20 +106,20 @@ fn driver_metric_judges_share_a_measurement_and_ratchet() {
     let cc = Judge::metric("cc", MetricJudge::new("complexity.cyclomatic").stat(Stat::P95).tool("lizard").max(10.0));
     let dup = Judge::metric("dup", MetricJudge::new("duplication.percent").max(3.0));
     let q = Judge::score("q", ScoreJudge::new("swe-default", "2").min(50.0));
-    let agg = Agg::open(&dir).unwrap().ratchet("cc", Ratchet::down(0.0));
+    let rlt = Relentless::open(&dir).unwrap().ratchet("cc", Ratchet::down(0.0));
 
-    assert_eq!(agg.judge(&cc).value(), Some(6.0), "the pre-step ask is the baseline");
-    assert_eq!(agg.judge(&dup).value(), Some(2.0));
-    let score = agg.judge(&q);
+    assert_eq!(rlt.judge(&cc).value(), Some(6.0), "the pre-step ask is the baseline");
+    assert_eq!(rlt.judge(&dup).value(), Some(2.0));
+    let score = rlt.judge(&q);
     assert_eq!((score.value(), score.met()), (Some(77.0), true), "{}", score.rationale());
     assert_eq!(measures(&dir), 1, "three judges, one measurement");
 
-    agg.step(&Step::new("implement").model("fake").prompt("work")).unwrap();
-    let worse = agg.judge(&cc);
+    rlt.step(&Step::new("implement").model("fake").prompt("work")).unwrap();
+    let worse = rlt.judge(&cc);
     assert_eq!(worse.value(), Some(9.0), "{}", worse.rationale());
-    agg.judge(&dup);
+    rlt.judge(&dup);
     assert_eq!(measures(&dir), 2, "the changed tree is measured once more");
-    assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack, "p95 6 → 9 under a zero-tolerance ratchet");
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "p95 6 → 9 under a zero-tolerance ratchet");
 }
 
 /// A score of what a step changed in a sub-path measures that path's changes since the step's ref,
@@ -130,8 +130,8 @@ fn a_score_of_changed_files_in_a_path_measures_them_alone() {
     write(&dir, "work/fake-report.json", REPORT);
     let changed = Scope::ChangedIn { path: "work".into(), since: "HEAD".into() };
     let q = Judge::score("q", ScoreJudge::new("swe-default", "2").scope(changed).min(50.0));
-    let agg = Agg::open(&dir).unwrap();
-    assert_eq!(agg.judge(&q).value(), Some(77.0));
+    let rlt = Relentless::open(&dir).unwrap();
+    assert_eq!(rlt.judge(&q).value(), Some(77.0));
     let calls = fs::read_to_string(dir.join("../calls.log")).unwrap();
     assert!(calls.lines().any(|l| l.starts_with("measure") && l.contains("/work ") && l.contains("--changed-since HEAD")), "{calls}");
     assert!(!calls.contains("--baseline"), "{calls}");
@@ -139,7 +139,7 @@ fn a_score_of_changed_files_in_a_path_measures_them_alone() {
     write(&dir, "work/fake-report.json", &REPORT.replacen("\"analyzers\"", "\"subject\":{\"files\":0,\"changed_since\":\"HEAD\"},\"analyzers\"", 1));
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "nothing changed in work"]);
-    let nothing = Agg::open(&dir).unwrap().judge(&Judge::score("q2", ScoreJudge::new("swe-default", "2")
+    let nothing = Relentless::open(&dir).unwrap().judge(&Judge::score("q2", ScoreJudge::new("swe-default", "2")
         .scope(Scope::ChangedIn { path: "work".into(), since: "HEAD".into() }).min(50.0)));
     assert!(nothing.met() && nothing.value().is_none(), "{}", nothing.rationale());
 }
@@ -152,7 +152,7 @@ fn a_score_reads_the_build_reports_its_script_writes() {
     let script = write(&dir, "../reports.sh", "#!/bin/sh\necho building >&2\ntouch \"$1/jacoco.xml\"\necho \"{\\\"jacoco\\\": \\\"$1/jacoco.xml\\\"}\"\n");
     chmod_x(&script);
     let q = Judge::score("q", ScoreJudge::new("swe-default", "2").reports(&script).min(50.0));
-    assert_eq!(Agg::open(&dir).unwrap().judge(&q).value(), Some(77.0));
+    assert_eq!(Relentless::open(&dir).unwrap().judge(&q).value(), Some(77.0));
     let calls = fs::read_to_string(dir.join("../calls.log")).unwrap();
     assert!(calls.lines().any(|l| l.starts_with("measure") && l.contains("--report jacoco=") && l.contains("/build/jacoco.xml")), "{calls}");
 
@@ -160,6 +160,6 @@ fn a_score_reads_the_build_reports_its_script_writes() {
     chmod_x(&broken);
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "after the first score"]);
-    let v = Agg::open(&dir).unwrap().judge(&Judge::score("q2", ScoreJudge::new("swe-default", "2").reports(&broken).min(50.0)));
+    let v = Relentless::open(&dir).unwrap().judge(&Judge::score("q2", ScoreJudge::new("swe-default", "2").reports(&broken).min(50.0)));
     assert!(!v.met() && v.rationale().contains("tests failed"), "{}", v.rationale());
 }

@@ -1,3 +1,3 @@
 #!/bin/sh
-echo "$AGG_STEP failed" >> .git/on-fail.log
-echo "cleaned up after $AGG_STEP"
+echo "$RLT_STEP failed" >> .git/on-fail.log
+echo "cleaned up after $RLT_STEP"

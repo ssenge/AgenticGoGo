@@ -34,7 +34,7 @@ pub fn human_time(epoch: u64) -> String {
 
 /// Read + parse a YAML config file, naming the file in BOTH failure modes (can't read it vs.
 /// can't parse it) — the distinction a user needs to fix the problem. Used for every config the
-/// loop refuses to start without: agg.yaml.
+/// loop refuses to start without: rlt.yaml.
 ///
 /// Contrast [`load_json_or_default`]: config errors are fatal and must be loud; runtime state is
 /// best-effort and must never fail the loop.
@@ -82,7 +82,7 @@ pub fn fmt_dur(secs: u64) -> String {
 /// dashboard.rs and status.rs.
 ///
 /// Not `bytesize`: it renders binary units as `1.2 KiB` and rolls over to `MB`/`GB`, so adopting
-/// it would change what the TUI and `agg status` print today.
+/// it would change what the TUI and `rlt status` print today.
 pub fn human_bytes(n: usize) -> String {
     if n >= 1024 {
         format!("{:.1} KB", n as f64 / 1024.0)

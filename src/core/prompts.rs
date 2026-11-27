@@ -8,10 +8,10 @@
 //!   (`problems`), as is a file that cannot be read — never a silent preference for one of them.
 //! - **Read at session start.** [`load`] runs as each session's brief is composed, so an edited
 //!   file applies from the next session; a run never has to restart to pick it up.
-//! - **Recorded.** Every file read is hashed into `agg/private/prompts.jsonl` ([`record`]), one row
+//! - **Recorded.** Every file read is hashed into `rlt/private/prompts.jsonl` ([`record`]), one row
 //!   per session, so a run shows which version of a prompt each session was given.
 
-use crate::core::config::{AggConfig, ResolvedStep};
+use crate::core::config::{RelentlessConfig, ResolvedStep};
 use crate::problem::Problem;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ pub struct PromptRecord {
     pub ts: u64,
 }
 
-/// Where a configured prompt file lives: absolute as written, else relative to `agg/`.
+/// Where a configured prompt file lives: absolute as written, else relative to `rlt/`.
 pub fn resolve(config_base: &Path, file: &str) -> PathBuf {
     let p = Path::new(file);
     if p.is_absolute() {
@@ -65,7 +65,7 @@ pub fn pair_problems(at: &str, key: &str, inline: Option<&str>, file: Option<&st
 }
 
 /// Every prompt-file refusal in `cfg`: the `defaults:` role pair and each step's two pairs.
-pub fn problems(cfg: &AggConfig, config_base: &Path) -> Vec<Problem> {
+pub fn problems(cfg: &RelentlessConfig, config_base: &Path) -> Vec<Problem> {
     let d = &cfg.defaults;
     let mut out =
         pair_problems("defaults", "role_prompt", d.role_prompt.as_deref(), d.role_prompt_file.as_deref(), config_base);
@@ -106,7 +106,7 @@ fn read(key: &str, config_base: &Path, file: &str) -> Result<(String, PromptFile
     Ok((text, PromptFile { key: key.into(), path: path.display().to_string(), sha256 }))
 }
 
-/// Append one row to `agg/private/prompts.jsonl`. Nothing to record (no file-backed prompt) writes
+/// Append one row to `rlt/private/prompts.jsonl`. Nothing to record (no file-backed prompt) writes
 /// nothing.
 pub fn record(dir: &Path, session: u32, step: &str, files: &[PromptFile]) -> Result<()> {
     use std::io::Write;
@@ -127,7 +127,7 @@ pub fn record(dir: &Path, session: u32, step: &str, files: &[PromptFile]) -> Res
     writeln!(f, "{line}").with_context(|| format!("appending to {}", path.display()))
 }
 
-/// Every row of `agg/private/prompts.jsonl`, oldest first; a missing file is no rows.
+/// Every row of `rlt/private/prompts.jsonl`, oldest first; a missing file is no rows.
 pub fn read_ledger(dir: &Path) -> Vec<PromptRecord> {
     std::fs::read_to_string(crate::paths::prompts_jsonl(dir))
         .unwrap_or_default()
@@ -140,7 +140,7 @@ pub fn read_ledger(dir: &Path) -> Vec<PromptRecord> {
 mod tests {
     use super::*;
 
-    fn cfg(yaml: &str) -> AggConfig {
+    fn cfg(yaml: &str) -> RelentlessConfig {
         serde_yaml::from_str(yaml).unwrap()
     }
 
@@ -153,9 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_file_resolves_under_agg_and_an_absolute_one_as_written() {
-        assert_eq!(resolve(Path::new("/p/agg"), "steps/w.md"), Path::new("/p/agg/steps/w.md"));
-        assert_eq!(resolve(Path::new("/p/agg"), "/shared/w.md"), Path::new("/shared/w.md"));
+    fn a_relative_file_resolves_under_rlt_and_an_absolute_one_as_written() {
+        assert_eq!(resolve(Path::new("/p/rlt"), "steps/w.md"), Path::new("/p/rlt/steps/w.md"));
+        assert_eq!(resolve(Path::new("/p/rlt"), "/shared/w.md"), Path::new("/shared/w.md"));
     }
 
     #[test]

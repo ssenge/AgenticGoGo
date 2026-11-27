@@ -1,4 +1,4 @@
-//! SAMPLE — "Recursively Self-Improving Software": a workflow in which agg improves **agg**.
+//! SAMPLE — "Recursively Self-Improving Software": a workflow in which rlt improves **rlt**.
 //!
 //! ✅ **THIS COMPILES.** It is a cargo example (`cargo build --example selfimprove`). Like its
 //! sibling `examples/workflow.rs` it is not meant to be RUN as-is — the judge files it names are
@@ -10,16 +10,16 @@
 //!
 //! REVISION 3 (2026-08-04). REWRITTEN 2026-08-03 against the rev-6 API (`examples/workflow.rs`,
 //! HANDOFF §4b), amended
-//! 2026-08-04: one `Agent` enum, ceilings and `on_regression` in Rust, `agg.gate()` after VERIFY,
+//! 2026-08-04: one `Agent` enum, ceilings and `on_regression` in Rust, `rlt.gate()` after VERIFY,
 //! `with_*` Verdict setters (the final audit's E0592 fix). The
 //! previous version was written against the node model — Stage, Sequence, Action, Loop, guard,
 //! `.action()`, `Status::Exhausted` — all of which are deleted. Flow here is `for`/`if`/`continue`.
 //!
-//! NOT HYPOTHETICAL. agg's `isolation: container` tier was built by agg driving its own source in a
+//! NOT HYPOTHETICAL. rlt's `isolation: container` tier was built by rlt driving its own source in a
 //! real overnight run. Every hazard in the table at the bottom was actually present.
 //!
 //! ── WHY THIS SAMPLE IS THE ARGUMENT FOR DELETING `gate:` ─────────────────────────────────────
-//! agg's own verification ladder is the canonical gating case, and the numbers are brutal:
+//! rlt's own verification ladder is the canonical gating case, and the numbers are brutal:
 //!
 //!     cargo build          ~5s        }
 //!     clippy -D warnings   ~15s       }  the cheap ladder — ~80 seconds
@@ -35,7 +35,7 @@
 //! like this one belongs on the Rust path. Expressed in YAML, `e2e` would run after every step.
 //!
 //! ── THE GENERATION BOUNDARY, STATED UP FRONT ─────────────────────────────────────────────────
-//! **The running binary is the PREVIOUS generation.** agg cannot hot-swap itself mid-run: the
+//! **The running binary is the PREVIOUS generation.** rlt cannot hot-swap itself mid-run: the
 //! process executing this loop was compiled before the worker's changes existed. Improvements land
 //! for the NEXT run; the final act is merge + tag, never restart-myself.
 //!
@@ -45,7 +45,7 @@
 //! generation's guardrails in force over the next one. It applies to judges too: the judge written by
 //! the `author_judge` step in LAND does not grade this run. Do not "fix" this.
 
-use agg::prelude::*;
+use relentless::prelude::*;
 
 /// `main` is the ENTRY POINT ONLY — where to run and how many generations. The sample itself (steps,
 /// judges, the flow) is [`drive`], so a harness can run THIS driver against a scratch project
@@ -53,34 +53,34 @@ use agg::prelude::*;
 ///
 ///   ./selfimprove                   # cwd, 12 generations — today's values, unchanged
 ///   ./selfimprove /tmp/proj 2       # argv:  <dir> [cycles]
-///   AGG_SAMPLE_DIR=… AGG_SAMPLE_CYCLES=2 ./selfimprove    # or env
-// `-> ExitCode`: `Termination` would collapse every ending to exit 1. See `agg::driver::run`.
+///   RLT_SAMPLE_DIR=… RLT_SAMPLE_CYCLES=2 ./selfimprove    # or env
+// `-> ExitCode`: `Termination` would collapse every ending to exit 1. See `relentless::driver::run`.
 fn main() -> std::process::ExitCode {
-    agg::driver::run(real_main)
+    relentless::driver::run(real_main)
 }
 
 fn real_main() -> Result<(), Fatal> {
-    let dir = arg(1, "AGG_SAMPLE_DIR").unwrap_or_else(|| ".".to_string());
-    let cycles = arg(2, "AGG_SAMPLE_CYCLES").and_then(|s| s.parse().ok()).unwrap_or(12);
+    let dir = arg(1, "RLT_SAMPLE_DIR").unwrap_or_else(|| ".".to_string());
+    let cycles = arg(2, "RLT_SAMPLE_CYCLES").and_then(|s| s.parse().ok()).unwrap_or(12);
 
     // A Rust driver configures EVERYTHING in Rust — ceilings and regression policy included. This
-    // path never reads `agg.yaml`; a stray one is ignored rather than half-merged.
+    // path never reads `rlt.yaml`; a stray one is ignored rather than half-merged.
     // RESUME — and it matters more here than anywhere. A generation that dies after `implement` has
     // burned an hour of a heavy model; replaying it from `select` would spend that hour again to
-    // reach the same place. Recorded calls are answered from `agg/private/calls.jsonl`, back as far
+    // reach the same place. Recorded calls are answered from `rlt/private/calls.jsonl`, back as far
     // as the last `gate()` that KEPT.
-    let resume = arg(3, "AGG_SAMPLE_RESUME").is_some();
-    let agg = Agg::open_with(dir, Opts { resume })?
-        // Declared here, ENFORCED by `agg.check_limits()?` at the top of each generation. No
+    let resume = arg(3, "RLT_SAMPLE_RESUME").is_some();
+    let rlt = Relentless::open_with(dir, Opts { resume })?
+        // Declared here, ENFORCED by `rlt.check_limits()?` at the top of each generation. No
         // condition strings: there is no `.abort_if()` on the Rust path, because a driver that
-        // wants to stop on a judge writes `if agg.judge(&x).met() { return Ok(()); }`.
+        // wants to stop on a judge writes `if rlt.judge(&x).met() { return Ok(()); }`.
         // SECONDS. `work_time` excludes time blocked on a human (`hil_*`); this driver has no
         // human calls, so a plain e2e deadline is the honest ceiling here.
         .limits(Limits { tokens: Some(60_000_000), cost: None, sessions: Some(300),
                          wall_time: Some(10.0 * 3600.0), work_time: None })
         .on_regression(OnRegression::Rollback);   // self-improvement: a regression must not land
 
-    drive(&agg, cycles)
+    drive(&rlt, cycles)
 }
 
 /// One positional arg, or an env var, or nothing.
@@ -88,7 +88,7 @@ fn arg(n: usize, var: &str) -> Option<String> {
     std::env::args().nth(n).or_else(|| std::env::var(var).ok()).filter(|s| !s.is_empty())
 }
 
-/// A model name a RUN may pin (`AGG_SAMPLE_HEAVY_MODEL` / `_GRIND_MODEL`). The default is the model
+/// A model name a RUN may pin (`RLT_SAMPLE_HEAVY_MODEL` / `_GRIND_MODEL`). The default is the model
 /// the narrative names; the override lets a real run name one that exists today without editing the
 /// driver. Nothing else about the step changes.
 fn model(default: &str, var: &str) -> String {
@@ -96,7 +96,7 @@ fn model(default: &str, var: &str) -> String {
 }
 
 /// THE SAMPLE — read from here down as if it were `main`; it was, until the split.
-fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
+fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // STEPS — two templates, one per trust level. `readonly` ACCUMULATES down a chain and
     // `writable` SUBTRACTS from what accumulated, which is what makes the two grants below
@@ -107,27 +107,27 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // tools cannot open a file, which is exactly what `select` below has to do.
     // ⚠ THE TIER IS NOT OPTIONAL HERE. `readonly` is delivered by the OS wrapper, and the wrapper
     // only runs under `sandbox`/`container` — under the default `none` this deny list would bind
-    // NOTHING and the comment below would be a lie. agg warns on `readonly` without a tier.
+    // NOTHING and the comment below would be a lie. rlt warns on `readonly` without a tier.
     let reading = Step::template()             // reads and judges; edits no source
         .agent(Agent::Claude)
         .effort(Effort::High)
         .isolation(Isolation::Sandbox)
-        .readonly(["src/", "tests/", "agg/judges/"]);
+        .readonly(["src/", "tests/", "rlt/judges/"]);
 
-    let sandboxed = Step::template()           // edits agg's OWN source
+    let sandboxed = Step::template()           // edits rlt's OWN source
         .agent(Agent::Claude)
         .isolation(Isolation::Sandbox)
-        .readonly(["tests/", "agg/judges/"]);
+        .readonly(["tests/", "rlt/judges/"]);
 
     // Picking a roadmap item is reading and judgement — but it is reading TWO REAL FILES, so it
     // needs a harness. What keeps it cheap and safe is the inherited deny on `src/`: the step can
     // read the whole repo and write only its note. `internal/ROADMAP.md` is real.
     let select = reading.create("select")
-        .prompt("Read internal/ROADMAP.md and agg/private/LOG.md. Pick the single highest-value \
+        .prompt("Read internal/ROADMAP.md and rlt/private/LOG.md. Pick the single highest-value \
                  unstarted item completable in one overnight run. Write the choice and your \
-                 reasoning to agg/state/wiki/next.md. Do NOT edit source.");
+                 reasoning to rlt/state/wiki/next.md. Do NOT edit source.");
 
-    // The design doc comes BEFORE the code, and from a DIFFERENT REVIEWER. This is how agg's own
+    // The design doc comes BEFORE the code, and from a DIFFERENT REVIEWER. This is how rlt's own
     // features were actually built: internal/STUCK_NOTIFY.md existed before src/features/notify.rs,
     // and the implementation session found four gaps in it. The doc is what makes gaps findable.
     //
@@ -136,35 +136,35 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // the sample runnable for a reader with a single agent installed; put the vendor back if you have
     // two. Either way the point stands: the knob is PER STEP, not per run.
     let design = Step::new("design")
-        .model(model("claude-sonnet-5", "AGG_SAMPLE_REVIEW_MODEL"))
+        .model(model("claude-sonnet-5", "RLT_SAMPLE_REVIEW_MODEL"))
         .effort(Effort::High)
-        .prompt("Turn agg/state/wiki/next.md into an implementation contract another session will \
+        .prompt("Turn rlt/state/wiki/next.md into an implementation contract another session will \
                  build from without your context. Ground every claim in code anchors you have read.");
 
     let implement = sandboxed.create("implement")
-        .model(model("claude-opus-4-8[1m]", "AGG_SAMPLE_HEAVY_MODEL"))
+        .model(model("claude-opus-4-8[1m]", "RLT_SAMPLE_HEAVY_MODEL"))
         .effort(Effort::Max)
-        .writable(["tests/"])                  // it SHOULD add tests; `agg/judges/` stays denied
+        .writable(["tests/"])                  // it SHOULD add tests; `rlt/judges/` stays denied
         .prompt("Implement the contract in the design doc. Add tests alongside.");
 
     // Inherits the denies and re-grants NOTHING. "Make the tests pass" has an obvious shortcut,
     // and this is the step that would take it — so `tests/` is kernel-read-only for it, and
-    // `agg/judges/` is too. The prompt below is a courtesy; the deny is the enforcement.
+    // `rlt/judges/` is too. The prompt below is a courtesy; the deny is the enforcement.
     let repair = sandboxed.create("repair")
-        .model(model("claude-sonnet-5", "AGG_SAMPLE_GRIND_MODEL"))   // the grind runs cheap
+        .model(model("claude-sonnet-5", "RLT_SAMPLE_GRIND_MODEL"))   // the grind runs cheap
         .prompt("Make the failing tests and lints pass. Do not delete or ignore tests.");
 
     // The ONLY step that may write graders — a real use of `writable` subtracting. Every landed
     // feature ships with the judge that keeps it honest in later runs; that judge has to be written
     // by something, and this is it. It cannot touch source, and nothing else can touch judges.
-    // Accumulate then subtract, in one step: `src/` joins the inherited denies, `agg/judges/` comes
-    // back out of them. Net writable: everything but `src/`, `tests/` and `agg/private/`.
+    // Accumulate then subtract, in one step: `src/` joins the inherited denies, `rlt/judges/` comes
+    // back out of them. Net writable: everything but `src/`, `tests/` and `rlt/private/`.
     let author_judge = sandboxed.create("author_judge")
         .readonly(["src/"])
-        .writable(["agg/judges/"])             // spelled EXACTLY as the template's deny — `writable`
+        .writable(["rlt/judges/"])             // spelled EXACTLY as the template's deny — `writable`
                                                // subtracts, and a trailing-slash mismatch subtracts
                                                // nothing while looking like it worked
-        .prompt("Write a judge under agg/judges/ that fails if this feature regresses. \
+        .prompt("Write a judge under rlt/judges/ that fails if this feature regresses. \
                  Exit 0 = met. Do not touch src/.");
 
     // The step-back gets a different reviewer on the theory that whoever dug the hole is the least
@@ -173,28 +173,28 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // a same-family model reproduces. It is a model override here only so the sample runs with one
     // agent installed.
     let reconsider = Step::new("reconsider")
-        .model(model("claude-sonnet-5", "AGG_SAMPLE_REVIEW_MODEL"))
+        .model(model("claude-sonnet-5", "RLT_SAMPLE_REVIEW_MODEL"))
         .prompt("Assume the current approach is wrong. Name 2-3 alternatives and pick one.");
 
     let land = Step::new("land")
         .prompt("Mark the item done in internal/ROADMAP.md, write a release note, tag the build.");
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
-    // JUDGES — agg's own ladder, cheapest first. Nothing is registered and nothing runs here.
+    // JUDGES — rlt's own ladder, cheapest first. Nothing is registered and nothing runs here.
     // ═════════════════════════════════════════════════════════════════════════════════════════
 
-    let builds = Judge::script("builds",     "agg/judges/build_ok.sh");      // ~5s
-    let lint   = Judge::script("lint_clean", "agg/judges/lint_clean.sh");    // ~15s
-    let tests  = Judge::script("tests_pass", "agg/judges/cargo_test.sh");    // ~60s
+    let builds = Judge::script("builds",     "rlt/judges/build_ok.sh");      // ~5s
+    let lint   = Judge::script("lint_clean", "rlt/judges/lint_clean.sh");    // ~15s
+    let tests  = Judge::script("tests_pass", "rlt/judges/cargo_test.sh");    // ~60s
 
     // ~10 minutes. No `gate` field — the `&&` in VERIFY is the gate.
-    let e2e = Judge::script("e2e", "agg/judges/e2e.sh")
+    let e2e = Judge::script("e2e", "rlt/judges/e2e.sh")
         // SECONDS — there is no `MINUTES` constant; earlier revisions of this file assumed one.
         .timeout(20 * 60);                // the run-level 300s default would kill it
 
     // ⛔ THERE IS NO `stalled` JUDGE HERE ANY MORE, and the reason is worth more than the judge was.
     //
-    // The shipped `agg/judges/stalled.sh` is MET WHEN THINGS ARE BAD — the one judge in the library
+    // The shipped `rlt/judges/stalled.sh` is MET WHEN THINGS ARE BAD — the one judge in the library
     // that inverts the convention every other one follows (`tests_pass`, `builds`, `lint_clean`,
     // `no_shrink`, `e2e`: met = good). It inverts it because YAML's `notify_if: stalled` reads
     // naturally that way. On the Rust path there is no `notify_if`, so the inversion buys nothing —
@@ -212,7 +212,7 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // The rule that generalises: on the Rust path a judge's `met` should mean GOOD. An inverted
     // detector belongs only in `notify_if`/`abort_if`, which this path does not have.
 
-    let design_sound = Judge::rubric("design_sound", "agg/judges/design_sound.md");
+    let design_sound = Judge::rubric("design_sound", "rlt/judges/design_sound.md");
 
     // THE ANTI-CHEAT INVARIANT: the test count must never decrease. It is a QUALITY invariant, not
     // a security one — the security answer to "delete the failing test" is the kernel deny on
@@ -221,7 +221,7 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     //
     // Native because it needs HISTORY across steps, and reading it in Rust means no subprocess, no
     // hand-parsing of verdicts.jsonl, and a comparison the compiler checks. NOT because Rust sees
-    // more than a script: script judges already get `AGG_SESSION`/`AGG_STEP` (core/judge.rs:88) and
+    // more than a script: script judges already get `RLT_SESSION`/`RLT_STEP` (core/judge.rs:88) and
     // can be handed whatever else they need.
     // `JudgeCtx` gives a native judge the other judges (`met/value/verdict/previous/history`) plus
     // `session()`, `step()`, `dir()`, `read()` and `diff()` — and NO clock, NO RNG, NO network, NO
@@ -233,24 +233,24 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // the regression set by virtue of having been asked, which is the whole rule. Note it is
     // met = GOOD, like every other judge here; that convention is what makes the rule safe.
     //
-    // ⚠ A native judge's closure is `Fn + Send + Sync + 'static` — agg keeps it for the whole run,
+    // ⚠ A native judge's closure is `Fn + Send + Sync + 'static` — rlt keeps it for the whole run,
     // so it cannot BORROW another judge out of `main`'s frame. Clone the one it consults into the
     // closure; `Judge` is `Clone` for exactly this, and a clone is a name plus a kind, not a run.
     let tests_for_shrink = tests.clone();
     let no_shrink = Judge::native("no_shrink", move |c| {
         // `value()` is Option<f64> because a BINARY judge emits no number, and conflating "no
-        // number" with 0 is a bug agg has already had once. None here means `tests_pass` was not
+        // number" with 0 is a bug rlt has already had once. None here means `tests_pass` was not
         // consulted on this step — not that the suite shrank to nothing.
         let Some(now) = c.value(&tests_for_shrink) else {
             return Verdict::binary(true).with_rationale("tests_pass not consulted this step");
         };
         // `previous()` is the last MERGED verdict — the right baseline, because a rolled-back
         // session's count is not a count anything has to beat. It reads `landed_met`'s data
-        // (`gate.rs:63`), so on this path "previous" means AS OF THE LAST `agg.gate()`, not as of
+        // (`gate.rs:63`), so on this path "previous" means AS OF THE LAST `rlt.gate()`, not as of
         // the last step: nothing merges between gates, so there is no finer baseline to have.
         let prev = c.previous(&tests_for_shrink).and_then(|v| v.value()).unwrap_or(now);
         // Tolerance zero on purpose. Legitimately removing a test is rare enough that it should
-        // cost a human an explicit `agg send inject`, not pass silently.
+        // cost a human an explicit `rlt send inject`, not pass silently.
         // `with_`-prefixed setters: two inherent methods cannot share the reader's name (E0592,
         // corrected 2026-08-04 — RUST_API §7.5).
         Verdict::binary(now >= prev).with_value(now).with_rationale(if now >= prev {
@@ -266,7 +266,7 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
     // ═════════════════════════════════════════════════════════════════════════════════════════
 
     // Declared once (`pos`) and iterated once (`for`) — one number, from the caller.
-    let cycle = agg.pos("cycle", cycles as u64);
+    let cycle = rlt.pos("cycle", cycles as u64);
 
     // ⚠ `1..=`, not `0..` — the bound given to `pos()` is a COUNT, so a 0-based counter renders
     // "cycle 0/2" first and "1/2" last. `c` is also the generation number in the landing log a human
@@ -277,33 +277,33 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
         // THE CEILINGS, ENFORCED. `.limits(..)` above is a budget; this is what makes it a ceiling.
         // Once per generation is right for this loop — a generation is long, and stopping halfway
         // through one saves nothing worth the complexity of checking more often.
-        agg.check_limits()?;
+        rlt.check_limits()?;
 
         // ── SELECT + DESIGN — do not build against a vague contract ────────────────────────
-        agg.step(&select)?;
+        rlt.step(&select)?;
         for _ in 0..3 {
-            agg.step(&design)?;
+            rlt.step(&design)?;
             // `value_or(d)`, not `value()`: the reader is `Option<f64>` (a binary judge emits no
             // number — see `no_shrink` below, which depends on exactly that), so a comparison needs
-            // the driver to STATE its default rather than have agg fabricate a 0.
-            if agg.judge(&design_sound).value_or(0.0) >= 85.0 {
+            // the driver to STATE its default rather than have rlt fabricate a 0.
+            if rlt.judge(&design_sound).value_or(0.0) >= 85.0 {
                 break;
             }
-            agg.info("design still vague — redrafting");
+            rlt.info("design still vague — redrafting");
         }
         // Re-testing is free (memoized for this step), so there is no `drafted_ok` bool and no
         // `Status::Exhausted` to match on. Three vague drafts means the ROADMAP item was
         // underspecified, so the right move is a different item — not implementing from a fog.
-        if agg.judge(&design_sound).value_or(0.0) < 85.0 {
-            agg.info("3 drafts and still vague — picking a different roadmap item next cycle");
+        if rlt.judge(&design_sound).value_or(0.0) < 85.0 {
+            rlt.info("3 drafts and still vague — picking a different roadmap item next cycle");
             continue 'cycle;
         }
 
         // ── BUILD — first cut, then grind to green ─────────────────────────────────────────
-        let r = agg.step(&implement)?;
-        agg.log(&format!("implement: {} tokens, landed={:?}", r.tokens, r.landed));   // Debug: no Display on `Landing`
-        if !agg.judge(&builds).met() {
-            agg.info("first cut does not compile — starting over next cycle");
+        let r = rlt.step(&implement)?;
+        rlt.log(&format!("implement: {} tokens, landed={:?}", r.tokens, r.landed));   // Debug: no Display on `Landing`
+        if !rlt.judge(&builds).met() {
+            rlt.info("first cut does not compile — starting over next cycle");
             continue 'cycle;
         }
 
@@ -319,12 +319,12 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
         for _ in 0..15 {
             // A different vendor gets the step-back; the same one gets the routine fix.
             if flat_laps >= 2 {
-                agg.step(&reconsider)?;
+                rlt.step(&reconsider)?;
                 flat_laps = 0;
             } else {
-                agg.step(&repair)?;
+                rlt.step(&repair)?;
             }
-            let green = [&builds, &lint, &tests].iter().filter(|j| agg.judge(j).met()).count();
+            let green = [&builds, &lint, &tests].iter().filter(|j| rlt.judge(j).met()).count();
             if green == 3 {
                 break;
             }
@@ -332,15 +332,15 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
             if green <= last_green { flat_laps += 1; } else { flat_laps = 0; }
             last_green = green;
         }
-        if !(agg.judge(&tests).met() && agg.judge(&lint).met()) {
+        if !(rlt.judge(&tests).met() && rlt.judge(&lint).met()) {
             // The work is NOT lost by leaving without a gate: every session is committed on its own
             // branch and session N+1 branches off session N, so the next cycle's worker still opens
             // the partial implementation. What has not happened is a merge to base.
-            agg.ask(&format!("cycle {c} did not converge in 15 laps — different approach?"));
+            rlt.ask(&format!("cycle {c} did not converge in 15 laps — different approach?"));
             continue 'cycle;
         }
-        if !agg.judge(&no_shrink).met() {
-            agg.ask(agg.judge(&no_shrink).rationale());   // memoized: the second ask is free
+        if !rlt.judge(&no_shrink).met() {
+            rlt.ask(rlt.judge(&no_shrink).rationale());   // memoized: the second ask is free
             continue 'cycle;
         }
 
@@ -350,19 +350,19 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
         // green. Across a 60-step run that is ~20 minutes of e2e instead of ~10 hours. There is no
         // `gate:` field, no `when:` on the judge and no run-set to declare — the flow already says
         // it, in the language the reader already knows.
-        if !(agg.judge(&builds).met()
-            && agg.judge(&lint).met()
-            && agg.judge(&tests).met()
-            && agg.judge(&e2e).met())
+        if !(rlt.judge(&builds).met()
+            && rlt.judge(&lint).met()
+            && rlt.judge(&tests).met()
+            && rlt.judge(&e2e).met())
         {
-            agg.info("e2e red after a green cheap ladder — not landable this cycle");
+            rlt.info("e2e red after a green cheap ladder — not landable this cycle");
             continue 'cycle;
         }
 
         // Every `step()` above only STAGED — work committed on the session branch, nothing merged.
-        // `gate()` closes the span and hands agg the keep/rollback call over every verdict consulted
+        // `gate()` closes the span and hands rlt the keep/rollback call over every verdict consulted
         // since the last gate, under the `on_regression` set in `main`. The driver says WHEN, the
-        // policy says WHAT — an `agg.rollback()` was proposed and rejected for inverting exactly
+        // policy says WHAT — an `rlt.rollback()` was proposed and rejected for inverting exactly
         // that. Note this is unrelated to the deleted judge-level `gate:` field above.
         //
         // ⚠ AT THIS GATE THE POLICY IS A BACKSTOP, NOT THE MECHANISM. The `&&` ladder above already
@@ -376,19 +376,19 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
         // No exclusion rule and no marker are needed, because there is no inverted detector in the
         // span: the stall check above is a local variable, not a judge (see the block where the
         // `stalled` judge used to be). That is the whole reason it is a local variable.
-        agg.gate()?;
+        rlt.gate()?;
 
         // ── LAND — merge and tag. NOT restart. ─────────────────────────────────────────────
         // The new judge grades the NEXT run, never this one: this driver is already compiled.
-        agg.step(&author_judge)?;
+        rlt.step(&author_judge)?;
 
         // The one human gate, and the only one. Landing is autonomous; deciding that a generation
         // is the one the next run picks up is not. `block` is USER-driven — the worker can never
         // reach it — and ceilings keep firing while it waits, so `wall_time` ends the run rather
         // than hanging until morning.
-        agg.block("generation is green end-to-end. Tag it as the next agg?")?;
+        rlt.block("generation is green end-to-end. Tag it as the next rlt?")?;
 
-        agg.step(&land)?;
+        rlt.step(&land)?;
 
         // GRADE THE SECOND SPAN BEFORE IT LANDS. This span writes a NEW JUDGE and the tag the next
         // generation boots from — the one merge in the whole driver that must never go in unverified.
@@ -397,13 +397,13 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
         // is written), and the span merges silently ungraded. It is also the only place
         // `OnRegression::Rollback` can fire in this driver — `builds`/`tests` were landed-met one
         // gate ago, so a generation that breaks its own build is DISCARDED here rather than tagged
-        // as the next agg. The policy does the discarding; this `if` only names the reason.
-        if !(agg.judge(&builds).met() && agg.judge(&tests).met()) {
-            agg.info("authoring the judge or tagging broke the tree — this generation is not landable");
+        // as the next rlt. The policy does the discarding; this `if` only names the reason.
+        if !(rlt.judge(&builds).met() && rlt.judge(&tests).met()) {
+            rlt.info("authoring the judge or tagging broke the tree — this generation is not landable");
         }
-        agg.gate()?;                       // second span: author_judge + land, same policy
-        agg.log(&format!(
-            "generation {c} landed. The NEXT `agg run` uses it; this process does not."
+        rlt.gate()?;                       // second span: author_judge + land, same policy
+        rlt.log(&format!(
+            "generation {c} landed. The NEXT `rlt run` uses it; this process does not."
         ));
     }
 
@@ -421,21 +421,21 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
 //   delete the failing test         `repair` inherits `readonly(["tests/"])` and   sandbox only
 //                                   re-grants nothing — a deny, not a prompt       (design, §4b.5)
 //   disable a test from inside a    `no_shrink`: the count must not fall. A        always — but it
-//   file it may legitimately write  detector, cleared by a human `agg send inject` detects, not bars
+//   file it may legitimately write  detector, cleared by a human `rlt send inject` detects, not bars
 //   suborn a script judge into      A JUDGE IS CONFINED AS A JUDGE (§2.5): the    sandbox|container
 //   met:true                        project tree is READ-ONLY to it, so it can    — SHIPPED
-//                                   neither rewrite `agg/judges/` nor edit the
+//                                   neither rewrite `rlt/judges/` nor edit the
 //                                   `src/` it grades into passing. Its writes are
-//                                   RELOCATED to `$AGG_JUDGE_SCRATCH`, so this
+//                                   RELOCATED to `$RLT_JUDGE_SCRATCH`, so this
 //                                   costs no judge anything. ⚠ What turns it on
 //                                   is `.isolation()` on a STEP — the run's tier
 //                                   is the strongest any step declared, and the
 //                                   judges take that, never the current step's.
-//   forge verdicts.jsonl to fake    `agg/private/` carve-out, derived from cwd in  sandbox|container
+//   forge verdicts.jsonl to fake    `rlt/private/` carve-out, derived from cwd in  sandbox|container
 //   progress — or a stall           `wrap()` (isolation/mod.rs:151), no knob.      — SHIPPED cc30d43
 //                                   Proven by `isolation::tests::private_dir_
 //                                   is_carved_out_of_the_writable_cwd`, mutated
-//   `agg send budget` to raise its  `bus/` lives under `agg/private/`              as above, shipped
+//   `rlt send budget` to raise its  `bus/` lives under `rlt/private/`              as above, shipped
 //   own token ceiling               (paths.rs:135) — the same carve-out
 //   weaken src/isolation/, escape   THE GENERATION BOUNDARY: this run's            structural, always
 //                                   confinement was compiled before the change
@@ -449,7 +449,7 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
 // `isolation: sandbox` means trusting the worker not to touch the machinery grading it. Under
 // `none` the moat is a protocol boundary, not a permission one (HANDOFF §5).
 //
-// THE RESIDUAL WITH SANDBOX: `agg/judges/` is committed by design, so that a rollback can restore a
+// THE RESIDUAL WITH SANDBOX: `rlt/judges/` is committed by design, so that a rollback can restore a
 // tampered grader — and `author_judge` deliberately punches a hole in the deny for exactly one
 // step. That step is the narrowest form of the problem that still lets a self-improving loop write
 // its own graders; it is not zero. `no_shrink` is not an answer to it (a native judge is not
@@ -457,7 +457,7 @@ fn drive(agg: &Agg, cycles: usize) -> Result<(), Fatal> {
 // reviewed at the tag.
 //
 // AND IF THE DRIVER NEVER REACHES `gate()` — a run where no cycle ever gets past e2e — nothing is
-// merged and nothing is discarded: the sessions sit on the span branch, base is untouched, and agg
+// merged and nothing is discarded: the sessions sit on the span branch, base is untouched, and rlt
 // says so at run end with the one `git merge` that would land them. Neither silent outcome (a
 // dropped overnight run, a moved `main` nobody approved) can happen.
 // ─────────────────────────────────────────────────────────────────────────────────────────────

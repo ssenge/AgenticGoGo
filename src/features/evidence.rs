@@ -29,7 +29,7 @@ pub fn begin(ctx: &mut LoopState, run_id: &str) {
     ctx.ext.get::<EvidenceState>().run_id = Some(run_id.to_string());
 }
 
-/// `agg/private/evidence/<run>/` — this run's evidence.
+/// `rlt/private/evidence/<run>/` — this run's evidence.
 fn run_dir(ctx: &mut LoopState) -> PathBuf {
     let run = ctx.ext.get::<EvidenceState>().run_id.clone().unwrap_or_else(|| "run".into());
     crate::paths::evidence_dir(&ctx.dir).join(run)

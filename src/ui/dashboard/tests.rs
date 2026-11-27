@@ -123,7 +123,7 @@ fn render(s: &DashboardState, w: u16, h: u16) -> String {
 fn renders_all_panels() {
     let s = demo_state();
     let text = render(&s, 100, 40);
-    assert!(text.contains("AgenticGoGo")); // title (waiting screen reuses it too)
+    assert!(text.contains("Relentless")); // title (waiting screen reuses it too)
     assert!(text.contains("Info"));
     assert!(text.contains("myproject"));
     assert!(text.contains("#7"));            // session number
@@ -159,7 +159,7 @@ fn binary_judge_reads_met_and_run_set_is_divided() {
 }
 
 /// The title row must carry the name ONLY — project/model/stop must NOT bleed into
-/// it. Row 0 is the centered "AgenticGoGo" banner; row 1 is the Info block border.
+/// it. Row 0 is the centered "Relentless" banner; row 1 is the Info block border.
 #[test]
 fn title_is_name_only() {
     let backend = TestBackend::new(100, 40);
@@ -169,7 +169,7 @@ fn title_is_name_only() {
     term.draw(|f| draw::draw(f, Path::new("."), Some(&s), &mut ui)).unwrap();
     let buf = term.backend().buffer().clone();
     let row0: String = (0..100).map(|x| buf[(x, 0)].symbol().to_string()).collect();
-    assert!(row0.contains("AgenticGoGo"));
+    assert!(row0.contains("Relentless"));
     assert!(!row0.contains("myproject")); // details live in Info, not the title
     assert!(!row0.contains("all_goals"));
     // row 1 is the Info block's top border.

@@ -1,14 +1,14 @@
-//! `agg/private/calls.jsonl` — the durable record of every call that crossed the agg API boundary.
+//! `rlt/private/calls.jsonl` — the durable record of every call that crossed the rlt API boundary.
 //!
 //! This is what makes a Rust driver RESUMABLE. A driver's position in its own control flow is never
 //! serialized; instead each completed call appends one line here, and on `--resume` the same calls
 //! are answered from the file instead of being executed. The driver walks itself back to the
 //! interruption point by *running*, because identical inputs produce identical branches.
 //!
-//! ## Why it lives in `agg/private/`
+//! ## Why it lives in `rlt/private/`
 //! `paths.rs` states the rule: *if the worker writing it could change when the loop ends, what it
-//! may spend, or what agg believes happened, it belongs here.* A worker able to append rows to this
-//! file could make agg **skip work and fabricate verdicts** — strictly worse than the
+//! may spend, or what rlt believes happened, it belongs here.* A worker able to append rows to this
+//! file could make rlt **skip work and fabricate verdicts** — strictly worse than the
 //! `verdicts.jsonl` hole the private split exists to close.
 //!
 //! ## Relationship to `verdicts.jsonl`
@@ -27,8 +27,8 @@ use std::path::Path;
 
 /// Which notification call produced a [`CallRecord::Note`].
 ///
-/// ⚠ `Log` is in this enum deliberately. The driver contract tells authors that an `agg.*` call is a
-/// safe place to put a once-only side effect, and `agg.log` is one of them — leaving it out would
+/// ⚠ `Log` is in this enum deliberately. The driver contract tells authors that an `rlt.*` call is a
+/// safe place to put a once-only side effect, and `rlt.log` is one of them — leaving it out would
 /// make that advice false. All four consume an ordinal and all four replay as no-ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,7 +40,7 @@ pub enum NoteLevel {
 }
 
 impl NoteLevel {
-    /// The wire spelling the facade uses for these calls — the same four strings `Agg::note` passes.
+    /// The wire spelling the facade uses for these calls — the same four strings `Relentless::note` passes.
     pub fn tag(self) -> &'static str {
         match self {
             NoteLevel::Log => "log",
@@ -52,7 +52,7 @@ impl NoteLevel {
 }
 
 /// One completed call. `ord` is the call's position in the driver's execution, `label` is the
-/// breadcrumb (`Agg::label_path`) as of that call — the consistency check that a resumed driver is
+/// breadcrumb (`Relentless::label_path`) as of that call — the consistency check that a resumed driver is
 /// really the same driver in the same place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -69,7 +69,7 @@ pub enum CallRecord {
     ///
     /// `gate` is the gate's own state AS OF this gate (`core::ratchet`: the ratchet references, the
     /// rollback counts, the oscillation history). A resume restores it from the last replayed gate,
-    /// which is exactly the truncation point — `agg/private/gate.json` alone may be AHEAD of it, by
+    /// which is exactly the truncation point — `rlt/private/gate.json` alone may be AHEAD of it, by
     /// the rollbacks of gates that were dropped and will re-execute. Absent in a ledger written
     /// before the ratchet existed; such a resume starts the gate state fresh.
     Gate {
@@ -306,7 +306,7 @@ mod tests {
     use crate::driver::{GateFailure, Landing};
 
     fn tmp(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("agg-calls-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("rlt-calls-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

@@ -1,31 +1,31 @@
 ---
-name: agg-new
-description: Set up AgenticGoGo for the current project — read existing plans, then generate agg/agg.yaml (defaults/judge/steps/sequence), the judge files under agg/judges/, agg/AGG.md (stable scope) and agg/state/STATE.md (forward advice) so `agg run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
+name: rlt-new
+description: Set up Relentless for the current project — read existing plans, then generate rlt/rlt.yaml (defaults/judge/steps/sequence), the judge files under rlt/judges/, rlt/RLT.md (stable scope) and rlt/state/STATE.md (forward advice) so `rlt run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
 disable-model-invocation: false
 ---
 
-# /agg:new — set up an AgenticGoGo loop for this project
+# /rlt:new — set up an Relentless loop for this project
 
-You are setting up **AgenticGoGo** (`agg`): a loop that runs fresh headless agent workers until a
+You are setting up **Relentless** (`rlt`): a loop that runs fresh headless agent workers until a
 **Definition of Done** — expressed as judges — is met. Your job in this skill is to turn whatever
-planning material already exists into the files the loop reads, all under the mandatory `agg/` folder:
+planning material already exists into the files the loop reads, all under the mandatory `rlt/` folder:
 
-- `agg/agg.yaml` — the whole config: `defaults` / `judge` / `steps` / `sequence`
-- `agg/judges/<name>.sh` (a script judge) or `agg/judges/<name>.md` (an LLM rubric judge) — one per
+- `rlt/rlt.yaml` — the whole config: `defaults` / `judge` / `steps` / `sequence`
+- `rlt/judges/<name>.sh` (a script judge) or `rlt/judges/<name>.md` (an LLM rubric judge) — one per
   clause of the Definition of Done. **A judge IS a goal.**
-- `agg/AGG.md` — the stable scope/goals/architecture each worker reads for orientation (committed)
-- `agg/state/STATE.md` — the forward "what to do next" advice the worker rewrites each session
-  (gitignored; agg composes it + AGG.md + memory into a per-session `agg/private/INSTRUCTIONS.md` brief)
+- `rlt/RLT.md` — the stable scope/goals/architecture each worker reads for orientation (committed)
+- `rlt/state/STATE.md` — the forward "what to do next" advice the worker rewrites each session
+  (gitignored; rlt composes it + RLT.md + memory into a per-session `rlt/private/INSTRUCTIONS.md` brief)
 
 **Core principle: do NOT replicate spec tooling.** Read what's already there and *translate* it into
 judges. Only ask the user for what's genuinely missing.
 
 **The model in one sentence: your judges ARE the gate — your Definition of Done, made executable.**
-Each judge decides one clause; `done_if` composes them into "done"; agg runs the judges, never the
+Each judge decides one clause; `done_if` composes them into "done"; rlt runs the judges, never the
 worker, so the loop cannot fake its own completion.
 
-`agg` can drive **Claude Code, OpenAI Codex, or GitHub Copilot** — chosen by the `agent:` keys you
-write into `agg.yaml`. They are **not interchangeable**, and `agg` REFUSES to start a run whose config
+`rlt` can drive **Claude Code, OpenAI Codex, or GitHub Copilot** — chosen by the `agent:` keys you
+write into `rlt.yaml`. They are **not interchangeable**, and `rlt` REFUSES to start a run whose config
 asks for something the chosen agent cannot do. **Step 0 is therefore not optional: get the agent
 right, or the config you generate will not start.**
 
@@ -60,7 +60,7 @@ claude --version; codex --version; copilot --version
 the one Step 0a printed — but they are independent choices (you can drive Codex from Claude Code),
 so let the user override. **If 0a printed `UNKNOWN`, ASK. Never assume.**
 
-Write the worker default as `defaults.agent: claude|codex|copilot` in `agg.yaml`. Then obey the
+Write the worker default as `defaults.agent: claude|codex|copilot` in `rlt.yaml`. Then obey the
 matrix below.
 
 ### The capability matrix — VERIFIED, do not re-derive
@@ -78,26 +78,26 @@ matrix below.
 ### Four hard rules. Break one and the config you write CANNOT START.
 
 1. **`sequence.limits.cost` and `abort_if: over_cost` are CLAUDE-ONLY.** Codex and Copilot cannot
-   price a session in dollars, so `agg` refuses the config outright rather than let a spend guard
+   price a session in dollars, so `rlt` refuses the config outright rather than let a spend guard
    silently never fire. **This is checked per step:** even one `agent: codex` step in an otherwise
    Claude sequence makes a `cost` guard uncoverable — use **`sequence.limits.tokens` (output
    tokens)** instead, which works on all three. (Copilot can additionally cap itself with
    `--max-ai-credits <n>` via `worker_args`.)
 2. **Codex: OMIT `model:` entirely** unless the user explicitly names one. Guessing (e.g.
    `gpt-5-codex`) is a hard 400 — *"not supported when using Codex with a ChatGPT account"*. Which
-   models exist depends on how the user authenticated, so let `agg` pick its default.
+   models exist depends on how the user authenticated, so let `rlt` pick its default.
 3. **Copilot: `model: auto` is safe — but then do NOT set `effort:`.** Copilot refuses the pair
    (*"Model `auto` does not support reasoning effort configuration"*) and every worker session dies
    instantly having spent 0 tokens. Use `model: auto` with **no** `effort:` (the default), or name a
    concrete model if the user really wants an effort level.
    Claude: `model: "claude-opus-4-8[1m]"` is the default.
-4. **Finish by running `agg doctor`** (Step 7). It re-checks every rule above against **every agent
+4. **Finish by running `rlt doctor`** (Step 7). It re-checks every rule above against **every agent
    the sequence names**. It is a free correctness check — if it passes, the config starts.
 
 > ⚠️ **The failure this ordering exists to prevent:** an early version of this skill said "default
 > to the agent you are running in", and Copilot — unable to introspect its own identity — wrote
-> `agent: claude` with a `claude-opus` model. `agg doctor` passed (a Claude config IS valid), and
-> the loop would have silently driven **Claude instead of Copilot**. `agg doctor` cannot catch this
+> `agent: claude` with a `claude-opus` model. `rlt doctor` passed (a Claude config IS valid), and
+> the loop would have silently driven **Claude instead of Copilot**. `rlt doctor` cannot catch this
 > — it has no way to know which agent you *meant*. **Step 0a is the only thing that catches it.**
 
 ## Step 1 — Discover existing plans (read, don't ask yet)
@@ -121,7 +121,7 @@ From the plans, derive a small set of **concrete, checkable judges** (aim for 3�
 single clause of the Definition of Done. For each, decide:
 
 - **name**: short snake_case (e.g. `tests_pass`, `modules_migrated`, `api_documented`). **This name
-  IS the filename** and how `done_if` refers to it — `tests_pass` → `agg/judges/tests_pass.sh`.
+  IS the filename** and how `done_if` refers to it — `tests_pass` → `rlt/judges/tests_pass.sh`.
 - **kind**: `script` (a `.sh` file) when the check is mechanical, or `llm` (a `.md` rubric file) when
   it's qualitative. **The file extension decides** — there is no `kind:` tag any more.
 - **the check**: for a script, the command that decides met/not-met; for a rubric, the criteria.
@@ -139,17 +139,17 @@ per-step, not per-judge.
 
 Every judge is a **file whose name is the judge name**, emitting a verdict JSON to stdout:
 `{"met": <bool>, "value": <num>, "max": <num>, "target": <num>, "rationale": "<one line>"}`
-Only `met` is required. `agg` reads the **last** JSON object on stdout, so a judge can log freely.
+Only `met` is required. `rlt` reads the **last** JSON object on stdout, so a judge can log freely.
 
 Two kinds, chosen by extension:
 
-- **script → `agg/judges/<name>.sh`** (preferred when measurable). Its stdout is the verdict JSON.
-  It runs **from the project root**, with cwd = project root and these env vars set: `AGG_SESSION`,
-  `AGG_STEP`, `AGG_JUDGE`, `AGG_PROJECT_DIR`. Suggest a real command for THIS project (a test runner,
+- **script → `rlt/judges/<name>.sh`** (preferred when measurable). Its stdout is the verdict JSON.
+  It runs **from the project root**, with cwd = project root and these env vars set: `RLT_SESSION`,
+  `RLT_STEP`, `RLT_JUDGE`, `RLT_PROJECT_DIR`. Suggest a real command for THIS project (a test runner,
   a benchmark, a coverage tool, a grep-count) and wrap it:
   ```bash
   #!/usr/bin/env bash
-  # agg/judges/tests_pass.sh
+  # rlt/judges/tests_pass.sh
   out="$(pytest -q 2>&1)"
   passed=$(printf '%s' "$out" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo 0)
   failed=$(printf '%s' "$out" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo 0)
@@ -159,7 +159,7 @@ Two kinds, chosen by extension:
     "$met" "$passed" "$total" "$total" "$passed" "$total"
   ```
   `chmod +x` it. A judge that exits non-zero but prints a valid verdict is still accepted.
-- **llm → `agg/judges/<name>.md`** (for qualitative goals) — **the file IS the rubric.** It declares
+- **llm → `rlt/judges/<name>.md`** (for qualitative goals) — **the file IS the rubric.** It declares
   the files it reads in its own YAML **frontmatter**, and its body is the grading criteria. It runs
   tools-off on the RULER (the `judge:` block), so a repo file can't talk the judge into a pass.
   ```markdown
@@ -176,9 +176,9 @@ Two kinds, chosen by extension:
   for the whole run, on the RULER. (Nothing model-specific goes in the `.md`.)
 
 **Reuse the standard library.** A set of parameterless judges ships inside the binary and installs to
-`~/.agg/judges/`: `cargo_test`, `build_ok`, `lint_clean`, `git_clean`, `no_regression`, `stalled`,
+`~/.rlt/judges/`: `cargo_test`, `build_ok`, `lint_clean`, `git_clean`, `no_regression`, `stalled`,
 `cmd_exit`, `grep_count`. If one fits, just name it in `done_if` — no file needed. To customise it,
-copy it into `agg/judges/<name>.sh` (a project file shadows the library by name). Anything needing an
+copy it into `rlt/judges/<name>.sh` (a project file shadows the library by name). Anything needing an
 argument is a three-line project script.
 
 ## Step 4 — Compose the Definition of Done (`done_if`, `abort_if`, `notify_if`, `invariants`)
@@ -190,7 +190,7 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   name** is its `met` bool; compose with `AND`/`OR`/`NOT` and parentheses. Aggregates: `all_goals`,
   `count_met`, `total`, `met_fraction`. Default: `all_goals`.
   - **Numeric thresholds use the dotted accessor** — `coverage.value >= 80`, NOT `coverage >= 80`.
-    A bare name is a bool; comparing a bool to a number is a **hard error at startup** (agg tells you
+    A bare name is a bool; comparing a bool to a number is a **hard error at startup** (rlt tells you
     to use the accessor). `.value` and `.max` are the accessors; `.target` is presentational only.
   - Examples: `"tests_pass"` · `"tests_pass AND coverage.value >= 80"` · `"met_fraction >= 0.75"` ·
     `"count_met >= 3"`.
@@ -205,8 +205,8 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   abort_if: "any_regressed(invariants) OR over_budget OR over_iterations OR work_time >= 28800"
   ```
 - **`notify_if`** — *optional, and the ONLY clause that does not end the run.* Same grammar; when it
-  is true agg runs `sequence.notify.cmd` and **the loop keeps running**. A human is a side-channel,
-  never a gate — a loop that halts to ask is exactly the babysitting agg exists to remove. Detectors
+  is true rlt runs `sequence.notify.cmd` and **the loop keeps running**. A human is a side-channel,
+  never a gate — a loop that halts to ask is exactly the babysitting rlt exists to remove. Detectors
   are ordinary judges, so there is nothing new to learn.
   ```yaml
   notify_if: "stalled"                              # `stalled` ships in the binary — nothing to author
@@ -217,24 +217,24 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   Delivery is **foreground and untimed**, so every command must bound itself (`curl --max-time 10`,
   or `timeout 10 …`) — an unbounded one hangs the loop, the exact thing `notify_if` exists to avoid.
   `{{reason}}` is the rationale of a judge named in the expression (`met` first, then highest
-  `value`); `{{project}}` / `{{session}}` / `{{step}}` also work. agg substitutes them
+  `value`); `{{project}}` / `{{session}}` / `{{step}}` also work. rlt substitutes them
   **shell-quoted**, so **never wrap a placeholder in quotes of your own** — you would get literal
   quote characters. `notify_if` with an empty `notify.cmd` is refused at startup (nothing would
   fire); `notify:` **without** `notify_if` is valid and means "stop + notify" — a ping only when
   `abort_if` halts, including an `abort_if` already true at launch. A `done_if` success never pings;
   for that use `hooks.on_stop`.
   - **⚠ THE MOAT — a WORKER-AUTHORED signal goes in `notify_if`, NEVER in `abort_if`.** A detector
-    that reads something the worker wrote (a `blocked` judge over `agg/state/BLOCKED.md`, say) hands
+    that reads something the worker wrote (a `blocked` judge over `rlt/state/BLOCKED.md`, say) hands
     the agent a way to end its own run by declaring itself stuck — the precise failure the judges
     exist to prevent. In `notify_if` the worst case is an annoying ping, rate-limited by the
     cooldown, and the loop keeps going. Keep TERMINATION on the signals the worker genuinely cannot
     reach — the process-internal ones: `over_budget`, `over_cost`, `over_iterations`, `wall_time`/`work_time`,
     `any_regressed(invariants)`, and the gate's own history — `consecutive_rollbacks`, `oscillating`,
     `consecutive_no_changes` (a worker that believes it is done while a judge is unmet changes
-    nothing, session after session: `consecutive_no_changes >= 3` ends that run). A `stalled`/`stuck` detector over agg's own
-    `agg/private/verdicts.jsonl` is a **higher bar, and how much higher depends on the isolation
-    tier**: agg owns that file and a worker touching it is tampering, and under `isolation:
-    sandbox`/`container` the ledger sits in `agg/private/`, carved out of the worker's writable set,
+    nothing, session after session: `consecutive_no_changes >= 3` ends that run). A `stalled`/`stuck` detector over rlt's own
+    `rlt/private/verdicts.jsonl` is a **higher bar, and how much higher depends on the isolation
+    tier**: rlt owns that file and a worker touching it is tampering, and under `isolation:
+    sandbox`/`container` the ledger sits in `rlt/private/`, carved out of the worker's writable set,
     so the kernel refuses the write. Under the default `isolation: none` it is a protocol boundary
     only — the worker can reach it and the ledger has no integrity check.
   - **Do not reuse one detector across clauses.** `notify_if: "stalled"` next to a
@@ -242,8 +242,8 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
     that just ran, one full cycle before the recovery step is dispatched. Either drop the `until:`
     bound, or give `notify_if` the stricter detector (`stuck.value >= 85`).
   - **Only propose a detector that resolves.** `stalled` is shipped; `stuck` and `blocked` are judges
-    you must WRITE into `agg/judges/` in Step 3 first — naming one that resolves to no file is a hard
-    startup error, and `agg doctor` will refuse the config.
+    you must WRITE into `rlt/judges/` in Step 3 first — naming one that resolves to no file is a hard
+    startup error, and `rlt doctor` will refuse the config.
 - **`invariants:`** — a list of judge names that must STAY met (the soundness guards). The gate rolls
   back any session that regresses one, and `any_regressed(invariants)` in `abort_if` gives up on it.
 
@@ -270,7 +270,7 @@ for more when the run risks going down a rabbit hole.
   - `{ step: NAME, until: <expr>, max: N }` — repeat it until the condition holds, at most N times;
     `<expr>` is the Step-4 grammar (e.g. `until: "NOT stalled"`), checked AFTER each dispatch
 
-  `times:` and `until:`+`max:` are alternatives, and both bounds are mandatory — agg refuses an
+  `times:` and `until:`+`max:` are alternatives, and both bounds are mandatory — rlt refuses an
   unbounded or zero repetition at startup. There is **no `if:`**: a lap dispatches every entry, in
   order. Conditional flow is the Rust driver API, not this file.
 
@@ -288,7 +288,7 @@ steps:
     agent: "codex"                 # a DIFFERENT vendor — perspective diversity
     prompt: >
       Assume the current approach is wrong. Name 2-3 fundamentally different approaches, pick one,
-      and write the rejected ones and WHY into your scratch note — agg will persist them.
+      and write the rejected ones and WHY into your scratch note — rlt will persist them.
     skip_judges: true              # stages; the next worker step gates it
 sequence:
   steps:
@@ -298,11 +298,11 @@ sequence:
 
 `stalled` is the library judge (it reads the verdict history). Naming it in an `until:` puts the
 `stalled` judge in the run-set automatically — you don't list it anywhere else. **Only propose a
-second agent the user actually has installed** (Step 0b) — `agg doctor` checks every agent named.
+second agent the user actually has installed** (Step 0b) — `rlt doctor` checks every agent named.
 
 ## Step 4.7 — Detect the user's tools and offer to wire them in (NO hardcoded tool list)
 
-agg the binary is tool-agnostic — it only runs generic lifecycle hooks. But the worker runs in THIS
+rlt the binary is tool-agnostic — it only runs generic lifecycle hooks. But the worker runs in THIS
 user's environment and inherits whatever tools the session has. A worker that USES those tools (a code
 graph instead of grepping, a memory tool to recall state across sessions) is cheaper and smarter. So:
 **enumerate the tools that are actually active in this session, then ASK the user which to wire into
@@ -320,7 +320,7 @@ Report only what's actually present:**
    - codex: `.agents/skills/`, `~/.agents/skills/`, `~/.codex/skills/`
    - copilot: `copilot skill list` (lists every source at once — and costs no quota)
 3. **Hooks** — a global settings hook (e.g. a command-rewrite proxy) is inherited by the headless
-   worker automatically. It needs NO agg wiring — just note it.
+   worker automatically. It needs NO rlt wiring — just note it.
    - claude: a `"hooks"` block in `~/.claude/settings.json`
 
 **Then, for each tool that plausibly helps a long autonomous loop, ASK the user (ONE question)
@@ -337,7 +337,7 @@ whether to wire it in — and infer HOW from the tool's own purpose:**
 
 **Rules:** never invent a tool that isn't present; only offer what you actually detected. Only write
 hooks the user confirms. If the user declines all, write no hooks — that's fine. The result goes into
-`agg.yaml` (`hooks:` + `prompt_includes:`) and, for prompt guidance, a small `AGG_TOOLING.md` you
+`rlt.yaml` (`hooks:` + `prompt_includes:`) and, for prompt guidance, a small `RLT_TOOLING.md` you
 reference from `prompt_includes`.
 
 ## Step 5 — Ask ONLY what's missing
@@ -350,15 +350,15 @@ you couldn't infer, e.g.:
 - the token budget and max wall-time, if the user wants guards
 - the inner-worker model — but see Step 0 rules 2–3: **never guess one for codex**
 
-Show the user the proposed `agg.yaml` (and the judge files) and let them approve or edit before writing.
+Show the user the proposed `rlt.yaml` (and the judge files) and let them approve or edit before writing.
 
-## Step 6 — Write the files (all under `agg/`)
+## Step 6 — Write the files (all under `rlt/`)
 
-Everything agg reads as config lives under `agg/` (committed). Runtime state is auto-created in two
-gitignored dirs beside it: `agg/state/` (the WORKER writes it) and `agg/private/` (agg owns it — the
+Everything rlt reads as config lives under `rlt/` (committed). Runtime state is auto-created in two
+gitignored dirs beside it: `rlt/state/` (the WORKER writes it) and `rlt/private/` (rlt owns it — the
 verdict ledger, the bus, the scoreboard). You author nothing in either. Write:
 
-### `agg/agg.yaml`
+### `rlt/rlt.yaml`
 
 ```yaml
 project: "<name>"
@@ -367,7 +367,7 @@ defaults:
   agent: "<claude|codex|copilot>"        # from Step 0 — REQUIRED (the worker default)
   # model: "<model>"                     # claude: "claude-opus-4-8[1m]" · copilot: auto · codex: OMIT
   # effort: <low|medium|high|xhigh|max>  # NOT with copilot's model: auto
-  state: "state/STATE.md"                # forward-advice file (under agg/, gitignored)
+  state: "state/STATE.md"                # forward-advice file (under rlt/, gitignored)
 
 judge:                                   # THE RULER — runs LLM judges + the summarizer; immutable
   agent: "<claude|codex|copilot>"        # usually the same as defaults.agent
@@ -385,13 +385,13 @@ sequence:
   limits:                                # run ceilings — omit a key or use null for "unlimited"
     tokens: <int or null>                # output-token ceiling → over_budget. Works on ALL agents.
     # cost: <dollars or null>            # → over_cost. CLAUDE-ONLY, all-Claude sequences only.
-    sessions: <int or null>              # worker-session cap → over_iterations (or `agg run --max-sessions <n>`)
+    sessions: <int or null>              # worker-session cap → over_iterations (or `rlt run --max-sessions <n>`)
   invariants: [<judge names that must STAY met>]
   done_if: "<expression over judge names>"
   abort_if: "<ceiling expression>"       # see Step 4
   # notify_if: "stalled"                 # optional PING that does NOT stop the loop — see Step 4.
   #                                      # `stalled` is shipped; a `stuck`/`blocked` detector must be
-  #                                      # AUTHORED in agg/judges/ first, or startup hard-errors.
+  #                                      # AUTHORED in rlt/judges/ first, or startup hard-errors.
   # notify: { cooldown_sessions: 3, cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"] }
 
 # Optional top-level survivors — omit if unused:
@@ -406,46 +406,46 @@ Agent-specific reminders (Step 0): **codex** — no `model:` in `defaults` OR `j
 **copilot** — `model: auto`, no `effort:`, no `cost:`, no `ratelimit_backoff_secs`, optional
 `worker_args: ["--max-ai-credits", "50"]`.
 
-### `agg/judges/<name>.sh` and `agg/judges/<name>.md`
+### `rlt/judges/<name>.sh` and `rlt/judges/<name>.md`
 
 Write one file per judge you derived in Step 2 (skip any you're reusing from the library). `chmod +x`
 the `.sh` scripts. Reference each by its bare name in `done_if` / `abort_if` / `invariants`.
 
-### `agg/AGG.md` — the stable scope (committed) and `agg/state/STATE.md` — the forward advice
+### `rlt/RLT.md` — the stable scope (committed) and `rlt/state/STATE.md` — the forward advice
 
-agg regenerates a per-session `agg/private/INSTRUCTIONS.md` brief (the worker's whole `-p` is a tiny
-pointer at it) by composing AGG.md + STATE + memory. Split the standing content by change-frequency:
+rlt regenerates a per-session `rlt/private/INSTRUCTIONS.md` brief (the worker's whole `-p` is a tiny
+pointer at it) by composing RLT.md + STATE + memory. Split the standing content by change-frequency:
 
-**`agg/AGG.md`** (committed, rare edits, human-owned) — the STABLE scope: what the project is, the
+**`rlt/RLT.md`** (committed, rare edits, human-owned) — the STABLE scope: what the project is, the
 goal, the architecture (key modules/entry points + the exact build/test commands), and the rules:
 - Do ONE self-contained chunk of real, correct work toward the judges each session (no stubs).
 - Be autonomous — there is NO human in the loop; never pause to ask.
 - Inline any workflow content the worker needs — do not assume it can invoke a skill by name in a
   headless session.
 
-**`agg/state/STATE.md`** (gitignored, the worker REWRITES it each session) — the forward "what to do
+**`rlt/state/STATE.md`** (gitignored, the worker REWRITES it each session) — the forward "what to do
 next": where things stand + the exact next task. Seed it with a first-session note; the worker keeps
 it current for its successor.
 
-(Institutional memory, `agg/private/LOG.md`, is written by agg, not the worker — never tell the worker
-to maintain it. The worker just edits files and NEVER runs git — agg commits the work automatically,
-runs the session on a throwaway branch, and keeps it only if the judges pass; agg owns all git.)
+(Institutional memory, `rlt/private/LOG.md`, is written by rlt, not the worker — never tell the worker
+to maintain it. The worker just edits files and NEVER runs git — rlt commits the work automatically,
+runs the session on a throwaway branch, and keeps it only if the judges pass; rlt owns all git.)
 
-## Step 7 — Validate: `agg doctor`, then `agg plan`
+## Step 7 — Validate: `rlt doctor`, then `rlt plan`
 
-**`agg doctor` first — it is the check that catches a config the chosen agent(s) cannot honour**
+**`rlt doctor` first — it is the check that catches a config the chosen agent(s) cannot honour**
 (a cost guard on a codex step, a model name codex will reject, a stray `effort:`). It verifies every
 agent the sequence names is installed AND that every key you wrote is one that agent can deliver:
 ```bash
-agg doctor
+rlt doctor
 ```
-Fix anything it marks ✗ — a ✗ here means `agg run` would refuse to start.
+Fix anything it marks ✗ — a ✗ here means `rlt run` would refuse to start.
 
 Then the dry-run, to confirm the judges resolve and work, and show the starting scoreboard:
 ```bash
-agg plan
+rlt plan
 ```
-If a judge errors or fails to resolve, fix its file/name before finishing. (`agg plan` lists every
+If a judge errors or fails to resolve, fix its file/name before finishing. (`rlt plan` lists every
 available judge name on a resolution failure.)
 
 ## Step 8 — Tell the user how to launch
@@ -454,18 +454,18 @@ available judge name on a resolution failure.)
 Setup complete — driving <agent>. Starting scoreboard above.
 
 To run the loop:
-  agg run                # foreground, watch it live
-  agg run --detach       # background (pidfile + agg/private/run.log), survives the terminal
+  rlt run                # foreground, watch it live
+  rlt run --detach       # background (pidfile + rlt/private/run.log), survives the terminal
 
 To watch the dashboard (second terminal):
-  agg dashboard
+  rlt dashboard
 
 To stop / steer:
-  agg stop               # graceful stop at the next session boundary
-  agg send inject "…"    # high-priority instruction for the next session
+  rlt stop               # graceful stop at the next session boundary
+  rlt send inject "…"    # high-priority instruction for the next session
 
 The loop stops when:  <done_if>
 ```
 
-(If `agg` is not on PATH, tell them to install it — the install script or GitHub Releases, see
+(If `rlt` is not on PATH, tell them to install it — the install script or GitHub Releases, see
 the repo README — since these skills ship without the CLI binary.)

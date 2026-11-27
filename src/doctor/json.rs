@@ -1,8 +1,8 @@
-//! `agg doctor --json` — the same preflight as the text doctor, as a stable, versioned document
+//! `rlt doctor --json` — the same preflight as the text doctor, as a stable, versioned document
 //! an orchestrator can act on before it spends anything: is the config valid, are the agents it
 //! names installed (path, version, what each can do), which isolation tiers this host offers.
 //!
-//! The config half IS `agg check` ([`crate::check::validate`]), so doctor and startup cannot
+//! The config half IS `rlt check` ([`crate::check::validate`]), so doctor and startup cannot
 //! disagree about what is wrong. Doctor adds the host facts and the one check startup does not
 //! make (the forward state file exists).
 
@@ -14,16 +14,16 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The whole `agg doctor --json` document. `schema_version` is shared with `agg check --json`.
+/// The whole `rlt doctor --json` document. `schema_version` is shared with `rlt check --json`.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
     pub schema_version: u32,
-    pub agg_version: &'static str,
+    pub rlt_version: &'static str,
     /// no problems: the config is valid, every agent it names is installed, every tier it asks
     /// for is available, and the state file exists. Warnings do not count.
     pub ok: bool,
     pub config: ConfigFacts,
-    /// EVERY backend agg knows, whether or not the config names it (`used`).
+    /// EVERY backend rlt knows, whether or not the config names it (`used`).
     pub backends: Vec<BackendFacts>,
     pub isolation: Tiers,
     /// `docker` or `podman` when one answers, else null.
@@ -52,17 +52,17 @@ pub struct ConfigFacts {
 #[derive(Debug, Serialize)]
 pub struct BackendFacts {
     pub name: &'static str,
-    /// the CLI agg launches, resolved via PATH.
+    /// the CLI rlt launches, resolved via PATH.
     pub bin: &'static str,
     /// named by the config (as a worker, the ruler, or a step's agent).
     pub used: bool,
-    /// `<bin> --version` succeeds — the same probe `agg run` makes.
+    /// `<bin> --version` succeeds — the same probe `rlt run` makes.
     pub installed: bool,
     /// where `bin` resolves on PATH, if anywhere.
     pub path: Option<PathBuf>,
     /// the first line `<bin> --version` printed.
     pub version: Option<String>,
-    /// the agent can additionally confine itself inside agg's jail (reporting only).
+    /// the agent can additionally confine itself inside rlt's jail (reporting only).
     pub self_sandboxes: bool,
     pub capabilities: Capabilities,
 }
@@ -103,7 +103,7 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
         if !config_base.join(&c.defaults.state).exists() {
             problems.push(Problem::new(
                 "defaults.state",
-                format!("state file `{}` does not exist — create it (or run `agg init`)", c.defaults.state),
+                format!("state file `{}` does not exist — create it (or run `rlt init`)", c.defaults.state),
             ));
         }
     }
@@ -118,7 +118,7 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
     let container_engine = crate::isolation::container_engine();
     DoctorReport {
         schema_version: check::SCHEMA_VERSION,
-        agg_version: env!("CARGO_PKG_VERSION"),
+        rlt_version: env!("CARGO_PKG_VERSION"),
         ok: problems.is_empty(),
         config: ConfigFacts {
             path: config.display().to_string(),
@@ -162,7 +162,7 @@ fn tiers(v: &Validation, engine: Option<&'static str>) -> Tiers {
     }
 }
 
-fn network_facts(cfg: Option<&crate::core::config::AggConfig>, engine: Option<&'static str>) -> NetworkFacts {
+fn network_facts(cfg: Option<&crate::core::config::RelentlessConfig>, engine: Option<&'static str>) -> NetworkFacts {
     let allow = match cfg.map(|c| &c.isolation_policy.network) {
         Some(crate::isolation::egress::Network::Allow(a)) => a.clone(),
         _ => return NetworkFacts { mode: "open", allow: vec![], sandbox: "open", container: "open" },
@@ -170,9 +170,9 @@ fn network_facts(cfg: Option<&crate::core::config::AggConfig>, engine: Option<&'
     NetworkFacts {
         mode: "allow",
         allow,
-        sandbox: if cfg!(target_os = "macos") { "seatbelt: outbound only to agg's proxy" } else { "refused: bwrap cannot narrow the network" },
+        sandbox: if cfg!(target_os = "macos") { "seatbelt: outbound only to rlt's proxy" } else { "refused: bwrap cannot narrow the network" },
         container: match engine {
-            Some("docker") => "internal network + relay to agg's proxy",
+            Some("docker") => "internal network + relay to rlt's proxy",
             Some(_) => "refused: needs docker's --internal networks",
             None => "unavailable: no engine",
         },
@@ -220,8 +220,8 @@ mod tests {
 
     #[test]
     fn a_missing_binary_has_no_version_and_no_path() {
-        assert_eq!(version_of("agg-no-such-binary-xyz"), None);
-        assert_eq!(on_path("agg-no-such-binary-xyz"), None);
+        assert_eq!(version_of("rlt-no-such-binary-xyz"), None);
+        assert_eq!(on_path("rlt-no-such-binary-xyz"), None);
     }
 
     #[test]
@@ -233,8 +233,8 @@ mod tests {
     #[test]
     fn the_report_shape_is_stable() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = serde_json::to_value(report(tmp.path(), &tmp.path().join("agg.yaml"))).unwrap();
-        for key in ["schema_version", "agg_version", "ok", "config", "backends", "isolation", "container_engine", "container_images", "network", "problems", "warnings"] {
+        let r = serde_json::to_value(report(tmp.path(), &tmp.path().join("rlt.yaml"))).unwrap();
+        for key in ["schema_version", "rlt_version", "ok", "config", "backends", "isolation", "container_engine", "container_images", "network", "problems", "warnings"] {
             assert!(r.get(key).is_some(), "missing `{key}`");
         }
         assert_eq!(r["ok"], false, "no config is not ok");

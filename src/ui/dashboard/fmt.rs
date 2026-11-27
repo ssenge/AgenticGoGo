@@ -33,7 +33,7 @@ pub(super) fn money(c: Option<f64>) -> String {
 
 /// The total cost to show for the per-agent panel: the aggregate spend, or `None` (→ "—") when NO
 /// agent could report a price — so a fully non-reporting run never prints a lying "$0.00".
-pub(super) fn agg_cost(s: &DashboardState) -> Option<f64> {
+pub(super) fn rlt_cost(s: &DashboardState) -> Option<f64> {
     let reported = if s.per_agent.is_empty() {
         s.cost_spent > 0.0
     } else {
@@ -75,7 +75,7 @@ pub(super) fn phase_color(phase: &Phase) -> Color {
         Phase::Backoff => Color::Yellow,
         Phase::Staging => Color::Yellow,
         Phase::Done => Color::Green,
-        // `Starting` is pre-loop; `Other` is a stage from a different agg build (see Phase).
+        // `Starting` is pre-loop; `Other` is a stage from a different rlt build (see Phase).
         Phase::Starting | Phase::Other(_) => Color::Gray,
     }
 }

@@ -11,7 +11,7 @@ a whole: it reruns every step after it. Write your answer to the file named unde
 
 - The run record (one JSON line per event: what each step did, in order, with the commit its result stands on)
   and `git log --oneline` and `git show <commit> --stat` in your working directory show which step wrote which
-  file ("agg: session N (<step>)", or the step's own name).
+  file ("rlt: session N (<step>)", or the step's own name).
 - Read the failing step's inputs and follow the wrong fact back to the step that wrote it. The failing step
   itself is the cause only when its inputs are right and its own result is wrong.
 

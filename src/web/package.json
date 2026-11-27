@@ -1,8 +1,8 @@
 {
-  "name": "agg-web",
+  "name": "rlt-web",
   "version": "0.1.0",
   "private": true,
-  "description": "Standalone web interface for AgenticGoGo — monitor and steer a running agg loop. Talks to `agg serve` over HTTP.",
+  "description": "Standalone web interface for Relentless — monitor and steer a running rlt loop. Talks to `rlt serve` over HTTP.",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

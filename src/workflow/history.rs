@@ -12,7 +12,7 @@ use anyhow::anyhow;
 use super::git::{git, git_out};
 
 /// Where the history lives unless the driver names another file.
-pub const DEFAULT: &str = "agg/private/steps.jsonl";
+pub const DEFAULT: &str = "rlt/private/steps.jsonl";
 
 thread_local! {
     /// The history and the step running in it: an error that ends the run past every block (a driver's own,
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn the_history_finds_a_steps_latest_result_and_its_approvals() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("agg/private")).unwrap();
+        std::fs::create_dir_all(dir.path().join("rlt/private")).unwrap();
         std::fs::write(dir.path().join(DEFAULT), [
             r#"{"step": "4.1 Gate profile", "kind": "done", "commit": "aaa"}"#,
             r#"{"step": "4.1 Gate profile", "kind": "unchanged", "commit": "bbb"}"#,

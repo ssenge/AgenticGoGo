@@ -1,14 +1,14 @@
 {
-  "name": "agenticgogo",
+  "name": "relentless",
   "owner": {
     "name": "Sebastian Senge",
     "email": "mail@sebastian-senge.de"
   },
   "plugins": [
     {
-      "name": "agg",
+      "name": "rlt",
       "source": "./plugin",
-      "description": "AgenticGoGo — turn a plan/spec into an autonomous agent loop. /agg:new sets up judges + a Definition of Done (done_if/abort_if); /agg:status and /agg:supervise watch and steer the run. (The `agg` CLI itself installs via the install script or GitHub Releases — see the repo README.)"
+      "description": "Relentless — turn a plan/spec into an autonomous agent loop. /rlt:new sets up judges + a Definition of Done (done_if/abort_if); /rlt:status and /rlt:supervise watch and steer the run. (The `rlt` CLI itself installs via the install script or GitHub Releases — see the repo README.)"
     }
   ]
 }

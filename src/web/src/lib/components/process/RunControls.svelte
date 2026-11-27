@@ -1,4 +1,4 @@
-<!-- Start, resume and stop a process run: what `agg process <file> <project> [--resume]` and a SIGTERM do. -->
+<!-- Start, resume and stop a process run: what `rlt process <file> <project> [--resume]` and a SIGTERM do. -->
 <script>
   let { running, query, onchange } = $props();
 

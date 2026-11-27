@@ -81,10 +81,10 @@ mod tests {
     fn the_critic_is_told_to_review_only_the_change() {
         let fix = context(&Rerun::Fix("two reads".into()), "record", &["oracles/capture.yaml".into()], &[]);
         assert!(fix.starts_with("## This run fixes an accepted result"));
-        assert!(fix.contains("`git diff refs/agg/before/record -- oracles/capture.yaml`"));
+        assert!(fix.contains("`git diff refs/rlt/before/record -- oracles/capture.yaml`"));
         assert!(fix.ends_with("\n\ntwo reads"));
         let refresh = context(&Rerun::Refresh("abc".into()), "fit", &[], &["oracles/".into()]);
-        assert!(refresh.contains("`git diff abc -- oracles/`") && refresh.contains("`git diff refs/agg/before/fit`"));
+        assert!(refresh.contains("`git diff abc -- oracles/`") && refresh.contains("`git diff refs/rlt/before/fit`"));
         assert!(context(&Rerun::Decided("d".into()), "design", &[], &[]).starts_with("## This run carries a decision"));
     }
 }

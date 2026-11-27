@@ -1,14 +1,14 @@
-//! The harness loop: `agg run`.
+//! The harness loop: `rlt run`.
 //!
 //! # A deterministic outer loop around a stochastic inner loop
 //!
-//! agg is the OUTER loop. It is plain Rust, and its control flow is DETERMINISTIC. Four stages per
+//! rlt is the OUTER loop. It is plain Rust, and its control flow is DETERMINISTIC. Four stages per
 //! STEP (§5.5) — one worker session per step:
 //!
 //! ```text
 //!   INJECT  next step from the sequence → state + steering → the worker's prompt
 //!   RUN     the fresh worker for THIS step's (agent, model, effort) — the ONE stochastic step
-//!   VERIFY  agg runs the run-set judges itself, externally, against the (staged) filesystem
+//!   VERIFY  rlt runs the run-set judges itself, externally, against the (staged) filesystem
 //!   GATE    keep / roll back / stage the span · check done_if / abort_if · repeat
 //! ```
 //!
@@ -16,7 +16,7 @@
 //! (exit 3). Per-step agent/model/effort are resolved at session-build time (the singleton is gone).
 
 use crate::bus::{Bus, Command};
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::core::walk::Walk;
 use crate::state::{DashboardState, LiveState, Phase};
 use anyhow::Result;
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 
 
-/// The worker's ENTIRE pushed input. The full brief is composed into `agg/private/INSTRUCTIONS.md`
+/// The worker's ENTIRE pushed input. The full brief is composed into `rlt/private/INSTRUCTIONS.md`
 /// every session and the worker is pointed at it — this kills the argv size ceiling AND the
 /// argv-parse fragility (a huge `-p` value that could start with `-`), and makes the exact context
 /// the worker saw inspectable on disk. The path is RELATIVE so it resolves from the worker's cwd
@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 /// forked or resumed from an earlier step's must see that a new brief began, or it answers from memory.
 pub fn instructions_pointer(session: u32, step: &str) -> String {
     format!(
-        "Read the file `agg/private/INSTRUCTIONS.md` in full and follow it — it is your complete brief for session \
+        "Read the file `rlt/private/INSTRUCTIONS.md` in full and follow it — it is your complete brief for session \
          {session}, step `{step}`."
     )
 }
@@ -75,7 +75,7 @@ pub fn keeps_memory(ctx: &LoopState) -> bool {
 
 // ── the lifecycle registry (HOOK_REDESIGN §3.1/§5) ────────────────────────────────────────────
 // Handlers are `.add()`ed to hook points in code and dispatched in order by the loop — the seed of
-// "every task is a hook". agg's own tasks (pick/compose/judges/gate/memory) are handlers too; only
+// "every task is a hook". rlt's own tasks (pick/compose/judges/gate/memory) are handlers too; only
 // the true scheduler control flow (over_max_sessions, worker_is_broken, the phase emits) stays core.
 //
 // The context a handler receives is the whole `LoopState` (§8: the context IS the run/session
@@ -86,12 +86,12 @@ pub fn keeps_memory(ctx: &LoopState) -> bool {
 
 
 
-/// ALL of agg's own per-run feature state, organised by feature (LOOPSTATE_REDESIGN §3.1) — the
+/// ALL of rlt's own per-run feature state, organised by feature (LOOPSTATE_REDESIGN §3.1) — the
 /// built-in "plugin", stored in the per-run `ext`. Persists across sessions (git span, summarizer
 /// window, memory tail, worker health); NEVER cleared mid-run.
-// agg's plugin state (AGGState/AGGScratch) lives in `features::state`; re-exported so the
+// rlt's plugin state (RLTState/RLTScratch) lives in `features::state`; re-exported so the
 // context + registry can name it. A third-party plugin defines its OWN state type the same way.
-pub use crate::features::state::{AGGScratch, AGGState};
+pub use crate::features::state::{RLTScratch, RLTState};
 pub use crate::context::LoopState;
 pub use crate::plugin::{Bootstrap, End, Extensions, Flow, Handler, LifecycleEvent, PreStart, RunOutcome};
 pub use crate::registry::{run_hook, Lifecycle};
@@ -128,7 +128,7 @@ use crate::registry::run_pre_start;
 
 // ── on_session_end handlers = the old GATE tail (HOOK_REDESIGN §4) ─────────────────────────────────
 
-// The LLM summarizer moved to `crate::features::summary::Summarize` — agg's first feature relocated
+// The LLM summarizer moved to `crate::features::summary::Summarize` — rlt's first feature relocated
 // out of the core as a plugin, reaching the core only through the public API.
 
 
@@ -199,7 +199,7 @@ impl Drop for RunPidGuard {
 
 
 
-/// How `agg run` was asked to run. A bare `u32` converts into it (the session cap, not resuming),
+/// How `rlt run` was asked to run. A bare `u32` converts into it (the session cap, not resuming),
 /// so a host that only ever passed a cap keeps compiling.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunOpts {
@@ -215,9 +215,9 @@ impl From<u32> for RunOpts {
     }
 }
 
-/// Drive the loop with agg's default plugin pipeline. The common entry point.
+/// Drive the loop with rlt's default plugin pipeline. The common entry point.
 pub fn run(
-    cfg: AggConfig,
+    cfg: RelentlessConfig,
     assembly: Assembly,
     dir: &Path,
     config_base: &Path,
@@ -226,12 +226,12 @@ pub fn run(
     run_with(cfg, assembly, dir, config_base, opts, |_| {})
 }
 
-/// Drive the loop with a chance to register EXTRA plugins on top of agg's own (HOOK_REDESIGN §5:
+/// Drive the loop with a chance to register EXTRA plugins on top of rlt's own (HOOK_REDESIGN §5:
 /// config-in-code registration, no yaml). `register` runs after `Lifecycle::default_pipeline` and
-/// before the loop, so a host adds its `Handler`s to any hook exactly as agg registers its own —
-/// agg's features and a third-party plugin ride the identical path.
+/// before the loop, so a host adds its `Handler`s to any hook exactly as rlt registers its own —
+/// rlt's features and a third-party plugin ride the identical path.
 pub fn run_with(
-    cfg: AggConfig,
+    cfg: RelentlessConfig,
     assembly: Assembly,
     dir: &Path,
     config_base: &Path,
@@ -244,8 +244,8 @@ pub fn run_with(
         if pid != std::process::id() {
             anyhow::bail!(
                 "a loop is already running in this project (pid {pid}).\n  \
-                 watch it:   agg dashboard\n  stop it:    agg stop\n  \
-                 (if you're sure it's dead, remove agg/private/run.pid and retry.)"
+                 watch it:   rlt dashboard\n  stop it:    rlt stop\n  \
+                 (if you're sure it's dead, remove rlt/private/run.pid and retry.)"
             );
         }
     }
@@ -286,7 +286,7 @@ pub fn run_with(
 
 /// The run body behind the guards: build the loop state, drive it, and write its report from it.
 fn run_reported(
-    cfg: AggConfig,
+    cfg: RelentlessConfig,
     assembly: Assembly,
     dir: &Path,
     config_base: &Path,
@@ -306,13 +306,13 @@ fn run_reported(
     let judge_model = cfg.judge_model(ruler);
     let judge_timeout = cfg.judge.timeout;
 
-    // agg's built-in hook registration (HOOK_REDESIGN §5) — EVERY lifecycle point, no exceptions,
+    // rlt's built-in hook registration (HOOK_REDESIGN §5) — EVERY lifecycle point, no exceptions,
     // including the `pre_start` git preconditions below and on_start (now) / on_stop (Drop guard).
     let mut lifecycle = Lifecycle::default_pipeline(&cfg, dir);
-    register(&mut lifecycle); // host/third-party plugins, added on top of agg's own (§5)
+    register(&mut lifecycle); // host/third-party plugins, added on top of rlt's own (§5)
 
     // ── session isolation (MANDATORY): the git preconditions run as `pre_start` hooks — recover a
-    //    stranded merge, require a clean git repo, ensure `agg/{state,private}` gitignored, resolve the base
+    //    stranded merge, require a clean git repo, ensure `rlt/{state,private}` gitignored, resolve the base
     //    branch. Any bail is a hard error out of run(), exactly as the old inline block. ──
     // A dirty tree ends a fresh run here; a resume saves it to a partial ref instead (A-18.3).
     let mut boot = Bootstrap { dir, cfg: &cfg, resume: opts.resume, iso_base: None };
@@ -353,11 +353,11 @@ fn run_reported(
     let (m, t) = eng.tally();
     eprintln!(
         "════════════════════════════════════════════════════════════\n\
-         AgenticGoGo — project {}\n\
+         Relentless — project {}\n\
          goals {m}/{t}  done_if: {}\n\
          ════════════════════════════════════════════════════════════\n\
-         ▶ watch live:  run `agg dashboard` in another terminal\n\
-         ⏹ stop anytime: `agg stop`",
+         ▶ watch live:  run `rlt dashboard` in another terminal\n\
+         ⏹ stop anytime: `rlt stop`",
         cfg.project,
         eng.done_if.clone().unwrap_or_default()
     );
@@ -427,7 +427,7 @@ fn run_reported(
         ext: Extensions::default(),
         scratch: Extensions::default(),
     };
-    st.ext.get::<AGGState>().git.iso_base = iso_base; // resolved base branch (was a named field)
+    st.ext.get::<RLTState>().git.iso_base = iso_base; // resolved base branch (was a named field)
     crate::features::evidence::begin(&mut st, run.run_id());
     crate::report::record_session(&mut st, run, true, Vec::new());
     st.publish();
@@ -485,7 +485,7 @@ fn drive(st: &mut LoopState, lifecycle: &Lifecycle, resume: Option<&crate::featu
             return Ok(outcome);
         }
         let step = step_once(st, lifecycle)?;
-        // every finished session goes on the call ledger — what `agg run --resume` replays.
+        // every finished session goes on the call ledger — what `rlt run --resume` replays.
         if let Some(o) = &step.outcome {
             crate::features::resume::record(st, o)?;
         }
@@ -524,7 +524,7 @@ pub(crate) fn step_once(st: &mut LoopState, lc: &Lifecycle) -> Result<StepEnd> {
     if let Some(e) = st.worker_is_broken() {
         return Err(e);
     }
-    // the test hook for "agg itself fails during VERIFY" (`report::fault_point`); debug builds only.
+    // the test hook for "rlt itself fails during VERIFY" (`report::fault_point`); debug builds only.
     #[cfg(debug_assertions)]
     crate::report::fault_point("verify")?;
     // rate-limited: incomplete session — go round again. Ceiling tripped during backoff → Halt.
@@ -549,7 +549,7 @@ pub(crate) fn step_once(st: &mut LoopState, lc: &Lifecycle) -> Result<StepEnd> {
 /// What one [`step_once`] produced: the loop-control answer, and — when the step got far enough to
 /// have one — what it DID.
 ///
-/// The `outcome` exists for the Rust driver (`agg.step(&s)?` returns it). The YAML path ignores it;
+/// The `outcome` exists for the Rust driver (`rlt.step(&s)?` returns it). The YAML path ignores it;
 /// it is built regardless because building it costs a handful of field copies and making it
 /// conditional would mean a second code path through the one function this design says there is
 /// only one of.
@@ -585,7 +585,7 @@ impl StepStaging {
     fn capture(st: &mut LoopState) -> StepStaging {
         let agent = st.cur_step.as_ref().map(|s| s.agent.clone()).unwrap_or_default();
         let (verdicts, staged, secs, exit, agent_session) = {
-            let sc = st.scratch.get::<AGGScratch>();
+            let sc = st.scratch.get::<RLTScratch>();
             let (secs, exit) = sc
                 .outcome
                 .as_ref()
@@ -606,14 +606,14 @@ impl StepStaging {
             exit,
             agent_session,
             staged,
-            on_span: st.ext.get::<AGGState>().git.span_tip.is_some(),
-            span_empty: st.scratch.get::<AGGScratch>().span_empty,
+            on_span: st.ext.get::<RLTState>().git.span_tip.is_some(),
+            span_empty: st.scratch.get::<RLTScratch>().span_empty,
         }
     }
 
     fn finish(self, st: &mut LoopState) -> crate::driver::StepOutcome {
         use crate::driver::Landing;
-        let rolled_back = st.scratch.get::<AGGScratch>().rolled_back;
+        let rolled_back = st.scratch.get::<RLTScratch>().rolled_back;
         let landed = match &self.staged {
             // a judged step whose merge was staged: the gate either kept it (it is on base now) or
             // discarded it.
@@ -669,7 +669,7 @@ mod tests {
         let rel = crate::paths::instructions_md(std::path::Path::new(""));
         assert!(
             pointer.contains(&*rel.to_string_lossy()),
-            "pointer must name the file agg actually writes ({})",
+            "pointer must name the file rlt actually writes ({})",
             rel.display()
         );
     }

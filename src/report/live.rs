@@ -1,4 +1,4 @@
-//! The parts of the report that are ALSO published live, in `state.json`, so `agg status --json` can
+//! The parts of the report that are ALSO published live, in `state.json`, so `rlt status --json` can
 //! show them mid-run without re-judging: the stop detectors, each ratcheted judge's reference, and
 //! a wait the loop is sitting in.
 //!

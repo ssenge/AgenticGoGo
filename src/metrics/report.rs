@@ -1,4 +1,4 @@
-//! The swe-metrics report (`swe-metrics/report/v1`) as agg reads it, and the SELECTION of one
+//! The swe-metrics report (`swe-metrics/report/v1`) as rlt reads it, and the SELECTION of one
 //! metric's value per tool out of it — pure, so every rule is a unit test.
 //!
 //! The selection rules mirror swe-metrics' own scoring lookup (`swe_metrics/scoring/values.py`), so
@@ -10,17 +10,17 @@
 //!   only for labels that occurred);
 //! - a statistic reads `stats.<stat>`; a single-value metric has no statistics.
 //!
-//! What is agg's own is FAIL-CLOSED: a value that is missing is an error that carries the reason
+//! What is rlt's own is FAIL-CLOSED: a value that is missing is an error that carries the reason
 //! the report gives (the analyzer's `skipped`/`failed` reason), never a pass.
 
 use super::spec::{family, Stat};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-/// The report schema this agg reads.
+/// The report schema this rlt reads.
 pub const REPORT_SCHEMA: &str = "swe-metrics/report/v1";
 
-/// One report, with the parts agg reads. Unknown fields are ignored: the schema is versioned by its
+/// One report, with the parts rlt reads. Unknown fields are ignored: the schema is versioned by its
 /// `schema` id, which [`Report::parse`] checks.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Report {
@@ -128,7 +128,7 @@ impl Report {
     pub fn parse(text: &str) -> Result<Report, String> {
         let r: Report = serde_json::from_str(text).map_err(|e| format!("not a swe-metrics report: {e}"))?;
         if r.schema != REPORT_SCHEMA {
-            return Err(format!("report schema `{}`, but this agg reads `{REPORT_SCHEMA}`", r.schema));
+            return Err(format!("report schema `{}`, but this rlt reads `{REPORT_SCHEMA}`", r.schema));
         }
         Ok(r)
     }

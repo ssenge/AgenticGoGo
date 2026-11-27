@@ -94,7 +94,7 @@ pub fn resolve_session(
     }
     // back to base before merge/discard (git ops require not being on the branch we delete).
     let on_base = checkout(dir, base);
-    let merge_msg = format!("agg: merge session #{session} ({branch})");
+    let merge_msg = format!("rlt: merge session #{session} ({branch})");
     let res = decide_session(vetoed, on_base, || merge_no_ff(dir, branch, &merge_msg));
     match res {
         SessionResolution::CheckoutFailed => {
@@ -141,7 +141,7 @@ pub enum StagedSession {
 pub fn stage_session(dir: &Path, base: &str, branch: &str, red_file: &str) -> StagedSession {
     let vetoed = file_exists(dir, red_file);
     // The worker's tracked edits were already committed on the session branch by the GitAutoCommit
-    // handler (GIT_REDESIGN: agg owns git) — so there is nothing uncommitted to discard here. A truly
+    // handler (GIT_REDESIGN: rlt owns git) — so there is nothing uncommitted to discard here. A truly
     // empty session (worker edited nothing) made no commit → `branch_has_no_new_commits` → NoChanges.
     if !checkout(dir, base) {
         eprintln!("  [iso] WARNING could not checkout base '{base}'; leaving session branch {branch} in place");
@@ -175,7 +175,7 @@ pub fn stage_session(dir: &Path, base: &str, branch: &str, red_file: &str) -> St
 /// inspection). Only meaningful after `stage_session` returned `Staged`.
 pub fn finalize_session(dir: &Path, branch: &str, session: u32, keep: bool) -> SessionResolution {
     if keep {
-        let merge_msg = format!("agg: merge session #{session} ({branch})");
+        let merge_msg = format!("rlt: merge session #{session} ({branch})");
         if commit_merge(dir, &merge_msg) {
             eprintln!("  [iso] session #{session} merged → kept (post-merge re-test passed)");
             delete_branch(dir, branch);

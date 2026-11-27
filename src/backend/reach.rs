@@ -20,7 +20,7 @@ pub fn explain(said: &str, gateway_keys: &[String]) -> String {
     let auth = ["invalid api key", "401", "authentication"].iter().any(|m| lower.contains(m));
     if auth && !gateway_keys.is_empty() {
         text.push_str(&format!(
-            "\n  the operator's settings env has {}; set agg: {{ user_env: true }} (or a list) in the process file",
+            "\n  the operator's settings env has {}; set rlt: {{ user_env: true }} (or a list) in the process file",
             gateway_keys.join(", ")
         ));
     }
@@ -71,7 +71,7 @@ mod tests {
         let keys = ["ANTHROPIC_BASE_URL".to_string(), "ANTHROPIC_AUTH_TOKEN".to_string()];
         let text = explain("Invalid API key · Please run /login", &keys);
         assert!(text.starts_with("Invalid API key"), "{text}");
-        assert!(text.contains("the operator's settings env has ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN; set agg: { user_env: true } (or a list) in the process file"), "{text}");
+        assert!(text.contains("the operator's settings env has ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN; set rlt: { user_env: true } (or a list) in the process file"), "{text}");
         assert!(explain("API Error: 401 Unauthorized", &keys).contains("user_env"));
         assert!(explain("Authentication failed", &keys).contains("user_env"));
         assert!(!explain("connection refused", &keys).contains("user_env"));

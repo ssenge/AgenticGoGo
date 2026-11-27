@@ -1,4 +1,4 @@
-//! A flow's scratch folder outside the project (`agg-flow-<pid>-<n>` in the temp dir): made per flow, removed
+//! A flow's scratch folder outside the project (`rlt-flow-<pid>-<n>` in the temp dir): made per flow, removed
 //! when the flow ends, and a crashed run's removed when the next flow starts. A file left there outlives the
 //! run that meant it, and a later run's agent that finds it takes its outdated claim for news.
 
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// What every flow's folder name starts with.
-const PREFIX: &str = "agg-flow-";
+const PREFIX: &str = "rlt-flow-";
 
 /// Flows this process made: several flows in one process (a test binary) each get their own folder, so one
 /// that ends never removes another's.
@@ -113,7 +113,7 @@ mod tests {
         }
         sweep(temp.path());
         assert_eq!([&dead, &legacy, &live, &other].map(|d| d.exists()), [false, false, true, true]);
-        assert_eq!((owner("agg-flow-42-3"), owner("agg-flow-42"), owner("agg-flowx-42")), (Some(42), Some(42), None));
+        assert_eq!((owner("rlt-flow-42-3"), owner("rlt-flow-42"), owner("rlt-flowx-42")), (Some(42), Some(42), None));
         remove(&live);
         remove(&other);
     }

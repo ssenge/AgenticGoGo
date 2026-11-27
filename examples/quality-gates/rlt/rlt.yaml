@@ -1,6 +1,6 @@
-# agg.yaml — quality gates without writing a judge script: metric and score judges over swe-metrics
-# (https://github.com/ssenge/swe-metrics — install it and put `swe-metrics` on PATH; agg refuses this
-# config at startup without it). A judge DECLARED under `judges:` needs no file in agg/judges/.
+# rlt.yaml — quality gates without writing a judge script: metric and score judges over swe-metrics
+# (https://github.com/ssenge/swe-metrics — install it and put `swe-metrics` on PATH; rlt refuses this
+# config at startup without it). A judge DECLARED under `judges:` needs no file in rlt/judges/.
 project: "quality-gates"
 
 defaults:

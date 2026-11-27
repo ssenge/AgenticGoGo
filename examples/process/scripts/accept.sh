@@ -3,4 +3,4 @@
 echo "$1" >> accepted.log
 mkdir -p checkpoints
 echo "$1 since $2" >> checkpoints/build.md
-echo "{\"met\": true, \"rationale\": \"accepted $1 ($AGG_STEP)\"}"
+echo "{\"met\": true, \"rationale\": \"accepted $1 ($RLT_STEP)\"}"

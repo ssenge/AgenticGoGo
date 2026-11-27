@@ -1,5 +1,5 @@
-//! Scenario mode (A-38): `agg process <file> --scenario <scenario.yaml>…` plays a process on a copy
-//! of an archived project with scripted agents (`agg scripted-agent`, installed as `claude` and `codex`) and scripted
+//! Scenario mode (A-38): `rlt process <file> --scenario <scenario.yaml>…` plays a process on a copy
+//! of an archived project with scripted agents (`rlt scripted-agent`, installed as `claude` and `codex`) and scripted
 //! answers to its asks, then checks what the run record and the agents' calls show. No tokens, seconds to minutes.
 
 use std::collections::BTreeMap;
@@ -32,7 +32,7 @@ pub struct Rule {
     /// files written first: path → text
     #[serde(default)]
     pub write: BTreeMap<String, String>,
-    /// a shell command run next, the prompt in the file `$AGG_SCENARIO_PROMPT` names
+    /// a shell command run next, the prompt in the file `$RLT_SCENARIO_PROMPT` names
     pub run: Option<String>,
     /// text written into the answer file the brief names (`Write it to <file> as YAML`)
     pub answer: Option<String>,
@@ -101,7 +101,7 @@ impl Scenario {
     }
 }
 
-/// `agg process <file> --scenario <scenario>… [--projects <dir>] [--keep]`: plays each scenario; exit 0 only when all are
+/// `rlt process <file> --scenario <scenario>… [--projects <dir>] [--keep]`: plays each scenario; exit 0 only when all are
 /// as expected.
 pub fn play(file: &Path, scenarios: &[PathBuf], projects: Option<&Path>, keep: bool) -> Result<ExitCode> {
     // the runs start elsewhere than the caller's folder, and a process's scripts are found from its file's own path
@@ -130,15 +130,15 @@ pub fn play(file: &Path, scenarios: &[PathBuf], projects: Option<&Path>, keep: b
 /// with `keep`); what it didn't expect, if anything.
 fn played(file: &Path, spec: &Process, list: &[Numbered], path: &Path, projects: &Path, keep: bool) -> Result<Vec<String>> {
     let scenario = Scenario::read(path).map_err(|e| anyhow!(e))?;
-    let work = std::env::temp_dir().join(format!("agg-scenario-{}-{}", std::process::id(), path.file_stem().and_then(|s| s.to_str()).unwrap_or("x")));
+    let work = std::env::temp_dir().join(format!("rlt-scenario-{}-{}", std::process::id(), path.file_stem().and_then(|s| s.to_str()).unwrap_or("x")));
     let _ = removed(&work);
     std::fs::create_dir_all(&work)?;
     let (project, bin) = prepared(&scenario, list, projects, &work)?;
-    let history = spec.run.history.clone().unwrap_or_else(|| "agg/private/steps.jsonl".into());
+    let history = spec.run.history.clone().unwrap_or_else(|| "rlt/private/steps.jsonl".into());
     let (calls, before) = (work.join("calls.jsonl"), lines(&project.join(&history)).len());
     let scenario_file = std::fs::canonicalize(path)?;
     let path_var = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    let env = [("PATH", path_var), ("AGG_SCENARIO", scenario_file.display().to_string()), ("AGG_SCENARIO_LOG", calls.display().to_string())];
+    let env = [("PATH", path_var), ("RLT_SCENARIO", scenario_file.display().to_string()), ("RLT_SCENARIO_LOG", calls.display().to_string())];
     let start = Instant::now();
     let (code, problems) = ran(file, &project, &scenario, &env, &work.join("run.log"))?;
     let record: Vec<String> = lines(&project.join(&history)).iter().skip(before).map(record_line).collect();
@@ -204,7 +204,7 @@ fn lines(path: &Path) -> Vec<Value> {
 
 /// The asks no one answered yet.
 fn open_asks(project: &Path) -> Vec<Value> {
-    let asks = lines(&project.join("agg/private/asks.jsonl"));
+    let asks = lines(&project.join("rlt/private/asks.jsonl"));
     let answered: Vec<&str> = asks.iter().filter(|a| a["state"] == "answered").filter_map(|a| a["id"].as_str()).collect();
     asks.iter().filter(|a| a["state"] == "open" && !answered.contains(&a["id"].as_str().unwrap_or_default())).cloned().collect()
 }

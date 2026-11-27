@@ -19,8 +19,8 @@ fn phase_round_trips_through_its_legacy_wire_strings() {
     }
 }
 
-/// A stage written by a DIFFERENT agg build (an old one wrote "judging") must neither crash
-/// the reader nor lose its name — `agg dashboard` attaches to loops it didn't launch.
+/// A stage written by a DIFFERENT rlt build (an old one wrote "judging") must neither crash
+/// the reader nor lose its name — `rlt dashboard` attaches to loops it didn't launch.
 #[test]
 fn an_unknown_phase_survives_verbatim() {
     let p: Phase = serde_json::from_str("\"judging\"").expect("must not reject a foreign stage");
@@ -29,7 +29,7 @@ fn an_unknown_phase_survives_verbatim() {
     assert_eq!(serde_json::to_string(&p).unwrap(), "\"judging\"", "and round-trip unchanged");
 }
 
-/// A state.json written by an OLDER `agg` (no model/halt_when/started_at/recent,
+/// A state.json written by an OLDER `rlt` (no model/halt_when/started_at/recent,
 /// goals without `weight`) must still deserialize — the new fields fall back to
 /// their defaults via `#[serde(default)]`. Guards the in-place-upgrade-mid-run case.
 #[test]
@@ -79,7 +79,7 @@ fn push_event_caps_the_ring_and_tracks_now_think() {
 
 #[test]
 fn live_state_publishes_to_disk() {
-    let dir = std::env::temp_dir().join(format!("agg_live_test_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rlt_live_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let live = LiveState::new(&dir, Instant::now(), DashboardState { project: "p".into(), ..Default::default() });
     live.update(|s| s.push_event(ActivityEvent { ts: "t".into(), kind: "tool".into(), text: "go".into() }));

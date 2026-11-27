@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 use crate::backend::AgentBackend;
 use crate::bus::Bus;
-use crate::core::config::{AggConfig, ResolvedStep};
+use crate::core::config::{RelentlessConfig, ResolvedStep};
 use crate::core::engine::{Engine, RunState};
 use crate::core::walk::Walk;
-use crate::features::state::AGGState;
+use crate::features::state::RLTState;
 use crate::plugin::{Extensions, RunOutcome, LifecycleEvent};
 use crate::state::{DashboardState, LiveState};
 use crate::util::now_epoch;
@@ -17,13 +17,13 @@ use crate::util::now_epoch;
 /// (HOOK_REDESIGN §8: the context IS the state, threaded sequentially, no facade). Fields are `pub`
 /// per the crate's no-facade convention (lib.rs) so a plugin in ANY module/crate reaches what it
 /// needs — most importantly its own typed state via `ext`/`scratch`. The core knows only the hook
-/// registry + this shared bus; every feature (agg's own included) is a plugin against it.
+/// registry + this shared bus; every feature (rlt's own included) is a plugin against it.
 ///
 /// `cfg`/`dir`/`config_base` are OWNED, not borrowed (RUST_API §3.1). A driver facade holds the
 /// config AND the state in one struct; borrowing a sibling field is self-referential and not
 /// expressible in safe Rust, so the lifetime parameter had to go. Reads still deref through.
 pub struct LoopState {
-    pub cfg: AggConfig,
+    pub cfg: RelentlessConfig,
     /// the RULER — LLM judges + summarizer. Immutable across the run (§4).
     pub ruler: &'static dyn AgentBackend,
     /// the ruler model (`judge.model`, resolved).
@@ -38,7 +38,7 @@ pub struct LoopState {
     pub cursor: Walk,
     /// the step being run THIS cycle (set by INJECT).
     pub cur_step: Option<ResolvedStep>,
-    /// the step a Rust DRIVER handed to `agg.step(&s)`. `PickStep` `take()`s it BEFORE it consults
+    /// the step a Rust DRIVER handed to `rlt.step(&s)`. `PickStep` `take()`s it BEFORE it consults
     /// anything else, which is how a driver's flow replaces the `sequence:` list without a second
     /// dispatch path existing anywhere. Always `None` on the YAML path.
     ///
@@ -72,10 +72,10 @@ pub struct LoopState {
     /// summarizer). Sums to `tokens_spent`/`cost_spent`; makes a mixed run's totals interpretable.
     pub per_agent: std::collections::BTreeMap<String, crate::state::AgentUsage>,
 
-    /// per-RUN generic extension store — agg's own feature state lives here as `AGGState`; a plugin
+    /// per-RUN generic extension store — rlt's own feature state lives here as `RLTState`; a plugin
     /// stashes its own type. Persists across sessions (never cleared mid-run). LOOPSTATE_REDESIGN §3.
     pub ext: Extensions,
-    /// per-SESSION generic extension store — agg's stage channel lives here as `AGGScratch`;
+    /// per-SESSION generic extension store — rlt's stage channel lives here as `RLTScratch`;
     /// `clear()`ed each session at the loop top so no field leaks across sessions (§3/§8).
     pub scratch: Extensions,
 }
@@ -96,7 +96,7 @@ impl LoopState {
     }
 
     /// met / total for every scoreboard — the snapshot AND the run ledger, which must never disagree
-    /// about the same run (they did: `state.json` said `2/2` while `agg history` said `0/0`).
+    /// about the same run (they did: `state.json` said `2/2` while `rlt history` said `0/0`).
     ///
     /// [`Engine::tally`] counts the DoD-set, which only the YAML path has; a driver decides it is done
     /// by RETURNING and leaves `eng.judges` empty by construction. Falling back to the judges it
@@ -173,7 +173,7 @@ impl LoopState {
         self.dash.goals = DashboardState::goals_from_engine(&self.eng, &self.dash.goals);
         // ⚠ ONLY when the engine HAS judges. On the DRIVER path `eng.judges` is empty by construction
         // — the run-set is built solely from YAML expressions (`assembly.rs`), and a driver's judges
-        // are `Judge` VALUES in its own binary that it hands to `agg.judge(&j)` one at a time.
+        // are `Judge` VALUES in its own binary that it hands to `rlt.judge(&j)` one at a time.
         // Rebuilding unconditionally here overwrote what the facade had just written with an empty
         // vec, so the TUI rendered `(no judges in snapshot)`, the web BFF served `judges: []` and
         // Progress read `0/0 · 0%` — all while the judges were demonstrably running and their
@@ -211,7 +211,7 @@ impl LoopState {
             work_time_s: self.clock.work_secs(now),
             human_wait_time_s: self.clock.human_wait_secs,
         };
-        let staged = self.ext.get::<AGGState>().git.span_branches.len() as u32;
+        let staged = self.ext.get::<RLTState>().git.span_branches.len() as u32;
         let tally = self.ext.get::<crate::report::Tally>();
         self.dash.sessions = crate::report::Sessions {
             total: self.session,
@@ -269,14 +269,14 @@ impl LoopState {
 
     pub fn worker_is_broken(&mut self) -> Option<anyhow::Error> {
         const LIMIT: u32 = 3;
-        (self.ext.get::<AGGState>().worker.dud_streak >= LIMIT).then(|| {
+        (self.ext.get::<RLTState>().worker.dud_streak >= LIMIT).then(|| {
             let agent = self.cur_step.as_ref().map(|s| s.agent.as_str()).unwrap_or("worker");
             anyhow::anyhow!(
                 "the `{agent}` worker failed to start {LIMIT} times in a row — non-zero exit, ZERO \
                  tokens, every time.\n\
                  That means the agent CLI rejected the invocation itself; it never reached the model. \
                  Retrying cannot help: each session builds the same command.\n\
-                 Run `agg doctor`, and try the worker by hand to see the CLI's own error."
+                 Run `rlt doctor`, and try the worker by hand to see the CLI's own error."
             )
         })
     }

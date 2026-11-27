@@ -1,5 +1,5 @@
-//! The interpreter (A-37): reads a process file, refuses to run on any problem of `--check`, sets up agg and the
-//! process's flow, and walks the phases and steps in file order, each kind through the block agg already has. The file
+//! The interpreter (A-37): reads a process file, refuses to run on any problem of `--check`, sets up rlt and the
+//! process's flow, and walks the phases and steps in file order, each kind through the block rlt already has. The file
 //! says what runs and in what order; nothing here names a step.
 
 use std::collections::{BTreeMap, HashMap};
@@ -14,7 +14,7 @@ use super::number::{number, resolve, Numbered};
 use super::proc::{Init, Proc};
 use super::settings::{Base, Settings};
 use super::{bases, check, standing, template};
-use crate::driver::{Agg, Fatal, OnRegression, Opts};
+use crate::driver::{Relentless, Fatal, OnRegression, Opts};
 use crate::plugin::RunOutcome;
 use crate::workflow::{Roles, Run};
 
@@ -24,7 +24,7 @@ pub fn start(file: PathBuf, project: PathBuf, args: Vec<String>) -> ExitCode {
     crate::workflow::run(move || drive(&file, &project, &args))
 }
 
-/// Notes which process file runs on the project (`agg/private/process.json`), so `agg serve` and `agg status` can report it.
+/// Notes which process file runs on the project (`rlt/private/process.json`), so `rlt serve` and `rlt status` can report it.
 fn remember(project: &Path, file: &Path) {
     let dir = crate::paths::private_dir(project);
     let file = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
@@ -61,15 +61,15 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     forget_stale_bases(&spec, &project);
     let settings = settings_of(&spec, &list, &home, &project, &vars)?;
     let roles = roles_of(&spec, &project)?;
-    let mut agg = Agg::open_with(&project, Opts { resume })?.memory(spec.agg.memory)
-        .vars(vars.clone()).user_settings(spec.agg.user_settings).user_env(spec.agg.user_env.clone())
-        .on_regression(if spec.agg.on_regression == "rollback" { OnRegression::Rollback } else { OnRegression::Annotate })
-        .judge_timeout(spec.agg.judge_timeout);
-    agg = agg.system_prompt(standing::text(spec.run.system_prompt.as_ref(), standing::SYSTEM, &home)?);
-    let reached = if resume { None } else { reachable(&agg, &spec, roles.as_ref())? };
+    let mut rlt = Relentless::open_with(&project, Opts { resume })?.memory(spec.rlt.memory)
+        .vars(vars.clone()).user_settings(spec.rlt.user_settings).user_env(spec.rlt.user_env.clone())
+        .on_regression(if spec.rlt.on_regression == "rollback" { OnRegression::Rollback } else { OnRegression::Annotate })
+        .judge_timeout(spec.rlt.judge_timeout);
+    rlt = rlt.system_prompt(standing::text(spec.run.system_prompt.as_ref(), standing::SYSTEM, &home)?);
+    let reached = if resume { None } else { reachable(&rlt, &spec, roles.as_ref())? };
     let force = task_force(&spec, &home, &project, &vars, roles.as_ref())?;
     let pinned = pinned(&home);
-    let p = Proc::new(agg, run, Init { spec: spec.clone(), list: list.clone(), home, settings, vars, roles, force });
+    let p = Proc::new(rlt, run, Init { spec: spec.clone(), list: list.clone(), home, settings, vars, roles, force });
     p.record("start", "start", true, &pinned);
     if let Some(said) = reached {
         p.record("preflight", "preflight", true, &said);
@@ -86,14 +86,14 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     Ok(())
 }
 
-/// Whether the run replays agg's ledger: `--resume`, unless it starts at a step (`--from`, also a re-entry's
+/// Whether the run replays rlt's ledger: `--resume`, unless it starts at a step (`--from`, also a re-entry's
 /// restart, which keeps the arguments it was started with), where the ledger no longer matches.
 fn resumes(args: &[String]) -> bool {
     args.iter().any(|a| a == "--resume") && !args.iter().any(|a| a == "--from")
 }
 
 /// The arguments of the run and whether it replays the ledger. A start records its arguments
-/// (`agg/private/started.json`); a plain `--resume` continues the run that was started last with them: after a re-entry
+/// (`rlt/private/started.json`); a plain `--resume` continues the run that was started last with them: after a re-entry
 /// that run starts at its step with its note, and its ledger begins there, so walking from the first step would diverge.
 fn continued(project: &Path, args: &[String]) -> (Vec<String>, bool) {
     let file = crate::paths::private_dir(project).join("started.json");
@@ -109,13 +109,13 @@ fn continued(project: &Path, args: &[String]) -> (Vec<String>, bool) {
     (started.into_iter().filter(|a| a != "--resume").chain(["--resume".to_string()]).collect(), true)
 }
 
-/// The commands `run.start` names, before agg opens the project; the last line each prints is logged.
+/// The commands `run.start` names, before rlt opens the project; the last line each prints is logged.
 fn starting_commands(spec: &Process, home: &Path, project: &Path) -> Result<(), Fatal> {
     for c in &spec.run.start {
         let first = c.split_whitespace().next().unwrap_or_default();
         let command = if first.contains('/') && !Path::new(first).is_absolute() { format!("{}/{c}", home.display()) } else { c.clone() };
         let out = std::process::Command::new("sh").arg("-c").arg(&command).current_dir(project)
-            .env("AGG_PROCESS_HOME", home).output().map_err(|e| anyhow!("`{c}`: {e}"))?;
+            .env("RLT_PROCESS_HOME", home).output().map_err(|e| anyhow!("`{c}`: {e}"))?;
         if let Some(line) = String::from_utf8_lossy(&out.stdout).lines().last() {
             println!("{line}");
         }
@@ -136,8 +136,8 @@ fn commit_inputs(spec: &Process, project: &Path) -> Result<(), Fatal> {
     if !ok(&["checkout", "-q", &c.branch]) {
         return Err(anyhow!("switching {} to {} failed", project.display(), c.branch).into());
     }
-    // agg's own runtime (the process note, a log started before the run) is never an input
-    crate::git::ensure_agg_gitignored(project);
+    // rlt's own runtime (the process note, a log started before the run) is never an input
+    crate::git::ensure_rlt_gitignored(project);
     ok(&["add", "-A"]);
     if !ok(&["diff", "--cached", "--quiet"]) && !ok(&["commit", "-q", "-m", &c.message]) {
         return Err(anyhow!("committing the inputs in {} failed", project.display()).into());
@@ -158,7 +158,7 @@ fn pinned(home: &Path) -> String {
 fn forget_stale_bases(spec: &Process, project: &Path) {
     let Some(file) = &spec.run.bases_reset_when_changed else { return };
     let now = crate::protect::sha256::hex(&std::fs::read(project.join(file)).unwrap_or_default());
-    let marker = project.join(".git").join("agg-bases-marker");
+    let marker = project.join(".git").join("rlt-bases-marker");
     if std::fs::read_to_string(&marker).ok().as_deref() != Some(now.as_str()) {
         bases::drop_stale(project, true);
         let _ = std::fs::write(marker, now);
@@ -218,13 +218,13 @@ fn roles_of(spec: &Process, project: &Path) -> Result<Option<Roles>, Fatal> {
     Ok(Some(roles))
 }
 
-/// The reachability preflight (`agg: { preflight }`, default on): one tiny call with the worker's agent and model before
+/// The reachability preflight (`rlt: { preflight }`, default on): one tiny call with the worker's agent and model before
 /// any step, so a worker that can't be reached stops the run with its cause. What answered; none when it is off, in
 /// scenario mode (scripted agents), or the process has no worker.
-fn reachable(agg: &Agg, spec: &Process, roles: Option<&Roles>) -> Result<Option<String>, Fatal> {
+fn reachable(rlt: &Relentless, spec: &Process, roles: Option<&Roles>) -> Result<Option<String>, Fatal> {
     let worker = spec.roles.as_ref().is_some_and(|r| r.names.iter().any(|n| n == "worker"));
-    let (true, true, Some(roles)) = (spec.agg.preflight && std::env::var_os("AGG_SCENARIO").is_none(), worker, roles) else { return Ok(None) };
-    agg.reachable(&roles.step("worker", "preflight", "")).map(Some)
+    let (true, true, Some(roles)) = (spec.rlt.preflight && std::env::var_os("RLT_SCENARIO").is_none(), worker, roles) else { return Ok(None) };
+    rlt.reachable(&roles.step("worker", "preflight", "")).map(Some)
 }
 
 /// The task force's step: its prompt, what it may never change, the sections of its brief.
@@ -245,7 +245,7 @@ fn task_force(spec: &Process, home: &Path, project: &Path, vars: &BTreeMap<Strin
     Ok(Some(step))
 }
 
-/// The task force's effective prompt as a file the step can name (`agg/private/task-force.md`): agg's default, a file or both.
+/// The task force's effective prompt as a file the step can name (`rlt/private/task-force.md`): rlt's default, a file or both.
 fn task_force_prompt(project: &Path, prompt: &str) -> Result<String, Fatal> {
     let dir = crate::paths::private_dir(project);
     std::fs::create_dir_all(&dir).map_err(|e| anyhow!("{}: {e}", dir.display()))?;
@@ -433,7 +433,7 @@ mod tests {
         Process::parse(&format!("version: 1\nrun:\n  commit_inputs: {extra}\nphases: []\n")).unwrap()
     }
 
-    /// The inputs a human filled in are committed on the branch the file names, agg's runtime ignored; a second call with nothing new
+    /// The inputs a human filled in are committed on the branch the file names, rlt's runtime ignored; a second call with nothing new
     /// commits nothing; a branch that doesn't exist halts the run with the reason.
     #[test]
     fn the_inputs_are_committed_on_their_branch_once() {
@@ -441,15 +441,15 @@ mod tests {
         let d = tmp.path();
         git(d, &["init", "-q", "-b", "main"]);
         git(d, &["commit", "-q", "--allow-empty", "-m", "base"]);
-        git(d, &["checkout", "-q", "-b", "agg/run/session-1"]);
+        git(d, &["checkout", "-q", "-b", "rlt/run/session-1"]);
         std::fs::write(d.join("task.md"), "the task").unwrap();
-        std::fs::create_dir_all(d.join("agg/private")).unwrap();
-        std::fs::write(d.join("agg/private/run.log"), "a log started before the run").unwrap();
+        std::fs::create_dir_all(d.join("rlt/private")).unwrap();
+        std::fs::write(d.join("rlt/private/run.log"), "a log started before the run").unwrap();
         let both = spec("{ branch: main, message: \"Inputs at start\" }");
         commit_inputs(&both, d).unwrap();
         assert_eq!(git(d, &["rev-parse", "--abbrev-ref", "HEAD"]), "main", "a halted run's session branch is left");
         assert_eq!(git(d, &["log", "-1", "--format=%s"]), "Inputs at start");
-        assert_eq!(git(d, &["show", "--name-only", "--format=", "HEAD"]), ".gitignore\ntask.md", "agg's runtime is no input");
+        assert_eq!(git(d, &["show", "--name-only", "--format=", "HEAD"]), ".gitignore\ntask.md", "rlt's runtime is no input");
         let before = git(d, &["rev-parse", "HEAD"]);
         commit_inputs(&both, d).unwrap();
         assert_eq!(git(d, &["rev-parse", "HEAD"]), before, "nothing new, no commit");

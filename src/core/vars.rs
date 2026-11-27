@@ -1,6 +1,6 @@
 //! A workflow's variables: `{{ name }}` in a step's prompt file (the role prompt's too) and in an LLM
 //! judge's rubric, its `inputs:` frontmatter included, is filled in from the map the driver set
-//! ([`Agg::vars`](crate::driver::Agg::vars)). Only files are templates: inline text a driver builds may
+//! ([`Relentless::vars`](crate::driver::Relentless::vars)). Only files are templates: inline text a driver builds may
 //! carry a project's content (a doc with a template language of its own), and code has `format!`. A
 //! `{{ name }}` the map lacks is an error: a worker or a judge briefed with a hole does the wrong work.
 //! Without variables nothing is touched.
@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
-// ponytail: process-wide, one workflow per process (the driver's `run`); per-Agg maps if a process ever
+// ponytail: process-wide, one workflow per process (the driver's `run`); per-Relentless maps if a process ever
 // drives two workflows with different variables
 static VARS: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
 
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(apply("{{ anything }}").unwrap(), "{{ anything }}");
     }
 
-    /// A prompt file and a rubric (its `inputs:` and its text) are rendered where agg reads them; an
+    /// A prompt file and a rubric (its `inputs:` and its text) are rendered where rlt reads them; an
     /// unknown name in a prompt file fails reading it.
     #[test]
     fn prompt_files_and_rubrics_are_rendered_where_they_are_read() {

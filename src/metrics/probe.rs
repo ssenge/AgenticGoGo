@@ -1,7 +1,7 @@
 //! The startup checks of an OPTIONAL dependency: a metric or score judge refuses the run when
 //! `swe-metrics` is missing where it will run, speaks another schema version, or — for a score
 //! judge — scores by another definition or version than the one configured. A config without such
-//! judges never runs any of this, which is what keeps agg working without swe-metrics installed.
+//! judges never runs any of this, which is what keeps rlt working without swe-metrics installed.
 //!
 //! WHERE it is checked is where it will run ([`Site`]): on the host's `PATH`, or — when the run's
 //! judges are containerized — in the judges' image, by short probe containers (no network, the
@@ -11,7 +11,7 @@ use super::measure::PROGRAM;
 use super::report::REPORT_SCHEMA;
 use super::score::{ScoreDoc, SCORE_SCHEMA};
 use super::spec::{Definition, ScoreJudge};
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::problem::Problem;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,7 +34,7 @@ pub enum Site {
 impl Site {
     /// Where `cfg`'s judges run swe-metrics; `None` = nowhere this probe can reach — a container run
     /// with no engine or no single judges' image, each refused at its own key already.
-    pub fn of(cfg: &AggConfig, project: &Path) -> Option<Site> {
+    pub fn of(cfg: &RelentlessConfig, project: &Path) -> Option<Site> {
         if cfg.run_isolation() != crate::isolation::Isolation::Container {
             return Some(Site::Host);
         }
@@ -102,7 +102,7 @@ fn call(site: &Site, args: &[&str], mounts: &[PathBuf]) -> Result<String, Fail> 
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// The probe container: no network, the project read-only (a definition file under `agg/` is read
+/// The probe container: no network, the project read-only (a definition file under `rlt/` is read
 /// from there), `mounts` read-only, as the project owner, `HOME` in the container's tmp.
 fn in_image(image: &str, project: &Path, args: &[&str], mounts: &[PathBuf]) -> Command {
     let mut c = Command::new(crate::isolation::container_engine().unwrap_or("docker"));
@@ -134,7 +134,7 @@ fn problem(site: &Site, at: &str, f: Fail) -> Problem {
     }
 }
 
-/// The `$id` of `swe-metrics schema <which>` must be the one this agg reads.
+/// The `$id` of `swe-metrics schema <which>` must be the one this rlt reads.
 fn schema(site: &Site, which: &str, want: &str) -> Result<(), Fail> {
     let text = call(site, &["schema", which], &[])?;
     let id = serde_json::from_str::<serde_json::Value>(&text)
@@ -144,7 +144,7 @@ fn schema(site: &Site, which: &str, want: &str) -> Result<(), Fail> {
     if id == want {
         Ok(())
     } else {
-        Err(Fail::Other(format!("swe-metrics speaks the {which} schema `{id}`, but this agg reads `{want}` — {}", site.fix())))
+        Err(Fail::Other(format!("swe-metrics speaks the {which} schema `{id}`, but this rlt reads `{want}` — {}", site.fix())))
     }
 }
 
@@ -155,7 +155,7 @@ fn definition_of(site: &Site, j: &ScoreJudge) -> Result<ScoreDoc, String> {
         Site::Host => std::env::temp_dir(),
         Site::Image { project, .. } => crate::paths::container_dir(project).join("judge"),
     }
-    .join(format!("agg-swe-metrics-probe-{}", std::process::id()));
+    .join(format!("rlt-swe-metrics-probe-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("probe dir: {e}"))?;
     let report = dir.join("empty-report.json");
     let empty = serde_json::json!({"schema": REPORT_SCHEMA, "subject": {"target": ".", "kind": "directory", "commit": null,
@@ -220,7 +220,7 @@ pub fn problems(metric: &[&str], score: &[(&str, &ScoreJudge)], site: &Site, tri
 mod tests {
     use super::*;
 
-    fn cfg(yaml: &str) -> AggConfig {
+    fn cfg(yaml: &str) -> RelentlessConfig {
         serde_yaml::from_str(yaml).unwrap()
     }
 
@@ -258,7 +258,7 @@ mod tests {
     }
 
     /// A missing swe-metrics in the image is the image probe's problem, spelled the same way, so
-    /// `agg check` lists it once.
+    /// `rlt check` lists it once.
     #[test]
     fn a_missing_swe_metrics_in_the_image_is_the_image_probes_problem() {
         let site = Site::Image { image: "j:1".into(), at: "judge.image".into(), project: PathBuf::from("/p") };

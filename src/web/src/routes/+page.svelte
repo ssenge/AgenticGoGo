@@ -23,16 +23,16 @@
 
   {#if loop.health.api_offline}
     <div class="card notice">
-      <strong>Can't reach <code>agg serve</code>.</strong>
+      <strong>Can't reach <code>rlt serve</code>.</strong>
       Start it in your project:
-      <code class="cmd">agg serve</code>
+      <code class="cmd">rlt serve</code>
       then this page connects automatically.
     </div>
   {:else if s?.waiting || !hasState}
     <div class="card notice">
       <strong>Waiting for a run.</strong>
-      <code>agg serve</code> is connected, but no loop has published state yet — start one with
-      <code class="cmd">agg run</code>.
+      <code>rlt serve</code> is connected, but no loop has published state yet — start one with
+      <code class="cmd">rlt run</code>.
     </div>
   {/if}
 
@@ -59,7 +59,7 @@
   </div>
 
   <footer>
-    <span>AgenticGoGo web · polling every 1s</span>
+    <span>Relentless web · polling every 1s</span>
     {#if loop.lastError}<span class="err">· {loop.lastError}</span>{/if}
   </footer>
 </div>

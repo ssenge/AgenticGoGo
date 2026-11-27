@@ -1,19 +1,19 @@
 //! ACCEPTANCE TEST for the `isolation: container` tier — this file IS the Definition of Done.
 //!
-//! It is written by the operator (agg), NOT the worker. The loop's judges require these tests to
+//! It is written by the operator (rlt), NOT the worker. The loop's judges require these tests to
 //! PASS and to still EXIST. DO NOT weaken, skip, or delete an assertion — that is the one way to
 //! "pass" that does not count. Implement the tier until these are green.
 //!
-//! Contract the worker must satisfy (public API on the `agg` lib crate):
-//!   * `agg::isolation::Isolation::Container` — a new tier, deserialized from the name `container`.
-//!   * `agg::isolation::containerize(cmd, cwd, writable, denies, image) -> anyhow::Result<Command>` —
+//! Contract the worker must satisfy (public API on the `rlt` lib crate):
+//!   * `relentless::isolation::Isolation::Container` — a new tier, deserialized from the name `container`.
+//!   * `relentless::isolation::containerize(cmd, cwd, writable, denies, image) -> anyhow::Result<Command>` —
 //!     reshape a built worker `Command` into a `docker run …` (or `podman run …`) that BIND-MOUNTS
 //!     `cwd` read-write, sets it as the workdir, mounts each `writable` path, re-mounts each
 //!     `denies` path `:ro`, leaves the network open, and runs the original program+args INSIDE
 //!     `image`. Analogous to `wrap()` for sandbox, except the command runs in a container rather
 //!     than a jailed host process. (`denies` — this step's `readonly` minus `writable` — was added
 //!     in BUILD.md commit 9; every assertion below predates it and is unchanged.)
-//!   * `agg::isolation::container_available() -> bool` — is a container engine (docker/podman) runnable.
+//!   * `relentless::isolation::container_available() -> bool` — is a container engine (docker/podman) runnable.
 //!
 //! SCOPE: this proves the CONFINEMENT MECHANISM + wiring against a base image. Running the actual
 //! agent CLI *inside* the container with its auth (the "container problem", ISOLATION.md §2/§4) is a
@@ -24,20 +24,20 @@ use std::process::Command;
 
 #[test]
 fn container_deserializes_from_the_tier_name() {
-    let iso: agg::isolation::Isolation = serde_yaml::from_str("container").expect("`container` parses");
-    assert_eq!(iso, agg::isolation::Isolation::Container);
+    let iso: relentless::isolation::Isolation = serde_yaml::from_str("container").expect("`container` parses");
+    assert_eq!(iso, relentless::isolation::Isolation::Container);
     // and garbage still rejects
-    assert!(serde_yaml::from_str::<agg::isolation::Isolation>("dockerish").is_err());
+    assert!(serde_yaml::from_str::<relentless::isolation::Isolation>("dockerish").is_err());
 }
 
 #[test]
 fn containerize_builds_a_docker_run_that_bind_mounts_cwd_and_runs_the_inner_command() {
     let mut inner = Command::new("claude");
     inner.arg("-p").arg("do the thing");
-    let cwd = Path::new("/private/tmp/agg-container-argv");
+    let cwd = Path::new("/private/tmp/rlt-container-argv");
     std::fs::create_dir_all(cwd).ok();
 
-    let cmd = agg::isolation::containerize(inner, cwd, &[], &[], "alpine:3.20")
+    let cmd = relentless::isolation::containerize(inner, cwd, &[], &[], "alpine:3.20")
         .expect("build the container command");
     let prog = cmd.get_program().to_string_lossy().into_owned();
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -47,11 +47,11 @@ fn containerize_builds_a_docker_run_that_bind_mounts_cwd_and_runs_the_inner_comm
     assert!(args.iter().any(|a| a == "--rm"), "ephemeral (--rm): {args:?}");
     // cwd is bind-mounted (`-v <cwd>:<cwd>`) AND is the working directory (`-w <cwd>`)
     assert!(
-        args.windows(2).any(|w| w[0] == "-v" && w[1].contains("agg-container-argv") && w[1].contains(':')),
+        args.windows(2).any(|w| w[0] == "-v" && w[1].contains("rlt-container-argv") && w[1].contains(':')),
         "cwd bind-mounted rw: {args:?}"
     );
     assert!(
-        args.windows(2).any(|w| w[0] == "-w" && w[1].contains("agg-container-argv")),
+        args.windows(2).any(|w| w[0] == "-w" && w[1].contains("rlt-container-argv")),
         "cwd is the workdir: {args:?}"
     );
     // the original program + args survive, in order, AFTER the image name
@@ -65,7 +65,7 @@ fn containerize_builds_a_docker_run_that_bind_mounts_cwd_and_runs_the_inner_comm
 
 #[test]
 fn container_available_returns_a_bool() {
-    let _: bool = agg::isolation::container_available();
+    let _: bool = relentless::isolation::container_available();
 }
 
 /// REAL container confinement — needs a running Docker/Podman engine. `#[ignore]`d so the plain
@@ -78,11 +78,11 @@ fn container_available_returns_a_bool() {
 #[test]
 #[ignore = "needs a real container engine; the loop's container_confines judge runs it with --ignored"]
 fn container_confines_writes() {
-    assert!(agg::isolation::container_available(), "no container engine on this host — cannot prove confinement");
+    assert!(relentless::isolation::container_available(), "no container engine on this host — cannot prove confinement");
     let home = std::env::var("HOME").expect("HOME");
     let pid = std::process::id();
-    let jail = Path::new(&home).join(format!("agg-container-jail-{pid}"));
-    let escape = Path::new(&home).join(format!("agg-container-escape-{pid}.txt")); // NOT bind-mounted
+    let jail = Path::new(&home).join(format!("rlt-container-jail-{pid}"));
+    let escape = Path::new(&home).join(format!("rlt-container-escape-{pid}.txt")); // NOT bind-mounted
     std::fs::create_dir_all(&jail).unwrap();
     let _ = std::fs::remove_file(&escape);
 
@@ -91,7 +91,7 @@ fn container_confines_writes() {
         "echo in > inside.txt && echo INSIDE_OK; echo out > '{}' 2>/dev/null || true",
         escape.display()
     ));
-    let out = agg::isolation::containerize(inner, &jail, &[], &[], "alpine:3.20")
+    let out = relentless::isolation::containerize(inner, &jail, &[], &[], "alpine:3.20")
         .expect("build the container command")
         .output()
         .expect("run the container");

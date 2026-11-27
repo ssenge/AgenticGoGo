@@ -1,8 +1,8 @@
 import { json } from '@sveltejs/kit';
-import { aggSend } from '$lib/server/agg.js';
+import { rltSend } from '$lib/server/rlt.js';
 
-// Proxy: POST /api/send → agg serve POST /api/send. The browser posts a control command here;
-// this forwards it to agg (which applies the liveness guard and returns 409 if no loop is live).
+// Proxy: POST /api/send → rlt serve POST /api/send. The browser posts a control command here;
+// this forwards it to rlt (which applies the liveness guard and returns 409 if no loop is live).
 export async function POST({ request }) {
   let cmd;
   try {
@@ -10,7 +10,7 @@ export async function POST({ request }) {
   } catch {
     return json({ error: 'invalid JSON' }, { status: 400 });
   }
-  const { status, body } = await aggSend(cmd);
+  const { status, body } = await rltSend(cmd);
   if (status === 0) return json(body, { status: 502 });
   return json(body ?? {}, { status });
 }

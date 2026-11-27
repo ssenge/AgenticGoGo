@@ -149,7 +149,7 @@ fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf], denied: &[PathBuf], net
     );
     let writes = writes.join(" ");
 
-    // The CARVE-OUT: agg's own private state sits INSIDE the writable cwd, so the allow above
+    // The CARVE-OUT: rlt's own private state sits INSIDE the writable cwd, so the allow above
     // grants it and only an explicit deny takes it back. Seatbelt resolves the LAST matching rule,
     // so this must be emitted AFTER `(allow file-write* …)` — swapping the two silently grants
     // everything again, which is why the real-kernel test below asserts the effect, not the text.
@@ -177,7 +177,7 @@ fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf], denied: &[PathBuf], net
 }
 
 /// The network clause: everything (`network: open`), or — under an allow-list — OUTBOUND only to
-/// agg's proxy on loopback and the `localhost` ports the list grants.
+/// rlt's proxy on loopback and the `localhost` ports the list grants.
 ///
 /// What stays open is what is not egress: binding and accepting (a test server the worker starts),
 /// and unix-domain sockets under the project and `$TMPDIR` (a socket the worker's own tooling made).
@@ -302,7 +302,7 @@ mod tests {
         assert!(!p.contains("/dev/stderr"), "dead clause — /dev/stderr is a symlink to /dev/fd/N: {p}");
     }
 
-    /// A writable path that resolves to `/` would grant the whole filesystem while agg still
+    /// A writable path that resolves to `/` would grant the whole filesystem while rlt still
     /// reported `isolation: sandbox` — the one failure mode this feature must never have. Refuse.
     #[test]
     fn profile_refuses_a_writable_path_that_resolves_to_root() {
@@ -328,7 +328,7 @@ mod tests {
     /// directories must NOT (a prefix regex there would match unrelated same-prefix siblings).
     #[test]
     fn a_writable_file_also_grants_its_atomic_write_temp_siblings() {
-        let dir = std::env::temp_dir().join(format!("agg-iso-atomic-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rlt-iso-atomic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(".agent.json");
         std::fs::write(&file, "{}").unwrap();

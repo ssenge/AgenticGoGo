@@ -1,4 +1,4 @@
-<!-- The projects of `agg serve --projects`: whether each runs and what waits, and the process's new-project form. -->
+<!-- The projects of `rlt serve --projects`: whether each runs and what waits, and the process's new-project form. -->
 <script>
   let { projects, form } = $props();
 

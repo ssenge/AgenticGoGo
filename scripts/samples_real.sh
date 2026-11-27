@@ -4,13 +4,13 @@
 # `examples/workflow.rs` / `examples/selfimprove.rs` against it with a REAL model.
 #
 # scripts/e2e_real.sh proves the YAML loop against a real agent. This proves the RUST DRIVER path:
-# `Agg::open` → `step()` → `judge()` → `gate()` → `block()`, with the driver being the shipped
+# `Relentless::open` → `step()` → `judge()` → `gate()` → `block()`, with the driver being the shipped
 # sample itself (`target/debug/examples/*`), not a copy of it — that is why `main` was split into a
-# thin `main()` + `drive(&agg, cycles)`: the cycle count and the project dir come from argv/env, so
+# thin `main()` + `drive(&rlt, cycles)`: the cycle count and the project dir come from argv/env, so
 # a harness can bound a run without editing the sample it is supposed to be exercising.
 #
 # NOTHING HERE IS FAKED. The `claude`/`codex` on PATH are PASSTHROUGH WRAPPERS (record argv + the
-# phase agg had published, then `exec` the real binary) — the same trick e2e_real.sh uses to observe
+# phase rlt had published, then `exec` the real binary) — the same trick e2e_real.sh uses to observe
 # a run without stubbing it. The judges run real python and real measurements. The task is real:
 # the seeded limiter has a genuine bug and a genuinely missing function, and two real tests fail
 # until an agent actually fixes them.
@@ -28,14 +28,14 @@
 #   tests/test_limiter.py is deterministic (injected clock, no sleeps): 2 of 6 tests fail on the
 #   seed. "Done" is not a model's opinion; it is `python3 -m unittest` exiting 0.
 #
-# COST: the owner is on a subscription. The `$` figures agg prints are API-EQUIVALENT LIST PRICE,
+# COST: the owner is on a subscription. The `$` figures rlt prints are API-EQUIVALENT LIST PRICE,
 # not a charge. Bound the run with --cycles anyway; 2 is enough to prove a loop loops.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIR="${AGG_SAMPLE_DIR:-${TMPDIR:-/tmp}/agg-samples-real}"
-RUN=""; CYCLES="${AGG_SAMPLE_CYCLES:-2}"; CHECK=""; FRESH=1; UNBLOCK=1
-HEAVY="${AGG_SAMPLE_HEAVY_MODEL:-}"; GRIND="${AGG_SAMPLE_GRIND_MODEL:-}"
+DIR="${RLT_SAMPLE_DIR:-${TMPDIR:-/tmp}/rlt-samples-real}"
+RUN=""; CYCLES="${RLT_SAMPLE_CYCLES:-2}"; CHECK=""; FRESH=1; UNBLOCK=1
+HEAVY="${RLT_SAMPLE_HEAVY_MODEL:-}"; GRIND="${RLT_SAMPLE_GRIND_MODEL:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,14 +46,14 @@ while [ $# -gt 0 ]; do
     --grind)    GRIND="$2"; shift 2 ;;
     --check)    CHECK=1; shift ;;
     --keep)     FRESH=0; shift ;;          # scaffold over an existing dir (keeps agent work)
-    --no-unblock) UNBLOCK=0; shift ;;      # do NOT auto-release agg.block() — a human will
+    --no-unblock) UNBLOCK=0; shift ;;      # do NOT auto-release rlt.block() — a human will
     -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
 case "${RUN:-}" in ""|workflow|selfimprove|yaml) ;; *) echo "--run takes workflow|selfimprove|yaml" >&2; exit 2 ;; esac
 # A lap of examples/workflow.yaml is at most 3+2+1+8+1+1 = 16 dispatches, so this is the session
-# budget that lets `--cycles N` mean "N full laps" on the YAML path too. `agg run` has no notion of
+# budget that lets `--cycles N` mean "N full laps" on the YAML path too. `rlt run` has no notion of
 # a lap — the walk wraps forever — so a ceiling is the only way to bound it.
 MAX_SESSIONS=$(( CYCLES * 16 ))
 
@@ -64,7 +64,7 @@ bad() { printf '  \033[31m✘ %s\033[0m\n' "$1"; }
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 sec "build (the samples ARE the drivers — they must compile before they can drive)"
 ( cd "$ROOT" && cargo build --quiet --examples ) || { bad "cargo build --examples"; exit 1; }
-ok "target/debug/examples/{workflow,selfimprove} + target/debug/agg"
+ok "target/debug/examples/{workflow,selfimprove} + target/debug/rlt"
 
 REAL_CLAUDE="$(command -v claude || true)"
 REAL_CODEX="$(command -v codex || true)"
@@ -74,7 +74,7 @@ REAL_CODEX="$(command -v codex || true)"
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 sec "scaffold: a real project with a real, failing task"
 [ "$FRESH" = 1 ] && rm -rf "$DIR"
-mkdir -p "$DIR"/{bin,src/ratelimit,tests,internal,agg/judges,agg/state/wiki}
+mkdir -p "$DIR"/{bin,src/ratelimit,tests,internal,rlt/judges,rlt/state/wiki}
 
 # ── the library under test: a token bucket with two REAL defects ────────────────────────────
 cat > "$DIR/src/ratelimit/__init__.py" <<'PY'
@@ -148,7 +148,7 @@ MD
 cat > "$DIR/internal/ROADMAP.md" <<'MD'
 # ROADMAP
 
-Each item is completable in one session and verifiable by `agg/judges/tests.sh`.
+Each item is completable in one session and verifiable by `rlt/judges/tests.sh`.
 
 - [ ] **continuous-refill** — `_refill` truncates elapsed time with `int()`, so anything under a
       second refills nothing. Make refill continuous (see internal/SPEC.md §2).
@@ -235,8 +235,8 @@ if __name__ == "__main__":
     unittest.main()
 PY
 
-# ── the worker's forward note (the Rust path reads agg/state/ the same way) ─────────────────
-cat > "$DIR/agg/state/STATE.md" <<'MD'
+# ── the worker's forward note (the Rust path reads rlt/state/ the same way) ─────────────────
+cat > "$DIR/rlt/state/STATE.md" <<'MD'
 # STATE
 
 First session. The library is `src/ratelimit/`, the contract is `internal/SPEC.md`, the executable
@@ -249,8 +249,8 @@ MD
 cat > "$DIR/.gitignore" <<'EOF'
 __pycache__/
 *.pyc
-agg/state/
-agg/private/
+rlt/state/
+rlt/private/
 bin/
 claude_args.txt
 trace.txt
@@ -260,14 +260,14 @@ EOF
 # ── passthrough wrappers: observe the real run without faking any part of it ────────────────
 cat > "$DIR/rec" <<'EOF'
 #!/bin/sh
-printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/private/state.json 2>/dev/null)" >> trace.txt
+printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' rlt/private/state.json 2>/dev/null)" >> trace.txt
 EOF
 for pair in "claude:$REAL_CLAUDE" "codex:$REAL_CODEX"; do
   name="${pair%%:*}"; real="${pair#*:}"
   [ -n "$real" ] || continue
   cat > "$DIR/bin/$name" <<EOF
 #!/bin/sh
-# PASSTHROUGH — record argv + the phase agg had published, then run the REAL $name. Nothing faked.
+# PASSTHROUGH — record argv + the phase rlt had published, then run the REAL $name. Nothing faked.
 for a in "\$@"; do [ "\$a" = "--version" ] && exec "$real" "\$@"; done
 printf '%s %s\n' "$name" "\$*" >> ${name}_args.txt
 sh ./rec RUN
@@ -280,7 +280,7 @@ ok "src/ratelimit + tests + internal/{SPEC,ROADMAP}.md + passthrough wrappers"
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 sec "the judges the samples name — real commands, real exit codes"
-J="$DIR/agg/judges"
+J="$DIR/rlt/judges"
 
 # A script judge is read from its STDOUT as verdict JSON (core/judge.rs:3). Each script below runs a
 # REAL command, keeps its REAL exit code in `$rc`, and reports that — the JSON is the wire format,
@@ -339,16 +339,16 @@ cat > "$J/loadtest.sh" <<'EOF'
 #!/bin/sh
 # LOAD — a fast STAND-IN for a 40-minute soak, but it genuinely measures: 200k real allow() calls
 # against a synthetic clock, per-op latency sampled with perf_counter_ns, p50/p99 in ms and
-# throughput written to $AGG_JUDGE_SCRATCH/bench.json — which the `p99_ok` judge (YAML) and
+# throughput written to $RLT_JUDGE_SCRATCH/bench.json — which the `p99_ok` judge (YAML) and
 # examples/workflow.rs's native p99 closure (Rust) both read.
 #
-# ⚠ NOT agg/state/bench.json. Since §2.5 the project tree is READ-ONLY to a judge — a judge that can
+# ⚠ NOT rlt/state/bench.json. Since §2.5 the project tree is READ-ONLY to a judge — a judge that can
 # write the tree it grades can make the code pass — so the measure/threshold handoff goes through the
 # per-session judge scratch, which is the one place judges may write and is shared between them.
 python3 - <<'PY'
 import json, os, pathlib, sys, time
 sys.path.insert(0, "src")
-SCRATCH = pathlib.Path(os.environ.get("AGG_JUDGE_SCRATCH", "agg/state"))
+SCRATCH = pathlib.Path(os.environ.get("RLT_JUDGE_SCRATCH", "rlt/state"))
 
 OPS, SAMPLE, FLOOR = 200_000, 20_000, 50_000.0   # ops, latency samples, min ops/sec to pass
 try:
@@ -416,9 +416,9 @@ EOF
 
 # ALIASES. The two sample paths NAME judges differently, and only one of them can choose:
 #
-#   Rust  — `Judge::script("tests_pass", "agg/judges/tests.sh")` maps a NAME to any PATH it likes.
-#   YAML  — resolves by NAME ONLY: `tests_pass` is `agg/judges/tests_pass.{sh,md}` or it is a
-#           STARTUP ERROR. That is `agg doctor`'s "no judge named `tests_pass`".
+#   Rust  — `Judge::script("tests_pass", "rlt/judges/tests.sh")` maps a NAME to any PATH it likes.
+#   YAML  — resolves by NAME ONLY: `tests_pass` is `rlt/judges/tests_pass.{sh,md}` or it is a
+#           STARTUP ERROR. That is `rlt doctor`'s "no judge named `tests_pass`".
 #
 # So the YAML sample cannot run against a project that only has `tests.sh`, however good that script
 # is. One implementation per check, as many names as the samples ask for — never a second copy,
@@ -433,7 +433,7 @@ cat > "$J/p99_ok.sh" <<'EOF'
 python3 - <<'PY'
 import json, os, pathlib, sys
 CEIL = 0.5   # ms
-b = pathlib.Path(os.environ.get("AGG_JUDGE_SCRATCH", "agg/state")) / "bench.json"
+b = pathlib.Path(os.environ.get("RLT_JUDGE_SCRATCH", "rlt/state")) / "bench.json"
 if not b.exists():
     # NOT met, and NOT a lie about latency: say which judge has to run first.
     print(json.dumps({"met": False, "value": None, "max": None, "target": CEIL,
@@ -459,7 +459,7 @@ chmod +x "$J"/*.sh
 # ── the rubric judges: graded by the REAL ruler, `inputs:` is the evidence it sees ──────────
 cat > "$J/survey_good.md" <<'MD'
 ---
-inputs: ["agg/state/wiki/survey.md", "internal/SPEC.md"]
+inputs: ["rlt/state/wiki/survey.md", "internal/SPEC.md"]
 ---
 You are grading a technical SURVEY of rate-limiting algorithms written for this project: a
 single-process Python token bucket with an injected clock (see the SPEC in the artifacts).
@@ -482,7 +482,7 @@ MD
 
 cat > "$J/spec_sound.md" <<'MD'
 ---
-inputs: ["agg/state/wiki/spec.md", "agg/state/wiki/survey.md", "internal/SPEC.md", "tests/test_limiter.py"]
+inputs: ["rlt/state/wiki/spec.md", "rlt/state/wiki/survey.md", "internal/SPEC.md", "tests/test_limiter.py"]
 ---
 You are grading an implementation SPEC — a document another engineer must be able to build from
 with none of the author's context. The project's authoritative contract (`internal/SPEC.md`) and
@@ -506,7 +506,7 @@ MD
 
 cat > "$J/design_sound.md" <<'MD'
 ---
-inputs: ["agg/state/wiki/next.md", "internal/ROADMAP.md", "internal/SPEC.md", "src/ratelimit/limiter.py"]
+inputs: ["rlt/state/wiki/next.md", "internal/ROADMAP.md", "internal/SPEC.md", "src/ratelimit/limiter.py"]
 ---
 You are grading a DESIGN NOTE that selects the next roadmap item and states the contract for it.
 The roadmap, the project spec, and the current source are in the artifacts.
@@ -528,7 +528,7 @@ ok "rubrics: survey_good/spec_sound/design_sound — graded by the real ruler"
 
 # ── git: session isolation is mandatory, so the project must be a repo ──────────────────────
 if [ ! -d "$DIR/.git" ]; then
-  ( cd "$DIR" && git init -q -b main && git config user.email samples@agg && git config user.name samples \
+  ( cd "$DIR" && git init -q -b main && git config user.email samples@rlt && git config user.name samples \
       && git add -A && git commit -q -m "seed: token bucket with a truncating refill and no allow_n" )
 fi
 ok "git repo seeded on main ($(cd "$DIR" && git rev-parse --short HEAD))"
@@ -540,12 +540,12 @@ if [ -n "$CHECK" ]; then
   # The seed MUST be green on build/lint/load and RED on tests/e2e. If that is not what the judges
   # say, the task is not the task and a real run would be judging the wrong thing.
   for j in build lint tests loadtest e2e; do
-    out=$( cd "$DIR" && "./agg/judges/$j.sh" 2>&1 ); rc=$?
+    out=$( cd "$DIR" && "./rlt/judges/$j.sh" 2>&1 ); rc=$?
     met=$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read().strip().splitlines()[-1])["met"])' 2>/dev/null)
     printf '  %-9s exit=%s met=%-5s %s\n' "$j" "$rc" "${met:-?}" \
       "$(printf '%s' "$out" | tail -1 | cut -c1-120)"
   done
-  case "$( cd "$DIR" && ./agg/judges/tests.sh | tail -1 )" in
+  case "$( cd "$DIR" && ./rlt/judges/tests.sh | tail -1 )" in
     *'"met":false'*) ok "the seed is genuinely RED (an agent has real work to do)" ;;
     *) bad "the seed already passes — the task is not a task" ;;
   esac
@@ -559,8 +559,8 @@ next (each spends REAL subscription usage):
   $0 --run workflow    --cycles $CYCLES --dir $DIR --keep
   $0 --run selfimprove --cycles $CYCLES --dir $DIR --keep
   $0 --run yaml        --cycles $CYCLES --dir $DIR --keep   # examples/workflow.yaml, verbatim
-watch:   (cd $DIR && $ROOT/target/debug/agg dashboard)
-release a block():     $ROOT/scripts/agg_unblock.sh $DIR
+watch:   (cd $DIR && $ROOT/target/debug/rlt dashboard)
+release a block():     $ROOT/scripts/rlt_unblock.sh $DIR
 EOF
   exit 0
 fi
@@ -573,21 +573,21 @@ if [ "$RUN" = yaml ]; then
   # (cheaper models, shorter timeouts) that differed from the shipped file in ~68 lines, which is
   # not evidence about the shipped file. Do NOT add sed overrides here; if a knob makes the sample
   # unrunnable, fix the SAMPLE.
-  cp "$ROOT/examples/workflow.yaml" "$DIR/agg/agg.yaml"
-  ok "agg/agg.yaml ← examples/workflow.yaml (verbatim, $(wc -l < "$ROOT/examples/workflow.yaml" | tr -d ' ') lines)"
-  BIN="$ROOT/target/debug/agg"
+  cp "$ROOT/examples/workflow.yaml" "$DIR/rlt/rlt.yaml"
+  ok "rlt/rlt.yaml ← examples/workflow.yaml (verbatim, $(wc -l < "$ROOT/examples/workflow.yaml" | tr -d ' ') lines)"
+  BIN="$ROOT/target/debug/rlt"
   printf '  driver: %s run --max-sessions %s  (the WALK, not a Rust driver)\n  log:    %s\n' "$BIN" "$MAX_SESSIONS" "$LOG"
 else
   BIN="$ROOT/target/debug/examples/$RUN"
   printf '  driver: %s\n  log:    %s\n' "$BIN" "$LOG"
 fi
 [ -x "$BIN" ] || { bad "missing $BIN"; exit 1; }
-printf '  \033[33mthis spends real subscription usage (the $ agg prints is API-equivalent list price).\033[0m\n'
+printf '  \033[33mthis spends real subscription usage (the $ rlt prints is API-equivalent list price).\033[0m\n'
 
-# The samples call `agg.block(..)` and WAIT on the operator bus. Unattended, nobody answers — so
-# release it from outside, which is exactly what the bus is for (`agg send resume`).
+# The samples call `rlt.block(..)` and WAIT on the operator bus. Unattended, nobody answers — so
+# release it from outside, which is exactly what the bus is for (`rlt send resume`).
 if [ "$UNBLOCK" = 1 ]; then
-  "$ROOT/scripts/agg_unblock.sh" "$DIR" --watch "$LOG" --answer "auto-approved by samples_real.sh" &
+  "$ROOT/scripts/rlt_unblock.sh" "$DIR" --watch "$LOG" --answer "auto-approved by samples_real.sh" &
   UNBLOCK_PID=$!
   trap '[ -n "${UNBLOCK_PID:-}" ] && kill "$UNBLOCK_PID" 2>/dev/null' EXIT
   ok "auto-unblocker watching (pid $UNBLOCK_PID) — pass --no-unblock to answer block() yourself"
@@ -598,7 +598,7 @@ if [ "$RUN" = yaml ]; then
   ( cd "$DIR" && PATH="$DIR/bin:$PATH" "$BIN" run --max-sessions "$MAX_SESSIONS" ) > "$LOG" 2>&1
 else
   ( cd "$DIR" && PATH="$DIR/bin:$PATH" \
-      AGG_SAMPLE_HEAVY_MODEL="$HEAVY" AGG_SAMPLE_GRIND_MODEL="$GRIND" \
+      RLT_SAMPLE_HEAVY_MODEL="$HEAVY" RLT_SAMPLE_GRIND_MODEL="$GRIND" \
       "$BIN" . "$CYCLES" ) > "$LOG" 2>&1
 fi
 RC=$?
@@ -609,12 +609,12 @@ printf '  exit=%s  wall=%ss\n' "$RC" "$EL"
 printf '  trace: %s\n' "$(tr '\n' ' ' < "$DIR/trace.txt" 2>/dev/null | cut -c1-200)"
 python3 - "$DIR" <<'PY' 2>/dev/null || echo "  (no state.json — the run did not start)"
 import json, sys
-d = json.load(open(sys.argv[1] + "/agg/private/state.json"))
+d = json.load(open(sys.argv[1] + "/rlt/private/state.json"))
 print(f"  sessions={d.get('session')}  phase={d.get('phase')}  "
       f"out-tok={d.get('tokens_spent')}  usage(API-eq)=${d.get('cost_spent')}")
 PY
-grep -c '^## session' "$DIR/agg/private/LOG.md" 2>/dev/null | sed 's/^/  memory entries: /'
-( cd "$DIR" && ./agg/judges/tests.sh | tail -1 | sed 's/^/  tests judge: /' )
+grep -c '^## session' "$DIR/rlt/private/LOG.md" 2>/dev/null | sed 's/^/  memory entries: /'
+( cd "$DIR" && ./rlt/judges/tests.sh | tail -1 | sed 's/^/  tests judge: /' )
 ( cd "$DIR" && git log --oneline -n 8 | sed 's/^/  git: /' )
 printf '\n  full log: %s\n' "$LOG"
 exit $RC

@@ -1,4 +1,4 @@
-//! `agg process <file> <project> --brief <step>` (A-38 3.8): the process's parts of what a step's worker and critic
+//! `rlt process <file> <project> --brief <step>` (A-38 3.8): the process's parts of what a step's worker and critic
 //! get, without running anything: the system prompt, the worker's prompt, the standing sections, the step's own
 //! sections, the quality guide and the critic's scope and rubric; `--brief task-force` is the task force's prompt. A
 //! name the step only knows at run time (`{{ item }}`) and a section's command stay as written.

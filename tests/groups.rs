@@ -2,7 +2,7 @@
 //! `merge_requires_improvement` merge rule and the session that changes nothing (`no_changes`) —
 //! end to end, on both front ends.
 //!
-//! The YAML half drives the real `agg` binary with a fake `claude` whose sessions follow a PLAN: one
+//! The YAML half drives the real `rlt` binary with a fake `claude` whose sessions follow a PLAN: one
 //! shell line per session, run in the project, then committed. The plan sits OUTSIDE the project so
 //! a rollback cannot restore it. The driver half drives the real facade, with judges whose verdict
 //! is a function of how many sessions' work is in the tree.
@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
-use agg::core::model::Verdict;
-use agg::core::verdicts::{append, rows_for, Outcome};
-use agg::prelude::*;
+use relentless::core::model::Verdict;
+use relentless::core::verdicts::{append, rows_for, Outcome};
+use relentless::prelude::*;
 
 fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
     let p = dir.join(name);
@@ -39,7 +39,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn write_judge(dir: &Path, name: &str, body: &str) {
-    chmod_x(&write(dir, &format!("agg/judges/{name}.sh"), body));
+    chmod_x(&write(dir, &format!("rlt/judges/{name}.sh"), body));
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -82,16 +82,16 @@ exit 0
 }
 
 fn commit_base(dir: &Path) {
-    write(dir, ".gitignore", "agg/state/\nagg/private/\n.obsidian/\n");
+    write(dir, ".gitignore", "rlt/state/\nagg/private/\n.obsidian/\n");
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "base"]);
 }
 
-/// `agg.yaml` with one judged `worker` step and `seq` as the whole body under `sequence:`.
+/// `rlt.yaml` with one judged `worker` step and `seq` as the whole body under `sequence:`.
 fn write_cfg(dir: &Path, seq: &str) {
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         &format!(
             "project: groups\ndefaults: {{ model: fake }}\nsteps:\n  worker: {{}}\n\
              sequence:\n  steps: [worker]\n{seq}summary: {{ enabled: false }}\nmemory: {{ enabled: false }}\n"
@@ -107,7 +107,7 @@ fn letter_judges(dir: &Path, names: &[&str]) {
 }
 
 fn run(dir: &Path, path: &str, sessions: &str) -> (Option<i32>, String) {
-    let out = Command::cargo_bin("agg")
+    let out = Command::cargo_bin("rlt")
         .unwrap()
         .current_dir(dir)
         .env("PATH", path)
@@ -235,10 +235,10 @@ fn a_reformat_only_session_is_not_merged_with_the_option_and_merged_without() {
         "{combined}"
     );
     assert_eq!(git(&dir, &["show", "main:fmt.txt"]), "", "the reformat never reached main");
-    let st = agg::core::ratchet::load(&dir).unwrap();
+    let st = relentless::core::ratchet::load(&dir).unwrap();
     assert_eq!((st.rollbacks, st.no_improvements, st.consecutive_no_improvements), (0, 1, 0), "not a rollback");
     let report: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(agg::paths::report_json(&dir)).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(relentless::paths::report_json(&dir)).unwrap()).unwrap();
     let sessions = &report["sessions"];
     assert_eq!((&sessions["merged"], &sessions["rolled_back"], &sessions["no_improvement"]), (&1.into(), &0.into(), &1.into()), "{report}");
 
@@ -268,7 +268,7 @@ fn a_ratchet_improvement_beyond_tolerance_counts_and_noise_does_not() {
         vec![(None, Outcome::Baseline), (Some(1), Outcome::NoImprovement), (Some(2), Outcome::Merged)],
         "{combined}"
     );
-    assert_eq!(agg::core::ratchet::load(&dir).unwrap().reference("cc"), Some(9.0));
+    assert_eq!(relentless::core::ratchet::load(&dir).unwrap().reference("cc"), Some(9.0));
 }
 
 /// A streak of sessions that improve nothing is bounded by its own process-internal term — and,
@@ -287,7 +287,7 @@ fn a_no_improvement_streak_aborts_on_consecutive_no_improvements() {
     assert_eq!(code, Some(3), "{combined}");
     assert!(combined.contains("consecutive_no_improvements >= 2"), "{combined}");
     assert_eq!(outcomes(&dir, "feature").len(), 3, "baseline + two sessions:\n{combined}");
-    assert_eq!(agg::core::ratchet::load(&dir).unwrap().rollbacks, 0);
+    assert_eq!(relentless::core::ratchet::load(&dir).unwrap().rollbacks, 0);
 }
 
 /// `stalled` (the shipped library judge) counts a `no_improvement` session as a step in which
@@ -298,7 +298,7 @@ fn stalled_counts_no_improvement_sessions_as_steps_where_nothing_moved() {
     let dir = tmp.path();
     let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/judges/stalled.sh");
     let judge = |dir: &Path| -> serde_json::Value {
-        let out = Command::new("bash").arg(&stalled).env("AGG_PROJECT_DIR", dir).output_bounded().unwrap();
+        let out = Command::new("bash").arg(&stalled).env("RLT_PROJECT_DIR", dir).output_bounded().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
     };
     let row = |s: u32, v: f64, o: Outcome| {
@@ -319,7 +319,7 @@ fn stalled_counts_no_improvement_sessions_as_steps_where_nothing_moved() {
 fn stalled_counts_no_changes_sessions_with_their_own_readings() {
     let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/judges/stalled.sh");
     let judge = |dir: &Path| -> serde_json::Value {
-        let out = Command::new("bash").arg(&stalled).env("AGG_PROJECT_DIR", dir).output_bounded().unwrap();
+        let out = Command::new("bash").arg(&stalled).env("RLT_PROJECT_DIR", dir).output_bounded().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
     };
     let row = |dir: &Path, s: u32, v: f64, o: Outcome| {
@@ -340,13 +340,13 @@ fn stalled_counts_no_changes_sessions_with_their_own_readings() {
     assert_eq!(judge(state_only.path())["met"], false, "`spec` moved on a no-change session: progress");
 }
 
-/// A project whose idle worker changes NOTHING git-visible, `.home/` ignored too so agg's own
+/// A project whose idle worker changes NOTHING git-visible, `.home/` ignored too so rlt's own
 /// library install cannot be swept onto session 1.
 fn idle_project(plan: &[&str], seq: &str) -> (tempfile::TempDir, PathBuf, String) {
     let (tmp, dir, path) = planned_project(plan);
     write_judge(&dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0}'\n");
     write_cfg(&dir, seq);
-    write(&dir, ".gitignore", "agg/state/\nagg/private/\n.obsidian/\n.home/\n");
+    write(&dir, ".gitignore", "rlt/state/\nagg/private/\n.obsidian/\n.home/\n");
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "base"]);
     (tmp, dir, path)
@@ -367,10 +367,10 @@ fn an_idle_worker_is_a_stall_and_abort_if_stalled_ends_the_run() {
         vec![(None, Outcome::Baseline), no_changes(1), no_changes(2), no_changes(3), no_changes(4)],
         "`stalled` reads sessions 1-3 during session 4's judging:\n{combined}"
     );
-    let st = agg::core::ratchet::load(&dir).unwrap();
+    let st = relentless::core::ratchet::load(&dir).unwrap();
     assert_eq!((st.no_changes, st.consecutive_no_changes, st.rollbacks), (4, 4, 0), "never a rollback");
     let report: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(agg::paths::report_json(&dir)).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(relentless::paths::report_json(&dir)).unwrap()).unwrap();
     let s = &report["sessions"];
     assert_eq!(
         (&s["total"], &s["no_changes"], &s["merged"], &s["rolled_back"], &s["no_improvement"]),
@@ -395,7 +395,7 @@ fn an_idle_streak_aborts_on_consecutive_no_changes_counted_from_the_last_keep() 
         [Outcome::Baseline, Outcome::NoChanges, Outcome::Merged, Outcome::NoChanges, Outcome::NoChanges],
         "the keep at session 2 restarted the streak:\n{combined}"
     );
-    let st = agg::core::ratchet::load(&dir).unwrap();
+    let st = relentless::core::ratchet::load(&dir).unwrap();
     assert_eq!((st.no_changes, st.consecutive_no_changes), (3, 2));
 }
 
@@ -403,7 +403,7 @@ fn an_idle_streak_aborts_on_consecutive_no_changes_counted_from_the_last_keep() 
 
 /// A fake `claude` that appends one line to `work.log` per worker session and commits it.
 static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
-    let root = std::env::temp_dir().join(format!("agg-groups-env-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("rlt-groups-env-{}", std::process::id()));
     let bin = root.join("bin");
     let home = root.join("home");
     fs::create_dir_all(&home).unwrap();
@@ -419,7 +419,7 @@ for a in "$@"; do
   esac
 done
 # a step whose brief says IDLE changes nothing — the `no_changes` session.
-if [ -n "$worker" ] && ! grep -q IDLE agg/private/INSTRUCTIONS.md 2>/dev/null; then
+if [ -n "$worker" ] && ! grep -q IDLE rlt/private/INSTRUCTIONS.md 2>/dev/null; then
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
   git commit -qm "worker: did work" >/dev/null 2>&1
@@ -442,7 +442,7 @@ fn driver_project() -> (tempfile::TempDir, Judge, Judge, Judge) {
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
         git(tmp.path(), args);
     }
-    git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "agg baseline"]);
+    git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "rlt baseline"]);
     let n = "n=$(cat work.log 2>/dev/null | wc -l | tr -d ' ')";
     for (name, test) in [("even", "[ $((n % 2)) -eq 0 ]"), ("odd", "[ $((n % 2)) -eq 1 ]"), ("any", "[ \"$n\" -ge 1 ]")] {
         write_judge(
@@ -451,7 +451,7 @@ fn driver_project() -> (tempfile::TempDir, Judge, Judge, Judge) {
             &format!("#!/bin/sh\n{n}\n{test} && printf '{{\"met\":true,\"value\":%s}}\\n' \"$n\" || printf '{{\"met\":false,\"value\":%s}}\\n' \"$n\"\n"),
         );
     }
-    let j = |n: &str| Judge::script(n, format!("agg/judges/{n}.sh"));
+    let j = |n: &str| Judge::script(n, format!("rlt/judges/{n}.sh"));
     (tmp, j("even"), j("odd"), j("any"))
 }
 
@@ -459,36 +459,36 @@ fn work() -> Step {
     Step::new("implement").model("fake").prompt("do a chunk")
 }
 
-/// `agg.group()` counts k-of-n, and at the gate a member asked ONLY through the group is judged with
+/// `rlt.group()` counts k-of-n, and at the gate a member asked ONLY through the group is judged with
 /// it, net: the even/odd swap of the second session is kept. Asked by name, the same swap is a
 /// per-judge regression and is rolled back.
 #[test]
 fn a_driver_group_counts_k_of_n_and_its_gate_judges_the_group_net() {
     let (tmp, even, odd, any) = driver_project();
     let q = Group::new("q", [even.clone(), odd.clone(), any.clone()]);
-    let agg = Agg::open(tmp.path()).unwrap();
-    let before = agg.group(&q);
+    let rlt = Relentless::open(tmp.path()).unwrap();
+    let before = rlt.group(&q);
     assert_eq!((before.count_met(), before.total()), (1, 3), "n=0: only `even`");
     assert!(!before.at_least(2) && before.any() && !before.all());
-    agg.step(&work()).unwrap();
-    assert!(agg.group(&q).at_least(2), "n=1: odd + any");
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
-    agg.step(&work()).unwrap();
-    let after = agg.group(&q);
+    rlt.step(&work()).unwrap();
+    assert!(rlt.group(&q).at_least(2), "n=1: odd + any");
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
+    rlt.step(&work()).unwrap();
+    let after = rlt.group(&q);
     assert_eq!(after.count_met(), 2, "n=2: even + any — odd lost, even gained");
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept, "a swap inside a group is not a regression");
-    drop(agg);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "a swap inside a group is not a regression");
+    drop(rlt);
 
     let (tmp, even, odd, _) = driver_project();
-    let agg = Agg::open(tmp.path()).unwrap();
-    agg.step(&work()).unwrap();
-    agg.judge(&even);
-    agg.judge(&odd);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
-    agg.step(&work()).unwrap();
-    agg.judge(&even);
-    agg.judge(&odd);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack, "asked by name, `odd` regressed on its own");
+    let rlt = Relentless::open(tmp.path()).unwrap();
+    rlt.step(&work()).unwrap();
+    rlt.judge(&even);
+    rlt.judge(&odd);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
+    rlt.step(&work()).unwrap();
+    rlt.judge(&even);
+    rlt.judge(&odd);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "asked by name, `odd` regressed on its own");
 }
 
 /// `merge_requires_improvement` on the driver: a gate whose asked judges improved nothing is
@@ -497,29 +497,29 @@ fn a_driver_group_counts_k_of_n_and_its_gate_judges_the_group_net() {
 #[test]
 fn a_driver_span_that_improves_nothing_is_not_merged() {
     let (tmp, _, _, any) = driver_project();
-    let size = Judge::script("odd", "agg/judges/odd.sh"); // its `value` is n — higher is better
-    let agg = Agg::open(tmp.path()).unwrap().merge_requires_improvement(true).ratchet("odd", Ratchet::up(0.0));
-    agg.judge(&size); // the baseline: 0
-    agg.step(&work()).unwrap();
-    agg.judge(&any);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept, "`any` went unmet→met");
-    agg.step(&work()).unwrap();
-    agg.judge(&any);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::NoImprovement, "`any` was met and is met");
-    let st = agg.gate_state();
+    let size = Judge::script("odd", "rlt/judges/odd.sh"); // its `value` is n — higher is better
+    let rlt = Relentless::open(tmp.path()).unwrap().merge_requires_improvement(true).ratchet("odd", Ratchet::up(0.0));
+    rlt.judge(&size); // the baseline: 0
+    rlt.step(&work()).unwrap();
+    rlt.judge(&any);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "`any` went unmet→met");
+    rlt.step(&work()).unwrap();
+    rlt.judge(&any);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::NoImprovement, "`any` was met and is met");
+    let st = rlt.gate_state();
     assert_eq!((st.rollbacks, st.no_improvements), (0, 1), "not a rollback");
     assert_eq!(git(tmp.path(), &["show", "main:work.log"]).lines().count(), 1, "the span did not land");
-    agg.step(&work()).unwrap();
-    agg.judge(&size);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept, "the ratchet moved the good way: 0 → 2");
-    drop(agg);
+    rlt.step(&work()).unwrap();
+    rlt.judge(&size);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "the ratchet moved the good way: 0 → 2");
+    drop(rlt);
 
     let (tmp, _, _, any) = driver_project();
-    let agg = Agg::open(tmp.path()).unwrap();
+    let rlt = Relentless::open(tmp.path()).unwrap();
     for _ in 0..2 {
-        agg.step(&work()).unwrap();
-        agg.judge(&any);
-        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept, "off by default");
+        rlt.step(&work()).unwrap();
+        rlt.judge(&any);
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "off by default");
     }
 }
 
@@ -530,20 +530,20 @@ fn a_driver_span_that_improves_nothing_is_not_merged() {
 fn a_driver_span_that_changes_nothing_counts_as_a_no_change_gate() {
     let (tmp, _, _, any) = driver_project();
     let idle = Step::new("idle").model("fake").prompt("IDLE: you are done, change nothing");
-    let agg = Agg::open(tmp.path()).unwrap();
-    // the first session also carries agg's own `.gitignore` entries, so it is never a no-change one.
-    agg.step(&work()).unwrap();
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    let rlt = Relentless::open(tmp.path()).unwrap();
+    // the first session also carries rlt's own `.gitignore` entries, so it is never a no-change one.
+    rlt.step(&work()).unwrap();
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     for _ in 0..2 {
-        agg.step(&idle).unwrap();
-        agg.judge(&any);
-        assert_eq!(agg.gate().unwrap(), GateOutcome::Nothing, "nothing to merge");
+        rlt.step(&idle).unwrap();
+        rlt.judge(&any);
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::Nothing, "nothing to merge");
     }
-    let st = agg.gate_state();
+    let st = rlt.gate_state();
     assert_eq!((st.no_changes, st.consecutive_no_changes, st.rollbacks), (2, 2, 0));
     let tags: Vec<Outcome> = rows_for(tmp.path(), "any", false).into_iter().map(|r| r.outcome).collect();
     assert_eq!(tags, [Outcome::NoChanges, Outcome::NoChanges]);
-    agg.step(&work()).unwrap();
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
-    assert_eq!((agg.gate_state().no_changes, agg.gate_state().consecutive_no_changes), (2, 0));
+    rlt.step(&work()).unwrap();
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
+    assert_eq!((rlt.gate_state().no_changes, rlt.gate_state().consecutive_no_changes), (2, 0));
 }

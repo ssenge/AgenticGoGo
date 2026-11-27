@@ -16,7 +16,7 @@ use anyhow::Result;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Default worker model (agg.yaml `model:`).
+/// Default worker model (rlt.yaml `model:`).
 pub const DEFAULT_MODEL: &str = "claude-opus-4-8[1m]";
 /// Default summarizer / LLM-judge model — the cheap one.
 pub const DEFAULT_SUMMARY_MODEL: &str = "haiku";
@@ -73,7 +73,7 @@ impl AgentBackend for Claude {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose");
-        // Max thinking effort for the headless worker (agg.yaml `effort:`; default "max").
+        // Max thinking effort for the headless worker (rlt.yaml `effort:`; default "max").
         // `ultracode` is interactive-only and not a valid `-p` flag value, so workers get the
         // highest effort reachable from `-p` here and opt into subagent orchestration through the
         // prompt prefix instead.
@@ -101,7 +101,7 @@ impl AgentBackend for Claude {
             command.arg("--append-system-prompt").arg(text);
         }
         command.envs(super::user_env::passed());
-        // Applied AFTER agg's own flags and BEFORE -p, so an operator can extend the invocation
+        // Applied AFTER rlt's own flags and BEFORE -p, so an operator can extend the invocation
         // but not clobber its shape.
         for a in spec.extra_args {
             command.arg(a);
@@ -245,10 +245,10 @@ impl AgentBackend for Claude {
         if !self.is_installed() {
             anyhow::bail!(
                 // Keep this PARALLEL with codex.rs / copilot.rs: install command, then login,
-                // then a HEADLESS check. `--version` is not the check — agg only ever drives the
+                // then a HEADLESS check. `--version` is not the check — rlt only ever drives the
                 // agent headlessly, so "the binary exists" proves nothing about whether it can run.
                 "the Claude Code CLI (`{}`) was not found on your PATH.\n  \
-                 AgenticGoGo drives it to run the inner workers. Install it with\n    \
+                 Relentless drives it to run the inner workers. Install it with\n    \
                  npm install -g @anthropic-ai/claude-code\n  \
                  then run `claude auth login`, and make sure `claude -p \"hello\"` answers.",
                 self.bin()
@@ -330,7 +330,7 @@ mod tests {
         let cmd = Claude.session_command(&spec);
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(cmd.get_program().to_string_lossy(), "claude");
-        // operator args land after agg's flags but before -p, and -p is last so the prompt can
+        // operator args land after rlt's flags but before -p, and -p is last so the prompt can
         // never be parsed as a flag value.
         let p = args.iter().position(|a| a == "-p").expect("-p present");
         let add_dir = args.iter().position(|a| a == "--add-dir").expect("worker_args passed through");

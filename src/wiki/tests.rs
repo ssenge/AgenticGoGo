@@ -1,4 +1,4 @@
-//! Unit tests for `agg wiki lint`: every rule on a minimal wiki, and the wiki the worker's own
+//! Unit tests for `rlt wiki lint`: every rule on a minimal wiki, and the wiki the worker's own
 //! instructions tell it to write.
 
 use super::*;
@@ -224,7 +224,7 @@ fn render_names_every_finding_and_the_verdict() {
     assert!(render(&absent(Path::new("w"))).contains("no wiki at w yet"));
 }
 
-/// THE contract between agg's instructions and its lint: a worker that copies the shapes the brief's
+/// THE contract between rlt's instructions and its lint: a worker that copies the shapes the brief's
 /// footer shows produces a conformant wiki. If the footer's examples drift from OKF, this fails.
 #[test]
 fn the_wiki_the_worker_footer_prescribes_passes_the_lint() {
@@ -237,12 +237,12 @@ fn the_wiki_the_worker_footer_prescribes_passes_the_lint() {
     assert!(!crate::loop_::EXIT_FOOTER.contains("timestamp"), "`timestamp` is OKF v0.1 (superseded by generated.at)");
 }
 
-/// The fenced examples of the footer, each under its "`agg/state/wiki/<page>`:" line.
+/// The fenced examples of the footer, each under its "`rlt/state/wiki/<page>`:" line.
 pub(super) fn footer_examples(footer: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut lines = footer.lines();
     while let Some(line) = lines.next() {
-        let Some(page) = line.strip_prefix("`agg/state/wiki/").and_then(|r| r.strip_suffix("`:")) else { continue };
+        let Some(page) = line.strip_prefix("`rlt/state/wiki/").and_then(|r| r.strip_suffix("`:")) else { continue };
         assert_eq!(lines.next(), Some("```"), "an example opens a fence right after its path");
         let body: Vec<&str> = lines.by_ref().take_while(|l| *l != "```").collect();
         out.push((page.to_string(), body.join("\n") + "\n"));

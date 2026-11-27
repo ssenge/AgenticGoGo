@@ -1,15 +1,15 @@
-//! Render the REAL `agg dashboard` TUI to an SVG, for the README screenshot.
+//! Render the REAL `rlt dashboard` TUI to an SVG, for the README screenshot.
 //!
 //! It drives the actual `dashboard::draw()` path via a headless ratatui `TestBackend` (the same
 //! render the live TUI uses), then walks the resulting cell buffer — symbol + fg/bg color per
 //! cell — into a self-contained SVG with a monospace grid. Because it uses the production render,
-//! the image cannot drift from what `agg dashboard` actually shows.
+//! the image cannot drift from what `rlt dashboard` actually shows.
 //!
 //! Usage:  cargo run --example dashboard_svg > assets/dashboard.svg
 //! Then rasterize to PNG (crisper in GitHub) with e.g. `magick -density 200 dashboard.svg dashboard.png`.
 
-use agg::ui::dashboard;
-use agg::state::DashboardState;
+use relentless::ui::dashboard;
+use relentless::state::DashboardState;
 use ratatui::style::Color;
 
 const COLS: u16 = 92;

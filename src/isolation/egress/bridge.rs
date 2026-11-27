@@ -1,24 +1,24 @@
 //! The container tier's egress path: an `--internal` network and a one-port RELAY.
 //!
 //! ```text
-//!  worker container ──(agg-egress-<run>: --internal, no route out)──▶ relay :3128
+//!  worker container ──(rlt-egress-<run>: --internal, no route out)──▶ relay :3128
 //!                                                                      │ (default bridge)
 //!                                                                      ▼
-//!                                                  agg's proxy on the host (the allow-list)
+//!                                                  rlt's proxy on the host (the allow-list)
 //! ```
 //!
 //! A container on a Docker `--internal` network has NO default route: a direct connection to any
 //! address — an IP, a DoH resolver, a raw socket — is "network unreachable", and the engine's DNS
 //! does not resolve outside names there (measured: SERVFAIL). The one thing it can reach is the
 //! relay, a container on BOTH networks running busybox `nc` (`-lk -e`: one relay per connection),
-//! which pipes bytes to agg's proxy on the host and decides nothing — the allow-list is enforced in
+//! which pipes bytes to rlt's proxy on the host and decides nothing — the allow-list is enforced in
 //! one place, the proxy. The relay image is the base image the tier already uses (`alpine`).
 //!
 //! The relay reaches the host as `host.docker.internal` where the engine provides it (Docker
 //! Desktop, colima/lima, OrbStack — it maps to the host's loopback, where the proxy listens), and
-//! on a Linux engine at the default bridge's gateway, where agg binds a second listener.
+//! on a Linux engine at the default bridge's gateway, where rlt binds a second listener.
 //!
-//! Every network and container is labelled `agg.egress=<project key>`; a run removes its own when it
+//! Every network and container is labelled `rlt.egress=<project key>`; a run removes its own when it
 //! ends, and removes any a crashed run left behind before it starts.
 
 use std::process::{Command, Stdio};
@@ -41,14 +41,14 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    /// Create the network and the relay to `target:port` (agg's proxy as the relay reaches it).
+    /// Create the network and the relay to `target:port` (rlt's proxy as the relay reaches it).
     /// `key` names the project; leftovers labelled with it are removed first.
     pub fn start(target: &str, port: u16, key: &str) -> Result<Bridge, String> {
         let engine = super::super::container_engine().ok_or("no container engine answers")?;
         sweep(engine, key);
         let id = format!("{key}-{}", std::process::id());
-        let b = Bridge { engine, network: format!("agg-egress-{id}"), relay: format!("agg-egress-relay-{id}") };
-        let label = format!("agg.egress={key}");
+        let b = Bridge { engine, network: format!("rlt-egress-{id}"), relay: format!("rlt-egress-relay-{id}") };
+        let label = format!("rlt.egress={key}");
         run(engine, &["network", "create", "--internal", "--label", &label, &b.network])?;
         let mut args: Vec<String> = ["run", "-d", "--rm", "--name", &b.relay, "--label", &label, "--network", "bridge"].map(String::from).to_vec();
         if target == "host.docker.internal" && cfg!(target_os = "linux") {
@@ -68,7 +68,7 @@ impl Bridge {
         format!("http://{}:{RELAY_PORT}", self.relay)
     }
 
-    /// Wait until the relay answers AND its far end is agg's proxy: a request for a host no
+    /// Wait until the relay answers AND its far end is rlt's proxy: a request for a host no
     /// allow-list holds must come back `403` from the proxy. Anything else in 10 s means the relay
     /// cannot reach the host, and the run is refused rather than started with a dead network.
     fn wait_ready(&self, target: &str, port: u16) -> Result<(), String> {
@@ -87,7 +87,7 @@ impl Bridge {
             std::thread::sleep(Duration::from_millis(200));
         }
         Err(format!(
-            "the egress relay cannot reach agg's proxy at {target}:{port} from inside the engine ({}) — \
+            "the egress relay cannot reach rlt's proxy at {target}:{port} from inside the engine ({}) — \
              the network allow-list cannot be enforced, so the run does not start",
             last.trim()
         ))
@@ -103,7 +103,7 @@ impl Drop for Bridge {
 
 /// Remove every relay and network an earlier run of this project left behind.
 fn sweep(engine: &str, key: &str) {
-    let label = format!("label=agg.egress={key}");
+    let label = format!("label=rlt.egress={key}");
     if let Ok(ids) = output(engine, &["ps", "-aq", "--filter", &label]) {
         for id in ids.split_whitespace() {
             let _ = output(engine, &["rm", "-f", id]);

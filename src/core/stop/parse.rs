@@ -216,7 +216,7 @@ impl<'a> Parser<'a> {
 
         // A subset is only meaningful on an aggregate. Reject it on anything else rather than
         // silently ignoring it — a silent "accepted but ignored" subset is a real footgun in a
-        // user's agg.yaml.
+        // user's rlt.yaml.
         if let Some((s, sub)) = &subset {
             if !matches!(name, "all_goals" | "count_met" | "count_regressed" | "total" | "met_fraction" | "any_regressed") {
                 bail!("`{name}` does not take a subset — `({s})` belongs on an aggregate (count_met, total, met_fraction, all_goals, any_regressed, count_regressed)");

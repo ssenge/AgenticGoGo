@@ -1,4 +1,4 @@
-//! The checks agg runs around every step when the process file asks (A-38): the inputs and outputs
+//! The checks rlt runs around every step when the process file asks (A-38): the inputs and outputs
 //! a step declares (`run.declared`), and the scripts it wrote (`run.scripts_runnable`). Each is a judge whose verdict
 //! goes to the run record like any hook's; a worker runs it as its own check too.
 

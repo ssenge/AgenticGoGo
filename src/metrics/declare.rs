@@ -4,7 +4,7 @@
 //! or the judges' image of a container run) — every problem located.
 
 use super::spec::{self, Declared as Shape, MetricJudge, Scope};
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::core::model::JudgeKind;
 use crate::core::ratchet::{Direction, Ratchet};
 use crate::problem::Problem;
@@ -25,11 +25,11 @@ pub struct Declared {
 
 /// Resolve the declared judges of `cfg`. `run_set` = the judge names the run executes: only those
 /// shape the shared measurements and are probed for. `probe` = whether to call swe-metrics.
-pub fn declare(cfg: &AggConfig, run_set: &[String], config_base: &Path, probe: bool) -> Declared {
+pub fn declare(cfg: &RelentlessConfig, run_set: &[String], config_base: &Path, probe: bool) -> Declared {
     let mut d = Declared::default();
     for (name, o) in &cfg.judges {
         if o.template.is_some() {
-            d.problems.push(Problem::new(format!("judges.{name}"), "a `template:` judge is declared in a process file (`judges:` of `agg process`), not in agg.yaml"));
+            d.problems.push(Problem::new(format!("judges.{name}"), "a `template:` judge is declared in a process file (`judges:` of `rlt process`), not in rlt.yaml"));
             continue;
         }
         let shape = Shape {
@@ -100,7 +100,7 @@ fn implied(kind: Option<&JudgeKind>) -> Option<Direction> {
     }
 }
 
-fn resolve_ratchets(cfg: &AggConfig, d: &mut Declared) {
+fn resolve_ratchets(cfg: &RelentlessConfig, d: &mut Declared) {
     for (name, rc) in &cfg.sequence.ratchet {
         let at = format!("sequence.ratchet.{name}");
         let kind = d.kinds.get(name);
@@ -184,7 +184,7 @@ fn probe_run_set(run_set: &[String], kinds: &BTreeMap<String, JudgeKind>, site: 
 mod tests {
     use super::*;
 
-    fn cfg(judges: &str, ratchet: &str) -> AggConfig {
+    fn cfg(judges: &str, ratchet: &str) -> RelentlessConfig {
         let ratchet = if ratchet.is_empty() { " {}\n".to_string() } else { format!("\n{ratchet}") };
         let body = format!("project: p\njudges:\n{judges}sequence:\n  ratchet:{ratchet}");
         serde_yaml::from_str(&body).unwrap_or_else(|e| panic!("{e}\n{body}"))

@@ -1,8 +1,8 @@
-//! An interrupted session's work, saved under `refs/agg/partial/<run>/<session>` (A-18.3).
+//! An interrupted session's work, saved under `refs/rlt/partial/<run>/<session>` (A-18.3).
 //!
 //! A session that a rate limit or an operator cut short is INCOMPLETE: it is never judged, so it is
 //! never merged — but the work is the operator's, and leaving it in the tree strands it (the next
-//! session would sweep it into its own commit, and a new `agg run` refuses a dirty tree). So it is
+//! session would sweep it into its own commit, and a new `rlt run` refuses a dirty tree). So it is
 //! committed to a ref outside every branch, and the tree goes back to the gated state.
 //!
 //! The commit is built through a THROWAWAY index (`GIT_INDEX_FILE`), so neither the real index nor
@@ -12,16 +12,16 @@ use super::{git, rev_parse};
 use std::path::Path;
 use std::process::Command;
 
-/// agg's runtime state, excluded from every snapshot and every reset — it is not the worker's work.
-const RUNTIME: [&str; 2] = [":(exclude)agg/state/**", ":(exclude)agg/private/**"];
+/// rlt's runtime state, excluded from every snapshot and every reset — it is not the worker's work.
+const RUNTIME: [&str; 2] = [":(exclude)rlt/state/**", ":(exclude)rlt/private/**"];
 
 /// The ref an interrupted session's work is saved under.
 pub fn partial_ref(run: &str, session: u32) -> String {
     let run: String = run.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
-    format!("refs/agg/partial/{run}/{session}")
+    format!("refs/rlt/partial/{run}/{session}")
 }
 
-/// Untracked, non-ignored files in the work tree, agg's runtime state excluded.
+/// Untracked, non-ignored files in the work tree, rlt's runtime state excluded.
 pub fn untracked_files(dir: &Path) -> Vec<String> {
     // `-z`: NUL-separated and unquoted, so a name with a space or a non-ASCII byte comes back as is.
     let mut args = vec!["ls-files", "-z", "--others", "--exclude-standard", "--", "."];
@@ -35,7 +35,7 @@ pub fn untracked_files(dir: &Path) -> Vec<String> {
 
 /// Whether the work tree holds anything a session produced: a tracked or staged change, or an
 /// untracked file that is not in `before` (the files present when the session started). `before:
-/// None` counts every untracked file — after a crash agg no longer knows which were there.
+/// None` counts every untracked file — after a crash rlt no longer knows which were there.
 pub fn has_uncommitted_work(dir: &Path, before: Option<&[String]>) -> bool {
     let mut args = vec!["status", "--porcelain", "--untracked-files=no", "--", "."];
     args.extend(RUNTIME);
@@ -67,7 +67,7 @@ pub fn save_partial(dir: &Path, run: &str, session: u32, head_is_work: bool, bef
 
 /// A commit of the work tree as it stands, parented on `head`, built without touching the index.
 fn snapshot_commit(dir: &Path, head: &str, run: &str, session: u32) -> Option<String> {
-    let (ok, index, _) = git(dir, &["rev-parse", "--git-path", "agg-partial.index"]);
+    let (ok, index, _) = git(dir, &["rev-parse", "--git-path", "rlt-partial.index"]);
     if !ok {
         return None;
     }
@@ -82,13 +82,13 @@ fn snapshot_commit(dir: &Path, head: &str, run: &str, session: u32) -> Option<St
         git_with_index(dir, &index, &["write-tree"])
     });
     let _ = std::fs::remove_file(&index);
-    let msg = format!("agg: partial work of session {session} (run {run}) — interrupted, NOT judged");
+    let msg = format!("rlt: partial work of session {session} (run {run}) — interrupted, NOT judged");
     let mut cmd = Command::new("git");
     cmd.current_dir(dir).args(["commit-tree", &tree?, "-p", head, "-m", &msg]);
-    // A repository without an identity must not cost the operator their work: name agg instead.
+    // A repository without an identity must not cost the operator their work: name rlt instead.
     if git(dir, &["config", "user.email"]).1.is_empty() {
-        cmd.env("GIT_AUTHOR_NAME", "agg").env("GIT_AUTHOR_EMAIL", "agg@localhost");
-        cmd.env("GIT_COMMITTER_NAME", "agg").env("GIT_COMMITTER_EMAIL", "agg@localhost");
+        cmd.env("GIT_AUTHOR_NAME", "rlt").env("GIT_AUTHOR_EMAIL", "rlt@localhost");
+        cmd.env("GIT_COMMITTER_NAME", "rlt").env("GIT_COMMITTER_EMAIL", "rlt@localhost");
     }
     let out = cmd.output().ok().filter(|o| o.status.success())?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -102,8 +102,8 @@ fn git_with_index(dir: &Path, index: &Path, args: &[&str]) -> Option<String> {
 
 /// Put the work tree back to HEAD: unstage, restore every tracked file, and remove the untracked
 /// files that are NOT in `keep` (the ones that existed before the session). `keep: None` leaves
-/// every untracked file alone — the crash path, where agg no longer knows which ones were the
-/// session's. agg's runtime state is never touched.
+/// every untracked file alone — the crash path, where rlt no longer knows which ones were the
+/// session's. rlt's runtime state is never touched.
 pub fn reset_work_tree(dir: &Path, keep: Option<&[String]>) {
     let _ = git(dir, &["reset", "-q", "--", "."]);
     let mut restore = vec!["checkout", "--", "."];

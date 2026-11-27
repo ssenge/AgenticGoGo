@@ -7,15 +7,15 @@ fn tmpdir(tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let d = std::env::temp_dir().join(format!(
-        "agg-memory-{}-{}-{}",
+        "rlt-memory-{}-{}-{}",
         std::process::id(),
         tag,
         N.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = std::fs::remove_dir_all(&d);
-    // BOTH runtime roots: the durable LOG.md is AGG-OWNED (`private/`) while the worker's scratch
+    // BOTH runtime roots: the durable LOG.md is RLT-OWNED (`private/`) while the worker's scratch
     // notes stay in `state/` — the tests write directly to each, so each must exist.
-    std::fs::create_dir_all(crate::paths::agg_dir(&d)).unwrap();
+    std::fs::create_dir_all(crate::paths::rlt_dir(&d)).unwrap();
     std::fs::create_dir_all(crate::paths::private_dir(&d)).unwrap();
     d
 }
@@ -34,7 +34,7 @@ fn delta(id: &str, before: f64, after: f64) -> GoalDelta {
 #[test]
 fn scratch_path_is_session_scoped() {
     let d = Path::new("/proj");
-    assert_eq!(scratch_path(d, 3), Path::new("/proj/agg/state/sessions/session-3.md"));
+    assert_eq!(scratch_path(d, 3), Path::new("/proj/rlt/state/sessions/session-3.md"));
     assert_ne!(scratch_path(d, 3), scratch_path(d, 4));
 }
 

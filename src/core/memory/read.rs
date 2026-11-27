@@ -9,25 +9,25 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// The durable, rolled-up memory file: `agg/private/LOG.md` (was `AGG_MEMORY.md`). Gitignored, so a
+/// The durable, rolled-up memory file: `rlt/private/LOG.md` (was `RLT_MEMORY.md`). Gitignored, so a
 /// machine-managed file never churns the user's git history.
 ///
-/// AGG-OWNED (`private/`, not `state/`): this is the enforced hard-facts audit trail — agg folds
+/// RLT-OWNED (`private/`, not `state/`): this is the enforced hard-facts audit trail — rlt folds
 /// every session's mechanical record into it, and the worker's own contribution arrives as an
 /// explicitly UNTRUSTED scratch note that gets sanitized on the way in ([`scratch_dir`]). A worker
-/// able to edit the trail directly could rewrite the history agg reasons from, bypassing exactly
-/// the sanitizing that makes the note safe. agg injects a slice into every prompt, so the worker
+/// able to edit the trail directly could rewrite the history rlt reasons from, bypassing exactly
+/// the sanitizing that makes the note safe. rlt injects a slice into every prompt, so the worker
 /// reads it without ever touching the file.
 pub fn memory_file(dir: &Path) -> PathBuf {
     crate::paths::private_dir(dir).join("LOG.md")
 }
 
-/// Directory for transient per-session worker scratch notes: `agg/state/sessions/`.
+/// Directory for transient per-session worker scratch notes: `rlt/state/sessions/`.
 pub fn scratch_dir(dir: &Path) -> PathBuf {
-    crate::paths::agg_dir(dir).join("sessions")
+    crate::paths::rlt_dir(dir).join("sessions")
 }
 
-/// The worker's optional scratch note for session `n`: `agg/state/sessions/session-<N>.md`.
+/// The worker's optional scratch note for session `n`: `rlt/state/sessions/session-<N>.md`.
 /// This is the EXACT path the resume prompt tells the worker to write to (no session-id suffix —
 /// the worker can't know its own Claude session id from inside `-p`). Single-writer today; when
 /// parallel workers (Tier C #1) land they add namespacing here.
@@ -35,17 +35,17 @@ pub fn scratch_path(dir: &Path, n: u32) -> PathBuf {
     scratch_dir(dir).join(format!("session-{n}.md"))
 }
 
-/// Ensure `agg/state/sessions/` exists (best-effort). Called before telling the worker where to write
+/// Ensure `rlt/state/sessions/` exists (best-effort). Called before telling the worker where to write
 /// and before reading its note, so memory works WITHOUT git isolation.
 pub fn ensure_scratch_dir(dir: &Path) {
     let _ = std::fs::create_dir_all(scratch_dir(dir));
 }
 
-/// Delete EVERY `session-*.md` scratch note in `agg/state/sessions/` (best-effort). Called once at loop
+/// Delete EVERY `session-*.md` scratch note in `rlt/state/sessions/` (best-effort). Called once at loop
 /// start: the durable `LOG.md` is the only legitimate cross-run carrier, so any scratch
-/// note already on disk is by definition stale — left by a prior `agg run` that crashed before
+/// note already on disk is by definition stale — left by a prior `rlt run` that crashed before
 /// folding it, or written by a worker under a forged/wrong session number. Without this sweep
-/// `agg/state/sessions/` grows unbounded across runs (per-session `clear_scratch` only ever targets the
+/// `rlt/state/sessions/` grows unbounded across runs (per-session `clear_scratch` only ever targets the
 /// CURRENT run's monotonic counter, which resets each process). Sweeping here also hardens the
 /// fold path: a stale forged note can never be mistaken for the current session's learning.
 pub fn sweep_scratch(dir: &Path) {
@@ -60,8 +60,8 @@ pub fn sweep_scratch(dir: &Path) {
 }
 
 /// Delete any stale scratch note for session `n` (best-effort). Called BEFORE launching the
-/// worker for session `n` so a note left by a PRIOR `agg run` (same N) can never be folded as
-/// if it belonged to this run, and AFTER folding so `agg/state/sessions/` does not grow unbounded.
+/// worker for session `n` so a note left by a PRIOR `rlt run` (same N) can never be folded as
+/// if it belonged to this run, and AFTER folding so `rlt/state/sessions/` does not grow unbounded.
 pub fn clear_scratch(dir: &Path, n: u32) {
     let _ = std::fs::remove_file(scratch_path(dir, n));
 }
@@ -107,7 +107,7 @@ pub fn read_block(dir: &Path, last_session: &str, inject_kb: Option<u64>) -> Str
 /// content is UNTRUSTED worker output, so it is:
 ///   - size-capped to `WORKER_NOTE_MAX_BYTES` (a worker can't blow the budget),
 ///   - stripped of control chars except `\n`/`\t`,
-///   - de-fanged of any line mimicking agg's own structural markers (entry sentinel, file
+///   - de-fanged of any line mimicking rlt's own structural markers (entry sentinel, file
 ///     header, the READ-block banners) so a worker can't forge institutional truth or a fake
 ///     operator instruction that the next session reads as real.
 ///

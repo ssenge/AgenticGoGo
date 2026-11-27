@@ -1,45 +1,45 @@
 [package]
-name = "agg"
-version = "0.0.51"
+name = "relentless"
+version = "0.1.0"
 edition = "2021"
-description = "AgenticGoGo — a generic agent loop for Claude Code workers"
+description = "Relentless - The Agentic Workflow Engine"
 authors = ["Sebastian Senge"]
 license = "MIT"
-repository = "https://github.com/ssenge/AgenticGoGo"
-default-run = "agg"
+repository = "https://github.com/ssenge/relentless"
+default-run = "rlt"
 
-# The loop is a library (`agg`) so integration tests in tests/ can drive the pure cores
+# The loop is a library (`relentless`) so integration tests in tests/ can drive the pure cores
 # directly; the binary is a thin CLI over it.
 [lib]
-name = "agg"
+name = "relentless"
 path = "src/lib.rs"
 
 [[bin]]
-name = "agg"
+name = "rlt"
 path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }  # verdict JSON (judge contract) + dashboard state; key order kept so `agg schema` lists fields as declared
-serde_yaml = "0.9"        # agg.yaml (harness + steps + sequence) — the one config file
+serde_json = { version = "1", features = ["preserve_order"] }  # verdict JSON (judge contract) + dashboard state; key order kept so `rlt schema` lists fields as declared
+serde_yaml = "0.9"        # rlt.yaml (harness + steps + sequence) — the one config file
 clap = { version = "4", features = ["derive"] }   # CLI subcommands
 anyhow = "1"              # ergonomic error handling at the boundary
 ratatui = "0.29"          # the live TUI dashboard
 crossterm = "0.28"        # terminal backend for ratatui
-tiny_http = "0.12"        # `agg serve` — the thin JSON API for the standalone web UI (sync, no tokio)
+tiny_http = "0.12"        # `rlt serve` — the thin JSON API for the standalone web UI (sync, no tokio)
 jiff = "0.2.32"
 sha2 = "0.11"             # content hashes of write_deny paths (a security check: no home-made primitive)
 nix = { version = "0.31.3", features = ["signal", "process", "fs"] }  # fs: dup/dup2 for `--report-json`
 signal-hook = "0.4.4"
-serde_path_to_error = "0.1"  # `agg check`: the dotted config path of a parse error
-schemars = "1"            # `agg schema`: the agg.yaml JSON Schema, DERIVED from the config types so it cannot drift
+serde_path_to_error = "0.1"  # `rlt check`: the dotted config path of a parse error
+schemars = "1"            # `rlt schema`: the rlt.yaml JSON Schema, DERIVED from the config types so it cannot drift
 regex = "1"               # scenario mode: fixed patterns over prompts
 fancy-regex = "0.14"      # scenario mode: the scenarios' own patterns (look-around is used) over prompts, questions and record lines
 
 [dev-dependencies]
-assert_cmd = "2"          # drive the built `agg` binary in integration tests
+assert_cmd = "2"          # drive the built `rlt` binary in integration tests
 tempfile = "3"            # throwaway project dirs for integration tests
-jsonschema = { version = "0.58", default-features = false }  # an INDEPENDENT validator proves `agg schema` output
+jsonschema = { version = "0.58", default-features = false }  # an INDEPENDENT validator proves `rlt schema` output
 anyhow = "1"              # the Handler trait's public return type — a plugin crate needs it too
 
 [profile.release]

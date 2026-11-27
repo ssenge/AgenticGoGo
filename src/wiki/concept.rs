@@ -124,10 +124,10 @@ fn check_generated(file: &str, v: &Value, out: &mut Findings) {
 }
 
 /// `verified` is one `{ by, at }` mapping or a list of them (§5.2). In the project's own wiki it is
-/// also a claim nobody made: the worker writes that wiki, and verification is a human act outside agg.
+/// also a claim nobody made: the worker writes that wiki, and verification is a human act outside rlt.
 fn check_verified(file: &str, v: &Value, worker_wiki: bool, out: &mut Findings) {
     if worker_wiki {
-        out.warning(file, "verified.worker", "`verified` in a worker-written wiki: verification is a reviewer's act, and neither agg nor the worker makes it");
+        out.warning(file, "verified.worker", "`verified` in a worker-written wiki: verification is a reviewer's act, and neither rlt nor the worker makes it");
     }
     let entries: Vec<&Value> = match v {
         Value::Sequence(s) => s.iter().collect(),

@@ -11,7 +11,7 @@ use std::path::Path;
 /// agent lacks it — this is not speculative generality.
 ///
 /// A `false` is not a defect to be worked around silently. It is a constraint the loop must
-/// enforce at startup (see [`crate::capability::check`]). Serialized as-is into `agg doctor --json`,
+/// enforce at startup (see [`crate::capability::check`]). Serialized as-is into `rlt doctor --json`,
 /// so a field name here is a stable interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Capabilities {
@@ -25,7 +25,7 @@ pub struct Capabilities {
     ///
     /// A backend that cannot price itself in dollars must say `false` rather than let the spend
     /// guard rot into a no-op — but should then offer [`AgentBackend::spend_ceiling_hint`] if the
-    /// agent can cap itself some other way. (A future agg could carry its own price table keyed by
+    /// agent can cap itself some other way. (A future rlt could carry its own price table keyed by
     /// model; that would be a new capability, not a lie in this one.)
     pub reports_cost_usd: bool,
     /// Can continue a prior session's context. Required by `resume_sessions: true`.
@@ -34,11 +34,11 @@ pub struct Capabilities {
     /// `Step::fork`; without it the step starts fresh.
     pub supports_fork: bool,
     /// Can start a worker with the project's settings only, without the operator's own (plugins, MCP
-    /// servers, hooks, personal instructions). Required by `Agg::user_settings(false)`; without it
+    /// servers, hooks, personal instructions). Required by `Relentless::user_settings(false)`; without it
     /// the worker loads them and the step says so.
     pub supports_project_settings_only: bool,
     /// Can add text to the worker's system prompt, so it holds for the whole session rather than as a
-    /// brief read in its first turn. Used by `Agg::system_prompt`; without it the worker runs without the
+    /// brief read in its first turn. Used by `Relentless::system_prompt`; without it the worker runs without the
     /// text and the step says so.
     pub supports_system_prompt: bool,
     /// Accepts a thinking-effort level. Required by a non-empty `effort:`.
@@ -114,7 +114,7 @@ pub struct SessionSpec<'a> {
     pub user_settings: bool,
     /// text added to the worker's system prompt (only where the backend supports it).
     pub system_prompt: Option<&'a str>,
-    /// operator-supplied extra flags (agg.yaml `worker_args`), passed through verbatim.
+    /// operator-supplied extra flags (rlt.yaml `worker_args`), passed through verbatim.
     pub extra_args: &'a [String],
     /// the project directory the worker runs in.
     pub cwd: &'a Path,

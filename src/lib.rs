@@ -1,7 +1,7 @@
-//! AgenticGoGo (`agg`) — a Ralph-loop harness for Claude Code workers.
+//! Relentless (`rlt`) — a Ralph-loop harness for Claude Code workers.
 //!
 //! This library crate exposes the harness internals so they can be driven from integration
-//! tests (`tests/`) and, in principle, embedded. The `agg` binary (`main.rs`) is a thin CLI
+//! tests (`tests/`) and, in principle, embedded. The `rlt` binary (`main.rs`) is a thin CLI
 //! over these modules.
 //!
 //! # Layout
@@ -60,7 +60,7 @@ pub mod util;
 pub mod wiki;
 pub mod workflow;
 
-/// Everything a Rust driver needs from one `use agg::prelude::*;`.
+/// Everything a Rust driver needs from one `use relentless::prelude::*;`.
 ///
 /// This is the ONE curated surface in an otherwise no-facade crate, and it earns the exception:
 /// a driver is written by a human against a documented API, not by a test reaching into internals,
@@ -69,7 +69,7 @@ pub mod workflow;
 ///
 /// ⚠ It re-exports the SHIPPED types rather than driver-local twins. There is exactly one
 /// [`Limits`](crate::core::config::Limits), one [`Isolation`](crate::isolation::Isolation), one
-/// [`Judge`](crate::core::model::Judge) and one [`Verdict`](crate::core::model::Verdict) in agg; a
+/// [`Judge`](crate::core::model::Judge) and one [`Verdict`](crate::core::model::Verdict) in rlt; a
 /// second definition on the driver path would be a split-brain waiting to drift.
 pub mod prelude {
     pub use crate::core::config::Limits;
@@ -78,7 +78,7 @@ pub mod prelude {
     pub use crate::core::vars::render;
     pub use crate::core::asks::Ask;
     pub use crate::driver::{
-        run, Agg, Agent, AgentSession, Effort, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, Landing,
+        run, Relentless, Agent, AgentSession, Effort, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, Landing,
         OnRegression, Opts, PosFrame, Step, StepOutcome,
     };
     pub use crate::isolation::Isolation;

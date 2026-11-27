@@ -28,9 +28,9 @@ pub struct Process {
     pub dirs: Dirs,
     #[serde(default)]
     pub settings: ProcessSettings,
-    /// run-level options of agg
+    /// run-level options of rlt
     #[serde(default)]
-    pub agg: AggSpec,
+    pub rlt: RltSpec,
     #[serde(default)]
     pub run: RunSpec,
     /// named write-deny lists, referenced by name in `deny:` lists
@@ -44,7 +44,7 @@ pub struct Process {
     pub task_force: Option<TaskForceSpec>,
     #[serde(default)]
     pub ladder: Option<LadderSpec>,
-    /// what `agg serve --process` shows and offers beyond agg's own report
+    /// what `rlt serve --process` shows and offers beyond rlt's own report
     #[serde(default)]
     pub ui: Option<UiSpec>,
     pub phases: Vec<Phase>,
@@ -59,16 +59,16 @@ pub struct UiSpec {
     pub new_project: Option<NewProject>,
     /// a command run in the project with the project's path and the report's kind (`map`, `profile`) as arguments and
     /// the report's JSON on stdin; it prints `{"steps": {<step id>: {<key>: <value>}}, "run": {<key>: <value>}}`, which
-    /// agg merges into each step's `extra` and the report's `extra`
+    /// rlt merges into each step's `extra` and the report's `extra`
     #[serde(default)]
     pub overlay: Option<String>,
 }
 
-/// The new-project form: its fields, and the command that makes the project from them before agg starts its run.
+/// The new-project form: its fields, and the command that makes the project from them before rlt starts its run.
 #[derive(Debug, Clone, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewProject {
-    /// run with the new project's path as its argument and each field as `AGG_FIELD_<NAME>` (upper case) in its
+    /// run with the new project's path as its argument and each field as `RLT_FIELD_<NAME>` (upper case) in its
     /// environment; it creates the folder
     pub command: String,
     #[serde(default)]
@@ -141,7 +141,7 @@ pub struct ProcessSettings {
     /// the project's overlay file (in the project); absent: none
     #[serde(default)]
     pub project: Option<String>,
-    /// keys of the project's file that agg tolerates and ignores
+    /// keys of the project's file that rlt tolerates and ignores
     #[serde(default)]
     pub extra_keys: Vec<String>,
     #[serde(default)]
@@ -171,34 +171,34 @@ pub struct QualitySpec {
     pub scope: Option<String>,
 }
 
-/// Options of the agg run itself.
+/// Options of the rlt run itself.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct AggSpec {
-    /// working memory between sessions (agg's STATE.md, wiki, summary): off by default for a process
+pub struct RltSpec {
+    /// working memory between sessions (rlt's STATE.md, wiki, summary): off by default for a process
     #[serde(default)]
     pub memory: bool,
     /// the operator's own plugins, hooks and connectors in the workers' sessions: off by default
     #[serde(default)]
     pub user_settings: bool,
     /// the keys of the operator's settings `env` block the Claude workers and judges get without loading the rest of
-    /// those settings: `false` (none, the default), `true` (every key) or a list of key names; the environment of agg
+    /// those settings: `false` (none, the default), `true` (every key) or a list of key names; the environment of rlt
     /// itself wins over the file
     #[serde(default)]
     pub user_env: crate::backend::user_env::UserEnv,
     /// one tiny call with the worker's agent and model before the first step, so an unreachable agent stops the run
     /// with its cause before any work (default true)
-    #[serde(default = "AggSpec::on")]
+    #[serde(default = "RltSpec::on")]
     pub preflight: bool,
     /// `annotate` (record a regression, keep the work) or `rollback`
-    #[serde(default = "AggSpec::annotate")]
+    #[serde(default = "RltSpec::annotate")]
     pub on_regression: String,
     /// a judge's time limit, seconds
-    #[serde(default = "AggSpec::timeout")]
+    #[serde(default = "RltSpec::timeout")]
     pub judge_timeout: u64,
 }
 
-impl AggSpec {
+impl RltSpec {
     fn annotate() -> String {
         "annotate".into()
     }
@@ -210,10 +210,10 @@ impl AggSpec {
     }
 }
 
-impl Default for AggSpec {
-    fn default() -> AggSpec {
-        AggSpec { memory: false, user_settings: false, user_env: Default::default(), preflight: true,
-                  on_regression: AggSpec::annotate(), judge_timeout: AggSpec::timeout() }
+impl Default for RltSpec {
+    fn default() -> RltSpec {
+        RltSpec { memory: false, user_settings: false, user_env: Default::default(), preflight: true,
+                  on_regression: RltSpec::annotate(), judge_timeout: RltSpec::timeout() }
     }
 }
 
@@ -226,7 +226,7 @@ pub struct RunSpec {
     /// files `--reset` never takes back
     #[serde(default)]
     pub own: Vec<String>,
-    /// commands before agg opens the project, every run; their last stdout line is logged
+    /// commands before rlt opens the project, every run; their last stdout line is logged
     #[serde(default)]
     pub start: Vec<String>,
     /// a file in the project with `switched_off: { <id>: <why> }`, written by a step
@@ -239,7 +239,7 @@ pub struct RunSpec {
     /// the critic's scope section, with `{{ outputs }}` filled in
     pub critic_scope: Option<super::standing::Text>,
     /// a notes file between steps (A-38): each step reads it first and writes its own section `## <step id>` of at most five
-    /// lines at the end; agg's brief section says so and checks the length after the step
+    /// lines at the end; rlt's brief section says so and checks the length after the step
     pub notes: Option<String>,
     /// the file the reviewers' open points are kept in until the next checkpoint
     pub open_points: Option<String>,
@@ -341,7 +341,7 @@ pub struct HooksSpec {
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskForceSpec {
-    /// agg's default (the goal, how to find the cause, the answer's form), or a file that replaces it, or `{ append: <file> }`
+    /// rlt's default (the goal, how to find the cause, the answer's form), or a file that replaces it, or `{ append: <file> }`
     pub prompt: Option<super::standing::Text>,
     /// re-entries and repairs per failed step
     #[serde(default = "TaskForceSpec::max")]
@@ -353,8 +353,8 @@ pub struct TaskForceSpec {
     /// proposals that go ahead without a human
     #[serde(default)]
     pub trust: Vec<Trust>,
-    /// commands run like a step's checks after a repair in place that met the failed step: `AGG_STEP` (the failed step's
-    /// id) and `AGG_FIX_BASE` (the commit before the repair) are set; an unmet verdict rejects the repair
+    /// commands run like a step's checks after a repair in place that met the failed step: `RLT_STEP` (the failed step's
+    /// id) and `RLT_FIX_BASE` (the commit before the repair) are set; an unmet verdict rejects the repair
     #[serde(default)]
     pub checks: Vec<String>,
 }
@@ -441,7 +441,7 @@ pub struct Step {
     /// a text for the task force's brief when this step fails
     #[serde(default)]
     pub constraints: Option<String>,
-    /// free-form, ignored by agg, handed through by `--list` (descriptions for docs and slides)
+    /// free-form, ignored by rlt, handed through by `--list` (descriptions for docs and slides)
     #[serde(default)]
     #[schemars(with = "Option<serde_json::Value>")]
     pub meta: Option<serde_yaml::Value>,
@@ -651,7 +651,7 @@ mod tests {
     fn a_process_parses_and_a_typo_is_refused() {
         let text = "version: 1\nphases:\n- id: a\n  name: A\n  steps:\n  - { id: s, name: S, kind: script, run: x.sh }\n";
         let p = Process::parse(text).unwrap();
-        assert_eq!((p.phases[0].steps[0].kind, p.dirs.prompts.as_str(), p.agg.judge_timeout), (Kind::Script, "prompts", 3600));
+        assert_eq!((p.phases[0].steps[0].kind, p.dirs.prompts.as_str(), p.rlt.judge_timeout), (Kind::Script, "prompts", 3600));
         let err = Process::parse(&text.replace("run:", "runn:")).unwrap_err().to_string();
         assert!(err.contains("runn"), "{err}");
         assert!(Process::parse(&text.replace("version: 1", "version: 2")).is_err());

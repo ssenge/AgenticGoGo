@@ -1,16 +1,16 @@
-//! The RUN REPORT — `agg/private/report.json`, the one machine-readable answer to "how did it end".
+//! The RUN REPORT — `rlt/private/report.json`, the one machine-readable answer to "how did it end".
 //!
 //! Before this existed, an embedding program had to piece the ending together from the exit code,
 //! `state.json`, `verdicts.jsonl` and `project.json` — all documented as INTERNAL, so any refactor of
-//! agg could break every wrapper. The report is the stable interface instead: versioned, published
+//! rlt could break every wrapper. The report is the stable interface instead: versioned, published
 //! as a JSON Schema (`docs/schemas/report.v3.json`), written atomically, and written on EVERY ending
-//! agg can observe — done, aborted, stopped, an error, and a panic inside agg itself.
+//! rlt can observe — done, aborted, stopped, an error, and a panic inside rlt itself.
 //!
 //! ```text
 //!   mod.rs    the format: `Report` and its parts, `Outcome`, the precedence rule
 //!   build.rs  what the loop records as it runs (`Tally`), and `LoopState` → `Report`
 //!   file.rs   the run handle: stale-report removal, `run_id`, the atomic write
-//!   headless.rs  `--report-json`: logs to `agg/private/run.log`, the report alone on stdout
+//!   headless.rs  `--report-json`: logs to `rlt/private/run.log`, the report alone on stdout
 //! ```
 //!
 //! # Extending it
@@ -45,13 +45,13 @@ pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// A TEST HOOK: fail on purpose at a named point, so the suite can prove an internal fault mid-run
-/// still ends in an `error` report. `AGG_TEST_FAULT=<point>-error` returns an `Err`,
+/// still ends in an `error` report. `RLT_TEST_FAULT=<point>-error` returns an `Err`,
 /// `<point>-panic` panics. Compiled into debug builds only — a release binary has no such switch.
 #[cfg(debug_assertions)]
 pub fn fault_point(point: &str) -> anyhow::Result<()> {
-    match std::env::var("AGG_TEST_FAULT") {
-        Ok(f) if f == format!("{point}-error") => anyhow::bail!("injected fault at {point} (AGG_TEST_FAULT)"),
-        Ok(f) if f == format!("{point}-panic") => panic!("injected panic at {point} (AGG_TEST_FAULT)"),
+    match std::env::var("RLT_TEST_FAULT") {
+        Ok(f) if f == format!("{point}-error") => anyhow::bail!("injected fault at {point} (RLT_TEST_FAULT)"),
+        Ok(f) if f == format!("{point}-panic") => panic!("injected panic at {point} (RLT_TEST_FAULT)"),
         _ => Ok(()),
     }
 }
@@ -70,9 +70,9 @@ pub enum Outcome {
     Done,
     /// `abort_if` fired, or a session cap was reached (exit 3 / 4).
     Aborted,
-    /// an operator ended it: `agg stop`, SIGTERM, SIGINT (exit 5).
+    /// an operator ended it: `rlt stop`, SIGTERM, SIGINT (exit 5).
     Stopped,
-    /// a fault inside agg or its environment — not a verdict about the work (exit 1).
+    /// a fault inside rlt or its environment — not a verdict about the work (exit 1).
     Error,
 }
 
@@ -112,13 +112,13 @@ pub fn decide(stopped: bool, done: bool, aborted: bool) -> Option<Outcome> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub schema_version: u32,
-    pub agg_version: String,
-    /// fresh per run; also written to `agg/private/run.log`, so a reader can never mistake the
+    pub rlt_version: String,
+    /// fresh per run; also written to `rlt/private/run.log`, so a reader can never mistake the
     /// previous run's report for this one's.
     pub run_id: String,
     pub project: String,
     pub outcome: Outcome,
-    /// the process exit code `agg run` returns with this report.
+    /// the process exit code `rlt run` returns with this report.
     pub exit_code: u8,
     /// human-readable: which `abort_if` term fired, the cap, the stop reason, the error.
     pub stop_reason: String,
@@ -151,7 +151,7 @@ pub struct Report {
 /// operator's own settings they got. Names only — a value never reaches the report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
-    pub agg_version: String,
+    pub rlt_version: String,
     /// `project,local` (the operator's own settings left out) or `all`.
     pub setting_sources: String,
     /// the keys of the operator's settings `env` block the Claude workers and judges got (`user_env`).
@@ -170,7 +170,7 @@ pub struct Sessions {
     pub no_improvement: u32,
     /// sessions that changed nothing git-visible, so there was nothing to merge (an idle worker, or
     /// a step whose whole output is gitignored worker state). Defaults to 0 when read from a live
-    /// state an older agg wrote.
+    /// state an older rlt wrote.
     #[serde(default)]
     pub no_changes: u32,
     /// sessions staged on a span that no gate ever decided — the work is on `result.staged_branch`.
@@ -196,7 +196,7 @@ pub struct JudgeEntry {
     pub ratchet: Option<RatchetView>,
 }
 
-/// A verdict as the report states it: the judge contract, with `evidence` naming agg's KEPT copies
+/// A verdict as the report states it: the judge contract, with `evidence` naming rlt's KEPT copies
 /// rather than the paths the judge declared (those pointed into a scratch that does not last).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VerdictView {
@@ -208,7 +208,7 @@ pub struct VerdictView {
     pub rationale: String,
     /// set when the judge could not grade at all, as distinct from "not met".
     pub error: Option<String>,
-    /// absolute paths of the evidence files agg kept for this verdict, under `paths.evidence_dir`.
+    /// absolute paths of the evidence files rlt kept for this verdict, under `paths.evidence_dir`.
     /// Omitted when none were kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
@@ -258,7 +258,7 @@ pub struct Paths {
     /// the per-gate verdict ledger. Its ROW FORMAT is internal; the path is given for auditing.
     pub ledger: String,
     pub log: String,
-    /// this run's kept judge evidence (`agg/private/evidence/<run_id>`); `null` when none was kept.
+    /// this run's kept judge evidence (`rlt/private/evidence/<run_id>`); `null` when none was kept.
     pub evidence_dir: Option<String>,
 }
 

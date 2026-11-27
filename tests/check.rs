@@ -1,4 +1,4 @@
-//! `agg check` and `agg doctor --json`, driven through the real binary.
+//! `rlt check` and `rlt doctor --json`, driven through the real binary.
 //!
 //! PATH holds ONLY a private `bin/` with a fake `claude`, so the host is fully controlled: no
 //! `sandbox-exec`/`bwrap` (the sandbox tier is unavailable), no `docker`/`podman` (no container
@@ -35,15 +35,15 @@ fn project(cfg: &str) -> (tempfile::TempDir, String) {
         "bin/claude",
         "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo 'fake-claude 9.9.9'; exit 0; }\n: > agent_ran\nexit 0\n",
     );
-    write(dir, "agg/judges/goal.sh", "#!/bin/sh\n: > judge_ran\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}'\n");
-    write(dir, "agg/state/STATE.md", "next\n");
-    write(dir, "agg/agg.yaml", cfg);
+    write(dir, "rlt/judges/goal.sh", "#!/bin/sh\n: > judge_ran\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}'\n");
+    write(dir, "rlt/state/STATE.md", "next\n");
+    write(dir, "rlt/rlt.yaml", cfg);
     let path = dir.join("bin").display().to_string();
     (tmp, path)
 }
 
-fn agg(dir: &Path, path: &str, args: &[&str]) -> Output {
-    Command::cargo_bin("agg")
+fn rlt(dir: &Path, path: &str, args: &[&str]) -> Output {
+    Command::cargo_bin("rlt")
         .unwrap()
         .current_dir(dir)
         .env("PATH", path)
@@ -82,7 +82,7 @@ const ALL_THREE: &str = "project: \"p\"\ndefaults: { agnet: \"claude\" }\nsummar
 fn check_json_returns_every_problem_at_once_and_runs_nothing() {
     let (tmp, path) = project(ALL_THREE);
     let dir = tmp.path();
-    let out = agg(dir, &path, &["check", "--json"]);
+    let out = rlt(dir, &path, &["check", "--json"]);
     assert_eq!(out.status.code(), Some(1), "problems must exit non-zero");
     let v = json(&out);
     assert_eq!(v["schema_version"], 1);
@@ -93,18 +93,18 @@ fn check_json_returns_every_problem_at_once_and_runs_nothing() {
 }
 
 /// "the same messages startup would give": each single fault's `check` message appears verbatim in
-/// what `agg run` refuses with.
+/// what `rlt run` refuses with.
 #[test]
 fn each_check_message_is_what_startup_says() {
     for (cfg, at) in [(BAD_KEY, "defaults.agnet"), (BAD_JUDGE, "sequence.done_if"), (BAD_TIER, "steps.worker.isolation")] {
         let (tmp, path) = project(cfg);
-        let v = json(&agg(tmp.path(), &path, &["check", "--json"]));
+        let v = json(&rlt(tmp.path(), &path, &["check", "--json"]));
         assert_eq!(problem_paths(&v), [at], "exactly one problem for this fixture: {v}");
         let msg = v["problems"][0]["message"].as_str().unwrap();
 
-        let run = agg(tmp.path(), &path, &["run", "--max-sessions", "1"]);
+        let run = rlt(tmp.path(), &path, &["run", "--max-sessions", "1"]);
         let err = String::from_utf8_lossy(&run.stderr);
-        assert!(!run.status.success(), "`agg run` must refuse this config too");
+        assert!(!run.status.success(), "`rlt run` must refuse this config too");
         assert!(err.contains(msg), "startup must say what check says.\n check: {msg}\n run:   {err}");
     }
 }
@@ -113,13 +113,13 @@ fn each_check_message_is_what_startup_says() {
 fn check_passes_a_good_config_and_runs_nothing() {
     let (tmp, path) = project(GOOD);
     let dir = tmp.path();
-    let out = agg(dir, &path, &["check", "--json"]);
+    let out = rlt(dir, &path, &["check", "--json"]);
     let v = json(&out);
     assert_eq!(out.status.code(), Some(0), "{v}");
     assert_eq!(v["ok"], true);
     assert!(v["problems"].as_array().unwrap().is_empty());
 
-    let out = agg(dir, &path, &["check"]);
+    let out = rlt(dir, &path, &["check"]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("1 judge(s) resolve"));
     assert!(!dir.join("judge_ran").exists() && !dir.join("agent_ran").exists(), "check must run nothing");
@@ -129,7 +129,7 @@ fn check_passes_a_good_config_and_runs_nothing() {
 #[test]
 fn check_human_mode_lists_every_problem_and_exits_1() {
     let (tmp, path) = project(ALL_THREE);
-    let out = agg(tmp.path(), &path, &["check"]);
+    let out = rlt(tmp.path(), &path, &["check"]);
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
     for want in ["✗ defaults.agnet: unknown field `agnet`", "✗ sequence.done_if:", "✗ steps.worker.isolation:", "3 problem(s)"] {
@@ -137,23 +137,23 @@ fn check_human_mode_lists_every_problem_and_exits_1() {
     }
 }
 
-/// A missing agent CLI is a startup refusal too (`agg run` preflights every agent it names).
+/// A missing agent CLI is a startup refusal too (`rlt run` preflights every agent it names).
 #[test]
 fn check_reports_a_missing_agent_cli_at_the_key_that_chose_it() {
     let (tmp, path) = project(&GOOD.replace("steps: { worker: {} }", "steps: { worker: { agent: \"codex\" } }"));
-    let v = json(&agg(tmp.path(), &path, &["check", "--json"]));
+    let v = json(&rlt(tmp.path(), &path, &["check", "--json"]));
     assert_eq!(problem_paths(&v), ["steps.worker.agent"], "{v}");
 }
 
 #[test]
 fn check_without_a_config_is_one_root_problem() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = agg(tmp.path(), "/nonexistent", &["check", "--json"]);
+    let out = rlt(tmp.path(), "/nonexistent", &["check", "--json"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(problem_paths(&json(&out)), [""]);
 }
 
-// ── agg doctor --json ──────────────────────────────────────────────────────────────────────────
+// ── rlt doctor --json ──────────────────────────────────────────────────────────────────────────
 
 /// A complete setup: ok, the fake agent found at its path with its version and capability flags,
 /// the other backends reported as absent, and this PATH-starved host offering only `none`.
@@ -161,11 +161,11 @@ fn check_without_a_config_is_one_root_problem() {
 fn doctor_json_reports_backends_tiers_and_ok() {
     let (tmp, path) = project(GOOD);
     let dir = tmp.path();
-    let out = agg(dir, &path, &["doctor", "--json"]);
+    let out = rlt(dir, &path, &["doctor", "--json"]);
     let v = json(&out);
     assert_eq!(out.status.code(), Some(0), "{v:#}");
     assert_eq!(v["schema_version"], 1);
-    assert_eq!(v["agg_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["rlt_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(v["ok"], true);
     assert_eq!(v["config"]["valid"], true);
     assert_eq!(v["config"]["judges"], 1);
@@ -194,7 +194,7 @@ fn doctor_json_reports_backends_tiers_and_ok() {
 #[test]
 fn doctor_json_flags_an_unavailable_requested_tier() {
     let (tmp, path) = project(BAD_TIER);
-    let out = agg(tmp.path(), &path, &["doctor", "--json"]);
+    let out = rlt(tmp.path(), &path, &["doctor", "--json"]);
     let v = json(&out);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(v["ok"], false);
@@ -206,13 +206,13 @@ fn doctor_json_flags_an_unavailable_requested_tier() {
 #[test]
 fn doctor_json_flags_a_missing_state_file_and_a_missing_config() {
     let (tmp, path) = project(GOOD);
-    fs::remove_file(tmp.path().join("agg/state/STATE.md")).unwrap();
-    let v = json(&agg(tmp.path(), &path, &["doctor", "--json"]));
+    fs::remove_file(tmp.path().join("rlt/state/STATE.md")).unwrap();
+    let v = json(&rlt(tmp.path(), &path, &["doctor", "--json"]));
     assert_eq!(problem_paths(&v), ["defaults.state"]);
     assert_eq!(v["config"]["valid"], true, "a missing state file is not a config error");
 
     let empty = tempfile::tempdir().unwrap();
-    let out = agg(empty.path(), &path, &["doctor", "--json"]);
+    let out = rlt(empty.path(), &path, &["doctor", "--json"]);
     let v = json(&out);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!((v["config"]["found"].as_bool(), v["ok"].as_bool()), (Some(false), Some(false)));
@@ -224,7 +224,7 @@ fn doctor_json_names_a_running_container_engine() {
     let (tmp, path) = project(&GOOD.replace("steps: { worker: {} }", "steps: { worker: { isolation: \"container\" } }"));
     // the fake engine answers `docker version` and the startup probe (the image has the CLI).
     write(tmp.path(), "bin/docker", "#!/bin/sh\ncase \"$*\" in *\"command -v claude\"*) echo 'BIN claude fake-claude 9.9.9';; esac\nexit 0\n");
-    let out = agg(tmp.path(), &path, &["doctor", "--json"]);
+    let out = rlt(tmp.path(), &path, &["doctor", "--json"]);
     let v = json(&out);
     assert_eq!(out.status.code(), Some(0), "{v:#}");
     assert_eq!(v["container_engine"], "docker");
@@ -240,9 +240,9 @@ fn doctor_json_names_a_running_container_engine() {
 fn a_container_image_without_the_agents_cli_is_refused() {
     let (tmp, path) = project(&GOOD.replace("steps: { worker: {} }", "steps: { worker: { isolation: \"container\", image: \"plain:1\" } }"));
     write(tmp.path(), "bin/docker", "#!/bin/sh\ncase \"$*\" in *\"command -v claude\"*) echo 'NOBIN claude';; esac\nexit 0\n");
-    let v = json(&agg(tmp.path(), &path, &["check", "--json"]));
+    let v = json(&rlt(tmp.path(), &path, &["check", "--json"]));
     assert!(problem_paths(&v).contains(&"steps.worker.image".to_string()), "{v:#}");
-    let d = json(&agg(tmp.path(), &path, &["doctor", "--json"]));
+    let d = json(&rlt(tmp.path(), &path, &["doctor", "--json"]));
     assert!(d["container_images"][0]["clis"]["claude"].is_null(), "{d:#}");
     assert_eq!(d["ok"], false);
 }

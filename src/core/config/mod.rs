@@ -1,4 +1,4 @@
-//! Configuration loading: `agg.yaml` (harness + steps + sequence). One file now — `goals.yaml`
+//! Configuration loading: `rlt.yaml` (harness + steps + sequence). One file now — `goals.yaml`
 //! is DELETED (§7.1): a judge IS a goal, resolved by name from disk.
 //!
 //! `#[serde(deny_unknown_fields)]` is on EVERY struct here (§4.1): without it a stale top-level
@@ -6,9 +6,9 @@
 //! a decorative key. That guard is also what makes "any other key in a step body (esp `judge_*`) is
 //! a HARD ERROR" true.
 //!
-//! This module is the SERDE SHAPE: every `agg.yaml` struct, its `Default`, and the `default_*`
+//! This module is the SERDE SHAPE: every `rlt.yaml` struct, its `Default`, and the `default_*`
 //! helper fns (which must live beside the structs that name them in `#[serde(default = "…")]`),
-//! plus [`ResolvedStep`]. The `impl AggConfig` behaviour (backends, step resolution, load + env
+//! plus [`ResolvedStep`]. The `impl RelentlessConfig` behaviour (backends, step resolution, load + env
 //! overrides) lives in the `methods` submodule.
 
 use crate::backend::{for_name, AgentBackend};
@@ -20,10 +20,10 @@ use std::sync::Arc;
 
 mod methods;
 
-/// Harness configuration (`agg.yaml`).
+/// Harness configuration (`rlt.yaml`).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct AggConfig {
+pub struct RelentlessConfig {
     pub project: String,
 
     /// Inherited by EVERY step; a step may override any of these (§4).
@@ -48,8 +48,8 @@ pub struct AggConfig {
     pub steps: BTreeMap<String, StepBody>,
 
     /// The repeating list of steps + the run-level ceilings/DoD. `#[serde(default)]` because an
-    /// `agg.yaml` may legitimately declare no flow at all — that is a Rust-DRIVER project, whose
-    /// steps are `agg.step(&s)` calls (BUILD.md §3.6).
+    /// `rlt.yaml` may legitimately declare no flow at all — that is a Rust-DRIVER project, whose
+    /// steps are `rlt.step(&s)` calls (BUILD.md §3.6).
     #[serde(default)]
     pub sequence: Sequence,
 
@@ -61,7 +61,7 @@ pub struct AggConfig {
     #[serde(default = "default_backoff")]
     pub ratelimit_backoff_secs: u64,
     /// The least time between a rate-limited attempt and the next one, in seconds (A-18.2). An
-    /// early `agg send wake` waits this out instead of hammering the provider. A robustness
+    /// early `rlt send wake` waits this out instead of hammering the provider. A robustness
     /// interval, not a limit: nothing about the run ends because of it.
     #[serde(default = "default_min_gap")]
     pub ratelimit_min_gap_secs: u64,
@@ -76,18 +76,18 @@ pub struct AggConfig {
     #[serde(default)]
     pub session_isolation: SessionIsolation,
     /// The standing project-instructions file the session brief POINTS AT, relative to the PROJECT
-    /// dir. Default `agg/AGG.md` — today's hardcoded path, now nameable.
+    /// dir. Default `rlt/RLT.md` — today's hardcoded path, now nameable.
     ///
-    /// ⚠ agg never reads its bytes. It checks `.exists()` and emits "Read `<path>`" into the brief;
+    /// ⚠ rlt never reads its bytes. It checks `.exists()` and emits "Read `<path>`" into the brief;
     /// a file that is not there produces no pointer at all. That is what makes it safe for the file
-    /// to be arbitrarily long — it never enters agg's context budget.
+    /// to be arbitrarily long — it never enters rlt's context budget.
     ///
     /// ADDITIVE, like `limits.wall_hours`: a config written before this key existed still parses.
     #[serde(default = "default_instructions")]
     pub instructions: String,
     /// READ-ONLY context directories from outside the project — a knowledge base, reference
     /// material, another repository's docs. Each is readable and never writable by the worker and
-    /// its judges; the brief lists them. agg does not interpret their contents.
+    /// its judges; the brief lists them. rlt does not interpret their contents.
     ///
     /// Needs a confining tier on EVERY step: under `none` nothing stops a write, so a run that
     /// names a context and has an unconfined step is refused at startup ([`crate::isolation::context`]).
@@ -104,12 +104,12 @@ pub struct AggConfig {
 #[serde(deny_unknown_fields)]
 pub struct IsolationPolicy {
     /// network EGRESS: `open` (the default — no policy) or `{ allow: [host[:port], …] }`, which
-    /// confines every confined process of the run to those destinations through agg's own proxy
+    /// confines every confined process of the run to those destinations through rlt's own proxy
     /// ([`crate::isolation::egress`]). Needs a tier that can enforce it on every step (`container`
     /// anywhere, `sandbox` on macOS), and the agents' own API endpoints in the list.
     #[serde(default)]
     pub network: crate::isolation::egress::Network,
-    /// environment variables passed INTO every container by NAME, when set in agg's environment
+    /// environment variables passed INTO every container by NAME, when set in rlt's environment
     /// (a token a judge's tooling needs, a proxy setting). The value never appears on a command
     /// line, in a log, a ledger or the report. Each agent's own credential variables
     /// (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, …) are passed without being listed here.
@@ -128,10 +128,10 @@ pub struct IsolationPolicy {
 #[serde(deny_unknown_fields)]
 pub struct ContextDir {
     /// the directory: absolute, `~/`-relative, or relative to the PROJECT dir. It must exist, and it
-    /// may not overlap the project (which also covers `agg/private/`).
+    /// may not overlap the project (which also covers `rlt/private/`).
     pub path: String,
     /// a short name — `[a-z0-9][a-z0-9_-]*`, unique. Under `isolation: container` the directory is
-    /// mounted read-only at `/context/<as>`; every confined process also gets `AGG_CONTEXT_<AS>`.
+    /// mounted read-only at `/context/<as>`; every confined process also gets `RLT_CONTEXT_<AS>`.
     #[serde(rename = "as")]
     pub name: String,
     /// only `ro` exists: a context is never writable. Spelled out so a config that says so is
@@ -165,8 +165,8 @@ pub struct Defaults {
     /// the sandbox constraint — inheritable, so an operator sets it once (§4.1).
     #[serde(default)]
     pub worker_args: Vec<String>,
-    /// the forward state file (`state/STATE.md`), resolved against `agg/`; the AGENT writes it
-    /// best-effort (§5.6). Under the gitignored `agg/state/`, so a worker's forward advice survives
+    /// the forward state file (`state/STATE.md`), resolved against `rlt/`; the AGENT writes it
+    /// best-effort (§5.6). Under the gitignored `rlt/state/`, so a worker's forward advice survives
     /// a session rollback (the code attempt is thrown away, the advice about it is not).
     #[serde(default = "default_state")]
     pub state: String,
@@ -175,9 +175,9 @@ pub struct Defaults {
     /// no Rust (this replaced the hardcoded `enum Role` red-team arm). `None` = no role section.
     #[serde(default)]
     pub role_prompt: Option<String>,
-    /// [`Self::role_prompt`], read from a FILE at every session start (relative to `agg/`, or
+    /// [`Self::role_prompt`], read from a FILE at every session start (relative to `rlt/`, or
     /// absolute) — so an edit applies from the next session, and its hash lands in
-    /// `agg/private/prompts.jsonl`. An alternative to `role_prompt`: setting both is a startup error.
+    /// `rlt/private/prompts.jsonl`. An alternative to `role_prompt`: setting both is a startup error.
     #[serde(default)]
     pub role_prompt_file: Option<String>,
     /// blast-radius isolation (`none` | `sandbox` | `container`) — the jail around the worker
@@ -229,13 +229,13 @@ pub struct JudgeCfg {
     /// EVERY judge's timeout, script and LLM alike (seconds).
     #[serde(default = "default_judge_timeout")]
     pub timeout: u64,
-    /// the most evidence (MiB) agg copies into `agg/private/evidence/` in ONE run. A disk bound,
+    /// the most evidence (MiB) rlt copies into `rlt/private/evidence/` in ONE run. A disk bound,
     /// not a run limit: a file that does not fit is skipped and recorded, and the run goes on.
     #[serde(default = "default_evidence_max_mb")]
     pub evidence_max_mb: u64,
     /// the image every judge runs in when the run's strongest tier is `container` — script judges
     /// and the ruler's LLM judges alike. `None` = `defaults.image`, else the one image the container
-    /// steps share; several different ones with neither key set is refused (agg will not guess
+    /// steps share; several different ones with neither key set is refused (rlt will not guess
     /// which toolchain your judges need).
     #[serde(default)]
     pub image: Option<String>,
@@ -261,7 +261,7 @@ impl Default for JudgeCfg {
 /// `timeout` survived the 2026-08-04 owner simplification that cut the judge-level `gate:`/`when:`
 /// because it is neither flow nor gating: a judge that takes longer than the run-level 300s (a load
 /// test, an e2e suite) simply DIES without it. A metric/score judge is declared here because it has
-/// no script to put in `agg/judges/` — the measuring is agg's (one shared `swe-metrics measure` per
+/// no script to put in `rlt/judges/` — the measuring is rlt's (one shared `swe-metrics measure` per
 /// session), and only the selector and the threshold are the project's. Only judges needing
 /// non-default config appear here, which is why the map is `#[serde(default)]` and usually absent.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -342,7 +342,7 @@ pub struct StepBody {
     /// ADDITIVE to the composed prompt (§5.6), never replacing.
     #[serde(default)]
     pub prompt: Option<String>,
-    /// `prompt` from a file (relative to `agg/`, or absolute), read at every session start. An
+    /// `prompt` from a file (relative to `rlt/`, or absolute), read at every session start. An
     /// alternative to `prompt`: setting both is a startup error.
     #[serde(default)]
     pub prompt_file: Option<String>,
@@ -357,17 +357,17 @@ pub struct StepBody {
     #[serde(default)]
     pub image: Option<String>,
     /// project-relative paths this step may READ but not WRITE — extra denies handed to the OS
-    /// wrapper on top of the derived `agg/private/` carve-out.
+    /// wrapper on top of the derived `rlt/private/` carve-out.
     ///
     /// ⚠ **Inert without a confining tier.** The deny list is delivered by the wrapper, and the
     /// wrapper only runs under `isolation: sandbox`/`container`; under the default `none` there is
-    /// no mechanism to deliver it to and the step can write every path listed. agg warns; it does
+    /// no mechanism to deliver it to and the step can write every path listed. rlt warns; it does
     /// not silently pretend.
     #[serde(default)]
     pub readonly: Vec<String>,
     /// paths SUBTRACTED from [`Self::readonly`] — how a step re-grants exactly one of the denies it
     /// would otherwise carry. Matching is exact on the normalised spelling
-    /// ([`crate::isolation::normalize_path`]), so `agg/judges` and `agg/judges/` are one path.
+    /// ([`crate::isolation::normalize_path`]), so `rlt/judges` and `rlt/judges/` are one path.
     #[serde(default)]
     pub writable: Vec<String>,
     /// MORE protected paths for this step, ADDED to `defaults.write_deny` (union). `writable:` never
@@ -531,16 +531,16 @@ impl Default for Sequence {
     }
 }
 
-/// The DRIVER's starting config — every key at exactly the value an `agg.yaml` that mentioned
+/// The DRIVER's starting config — every key at exactly the value an `rlt.yaml` that mentioned
 /// nothing would deserialize to, with an EMPTY `sequence.steps` (which is what marks a project as
 /// driver-driven, BUILD.md §3.6) and an empty `project` for the caller to name.
 ///
 /// The YAML path never reaches this: it always deserializes a real file. It exists because
-/// `Agg::open` must produce a config the builder chain can fill, and `AggConfig::load` is the one
-/// thing the driver path must NOT do — a stray `agg.yaml` in a driver project is IGNORED.
-impl Default for AggConfig {
+/// `Relentless::open` must produce a config the builder chain can fill, and `RelentlessConfig::load` is the one
+/// thing the driver path must NOT do — a stray `rlt.yaml` in a driver project is IGNORED.
+impl Default for RelentlessConfig {
     fn default() -> Self {
-        AggConfig {
+        RelentlessConfig {
             project: String::new(),
             defaults: Defaults::default(),
             judge: JudgeCfg::default(),
@@ -568,7 +568,7 @@ impl Default for AggConfig {
 #[serde(deny_unknown_fields)]
 pub struct NotifyCfg {
     /// shell commands, run exactly like a hook — best-effort, non-fatal, in the step's jail. Each
-    /// string may contain `{{reason}}` / `{{project}}` / `{{session}}` / `{{step}}`, which agg
+    /// string may contain `{{reason}}` / `{{project}}` / `{{session}}` / `{{step}}`, which rlt
     /// substitutes SHELL-QUOTED (§12.4) — do not add quotes of your own around a placeholder.
     #[serde(default)]
     pub cmd: Vec<String>,
@@ -653,8 +653,8 @@ impl Default for Watchdog {
 /// those values moved here; the grammar terms and state.json field names did NOT change.
 ///
 /// ONE struct, shared by both entry points: the YAML path reads it out of `sequence.limits:`, and a
-/// Rust driver hands the same value to `Agg::limits(..)`. That is why [`Limits::wall_hours`] is a
-/// valid `agg.yaml` key even though only the driver path enforces it — a second, driver-only limits
+/// Rust driver hands the same value to `Relentless::limits(..)`. That is why [`Limits::wall_hours`] is a
+/// valid `rlt.yaml` key even though only the driver path enforces it — a second, driver-only limits
 /// struct would have to be kept in sync with this one forever, for no gain.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -720,13 +720,13 @@ fn default_state() -> String {
     "state/STATE.md".into()
 }
 fn default_instructions() -> String {
-    format!("{}/AGG.md", crate::paths::CONFIG_DIR)
+    format!("{}/RLT.md", crate::paths::CONFIG_DIR)
 }
 fn default_branch_prefix() -> String {
-    "agg".into()
+    "rlt".into()
 }
 fn default_red_file() -> String {
-    ".agg_red".into()
+    ".rlt_red".into()
 }
 fn default_heartbeat() -> u64 {
     30
@@ -807,10 +807,10 @@ pub struct ResolvedStep {
     /// what is new for this attempt, for the opening message of a session that continues the step's own
     /// (`Step::news`). Always `None` on the YAML path, and for a fresh or forked session.
     pub news: Option<String>,
-    /// whether the worker loads the operator's own agent settings (`Agg::user_settings`). Always
+    /// whether the worker loads the operator's own agent settings (`Relentless::user_settings`). Always
     /// `true` on the YAML path.
     pub user_settings: bool,
-    /// text the worker's agent adds to its system prompt (`Agg::system_prompt`), only where it can.
+    /// text the worker's agent adds to its system prompt (`Relentless::system_prompt`), only where it can.
     /// Always `None` on the YAML path.
     pub system_prompt: Option<String>,
     pub role_prompt: Option<String>,
@@ -876,7 +876,7 @@ impl ResolvedStep {
 
     /// The paths this step may NOT write: `readonly` minus `writable`
     /// ([`crate::isolation::denied_paths`]). Handed to the wrapper as a SECOND argument beside its
-    /// derived `agg/private/` carve-out — never as a replacement for it.
+    /// derived `rlt/private/` carve-out — never as a replacement for it.
     pub fn denied(&self) -> Vec<String> {
         crate::isolation::denied_paths(&self.readonly, &self.writable)
     }

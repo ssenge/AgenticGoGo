@@ -2,20 +2,20 @@
 
 use anyhow::Result;
 
-use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LifecycleEvent, LoopState, RunOutcome};
+use crate::loop_::{RLTScratch, RLTState, Flow, Handler, LifecycleEvent, LoopState, RunOutcome};
 
 /// Institutional memory: the post-judge refinement fold. Gated on the floor fold (`scratch.mem_folded`)
 /// and reads `scratch.rolled_back` + the summary — exactly the old post-judge fold.
 pub struct RefineFold;
 impl Handler for RefineFold {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        if !(ctx.cfg.memory.enabled && ctx.scratch.get::<AGGScratch>().mem_folded) {
+        if !(ctx.cfg.memory.enabled && ctx.scratch.get::<RLTScratch>().mem_folded) {
             return Ok(Flow::Continue);
         }
-        let outcome = ctx.scratch.get::<AGGScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
-        let deltas = ctx.scratch.get::<AGGScratch>().res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
-        let rolled_back = ctx.scratch.get::<AGGScratch>().rolled_back;
-        let summarized_this_cycle = ctx.scratch.get::<AGGScratch>().summarized_this_cycle;
+        let outcome = ctx.scratch.get::<RLTScratch>().outcome.clone().expect("LaunchWorker set scratch.outcome");
+        let deltas = ctx.scratch.get::<RLTScratch>().res.as_ref().map(|r| r.deltas.clone()).unwrap_or_default();
+        let rolled_back = ctx.scratch.get::<RLTScratch>().rolled_back;
+        let summarized_this_cycle = ctx.scratch.get::<RLTScratch>().summarized_this_cycle;
         let scoreboard = ctx.eng.scoreboard();
         let ended = crate::util::now_epoch();
         let mut mech = crate::core::memory::mechanical_note(
@@ -23,7 +23,7 @@ impl Handler for RefineFold {
             outcome.duration_secs, ended.saturating_sub(outcome.duration_secs), ended,
             &scoreboard, &deltas,
         );
-        if ctx.scratch.get::<AGGScratch>().no_improvement {
+        if ctx.scratch.get::<RLTScratch>().no_improvement {
             mech = format!(
                 "session NOT MERGED — no_improvement: nothing regressed, but no goal and no ratchet \
                  improved either; the work below is NOT on the base branch.\n{mech}"
@@ -50,7 +50,7 @@ impl Handler for RefineFold {
             &ctx.dir, ctx.session, source, &body, ctx.cfg.memory.max_kb, true,
         );
         crate::core::memory::clear_scratch(&ctx.dir, ctx.session);
-        ctx.ext.get::<AGGState>().memory.last_session =
+        ctx.ext.get::<RLTState>().memory.last_session =
             crate::core::memory::last_session_block(&deltas, &scoreboard);
         eprintln!("  [memory] session #{} folded ({source}); LOG.md {} B", ctx.session, ctx.dash.memory_bytes);
         ctx.publish();
@@ -68,9 +68,9 @@ pub struct CheckRunStop;
 impl Handler for CheckRunStop {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         use crate::report::Outcome;
-        let res = ctx.scratch.get::<AGGScratch>().res.take().expect("an on_verify handler set scratch.res");
+        let res = ctx.scratch.get::<RLTScratch>().res.take().expect("an on_verify handler set scratch.res");
         // Everything that holds at this session end, decided by ONE rule (`report::decide`): a stop
-        // beats done beats aborted. A signal or a queued `agg stop` that arrived mid-session is
+        // beats done beats aborted. A signal or a queued `rlt stop` that arrived mid-session is
         // honoured HERE rather than a session later — or a run its operator stopped could still be
         // reported as `done`/`aborted`.
         let interrupted = crate::os::signals::interrupted();
@@ -113,11 +113,11 @@ impl Handler for CheckRunStop {
 /// THE UNGATED-SPAN WARNING (BUILD.md §3.10): the run is over with work still staged and never
 /// gated, so the base branch does not have it.
 ///
-/// Pure, and separate from [`report_stranded_span`], for two reasons: the driver's `Drop for Agg`
+/// Pure, and separate from [`report_stranded_span`], for two reasons: the driver's `Drop for Relentless`
 /// needs the same sentence the YAML path's abort prints, and a test must be able to assert the exact
 /// text against the state a real run ended in rather than one it reconstructed.
 ///
-/// ⛔ **agg never auto-merges** — landing work the operator never gated is a call agg was not given
+/// ⛔ **rlt never auto-merges** — landing work the operator never gated is a call rlt was not given
 /// — and **never auto-rolls-back**: discarding an overnight run over a late regression is far worse
 /// than keeping it. So the only honest action is to say precisely where the work is and how to land
 /// it, naming the TIP (which descends from every other branch in the span, so one merge takes all of
@@ -135,9 +135,9 @@ pub fn stranded_span_message(span_branches: &[String], span_tip: Option<&str>, b
 }
 
 /// Print [`stranded_span_message`] if there is one. Called at run end on both paths — from
-/// `CheckRunStop`'s abort on the YAML path, and from `Drop for Agg` on the driver path.
+/// `CheckRunStop`'s abort on the YAML path, and from `Drop for Relentless` on the driver path.
 pub fn report_stranded_span(ctx: &mut LoopState) {
-    let git = &ctx.ext.get::<AGGState>().git;
+    let git = &ctx.ext.get::<RLTState>().git;
     let msg = stranded_span_message(&git.span_branches, git.span_tip.as_deref(), &git.iso_base);
     if let Some(msg) = msg {
         eprintln!("{msg}");

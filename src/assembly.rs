@@ -2,20 +2,20 @@
 
 use std::path::Path;
 use anyhow::Result;
-use crate::core::config::{AggConfig, SeqStep};
+use crate::core::config::{RelentlessConfig, SeqStep};
 use crate::core::engine::Engine;
 use crate::core::model::Judge;
 use crate::core::stop;
 use crate::problem::{self, Problem};
 
 /// The engine + the sequence entries, assembled from config. Built once, before the loop (and by
-/// `agg plan`).
+/// `rlt plan`).
 pub struct Assembly {
     pub engine: Engine,
     pub steps: Vec<SeqStep>,
 }
 
-/// A refused [`build`]: EVERY problem found, plus the judges that did resolve — so `agg check` can
+/// A refused [`build`]: EVERY problem found, plus the judges that did resolve — so `rlt check` can
 /// still run the capability checks over them and report those problems in the same pass.
 pub struct Refused {
     pub problems: Vec<Problem>,
@@ -32,25 +32,25 @@ pub struct Refused {
 /// # The DRIVER variant (BUILD.md §3.6)
 ///
 /// An EMPTY `sequence.steps` **is** a Rust-driver project: the flow lives in the driver's own
-/// `for`/`if`, so there is no entry list to validate and no `done_if` for agg to evaluate. Every
+/// `for`/`if`, so there is no entry list to validate and no `done_if` for rlt to evaluate. Every
 /// refusal below is about the entry list, so with no entries there is nothing to refuse — and the
 /// all-`skip_judges` guard would otherwise reject every driver project outright.
-/// The resulting run-set is EMPTY (nothing is declared to agg on that path: no `abort_if`, no
+/// The resulting run-set is EMPTY (nothing is declared to rlt on that path: no `abort_if`, no
 /// `notify_if`, no `invariants`), which is correct rather than a gap — driver judges are LAZY and
 /// the driver asks for them by hand.
-pub fn assemble(cfg: &AggConfig, config_base: &Path) -> Result<Assembly> {
+pub fn assemble(cfg: &RelentlessConfig, config_base: &Path) -> Result<Assembly> {
     build(cfg, config_base).map_err(|r| anyhow::anyhow!(problem::render(&r.problems)))
 }
 
 /// [`assemble`], collecting EVERY problem (each with its config path) instead of stopping at the
-/// first. The one validation both `agg run` and `agg check` go through.
-pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembly, Refused> {
+/// first. The one validation both `rlt run` and `rlt check` go through.
+pub fn build(cfg: &RelentlessConfig, config_base: &Path) -> std::result::Result<Assembly, Refused> {
     use crate::core::judges;
     use crate::core::model::Lifecycle;
 
     // the standard library must exist before we resolve names against it (§6.1).
     if let Err(e) = judges::ensure_library() {
-        eprintln!("  ⚠ could not refresh ~/.agg/judges: {e}");
+        eprintln!("  ⚠ could not refresh ~/.rlt/judges: {e}");
     }
 
     let entries = &cfg.sequence.steps;
@@ -175,7 +175,7 @@ pub fn build(cfg: &AggConfig, config_base: &Path) -> std::result::Result<Assembl
 
 /// The configured groups, with what the gate needs: the groups `done_if` names (judged as a unit)
 /// and the judges it holds one by one (named bare in `done_if`, or invariants).
-fn groups_for(cfg: &AggConfig, done_if: Option<&str>) -> crate::core::groups::Groups {
+fn groups_for(cfg: &RelentlessConfig, done_if: Option<&str>) -> crate::core::groups::Groups {
     let mut g = crate::core::groups::Groups::from_map(cfg.sequence.groups.clone());
     if let Some(d) = done_if {
         g.gated = stop::subsets(d).unwrap_or_default().into_iter().filter(|s| g.map.contains_key(s)).collect();
@@ -187,7 +187,7 @@ fn groups_for(cfg: &AggConfig, done_if: Option<&str>) -> crate::core::groups::Gr
 
 /// The refusals for ONE `sequence.steps` entry: an unknown step name, and a repetition that is
 /// unbounded, zero, or bounded twice.
-fn entry_problems(cfg: &AggConfig, i: usize, e: &SeqStep) -> Vec<Problem> {
+fn entry_problems(cfg: &RelentlessConfig, i: usize, e: &SeqStep) -> Vec<Problem> {
     let at = format!("sequence.steps[{i}]");
     let mut out = Vec::new();
     // every referenced step name must be a key in `steps:` (§5.4).
@@ -247,7 +247,7 @@ struct Named {
 /// DoD-set = done_if ∪ invariants; run-set = DoD ∪ abort_if ∪ notify_if ∪ every `until:` ∪ every
 /// ratchet key ∪ every group member (§5.3). A group an expression uses as a subset contributes its
 /// members on that expression's terms — so a group in `done_if` is in the DoD-set.
-/// On the driver path there is no DoD at all — agg is never told what "done" means, so it must
+/// On the driver path there is no DoD at all — rlt is never told what "done" means, so it must
 /// not claim success. `Sequence::done_if` still carries its YAML default; it is simply not read.
 ///
 /// `notify_if` joins the RUN-SET on exactly the same terms as `abort_if` (STUCK_NOTIFY §12.1): its
@@ -255,7 +255,7 @@ struct Named {
 /// `all_goals` can't be blocked by `stuck` and the regression gate (scoped to `in_dod`) can't roll
 /// a session back because a detector flipped. An `until:` expression joins on the same terms: its
 /// judges must execute every step or the condition could never become true.
-fn run_set(cfg: &AggConfig, driver: bool, problems: &mut Vec<Problem>) -> Vec<Named> {
+fn run_set(cfg: &RelentlessConfig, driver: bool, problems: &mut Vec<Problem>) -> Vec<Named> {
     let seq = &cfg.sequence;
     let mut out: Vec<Named> = Vec::new();
     if !driver {
@@ -346,7 +346,7 @@ fn add_name(out: &mut Vec<Named>, name: &str, path: String, dod: bool) {
 mod tests {
     use super::*;
 
-    /// A throwaway config_base (the `agg/` folder) whose `judges/` holds one script per name. Only
+    /// A throwaway config_base (the `rlt/` folder) whose `judges/` holds one script per name. Only
     /// the FILE's existence matters — `assemble` resolves names to files, it never runs them.
     fn base_with_judges(names: &[&str]) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
@@ -360,7 +360,7 @@ mod tests {
 
     /// The smallest assemblable config, plus `seq_extra` lines under `sequence:` (each already
     /// 2-space indented and newline-terminated). `done_if` is always the judge `goal`.
-    fn cfg_with(seq_extra: &str) -> AggConfig {
+    fn cfg_with(seq_extra: &str) -> RelentlessConfig {
         let body = format!(
             "project: p\nsteps: {{ worker: {{}} }}\nsequence:\n  steps: [worker]\n  done_if: \"goal\"\n{seq_extra}"
         );
@@ -369,7 +369,7 @@ mod tests {
 
     /// `cfg_with`'s twin for the entry shape: `seq_steps` is the whole `sequence.steps` list as it
     /// would be written inline in YAML. One judged step (`worker`) is always defined.
-    fn cfg_with_steps(seq_steps: &str) -> AggConfig {
+    fn cfg_with_steps(seq_steps: &str) -> RelentlessConfig {
         let body = format!(
             "project: p\nsteps: {{ worker: {{}} }}\nsequence:\n  steps: {seq_steps}\n  done_if: \"goal\"\n"
         );
@@ -378,7 +378,7 @@ mod tests {
 
     /// The message of an `assemble` that must FAIL. Hand-rolled because `Assembly` is deliberately
     /// not `Debug` (it holds judge state), so `Result::unwrap_err` is unavailable here.
-    fn assemble_err(cfg: &AggConfig, base: &Path) -> String {
+    fn assemble_err(cfg: &RelentlessConfig, base: &Path) -> String {
         match assemble(cfg, base) {
             Ok(_) => panic!("assemble was expected to REFUSE this config, but it succeeded"),
             Err(e) => format!("{e:#}"),
@@ -397,7 +397,7 @@ mod tests {
             let body = format!(
                 "project: p\nsteps: {{ stage: {{ skip_judges: true }} }}\nsequence:\n  steps: {steps}\n  done_if: \"goal\"\n"
             );
-            let cfg: AggConfig = serde_yaml::from_str(&body).expect("the fixture must parse");
+            let cfg: RelentlessConfig = serde_yaml::from_str(&body).expect("the fixture must parse");
             let err = assemble_err(&cfg, tmp.path());
             assert!(
                 err.contains("skip_judges") && err.contains("never fire"),
@@ -413,7 +413,7 @@ mod tests {
         let tmp = base_with_judges(&["goal"]);
         let body = "project: p\nsteps: { stage: { skip_judges: true }, worker: {} }\nsequence:\n  \
                     steps: [{ step: stage }, { step: worker, until: goal, max: 3 }]\n  done_if: \"goal\"\n";
-        let cfg: AggConfig = serde_yaml::from_str(body).expect("the fixture must parse");
+        let cfg: RelentlessConfig = serde_yaml::from_str(body).expect("the fixture must parse");
         assemble(&cfg, tmp.path()).expect("one judged step must be enough");
     }
 
@@ -424,9 +424,9 @@ mod tests {
     fn an_empty_sequence_assembles_and_neither_refusal_fires() {
         let tmp = base_with_judges(&["goal"]);
         for body in ["project: p\n", "project: p\nsequence: { steps: [] }\n"] {
-            let cfg: AggConfig = serde_yaml::from_str(body).expect("an empty sequence must parse");
+            let cfg: RelentlessConfig = serde_yaml::from_str(body).expect("an empty sequence must parse");
             let asm = assemble(&cfg, tmp.path()).expect("an empty sequence is a driver project and must assemble");
-            assert!(asm.engine.judges.is_empty(), "a driver project declares nothing to agg — the run-set is EMPTY");
+            assert!(asm.engine.judges.is_empty(), "a driver project declares nothing to rlt — the run-set is EMPTY");
         }
     }
 
@@ -481,7 +481,7 @@ mod tests {
     /// directions:
     ///
     /// * missing from the run-set ⇒ the name resolves to no judge file, so the `stop::validate` call
-    ///   in `Engine::new` rejects the expression as an unknown identifier and every `agg
+    ///   in `Engine::new` rejects the expression as an unknown identifier and every `rlt
     ///   run`/`plan`/`doctor` dies at startup — you could never USE `notify_if` at all;
     /// * present but `in_dod` ⇒ a detector silently becomes a GOAL: it would hold `all_goals` down,
     ///   inflate the N/M scoreboard, and hand `GateKeepRollback`'s regression check (scoped to
@@ -547,7 +547,7 @@ mod tests {
         assert!(err.contains("oscillation_window"), "{err}");
         let bad = "  ratchet: { cc: { direction: up, best: true } }\n";
         let body = format!("project: p\nsteps: {{ worker: {{}} }}\nsequence:\n  steps: [worker]\n  done_if: \"goal\"\n{bad}");
-        assert!(serde_yaml::from_str::<AggConfig>(&body).is_err(), "deny_unknown_fields: {bad}");
+        assert!(serde_yaml::from_str::<RelentlessConfig>(&body).is_err(), "deny_unknown_fields: {bad}");
         // a script judge states no direction of its own, so leaving it out is refused at startup —
         // at the key to edit (only a metric or score judge may leave it to the judge).
         let cfg = cfg_with("  ratchet: { cc: { tolerance: 1 } }\n");
@@ -587,7 +587,7 @@ mod tests {
     }
 
     /// The paths of a REFUSED build — hand-rolled for the same reason as `assemble_err`.
-    fn refused_paths(cfg: &AggConfig, base: &Path) -> Vec<String> {
+    fn refused_paths(cfg: &RelentlessConfig, base: &Path) -> Vec<String> {
         match build(cfg, base) {
             Ok(_) => panic!("build was expected to REFUSE this config"),
             Err(r) => r.problems.into_iter().map(|p| p.path).collect(),
@@ -602,7 +602,7 @@ mod tests {
         let body = "project: p\nsteps: { worker: {} }\nsequence:\n  steps: [ghost, { step: worker, times: 0 }, \
                     { step: worker, max: 2 }]\n  done_if: \"goal AND missing\"\n  invariants: [lost]\n  \
                     abort_if: \"(\"\n  notify_if: \"goal\"\n";
-        let cfg: AggConfig = serde_yaml::from_str(body).expect("the fixture must parse");
+        let cfg: RelentlessConfig = serde_yaml::from_str(body).expect("the fixture must parse");
         assert_eq!(
             refused_paths(&cfg, tmp.path()),
             [
@@ -709,7 +709,7 @@ mod tests {
         cfg.sequence.ratchet.insert("cc".into(), crate::core::ratchet::Ratchet::down(0.0).into());
         assemble(&cfg, tmp.path()).expect("a ratchet can improve");
         assemble(&cfg_with("  merge_requires_improvement: true\n"), tmp.path()).expect("a DoD judge can improve");
-        let driver: AggConfig = serde_yaml::from_str("project: p\nsequence: { merge_requires_improvement: true }\n").unwrap();
+        let driver: RelentlessConfig = serde_yaml::from_str("project: p\nsequence: { merge_requires_improvement: true }\n").unwrap();
         assemble(&driver, tmp.path()).expect("a driver project declares no DoD");
     }
 }

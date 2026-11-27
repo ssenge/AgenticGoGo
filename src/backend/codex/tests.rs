@@ -9,7 +9,7 @@ fn usage_comes_from_turn_completed_and_reasoning_is_not_double_counted() {
     // the captured run reported output_tokens: 151 with reasoning_output_tokens: 16.
     // 151, not 167 — reasoning is a BREAKDOWN of output, not an addition to it.
     assert_eq!(total.output, Some(151), "reasoning_output_tokens must NOT be summed on top of output_tokens");
-    // input_tokens 24695 INCLUDES cached_input_tokens 22528: the kinds agg reports do not overlap.
+    // input_tokens 24695 INCLUDES cached_input_tokens 22528: the kinds rlt reports do not overlap.
     assert_eq!(total.cache_read, Some(22528));
     assert_eq!(total.input, Some(24695 - 22528));
     assert_eq!(total.cache_write, None, "codex reports no cache-write figure — None, not 0");
@@ -106,12 +106,12 @@ fn resume_is_a_subcommand_not_a_flag() {
     assert_eq!(args.last().unwrap(), "carry on");
 }
 
-/// ⛔ INVERTED 2026-08-05. Blast-radius isolation is AGG's on every tier: `worker.rs` wraps every
+/// ⛔ INVERTED 2026-08-05. Blast-radius isolation is RLT's on every tier: `worker.rs` wraps every
 /// agent, and Codex's own kernel sandbox is disabled because kernel sandboxes DO NOT NEST —
-/// Seatbelt refuses a second `sandbox_apply` from an already-confined process, so agg's jail plus
+/// Seatbelt refuses a second `sandbox_apply` from an already-confined process, so rlt's jail plus
 /// Codex's own apply killed the worker at launch (measured:
-/// `isolation::tests::an_agents_own_kernel_sandbox_nests_inside_aggs`). The bypass flag therefore
-/// appears under EVERY tier; it disables Codex's confinement, never agg's.
+/// `isolation::tests::an_agents_own_kernel_sandbox_nests_inside_rlts`). The bypass flag therefore
+/// appears under EVERY tier; it disables Codex's confinement, never rlt's.
 #[test]
 fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
     let base = SessionSpec {
@@ -139,7 +139,7 @@ fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
     );
     assert!(!none.contains(&"--sandbox".to_string()), "none must NOT pass --sandbox");
 
-    // Sandbox ⇒ Codex's own sandbox stays OFF. agg's OS wrapper is the confinement, and a second
+    // Sandbox ⇒ Codex's own sandbox stays OFF. rlt's OS wrapper is the confinement, and a second
     // kernel sandbox inside it does not merely add nothing — it fails to apply and kills the run.
     let sb: Vec<String> = Codex
         .session_command(&SessionSpec { isolation: crate::isolation::Isolation::Sandbox, ..base })
@@ -148,11 +148,11 @@ fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
         .collect();
     assert!(
         !sb.contains(&"sandbox_mode=workspace-write".to_string()),
-        "Codex must NOT apply its own kernel sandbox — it cannot nest inside agg's"
+        "Codex must NOT apply its own kernel sandbox — it cannot nest inside rlt's"
     );
     assert!(
         sb.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
-        "the flag disables CODEX's confinement; agg's wrapper is still around this process"
+        "the flag disables CODEX's confinement; rlt's wrapper is still around this process"
     );
     // --skip-git-repo-check survives under BOTH tiers (headless runs outside a repo).
     assert!(sb.contains(&"--skip-git-repo-check".to_string()) && none.contains(&"--skip-git-repo-check".to_string()));
@@ -187,15 +187,15 @@ fn codex_never_applies_its_own_kernel_sandbox_because_they_do_not_nest() {
     }
     assert!(
         resumed.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
-        "a RESUMED session is confined by agg's wrapper too — and equally must not self-apply"
+        "a RESUMED session is confined by rlt's wrapper too — and equally must not self-apply"
     );
 }
 
-/// Codex has its own kernel jail — and that buys it NO exemption from agg's (§2.4). The flag stays
+/// Codex has its own kernel jail — and that buys it NO exemption from rlt's (§2.4). The flag stays
 /// as a report; the consequence is that Codex now needs the same `~/.codex` write carve-out every
-/// wrapped backend needs, because agg's deny-default profile otherwise takes its own state dir away.
+/// wrapped backend needs, because rlt's deny-default profile otherwise takes its own state dir away.
 #[test]
-fn codex_self_sandboxes_but_agg_wraps_it_anyway() {
+fn codex_self_sandboxes_but_rlt_wraps_it_anyway() {
     use crate::backend::AgentBackend;
     assert!(Codex.self_sandboxes(), "Codex has a native kernel sandbox — it is the INNER of two layers");
     // Only asserted when the dir is actually there: `state_paths_that_exist` filters, deliberately.
@@ -214,9 +214,9 @@ fn codex_declares_what_it_genuinely_cannot_do() {
     assert!(!c.reports_cost_usd, "codex reports no dollar cost anywhere");
     assert!(c.supports_effort, "via -c model_reasoning_effort= (verified working)");
     assert!(c.supports_one_shot, "read-only sandbox = can host a judge that cannot WRITE");
-    assert_eq!(Codex.default_effort(), "high", "codex's ceiling — agg's `max` clamps to it");
+    assert_eq!(Codex.default_effort(), "high", "codex's ceiling — rlt's `max` clamps to it");
     assert!(c.detects_rate_limits, "turn.failed/error carry the text, same as Claude");
-    // the level mapping: agg speaks Claude's vocabulary; codex tops out at `high`.
+    // the level mapping: rlt speaks Claude's vocabulary; codex tops out at `high`.
     assert_eq!(effort_arg(""), None, "empty = pass nothing");
     assert_eq!(effort_arg("low"), Some("low"));
     assert_eq!(effort_arg("max"), Some("high"), "clamp, don't reject — `max` = as hard as it thinks");

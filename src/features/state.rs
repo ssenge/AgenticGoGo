@@ -1,6 +1,6 @@
-//! agg's OWN plugin state — the built-in plugin's data, stored in the run's generic `Extensions`
+//! rlt's OWN plugin state — the built-in plugin's data, stored in the run's generic `Extensions`
 //! store (LOOPSTATE_REDESIGN §3.1). A third-party plugin defines its own state type the same way;
-//! this is just agg's. `AGGState` is per-run (in `ext`); `AGGScratch` is per-session (in `scratch`,
+//! this is just rlt's. `RLTState` is per-run (in `ext`); `RLTScratch` is per-session (in `scratch`,
 //! `clear()`ed each iteration).
 
 use std::time::Instant;
@@ -8,10 +8,10 @@ use std::time::Instant;
 use crate::backend::worker::SessionOutcome;
 use crate::core::engine::{CycleResult, GoalRuntime};
 
-/// ALL of agg's own per-run feature state, organised by feature. Persists across sessions (git span,
+/// ALL of rlt's own per-run feature state, organised by feature. Persists across sessions (git span,
 /// summarizer window, memory tail, worker health); NEVER cleared mid-run.
 #[derive(Default)]
-pub struct AGGState {
+pub struct RLTState {
     pub git: GitIso,
     pub summary: Summary,
     pub memory: Memory,
@@ -66,8 +66,8 @@ pub struct WorkerHealth {
 #[derive(Default)]
 pub struct Operator {
     pub pending_instruction: Option<String>,
-    /// the operator answered `agg send resume`. Recorded by `BusDrain` rather than swallowed,
-    /// because `Agg::block` waits for exactly this — and it drains the bus through `BusDrain` so
+    /// the operator answered `rlt send resume`. Recorded by `BusDrain` rather than swallowed,
+    /// because `Relentless::block` waits for exactly this — and it drains the bus through `BusDrain` so
     /// that the driver path and the loop cannot disagree about what a command means. The YAML path
     /// ignores it (a `Resume` outside a `Pause` was always a no-op there).
     pub resumed: bool,
@@ -85,7 +85,7 @@ pub struct Inject {
 /// `clear()`ed each session at the loop top so no field (esp. `prompt`) leaks across sessions. NOT
 /// the on-disk memory scratch (`memory::clear_scratch`) — a different thing.
 #[derive(Default)]
-pub struct AGGScratch {
+pub struct RLTScratch {
     /// `WriteInstructions` (on_session_start) → the RUN launch.
     pub prompt: Option<String>,
     /// `PickStep` sets it from `cur_step.skip_judges`; `run_hook`'s predicate bypasses a handler that

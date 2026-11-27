@@ -6,7 +6,7 @@ use anyhow::Result;
 use crate::bus::Command;
 use crate::core::config::ResolvedStep;
 use crate::core::stop::{self, StopContext};
-use crate::loop_::{keeps_memory, AGGScratch, AGGState, Flow, Handler, LoopState, EXIT_FOOTER, EXIT_FOOTER_NO_MEMORY, opening, wait_for_resume};
+use crate::loop_::{keeps_memory, RLTScratch, RLTState, Flow, Handler, LoopState, EXIT_FOOTER, EXIT_FOOTER_NO_MEMORY, opening, wait_for_resume};
 
 /// Drain the operator bus at the session boundary (inject / pause / set-budget / stop / note).
 pub struct BusDrain;
@@ -29,7 +29,7 @@ impl Handler for BusDrain {
             match cmd {
                 Command::InjectInstruction { text } => {
                     eprintln!("  [bus] inject-instruction → prepended to next session");
-                    let op = &mut ctx.ext.get::<AGGState>().operator;
+                    let op = &mut ctx.ext.get::<RLTState>().operator;
                     op.pending_instruction = Some(match op.pending_instruction.take() {
                         Some(prev) => format!("{prev}\n\n{text}"),
                         None => text,
@@ -49,7 +49,7 @@ impl Handler for BusDrain {
                         return Ok(Flow::Stop(ctx.stopped_via_bus(reason)));
                     }
                 }
-                Command::Resume => ctx.ext.get::<AGGState>().operator.resumed = true,
+                Command::Resume => ctx.ext.get::<RLTState>().operator.resumed = true,
                 // a wake is consumed by a rate-limit WAIT (`features::backoff`); at a session
                 // boundary there is none, and the next session starts anyway.
                 Command::Wake => eprintln!("  [bus] wake → the loop is not waiting; nothing to end"),
@@ -156,7 +156,7 @@ fn announce(ctx: &mut LoopState, step: ResolvedStep) {
         (up % 3600) / 60,
     );
     // skip_judges into the channel BEFORE cur_step is moved (later hooks read the channel).
-    ctx.scratch.get::<AGGScratch>().skip_judges = step.skip_judges;
+    ctx.scratch.get::<RLTScratch>().skip_judges = step.skip_judges;
     ctx.cur_step = Some(step);
 }
 
@@ -168,7 +168,7 @@ impl Handler for SessionBranchCut {
         let iso = &ctx.cfg.session_isolation;
         let br = crate::git::session_branch(&iso.branch_prefix, &ctx.cfg.project, ctx.session);
         crate::git::remove_file(&ctx.dir, &iso.red_file); // clear a stale veto
-        ctx.ext.get::<AGGState>().git.session_branch = if crate::git::create_branch(&ctx.dir, &br, &base_ref) {
+        ctx.ext.get::<RLTState>().git.session_branch = if crate::git::create_branch(&ctx.dir, &br, &base_ref) {
             eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", ctx.session);
             // so a later session of this step can be told what a stopped one left (the ledger has no step before it ends)
             if let Some(step) = &ctx.cur_step {
@@ -196,7 +196,7 @@ impl Handler for WriteInstructions {
         }
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         let state_path = ctx.config_base.join(&step.state);
-        ctx.ext.get::<AGGState>().inject.state_before = std::fs::read_to_string(&state_path).ok();
+        ctx.ext.get::<RLTState>().inject.state_before = std::fs::read_to_string(&state_path).ok();
         // prompt files are read NOW, every session — an edit applies from the next one — and each
         // read is hashed into the prompt ledger. A file gone mid-run fails the run: a brief without
         // its task would send the worker off on the wrong work.
@@ -208,7 +208,7 @@ impl Handler for WriteInstructions {
             eprintln!("  ⚠ could not record the prompt files' hashes: {e:#}");
         }
         let prompt = compose_prompt(ctx, &step);
-        ctx.scratch.get::<AGGScratch>().prompt = Some(prompt);
+        ctx.scratch.get::<RLTScratch>().prompt = Some(prompt);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {
@@ -230,15 +230,15 @@ impl Handler for ClearMemScratch {
     }
 }
 
-/// Compose the worker's whole brief into `agg/private/INSTRUCTIONS.md`, then return the tiny fixed
+/// Compose the worker's whole brief into `rlt/private/INSTRUCTIONS.md`, then return the tiny fixed
 /// pointer that becomes the actual `-p` value (§2/§3). Highest-priority first — operator steering,
-/// then the task (role + `prompt:`), then context pointers/excerpts (memory tail → STATE → AGG.md →
-/// wiki), then the standing footer. Long files are POINTED at or excerpted so agg keeps the context
+/// then the task (role + `prompt:`), then context pointers/excerpts (memory tail → STATE → RLT.md →
+/// wiki), then the standing footer. Long files are POINTED at or excerpted so rlt keeps the context
 /// budget bounded. On a write failure it falls back to returning the brief inline, arg-safe.
 pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     let mut s = String::new();
     s.push_str(
-        "<!-- agg/private/INSTRUCTIONS.md — WRITTEN BY agg, REGENERATED every session. Do not edit; it is overwritten. -->\n\n",
+        "<!-- rlt/private/INSTRUCTIONS.md — WRITTEN BY rlt, REGENERATED every session. Do not edit; it is overwritten. -->\n\n",
     );
     let agent = &step.agent;
     s.push_str(&format!("# Session {} · step `{}` · agent `{agent}`\n", ctx.session, step.name));
@@ -246,16 +246,16 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     // ── operator steering — highest priority, act on it FIRST. The banner keeps the phrase
     //    "HIGH-PRIORITY OPERATOR INSTRUCTION" so the memory sanitizer (`looks_like_marker`) still
     //    de-fangs a worker note that tries to forge it. ──
-    if let Some(instr) = ctx.ext.get::<AGGState>().operator.pending_instruction.take() {
+    if let Some(instr) = ctx.ext.get::<RLTState>().operator.pending_instruction.take() {
         s.push_str(&format!(
             "\n## ⚠ HIGH-PRIORITY OPERATOR INSTRUCTION — do this FIRST (it overrides the default plan)\n{instr}\n"
         ));
     }
     // ── answers to the questions THIS WORKER asked, scoped to the ask id it was given ──
-    //    A worker's `agg hil` call recorded and exited; this is where the answer comes back. Note
+    //    A worker's `rlt hil` call recorded and exited; this is where the answer comes back. Note
     //    what is NOT here: the answer is presented as a HUMAN's answer, quoted, and never as an
     //    instruction — a worker that asked "should I delete prod?" must not get "yes" laundered into
-    //    its orders as though agg said it.
+    //    its orders as though rlt said it.
     let answered = crate::core::asks::answers_for_worker(&ctx.dir);
     if !answered.is_empty() {
         s.push_str("\n## Answers to your questions\n");
@@ -269,7 +269,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
         }
         s.push_str(
             "\nIf an answer resolves what blocked you, act on it. If it does not, ask again with \
-             `agg hil …` and END your session — do not wait.\n",
+             `rlt hil …` and END your session — do not wait.\n",
         );
         // Delivered exactly once: without this every answer ever given is re-injected into every
         // future brief for the life of the project.
@@ -290,19 +290,19 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
             s.push_str(&format!("\n## This session — do ONE focused chunk\n{}\n", p.trim()));
         }
     }
-    let prompt_prefix = ctx.ext.get::<AGGState>().inject.prompt_prefix.clone();
+    let prompt_prefix = ctx.ext.get::<RLTState>().inject.prompt_prefix.clone();
     if !prompt_prefix.is_empty() {
         s.push_str(&format!("\n{}\n", prompt_prefix.trim()));
     }
 
     // ── context: memory recent-tail excerpt + a conditional pointer to the full LOG ──
     if ctx.cfg.memory.enabled && step.memory {
-        let last_session = ctx.ext.get::<AGGState>().memory.last_session.clone();
+        let last_session = ctx.ext.get::<RLTState>().memory.last_session.clone();
         let mem = crate::core::memory::read_block(&ctx.dir, &last_session, ctx.cfg.memory.inject_kb);
         if !mem.trim().is_empty() {
             s.push_str(&format!("\n## What's been tried\n{}\n", mem.trim()));
             s.push_str(
-                "Full history in `agg/private/LOG.md` — read it ONLY if you need older detail; it is long, don't load it all.\n",
+                "Full history in `rlt/private/LOG.md` — read it ONLY if you need older detail; it is long, don't load it all.\n",
             );
         }
     }
@@ -312,7 +312,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
     if let Some(st) = state {
         if !st.trim().is_empty() {
             s.push_str(&format!(
-                "\n## Where things stand\nRead `agg/{}` — your predecessor's forward advice (kept short; read it in full).\n",
+                "\n## Where things stand\nRead `rlt/{}` — your predecessor's forward advice (kept short; read it in full).\n",
                 step.state
             ));
         }
@@ -336,7 +336,7 @@ pub fn compose_prompt(ctx: &mut LoopState, step: &ResolvedStep) -> String {
         let pages = wiki_pages(&wiki);
         if !pages.is_empty() {
             s.push_str(&format!(
-                "\n## Knowledge base\nConsult and maintain the durable wiki at `agg/state/wiki/` (start with {}).\n",
+                "\n## Knowledge base\nConsult and maintain the durable wiki at `rlt/state/wiki/` (start with {}).\n",
                 pages.join(", ")
             ));
         }
@@ -379,7 +379,7 @@ fn wiki_pages(wiki: &Path) -> Vec<String> {
 /// The branch a JUDGED step's regression check reads / the branch a session is cut off. Base is the
 /// resolved isolation base branch, unless a `skip_judges` span is in progress (then its tip).
 pub fn base_ref(ctx: &mut LoopState) -> String {
-    let git = &ctx.ext.get::<AGGState>().git;
+    let git = &ctx.ext.get::<RLTState>().git;
     git.span_tip.clone().unwrap_or_else(|| git.iso_base.clone())
 }
 

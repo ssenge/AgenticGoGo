@@ -28,7 +28,7 @@ use std::process::{Command, Stdio};
 /// invocation reproducible.
 pub const DEFAULT_MODEL: &str = "auto";
 /// The summarizer/judge model — `default_summary_model()`'s value, i.e. the serde default for
-/// `summary.model` when agg.yaml omits it.
+/// `summary.model` when rlt.yaml omits it.
 pub const DEFAULT_SUMMARY_MODEL: &str = "auto";
 
 /// The isolation a JUDGE/summarizer call runs under. **`--allow-all-tools` is deliberately absent**
@@ -108,7 +108,7 @@ impl AgentBackend for Copilot {
     /// Copilot bills in AI Credits, so it cannot report dollars — but it is NOT unboundable.
     fn spend_ceiling_hint(&self) -> Option<&'static str> {
         Some("Copilot bills in AI Credits, so cap the session with `--max-ai-credits <n>` \
-              via agg.yaml `worker_args`")
+              via rlt.yaml `worker_args`")
     }
 
     /// `copilot -p <prompt> --output-format json` — the prompt goes on `-p` (unlike Codex, where
@@ -281,8 +281,8 @@ impl AgentBackend for Copilot {
 
     /// `--effort` and `--model auto` are each fine alone and fatal together — see
     /// [`AgentBackend::config_conflict`] and [`Self::default_effort`]. Fixing the DEFAULT was not
-    /// enough: a user (or `/agg:new`) can still ask for both explicitly, and every worker session
-    /// would die instantly while `agg doctor` reported the config as fine. So refuse it at startup.
+    /// enough: a user (or `/rlt:new`) can still ask for both explicitly, and every worker session
+    /// would die instantly while `rlt doctor` reported the config as fine. So refuse it at startup.
     fn config_conflict(&self, model: &str, effort: &str) -> Option<String> {
         (model == "auto" && !effort.is_empty()).then(|| {
             format!(
@@ -299,7 +299,7 @@ impl AgentBackend for Copilot {
     /// **Empty on purpose — do NOT "restore" this to `max`.**
     ///
     /// This used to return `"max"`, on the reasoning that Copilot's `--effort` takes the same
-    /// vocabulary Claude's does, so agg's default could carry over. The flag does exist and the
+    /// vocabulary Claude's does, so rlt's default could carry over. The flag does exist and the
     /// vocabulary does match — but that was never tried against [`DEFAULT_MODEL`], and the two
     /// defaults are mutually exclusive:
     ///
@@ -308,10 +308,10 @@ impl AgentBackend for Copilot {
     /// Error: Model "auto" does not support reasoning effort configuration (requested: "max").
     /// ```
     ///
-    /// So the out-of-the-box Copilot config — no `model:`, no `effort:` in agg.yaml, both falling
+    /// So the out-of-the-box Copilot config — no `model:`, no `effort:` in rlt.yaml, both falling
     /// back to these defaults — made **every worker session die in 4s with exit 1 and 0 tokens.**
     /// The loop dutifully ran its sessions, judged, and halted on `over_iterations` having done
-    /// nothing at all. Caught by actually driving `agg run` against Copilot end-to-end; no unit
+    /// nothing at all. Caught by actually driving `rlt run` against Copilot end-to-end; no unit
     /// test would have, because the incompatibility lives in Copilot's argv validation.
     ///
     /// Effort stays *supported* ([`Capabilities::supports_effort`]) — set `effort:` explicitly and
@@ -391,7 +391,7 @@ impl AgentBackend for Copilot {
             anyhow::bail!(
                 // PARALLEL with claude.rs / codex.rs — install, login, HEADLESS check.
                 "the GitHub Copilot CLI (`{}`) was not found on your PATH.\n  \
-                 AgenticGoGo drives it to run the inner workers. Install it with\n    \
+                 Relentless drives it to run the inner workers. Install it with\n    \
                  npm install -g @github/copilot\n  \
                  then run `copilot login` (or set GH_TOKEN / COPILOT_GITHUB_TOKEN), and make\n  \
                  sure `copilot -p \"hello\"` answers.",

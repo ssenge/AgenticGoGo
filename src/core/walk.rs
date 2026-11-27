@@ -9,7 +9,7 @@
 //! ```
 //!
 //! This is the ONLY execution model in the tree: it dispatches through the SAME primitive a Rust
-//! driver's `agg.step()` calls — one primitive, two drivers over it. The hand-written lexer +
+//! driver's `rlt.step()` calls — one primitive, two drivers over it. The hand-written lexer +
 //! parser + branching cursor that used to read the terse line syntax is gone (BUILD.md §4 row 13).
 //! There is no `if:` either (owner simplification, 2026-08-04, §14.14), so a lap ALWAYS dispatches:
 //! the old "a lap ended with every branch false" refusal is unrepresentable here rather than
@@ -42,11 +42,11 @@ impl Walk {
     /// The next step to dispatch. `eval` decides an `until` expression.
     ///
     /// Errors only on an EMPTY entry list, which never reaches here on either path — a driver
-    /// project's steps arrive through `ctx.next_step` (`PickStep` takes it first) and `agg run`
+    /// project's steps arrive through `ctx.next_step` (`PickStep` takes it first) and `rlt run`
     /// needs a list. It bails rather than indexing into nothing.
     pub fn next_step(&mut self, eval: &mut impl FnMut(&str) -> Result<bool>) -> Result<String> {
         if self.entries.is_empty() {
-            bail!("the sequence is empty — `agg run` needs at least one step in `sequence.steps`");
+            bail!("the sequence is empty — `rlt run` needs at least one step in `sequence.steps`");
         }
         loop {
             if self.idx >= self.entries.len() {
@@ -94,7 +94,7 @@ impl Walk {
     }
 
     /// Where the walk stands after its last dispatch: `(entry index, dispatches of it so far)`.
-    /// `agg run --resume` records it on every step of the call ledger.
+    /// `rlt run --resume` records it on every step of the call ledger.
     pub fn position(&self) -> (usize, u32) {
         (self.idx, self.reps)
     }
@@ -114,7 +114,7 @@ impl Walk {
             _ => bail!(
                 "resume DIVERGED: the ledger recorded step `{step}` at sequence entry {idx}, but \
                  `sequence.steps` has {} there — the sequence changed since the run was interrupted.\n  \
-                 Re-run WITHOUT --resume to start fresh, or restore the agg.yaml that wrote it.",
+                 Re-run WITHOUT --resume to start fresh, or restore the rlt.yaml that wrote it.",
                 self.entries.get(idx).map(|e| format!("`{}`", e.step)).unwrap_or_else(|| "nothing".into())
             ),
         }

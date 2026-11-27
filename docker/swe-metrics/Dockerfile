@@ -1,22 +1,22 @@
 # Reference JUDGE image: swe-metrics and its pinned tools, for metric and score judges under
-# `isolation: container` (`judge: { image: "agg-swe-metrics" }`).
+# `isolation: container` (`judge: { image: "rlt-swe-metrics" }`).
 #
-#   docker/swe-metrics/build.sh ~/src/swe-metrics            # → agg-swe-metrics
+#   docker/swe-metrics/build.sh ~/src/swe-metrics            # → rlt-swe-metrics
 #
 # The build context is NOT this directory: build.sh assembles one from a swe-metrics git checkout
 # (`git archive` of a commit — swe-metrics is installed from source) plus this Dockerfile, so the
 # image is exactly one swe-metrics commit, recorded in its `org.opencontainers.image.revision` label.
 #
-# It follows agg's IMAGE CONTRACT (docs/CONFIG.md → "The container tier runs the agent"):
-#   - `swe-metrics` and every tool it runs on PATH for ANY uid — agg runs the container as the
+# It follows rlt's IMAGE CONTRACT (docs/CONFIG.md → "The container tier runs the agent"):
+#   - `swe-metrics` and every tool it runs on PATH for ANY uid — rlt runs the container as the
 #     project's owner, never root — installed system-wide under /opt, not under /root;
 #   - /bin/sh, git (`scope: changed`, the git history analyzer);
-#   - no credentials, no ENTRYPOINT, nothing that relies on a passwd entry — HOME is agg's to set.
+#   - no credentials, no ENTRYPOINT, nothing that relies on a passwd entry — HOME is rlt's to set.
 #
 # `judge.image` is the image EVERY judge of the run uses: when the run also has script judges, add
-# their toolchain below (or start your own judge image `FROM agg-swe-metrics`).
+# their toolchain below (or start your own judge image `FROM rlt-swe-metrics`).
 #
-# trivy's vulnerability database is NOT baked in (it is ~1.5 GB and goes stale within a day): agg
+# trivy's vulnerability database is NOT baked in (it is ~1.5 GB and goes stale within a day): rlt
 # mounts the host's trivy cache read-only into the container (docs/CONFIG.md → metric judges).
 FROM python:3.12-slim-bookworm
 
@@ -26,7 +26,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 ARG SWE_METRICS_COMMIT=unknown
-LABEL org.opencontainers.image.title="agg-swe-metrics" \
+LABEL org.opencontainers.image.title="rlt-swe-metrics" \
       org.opencontainers.image.revision="${SWE_METRICS_COMMIT}"
 
 COPY swe-metrics /opt/swe-metrics/src
@@ -42,11 +42,11 @@ RUN HOME=/tmp/build-home /opt/swe-metrics/src/scripts/install-tools.sh \
  && /opt/swe-metrics/src/scripts/install-tools.sh --prefix /opt/swe-metrics/tools --bin-dir /usr/local/bin --check \
  && rm -rf /tmp/build-home /root/.cache /root/.npm
 
-# a uid with no passwd entry (agg runs as the project owner) must not crash a node tool.
+# a uid with no passwd entry (rlt runs as the project owner) must not crash a node tool.
 COPY userinfo.cjs /opt/swe-metrics/userinfo.cjs
 
 # a non-root uid cannot write the image's bytecode caches; nothing should try. And no tool phones
-# home for a newer version or telemetry: a measurement must not depend on the network (behind agg's
+# home for a newer version or telemetry: a measurement must not depend on the network (behind rlt's
 # allow-list each such call is refused and logged as a denied connection).
 ENV PYTHONDONTWRITEBYTECODE=1 \
     NODE_OPTIONS="--require /opt/swe-metrics/userinfo.cjs" \

@@ -119,7 +119,7 @@ fn the_removed_wall_hours_term_is_not_a_silent_alias() {
     );
     assert!(
         crate::core::stop::judge_names("wall_hours >= 8").unwrap().contains(&"wall_hours".to_string()),
-        "it is reported as an unknown JUDGE name, which is what makes agg hard-error at startup"
+        "it is reported as an unknown JUDGE name, which is what makes rlt hard-error at startup"
     );
 }
 

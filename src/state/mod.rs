@@ -2,8 +2,8 @@
 //!
 //! Two-stream discipline: the line-oriented log on stdout stays the source of truth
 //! (greppable, tailable). The TUI is a *view* rendered from this compact state file, never
-//! the only output. The loop writes `agg/private/state.json` atomically after each meaningful change;
-//! `agg dashboard` polls it and repaints in place.
+//! the only output. The loop writes `rlt/private/state.json` atomically after each meaningful change;
+//! `rlt dashboard` polls it and repaints in place.
 //!
 //! Single-writer-under-lock: both the loop (boundary updates) and the worker's reader thread
 //! (live activity, mid-session) mutate ONE `Arc<Mutex<DashboardState>>` and publish through
@@ -28,7 +28,7 @@ pub const RECENT_CAP: usize = 50;
 
 /// A single goal's view for the dashboard.
 ///
-/// `#[serde(default)]` so a state.json written by an older `agg` (missing `weight`,
+/// `#[serde(default)]` so a state.json written by an older `rlt` (missing `weight`,
 /// etc.) still deserializes — the dashboard and loop binaries can differ across an
 /// in-place upgrade mid-run, and a parse failure would blank the whole dashboard.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ pub struct JudgeView {
 }
 
 impl JudgeView {
-    /// Bridge a legacy [`GoalView`] into a judge view, so a state.json written by a pre-§7.4 `agg`
+    /// Bridge a legacy [`GoalView`] into a judge view, so a state.json written by a pre-§7.4 `rlt`
     /// still renders on the new scoreboard. Recovers the lost Option-ness from the goal type: a
     /// `binary` goal carried no real number, so `value`/`max` come back as `None`.
     fn from_goal(g: &GoalView) -> Self {
@@ -130,7 +130,7 @@ pub struct ActivityEvent {
 /// The full dashboard snapshot.
 ///
 /// `#[serde(default)]` for forward/backward compatibility: a snapshot written by a
-/// different `agg` version (older = missing the live-activity fields, newer = extra
+/// different `rlt` version (older = missing the live-activity fields, newer = extra
 /// fields) still deserializes cleanly rather than blanking the dashboard.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -148,8 +148,8 @@ pub struct DashboardState {
     pub step_agent: String,
     pub step_model: String,
     /// A Rust DRIVER's position in its own control flow — `cycle 3/20 › attempt 2/3` — assembled from
-    /// the live [`crate::driver::PosFrame`] stack (`Agg::label_path`). Empty on the YAML path and for
-    /// any driver that declares no `pos()`: agg CANNOT see a hand-written `for`, so a loop with no
+    /// the live [`crate::driver::PosFrame`] stack (`Relentless::label_path`). Empty on the YAML path and for
+    /// any driver that declares no `pos()`: rlt CANNOT see a hand-written `for`, so a loop with no
     /// breadcrumb shows no counter rather than a fabricated one.
     ///
     /// It is the only progress signal that exists for driver flow — `session N` counts sessions, not
@@ -170,10 +170,10 @@ pub struct DashboardState {
     /// epoch secs the loop started (for an absolute "started at" in the Info block)
     pub started_at_epoch: u64,
     pub up_secs: u64,
-    /// session number WITHIN the current `agg run` invocation (resets to 0 each run).
+    /// session number WITHIN the current `rlt run` invocation (resets to 0 each run).
     pub session: u32,
-    /// cumulative session count across ALL `agg run` invocations for this project
-    /// (persisted in the run ledger `agg/private/project.json`). Survives restarts so the dashboard can
+    /// cumulative session count across ALL `rlt run` invocations for this project
+    /// (persisted in the run ledger `rlt/private/project.json`). Survives restarts so the dashboard can
     /// show "how many sessions has this project ever run", not just this invocation.
     pub lifetime_session: u32,
     /// the outer loop's current stage.
@@ -221,12 +221,12 @@ pub struct DashboardState {
     /// OPEN HUMAN ASKS — questions a human still owes an answer to, oldest first.
     ///
     /// With no timeout on a `hil_*` call, a forgotten ask hangs the run indefinitely. That is the
-    /// accepted cost of the design, and this field is most of the mitigation: `agg status` and the
+    /// accepted cost of the design, and this field is most of the mitigation: `rlt status` and the
     /// web reader must show the question and how long it has been waiting, prominently, so "blocked
     /// on a human" is never a silent state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub asks: Vec<AskView>,
-    /// The parts of the run report a live reader needs too (A-17), published so `agg status --json`
+    /// The parts of the run report a live reader needs too (A-17), published so `rlt status --json`
     /// can state them mid-run without re-judging: the run's id, its clock, session fates, the stop
     /// detectors, the ratchet references, usage totals and any wait.
     pub run_id: String,
@@ -360,7 +360,7 @@ impl DashboardState {
     }
 
     /// The per-judge scoreboard the readers render (§7.4). Prefers the native `judges`; falls back
-    /// to mapping the legacy `goals` so a state.json written by a pre-§7.4 `agg` still renders
+    /// to mapping the legacy `goals` so a state.json written by a pre-§7.4 `rlt` still renders
     /// (the cross-version contract the whole struct is `#[serde(default)]` for).
     pub fn judge_views(&self) -> Vec<JudgeView> {
         if !self.judges.is_empty() {
@@ -408,7 +408,7 @@ impl DashboardState {
     /// so the snapshot's copy goes stale the moment someone answers, and every reader would keep
     /// showing a question that has already been dealt with, indefinitely.
     ///
-    /// Refreshed HERE so `agg status`, `agg status --json`, `agg serve` and the TUI cannot disagree
+    /// Refreshed HERE so `rlt status`, `rlt status --json`, `rlt serve` and the TUI cannot disagree
     /// about what is still waiting on a human.
     pub fn read(dir: &Path) -> Option<DashboardState> {
         let text = std::fs::read_to_string(Self::path(dir)).ok()?;

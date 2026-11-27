@@ -1,6 +1,6 @@
-//! `agg process <file> --check` (A-37 §3): everything about a process file that can be told without running it,
+//! `rlt process <file> --check` (A-37 §3): everything about a process file that can be told without running it,
 //! listed at once, each with where it is: unknown ids, keys a step's kind doesn't take, files that aren't there,
-//! `{{ names }}` nobody fills in, steps the file refers to that it doesn't have. `agg process` refuses to run on
+//! `{{ names }}` nobody fills in, steps the file refers to that it doesn't have. `rlt process` refuses to run on
 //! any finding.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -288,8 +288,8 @@ impl Ctx<'_> {
 
     fn top_level(&mut self, _list: &[Numbered]) {
         let p = self.process;
-        if !matches!(p.agg.on_regression.as_str(), "annotate" | "rollback") {
-            self.out.push(format!("agg.on_regression: `{}` is `annotate` or `rollback`", p.agg.on_regression));
+        if !matches!(p.rlt.on_regression.as_str(), "annotate" | "rollback") {
+            self.out.push(format!("rlt.on_regression: `{}` is `annotate` or `rollback`", p.rlt.on_regression));
         }
         for id in p.settings.skip.iter().flatten() {
             if !self.ids.contains(id) {

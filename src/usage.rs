@@ -1,10 +1,10 @@
 //! USAGE — the tokens and dollars every agent call reported, kept per session and summed per run.
 //!
-//! agg runs the agents itself, so it is the only party that sees what they spent. This module is the
+//! rlt runs the agents itself, so it is the only party that sees what they spent. This module is the
 //! record of it: [`Usage`] is what ONE call reported (the backend parses it off the wire), the
 //! [`Ledger`] files each call under its session, its role and the model that actually ran, and
 //! [`Summary`] is the run's totals. The run report's `session_log` and `usage`, the live status's
-//! `usage` and `agg history --json` are all views of it.
+//! `usage` and `rlt history --json` are all views of it.
 //!
 //! # Three rules
 //!

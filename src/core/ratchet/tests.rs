@@ -217,7 +217,7 @@ fn the_history_is_bounded() {
 }
 
 #[test]
-fn the_state_round_trips_through_agg_private() {
+fn the_state_round_trips_through_rlt_private() {
     let tmp = tempfile::tempdir().unwrap();
     assert!(load(tmp.path()).is_none(), "no file is no state, not a crash");
     let mut g = gate(&[("cc", Ratchet::down(0.0).baseline(4.0))]);

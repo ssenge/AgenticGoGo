@@ -1,9 +1,9 @@
-//! Persistent per-project state: `agg/private/project.json`.
+//! Persistent per-project state: `rlt/private/project.json`.
 //!
-//! Each `agg run` is otherwise amnesiac — the per-run session counter resets to
+//! Each `rlt run` is otherwise amnesiac — the per-run session counter resets to
 //! 0, so a restart looks like the work started over even when a project has run
 //! for hours across many invocations. This module gives a project a durable
-//! identity and a **run-history ledger**: every `agg run` appends a record at
+//! identity and a **run-history ledger**: every `rlt run` appends a record at
 //! launch and finalizes it on exit (sessions, tokens, wall-time, why it ended).
 //!
 //! Derived facts (lifetime session total, lifetime tokens) are computed from the
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// One completed (or in-flight) `agg run` invocation.
+/// One completed (or in-flight) `rlt run` invocation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RunRecord {
@@ -51,11 +51,11 @@ pub struct RunRecord {
     pub end_reason: String,
 }
 
-/// The whole `agg/private/project.json` document: stable identity + the run ledger.
+/// The whole `rlt/private/project.json` document: stable identity + the run ledger.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Project {
-    /// stable project name (from agg.yaml; informational).
+    /// stable project name (from rlt.yaml; informational).
     pub name: String,
     /// epoch secs the project's history began (first run we ever recorded).
     pub created_at_epoch: u64,
@@ -91,7 +91,7 @@ impl Project {
     }
 
     /// Cumulative session count across ALL prior completed/in-flight runs.
-    /// Surfaced by `agg history`; kept here so the ledger is the single source of truth.
+    /// Surfaced by `rlt history`; kept here so the ledger is the single source of truth.
     pub fn lifetime_sessions(&self) -> u32 {
         self.runs.iter().map(|r| r.sessions).sum()
     }
@@ -101,12 +101,12 @@ impl Project {
         self.runs.iter().map(|r| r.tokens).sum()
     }
 
-    /// Human-readable run-history report for `agg history`: one line per run (newest first)
+    /// Human-readable run-history report for `rlt history`: one line per run (newest first)
     /// plus a lifetime total. Pure (no I/O) so it's unit-testable.
     pub fn render_history(&self) -> String {
         if self.runs.is_empty() {
-            return "no run history yet (agg/private/project.json is empty).\n  \
-                    run `agg run` at least once — each invocation appends a record here."
+            return "no run history yet (rlt/private/project.json is empty).\n  \
+                    run `rlt run` at least once — each invocation appends a record here."
                 .to_string();
         }
         let mut out = String::new();
@@ -156,7 +156,7 @@ pub struct RunLedger {
     proj: Project,
     finished: bool,
     /// sessions/tokens a resumed run inherited from the record before it — subtracted from this
-    /// record, so the lifetime sums count each session once (`agg run --resume`).
+    /// record, so the lifetime sums count each session once (`rlt run --resume`).
     inherited: (u32, u64),
 }
 
@@ -198,7 +198,7 @@ impl RunLedger {
     }
 
     /// This run continues one that had already counted `sessions` and `tokens`: record only what is
-    /// spent from here on, so `agg history` does not count the inherited sessions twice.
+    /// spent from here on, so `rlt history` does not count the inherited sessions twice.
     pub fn inherit(&mut self, sessions: u32, tokens: u64) {
         self.inherited = (sessions, tokens);
     }
@@ -260,9 +260,9 @@ mod tests {
     fn tmpdir(tag: &str) -> PathBuf {
         // per-test dir under the system temp (tests share a process, so the dir
         // must be unique per test to avoid cross-test ledger contamination).
-        let p = std::env::temp_dir().join(format!("agg-proj-test-{}-{tag}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("rlt-proj-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(crate::paths::agg_dir(&p)).unwrap();
+        std::fs::create_dir_all(crate::paths::rlt_dir(&p)).unwrap();
         p
     }
 

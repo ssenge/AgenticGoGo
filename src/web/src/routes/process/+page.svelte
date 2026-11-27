@@ -6,7 +6,7 @@
   import Projects from '$lib/components/process/Projects.svelte';
   import RunControls from '$lib/components/process/RunControls.svelte';
 
-  // A process run (agg process): the projects of `agg serve --projects` and the new-project form; for one project where
+  // A process run (rlt process): the projects of `rlt serve --projects` and the new-project form; for one project where
   // the run is (map), what waits for a human (checkpoints), the controls and where the time went (profile).
   let map = $state(null);
   let profile = $state(null);
@@ -28,7 +28,7 @@
 
   async function loadProjects() {
     const [list, ui] = await Promise.all([get('/api/projects'), get('/api/ui')]);
-    if (list.status === 0 || list.status === 502) throw new Error('agg serve is not reachable');
+    if (list.status === 0 || list.status === 502) throw new Error('rlt serve is not reachable');
     projects = list.body;
     form = ui.body?.new_project ?? null;
   }
@@ -47,7 +47,7 @@
       error = 'This project has run no process yet.';
       return;
     }
-    if (!m.ok || !p.ok) throw new Error('agg serve answered ' + (m.ok ? p.status : m.status));
+    if (!m.ok || !p.ok) throw new Error('rlt serve answered ' + (m.ok ? p.status : m.status));
     map = m.body;
     profile = p.body;
     error = '';
@@ -58,7 +58,7 @@
       if (listing) await loadProjects();
       else await loadRun();
     } catch (e) {
-      error = `Can't reach agg serve: ${e?.message ?? e}`;
+      error = `Can't reach rlt serve: ${e?.message ?? e}`;
     }
   }
 

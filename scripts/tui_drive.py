@@ -6,7 +6,7 @@ terminal — ratatui then renders zero cells and the capture is empty. So we for
 pty ourselves, set TIOCSWINSZ, optionally send a keypress after the first paint,
 and print everything the child wrote.
 
-    tui_drive.py --key q --after 1.5 --timeout 15 -- agg dashboard
+    tui_drive.py --key q --after 1.5 --timeout 15 -- rlt dashboard
 
 stdout: whatever the TUI painted (raw, escape codes included).
 exit:   the child's exit status, or 124 if it had to be killed on timeout.

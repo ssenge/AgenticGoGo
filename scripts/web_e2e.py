@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-browser acceptance test for the AgenticGoGo web interface.
+"""Real-browser acceptance test for the Relentless web interface.
 
 Drives Chromium via Playwright and CLICKS what a user clicks — Pause, Resume, Inject…,
 Budget…, Stop — then verifies the effect reached the actual loop (its stderr log, the prompt
@@ -20,7 +20,7 @@ from playwright.sync_api import sync_playwright, expect
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--url", required=True)
-ap.add_argument("--project", required=True, help="the agg project dir the loop runs in")
+ap.add_argument("--project", required=True, help="the rlt project dir the loop runs in")
 ap.add_argument("--headed", action="store_true")
 ap.add_argument("--shots", default="", help="write screenshots here")
 A = ap.parse_args()
@@ -75,9 +75,9 @@ def prompt():
 
 
 def state():
-    # the snapshot is AGG-owned, so it lives in agg/private/ (agg/state/ is the worker's half and a
+    # the snapshot is RLT-owned, so it lives in rlt/private/ (rlt/state/ is the worker's half and a
     # confined worker could otherwise forge the scoreboard this UI trusts); mirrors e2e.sh's snap().
-    p = PROJ / "agg" / "private" / "state.json"
+    p = PROJ / "rlt" / "private" / "state.json"
     return json.loads(p.read_text()) if p.exists() else {}
 
 
@@ -99,7 +99,7 @@ with sync_playwright() as pw:
 
     # ── the page loads and hydrates ───────────────────────────────────────────
     page.goto(A.url, wait_until="networkidle")
-    check("AgenticGoGo" in page.content(), "page loads and renders the app shell")
+    check("Relentless" in page.content(), "page loads and renders the app shell")
     expect(page.locator("header.hdr")).to_be_visible()
     ok("header is visible")
 

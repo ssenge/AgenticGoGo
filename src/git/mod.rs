@@ -5,9 +5,9 @@
 //! is merged back into the base UNLESS the worker vetoed it (wrote the red file), in which
 //! case the branch is discarded and the base is untouched.
 //!
-//! All operations shell out to `git` (no libgit2 dependency — agg stays lean). Every call is
+//! All operations shell out to `git` (no libgit2 dependency — rlt stays lean). Every call is
 //! best-effort-logged: a git failure is surfaced but never panics the loop. Isolation can only
-//! proceed on a usable repo (a git repo, a clean tree, a non-detached HEAD), so `agg run`
+//! proceed on a usable repo (a git repo, a clean tree, a non-detached HEAD), so `rlt run`
 //! REFUSES to start otherwise (see `loop_::run`) rather than degrading — isolation is the
 //! product's correctness guarantee, not an enhancement.
 
@@ -55,19 +55,19 @@ pub fn current_branch(dir: &Path) -> Option<String> {
     }
 }
 
-/// Is the work tree clean enough to branch (no tracked modifications OUTSIDE agg's own runtime
-/// state)? Untracked files are allowed (they carry across a checkout). agg's `agg/{state,private}/` runtime
+/// Is the work tree clean enough to branch (no tracked modifications OUTSIDE rlt's own runtime
+/// state)? Untracked files are allowed (they carry across a checkout). rlt's `rlt/{state,private}/` runtime
 /// state (state.json/project.json/run.pid) churns every cycle and MUST NOT count as dirty —
 /// it's runtime, not project content (and gitignored). We exclude it via a pathspec. The
-/// pathspec excludes `agg/state/**` and `agg/private/**` (NOT `agg`): the committed config + judge
-/// library under `agg/` must still be checked, only the two runtime-state halves are churn.
+/// pathspec excludes `rlt/state/**` and `rlt/private/**` (NOT `rlt`): the committed config + judge
+/// library under `rlt/` must still be checked, only the two runtime-state halves are churn.
 pub fn is_clean(dir: &Path) -> bool {
-    // pathspec `:(exclude)agg/{state,private}/**` drops agg's runtime churn (BOTH halves of the
-    // who-may-write split — `private/` is agg-owned but just as much churn); `--untracked-files=no`
+    // pathspec `:(exclude)rlt/{state,private}/**` drops rlt's runtime churn (BOTH halves of the
+    // who-may-write split — `private/` is rlt-owned but just as much churn); `--untracked-files=no`
     // ignores untracked.
     git(
         dir,
-        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)agg/state/**", ":(exclude)agg/private/**"],
+        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)rlt/state/**", ":(exclude)rlt/private/**"],
     )
     .1
     .is_empty()
@@ -84,23 +84,23 @@ pub fn merge_in_progress(dir: &Path) -> bool {
 }
 
 /// If a leftover staged merge from a crashed rollback-gate cycle is present, abort it so the repo
-/// returns to a clean base. Only aborts an agg-owned merge (one whose branch heads under the
-/// session branch prefix exist / whose MERGE_MSG names an agg session) — a merge the USER started
+/// returns to a clean base. Only aborts an rlt-owned merge (one whose branch heads under the
+/// session branch prefix exist / whose MERGE_MSG names an rlt session) — a merge the USER started
 /// by hand is left untouched and reported. Call at loop startup, BEFORE the is_clean check.
 /// Returns true if it aborted something (for logging). Best-effort.
 pub fn recover_stranded_merge(dir: &Path, branch_prefix: &str) -> bool {
     if !merge_in_progress(dir) {
         return false;
     }
-    // Is this agg's merge? Check MERGE_MSG for our merge-commit signature or the session prefix.
+    // Is this rlt's merge? Check MERGE_MSG for our merge-commit signature or the session prefix.
     let msg = std::fs::read_to_string(dir.join(".git").join("MERGE_MSG")).unwrap_or_default();
-    let is_aggs = msg.contains("agg: merge session") || msg.contains(branch_prefix);
-    if is_aggs {
+    let is_ours = msg.contains("rlt: merge session") || msg.contains(branch_prefix);
+    if is_ours {
         eprintln!("  [iso] found a leftover staged merge from an interrupted session — aborting it to restore a clean base");
         let _ = git(dir, &["merge", "--abort"]);
         true
     } else {
-        eprintln!("  [iso] WARNING a merge is in progress that agg did not start (MERGE_HEAD present) — leaving it alone; resolve it, then re-run");
+        eprintln!("  [iso] WARNING a merge is in progress that rlt did not start (MERGE_HEAD present) — leaving it alone; resolve it, then re-run");
         false
     }
 }
@@ -126,47 +126,47 @@ pub fn checkout(dir: &Path, branch: &str) -> bool {
 }
 
 /// Discard the CURRENT branch's uncommitted modifications to TRACKED files. LEGACY: GIT_REDESIGN
-/// replaced this on the normal staging path with `auto_commit_tracked` — agg now COMMITS the worker's
+/// replaced this on the normal staging path with `auto_commit_tracked` — rlt now COMMITS the worker's
 /// edits rather than discarding them (the worker never runs git). Retained for the (unused)
 /// `resolve_session` path + its unit test. Only tracked modifications are reset (`git checkout -- .`)
-/// — untracked files are left, and `agg/{state,private}/` runtime state is never touched. Returns true if there
+/// — untracked files are left, and `rlt/{state,private}/` runtime state is never touched. Returns true if there
 /// was something to discard (for logging).
 pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
     let dirty = !git(
         dir,
-        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)agg/state/**", ":(exclude)agg/private/**"],
+        &["status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)rlt/state/**", ":(exclude)rlt/private/**"],
     )
     .1
     .is_empty();
     if dirty {
         // restore tracked files to HEAD of the (session) branch; pathspec form leaves untracked
         // files and can't over-reach into base — we are still ON the session branch here. The
-        // the excludes are the two runtime-state halves ONLY: the committed `agg/` config + judges MUST be restored
+        // the excludes are the two runtime-state halves ONLY: the committed `rlt/` config + judges MUST be restored
         // (a rolled-back session must not keep the worker's edits to the judges that graded it).
-        let _ = git(dir, &["checkout", "--", ".", ":(exclude)agg/state/**", ":(exclude)agg/private/**"]);
+        let _ = git(dir, &["checkout", "--", ".", ":(exclude)rlt/state/**", ":(exclude)rlt/private/**"]);
     }
     dirty
 }
 
-/// Commit the CURRENT (session) branch's uncommitted TRACKED edits — GIT_REDESIGN: agg owns git,
+/// Commit the CURRENT (session) branch's uncommitted TRACKED edits — GIT_REDESIGN: rlt owns git,
 /// the worker just edits files and never runs git. Stages everything EXCEPT the runtime-state halves (
 /// state, gitignored + excluded via the moat pathspec) and commits IFF something is staged (no
 /// `--allow-empty`: a no-op session makes no commit, exactly like a worker that changed nothing, and
 /// a worker that DID commit leaves nothing staged so no extra commit is made). This REPLACES
 /// `discard_uncommitted_tracked` on the normal path: the worker's work is now KEPT (committed) rather
 /// than thrown away, which kills the "worker forgot to commit → work lost" failure (GIT_REDESIGN §2).
-/// `--no-verify` so a project's pre-commit hook can't block agg's mechanical commit. Returns true if
+/// `--no-verify` so a project's pre-commit hook can't block rlt's mechanical commit. Returns true if
 /// it made a commit (for logging).
 pub fn auto_commit_tracked(dir: &Path, message: &str) -> bool {
-    // stage tracked modifications, deletions, AND new files — but never agg's runtime state.
-    let _ = git(dir, &["add", "-A", "--", ".", ":(exclude)agg/state/**", ":(exclude)agg/private/**"]);
+    // stage tracked modifications, deletions, AND new files — but never rlt's runtime state.
+    let _ = git(dir, &["add", "-A", "--", ".", ":(exclude)rlt/state/**", ":(exclude)rlt/private/**"]);
     // commit only if the index actually differs from HEAD (worker already committed / did nothing).
     if git(dir, &["diff", "--cached", "--name-only"]).1.is_empty() {
         return false;
     }
     let (ok, _, err) = git(dir, &["commit", "--no-verify", "--no-edit", "-m", message]);
     if !ok {
-        eprintln!("  [git] agg auto-commit failed on the session branch: {err}");
+        eprintln!("  [git] rlt auto-commit failed on the session branch: {err}");
     }
     ok
 }
@@ -278,36 +278,36 @@ pub fn remove_file(dir: &Path, path: &str) {
     let _ = std::fs::remove_file(dir.join(path));
 }
 
-/// Ensure the project's `.gitignore` carries BOTH runtime-state halves (`agg/state/` and
-/// `agg/private/`) (agg's runtime state must never get
+/// Ensure the project's `.gitignore` carries BOTH runtime-state halves (`rlt/state/` and
+/// `rlt/private/`) (rlt's runtime state must never get
 /// committed onto session branches or merged into base) AND `.obsidian/` (so a user who opens the
-/// `agg/` folder as an Obsidian vault — to visualize the LLM wiki — never commits Obsidian's config).
-/// Idempotent, order-independent. MIGRATION: runtime state used to live at `<project>/.agg/`, so a
+/// `rlt/` folder as an Obsidian vault — to visualize the LLM wiki — never commits Obsidian's config).
+/// Idempotent, order-independent. MIGRATION: runtime state used to live at `<project>/.rlt/`, so a
 /// pre-move project ignores that now-stale path — we DROP it rather than leave two contradictory
-/// lines. Only the two runtime-state dirs are ignored under `agg/`: the committed config + judges must stay tracked.
+/// lines. Only the two runtime-state dirs are ignored under `rlt/`: the committed config + judges must stay tracked.
 /// Best-effort.
-pub fn ensure_agg_gitignored(dir: &Path) {
+pub fn ensure_rlt_gitignored(dir: &Path) {
     // FIRST, and unconditionally: the `.gitignore` below is a work-tree file a rollback can delete.
-    ensure_agg_excluded(dir);
+    ensure_rlt_excluded(dir);
     let gi = dir.join(".gitignore");
     let existing = std::fs::read_to_string(&gi).unwrap_or_default();
     let has = |opts: &[&str]| existing.lines().any(|l| opts.contains(&l.trim()));
-    let is_stale = |t: &str| matches!(t, ".agg" | ".agg/" | "/.agg" | "/.agg/");
+    let is_stale = |t: &str| matches!(t, ".rlt" | ".rlt/" | "/.rlt" | "/.rlt/");
 
-    let has_state = has(&["agg/state", "agg/state/", "/agg/state", "/agg/state/"]);
-    // `agg/private/` is agg-owned runtime state — gitignored for the same reason `agg/state/` is
+    let has_state = has(&["rlt/state", "rlt/state/", "/rlt/state", "/rlt/state/"]);
+    // `rlt/private/` is rlt-owned runtime state — gitignored for the same reason `rlt/state/` is
     // (machine-managed churn must never touch the user's history). Tracked separately so an
-    // existing project that already ignores `agg/state/` still picks the new entry up.
-    let has_private = has(&["agg/private", "agg/private/", "/agg/private", "/agg/private/"]);
-    // `.obsidian/` (no leading slash) matches an Obsidian vault at ANY depth — root, `agg/`, or
-    // `agg/state/` — so it covers whichever folder the user opens as the vault.
+    // existing project that already ignores `rlt/state/` still picks the new entry up.
+    let has_private = has(&["rlt/private", "rlt/private/", "/rlt/private", "/rlt/private/"]);
+    // `.obsidian/` (no leading slash) matches an Obsidian vault at ANY depth — root, `rlt/`, or
+    // `rlt/state/` — so it covers whichever folder the user opens as the vault.
     let has_obsidian = has(&[".obsidian", ".obsidian/", "/.obsidian", "/.obsidian/"]);
     let has_stale = existing.lines().any(|l| is_stale(l.trim()));
     if has_state && has_private && has_obsidian && !has_stale {
         return; // both entries present, nothing stale — done
     }
 
-    // Re-emit every line except the stale pre-move `.agg/` entry, then append whichever entries are
+    // Re-emit every line except the stale pre-move `.rlt/` entry, then append whichever entries are
     // missing, so the file ends with exactly one (correct) copy of each, never a contradictory pair.
     let mut new: String = existing
         .lines()
@@ -315,34 +315,34 @@ pub fn ensure_agg_gitignored(dir: &Path) {
         .map(|l| format!("{l}\n"))
         .collect();
     if !has_state {
-        new.push_str("agg/state/\n");
+        new.push_str("rlt/state/\n");
     }
     if !has_private {
-        new.push_str("agg/private/\n");
+        new.push_str("rlt/private/\n");
     }
     if !has_obsidian {
         new.push_str(".obsidian/\n");
     }
     let _ = std::fs::write(&gi, new);
     // also stop tracking runtime state if it was committed under the OLD layout (keeps files on
-    // disk). Target `agg/state` ONLY — `git rm --cached agg` would untrack the whole committed
+    // disk). Target `rlt/state` ONLY — `git rm --cached rlt` would untrack the whole committed
     // config + judge library, inverting the moat. (We do NOT untrack a `.obsidian/` a user chose to
     // commit — only ignore it going forward.)
-    let _ = git(dir, &["rm", "-r", "--cached", "--quiet", "agg/state"]);
+    let _ = git(dir, &["rm", "-r", "--cached", "--quiet", "rlt/state"]);
 }
 
-/// The entries agg itself needs ignored: the two runtime-state halves and an Obsidian vault config.
-pub const AGG_IGNORED: [&str; 3] = ["agg/state/", "agg/private/", ".obsidian/"];
+/// The entries rlt itself needs ignored: the two runtime-state halves and an Obsidian vault config.
+pub const RLT_IGNORED: [&str; 3] = ["rlt/state/", "rlt/private/", ".obsidian/"];
 
-/// Write [`AGG_IGNORED`] into the repository's `info/exclude` as well — the copy no rollback can
+/// Write [`RLT_IGNORED`] into the repository's `info/exclude` as well — the copy no rollback can
 /// remove.
 ///
 /// `.gitignore` is a WORK-TREE file, and on a project whose base branch never committed one, the
 /// first session commits it on its branch; a rollback then deletes it again (tracked there, absent on
-/// base), and with it every agg entry — so the next session committed `agg/private/`. `info/exclude`
+/// base), and with it every rlt entry — so the next session committed `rlt/private/`. `info/exclude`
 /// lives in the git directory: no checkout, merge, abort or reset touches it. `.gitignore` is still
 /// written, so a clone of the project keeps ignoring the same paths. Idempotent; best-effort.
-pub fn ensure_agg_excluded(dir: &Path) {
+pub fn ensure_rlt_excluded(dir: &Path) {
     // `--git-path` resolves `info/` to the COMMON git dir, which is where a linked worktree reads it.
     let (ok, rel, _) = git(dir, &["rev-parse", "--git-path", "info/exclude"]);
     if !ok || rel.is_empty() {
@@ -351,7 +351,7 @@ pub fn ensure_agg_excluded(dir: &Path) {
     let path = dir.join(rel);
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let missing: Vec<&str> =
-        AGG_IGNORED.iter().copied().filter(|e| !existing.lines().any(|l| l.trim() == *e)).collect();
+        RLT_IGNORED.iter().copied().filter(|e| !existing.lines().any(|l| l.trim() == *e)).collect();
     if missing.is_empty() {
         return;
     }

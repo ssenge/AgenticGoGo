@@ -5,7 +5,7 @@
 //! The policy reaches five spawn surfaces — the worker, a script judge, an LLM judge's one-shot, a
 //! hook, `notify.cmd` — and every one of them already confines by calling [`super::wrap`] /
 //! [`super::containerize`] with the project dir. Deriving the policy from that dir is the same
-//! choice `agg/private/`'s carve-out made ([`super::deny_set`]): a parameter is a thing a future
+//! choice `rlt/private/`'s carve-out made ([`super::deny_set`]): a parameter is a thing a future
 //! call site can forget, and forgetting this one would hand a confined process a writable context
 //! or an open network. It also keeps the public [`crate::backend::AgentBackend::one_shot`]
 //! signature stable for driver-supplied backends.
@@ -44,9 +44,9 @@ impl ContextMount {
         }
     }
 
-    /// `AGG_CONTEXT_<AS>` — the env var a confined process finds this directory under.
+    /// `RLT_CONTEXT_<AS>` — the env var a confined process finds this directory under.
     pub fn env_key(&self) -> String {
-        format!("AGG_CONTEXT_{}", self.name.to_uppercase().replace('-', "_"))
+        format!("RLT_CONTEXT_{}", self.name.to_uppercase().replace('-', "_"))
     }
 }
 
@@ -65,7 +65,7 @@ pub struct RunPolicy {
     /// the image judges run in when the run's tier is `container` (`judge.image`, resolved).
     pub judge_image: String,
     /// the run's judge tier from its config (`cfg.run_isolation()`). Under `container` swe-metrics
-    /// runs in `judge_image` even for a judge run outside the loop (`agg judge`, `agg plan`): that
+    /// runs in `judge_image` even for a judge run outside the loop (`rlt judge`, `rlt plan`): that
     /// is where startup found it, and the host need not have it at all.
     pub judge_tier: super::Isolation,
     /// the network allow-list and its enforcement; `None` = `network: open`.
@@ -86,7 +86,7 @@ impl Default for RunPolicy {
 }
 
 impl RunPolicy {
-    /// The `AGG_CONTEXT_<AS>` variables for a process confined on `tier`.
+    /// The `RLT_CONTEXT_<AS>` variables for a process confined on `tier`.
     pub fn context_env(&self, tier: super::Isolation) -> Vec<(String, PathBuf)> {
         self.contexts.iter().map(|c| (c.env_key(), c.seen_on(tier))).collect()
     }
@@ -162,8 +162,8 @@ mod tests {
         let c = ctx("my-brain", "/home/u/brain");
         assert_eq!(c.seen_on(super::super::Isolation::Container), Path::new("/context/my-brain"));
         assert_eq!(c.seen_on(super::super::Isolation::Sandbox), Path::new("/home/u/brain"));
-        assert_eq!(c.env_key(), "AGG_CONTEXT_MY_BRAIN");
+        assert_eq!(c.env_key(), "RLT_CONTEXT_MY_BRAIN");
         let p = RunPolicy { contexts: vec![c], ..RunPolicy::default() };
-        assert_eq!(p.context_env(super::super::Isolation::Container), [("AGG_CONTEXT_MY_BRAIN".to_string(), PathBuf::from("/context/my-brain"))]);
+        assert_eq!(p.context_env(super::super::Isolation::Container), [("RLT_CONTEXT_MY_BRAIN".to_string(), PathBuf::from("/context/my-brain"))]);
     }
 }

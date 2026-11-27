@@ -7,22 +7,22 @@
 //! content. The first judge of a session measures; every later one with the same key reads the same
 //! report. A failed measurement is cached too: five judges must not run a broken analyzer five
 //! times. The report and the tools' details land in the session's judge scratch
-//! (`$AGG_JUDGE_SCRATCH/swe-metrics/<scope>/`), which is where a verdict's evidence is taken from.
+//! (`$RLT_JUDGE_SCRATCH/swe-metrics/<scope>/`), which is where a verdict's evidence is taken from.
 //!
 //! # The incumbent
-//! The report of the last KEPT state, per scope, at `agg/private/metrics/incumbent/<scope>.json`:
+//! The report of the last KEPT state, per scope, at `rlt/private/metrics/incumbent/<scope>.json`:
 //! the baseline pass measures it, and every kept gate promotes the session's reports. A score judge
 //! hands it to `swe-metrics score --baseline`; `combine: all` compares its tools against it.
 //!
 //! # Confinement
 //! swe-metrics runs as a judge does (`core::judge`): from the project root, with `stdin` closed,
-//! the `AGG_*` judge env and `TMPDIR` in the scratch, in the run's strongest tier.
+//! the `RLT_*` judge env and `TMPDIR` in the scratch, in the run's strongest tier.
 //! - `sandbox`: in the OS jail with the project read-only and only the scratch and the judge cache
 //!   writable. Unlike a script judge, `XDG_CACHE_HOME` is left alone: swe-metrics' tools keep
 //!   machine-wide caches there (trivy's vulnerability database), and pointing it at a per-project
 //!   directory would fetch them per project.
 //! - `container`: in the judges' image (`super::contained`), the project read-only, writing only its
-//!   session scratch (under `agg/private/container/judge/`), a fresh home and the container's own
+//!   session scratch (under `rlt/private/container/judge/`), a fresh home and the container's own
 //!   `/tmp` (its `TMPDIR`); the host's trivy database mounted read-only.
 
 use super::report::Report;
@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-/// The program agg runs. Optional: agg works without it, and a metric/score judge refuses at
+/// The program rlt runs. Optional: rlt works without it, and a metric/score judge refuses at
 /// startup when it is missing (`super::probe`).
 pub const PROGRAM: &str = "swe-metrics";
 
@@ -227,7 +227,7 @@ fn host_command(c: &Ctx<'_>, program: &std::ffi::OsStr, args: &[String]) -> Resu
     Ok(command)
 }
 
-/// `swe-metrics <args>` as every tier starts it: from the project root, stdin closed, the `AGG_*`
+/// `swe-metrics <args>` as every tier starts it: from the project root, stdin closed, the `RLT_*`
 /// judge env, and `TMPDIR` in `scratch`.
 pub(super) fn command(c: &Ctx<'_>, args: &[String], scratch: &Path) -> Command {
     command_of(c, PROGRAM.as_ref(), args, scratch)
@@ -239,11 +239,11 @@ fn command_of(c: &Ctx<'_>, program: &std::ffi::OsStr, args: &[String], scratch: 
         .args(args)
         .current_dir(c.cwd)
         .stdin(Stdio::null())
-        .env("AGG_SESSION", c.session.map(|s| s.to_string()).unwrap_or_default())
-        .env("AGG_STEP", c.step)
-        .env("AGG_JUDGE", c.judge)
-        .env("AGG_PROJECT_DIR", c.cwd)
-        .env("AGG_JUDGE_SCRATCH", scratch)
+        .env("RLT_SESSION", c.session.map(|s| s.to_string()).unwrap_or_default())
+        .env("RLT_STEP", c.step)
+        .env("RLT_JUDGE", c.judge)
+        .env("RLT_PROJECT_DIR", c.cwd)
+        .env("RLT_JUDGE_SCRATCH", scratch)
         .env("TMPDIR", scratch);
     command
 }
@@ -269,7 +269,7 @@ fn tree_key(cwd: &Path) -> String {
 
 // ---------------- the incumbent ----------------
 
-/// `agg/private/metrics/incumbent/<scope>.json` — the incumbent's report for `scope`, if kept.
+/// `rlt/private/metrics/incumbent/<scope>.json` — the incumbent's report for `scope`, if kept.
 pub fn incumbent(cwd: &Path, scope: &Scope, reports: Option<&Path>) -> Option<PathBuf> {
     let p = crate::paths::metrics_incumbent_dir(cwd).join(format!("{}.json", site(scope, reports)));
     p.is_file().then_some(p)

@@ -1,5 +1,5 @@
 //! A scripted coding agent for scenario mode (A-38): installed as `claude` and as
-//! `codex` (hidden subcommand `agg scripted-agent <claude|codex> <the agent's arguments>`), it does what the scenario's
+//! `codex` (hidden subcommand `rlt scripted-agent <claude|codex> <the agent's arguments>`), it does what the scenario's
 //! first matching rule says, answers as the real agent's output format does, and logs each call. A judge without a rule
 //! is met; a worker without one changes nothing.
 
@@ -13,11 +13,11 @@ use serde_json::{json, Value};
 
 use super::scenario::{Rule, Scenario};
 
-/// What agg asks every rubric judge for, last in its prompt.
+/// What rlt asks every rubric judge for, last in its prompt.
 const VERDICT: &str = "Output ONLY a single JSON object";
 const MET: &str = r#"{"met": true, "value": 1, "max": 1, "target": 1, "rationale": "scripted: met"}"#;
 
-/// `agg scripted-agent <agent> <args…>`: answers one call as the agent named first.
+/// `rlt scripted-agent <agent> <args…>`: answers one call as the agent named first.
 pub fn command(args: &[String]) -> ExitCode {
     let (agent, rest) = match args.split_first() {
         Some((a, r)) => (a.as_str(), r),
@@ -38,7 +38,7 @@ pub fn command(args: &[String]) -> ExitCode {
 
 fn answer(agent: &str, args: &[String]) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let (scenario, log) = (env("AGG_SCENARIO")?, PathBuf::from(env("AGG_SCENARIO_LOG")?));
+    let (scenario, log) = (env("RLT_SCENARIO")?, PathBuf::from(env("RLT_SCENARIO_LOG")?));
     let rules = Scenario::read(Path::new(&scenario))?.agents;
     let prompt = brief(&prompt_of(agent, args), &cwd);
     let kind = if prompt.contains(VERDICT) { "judge" } else { "worker" };
@@ -82,9 +82,9 @@ fn prompt_of(agent: &str, args: &[String]) -> String {
     }
 }
 
-/// What the agent is asked: the prompt, and the brief file it names (agg puts a worker's brief there).
+/// What the agent is asked: the prompt, and the brief file it names (rlt puts a worker's brief there).
 fn brief(prompt: &str, cwd: &Path) -> String {
-    let named = Regex::new(r"`(agg/private/[^`]+\.md)`").ok().and_then(|re| re.captures(prompt).map(|c| c[1].to_string()));
+    let named = Regex::new(r"`(rlt/private/[^`]+\.md)`").ok().and_then(|re| re.captures(prompt).map(|c| c[1].to_string()));
     match named.and_then(|n| std::fs::read_to_string(cwd.join(n)).ok()) {
         Some(text) => format!("{prompt}\n{text}"),
         None => prompt.to_string(),
@@ -121,7 +121,7 @@ fn rule_for(rules: &[Rule], prompt: &str, agent: &str, kind: &str, log: &Path) -
 }
 
 /// The rule's work in the agent's folder: `write` (path: text), then `run` (a shell command, the prompt in the file
-/// `$AGG_SCENARIO_PROMPT` names), then `answer` (text) into the answer file the brief names (`Write it to <file> as YAML`).
+/// `$RLT_SCENARIO_PROMPT` names), then `answer` (text) into the answer file the brief names (`Write it to <file> as YAML`).
 fn act(rule: &Rule, cwd: &Path, prompt: &str) -> Result<(), String> {
     for (path, text) in &rule.write {
         let target = cwd.join(path);
@@ -131,9 +131,9 @@ fn act(rule: &Rule, cwd: &Path, prompt: &str) -> Result<(), String> {
         std::fs::write(&target, text).map_err(|e| format!("{}: {e}", target.display()))?;
     }
     if let Some(run) = &rule.run {
-        let file = std::env::temp_dir().join(format!("agg-scenario-prompt-{}.md", std::process::id()));
+        let file = std::env::temp_dir().join(format!("rlt-scenario-prompt-{}.md", std::process::id()));
         std::fs::write(&file, prompt).map_err(|e| e.to_string())?;
-        let _ = Command::new("sh").arg("-c").arg(run).current_dir(cwd).env("AGG_SCENARIO_PROMPT", &file).status();
+        let _ = Command::new("sh").arg("-c").arg(run).current_dir(cwd).env("RLT_SCENARIO_PROMPT", &file).status();
         let _ = std::fs::remove_file(&file);
     }
     let named = Regex::new(r"Write it to (\S+) as YAML").ok().and_then(|re| re.captures(prompt).map(|c| c[1].to_string()));
@@ -218,7 +218,7 @@ mod tests {
     fn a_rule_writes_runs_and_answers() {
         let tmp = tempfile::tempdir().unwrap();
         let answer = tmp.path().join("answer.yaml");
-        let rule = &rules("- { when: x, write: { out/a.txt: hello }, run: 'cp \"$AGG_SCENARIO_PROMPT\" copy.md', answer: 'outcome: fixed' }\n")[0];
+        let rule = &rules("- { when: x, write: { out/a.txt: hello }, run: 'cp \"$RLT_SCENARIO_PROMPT\" copy.md', answer: 'outcome: fixed' }\n")[0];
         act(rule, tmp.path(), &format!("# Step\nWrite it to {} as YAML\n", answer.display())).unwrap();
         assert_eq!(std::fs::read_to_string(tmp.path().join("out/a.txt")).unwrap(), "hello");
         assert!(std::fs::read_to_string(tmp.path().join("copy.md")).unwrap().contains("# Step"));
@@ -232,9 +232,9 @@ mod tests {
         assert_eq!(prompt_of("codex", &["exec".into(), "the prompt".into()]), "the prompt");
         assert_eq!(prompt_of("claude", &["--x".into()]), "");
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("agg/private")).unwrap();
-        std::fs::write(tmp.path().join("agg/private/INSTRUCTIONS.md"), "the brief").unwrap();
-        assert_eq!(brief("read `agg/private/INSTRUCTIONS.md`", tmp.path()), "read `agg/private/INSTRUCTIONS.md`\nthe brief");
+        std::fs::create_dir_all(tmp.path().join("rlt/private")).unwrap();
+        std::fs::write(tmp.path().join("rlt/private/INSTRUCTIONS.md"), "the brief").unwrap();
+        assert_eq!(brief("read `rlt/private/INSTRUCTIONS.md`", tmp.path()), "read `rlt/private/INSTRUCTIONS.md`\nthe brief");
         assert_eq!(brief("nothing named", tmp.path()), "nothing named");
     }
 }

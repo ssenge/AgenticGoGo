@@ -1,13 +1,13 @@
 //! The judge cache (A-37): a check's met verdict from an earlier run of it on exactly the same project
 //! content. The worker's self-check and the run's judge run the same check on the same state, and a long check (the
-//! gates, a rerun of every measure) needn't run twice. `agg cached [--ignore <path>]… -- <command>…` runs the check,
+//! gates, a rerun of every measure) needn't run twice. `rlt cached [--ignore <path>]… -- <command>…` runs the check,
 //! or answers with the cached verdict; the process wraps its script checks in it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 /// Where the verdicts are, under the project's git folder (shared by its worktrees, never committed).
-const DIR: &str = "agg-verdicts";
+const DIR: &str = "rlt-verdicts";
 
 fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
     let mut c = Command::new("git");
@@ -22,7 +22,7 @@ fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
 /// The hash of the working tree as git sees it (untracked files in, ignored ones out, the files `ignore` names
 /// out); none when a nested repository's changes would be invisible in it.
 fn content(cwd: &Path, ignore: &[String]) -> Option<String> {
-    let tmp = std::env::temp_dir().join(format!("agg-cache-{}-{}", std::process::id(),
+    let tmp = std::env::temp_dir().join(format!("rlt-cache-{}-{}", std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())));
     std::fs::create_dir_all(&tmp).ok()?;
     let index = tmp.join("index");
@@ -81,7 +81,7 @@ pub fn cached(cwd: &Path, command: &[String], ignore: &[String]) -> (i32, String
     (code, printed)
 }
 
-/// The command `agg cached`: its arguments after the subcommand. `--content` prints the project's content hash instead
+/// The command `rlt cached`: its arguments after the subcommand. `--content` prints the project's content hash instead
 /// of running a check (exit 1 where there is none).
 pub fn command(args: &[String]) -> ExitCode {
     let (mut ignore, mut hash_only) = (vec![], false);

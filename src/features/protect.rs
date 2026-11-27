@@ -4,9 +4,9 @@
 //! before the worker starts; [`after_worker`] does it again the moment the worker exits and diffs
 //! the two. A difference is a `protected_path_violation`:
 //!
-//! 1. the paths are put back from agg's own copies — BEFORE judging, so no judge ever grades
+//! 1. the paths are put back from rlt's own copies — BEFORE judging, so no judge ever grades
 //!    against a weakened oracle;
-//! 2. a row lands in `agg/private/violations.jsonl` with the paths;
+//! 2. a row lands in `rlt/private/violations.jsonl` with the paths;
 //! 3. the open span is marked, and the next gate ([`crate::features::gate::keep_or_rollback`])
 //!    rolls it back whatever the judges said and whatever `gate_regressions` is set to.
 //!
@@ -15,17 +15,17 @@
 //! running, say — is caught by the next [`before_worker`], which compares against the state the
 //! last check left behind ("between sessions") and restores it too.
 //!
-//! The decision state is in agg's MEMORY, never re-read from disk: under `isolation: none` the
-//! worker can write `agg/private/`, so a ledger row is a record, not the authority.
+//! The decision state is in rlt's MEMORY, never re-read from disk: under `isolation: none` the
+//! worker can write `rlt/private/`, so a ledger row is a record, not the authority.
 
 use anyhow::{bail, Context, Result};
 
 use crate::core::config::ResolvedStep;
-use crate::loop_::{AGGScratch, AGGState, LoopState};
+use crate::loop_::{RLTScratch, RLTState, LoopState};
 use crate::protect::snapshot::{self, Snapshot};
 use crate::protect::{PatternSet, ViolationRecord, VIOLATION};
 
-/// Per-run protected-path state, in [`AGGState`].
+/// Per-run protected-path state, in [`RLTState`].
 #[derive(Default)]
 pub struct ProtectState {
     /// paths a session in the OPEN span changed. Non-empty ⇒ the next gate rolls the span back.
@@ -33,7 +33,7 @@ pub struct ProtectState {
     /// how the protected entries looked when the last check finished (restored if need be) — the
     /// reference for catching a change made between two sessions. `None` after a session that
     /// protected nothing, so a step with a different list never compares against it; and `None` when a
-    /// driver hands agg its next step, the driver's own writes in between being no worker's.
+    /// driver hands rlt its next step, the driver's own writes in between being no worker's.
     pub last: Option<LastCheck>,
 }
 
@@ -48,17 +48,17 @@ pub struct LastCheck {
 /// Snapshot the step's protected entries before its worker runs. No-op for a step with none.
 pub fn before_worker(ctx: &mut LoopState, step: &ResolvedStep) -> Result<()> {
     if step.write_deny.is_empty() {
-        ctx.ext.get::<AGGState>().protect.last = None;
+        ctx.ext.get::<RLTState>().protect.last = None;
         return Ok(());
     }
     // a bind-based tier needs `dir/**` roots to exist; create them now, so the snapshot sees them
-    // and agg's own mkdir is not read as the worker's.
+    // and rlt's own mkdir is not read as the worker's.
     crate::protect::materialize(&ctx.dir, step.isolation, &step.write_deny);
     let set = PatternSet::compile(&ctx.dir, &step.write_deny)?;
     let store = crate::paths::protected_store(&ctx.dir);
     let snap = snapshot::take(&ctx.dir, &set, Some(&store)).context("snapshotting the protected paths")?;
 
-    let last = ctx.ext.get::<AGGState>().protect.last.take();
+    let last = ctx.ext.get::<RLTState>().protect.last.take();
     let snap = match last {
         Some(l) if l.patterns == step.write_deny => {
             let changed = snapshot::diff(&l.snap, &snap);
@@ -78,14 +78,14 @@ pub fn before_worker(ctx: &mut LoopState, step: &ResolvedStep) -> Result<()> {
         }
         _ => snap,
     };
-    ctx.scratch.get::<AGGScratch>().protect_before = Some(snap);
+    ctx.scratch.get::<RLTScratch>().protect_before = Some(snap);
     Ok(())
 }
 
 /// Compare against [`before_worker`]'s snapshot; on any difference restore, record and mark the
 /// span for rollback.
 pub fn after_worker(ctx: &mut LoopState, step: &ResolvedStep) -> Result<()> {
-    let Some(before) = ctx.scratch.get::<AGGScratch>().protect_before.take() else {
+    let Some(before) = ctx.scratch.get::<RLTScratch>().protect_before.take() else {
         return Ok(());
     };
     let set = PatternSet::compile(&ctx.dir, &step.write_deny)?;
@@ -101,9 +101,9 @@ pub fn after_worker(ctx: &mut LoopState, step: &ResolvedStep) -> Result<()> {
         );
         let session = ctx.session;
         undo(ctx, &set, &before, &changed, (session, &step.name, "session"))?;
-        ctx.ext.get::<AGGState>().protect.span_violation.extend(changed);
+        ctx.ext.get::<RLTState>().protect.span_violation.extend(changed);
     }
-    ctx.ext.get::<AGGState>().protect.last = Some(LastCheck {
+    ctx.ext.get::<RLTState>().protect.last = Some(LastCheck {
         patterns: step.write_deny.clone(),
         snap: before,
         session: ctx.session,

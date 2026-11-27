@@ -34,7 +34,7 @@ use std::process::{Command, Stdio};
 ///
 /// `isolation` is the RUN-LEVEL tier (`cfg.run_isolation()`), **not the current step's** (§2.5).
 /// Under `Sandbox` the judge runs in a kernel jail — otherwise a confined worker escapes trivially by
-/// rewriting `agg/judges/*.sh` (they live in its writable cwd) for agg to run unconfined
+/// rewriting `rlt/judges/*.sh` (they live in its writable cwd) for rlt to run unconfined
 /// (ISOLATION.md §12). Baseline/manual judging (no worker ran) passes `None`.
 ///
 /// # Why the RUN tier and not the step's
@@ -99,8 +99,8 @@ pub fn run(
 }
 
 /// Where swe-metrics runs for a judge on `isolation`: that tier — except that a run whose judges
-/// are containerized measures in the judges' image even from an unconfined caller (`agg judge`,
-/// `agg plan`): startup checked swe-metrics THERE, and a container run need not have it on the host.
+/// are containerized measures in the judges' image even from an unconfined caller (`rlt judge`,
+/// `rlt plan`): startup checked swe-metrics THERE, and a container run need not have it on the host.
 /// In a container every path it is handed must be the one the bind mount shows, so the project dir
 /// is canonical there.
 fn metrics_site(cwd: &Path, isolation: crate::isolation::Isolation) -> (std::path::PathBuf, crate::isolation::Isolation) {
@@ -125,7 +125,7 @@ fn metrics_ctx<'a>(
 }
 
 /// A verdict store with nothing in it — for the call sites that judge ONE judge with no run-set
-/// around it (`agg judge`). A native judge asking about a sibling there is asking about something
+/// around it (`rlt judge`). A native judge asking about a sibling there is asking about something
 /// that does not exist in that invocation, and saying so is better than fabricating a verdict.
 pub struct NoJudges;
 
@@ -137,7 +137,7 @@ impl JudgeSource for NoJudges {
 
 /// The diff [`JudgeCtx::diff`] hands a native judge, captured EAGERLY — before the closure runs, so
 /// one judge's scribbling cannot change what a later judge sees. With no isolation base resolved
-/// (the manual `agg judge`), fall back to the working tree against HEAD.
+/// (the manual `rlt judge`), fall back to the working tree against HEAD.
 fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
     match iso_base {
         Some(base) if !base.is_empty() => git(&["diff", base], cwd),
@@ -151,7 +151,7 @@ fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
 /// that step**, which is deliberate and is the only part of §2.5's table that experience moved.
 ///
 /// It lives under `$TMPDIR`, which the sandbox already grants, so relocating a write here needs no
-/// new grant — only a redirect. That is the whole trick: agg never has to GUESS that some judge
+/// new grant — only a redirect. That is the whole trick: rlt never has to GUESS that some judge
 /// wanted `tests/__pycache__`.
 ///
 /// # Why shared and not per-judge
@@ -168,7 +168,7 @@ fn session_diff(cwd: &Path, iso_base: Option<&str>) -> String {
 /// last session's benchmark while this session regressed it. A fresh directory each session makes
 /// that unrepresentable rather than guarded against.
 ///
-/// The project hash keeps two agg runs on one machine (same session number, different projects) from
+/// The project hash keeps two rlt runs on one machine (same session number, different projects) from
 /// colliding — the scratch is under a shared `$TMPDIR`, so the path has to carry the project.
 ///
 /// The scratch outlives its session but not the run: [`sweep_scratch`] removes it when the run
@@ -189,17 +189,17 @@ pub fn scratch_path(cwd: &Path, session: Option<u32>, tier: crate::isolation::Is
     if tier == crate::isolation::Isolation::Container {
         return crate::isolation::runtime::judge_scratch(cwd, session);
     }
-    std::env::temp_dir().join(format!("agg-judges-{}-{}", project_key(cwd), session.unwrap_or(0)))
+    std::env::temp_dir().join(format!("rlt-judges-{}-{}", project_key(cwd), session.unwrap_or(0)))
 }
 
 /// Removes every session's judge scratch of this project, on the host and in the container dir: run
 /// at run end, when the evidence has been copied out. One run per project at a time (the run guard),
-/// so no live judge loses its files. `AGG_KEEP_JUDGE_SCRATCH` set keeps them, for debugging a judge.
+/// so no live judge loses its files. `RLT_KEEP_JUDGE_SCRATCH` set keeps them, for debugging a judge.
 pub(crate) fn sweep_scratch(cwd: &Path) {
-    if std::env::var_os("AGG_KEEP_JUDGE_SCRATCH").is_some() {
+    if std::env::var_os("RLT_KEEP_JUDGE_SCRATCH").is_some() {
         return; // debugging a judge: its working files stay where it left them
     }
-    sweep(&std::env::temp_dir(), &format!("agg-judges-{}-", project_key(cwd)));
+    sweep(&std::env::temp_dir(), &format!("rlt-judges-{}-", project_key(cwd)));
     if let Some(container) = crate::isolation::runtime::judge_scratch(cwd, None).parent() {
         sweep(container, "scratch-");
     }
@@ -229,13 +229,13 @@ fn sweep(dir: &Path, prefix: &str) {
 /// npm are built to detect. A stale *measurement* (`bench.json`) is not detectable by anyone, which
 /// is exactly why that one is per-session and this one is not.
 pub(crate) fn cache_dir(cwd: &Path) -> std::io::Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join(format!("agg-judge-cache-{}", project_key(cwd)));
+    let dir = std::env::temp_dir().join(format!("rlt-judge-cache-{}", project_key(cwd)));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
 /// A stable, filesystem-safe key for a project directory. Both judge dirs live under a shared
-/// `$TMPDIR`, so the path has to carry the project or two agg runs on one machine collide.
+/// `$TMPDIR`, so the path has to carry the project or two rlt runs on one machine collide.
 fn project_key(cwd: &Path) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -243,7 +243,7 @@ fn project_key(cwd: &Path) -> String {
     format!("{:x}", h.finish())
 }
 
-/// Point every toolchain cache agg knows about at the scratch dir.
+/// Point every toolchain cache rlt knows about at the scratch dir.
 ///
 /// The failure this prevents, verbatim from the 2026-08-05 run: `build.sh` runs
 /// `python3 -m compileall`, Python writes `tests/__pycache__`, the kernel says EPERM, and the judge
@@ -253,11 +253,11 @@ fn project_key(cwd: &Path) -> String {
 /// write `tests/` any more and the failure disappears without granting anything.
 ///
 /// ponytail: a fixed table, not a config knob. Every entry is a documented, stable env var of a
-/// major toolchain — if a judge needs one agg does not know about, it exports it itself from
-/// `$AGG_JUDGE_SCRATCH`, which is why that variable is published rather than kept internal.
+/// major toolchain — if a judge needs one rlt does not know about, it exports it itself from
+/// `$RLT_JUDGE_SCRATCH`, which is why that variable is published rather than kept internal.
 fn redirect_caches(command: &mut Command, scratch: &Path, cache: &Path) {
     // per SESSION — the judge's own workspace, and the measure→threshold handoff.
-    command.env("AGG_JUDGE_SCRATCH", scratch).env("TMPDIR", scratch);
+    command.env("RLT_JUDGE_SCRATCH", scratch).env("TMPDIR", scratch);
     // per PROJECT — toolchain caches, which must survive the session or every judge rebuilds cold.
     for key in ["XDG_CACHE_HOME", "PYTHONPYCACHEPREFIX", "CARGO_TARGET_DIR", "GOCACHE", "npm_config_cache"] {
         command.env(key, cache);
@@ -269,8 +269,8 @@ fn redirect_caches(command: &mut Command, scratch: &Path, cache: &Path) {
 
 // ---------------- script judge ----------------
 
-/// Execute the judge FILE. cwd = project root; stdin = `/dev/null` (script judges inherited agg's
-/// stdin before — §5.2 nulls it); env carries the four NEW `AGG_*` keys.
+/// Execute the judge FILE. cwd = project root; stdin = `/dev/null` (script judges inherited rlt's
+/// stdin before — §5.2 nulls it); env carries the four NEW `RLT_*` keys.
 ///
 /// Under `isolation: Sandbox` the script runs in the OS jail. A script judge is arbitrary shell —
 /// the exact thing a confined worker rewrites to escape — so it is ALWAYS wrapped when the run is
@@ -280,11 +280,11 @@ fn redirect_caches(command: &mut Command, scratch: &Path, cache: &Path) {
 /// | | |
 /// |---|---|
 /// | read | the whole project, as always — reads stay open at every tier |
-/// | write | **`$AGG_JUDGE_SCRATCH` only.** The project tree is READ-ONLY to a judge |
-/// | denied | all of `cwd`, which subsumes the two that must never be writable: `agg/private/` (it is about to hold this judge's verdict row) and `agg/judges/` (a judge must not rewrite the grader, itself included) |
+/// | write | **`$RLT_JUDGE_SCRATCH` only.** The project tree is READ-ONLY to a judge |
+/// | denied | all of `cwd`, which subsumes the two that must never be writable: `rlt/private/` (it is about to hold this judge's verdict row) and `rlt/judges/` (a judge must not rewrite the grader, itself included) |
 /// | the step's `readonly`/`writable` | not inherited — they describe the worker |
 ///
-/// agg does not GUESS which folders a judge needs; it RELOCATES the writes ([`scratch_dir`]). A judge
+/// rlt does not GUESS which folders a judge needs; it RELOCATES the writes ([`scratch_dir`]). A judge
 /// that still writes in-tree gets EPERM and fails loudly, which is correct: a judge that mutates the
 /// tree it is grading is a bug whether or not a sandbox catches it. It also extends the determinism
 /// `session_diff` already buys natively — a write-free judge cannot perturb what a later judge sees.
@@ -305,7 +305,7 @@ fn run_script(
         Err(e) => return Verdict::failed(format!("judge script {}: {e}", path.display())),
     };
     let dirs = if isolation == crate::isolation::Isolation::Container {
-        // in a container both live under the project (`agg/private/container/judge/`), where the
+        // in a container both live under the project (`rlt/private/container/judge/`), where the
         // engine can see them — see `crate::paths::container_dir`.
         let s = crate::isolation::runtime::judge_scratch(cwd, session);
         let c = crate::isolation::runtime::judge_cache(cwd);
@@ -321,14 +321,14 @@ fn run_script(
     command
         .current_dir(cwd)
         .stdin(Stdio::null())
-        .env("AGG_SESSION", session.map(|s| s.to_string()).unwrap_or_default())
-        .env("AGG_STEP", step)
-        .env("AGG_JUDGE", name)
-        .env("AGG_PROJECT_DIR", cwd);
+        .env("RLT_SESSION", session.map(|s| s.to_string()).unwrap_or_default())
+        .env("RLT_STEP", step)
+        .env("RLT_JUDGE", name)
+        .env("RLT_PROJECT_DIR", cwd);
     redirect_caches(&mut command, &scratch, &cache);
     if isolation == crate::isolation::Isolation::None {
         // a confining tier exports the run's context dirs itself (`wrap`/`containerize`); an
-        // unconfined judge (`agg judge`, a driver's baseline) still finds them by the same names.
+        // unconfined judge (`rlt judge`, a driver's baseline) still finds them by the same names.
         for (k, v) in crate::isolation::policy::for_dir(cwd).context_env(isolation) {
             command.env(k, v);
         }
@@ -337,7 +337,7 @@ fn run_script(
         // `denies` = the whole project. Emitted AFTER the allow-list (`isolation/macos.rs`), so it
         // WINS over the `cwd` grant every wrapped command gets — which is the point: this judge may
         // read everything and write only its scratch. One entry covers both paths that must never be
-        // writable (`agg/private/`, `agg/judges/`) plus every path a step's `readonly:` would have
+        // writable (`rlt/private/`, `rlt/judges/`) plus every path a step's `readonly:` would have
         // named, so nothing here has to be kept in sync with a step's lists.
         let denies = [".".to_string()];
         match crate::isolation::wrap(command, cwd, &[scratch.clone(), cache.clone()], &denies) {
@@ -350,7 +350,7 @@ fn run_script(
     if isolation == crate::isolation::Isolation::Container {
         // §2.5 on the strongest tier: the judge runs in the judges' image, the project read-only,
         // writing only its scratch + cache — the same rule as the sandbox's `denies = ["."]`. A
-        // container worker can rewrite `agg/judges/*.sh` in its bind-mounted tree; run on the host,
+        // container worker can rewrite `rlt/judges/*.sh` in its bind-mounted tree; run on the host,
         // that rewrite would be an escape (the residual this closes).
         match crate::isolation::runtime::script_judge(command, cwd, &abs, &[scratch.clone(), cache.clone()]) {
             Ok(c) => command = c,
@@ -390,7 +390,7 @@ fn command_wrapper(c: &crate::core::model::CommandJudge) -> String {
         .iter()
         .map(|d| match Path::new(d).is_absolute() {
             true => format!("{}:", shell_quote(d)),
-            false => format!("\"$AGG_PROJECT_DIR\"/{}:", shell_quote(d)),
+            false => format!("\"$RLT_PROJECT_DIR\"/{}:", shell_quote(d)),
         })
         .collect();
     COMMAND_WRAPPER.replace("{PATH}", &dirs).replace("{COMMAND}", &shell_quote(&c.command))
@@ -653,7 +653,7 @@ mod tests {
 
     /// A command judge in a fresh project folder: its verdict and the folder.
     fn command_verdict(c: crate::core::model::CommandJudge) -> Verdict {
-        let proj = std::env::temp_dir().join(format!("agg-command-judge-{}-{}", std::process::id(), c.command.len()));
+        let proj = std::env::temp_dir().join(format!("rlt-command-judge-{}-{}", std::process::id(), c.command.len()));
         std::fs::create_dir_all(proj.join("tools")).unwrap();
         std::fs::write(proj.join("tools/shout"), "#!/bin/sh\necho shouted\n").unwrap();
         #[cfg(unix)]
@@ -701,7 +701,7 @@ mod tests {
     }
 
     /// The wiring for ISOLATION.md §12: a SANDBOXED script judge — the exact escape a confined
-    /// worker would plant by rewriting `agg/judges/*.sh` — cannot write outside the project, yet
+    /// worker would plant by rewriting `rlt/judges/*.sh` — cannot write outside the project, yet
     /// still runs and returns its verdict (proving `wrap()` carried the judge through, env and all).
     ///
     /// `#[ignore]`d like its isolation twin (`isolation::tests::real_sandbox_confines_writes`):
@@ -712,10 +712,10 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sandboxed_script_judge_cannot_write_outside_cwd() {
         assert!(crate::isolation::available(), "no OS sandbox on this host — cannot prove confinement");
-        let proj = std::env::temp_dir().join(format!("agg-judge-jail-{}", std::process::id()));
+        let proj = std::env::temp_dir().join(format!("rlt-judge-jail-{}", std::process::id()));
         std::fs::create_dir_all(&proj).unwrap();
         // Outside the jail's writable set (cwd + $TMPDIR + /tmp + /dev): the repo's target dir.
-        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/agg-judge-escape-probe.txt");
+        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/rlt-judge-escape-probe.txt");
         let _ = std::fs::remove_file(&outside);
 
         let judge = proj.join("answered.sh");
@@ -752,7 +752,7 @@ mod tests {
     ///
     /// Three assertions, and the third is the one that proves the mechanism rather than the symptom:
     /// the judge returns a REAL verdict, the project tree is untouched, and the bytecode actually
-    /// LANDED — in `$AGG_JUDGE_SCRATCH`, because agg relocated the write instead of guessing which
+    /// LANDED — in `$RLT_JUDGE_SCRATCH`, because rlt relocated the write instead of guessing which
     /// folder to grant. Without the third, a judge that silently wrote nothing would pass too.
     ///
     /// `cargo test -- --ignored a_judge_writes_only_scratch --nocapture`
@@ -765,7 +765,7 @@ mod tests {
             eprintln!("no python3 on this host — skipping");
             return;
         }
-        let proj = std::env::temp_dir().join(format!("agg-judge-pyc-{}", std::process::id()));
+        let proj = std::env::temp_dir().join(format!("rlt-judge-pyc-{}", std::process::id()));
         std::fs::create_dir_all(proj.join("tests")).unwrap();
         std::fs::write(proj.join("tests/test_x.py"), "def test_x():\n    assert True\n").unwrap();
 

@@ -1,8 +1,8 @@
-//! `agg status` — a cheap, read-only snapshot of a run.
+//! `rlt status` — a cheap, read-only snapshot of a run.
 //!
-//! Unlike `agg plan` (which RE-RUNS every judge — possibly an expensive LLM call — to compute a
-//! fresh scoreboard), `status` just reads the `agg/private/state.json` snapshot the running loop
-//! already publishes and renders it. That matches the `/agg:status` skill's "read the digest,
+//! Unlike `rlt plan` (which RE-RUNS every judge — possibly an expensive LLM call — to compute a
+//! fresh scoreboard), `status` just reads the `rlt/private/state.json` snapshot the running loop
+//! already publishes and renders it. That matches the `/rlt:status` skill's "read the digest,
 //! don't re-judge" discipline, so the same word means the same (cheap) thing in both places.
 
 use crate::state::{DashboardState, JudgeView};
@@ -13,9 +13,9 @@ use std::path::Path;
 pub fn render(dir: &Path) -> String {
     match DashboardState::read(dir) {
         Some(s) => render_state(&s) + &process_line(dir),
-        None => "no run snapshot yet (agg/private/state.json not found).\n  \
-                 • `agg run` to start the loop (it publishes state as it goes), or\n  \
-                 • `agg plan` to evaluate the judges once now (a dry run — this re-judges)."
+        None => "no run snapshot yet (rlt/private/state.json not found).\n  \
+                 • `rlt run` to start the loop (it publishes state as it goes), or\n  \
+                 • `rlt plan` to evaluate the judges once now (a dry run — this re-judges)."
             .to_string(),
     }
 }
@@ -33,7 +33,7 @@ fn process_line(dir: &Path) -> String {
 
 /// The live status document (`docs/schemas/status.v1.json`) as pretty JSON — the STABLE interface
 /// for a program watching a run, built by [`crate::report::status`]. Errors with an actionable hint
-/// if no snapshot exists yet, so `agg status --json` in a fresh project fails loud rather than
+/// if no snapshot exists yet, so `rlt status --json` in a fresh project fails loud rather than
 /// emitting misleading empty JSON.
 pub fn render_json(dir: &Path) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(&crate::report::status::document(dir)?)?)
@@ -52,7 +52,7 @@ fn render_state(s: &DashboardState) -> String {
     // the current STEP and who ran it (§7.4) — a mixed run is uninterpretable without the agent+model.
     if !s.step.is_empty() {
         let agent = if s.step_agent.is_empty() { "—" } else { s.step_agent.as_str() };
-        // empty model = agg pins no `--model`, the agent uses its own default (e.g. codex, whose
+        // empty model = rlt pins no `--model`, the agent uses its own default (e.g. codex, whose
         // DEFAULT_MODEL is "" on purpose). Say so rather than showing a bare em-dash.
         let model = if s.step_model.is_empty() { "agent default" } else { s.step_model.as_str() };
         out.push_str(&format!("step   {}  ·  {agent} / {model}\n", s.step));
@@ -84,7 +84,7 @@ fn render_state(s: &DashboardState) -> String {
     }
     // FLAGGED — `notify_if` fired and the loop is asking for a human. It KEPT RUNNING (that is the
     // point), so this is a standing flag, not a status: it stays until the run ends. Spelled out
-    // rather than abbreviated, because `agg status` is what an operator checks from their phone.
+    // rather than abbreviated, because `rlt status` is what an operator checks from their phone.
     if let Some(sess) = s.notify_session {
         out.push_str(&format!("⚑ FLAGGED for help since session #{sess} — {}\n", s.notify_reason));
         out.push_str("  (the loop is still running; it never blocks on a human)\n");
@@ -95,7 +95,7 @@ fn render_state(s: &DashboardState) -> String {
         let left = crate::util::fmt_dur(w.until.saturating_sub(crate::util::now_epoch()));
         out.push_str(&format!(
             "⏸ WAITING — {} for `{}` until {} (in {left})
-  (`agg send wake` tries again now; `agg stop` ends the run)
+  (`rlt send wake` tries again now; `rlt stop` ends the run)
 ",
             w.reason,
             w.agent,
@@ -117,8 +117,8 @@ fn render_state(s: &DashboardState) -> String {
                 a.question
             ));
             match (&a.options, a.case.as_str()) {
-                (Some(o), _) => out.push_str(&format!("      → agg answer {} <{}>\n", a.id, o.join("|"))),
-                (None, _) => out.push_str(&format!("      → agg answer {} \"<value>\"\n", a.id)),
+                (Some(o), _) => out.push_str(&format!("      → rlt answer {} <{}>\n", a.id, o.join("|"))),
+                (None, _) => out.push_str(&format!("      → rlt answer {} \"<value>\"\n", a.id)),
             }
         }
     }
@@ -410,7 +410,7 @@ mod tests {
         });
         let out = render_state(&s);
         assert!(out.contains("WAITING — rate_limit for `claude`"), "{out}");
-        assert!(out.contains("agg send wake"), "{out}");
+        assert!(out.contains("rlt send wake"), "{out}");
     }
 
     /// The §7.4 per-agent breakdown: one row per agent + a total; a non-reporting agent shows "—".
@@ -487,7 +487,7 @@ mod tests {
     }
 
     /// A flagged loop must SAY it is flagged — and must say, in the same breath, that it is still
-    /// running. `agg status` is what an operator checks from their phone; red text that reads like
+    /// running. `rlt status` is what an operator checks from their phone; red text that reads like
     /// a dead run would send them to a terminal for nothing.
     #[test]
     fn a_flagged_run_says_so_and_says_it_is_still_running() {

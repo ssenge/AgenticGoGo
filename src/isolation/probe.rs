@@ -4,15 +4,15 @@
 //! 1. **Does the image have the CLI?** A worker step runs `claude`/`codex` inside its image, and the
 //!    judges' image runs the ruler's CLI for an LLM judge and `swe-metrics` for a metric or score
 //!    judge. Missing, every session dies at spawn.
-//! 2. **Can the engine see the paths agg mounts?** A VM-backed engine (colima, lima) shares only
+//! 2. **Can the engine see the paths rlt mounts?** A VM-backed engine (colima, lima) shares only
 //!    some host directories with its VM, and a bind of one it cannot see is not an error — the
 //!    container gets an EMPTY directory there. A worker in an empty project, or a judge reading an
 //!    empty context, is a session that runs, reports success, and did nothing real.
 //!
-//! Both are refusals, located at the key that chose the image or the path ([`assess`]), so `agg
-//! check` lists them and `agg run` will not start. The facts also feed `agg doctor --json`.
+//! Both are refusals, located at the key that chose the image or the path ([`assess`]), so `rlt
+//! check` lists them and `rlt run` will not start. The facts also feed `rlt doctor --json`.
 
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::core::model::{Judge, JudgeKind};
 use crate::problem::Problem;
 use serde::Serialize;
@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// What the probe learned about one image (`agg doctor --json` → `container_images`).
+/// What the probe learned about one image (`rlt doctor --json` → `container_images`).
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageFacts {
     pub image: String,
@@ -43,7 +43,7 @@ struct Need {
 
 /// Probe every image `cfg` runs in and report each problem at its key. Runs nothing when the config
 /// has no container tier or no engine answers (that refusal is the tier check's).
-pub fn assess(cfg: &AggConfig, judges: &[Judge], dir: &Path) -> (Vec<ImageFacts>, Vec<Problem>) {
+pub fn assess(cfg: &RelentlessConfig, judges: &[Judge], dir: &Path) -> (Vec<ImageFacts>, Vec<Problem>) {
     let needs = needs(cfg, judges);
     if needs.is_empty() || !super::container_available() {
         return (Vec::new(), Vec::new());
@@ -91,7 +91,7 @@ pub fn missing_cli(at: &str, image: &str, bin: &str) -> Problem {
 }
 
 /// The config key that chose the judges' image — where its problems are reported.
-pub fn judge_image_key(cfg: &AggConfig) -> &'static str {
+pub fn judge_image_key(cfg: &RelentlessConfig) -> &'static str {
     if cfg.judge.image.is_some() {
         "judge.image"
     } else if cfg.defaults.image.is_some() {
@@ -102,7 +102,7 @@ pub fn judge_image_key(cfg: &AggConfig) -> &'static str {
 }
 
 /// Every image the run starts a container from, with the CLIs it must have.
-fn needs(cfg: &AggConfig, judges: &[Judge]) -> BTreeMap<String, Need> {
+fn needs(cfg: &RelentlessConfig, judges: &[Judge]) -> BTreeMap<String, Need> {
     use super::Isolation::Container;
     let mut out: BTreeMap<String, Need> = BTreeMap::new();
     let mut add = |image: String, at: String, bin: Option<&str>| {
@@ -142,7 +142,7 @@ fn needs(cfg: &AggConfig, judges: &[Judge]) -> BTreeMap<String, Need> {
 }
 
 /// The host paths a container of this run mounts, each with the key that names it.
-fn mounted_paths(cfg: &AggConfig, dir: &Path) -> Vec<(PathBuf, String)> {
+fn mounted_paths(cfg: &RelentlessConfig, dir: &Path) -> Vec<(PathBuf, String)> {
     let project = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut out = vec![(project, String::new())];
     let (policy, _) = super::run::resolve(cfg, dir);
@@ -171,8 +171,8 @@ pub fn probe(image: &str, bins: &[String], paths: &[PathBuf], user: Option<&str>
         ));
     }
     for (i, p) in paths.iter().enumerate() {
-        cmd.arg("-v").arg(format!("{}:/agg-probe/{i}:ro", p.display()));
-        script.push_str(&format!("if [ -n \"$(ls -A /agg-probe/{i} 2>/dev/null)\" ]; then echo SEES {i}; else echo EMPTY {i}; fi\n"));
+        cmd.arg("-v").arg(format!("{}:/rlt-probe/{i}:ro", p.display()));
+        script.push_str(&format!("if [ -n \"$(ls -A /rlt-probe/{i} 2>/dev/null)\" ]; then echo SEES {i}; else echo EMPTY {i}; fi\n"));
     }
     cmd.arg(image).arg("-c").arg(&script).stdin(Stdio::null());
     let out = match crate::os::proc::run_with_timeout(cmd, PROBE_TIMEOUT_SECS) {
@@ -216,7 +216,7 @@ fn non_empty(p: &Path) -> bool {
 mod tests {
     use super::*;
 
-    fn cfg(yaml: &str) -> AggConfig {
+    fn cfg(yaml: &str) -> RelentlessConfig {
         serde_yaml::from_str(yaml).unwrap()
     }
 
@@ -272,7 +272,7 @@ mod tests {
     }
 
     /// REAL ENGINE (skipped without one): a path the engine cannot see arrives empty and is
-    /// reported; one under the project tree (shared with every engine agg supports) is seen; and a
+    /// reported; one under the project tree (shared with every engine rlt supports) is seen; and a
     /// CLI the image lacks is reported missing.
     #[test]
     fn the_probe_reports_missing_clis_and_paths_the_engine_cannot_see() {
@@ -281,11 +281,11 @@ mod tests {
             return;
         }
         let seen = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let f = probe(super::super::DEFAULT_IMAGE, &["sh".into(), "agg-no-such-cli".into()], std::slice::from_ref(&seen), Some("1000:1000"));
+        let f = probe(super::super::DEFAULT_IMAGE, &["sh".into(), "rlt-no-such-cli".into()], std::slice::from_ref(&seen), Some("1000:1000"));
         assert!(f.error.is_none(), "{f:?}");
-        assert!(f.clis["sh"].is_some() && f.clis["agg-no-such-cli"].is_none(), "{f:?}");
+        assert!(f.clis["sh"].is_some() && f.clis["rlt-no-such-cli"].is_none(), "{f:?}");
         assert!(f.invisible.is_empty(), "the repo is visible to the engine: {f:?}");
-        let f = probe("agg-no-such-image:0", &[], &[], None);
+        let f = probe("rlt-no-such-image:0", &[], &[], None);
         assert!(f.error.is_some(), "an image that does not exist cannot be probed: {f:?}");
     }
 }

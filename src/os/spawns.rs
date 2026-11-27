@@ -11,10 +11,10 @@
 //!      relaunches a duplicate, piling up runaway CPU.
 //!
 //! THE FIX (three cooperating layers; this module is layer 2 + the engine for layer 3):
-//!   • Layer 1 — guidance (in AGG_RESUME): don't end your turn while a spawned task runs;
+//!   • Layer 1 — guidance (in RLT_RESUME): don't end your turn while a spawned task runs;
 //!     poll-and-resume until it finishes. If this held 100% the problem never occurs — but
 //!     context-fill / rate-limit / watchdog can end a session anyway, so it can't be relied on.
-//!   • Layer 2 — `agg spawn --reason "…" -- <cmd>`: agg launches the task itself, so it
+//!   • Layer 2 — `rlt spawn --reason "…" -- <cmd>`: rlt launches the task itself, so it
 //!     KNOWS the pgid directly (no env marker — macOS blocks reading a process's env). It
 //!     records {pgid, reason, log, started_session, status} here. That record (a) marks the
 //!     pgid PROTECTED so the post-session reaper SPARES it, and (b) is injected into the next
@@ -27,8 +27,8 @@
 //! Why pgid is the ownership handle (not ppid, not an env marker): a backgrounded child
 //! KEEPS its pgid after its parent dies and re-parents to pid 1 — verified — whereas its
 //! `ppid` flips to 1 (lineage lost). And modern macOS blocks reading another process's
-//! environment, so an `AGG_RUN_ID` env tag is unreadable from outside. pgid, recorded by
-//! agg at spawn time while it still owns the process, is the stable, provable, cross-platform
+//! environment, so an `RLT_RUN_ID` env tag is unreadable from outside. pgid, recorded by
+//! rlt at spawn time while it still owns the process, is the stable, provable, cross-platform
 //! "this is ours" key.
 
 use crate::os::proc::pid_alive;
@@ -39,14 +39,14 @@ use std::path::{Path, PathBuf};
 /// One registered long-running task.
 ///
 /// `#[serde(default)]` for forward/backward compat: a spawns.json written by a different
-/// `agg` version still deserializes (same discipline as state.json).
+/// `rlt` version still deserializes (same discipline as state.json).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpawnEntry {
     /// short operator/worker-chosen handle, e.g. "scaling-20q". Unique within a project.
     pub name: String,
     /// process-group id of the spawned task. THE ownership + reaping key (stable across
-    /// the parent dying; agg set it via `process_group(0)` at spawn).
+    /// the parent dying; rlt set it via `process_group(0)` at spawn).
     pub pgid: u32,
     /// the task's own pid (== pgid, since it leads its group). Kept for liveness checks.
     pub pid: u32,
@@ -55,7 +55,7 @@ pub struct SpawnEntry {
     pub reason: String,
     /// the command line, for the operator and the next worker to recognize the task.
     pub cmd: String,
-    /// path to the task's combined stdout+stderr log (under `agg/state/spawns/<name>.log`).
+    /// path to the task's combined stdout+stderr log (under `rlt/state/spawns/<name>.log`).
     pub log: String,
     /// the session number that launched it (for the "started session N" breadcrumb).
     pub started_session: u32,
@@ -174,7 +174,7 @@ pub fn summary_for_prompt(dir: &Path) -> Option<String> {
         return None;
     }
     let mut s = String::from(
-        "═══ BACKGROUND TASKS (agg spawn) — read before launching anything ═══\n",
+        "═══ BACKGROUND TASKS (rlt spawn) — read before launching anything ═══\n",
     );
     for e in &live {
         s.push_str(&format!(
@@ -202,8 +202,8 @@ mod tests {
         // unique-ish without Date/rand: use the test pid + a static counter
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
-        d.push(format!("agg-spawns-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(crate::paths::agg_dir(&d)).unwrap();
+        d.push(format!("rlt-spawns-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(crate::paths::rlt_dir(&d)).unwrap();
         d
     }
 

@@ -1,32 +1,32 @@
 #!/bin/sh
-# AgenticGoGo (`agg`) installer — collapses the "download the right binary + chmod +
+# Relentless (`rlt`) installer — collapses the "download the right binary + chmod +
 # put it on PATH" dance into one line:
 #
-#   curl -fsSL https://raw.githubusercontent.com/ssenge/AgenticGoGo/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ssenge/relentless/main/scripts/install.sh | sh
 #
 # What it does: detect your OS/arch, download the matching release binary from the
-# latest GitHub Release, make it executable, and install it onto your PATH: over the `agg`
+# latest GitHub Release, make it executable, and install it onto your PATH: over the `rlt`
 # already first on PATH when you can write there (an upgrade in place), else in /usr/local/bin,
-# else ~/.local/bin. Then it verifies `agg --version`, lists every other `agg` on PATH with its
+# else ~/.local/bin. Then it verifies `rlt --version`, lists every other `rlt` on PATH with its
 # version (a copy older than the one just installed gets a WARNING with the command that fixes it:
-# other copies are never changed by this script) and says which copy `agg` resolves to now.
+# other copies are never changed by this script) and says which copy `rlt` resolves to now.
 #
 # Overrides (env vars):
-#   AGG_VERSION=v0.0.2        install a specific tag instead of the latest release
-#   AGG_INSTALL_DIR=~/bin     install to a specific dir (skips the upgrade in place and /usr/local/bin)
-#   AGG_DOWNLOAD_URL=<url>    download the binary from this URL (file:// works) instead of GitHub's
+#   RLT_VERSION=v0.0.2        install a specific tag instead of the latest release
+#   RLT_INSTALL_DIR=~/bin     install to a specific dir (skips the upgrade in place and /usr/local/bin)
+#   RLT_DOWNLOAD_URL=<url>    download the binary from this URL (file:// works) instead of GitHub's
 #
-# This installs ONLY the `agg` CLI. The `/agg:*` skills are separate, and work on ALL THREE agents
-# (Claude Code, OpenAI Codex, GitHub Copilot) — once `agg` is on your PATH:
+# This installs ONLY the `rlt` CLI. The `/rlt:*` skills are separate, and work on ALL THREE agents
+# (Claude Code, OpenAI Codex, GitHub Copilot) — once `rlt` is on your PATH:
 #
-#   agg skills install --agent claude|codex|copilot
+#   rlt skills install --agent claude|codex|copilot
 #
 # …or via the plugin marketplace, which all three consume from the same manifest. See the README.
 
 set -eu
 
-REPO="ssenge/AgenticGoGo"
-BIN="agg"
+REPO="ssenge/relentless"
+BIN="rlt"
 
 # ---- pretty output (no color if not a tty) ----
 if [ -t 1 ]; then
@@ -66,20 +66,20 @@ case "$os" in
       *) die "unsupported macOS arch '$arch'." ;;
     esac ;;
   MINGW*|MSYS*|CYGWIN*)
-    die "Windows: download agg-x86_64-pc-windows-msvc.exe from https://github.com/$REPO/releases/latest" ;;
+    die "Windows: download rlt-x86_64-pc-windows-msvc.exe from https://github.com/$REPO/releases/latest" ;;
   *)
     die "unsupported OS '$os'. See https://github.com/$REPO#install" ;;
 esac
 asset="${BIN}-${target}"
 info "platform: ${BOLD}${os} ${arch}${RST} → asset ${BOLD}${asset}${RST}"
 
-# ---- resolve the download URL (latest, or a pinned AGG_VERSION) ----
-if [ "${AGG_DOWNLOAD_URL:-}" != "" ]; then
-  url="$AGG_DOWNLOAD_URL"
-  info "download: ${BOLD}${url}${RST} (AGG_DOWNLOAD_URL)"
-elif [ "${AGG_VERSION:-}" != "" ]; then
-  url="https://github.com/${REPO}/releases/download/${AGG_VERSION}/${asset}"
-  info "version: ${BOLD}${AGG_VERSION}${RST} (pinned)"
+# ---- resolve the download URL (latest, or a pinned RLT_VERSION) ----
+if [ "${RLT_DOWNLOAD_URL:-}" != "" ]; then
+  url="$RLT_DOWNLOAD_URL"
+  info "download: ${BOLD}${url}${RST} (RLT_DOWNLOAD_URL)"
+elif [ "${RLT_VERSION:-}" != "" ]; then
+  url="https://github.com/${REPO}/releases/download/${RLT_VERSION}/${asset}"
+  info "version: ${BOLD}${RLT_VERSION}${RST} (pinned)"
 else
   url="https://github.com/${REPO}/releases/latest/download/${asset}"
   info "version: ${BOLD}latest${RST}"
@@ -105,7 +105,7 @@ fi
 chmod 755 "$tmp"
 
 # ---- choose an install dir ----
-# Priority: AGG_INSTALL_DIR override → the `agg` first on PATH, if its directory is writable (an upgrade in place:
+# Priority: RLT_INSTALL_DIR override → the `rlt` first on PATH, if its directory is writable (an upgrade in place:
 # a copy earlier on PATH would otherwise keep winning) → /usr/local/bin (with sudo if needed) → ~/.local/bin.
 install_to() {
   dir="$1"
@@ -124,7 +124,7 @@ install_to() {
   return 0
 }
 
-# The directory of the `agg` first on PATH when it is a file there and the user can write to the directory.
+# The directory of the `rlt` first on PATH when it is a file there and the user can write to the directory.
 first_on_path_dir() {
   found="$(command -v "$BIN" 2>/dev/null || true)"
   case "$found" in /*) ;; *) return 1 ;; esac
@@ -133,8 +133,8 @@ first_on_path_dir() {
 }
 
 dest=""
-if [ "${AGG_INSTALL_DIR:-}" != "" ]; then
-  dest="$(install_to "$AGG_INSTALL_DIR")" || die "couldn't install to AGG_INSTALL_DIR=$AGG_INSTALL_DIR"
+if [ "${RLT_INSTALL_DIR:-}" != "" ]; then
+  dest="$(install_to "$RLT_INSTALL_DIR")" || die "couldn't install to RLT_INSTALL_DIR=$RLT_INSTALL_DIR"
 else
   if upgrade_dir="$(first_on_path_dir)" && dest="$(install_to "$upgrade_dir")"; then
     info "upgrading the copy first on PATH, in place"
@@ -163,7 +163,7 @@ else
   warn "installed, but '$dest --version' didn't run cleanly. Try a new shell."
 fi
 
-# ---- every other `agg` on PATH ----
+# ---- every other `rlt` on PATH ----
 # `1.2.10` < `1.3.0`: numeric, field by field (sort -V is not everywhere). Exit 0 when $1 is older than $2.
 older_than() {
   awk -v a="$1" -v b="$2" 'BEGIN {
@@ -171,7 +171,7 @@ older_than() {
     for (i = 1; i <= n; i++) { if (x[i] + 0 < y[i] + 0) exit 0; if (x[i] + 0 > y[i] + 0) exit 1 }
     exit 1 }'
 }
-# The bare version number in `agg 0.0.51`, empty when the output has none.
+# The bare version number in `rlt 0.0.51`, empty when the output has none.
 number_of() { printf '%s\n' "$1" | sed -n 's/.*[^0-9.]\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
 
 dest_real="$(cd "$dest_dir" 2>/dev/null && pwd -P)/$BIN"
@@ -213,19 +213,19 @@ if [ -z "$now" ]; then
   warn "$BIN is not found on PATH yet — see the PATH note above."
 else
   say ""
-  info "agg resolves to: ${BOLD}${now}${RST} ($("$now" --version 2>/dev/null || echo 'no version'))"
+  info "rlt resolves to: ${BOLD}${now}${RST} ($("$now" --version 2>/dev/null || echo 'no version'))"
 fi
 
 # ---- nudge about the two other pieces of the setup ----
 say ""
 say "${BOLD}Next steps${RST}"
 if command -v claude >/dev/null 2>&1; then
-  say "  ${GRN}✓${RST} Claude Code CLI found (agg drives it to run workers)."
+  say "  ${GRN}✓${RST} Claude Code CLI found (rlt drives it to run workers)."
 else
-  warn "Claude Code CLI (\`claude\`) not found — agg needs it. Install: https://claude.com/claude-code"
+  warn "Claude Code CLI (\`claude\`) not found — rlt needs it. Install: https://claude.com/claude-code"
 fi
-say "  ${DIM}•${RST} scaffold a project:  ${BOLD}agg init${RST}"
-say "  ${DIM}•${RST} check your setup:    ${BOLD}agg doctor${RST}"
-say "  ${DIM}•${RST} plugin (/agg:* skills), inside Claude Code:"
+say "  ${DIM}•${RST} scaffold a project:  ${BOLD}rlt init${RST}"
+say "  ${DIM}•${RST} check your setup:    ${BOLD}rlt doctor${RST}"
+say "  ${DIM}•${RST} plugin (/rlt:* skills), inside Claude Code:"
 say "       /plugin marketplace add ${REPO}"
-say "       /plugin install agg@agenticgogo"
+say "       /plugin install rlt@relentless"

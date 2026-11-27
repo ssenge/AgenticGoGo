@@ -15,26 +15,26 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------------------------
 
 /// Everything that can end a driver call unsuccessfully, in one type so `fn main() -> Result<(), Fatal>`
-/// works and a driver's own `?` on a file operation composes with agg's.
+/// works and a driver's own `?` on a file operation composes with rlt's.
 ///
 /// # Why `Ended` is an ERROR and not an `Ok` value
 ///
-/// A breached ceiling, `agg stop` and Ctrl-C are all *enforcement*: the driver must stop doing work,
+/// A breached ceiling, `rlt stop` and Ctrl-C are all *enforcement*: the driver must stop doing work,
 /// and the cheapest way to make that true for code that was written without thinking about it is
-/// `?`. The latch (BUILD.md §3.3) then makes every subsequent `agg.*` call a no-op, so even a driver
+/// `?`. The latch (BUILD.md §3.3) then makes every subsequent `rlt.*` call a no-op, so even a driver
 /// that swallows the `Err` and loops spends nothing further.
 ///
 /// # `#[non_exhaustive]`
 ///
-/// A driver that matches on `Fatal` must keep compiling when agg grows a variant; the interesting
+/// A driver that matches on `Fatal` must keep compiling when rlt grows a variant; the interesting
 /// discrimination for a driver is `Ended` vs. everything else, and that is stable.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Fatal {
-    /// A ceiling fired, the operator ran `agg stop`, or Ctrl-C landed — the enforcement path.
+    /// A ceiling fired, the operator ran `rlt stop`, or Ctrl-C landed — the enforcement path.
     /// Carries the outcome the run is latched to; `RunOutcome::exit_code` maps it to a process code.
     Ended(RunOutcome),
-    /// The driver's (or agg's) own `?` on a file operation. Kept distinct from [`Fatal::Other`] so a
+    /// The driver's (or rlt's) own `?` on a file operation. Kept distinct from [`Fatal::Other`] so a
     /// driver can match `ErrorKind` without downcasting through `anyhow`.
     Io(std::io::Error),
     /// Everything the pipeline raises — `step_once` and friends return `anyhow::Result`.
@@ -46,8 +46,8 @@ impl Fatal {
     ///
     /// ⚠ Without this, a driver is INDISTINGUISHABLE from a panic to any wrapper. `fn main() ->
     /// Result<(), Fatal>` uses Rust's `Termination` impl, which prints `Error: {:?}` and exits **1**
-    /// for every error — so `agg stop`, a blown ceiling, a max-sessions stop and a genuine bug all
-    /// arrived as 1. Measured, not assumed. The `RunOutcome` codes existed only on the `agg run`
+    /// for every error — so `rlt stop`, a blown ceiling, a max-sessions stop and a genuine bug all
+    /// arrived as 1. Measured, not assumed. The `RunOutcome` codes existed only on the `rlt run`
     /// path; this is the driver half of the same contract.
     pub fn exit_code(&self) -> u8 {
         match self {
@@ -65,7 +65,7 @@ impl Fatal {
 ///
 /// ```ignore
 /// fn main() -> std::process::ExitCode {
-///     agg::driver::run(|| drive(&Agg::open(".")?))
+///     relentless::driver::run(|| drive(&Relentless::open(".")?))
 /// }
 /// ```
 pub fn run(f: impl FnOnce() -> Result<(), Fatal>) -> std::process::ExitCode {
@@ -76,7 +76,7 @@ pub fn run(f: impl FnOnce() -> Result<(), Fatal>) -> std::process::ExitCode {
             // fault nobody has reported yet.
             if !matches!(e, Fatal::Ended(_)) {
                 eprintln!("error: {e}");
-                // `Drop for Agg` wrote the report before this `Err` surfaced, and `Drop` cannot see
+                // `Drop for Relentless` wrote the report before this `Err` surfaced, and `Drop` cannot see
                 // it — so the report says `done` for a run that failed. Correct it to the truth.
                 if let Err(w) = crate::report::amend_to_error(&format!("{e}")) {
                     eprintln!("error: cannot correct the run report: {w}");
@@ -139,7 +139,7 @@ pub enum Landing {
     Nothing,
 }
 
-/// What one `agg.step(&s)?` did.
+/// What one `rlt.step(&s)?` did.
 ///
 /// ⚠ **Not `#[must_use]`, on purpose** (BUILD.md §3.3): most `step()` call sites discard the value,
 /// and the shipped tree has zero explicit `#[must_use]`. A lint that fires on the common case
@@ -158,8 +158,8 @@ pub struct StepOutcome {
     /// the RUN-SET verdicts (the ceiling detectors), in order.
     ///
     /// ⚠ **Empty on the driver path**, and that is correct rather than a gap: nothing is declared to
-    /// agg here (no `abort_if`/`notify_if`/`invariants`), so there is no run-set to run. The judges
-    /// a driver asks for are LAZY — they live in `agg.judge(..)`'s per-step cache, not here.
+    /// rlt here (no `abort_if`/`notify_if`/`invariants`), so there is no run-set to run. The judges
+    /// a driver asks for are LAZY — they live in `rlt.judge(..)`'s per-step cache, not here.
     pub verdicts: Vec<(String, Verdict)>,
     /// cumulative output tokens spent by the run as of this step.
     pub tokens: u64,
@@ -188,7 +188,7 @@ pub struct AgentSession {
 // Gate results
 // ---------------------------------------------------------------------------------------------
 
-/// What `agg.gate()` did with the open span.
+/// What `rlt.gate()` did with the open span.
 ///
 /// ⚠ Not `#[must_use]`, for the same reason as [`StepOutcome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,12 +241,12 @@ pub enum OnRegression {
     Rollback,
 }
 
-/// Run-level options that must be known at `Agg::open_with` time, before any config is applied.
+/// Run-level options that must be known at `Relentless::open_with` time, before any config is applied.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Opts {
     /// fast-forward through the calls a previous process already completed, from `calls.jsonl`.
     ///
-    /// OPT-IN: agg does not decide on its own that a driver's re-run is a continuation, because it
+    /// OPT-IN: rlt does not decide on its own that a driver's re-run is a continuation, because it
     /// cannot know whether the driver's source changed underneath the ledger.
     pub resume: bool,
 }
@@ -320,7 +320,7 @@ impl std::fmt::Debug for Agent {
 /// The vocabulary is `low|medium|high|xhigh|max` — Claude's and Copilot's shared scale
 /// (`backend/mod.rs`). Codex takes no effort flag at all, which is why [`Effort::Default`] exists
 /// and why the field on a step is an `Effort` rather than an `Option<Effort>`: "I did not ask for an
-/// effort" is a real, nameable choice, and agg's blanket `max` would otherwise be a demand no Codex
+/// effort" is a real, nameable choice, and rlt's blanket `max` would otherwise be a demand no Codex
 /// run could satisfy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Effort {
@@ -335,7 +335,7 @@ pub enum Effort {
 }
 
 impl Effort {
-    /// The literal agg.yaml/CLI spelling, or `None` for [`Effort::Default`] (= defer to the
+    /// The literal rlt.yaml/CLI spelling, or `None` for [`Effort::Default`] (= defer to the
     /// backend). Mirrors `ResolvedStep::effort`'s `Option<String>`, so the two paths agree.
     pub fn as_str(self) -> Option<&'static str> {
         match self {

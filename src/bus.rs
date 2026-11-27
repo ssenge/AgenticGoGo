@@ -5,11 +5,11 @@
 //! **session-granular**: the loop drains `bus/in/` at each session boundary and
 //! applies the commands before launching the next worker.
 //!
-//! Layout under the project's AGG-OWNED `agg/private/` (the bus is the OPERATOR's channel — a
+//! Layout under the project's RLT-OWNED `rlt/private/` (the bus is the OPERATOR's channel — a
 //! worker able to write here would raise its own budget or unpause itself, so it is carved out of
 //! the sandbox writable set):
 //! ```text
-//! agg/private/bus/
+//! rlt/private/bus/
 //!   in/        # operator / outer-Claude → loop  (one JSON file per command)
 //!   out/       # loop → operator                 (status/questions)
 //!   log.jsonl  # append-only audit of everything drained
@@ -34,7 +34,7 @@ pub enum Command {
     /// Resume a paused loop. While the loop waits out a rate limit it also ends the wait, like
     /// [`Command::Wake`].
     Resume,
-    /// End a rate-limit wait now and try the next session (A-18.2). Still limited ⇒ agg detects it
+    /// End a rate-limit wait now and try the next session (A-18.2). Still limited ⇒ rlt detects it
     /// and waits again; `ratelimit_min_gap_secs` keeps two attempts apart. A no-op while not waiting.
     Wake,
     /// Stop the loop gracefully after the current session boundary.
@@ -43,15 +43,15 @@ pub enum Command {
     Note { text: String },
     //
     // ⛔ There is deliberately NO `Answer` here. An answer to a human ask is a DURABLE FACT, not a
-    // steering message: it belongs in `agg/private/asks.jsonl`, which outlives the workflow that
+    // steering message: it belongs in `rlt/private/asks.jsonl`, which outlives the workflow that
     // raised the question, and a blocked driver polls that ledger rather than this queue. Routing it
     // through the bus made it the one command that had to be exempted from the liveness rule below,
-    // which is what exposed the confusion. See `core::asks` and `agg answer`.
+    // which is what exposed the confusion. See `core::asks` and `rlt answer`.
 }
 
 /// Queue a steering command onto a project's bus with a send-ordered filename.
 ///
-/// Shared by every channel — the CLI (`agg send`) and the web API (`POST /api/send`) — so they
+/// Shared by every channel — the CLI (`rlt send`) and the web API (`POST /api/send`) — so they
 /// cannot disagree about what sending means. **The liveness rule lives HERE**, not in the callers:
 /// it used to be decided independently in two files, and they decided differently (the CLI queued
 /// with a warning, the API refused with 409), which is how the same command came to behave
@@ -69,8 +69,8 @@ pub fn queue_command(dir: &Path, cmd: &Command) -> std::io::Result<PathBuf> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotConnected,
             "no workflow is running in this project, so there is no queue to append to — \
-             start one with `agg run` and send again. (A human ask is different: it outlives its \
-             workflow, so answer it any time with `agg answer <id> <value>`.)",
+             start one with `rlt run` and send again. (A human ask is different: it outlives its \
+             workflow, so answer it any time with `rlt answer <id> <value>`.)",
         ));
     }
     let b = Bus::open(dir)?;
@@ -215,7 +215,7 @@ mod tests {
 
     fn tmpdir(name: &str) -> PathBuf {
         // unique per-test dir (tests run in parallel — must not share a bus dir)
-        let base = std::env::temp_dir().join(format!("agg-bus-test-{}-{}", std::process::id(), name));
+        let base = std::env::temp_dir().join(format!("rlt-bus-test-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base

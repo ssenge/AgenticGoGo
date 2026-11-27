@@ -2,7 +2,7 @@
 //!
 //! `open` (the default) is the network every tier has always had. `allow` confines every process
 //! the run confines — worker, judges, the LLM judge's one-shot, and on `sandbox` the hooks — to the
-//! listed destinations, through ONE enforcement point: agg's own proxy ([`proxy`]), which checks the
+//! listed destinations, through ONE enforcement point: rlt's own proxy ([`proxy`]), which checks the
 //! name the client asked for and resolves it itself. Each tier's job is to make the proxy the only
 //! way out:
 //!
@@ -33,7 +33,7 @@ pub enum Network {
     /// before the key existed).
     #[default]
     Open,
-    /// only these `host[:port]` destinations, through agg's proxy.
+    /// only these `host[:port]` destinations, through rlt's proxy.
     Allow(Vec<String>),
 }
 
@@ -71,7 +71,7 @@ impl schemars::JsonSchema for Network {
     }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
-            "description": "`open` (no egress policy, the default), or `{ allow: [host[:port], …] }` — only those destinations, through agg's proxy.",
+            "description": "`open` (no egress policy, the default), or `{ allow: [host[:port], …] }` — only those destinations, through rlt's proxy.",
             "anyOf": [
                 { "const": "open" },
                 {
@@ -119,7 +119,7 @@ impl Egress {
         self.local
             .get_or_init(|| {
                 proxy::Proxy::start("127.0.0.1:0".parse().expect("addr"), self.allow.clone())
-                    .map_err(|e| format!("cannot start agg's egress proxy: {e}"))
+                    .map_err(|e| format!("cannot start rlt's egress proxy: {e}"))
             })
             .as_ref()
             .map(|p| p.addr().port())
@@ -155,7 +155,7 @@ impl Egress {
 }
 
 /// Why a step on `tier`, run by `agent`, cannot honour `allow` — empty when it can. The ONE rule
-/// both startup (`capability::assess`, per YAML step) and the driver (`Agg::step`, per code-built
+/// both startup (`capability::assess`, per YAML step) and the driver (`Relentless::step`, per code-built
 /// step) apply. `(on_tier, on_endpoint)`: the first belong at the step's `isolation` key, the
 /// second at the allow-list.
 pub fn step_problems(tier: super::Isolation, agent: &dyn crate::backend::AgentBackend, allow: &AllowList) -> (Vec<String>, Vec<String>) {
@@ -186,7 +186,7 @@ pub fn endpoint_problem(agent: &dyn crate::backend::AgentBackend, allow: &AllowL
     let hosts = agent.api_hosts();
     if hosts.is_empty() {
         return Some(format!(
-            "agent `{}` declares no API endpoint, so agg cannot verify the allow-list lets it reach its \
+            "agent `{}` declares no API endpoint, so rlt cannot verify the allow-list lets it reach its \
              model — refused rather than started blind",
             agent.name()
         ));

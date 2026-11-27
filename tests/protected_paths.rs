@@ -1,4 +1,4 @@
-//! `write_deny` end to end: the real `agg` binary, a FAKE agent that tries one way of changing a
+//! `write_deny` end to end: the real `rlt` binary, a FAKE agent that tries one way of changing a
 //! protected path per run, on `isolation: none` and on this host's kernel sandbox.
 //!
 //! The project is built so that, WITHOUT protection, every attack would MERGE: the fake worker also
@@ -40,15 +40,15 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// The fake agent: makes the honest change, then runs `$AGG_TEST_ATTACK` and logs whether the
+/// The fake agent: makes the honest change, then runs `$RLT_TEST_ATTACK` and logs whether the
 /// attack's shell succeeded plus its stderr (so an `EPERM` is visible to the test).
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 for a in "$@"; do
   if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
 done
 echo work > src/lib.txt
-if [ -n "$AGG_TEST_ATTACK" ]; then
-  if sh -c "$AGG_TEST_ATTACK" 2>attack.err; then echo ATTACK_OK > attack.log; else echo ATTACK_FAILED > attack.log; fi
+if [ -n "$RLT_TEST_ATTACK" ]; then
+  if sh -c "$RLT_TEST_ATTACK" 2>attack.err; then echo ATTACK_OK > attack.log; else echo ATTACK_FAILED > attack.log; fi
 fi
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
 exit 0
@@ -79,10 +79,10 @@ fn project(tier: &str, top_extra: &str) -> (tempfile::TempDir, String) {
     write(d, "tests/oracles/x.json", "orig\n");
     write(d, "tests/oracles/cache.gen", "generated\n");
     write(d, "src/lib.txt", "base\n");
-    write(d, ".gitignore", "agg/state/\nagg/private/\nbin/\n.home/\n*.gen\nattack.log\nattack.err\npre_hl\n");
+    write(d, ".gitignore", "rlt/state/\nagg/private/\nbin/\n.home/\n*.gen\nattack.log\nattack.err\npre_hl\n");
     write(
         d,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         &format!(
             "project: \"protect\"\n\
              defaults: {{ model: \"fake\", isolation: \"{tier}\", write_deny: [\"tests/oracles/**\"] }}\n\
@@ -91,9 +91,9 @@ fn project(tier: &str, top_extra: &str) -> (tempfile::TempDir, String) {
              summary: {{ enabled: false }}\n{top_extra}"
         ),
     );
-    write(d, "agg/judges/worked.sh", JUDGE);
-    chmod_x(&d.join("agg/judges/worked.sh"));
-    write(d, "agg/state/STATE.md", "do work\n");
+    write(d, "rlt/judges/worked.sh", JUDGE);
+    chmod_x(&d.join("rlt/judges/worked.sh"));
+    write(d, "rlt/state/STATE.md", "do work\n");
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "oracle + config"]);
 
@@ -106,15 +106,15 @@ fn project(tier: &str, top_extra: &str) -> (tempfile::TempDir, String) {
     (tmp, path)
 }
 
-/// `agg run --max-sessions <n>` with `attack` in the fake agent's environment.
+/// `rlt run --max-sessions <n>` with `attack` in the fake agent's environment.
 fn run(dir: &Path, path: &str, attack: &str, sessions: &str) -> (Option<i32>, String) {
-    let out = Command::cargo_bin("agg")
+    let out = Command::cargo_bin("rlt")
         .unwrap()
         .args(["run", "--max-sessions", sessions])
         .current_dir(dir)
         .env("PATH", path)
         .env("HOME", dir.join(".home"))
-        .env("AGG_TEST_ATTACK", attack)
+        .env("RLT_TEST_ATTACK", attack)
         .output_bounded()
         .unwrap();
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -135,7 +135,7 @@ fn kernel_sandbox_usable() -> bool {
 }
 
 fn case_insensitive(dir: &Path) -> bool {
-    agg::protect::case_insensitive(dir)
+    relentless::protect::case_insensitive(dir)
 }
 
 /// The attacks — the ten cases of the requirement plus the ones a determined agent reaches for
@@ -178,7 +178,7 @@ fn attack(tier: &str, name: &str, cmd: &str) -> (End, bool) {
     assert!(!d.join("tests/oracles/new.json").exists(), "{ctx}");
     assert_eq!(git(d, &["show", "main:tests/oracles/x.json"]), "orig\n", "{ctx}");
 
-    let rows = agg::protect::read(d);
+    let rows = relentless::protect::read(d);
     let log = fs::read_to_string(d.join("attack.log")).unwrap_or_default();
     // no log ⇒ the attack never ran (the env did not reach the jailed agent), and "blocked" would
     // pass vacuously.
@@ -275,7 +275,7 @@ fn an_honest_session_is_untouched_and_judges_still_read_protected_paths() {
         let (tmp, path) = project(tier, "");
         let (code, text) = run(tmp.path(), &path, "", "1");
         assert_eq!(code, Some(0), "[{tier}]\n{text}");
-        assert!(agg::protect::read(tmp.path()).is_empty(), "[{tier}] no violation:\n{text}");
+        assert!(relentless::protect::read(tmp.path()).is_empty(), "[{tier}] no violation:\n{text}");
         assert!(text.contains("worked, oracle readable"), "[{tier}] the judge read the oracle:\n{text}");
         if tier == "none" {
             assert!(text.contains("only the GATE CHECK applies"), "none warns at startup:\n{text}");
@@ -291,15 +291,15 @@ fn a_change_between_sessions_is_caught_at_the_next_session() {
     let d = tmp.path();
     // the honest change is made in session 1 and merges; keep going with a done_if it cannot meet
     // so session 2 starts and runs its check.
-    let yaml = fs::read_to_string(d.join("agg/agg.yaml")).unwrap().replace("done_if: \"worked\"", "done_if: \"never\"");
-    write(d, "agg/agg.yaml", &yaml);
-    write(d, "agg/judges/never.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
-    chmod_x(&d.join("agg/judges/never.sh"));
+    let yaml = fs::read_to_string(d.join("rlt/rlt.yaml")).unwrap().replace("done_if: \"worked\"", "done_if: \"never\"");
+    write(d, "rlt/rlt.yaml", &yaml);
+    write(d, "rlt/judges/never.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    chmod_x(&d.join("rlt/judges/never.sh"));
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "never"]);
 
     let (_code, text) = run(d, &path, "", "2");
-    let rows = agg::protect::read(d);
+    let rows = relentless::protect::read(d);
     let between: Vec<_> = rows.iter().filter(|r| r.window == "between_sessions").collect();
     assert!(!between.is_empty(), "the late write must be caught:\n{text}\n{rows:?}");
     assert_eq!(between[0].paths, ["tests/oracles/x.json"]);
@@ -314,8 +314,8 @@ fn a_change_between_sessions_is_caught_at_the_next_session() {
 fn an_unenforceable_pattern_is_refused_at_startup() {
     let (tmp, path) = project("none", "");
     let d = tmp.path();
-    let yaml = fs::read_to_string(d.join("agg/agg.yaml")).unwrap().replace("tests/oracles/**", "/etc/passwd");
-    write(d, "agg/agg.yaml", &yaml);
+    let yaml = fs::read_to_string(d.join("rlt/rlt.yaml")).unwrap().replace("tests/oracles/**", "/etc/passwd");
+    write(d, "rlt/rlt.yaml", &yaml);
     git(d, &["commit", "-qam", "bad pattern"]);
     let (code, text) = run(d, &path, "", "1");
     assert_eq!(code, Some(1), "{text}");
@@ -325,13 +325,13 @@ fn an_unenforceable_pattern_is_refused_at_startup() {
 // ---- the container tier: protected paths reach the engine as `:ro` mounts ----
 
 /// The container tier gets the protected DIRECTORY as a read-only mount, beside the derived
-/// `agg/private/` carve-out.
+/// `rlt/private/` carve-out.
 #[test]
 fn the_container_tier_mounts_protected_paths_read_only() {
     let (tmp, _) = project("container", "");
     let d = tmp.path();
-    let denies = agg::protect::bind_paths(d, &["tests/oracles/**".to_string()]);
-    let cmd = agg::isolation::containerize(Command::new("true"), d, &[], &denies, "alpine:3.20").unwrap();
+    let denies = relentless::protect::bind_paths(d, &["tests/oracles/**".to_string()]);
+    let cmd = relentless::isolation::containerize(Command::new("true"), d, &[], &denies, "alpine:3.20").unwrap();
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     let canon = fs::canonicalize(d.join("tests/oracles")).unwrap();
     let want = format!("{p}:{p}:ro", p = canon.display());
@@ -349,11 +349,11 @@ fn the_container_tier_mounts_protected_paths_read_only() {
 #[test]
 #[ignore = "needs a running container engine with alpine:3.20; run by hand"]
 fn real_container_denies_writes_to_a_protected_directory() {
-    assert!(agg::isolation::container_available(), "no container engine");
-    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/agg-protect-ctr-{}", std::process::id()));
+    assert!(relentless::isolation::container_available(), "no container engine");
+    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("target/rlt-protect-ctr-{}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
     write(&d, "tests/oracles/x.json", "orig\n");
-    let denies = agg::protect::bind_paths(&d, &["tests/oracles/**".to_string()]);
+    let denies = relentless::protect::bind_paths(&d, &["tests/oracles/**".to_string()]);
     let script = "t() { if sh -c \"$2\" 2>/dev/null; then echo \"$1 OK\"; else echo \"$1 DENIED\"; fi; }; \
         t direct 'echo evil > tests/oracles/x.json'; \
         t delete 'rm tests/oracles/x.json'; \
@@ -365,7 +365,7 @@ fn real_container_denies_writes_to_a_protected_directory() {
         t outside 'echo ok > src.txt'";
     let mut inner = Command::new("/bin/sh");
     inner.arg("-c").arg(script);
-    let out = agg::isolation::containerize(inner, &d, &[], &denies, "alpine:3.20").unwrap().output_bounded().unwrap();
+    let out = relentless::isolation::containerize(inner, &d, &[], &denies, "alpine:3.20").unwrap().output_bounded().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let after = fs::read_to_string(d.join("tests/oracles/x.json")).unwrap_or_default();
     let _ = fs::remove_dir_all(&d);

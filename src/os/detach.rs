@@ -1,12 +1,12 @@
-//! `agg run --detach` — run the loop in the background.
+//! `rlt run --detach` — run the loop in the background.
 //!
 //! Long loops want to outlive the terminal. Rather than make the user remember
-//! `nohup agg run > agg/private/run.log 2>&1 &`, `--detach` does it for them: it re-execs
-//! `agg run` (with the SAME args, minus the detach flag) as a child in its own
-//! session, redirects the child's stdout+stderr to `agg/private/run.log`, writes the child
-//! PID to `agg/private/run.pid`, prints how to follow/stop, and returns.
+//! `nohup rlt run > rlt/private/run.log 2>&1 &`, `--detach` does it for them: it re-execs
+//! `rlt run` (with the SAME args, minus the detach flag) as a child in its own
+//! session, redirects the child's stdout+stderr to `rlt/private/run.log`, writes the child
+//! PID to `rlt/private/run.pid`, prints how to follow/stop, and returns.
 //!
-//! The child is an ordinary foreground `agg run` from its own point of view — all the
+//! The child is an ordinary foreground `rlt run` from its own point of view — all the
 //! loop/worker/watchdog machinery is unchanged; only its stdio and session differ.
 
 use crate::paths::{private_dir, run_log, run_pid};
@@ -15,17 +15,17 @@ use std::fs::OpenOptions;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Record THIS process as the live loop. Called by every `agg run` (foreground OR detached)
-/// so `agg stop` and the double-run guard always read a current pid — previously only the
-/// `--detach` path wrote run.pid, so a foreground / `nohup agg run` left it pointing at a
-/// stale (often dead) pid, and `agg stop` would target the wrong process.
+/// Record THIS process as the live loop. Called by every `rlt run` (foreground OR detached)
+/// so `rlt stop` and the double-run guard always read a current pid — previously only the
+/// `--detach` path wrote run.pid, so a foreground / `nohup rlt run` left it pointing at a
+/// stale (often dead) pid, and `rlt stop` would target the wrong process.
 pub fn write_run_pid(dir: &Path) {
-    // run.pid is AGG-OWNED: it lives in `private/`, which `agg/state/` does not create for us.
+    // run.pid is RLT-OWNED: it lives in `private/`, which `rlt/state/` does not create for us.
     let _ = std::fs::create_dir_all(private_dir(dir));
     let _ = std::fs::write(run_pid(dir), std::process::id().to_string());
 }
 
-/// Remove run.pid (best-effort) when the loop exits, so a later `agg stop` doesn't act on a
+/// Remove run.pid (best-effort) when the loop exits, so a later `rlt stop` doesn't act on a
 /// dead pid and the double-run guard doesn't falsely report a live loop.
 pub fn clear_run_pid(dir: &Path) {
     let _ = std::fs::remove_file(run_pid(dir));
@@ -34,14 +34,14 @@ pub fn clear_run_pid(dir: &Path) {
 /// Spawn the loop detached and return immediately. Refuses if a previous detached run
 /// is still alive (a stale pidfile from a dead process is cleaned up and ignored).
 pub fn spawn_detached(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(private_dir(dir)).with_context(|| "creating agg/private dir")?;
+    std::fs::create_dir_all(private_dir(dir)).with_context(|| "creating rlt/private dir")?;
 
     // Guard against a double-detach: if run.pid points at a live process, bail.
     if let Some(pid) = live_pid(dir) {
         anyhow::bail!(
             "a detached loop is already running here (pid {pid}).\n  \
              follow it:  tail -f {}\n  \
-             stop it:    agg stop",
+             stop it:    rlt stop",
             run_log(dir).display()
         );
     }
@@ -59,17 +59,17 @@ pub fn spawn_detached(dir: &Path) -> Result<()> {
     eprintln!(
         "▶ detached loop started (pid {pid}).\n  \
          follow:    tail -f {log}\n  \
-         dashboard: agg dashboard\n  \
-         stop:      agg stop",
+         dashboard: rlt dashboard\n  \
+         stop:      rlt stop",
         log = run_log(dir).display(),
     );
     Ok(())
 }
 
-/// Start `agg <args>` in `dir`, in a session of its own (it outlives the caller and the terminal), its stdout and stderr appended
-/// to `agg/private/run.log`; returns its pid. argv[0] is the resolved current executable, so a PATH-relative call works.
+/// Start `rlt <args>` in `dir`, in a session of its own (it outlives the caller and the terminal), its stdout and stderr appended
+/// to `rlt/private/run.log`; returns its pid. argv[0] is the resolved current executable, so a PATH-relative call works.
 pub fn spawn_logged(dir: &Path, args: &[String]) -> Result<u32> {
-    std::fs::create_dir_all(private_dir(dir)).with_context(|| "creating agg/private dir")?;
+    std::fs::create_dir_all(private_dir(dir)).with_context(|| "creating rlt/private dir")?;
     let exe = std::env::current_exe().with_context(|| "resolving current executable")?;
     // appended, so successive runs accumulate
     let log = OpenOptions::new()
@@ -88,10 +88,10 @@ pub fn spawn_logged(dir: &Path, args: &[String]) -> Result<u32> {
             cmd.pre_exec(crate::os::proc::setsid);
         }
     }
-    Ok(cmd.spawn().with_context(|| "spawning agg")?.id())
+    Ok(cmd.spawn().with_context(|| "spawning rlt")?.id())
 }
 
-/// Read `agg/private/run.pid` and return the PID iff that process is still alive. A stale
+/// Read `rlt/private/run.pid` and return the PID iff that process is still alive. A stale
 /// pidfile (process gone) is removed and `None` returned. Public so the loop can use it as a
 /// double-run guard on BOTH the foreground and the detached path.
 pub fn live_pid(dir: &Path) -> Option<u32> {
@@ -113,13 +113,13 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         let d = std::env::temp_dir().join(format!(
-            "agg-detach-{}-{}-{}",
+            "rlt-detach-{}-{}-{}",
             std::process::id(),
             tag,
             N.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(private_dir(&d)).unwrap(); // run.pid is AGG-OWNED
+        std::fs::create_dir_all(private_dir(&d)).unwrap(); // run.pid is RLT-OWNED
         d
     }
 

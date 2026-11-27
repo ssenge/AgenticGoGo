@@ -1,4 +1,4 @@
-//! `agg/private/verdicts.jsonl` — the durable, append-only record of every verdict the loop
+//! `rlt/private/verdicts.jsonl` — the durable, append-only record of every verdict the loop
 //! RESOLVES (§5.8). Safety-critical GATE state, not an audit log: the gate's "was met" (§5.7)
 //! reads it, so a failed write is a **hard error**, not a swallowed line.
 //!
@@ -9,7 +9,7 @@
 //!
 //! Each line is a NEW ENVELOPE wrapping a [`Verdict`] (which carries no `ts`/`session`/`step`),
 //! stamped by the GATE with the session's final disposition. Only the **loop process** writes it
-//! — `run.pid` already forbids a second loop, so there is no lock. `agg plan` and `agg judge`
+//! — `run.pid` already forbids a second loop, so there is no lock. `rlt plan` and `rlt judge`
 //! write nothing: they are not the loop.
 
 use crate::core::model::Verdict;
@@ -71,11 +71,11 @@ pub struct VerdictRecord {
     pub rationale: String,
     #[serde(default)]
     pub evidence: Vec<String>,
-    /// the copies agg kept of `evidence`, project-relative
-    /// (`agg/private/evidence/<run>/<session>/<judge>/…`). Absent when nothing was kept.
+    /// the copies rlt kept of `evidence`, project-relative
+    /// (`rlt/private/evidence/<run>/<session>/<judge>/…`). Absent when nothing was kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_saved: Vec<String>,
-    /// `<declared>: <reason>` for each `evidence` entry agg did not keep — refused (outside the
+    /// `<declared>: <reason>` for each `evidence` entry rlt did not keep — refused (outside the
     /// judge scratch and the project), missing, or over the size cap. Absent when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_skipped: Vec<String>,
@@ -192,7 +192,7 @@ pub fn append_marked(
     append_full(dir, session, step, verdicts, outcome, ratchet, &HashMap::new())
 }
 
-/// [`append_marked`], also stamping each row with the evidence agg kept for that verdict — `kept`
+/// [`append_marked`], also stamping each row with the evidence rlt kept for that verdict — `kept`
 /// maps a judge to its `(saved, skipped)` lists, as [`VerdictRecord::evidence_saved`] states them.
 pub fn append_full(
     dir: &Path,
@@ -259,7 +259,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         let d = std::env::temp_dir().join(format!(
-            "agg-verdicts-{}-{}-{}",
+            "rlt-verdicts-{}-{}-{}",
             std::process::id(),
             tag,
             N.fetch_add(1, Ordering::Relaxed)
@@ -357,10 +357,10 @@ mod tests {
 
     #[test]
     fn a_failed_write_is_a_hard_error_not_a_swallow() {
-        // Put a FILE where `agg/` must go so `agg/private/` cannot be created → the open
+        // Put a FILE where `rlt/` must go so `rlt/private/` cannot be created → the open
         // fails. Unlike bus.rs, append must PROPAGATE that, not swallow it: this is gate state.
         let d = tmpdir("hard");
-        std::fs::write(d.join("agg"), "not a dir").unwrap();
+        std::fs::write(d.join("rlt"), "not a dir").unwrap();
         let r = append(&d, None, "baseline", &[("g".into(), v(true))], Outcome::Baseline);
         assert!(r.is_err(), "a verdicts.jsonl write failure must be a hard error");
     }
@@ -398,11 +398,11 @@ mod tests {
     fn kept_evidence_is_stamped_on_its_own_row_only() {
         let d = tmpdir("evidence");
         let mut kept = HashMap::new();
-        kept.insert("lint".to_string(), (vec!["agg/private/evidence/r/2/lint/cc.sarif".to_string()], vec!["x: refused".to_string()]));
+        kept.insert("lint".to_string(), (vec!["rlt/private/evidence/r/2/lint/cc.sarif".to_string()], vec!["x: refused".to_string()]));
         let rows = [("lint".to_string(), v(true)), ("ok".to_string(), v(true))];
         append_full(&d, Some(2), "worker", &rows, Outcome::Merged, &[], &kept).unwrap();
         let lint = &rows_for(&d, "lint", false)[0];
-        assert_eq!(lint.evidence_saved, ["agg/private/evidence/r/2/lint/cc.sarif"]);
+        assert_eq!(lint.evidence_saved, ["rlt/private/evidence/r/2/lint/cc.sarif"]);
         assert_eq!(lint.evidence_skipped, ["x: refused"]);
         let text = std::fs::read_to_string(crate::paths::verdicts_jsonl(&d)).unwrap();
         assert_eq!(text.matches("evidence_saved").count(), 1, "only the lint row carries it: {text}");

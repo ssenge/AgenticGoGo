@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Release an `agg.block(..)` FROM OUTSIDE — the operator's half of the one call that stops a loop.
+# Release an `rlt.block(..)` FROM OUTSIDE — the operator's half of the one call that stops a loop.
 #
-# `agg.block(msg)` (src/driver/facade.rs) is the driver saying "I cannot proceed without a human".
+# `rlt.block(msg)` (src/driver/facade.rs) is the driver saying "I cannot proceed without a human".
 # It pings, then WAITS on the operator bus, re-checking the ceilings every 5s, until a `resume`
 # arrives (or a `stop`, or a ceiling ends the run). The worker cannot reach it and cannot answer it:
-# the bus lives under `agg/private/`, which is carved out of every worker's writable set. The
+# the bus lives under `rlt/private/`, which is carved out of every worker's writable set. The
 # operator answers it, and this is how.
 #
-#   ./scripts/agg_unblock.sh <project-dir>                     # send ONE resume, now
-#   ./scripts/agg_unblock.sh <project-dir> --stop "reason"      # end the run instead
-#   ./scripts/agg_unblock.sh <project-dir> --watch <driver.log> # unattended: resume EVERY block
-#   ./scripts/agg_unblock.sh <project-dir> --watch <log> --answer "why it was ok to proceed"
+#   ./scripts/rlt_unblock.sh <project-dir>                     # send ONE resume, now
+#   ./scripts/rlt_unblock.sh <project-dir> --stop "reason"      # end the run instead
+#   ./scripts/rlt_unblock.sh <project-dir> --watch <driver.log> # unattended: resume EVERY block
+#   ./scripts/rlt_unblock.sh <project-dir> --watch <log> --answer "why it was ok to proceed"
 #
 # `--watch` is for an unattended run (an overnight sample, CI): it tails the driver's own output,
 # and each time a new `[block]` announcement appears it queues one `resume`. It answers exactly as
@@ -22,8 +22,8 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AGG="${AGG_BIN:-$ROOT/target/debug/agg}"
-DIR=""; WATCH=""; ANSWER=""; STOP=""; POLL="${AGG_UNBLOCK_POLL:-5}"; MAX_SECS="${AGG_UNBLOCK_MAX_SECS:-14400}"
+RLT="${RLT_BIN:-$ROOT/target/debug/rlt}"
+DIR=""; WATCH=""; ANSWER=""; STOP=""; POLL="${RLT_UNBLOCK_POLL:-5}"; MAX_SECS="${RLT_UNBLOCK_MAX_SECS:-14400}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -35,14 +35,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$DIR" ] && [ -d "$DIR" ] || { echo "usage: $0 <project-dir> [--watch <log>] [--answer <text>] [--stop <reason>]" >&2; exit 2; }
-[ -x "$AGG" ] || { echo "no agg binary at $AGG (cargo build)" >&2; exit 1; }
+[ -x "$RLT" ] || { echo "no rlt binary at $RLT (cargo build)" >&2; exit 1; }
 
-# One command onto the project's bus. `agg send` writes it atomically (tmp + rename) and the loop
+# One command onto the project's bus. `rlt send` writes it atomically (tmp + rename) and the loop
 # drains it on its next 5s pass; it queues fine even before a run exists.
-send() { ( cd "$DIR" && "$AGG" send "$@" ) >/dev/null 2>&1; }
+send() { ( cd "$DIR" && "$RLT" send "$@" ) >/dev/null 2>&1; }
 
 if [ -n "$STOP" ]; then
-  send stop "$STOP"                       # `agg send stop <reason>` — the reason is positional
+  send stop "$STOP"                       # `rlt send stop <reason>` — the reason is positional
   echo "queued: stop ($STOP)"
   exit 0
 fi
@@ -77,12 +77,12 @@ while [ "$waited" -lt "$MAX_SECS" ]; do
     # run.pid is written at boot and cleared by the Drop guard, so "seen, then gone" is the end of
     # the run. It must be SEEN first: a watcher started before the driver booted would otherwise
     # read the not-yet-written pidfile as "already finished" and quit before the first block.
-    if [ -f "$DIR/agg/private/run.pid" ]; then
+    if [ -f "$DIR/rlt/private/run.pid" ]; then
       seen_pid=1
     elif [ "${seen_pid:-0}" = 1 ]; then
       echo "unblock: run finished (run.pid cleared) — answered $answered block(s)"
       exit 0
-    elif [ "$waited" -ge "${AGG_UNBLOCK_BOOT_GRACE:-120}" ] && [ -s "$WATCH" ]; then
+    elif [ "$waited" -ge "${RLT_UNBLOCK_BOOT_GRACE:-120}" ] && [ -s "$WATCH" ]; then
       echo "unblock: no run.pid ever appeared — nothing to answer" >&2
       exit 0
     fi

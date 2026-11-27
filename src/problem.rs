@@ -1,9 +1,9 @@
-//! One config problem: WHERE (a dotted path into `agg.yaml`) and WHAT (the message startup gives).
+//! One config problem: WHERE (a dotted path into `rlt.yaml`) and WHAT (the message startup gives).
 //!
 //! Startup validation used to stop at the first error, which turns fixing a generated config into
 //! a loop of "run, read one error, fix, run again". The validators now COLLECT [`Problem`]s, so
-//! `agg check` can list every one at once and an orchestrator can point at the offending key; the
-//! startup paths (`agg run` / `plan` / `doctor`) render the same list into their one error.
+//! `rlt check` can list every one at once and an orchestrator can point at the offending key; the
+//! startup paths (`rlt run` / `plan` / `doctor`) render the same list into their one error.
 
 use serde::Serialize;
 

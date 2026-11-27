@@ -1,6 +1,6 @@
 name: release
 
-# Build per-platform `agg` binaries and attach them to the GitHub Release.
+# Build per-platform `rlt` binaries and attach them to the GitHub Release.
 # Triggers when you push a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
 # Free on public repos: GitHub Actions minutes are unlimited for public repositories.
 on:
@@ -55,28 +55,28 @@ jobs:
 
       - name: Build release binary (linux, glibc 2.17)
         if: runner.os == 'Linux'
-        run: cargo zigbuild --release --target ${{ matrix.target }}.2.17 --bin agg
+        run: cargo zigbuild --release --target ${{ matrix.target }}.2.17 --bin rlt
 
       - name: Build release binary
         if: runner.os != 'Linux'
-        run: cargo build --release --target ${{ matrix.target }} --bin agg
+        run: cargo build --release --target ${{ matrix.target }} --bin rlt
 
       # Name the artifact after the target so each platform asset is distinct.
       - name: Stage artifact (unix)
         if: runner.os != 'Windows'
         run: |
-          cp "target/${{ matrix.target }}/release/agg" "agg-${{ matrix.target }}"
-          chmod +x "agg-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/rlt" "rlt-${{ matrix.target }}"
+          chmod +x "rlt-${{ matrix.target }}"
 
       - name: Stage artifact (windows)
         if: runner.os == 'Windows'
-        run: cp "target/${{ matrix.target }}/release/agg.exe" "agg-${{ matrix.target }}.exe"
+        run: cp "target/${{ matrix.target }}/release/rlt.exe" "rlt-${{ matrix.target }}.exe"
 
       - name: Upload to the Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            agg-${{ matrix.target }}
-            agg-${{ matrix.target }}.exe
+            rlt-${{ matrix.target }}
+            rlt-${{ matrix.target }}.exe
           fail_on_unmatched_files: false

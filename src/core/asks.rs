@@ -8,8 +8,8 @@
 //!
 //! | | channel | trust |
 //! |---|---|---|
-//! | request | a driver call site, or the worker via `agg hil` → `agg/state/asks/` | **untrusted** — a worker-authored question is text, exactly like `BLOCKED.md`'s rationale |
-//! | answer | `agg answer` → the ledger `agg/private/asks.jsonl` | **trusted** — `private/` is carved out of the worker's writable set under `sandbox`/`container` |
+//! | request | a driver call site, or the worker via `rlt hil` → `rlt/state/asks/` | **untrusted** — a worker-authored question is text, exactly like `BLOCKED.md`'s rationale |
+//! | answer | `rlt answer` → the ledger `rlt/private/asks.jsonl` | **trusted** — `private/` is carved out of the worker's writable set under `sandbox`/`container` |
 //!
 //! That is why the ledger lives in `private/` while worker requests land in `state/`: a worker must
 //! not be able to answer its own question, or "a human approved the prod deploy" means nothing.
@@ -27,17 +27,17 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 /// Which `hil_*` call opened the ask. **Derived from the function that was called** — never chosen
-/// by a caller and never inferred by agg. It exists so a reader knows whether to render buttons or a
+/// by a caller and never inferred by rlt. It exists so a reader knows whether to render buttons or a
 /// text field, and so an answer can be validated against a closed set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AskCase {
     /// `hil_bool` — sugar for a two-option `Choose`.
     Bool,
-    /// `hil_choose` — a CLOSED answer set. The options are recorded, so `agg answer` can refuse
+    /// `hil_choose` — a CLOSED answer set. The options are recorded, so `rlt answer` can refuse
     /// anything not on the list and the caller cannot be handed a value it did not offer.
     Choose,
-    /// `hil_input` — an OPEN set. Pair it with a judge; agg cannot validate free text.
+    /// `hil_input` — an OPEN set. Pair it with a judge; rlt cannot validate free text.
     Input,
 }
 
@@ -156,7 +156,7 @@ pub fn all(dir: &Path) -> Vec<Ask> {
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         match serde_json::from_str::<Row>(line) {
             Ok(Row::Open { id, case, question, options, origin, session, step, ts }) => {
-                // A duplicate `Open` for a known id is ignored — ids are agg-minted and a repeat
+                // A duplicate `Open` for a known id is ignored — ids are rlt-minted and a repeat
                 // would mean a replay, not a new question.
                 if !out.iter().any(|a| a.id == id) {
                     out.push(Ask {
@@ -240,9 +240,9 @@ pub fn answer(dir: &Path, id: &str, answer: &str, by: &str, now_epoch: u64) -> s
     )
 }
 
-/// A request the WORKER wrote, before agg has promoted it into the ledger.
+/// A request the WORKER wrote, before rlt has promoted it into the ledger.
 ///
-/// Deliberately not an [`Ask`]: it has no id, no session and no state, because those are agg's to
+/// Deliberately not an [`Ask`]: it has no id, no session and no state, because those are rlt's to
 /// assign. A worker that could mint its own ask id could collide with a real one and answer it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerRequest {
@@ -253,7 +253,7 @@ pub struct WorkerRequest {
     pub ts: u64,
 }
 
-/// Write a worker request to `agg/state/asks/`. Returns the file written.
+/// Write a worker request to `rlt/state/asks/`. Returns the file written.
 ///
 /// The filename carries the epoch so promotion happens in ask order. Written via tmp+rename so the
 /// loop never promotes a half-written request.
@@ -395,7 +395,7 @@ pub fn mark_delivered(dir: &Path, asks: &[Ask], now_epoch: u64) {
 
 /// Validate an answer against the ask it claims to answer, resolving it to a canonical value.
 ///
-/// ONE validator, shared by every inbound channel (`agg answer`, `POST /api/send`, and whatever
+/// ONE validator, shared by every inbound channel (`rlt answer`, `POST /api/send`, and whatever
 /// comes next), for the same reason `queue_command` is shared: two validators that disagreed about
 /// what "postgres" means would be a bug nobody could see from either side.
 ///
@@ -445,12 +445,12 @@ pub fn validate_answer(dir: &Path, id: &str, value: &str) -> Result<String, Stri
     }
 }
 
-/// Put a newly-opened ask on the OPERATOR'S OUTBOUND QUEUE (`agg/private/bus/out/`).
+/// Put a newly-opened ask on the OPERATOR'S OUTBOUND QUEUE (`rlt/private/bus/out/`).
 ///
 /// A question is a message to the operator, which is what [`crate::bus::Bus::emit`] was built for —
 /// the in/out pair is symmetric: the ask goes out on `bus/out/`, the answer comes back on `bus/in/`
-/// via `agg answer`. Readers (the TUI, `agg status`, the web UI) consume it through the
-/// `asks` field agg publishes to `state.json`; a push transport can be layered on later without
+/// via `rlt answer`. Readers (the TUI, `rlt status`, the web UI) consume it through the
+/// `asks` field rlt publishes to `state.json`; a push transport can be layered on later without
 /// changing anything here.
 ///
 /// `notify.cmd` is an OPTIONAL adapter on top of this, not the mechanism: a run with no notify
@@ -469,7 +469,7 @@ pub fn emit_to_operator(dir: &Path, ask: &Ask) {
 
 /// Mint an id: short, sortable-ish, and unique per process even inside one second.
 ///
-/// Not a UUID — an operator retypes these into `agg answer <id>`, so four hex characters that a
+/// Not a UUID — an operator retypes these into `rlt answer <id>`, so four hex characters that a
 /// human can read off a phone beats a canonical identifier nobody will ever type twice. Collisions
 /// are checked against the ledger by the caller.
 pub fn mint_id(seq: u64, now_epoch: u64) -> String {

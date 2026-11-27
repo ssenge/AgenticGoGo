@@ -1,13 +1,13 @@
 # The Rust driver API
 
-**This is heavier and Rust-only — use `agg.yaml` unless you need flow it cannot express.**
+**This is heavier and Rust-only — use `rlt.yaml` unless you need flow it cannot express.**
 
 The YAML path is a *list of steps that laps forever* until `done_if` fires. That covers most of what
 people build. The Rust API exists for the runs where the shape of the work is a program: a branch
 that depends on a judge's number, a retry ladder whose bound changes with what it learned, a loop
 that asks an expensive judge only when three cheap ones already passed.
 
-Everything below is the same engine. `agg.step()` dispatches through the identical primitive the
+Everything below is the same engine. `rlt.step()` dispatches through the identical primitive the
 YAML walk does — one execution model, two ways to drive it. What you gain is `if`, `for`, `?` and
 the borrow checker. What you pay is a compiled binary instead of a config file.
 
@@ -32,8 +32,8 @@ this shape, stop here — `examples/workflow.yaml` is a heavily-commented refere
 ## A process of standard steps: a process file
 
 When the flow is a **process** — phases of steps, each a script, an agent's work judged by checks and a critic, a human's
-approval, a loop over a list or an exam — it needs no Rust either: write a **process file** and run `agg process <file>
-<project>` ([PROCESS.md](PROCESS.md)). It composes the blocks of [`agg::workflow`](#workflow-building-blocks-aggworkflow); the YAML has no logic of its own.
+approval, a loop over a list or an exam — it needs no Rust either: write a **process file** and run `rlt process <file>
+<project>` ([PROCESS.md](PROCESS.md)). It composes the blocks of [`relentless::workflow`](#workflow-building-blocks-aggworkflow); the YAML has no logic of its own.
 
 ## When it is not
 
@@ -41,8 +41,8 @@ Four things YAML deliberately cannot do, each of which is a `for`/`if` in Rust:
 
 | you want | YAML | Rust |
 |---|---|---|
-| skip a step based on a verdict | ✗ — a lap runs every entry (`if:` was cut) | `if agg.judge(&x).met() { continue }` |
-| **not run** an expensive judge unless cheap ones pass | ✗ — every run-set judge runs after every judged step | `agg.judge(&cheap).met() && agg.judge(&slow).met()` |
+| skip a step based on a verdict | ✗ — a lap runs every entry (`if:` was cut) | `if rlt.judge(&x).met() { continue }` |
+| **not run** an expensive judge unless cheap ones pass | ✗ — every run-set judge runs after every judged step | `rlt.judge(&cheap).met() && rlt.judge(&slow).met()` |
 | a bound that changes with what the run learned | ✗ — `max:` is a literal | any expression |
 | state that changes *within* a cycle | ✗ — verdict rows land per gate | a local variable |
 
@@ -53,32 +53,32 @@ The second row is the one that costs money. A 40-minute load test in a YAML run-
 
 ## The surface
 
-Eleven calls. `Agg::open(dir)` then a self-consuming builder chain, then ordinary Rust.
+Eleven calls. `Relentless::open(dir)` then a self-consuming builder chain, then ordinary Rust.
 
 ```rust
-use agg::driver::{Agg, Judge, Limits, OnRegression, Step, Verdict};
+use relentless::driver::{Relentless, Judge, Limits, OnRegression, Step, Verdict};
 
-fn main() -> Result<(), agg::driver::Fatal> {
-    let agg = Agg::open(".")?
+fn main() -> Result<(), relentless::driver::Fatal> {
+    let rlt = Relentless::open(".")?
         // SECONDS. `work_time` excludes time blocked on a human — see "Asking a human" below.
         .limits(Limits { tokens: Some(40_000_000), cost: None, sessions: Some(300),
                          wall_time: Some(10.0 * 3600.0), work_time: None })
         .on_regression(OnRegression::Rollback);
 
     let implement = Step::new("implement").prompt("Make the failing tests pass.");
-    let tests     = Judge::script("tests_pass", "agg/judges/tests.sh");
-    let slow      = Judge::script("load_ok", "agg/judges/loadtest.sh").timeout(45 * 60);
+    let tests     = Judge::script("tests_pass", "rlt/judges/tests.sh");
+    let slow      = Judge::script("load_ok", "rlt/judges/loadtest.sh").timeout(45 * 60);
 
-    let cycle = agg.pos("cycle", 20);          // the breadcrumb readers render
+    let cycle = rlt.pos("cycle", 20);          // the breadcrumb readers render
     for c in 1..=20 {
         cycle.update(c);
-        agg.check_limits()?;                   // ceilings are OPT-IN — this is where they fire
+        rlt.check_limits()?;                   // ceilings are OPT-IN — this is where they fire
 
-        agg.step(&implement)?;                 // stages work on a session branch; nothing merged
-        if !(agg.judge(&tests).met() && agg.judge(&slow).met()) {
+        rlt.step(&implement)?;                 // stages work on a session branch; nothing merged
+        if !(rlt.judge(&tests).met() && rlt.judge(&slow).met()) {
             continue;                          // `&&` IS the cost gate: `slow` never runs when red
         }
-        agg.gate()?;                           // close the span: merge it, or apply on_regression
+        rlt.gate()?;                           // close the span: merge it, or apply on_regression
     }
     Ok(())
 }
@@ -86,40 +86,40 @@ fn main() -> Result<(), agg::driver::Fatal> {
 
 | call | what it does |
 |---|---|
-| `Agg::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
+| `Relentless::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
 | `.limits()` `.on_regression()` `.ratchet()` `.merge_requires_improvement()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
 | `.user_settings(bool)` | whether workers load the operator's own agent settings (plugins, MCP servers, hooks, personal instructions). On by default; off, Claude workers start with `--setting-sources project,local`, and an agent that can't leave them out says so |
-| `.user_env(false \| true \| [keys])` | which keys of the operator's settings `env` block (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`) every Claude worker and one-shot call gets as environment variables without the rest of those settings: none (default), every key, or the named ones. A variable agg's own environment has wins; `AGG_*` keys are never taken; string values only; only names are logged. Process-wide like `AGG_MODELS`. Other agents: no-op |
-| `.reachable(&step)` | one tiny call with the step's agent and model, its settings and `user_env` as the run has them, before the run starts: `Ok` with what answered, or an error naming the agent's cause (and, for an authentication error where the operator's settings hold `ANTHROPIC_*` keys the run does not pass, the setting that passes them). `agg process` calls it before its first step (`agg: { preflight: false }` skips it) |
+| `.user_env(false \| true \| [keys])` | which keys of the operator's settings `env` block (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`) every Claude worker and one-shot call gets as environment variables without the rest of those settings: none (default), every key, or the named ones. A variable rlt's own environment has wins; `RLT_*` keys are never taken; string values only; only names are logged. Process-wide like `RLT_MODELS`. Other agents: no-op |
+| `.reachable(&step)` | one tiny call with the step's agent and model, its settings and `user_env` as the run has them, before the run starts: `Ok` with what answered, or an error naming the agent's cause (and, for an authentication error where the operator's settings hold `ANTHROPIC_*` keys the run does not pass, the setting that passes them). `rlt process` calls it before its first step (`rlt: { preflight: false }` skips it) |
 | `.system_prompt(text)` | text every worker's agent adds to its system prompt, for a rule that must hold for the whole session rather than the first turn (A-34). Claude: `--append-system-prompt`; an agent that can't take it runs without it and says so |
-| `.vars([(name, value), ..])` | the workflow's variables: `{{ name }}` in every step's prompt **file** (the role prompt's too) and every LLM judge's rubric (its `inputs:` frontmatter too) is filled in where agg reads it; a name the map lacks fails that step or judge. Inline prompts a driver builds aren't templates (they may carry a project's own `{{ … }}`; code has `format!`), and other `{{` (no plain name inside) stays as it is. `agg::prelude::render(text, &vars)` renders a file of the driver's own (its config) the same way |
-| `.memory(bool)` | the run's default for `Step::memory`: whether sessions keep agg's working memory (forward state, wiki, memory log, summary). On by default; a step's own setting wins |
+| `.vars([(name, value), ..])` | the workflow's variables: `{{ name }}` in every step's prompt **file** (the role prompt's too) and every LLM judge's rubric (its `inputs:` frontmatter too) is filled in where rlt reads it; a name the map lacks fails that step or judge. Inline prompts a driver builds aren't templates (they may carry a project's own `{{ … }}`; code has `format!`), and other `{{` (no plain name inside) stays as it is. `relentless::prelude::render(text, &vars)` renders a file of the driver's own (its config) the same way |
+| `.memory(bool)` | the run's default for `Step::memory`: whether sessions keep rlt's working memory (forward state, wiki, memory log, summary). On by default; a step's own setting wins |
 | `.judge_agent(Agent::Codex)` `.judge_model(m)` `.judge_timeout(secs)` | the ruler — YAML's `judge.agent` / `judge.model` / `judge.timeout` ([CONFIG](CONFIG.md#judge--the-ruler)). `Agent::Custom` is refused when the run boots: the ruler is resolved by name |
 | `.context(path, name)` `.network(Network::Allow(..))` `.image()` `.judge_image()` `.pass_env([..])` `.credentials([..])` | the run's confinement: read-only context dirs, the egress allow-list, the container images and what crosses into a container — YAML's `context:` / `isolation_policy:` / `image:` / `judge.image` ([CONFIG](CONFIG.md#network-egress--isolation_policynetwork)) |
-| `agg.step(&s)` | run one session. Commits on a session branch — **stages**, never merges |
-| `agg.judge(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
-| `agg.group(&g)` | every member of a `Group`'s verdict, through `judge()`'s memoized cache — count over it: `.at_least(2)`, `.all()`, `.any()` |
-| `agg.gate()` | close the span: merge everything staged since the last gate, or discard it per policy |
-| `agg.gate_state()` | the gate's own history: ratchet references, `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes`, `oscillating(k)` |
-| `agg.check_limits()` | enforce ceilings, drain the operator bus, honour Ctrl-C |
-| `agg.pos(label, max)` | an RAII breadcrumb — `cycle 3/20 › attempt 2/3` — published to `state.json` |
-| `agg.ask()` `agg.info()` `agg.log()` | the three notification levels — non-blocking, and still the default |
-| `agg.hil_bool(q)` `hil_choose(q,&[..])` `hil_input(q)` | **ask a human and get the value back.** BLOCKS until answered |
-| `agg.open_asks()` | the asks a human still owes an answer to — including ones the WORKER opened |
-| `agg.block(q)` | the old doorbell: waits for `agg send resume`, returns nothing. Prefer `hil_bool` |
-| `agg.finish(outcome)` `agg.finish_with(outcome, reason)` | end the run explicitly (else dropping `Agg` records `GoalsMet`). `finish_with(RunOutcome::Halt, "rollbacks >= 2")` names the stop condition the driver saw fire, worded as `agg run` words a fired `abort_if` term: report `stop_reason` `ABORT: rollbacks >= 2`, run-ledger end reason `abort:rollbacks >= 2` |
+| `rlt.step(&s)` | run one session. Commits on a session branch — **stages**, never merges |
+| `rlt.judge(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
+| `rlt.group(&g)` | every member of a `Group`'s verdict, through `judge()`'s memoized cache — count over it: `.at_least(2)`, `.all()`, `.any()` |
+| `rlt.gate()` | close the span: merge everything staged since the last gate, or discard it per policy |
+| `rlt.gate_state()` | the gate's own history: ratchet references, `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes`, `oscillating(k)` |
+| `rlt.check_limits()` | enforce ceilings, drain the operator bus, honour Ctrl-C |
+| `rlt.pos(label, max)` | an RAII breadcrumb — `cycle 3/20 › attempt 2/3` — published to `state.json` |
+| `rlt.ask()` `rlt.info()` `rlt.log()` | the three notification levels — non-blocking, and still the default |
+| `rlt.hil_bool(q)` `hil_choose(q,&[..])` `hil_input(q)` | **ask a human and get the value back.** BLOCKS until answered |
+| `rlt.open_asks()` | the asks a human still owes an answer to — including ones the WORKER opened |
+| `rlt.block(q)` | the old doorbell: waits for `rlt send resume`, returns nothing. Prefer `hil_bool` |
+| `rlt.finish(outcome)` `rlt.finish_with(outcome, reason)` | end the run explicitly (else dropping `Relentless` records `GoalsMet`). `finish_with(RunOutcome::Halt, "rollbacks >= 2")` names the stop condition the driver saw fire, worded as `rlt run` words a fired `abort_if` term: report `stop_reason` `ABORT: rollbacks >= 2`, run-ledger end reason `abort:rollbacks >= 2` |
 
 A step's task can live in a file: `Step::new("implement").prompt_file("steps/implement.md")` (relative
-to `agg/`, or absolute) is read at every session start and hashed into `agg/private/prompts.jsonl`,
+to `rlt/`, or absolute) is read at every session start and hashed into `rlt/private/prompts.jsonl`,
 exactly like YAML's `prompt_file:`. `.prompt()` and `.prompt_file()` replace each other — a derived
-step overrides its template's choice — and `agg.step()` refuses a step carrying both, or naming a
+step overrides its template's choice — and `rlt.step()` refuses a step carrying both, or naming a
 file it cannot read.
 
 The role works the same way: `.role_prompt(text)` / `.role_prompt_file("roles/tester.md")` are YAML's
 per-step `role_prompt:` / `role_prompt_file:`, replace each other, and — set either — replace the run's
 defaults for that step; a step that sets neither runs with the defaults.
 
-A step that runs once and hands its result on in its own files can drop agg's working memory:
+A step that runs once and hands its result on in its own files can drop rlt's working memory:
 `Step::new("check").memory(false)`. Its brief then names no `STATE.md`, wiki or memory log, and no memory
 fold or summary runs after it. Memory stays on for steps that loop, where one session advises the next.
 
@@ -128,7 +128,7 @@ names; its MCP servers' tools come on top. A session then starts with only those
 context. Claude: `--tools`; an agent that can't limit its tools runs with all of them and the step says so.
 
 A step can start from an earlier step's agent session instead of a fresh context:
-`agg.step(&review.create("fix").resume(&done.agent_session.unwrap()))` continues it, `.fork(&s)` branches
+`rlt.step(&review.create("fix").resume(&done.agent_session.unwrap()))` continues it, `.fork(&s)` branches
 off it and leaves it as it was, so several steps can start from one session and a rerun starts from the
 same context. `StepOutcome::agent_session` is the handle (the agent and its session id). Only the agent that
 ran the session can continue it; on another agent, a backend without resume (or fork: only Claude has it),
@@ -143,9 +143,9 @@ the rest of the brief for known; a fresh or forked session gets the pointer alon
 Three kinds, one type:
 
 ```rust
-Judge::script("tests_pass", "agg/judges/tests.sh")     // any executable; verdict JSON on stdout
-Judge::rubric("spec_sound", "agg/judges/spec.md")      // the .md IS the prompt; graded by the ruler
-Judge::rubric("review", "agg/judges/review.md")       // …asking its OWN agent, model and effort,
+Judge::script("tests_pass", "rlt/judges/tests.sh")     // any executable; verdict JSON on stdout
+Judge::rubric("spec_sound", "rlt/judges/spec.md")      // the .md IS the prompt; graded by the ruler
+Judge::rubric("review", "rlt/judges/review.md")       // …asking its OWN agent, model and effort,
     .agent(Agent::Codex).model("gpt-5").effort(Effort::Low) // not the run's ruler (a reviewer ≠ the worker)
 Judge::native("p99_ok", |c| {                          // a Rust closure over a JudgeCtx
     let ms = std::fs::read_to_string(c.scratch().join("bench.json"))
@@ -163,15 +163,15 @@ diverge from the run it claims to reproduce. A check that genuinely needs the cl
 `c.scratch()` is the per-session directory judges may write — **shared between them**, so one judge
 can measure and another apply a threshold. A judge able to write the tree it grades can make the code
 pass, so under a confining tier the project tree is read-only to it and writes are relocated:
-`$AGG_JUDGE_SCRATCH` for working files, a persistent per-project dir for toolchain caches
+`$RLT_JUDGE_SCRATCH` for working files, a persistent per-project dir for toolchain caches
 (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, `GOCACHE`, …). Full table in
 [docs/CONFIG.md](CONFIG.md#-a-judge-may-not-write-the-project-tree).
 
-A verdict's `.with_evidence([...])` paths are KEPT: when the driver asks a judge, agg copies each
+A verdict's `.with_evidence([...])` paths are KEPT: when the driver asks a judge, rlt copies each
 named file (relative paths resolve in `c.scratch()` first, then the project) to
-`agg/private/evidence/<run_id>/<session>/<judge>/` — under the session it was JUDGED in, since a later
+`rlt/private/evidence/<run_id>/<session>/<judge>/` — under the session it was JUDGED in, since a later
 `gate()` sees another scratch — and names the copies on the gate's ledger row and in the report.
-`Agg::evidence_max_mb(n)` bounds one run's copies (default 100, the twin of `judge.evidence_max_mb`).
+`Relentless::evidence_max_mb(n)` bounds one run's copies (default 100, the twin of `judge.evidence_max_mb`).
 
 ⚠ **What confines a driver's judges is `.isolation()` on its STEPS.** There is no separate knob: the
 run's tier is the strongest tier any step has declared, and judges take that — never the tier of
@@ -182,7 +182,7 @@ its caller.
 let build = Step::new("implement").isolation(Isolation::Sandbox);   // ← this confines the JUDGES too
 ```
 
-A context dir or a network allow-list needs EVERY step confined: `agg.step()` refuses an
+A context dir or a network allow-list needs EVERY step confined: `rlt.step()` refuses an
 `Isolation::None` step when the run has either, and refuses a step whose agent's endpoint is not on
 the allow-list (a driver's steps never reach the YAML startup check, so the rule runs per step).
 `Step::image("…")` picks a container step's image; under `Isolation::Container` the judges run in
@@ -190,7 +190,7 @@ the allow-list (a driver's steps never reach the YAML startup check, so the rule
 
 A driver that declares no tier anywhere runs its judges unconfined, exactly as it runs its workers
 unconfined. That is the default and it is the honest one — but if you sandbox the worker and not the
-judges, the judge script is the way out, because a confined worker can rewrite `agg/judges/*.sh` in
+judges, the judge script is the way out, because a confined worker can rewrite `rlt/judges/*.sh` in
 its own writable cwd.
 
 ---
@@ -203,17 +203,17 @@ under `OnRegression::Rollback`, discards the span. Same engine, same body as the
 [`sequence.ratchet`](CONFIG.md#the-ratchet--numeric-no-regression):
 
 ```rust
-let agg = Agg::open(".")?
+let rlt = Relentless::open(".")?
     .ratchet("cc_p95", Ratchet::down(0.5))                        // lower is better, ±0.5
     .ratchet("mutation", Ratchet::up(1.0).baseline(71.0));        // higher is better, seeded
 
-agg.judge(&cc_p95);              // asked BEFORE the first step() = the driver's baseline pass
+rlt.judge(&cc_p95);              // asked BEFORE the first step() = the driver's baseline pass
 for _ in 0..20 {
-    agg.step(&implement)?;
-    agg.judge(&cc_p95);          // the ratchet applies to the judges ASKED since the last gate
-    agg.judge(&mutation);
-    agg.gate()?;                 // a regression beyond tolerance ⇒ GateOutcome::RolledBack
-    let g = agg.gate_state();
+    rlt.step(&implement)?;
+    rlt.judge(&cc_p95);          // the ratchet applies to the judges ASKED since the last gate
+    rlt.judge(&mutation);
+    rlt.gate()?;                 // a regression beyond tolerance ⇒ GateOutcome::RolledBack
+    let g = rlt.gate_state();
     if g.consecutive_rollbacks >= 3 || g.oscillating(4) { break; }   // YAML's abort_if terms, in Rust
 }
 ```
@@ -225,10 +225,10 @@ for _ in 0..20 {
   `no_improvements`, `no_changes` (and their `consecutive_` forms) and `oscillating` read on the YAML path.
   A span with no commits returns `GateOutcome::Nothing` from `gate()`, but it is still a gate: its rows
   are stamped `no_changes` and it counts for `no_changes` / `consecutive_no_changes` — bound an idle
-  worker with `agg.gate_state().consecutive_no_changes >= 3`. The signature `oscillating` compares is every judge asked since the
+  worker with `rlt.gate_state().consecutive_no_changes >= 3`. The signature `oscillating` compares is every judge asked since the
   last gate that was unmet, plus every ratchet regression.
 - **On resume** the state is restored from the last replayed `gate` record — i.e. as of the last kept
-  gate — not from `agg/private/gate.json`, which may be ahead of it by gates that will re-execute.
+  gate — not from `rlt/private/gate.json`, which may be ahead of it by gates that will re-execute.
 
 ### Metric and score judges (swe-metrics)
 
@@ -237,11 +237,11 @@ The YAML `judges.<name>.metric` / `.score` declarations
 the same engine, so judges asked in one span share ONE `swe-metrics measure` of the tree:
 
 ```rust
-use agg::prelude::*;
+use relentless::prelude::*;
 let cc = Judge::metric("cc_p95", MetricJudge::new("complexity.cyclomatic").stat(Stat::P95).tool("lizard").max(10.0));
 let vulns = Judge::metric("vulns", MetricJudge::new("dependencies.vulnerabilities").label("severity", &["critical", "high"]).max(0.0));
 let quality = Judge::score("quality", ScoreJudge::new("swe-default", "2").min(80.0));
-let agg = Agg::open(".")?.ratchet("cc_p95", Ratchet::down(0.5));   // the driver states the direction
+let rlt = Relentless::open(".")?.ratchet("cc_p95", Ratchet::down(0.5));   // the driver states the direction
 ```
 
 `MetricJudge` also takes `.combine(Combine::All)`, `.scope(Scope::Changed)` and `.min(..)`; `ScoreJudge` takes
@@ -257,18 +257,18 @@ first kept gate — a score asked before that is computed without `--baseline`.
 
 ### Groups and the improvement rule
 
-A [`Group`](CONFIG.md#judge-groups--k-of-n) names judges that measure one thing; `agg.group(&g)` asks
-every member (each through the same memoized cache as `agg.judge()`) and returns a `GroupVerdict` to
+A [`Group`](CONFIG.md#judge-groups--k-of-n) names judges that measure one thing; `rlt.group(&g)` asks
+every member (each through the same memoized cache as `rlt.judge()`) and returns a `GroupVerdict` to
 count over. The threshold lives where you branch, never on the group:
 
 ```rust
 let quality = Group::new("quality", [sonar.clone(), codescene.clone(), lizard.clone()]);
-let agg = Agg::open(".")?.merge_requires_improvement(true);
+let rlt = Relentless::open(".")?.merge_requires_improvement(true);
 for _ in 0..20 {
-    agg.step(&implement)?;
-    if !agg.group(&quality).at_least(2) { continue; }    // two of three
-    let outcome = agg.gate()?;                            // Kept · RolledBack · NoImprovement · …
-    if outcome == GateOutcome::NoImprovement && agg.gate_state().consecutive_no_improvements >= 4 {
+    rlt.step(&implement)?;
+    if !rlt.group(&quality).at_least(2) { continue; }    // two of three
+    let outcome = rlt.gate()?;                            // Kept · RolledBack · NoImprovement · …
+    if outcome == GateOutcome::NoImprovement && rlt.gate_state().consecutive_no_improvements >= 4 {
         break;                                            // four sessions in a row that moved nothing
     }
 }
@@ -276,7 +276,7 @@ for _ in 0..20 {
 
 - **At `gate()`, a judge asked ONLY through `group()` is judged with its group, net**: one member going
   met→unmet while another goes unmet→met is not a regression; a net loss is. A judge the driver also
-  asked by name (`agg.judge`) is held to the per-judge rule. A driver that never asks a group sees no
+  asked by name (`rlt.judge`) is held to the per-judge rule. A driver that never asks a group sees no
   change.
 - **`merge_requires_improvement(true)`** — `gate()` keeps a span only if a judge asked since the last
   gate went unmet→met (a group: gained ground net) or a ratcheted judge moved the good way beyond its
@@ -290,65 +290,65 @@ Three calls, one behaviour: **block until a human answers.** No timeout, no defa
 run — an idle process spends no tokens, and waiting is cheaper than the machinery that avoids waiting.
 
 ```rust
-let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize  (closed set)
-let v  = agg.hil_input("Which instance is prod?")?;                  // -> String (open set)
-let ok = agg.hil_bool("Deploy to prod?")?;                           // -> bool
+let i  = rlt.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize  (closed set)
+let v  = rlt.hil_input("Which instance is prod?")?;                  // -> String (open set)
+let ok = rlt.hil_bool("Deploy to prod?")?;                           // -> bool
 ```
 
-A human answers with `agg answer <id> …` (`agg status` lists open asks and their ids). For a
+A human answers with `rlt answer <id> …` (`rlt status` lists open asks and their ids). For a
 `choose`/`bool` ask the value must be on the recorded list, so the CLI refuses anything else and this
 call cannot hand you a value you did not offer — that is why `hil_choose` exists next to `hil_input`.
 
-⛔ **`agg.yaml` has no `hil` key and the worker cannot reach these.** `agg hil` records an ask and
+⛔ **`rlt.yaml` has no `hil` key and the worker cannot reach these.** `rlt hil` records an ask and
 exits; only a driver author, at a call site they wrote, can make the loop wait. With no bound on the
-wait, that asymmetry is the only thing standing between this and the interactive agent agg replaces.
+wait, that asymmetry is the only thing standing between this and the interactive agent rlt replaces.
 
 Four rules, and they are the whole design:
 
 1. **A human's answer unblocks the STEP; a judge still owns the VERDICT.** Never let a "done" satisfy
-   a goal — `while !agg.judge(&dns_ok).met() { agg.hil_bool("created the record?")?; }`.
+   a goal — `while !rlt.judge(&dns_ok).met() { rlt.hil_bool("created the record?")?; }`.
 2. **An answer may NAME a secret, never CONTAIN one.** `hil_input` writes to the ask ledger and the
    next session's brief. Ask for the credential to be *placed*, and confirm with `hil_bool`.
 3. **`gate()` before you block for a human who will touch the tree.** `step()` only stages, so a
-   human editing an open span collides with staged work. agg warns; it cannot fix it for you.
+   human editing an open span collides with staged work. rlt warns; it cannot fix it for you.
 4. **Set `work_time`, not just `wall_time`.** Ceilings keep firing while blocked, so an overnight
    question would otherwise consume a ceiling meant to measure the agent's effort. `work_time`
    excludes human wait; `wall_time` is a genuine end-to-end deadline.
 
-`agg stop` and Ctrl-C interrupt a wait — the bus is drained on every poll — which is why no timeout is
+`rlt stop` and Ctrl-C interrupt a wait — the bus is drained on every poll — which is why no timeout is
 needed to escape a question nobody will answer.
 
 ### Exit codes
 
 `fn main() -> Result<(), Fatal>` collapses **every** ending to exit 1: Rust's `Termination` impl
-prints `Error: {:?}` and returns `FAILURE`, so `agg stop`, a blown ceiling and a genuine panic all
-look identical to a wrapper. Use `agg::driver::run`:
+prints `Error: {:?}` and returns `FAILURE`, so `rlt stop`, a blown ceiling and a genuine panic all
+look identical to a wrapper. Use `relentless::driver::run`:
 
 ```rust
-fn main() -> std::process::ExitCode { agg::driver::run(real_main) }
+fn main() -> std::process::ExitCode { relentless::driver::run(real_main) }
 fn real_main() -> Result<(), Fatal> { /* … */ }
 ```
 
-It maps the ending to the same codes `agg run` uses: **0** goals met · **3** `abort_if` · **4**
-max-sessions · **5** stopped by an operator · **1** a real fault. `agg::workflow::run` adds **6**: a halt
+It maps the ending to the same codes `rlt run` uses: **0** goals met · **3** `abort_if` · **4**
+max-sessions · **5** stopped by an operator · **1** a real fault. `relentless::workflow::run` adds **6**: a halt
 because the task force's re-entries and repairs for the failed step are spent (a restart of that step halts
 again; something it works on must change first).
 
-A driver run writes the same `agg/private/report.json` as `agg run` (see
-[CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson)), when the `Agg` drops. `Drop` cannot see
-whether `main` returned `Err`, so a driver's own error reads as `done` there — `agg::driver::run`
+A driver run writes the same `rlt/private/report.json` as `rlt run` (see
+[CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson)), when the `Relentless` drops. `Drop` cannot see
+whether `main` returned `Err`, so a driver's own error reads as `done` there — `relentless::driver::run`
 corrects it to `outcome: error`, which is one more reason to use it. A driver that panics leaves no
 report; a consumer reads a missing report as `error`.
 
-## Workflow building blocks (`agg::workflow`)
+## Workflow building blocks (`relentless::workflow`)
 
 A process of named steps — a script, an agent's work judged and repaired, a condition, a human's approval —
-needs the same few blocks in every driver. `agg::workflow` has them, built on the calls above (no second
+needs the same few blocks in every driver. `relentless::workflow` has them, built on the calls above (no second
 execution model). A step's **key** is the first word of its name (`"2.5"` of `"2.5 Resolve bindings"`).
 
 ```rust
-use agg::prelude::*;
-use agg::workflow::{self, Flow, Run, Task, Roles};
+use relentless::prelude::*;
+use relentless::workflow::{self, Flow, Run, Task, Roles};
 
 fn main() -> std::process::ExitCode {
     workflow::run(drive)                       // starts the run again where the task force sent it (--from, --note)
@@ -357,8 +357,8 @@ fn main() -> std::process::ExitCode {
 fn drive() -> Result<(), Fatal> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let roles = Roles::load("roles.yaml".as_ref(), &["worker", "critic"])?;
-    let flow = Flow::new(Agg::open(".")?, Run::from_args(&args)?)
-        .history("reports/steps.jsonl")        // default agg/private/steps.jsonl; a tracked path is committed
+    let flow = Flow::new(Relentless::open(".")?, Run::from_args(&args)?)
+        .history("reports/steps.jsonl")        // default rlt/private/steps.jsonl; a tracked path is committed
         .own(["task.md"])                      // what --reset never takes back
         .on_failure(roles.step("worker", "task-force", "/abs/task-force.md"), 3);
     flow.script_step("1 Fetch", &Judge::script("fetch", "scripts/fetch.sh"))?;
@@ -376,8 +376,8 @@ fn drive() -> Result<(), Fatal> {
 
 | block | what it does |
 |---|---|
-| `Flow::new(agg, Run)` | the run: `Run::from_args` reads `--from <key> [--note t | --note-file f [--decided]] [--reset] [--until <key>] [--reentries n]`; a step before `from` doesn't run, the `from` step gets the note leading its brief (`--decided`: the note is the humans' decision, and the `from` step refreshes against it like a later step, unchanged when it doesn't concern it), every later step refreshes; `--until` ends the run after that step |
-| `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` `.trust(rule)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; the task force (at most `max` re-entries and repairs in place per failed step of a run, kept in `agg/private/task-force.json` across the driver's processes, a restart `--from` a step included; a run from the start begins the count anew; past it the run exits 6); which of the task force's proposals go ahead without a human's yes (`rule(failed step, re-enter at)`) |
+| `Flow::new(rlt, Run)` | the run: `Run::from_args` reads `--from <key> [--note t | --note-file f [--decided]] [--reset] [--until <key>] [--reentries n]`; a step before `from` doesn't run, the `from` step gets the note leading its brief (`--decided`: the note is the humans' decision, and the `from` step refreshes against it like a later step, unchanged when it doesn't concern it), every later step refreshes; `--until` ends the run after that step |
+| `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` `.trust(rule)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; the task force (at most `max` re-entries and repairs in place per failed step of a run, kept in `rlt/private/task-force.json` across the driver's processes, a restart `--from` a step included; a run from the start begins the count anew; past it the run exits 6); which of the task force's proposals go ahead without a human's yes (`rule(failed step, re-enter at)`) |
 | `.order(keys)` `.constraints(f)` | every step key of the driver in order, built or not, so `--until` ends the run before the first step after it even when the steps up to it never run; what a failed step must keep to (`f(flow, step) -> Option<String>`: its scope, its rubric), in the task force's brief |
 | `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails, and after the task force's repair in place the script runs again |
 | `flow.recover(name, why, &again)` | the driver's own failure that `again` can judge again (`Ok(None)`: met now): the task force may repair it in place, and when `again` is met the call returns and the step goes on; `flow.fail(name, why)` for one it can't judge again |
@@ -415,7 +415,7 @@ agreed); a refresh doesn't discuss again; a voice that writes no position fails 
 where one agent's blind spots cost most, with voices of comparable strength: a weaker voice tends to defer.
 
 The files a brief names (`flow.scratch(file)`, `flow.wrapper(file, command)`) live in the flow's own folder
-outside the project, `agg-flow-<pid>-<n>` in the temp dir. It is removed when the flow is dropped, however the
+outside the project, `rlt-flow-<pid>-<n>` in the temp dir. It is removed when the flow is dropped, however the
 run ended, and a flow that starts removes the folders of runs whose process is gone: a file a dead run left
 there would read as current to a later run's agent.
 
@@ -424,10 +424,10 @@ there would read as current to a later run's agent.
 An overnight driver that dies at hour six should not start again at hour zero.
 
 ```rust
-let agg = Agg::open_with(".", Opts { resume: true })?;   // instead of Agg::open(".")
+let rlt = Relentless::open_with(".", Opts { resume: true })?;   // instead of Relentless::open(".")
 ```
 
-Every completed call appended a line to `agg/private/calls.jsonl`, and on resume the same calls are
+Every completed call appended a line to `rlt/private/calls.jsonl`, and on resume the same calls are
 answered from that file — no worker, no ruler, no git, no tokens. **Your loop is not serialized and
 does not need to be:** it runs from the top and its own `if`/`for` walk it back to where it stopped,
 because identical inputs produce identical branches.
@@ -435,20 +435,20 @@ because identical inputs produce identical branches.
 ⚠ **Fast-forward reaches back only as far as the last `gate()` that returned `Kept`.** Everything
 after it is discarded and re-executes. That is not conservatism: `step()` always *stages*, so until
 a gate lands it the work is on a per-run branch the ledger cannot describe — replaying such a step
-as "done" would leave the next session building on an orphaned ref. agg prints exactly what it
+as "done" would leave the next session building on an orphaned ref. rlt prints exactly what it
 drops.
 
 Three consequences worth designing around:
 
-- **Side effects outside `agg.*` re-execute.** A `println!`, a file write or an HTTP POST in your
-  loop body happens again during replay. Put once-only effects behind an `agg.*` call (`log`, `info`,
+- **Side effects outside `rlt.*` re-execute.** A `println!`, a file write or an HTTP POST in your
+  loop body happens again during replay. Put once-only effects behind an `rlt.*` call (`log`, `info`,
   `ask`, `block` are all recorded) or make them idempotent.
 - **An answered `hil_*`/`block()` after the last kept gate will ask again**, and the original answer
   is not recoverable — the one resume cost paid by a person rather than by tokens. Gate before you ask
-  if that matters; agg prints exactly which human calls it dropped.
+  if that matters; rlt prints exactly which human calls it dropped.
 - **Don't branch on the clock, `rand`, or an env var.** Anything derived from a `Verdict` or a
   `StepOutcome` is safe by construction; anything else can send the replay down a different path,
-  and agg will refuse rather than guess — a call that does not match the record aborts the resume
+  and rlt will refuse rather than guess — a call that does not match the record aborts the resume
   naming both sides.
 
 ## Two rules that are easy to get wrong
@@ -471,4 +471,4 @@ the right default.
 | `examples/workflow.rs` | the full surface in use — steps, all three judge kinds, `&&` gating, `block()` |
 | `examples/selfimprove.rs` | a driver that improves the tool that runs it, and the hazards that come with it |
 | `examples/workflow.yaml` | the same workflow in YAML, with an honest list of what it loses |
-| `docs/CONFIG.md` | every `agg.yaml` key |
+| `docs/CONFIG.md` | every `rlt.yaml` key |

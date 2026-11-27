@@ -1,4 +1,4 @@
-//! A run of a process (A-37): agg's flow plus how this process's steps run: its settings, hooks
+//! A run of a process (A-37): rlt's flow plus how this process's steps run: its settings, hooks
 //! around steps and phases, the judge cache, the processes steps leave running, and the registries the flow's callbacks
 //! need (a step's key, its phase). What the interpreter ([`super::run`]) and the step kinds work through.
 
@@ -14,7 +14,7 @@ use super::number::Numbered;
 use super::settings::Settings;
 use super::{bases, leftovers};
 use crate::core::model::{Judge, JudgeKind};
-use crate::driver::{Agg, Fatal, Step};
+use crate::driver::{Relentless, Fatal, Step};
 use crate::workflow::{Flow, Roles, Run};
 
 /// What the flow's callbacks share with the run: they outlive the call that registered them, so they hold it by `Rc`.
@@ -38,7 +38,7 @@ pub struct Shared {
     pub phase: RefCell<Option<String>>,
 }
 
-/// What a run needs besides agg itself.
+/// What a run needs besides rlt itself.
 pub struct Init {
     pub spec: Process,
     pub list: Vec<Numbered>,
@@ -49,7 +49,7 @@ pub struct Init {
     pub force: Option<Step>,
 }
 
-/// A run of a process: agg's flow, the process's settings and the registries.
+/// A run of a process: rlt's flow, the process's settings and the registries.
 pub struct Proc {
     flow: Flow,
     pub shared: Rc<Shared>,
@@ -68,22 +68,22 @@ impl Deref for Proc {
 }
 
 impl Proc {
-    /// The run on `agg`, starting and ending as `run` says, with the process's callbacks and its task force.
-    pub fn new(agg: Agg, run: Run, init: Init) -> Proc {
-        let project = agg.dir().to_path_buf();
+    /// The run on `rlt`, starting and ending as `run` says, with the process's callbacks and its task force.
+    pub fn new(rlt: Relentless, run: Run, init: Init) -> Proc {
+        let project = rlt.dir().to_path_buf();
         let spec = &init.spec;
-        let _ = std::fs::remove_dir_all(project.join(".git").join("agg-verdicts"));
+        let _ = std::fs::remove_dir_all(project.join(".git").join("rlt-verdicts"));
         if spec.run.leftovers {
             let ended = leftovers::watch(&project);
             if ended > 0 {
-                agg.info(&format!("ended {ended} processes that earlier, stopped runs left running"));
+                rlt.info(&format!("ended {ended} processes that earlier, stopped runs left running"));
             }
         }
         let hooks = spec.run.hooks.as_ref().and_then(|h| h.process.as_ref()).map(|f| hooks::read(&init.home.join(f))).unwrap_or_default();
         let shared = Rc::new(Shared { spec: init.spec.clone(), home: init.home.clone(), project: project.clone(),
             vars: init.vars, settings: init.settings.clone(), hooks, keys: RefCell::default(), ids: RefCell::default(), phases: RefCell::default(),
             constraints: RefCell::default(), phase: RefCell::default() });
-        let mut flow = Flow::new(agg, run);
+        let mut flow = Flow::new(rlt, run);
         if let Some(h) = &spec.run.history {
             flow = flow.history(h);
         }
@@ -107,15 +107,15 @@ impl Proc {
         Proc { flow, shared, project, home: init.home, list: init.list, settings: init.settings, roles: init.roles }
     }
 
-    /// The check run through the verdict cache (`agg cached`): the worker's self-check and the run's judge run it on
+    /// The check run through the verdict cache (`rlt cached`): the worker's self-check and the run's judge run it on
     /// the same content, and the second one is answered from the first.
     pub fn cached(&self, check: &Judge) -> Result<Judge, Fatal> {
         let JudgeKind::Script { path } = &check.kind else { return Ok(check.clone()) };
         let Some(cache) = &self.shared.spec.run.judge_cache else { return Ok(check.clone()) };
-        let agg = std::env::current_exe().map_err(|e| anyhow::anyhow!("finding agg: {e}"))?;
+        let rlt = std::env::current_exe().map_err(|e| anyhow::anyhow!("finding rlt: {e}"))?;
         let ignore: String = cache.ignore.iter().map(|i| format!(" --ignore {}", super::exec::quote(i))).collect();
         let wrapper = self.wrapper(&format!("{}-cached.sh", check.name),
-            &format!("{} cached{ignore} -- {}", super::exec::quote(&agg.display().to_string()), path.display()))?;
+            &format!("{} cached{ignore} -- {}", super::exec::quote(&rlt.display().to_string()), path.display()))?;
         Ok(Judge::script(check.name.clone(), wrapper.as_str()))
     }
 

@@ -1,8 +1,8 @@
 use super::*;
 
-/// Parse a config body the way `AggConfig::load` does (minus the env overrides).
-fn parse(body: &str) -> Result<AggConfig, serde_yaml::Error> {
-    serde_yaml::from_str::<AggConfig>(body)
+/// Parse a config body the way `RelentlessConfig::load` does (minus the env overrides).
+fn parse(body: &str) -> Result<RelentlessConfig, serde_yaml::Error> {
+    serde_yaml::from_str::<RelentlessConfig>(body)
 }
 
 /// The smallest config that parses — `project` + `sequence` are the only required keys.
@@ -41,7 +41,7 @@ fn a_sequence_entry_parses_in_both_spellings() {
     assert!(err.contains("if"), "got: {err}");
 }
 
-/// An `agg.yaml` with no `sequence:` at all is a DRIVER project (BUILD.md §3.6) and must LOAD —
+/// An `rlt.yaml` with no `sequence:` at all is a DRIVER project (BUILD.md §3.6) and must LOAD —
 /// the key is `#[serde(default)]`, as is `sequence.steps`.
 #[test]
 fn a_config_with_no_sequence_at_all_parses_as_a_driver_project() {
@@ -82,7 +82,7 @@ fn the_retired_ceiling_keys_are_a_hard_error_not_silently_ignored() {
 
 /// BUILD.md §2.2: `wall_hours` is ADDITIVE to the one shared `Limits` struct. Two things must hold
 /// at once — a config written before the key existed still parses (no YAML behaviour change), and a
-/// config that DOES set it round-trips, so the driver path and `agg.yaml` cannot disagree about the
+/// config that DOES set it round-trips, so the driver path and `rlt.yaml` cannot disagree about the
 /// value. Serde round-trip rather than a bare parse: `deny_unknown_fields` makes a serializer/
 /// deserializer mismatch a hard error, which is exactly the regression worth catching.
 #[test]
@@ -101,9 +101,9 @@ fn limits_round_trips_with_and_without_wall_hours() {
     assert_eq!(new.wall_time, Some(12.0));
     assert_eq!(round(&new).wall_time, Some(12.0));
 
-    // …and it is a real `agg.yaml` key, not just a Rust field.
+    // …and it is a real `rlt.yaml` key, not just a Rust field.
     let cfg = parse("project: p\nsteps: { worker: {} }\nsequence: { steps: [worker], limits: { wall_time: 12 } }\n")
-        .expect("`limits.wall_time` is a valid agg.yaml key");
+        .expect("`limits.wall_time` is a valid rlt.yaml key");
     assert_eq!(cfg.sequence.limits.wall_time, Some(12.0));
 
     // the guard the whole config module rests on still bites.
@@ -130,15 +130,15 @@ fn fenced_yaml_blocks(md: &str) -> Vec<String> {
     out
 }
 
-/// REGRESSION (the guard that would have caught the shipped bug): the `/agg:new` scaffold that
-/// the binary EMBEDS must still parse as a CURRENT config. The `/agg:*` skills are
+/// REGRESSION (the guard that would have caught the shipped bug): the `/rlt:new` scaffold that
+/// the binary EMBEDS must still parse as a CURRENT config. The `/rlt:*` skills are
 /// `include_str!`'d into the binary as string LITERALS (`crate::skills::SKILLS`), so a stale
 /// scaffold compiles cleanly — the green build does NOT catch a scaffold whose generated config
 /// is invalid. That gap already shipped one real bug: the scaffold emitted `budget:`/
 /// `max_sessions:` configs that now HARD-ERROR under `deny_unknown_fields`.
 ///
 /// This reads the SAME embedded body the binary installs (NOT a fresh file read), extracts the
-/// `agg.yaml` scaffold block, fills its human placeholders with concrete VALID values, and
+/// `rlt.yaml` scaffold block, fills its human placeholders with concrete VALID values, and
 /// asserts it parses through the REAL config parser. If the scaffold ever reintroduces a retired
 /// key (budget / cost / max_sessions / stop_when / halt_when / goals), `deny_unknown_fields`
 /// rejects it and this test FAILS — which is the whole point. (We use the real parse, as
@@ -150,14 +150,14 @@ fn the_embedded_new_scaffold_parses_as_a_current_config() {
     // the SAME include_str! body the binary ships — guard what actually installs.
     let (_, new_skill) = crate::skills::SKILLS
         .iter()
-        .find(|(name, _)| *name == "agg-new")
-        .expect("the agg-new skill must be embedded in SKILLS");
+        .find(|(name, _)| *name == "rlt-new")
+        .expect("the rlt-new skill must be embedded in SKILLS");
 
     // the scaffold is the fenced yaml block carrying the whole config: sequence.limits + done_if.
     let scaffold = fenced_yaml_blocks(new_skill)
         .into_iter()
         .find(|b| b.contains("sequence:") && b.contains("limits:") && b.contains("done_if"))
-        .expect("the /agg:new scaffold (a ```yaml block with sequence.limits + done_if) must be present");
+        .expect("the /rlt:new scaffold (a ```yaml block with sequence.limits + done_if) must be present");
 
     // fill the human placeholders with concrete VALID values (an agent / a number / a judge name).
     let filled = scaffold
@@ -181,7 +181,7 @@ fn the_embedded_new_scaffold_parses_as_a_current_config() {
     // THE assertion: the filled scaffold parses through the real deny_unknown_fields parser. A
     // retired key anywhere in it makes this fail.
     let cfg = parse(&filled).unwrap_or_else(|e| {
-        panic!("the /agg:new scaffold must parse as a current AggConfig, got:\n{e}\n--- filled scaffold ---\n{filled}")
+        panic!("the /rlt:new scaffold must parse as a current RelentlessConfig, got:\n{e}\n--- filled scaffold ---\n{filled}")
     });
 
     // …and it is the CURRENT shape, not a coincidental parse: the unified ceiling home + the
@@ -220,7 +220,7 @@ fn a_step_takes_normalised_readonly_and_writable_lists() {
          steps:\n  \
            implement:\n    \
              isolation: sandbox\n    \
-             readonly: [tests/, agg/judges/, ./src]\n    \
+             readonly: [tests/, rlt/judges/, ./src]\n    \
              writable: [tests]\n\
          sequence: { steps: [implement] }\n",
     )
@@ -228,10 +228,10 @@ fn a_step_takes_normalised_readonly_and_writable_lists() {
     let step = cfg.resolve_step("implement").expect("resolves");
 
     // one spelling stored, whatever spelling was written
-    assert_eq!(step.readonly, ["tests", "agg/judges", "src"]);
+    assert_eq!(step.readonly, ["tests", "rlt/judges", "src"]);
     assert_eq!(step.writable, ["tests"]);
     // …and the subtraction lands despite `readonly: [tests/]` vs `writable: [tests]`
-    assert_eq!(step.denied(), ["agg/judges", "src"]);
+    assert_eq!(step.denied(), ["rlt/judges", "src"]);
     assert!(step.custom.is_none(), "YAML cannot name a driver-supplied backend");
 }
 
@@ -381,7 +381,7 @@ sequence:
     cooldown_sessions: 5
     cmd:
       - "curl -s -d {{reason}} ntfy.sh/my-topic"
-      - "echo {{project}} {{session}} {{step}} >> agg/state/NOTIFY.log"
+      - "echo {{project}} {{session}} {{step}} >> rlt/state/NOTIFY.log"
 "#,
     )
     .expect("the full notify ladder must parse under `sequence:`");
@@ -453,20 +453,20 @@ fn a_notify_block_without_notify_if_is_valid_the_stop_plus_notify_policy() {
     assert_eq!(cfg.sequence.notify.expect("…but a delivery IS").cmd, vec!["say {{reason}}".to_string()]);
 }
 
-/// The env overrides re-home onto the new shape (§4.1): `AGG_MODEL` → `defaults.model`,
-/// `AGG_COST_TOTAL` → `sequence.limits.cost`, `AGG_TOKEN_BUDGET` → `sequence.limits.tokens`.
+/// The env overrides re-home onto the new shape (§4.1): `RLT_MODEL` → `defaults.model`,
+/// `RLT_COST_TOTAL` → `sequence.limits.cost`, `RLT_TOKEN_BUDGET` → `sequence.limits.tokens`.
 /// (Serial: mutates process env.)
 #[test]
 fn env_overrides_land_on_the_new_shape() {
     // guard against parallel env races by scoping tightly and restoring.
-    std::env::set_var("AGG_MODEL", "haiku-from-env");
-    std::env::set_var("AGG_COST_TOTAL", "12.5");
-    std::env::set_var("AGG_TOKEN_BUDGET", "700000");
+    std::env::set_var("RLT_MODEL", "haiku-from-env");
+    std::env::set_var("RLT_COST_TOTAL", "12.5");
+    std::env::set_var("RLT_TOKEN_BUDGET", "700000");
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.apply_env_overrides();
-    std::env::remove_var("AGG_MODEL");
-    std::env::remove_var("AGG_COST_TOTAL");
-    std::env::remove_var("AGG_TOKEN_BUDGET");
+    std::env::remove_var("RLT_MODEL");
+    std::env::remove_var("RLT_COST_TOTAL");
+    std::env::remove_var("RLT_TOKEN_BUDGET");
     assert_eq!(cfg.defaults.model.as_deref(), Some("haiku-from-env"));
     assert_eq!(cfg.sequence.limits.cost, Some(12.5));
     assert_eq!(cfg.sequence.limits.tokens, Some(700_000));

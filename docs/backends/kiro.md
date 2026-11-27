@@ -1,9 +1,9 @@
-# Kiro CLI as an agg backend: investigation
+# Kiro CLI as an rlt backend: investigation
 
 **Verdict (2026-10-10): not implemented.** The Kiro CLI has a documented headless mode with
 auto-approval, model and effort selection, and a JSON Lines output format. What it does not have is a
 *documented* event schema: the docs do not say which events `--output-format stream-json` emits, where
-the session ends, where (or whether) tokens are reported, or how a rate limit shows up. agg's rule is
+the session ends, where (or whether) tokens are reported, or how a rate limit shows up. rlt's rule is
 to verify agent behaviour on the wire, never from docs alone ([BACKENDS.md](../BACKENDS.md#the-rule-the-wire-not-the-docs)),
 and the CLI is not installed here, so no stream could be recorded. A backend written now would have to
 guess its field paths, which is exactly the failure that header comment in `src/backend/mod.rs`
@@ -13,9 +13,9 @@ The sections below record what the official docs say, what is missing, and what 
 
 Kiro CLI version at the time of writing: 2.29.0 (2026-10-09). Headless mode shipped in 2.0 (2026-04-13). [10]
 
-## What agg needs, and what Kiro documents
+## What rlt needs, and what Kiro documents
 
-| agg needs (`AgentBackend`) | Kiro CLI, per its docs | Enough? |
+| rlt needs (`AgentBackend`) | Kiro CLI, per its docs | Enough? |
 |---|---|---|
 | Headless prompt on argv, stdin `/dev/null` | `kiro-cli chat --no-interactive "<prompt>"`; the prompt is positional or piped stdin, not both. V2/V3 read stdin only without a positional argument. [1] | ✅ |
 | Auto-approval for a worker | `--trust-all-tools` (also auto-approves Hook confirmations); `--trust-tools=<ids>` for exact tool IDs on V3. [1][2] | ✅ |
@@ -33,8 +33,8 @@ Kiro CLI version at the time of writing: 2.29.0 (2026-10-09). Headless mode ship
 Two things are in Kiro's favour and worth keeping for later: permission rules and the workspace
 trust decision live **outside** the repository (`~/.kiro/settings/permissions.yaml`,
 `~/.kiro/workspace-roots/<hash>/`), so "a cloned repo cannot inject permission rules" [8]; and the ACP server (`kiro-cli acp`) is a
-documented JSON-RPC protocol. ACP does not fit agg's contract, though: it is a bidirectional session
-over stdin/stdout, and agg's backends are one argv invocation with stdin nulled and stdout read as a
+documented JSON-RPC protocol. ACP does not fit rlt's contract, though: it is a bidirectional session
+over stdin/stdout, and rlt's backends are one argv invocation with stdin nulled and stdout read as a
 line stream (`AgentBackend::session_command`).
 
 ## Third-party evidence (not authoritative)
@@ -45,7 +45,7 @@ stream-json --no-interactive --trust-tools read,write,glob,grep` and documents t
 runError, runFinished", with `sessionId` in `data` and `status`, `finalText`, `stopReason` on
 `runFinished`. [9] It reads credits from a separate `/usage` prompt, not from the stream, which
 suggests the stream carries no usage. Its checked-in fixture `tests/fixtures/kiro.log` is not a raw
-capture (its session id is a placeholder), so it cannot serve as an agg fixture. This is consistent
+capture (its session id is a placeholder), so it cannot serve as an rlt fixture. This is consistent
 with the official docs, and it does not replace a recording.
 
 ## What a Kiro backend would need

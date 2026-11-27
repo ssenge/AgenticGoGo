@@ -1,11 +1,11 @@
-# agg.yaml — harness + steps + sequence. One file: a judge IS a goal, resolved by NAME from
-# agg/judges/<name>.{sh,md} (then ~/.agg/judges/).
+# rlt.yaml — harness + steps + sequence. One file: a judge IS a goal, resolved by NAME from
+# rlt/judges/<name>.{sh,md} (then ~/.rlt/judges/).
 project: "my-project"
 
 # Inherited by EVERY step; a step body may override any of these.
 defaults:
   agent: "{{AGENT}}"
-{{MODEL_LINE}}{{EFFORT_LINE}}  state: "state/STATE.md"          # forward "what to do next" file the AGENT maintains (under agg/, gitignored)
+{{MODEL_LINE}}{{EFFORT_LINE}}  state: "state/STATE.md"          # forward "what to do next" file the AGENT maintains (under rlt/, gitignored)
 
 # THE RULER — runs the LLM judges + the summarizer. Immutable; naming any of these in a step is a
 # HARD ERROR (a grader that moves makes verdicts incomparable across cycles).
@@ -28,16 +28,16 @@ sequence:
   # Run-level ceilings, unified under one block — each null = unlimited.
   limits:
     tokens: null                   # output-token ceiling — worker AND judge spend → over_budget
-{{COST_LINE}}    sessions: null                 # session cap → over_iterations (or pass `agg run --max-sessions <n>`)
+{{COST_LINE}}    sessions: null                 # session cap → over_iterations (or pass `rlt run --max-sessions <n>`)
   gate_regressions: true           # roll a session back if a previously-met judge regresses
   invariants: []                   # judge names that must STAY met
   done_if: "tests_pass"            # your Definition of Done — judge names, all_goals, count_met, …
   abort_if: "over_budget{{OVER_COST}} OR over_iterations OR work_time >= 14400"
-  # OPTIONAL — the NON-TERMINAL twin of abort_if: when it fires agg runs `notify.cmd` and the loop
+  # OPTIONAL — the NON-TERMINAL twin of abort_if: when it fires rlt runs `notify.cmd` and the loop
   # KEEPS RUNNING (a human is a side-channel, never a gate). STAYS COMMENTED: `stuck` is a judge YOU
   # author, and naming a judge that resolves to no file is a HARD startup error — this file must run
   # with zero edits. `notify_if: "stalled"` needs no authoring (shipped judge) if you want it today.
-  # {{reason}} is the firing judge's rationale, shell-quoted BY agg — never add quotes of your own.
+  # {{reason}} is the firing judge's rationale, shell-quoted BY rlt — never add quotes of your own.
   # Delivery is FOREGROUND and untimed, so bound every command (`curl --max-time 10`, `timeout 10 …`):
   # an unbounded curl against a wedged host stalls the loop, the exact thing this clause avoids.
   # notify_if: "stuck.value >= 85"
@@ -47,7 +47,7 @@ sequence:
 # The `sequence:` above is a list that laps forever. It cannot branch on a verdict, and every
 # run-set judge runs after every judged step — so a 40-minute check runs on the cycles where the
 # build is already red. When that starts costing you, the same engine has a Rust driver API:
-# `agg.step()` / `agg.judge()` / `agg.gate()` from ordinary Rust, where `&&` short-circuits and an
+# `rlt.step()` / `rlt.judge()` / `rlt.gate()` from ordinary Rust, where `&&` short-circuits and an
 # `if` skips a step. It is heavier and Rust-only — stay here unless you need it.
 #   → docs/RUST_API.md, examples/workflow.rs
 # (COMMENTED ON PURPOSE: this file must run with zero edits.)
@@ -57,4 +57,4 @@ watchdog: { idle_secs: 900, cpu_grace: 180 }
 ratelimit_backoff_secs: 1800
 summary: { enabled: true, min_interval_secs: 300 }
 memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
-session_isolation: {}              # MANDATORY; defaults (branch_prefix: agg, red_file: .agg_red)
+session_isolation: {}              # MANDATORY; defaults (branch_prefix: rlt, red_file: .rlt_red)

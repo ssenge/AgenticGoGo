@@ -1,16 +1,16 @@
-//! End-to-end integration tests driving the real `agg` binary.
+//! End-to-end integration tests driving the real `rlt` binary.
 //!
 //! A judge IS a goal now (§7.1): there is no `goals.yaml`. A judge is a file at
-//! `agg/judges/<name>.sh` (or `.md`), resolved by the NAME referenced in `done_if` / `invariants` /
-//! an `if` condition. The config is one file, `agg/agg.yaml` (defaults/judge/steps/sequence).
+//! `rlt/judges/<name>.sh` (or `.md`), resolved by the NAME referenced in `done_if` / `invariants` /
+//! an `if` condition. The config is one file, `rlt/rlt.yaml` (defaults/judge/steps/sequence).
 //!
 //! The loop spawns `claude -p` workers, so these tests put a FAKE `claude` on PATH: a tiny shell
 //! stub that emits valid stream-json and, as a side effect, advances the project state so a judge
 //! can flip to met. That exercises the genuinely risky path — the actual launch → stream → judge →
 //! gate machinery — without a real model or network.
 //!
-//! Session isolation is MANDATORY (§4.1), so every `agg run` needs a git repo, a clean tree and a
-//! non-detached HEAD. HOME is redirected into each test's temp dir so the `~/.agg/judges` standard
+//! Session isolation is MANDATORY (§4.1), so every `rlt run` needs a git repo, a clean tree and a
+//! non-detached HEAD. HOME is redirected into each test's temp dir so the `~/.rlt/judges` standard
 //! library install (`ensure_library`) never touches the developer's real home.
 //!
 //! Unix-only (the stub + PATH shimming use sh). The harness's own platform is unix-first.
@@ -42,14 +42,14 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
-/// Write a script judge to `agg/judges/<name>.sh` (the project judges dir, §5.1) and make it
+/// Write a script judge to `rlt/judges/<name>.sh` (the project judges dir, §5.1) and make it
 /// executable. `name` is what `done_if` / `invariants` / an `if` condition references.
 fn write_judge(dir: &Path, name: &str, body: &str) {
-    let p = write(dir, &format!("agg/judges/{name}.sh"), body);
+    let p = write(dir, &format!("rlt/judges/{name}.sh"), body);
     chmod_x(&p);
 }
 
-/// A single-`worker`-step `agg.yaml`. `done_if` is the DoD expression; `seq_extra` is extra lines
+/// A single-`worker`-step `rlt.yaml`. `done_if` is the DoD expression; `seq_extra` is extra lines
 /// under `sequence:` (each already 2-space indented, may be ""); `top_extra` is extra top-level
 /// lines (may be ""). `summary` is off — these fake-worker tests make no ruler calls.
 fn cfg(project: &str, done_if: &str, seq_extra: &str, top_extra: &str) -> String {
@@ -62,24 +62,24 @@ fn cfg(project: &str, done_if: &str, seq_extra: &str, top_extra: &str) -> String
     )
 }
 
-/// Write the worker's forward-advice file. It is WORKER-writable, so it stays in `agg/state/` under
-/// the private-split — but it resolves through `agg::paths` so the next layout move lands in this
+/// Write the worker's forward-advice file. It is WORKER-writable, so it stays in `rlt/state/` under
+/// the private-split — but it resolves through `relentless::paths` so the next layout move lands in this
 /// one helper instead of the ~15 call sites that used to spell the path out.
 fn write_state_md(dir: &Path, content: &str) -> std::path::PathBuf {
-    let p = agg::paths::agg_dir(dir).join("STATE.md");
+    let p = relentless::paths::rlt_dir(dir).join("STATE.md");
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     fs::write(&p, content).unwrap();
     p
 }
 
-/// Write `agg/agg.yaml` (via [`cfg`]) + the forward state file (via [`write_state_md`]).
+/// Write `rlt/rlt.yaml` (via [`cfg`]) + the forward state file (via [`write_state_md`]).
 fn write_cfg(dir: &Path, project: &str, done_if: &str, seq_extra: &str, top_extra: &str) {
-    write(dir, "agg/agg.yaml", &cfg(project, done_if, seq_extra, top_extra));
+    write(dir, "rlt/rlt.yaml", &cfg(project, done_if, seq_extra, top_extra));
     write_state_md(dir, "do work\n");
 }
 
 /// Turn `dir` into a clean git repo on `main` with one (empty) commit. Session isolation is
-/// MANDATORY, so `agg run` refuses to start without a git repo + clean tree + non-detached HEAD;
+/// MANDATORY, so `rlt run` refuses to start without a git repo + clean tree + non-detached HEAD;
 /// every test that drives the loop needs this. The commit is empty so the config, the fake
 /// `claude`, and the worker's output all stay UNTRACKED — which `is_clean` ignores, so the tree
 /// reads clean and sessions branch from a born `main`.
@@ -90,10 +90,10 @@ fn git_init(dir: &Path) {
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
-    g(&["commit", "-q", "--allow-empty", "-m", "agg baseline"]);
+    g(&["commit", "-q", "--allow-empty", "-m", "rlt baseline"]);
 }
 
-/// Assert `agg run` ended with a specific exit code. Codes: 0 done/stopped, 3 abort, 4 max-sessions,
+/// Assert `rlt run` ended with a specific exit code. Codes: 0 done/stopped, 3 abort, 4 max-sessions,
 /// 1 hard error. (A run that reaches the session cap with the DoD unmet exits 4.)
 fn assert_exit(out: &std::process::Output, code: i32, combined: &str) {
     assert_eq!(out.status.code(), Some(code), "expected exit {code}:\n{combined}");
@@ -136,11 +136,11 @@ exit 0
     (tmp, path)
 }
 
-/// `agg` command rooted at `dir`, with the given PATH (so the fake claude is found). HOME is
+/// `rlt` command rooted at `dir`, with the given PATH (so the fake claude is found). HOME is
 /// redirected into the project temp so `ensure_library` writes the standard judge library there,
-/// never the developer's real `~/.agg/judges`.
-fn agg(dir: &Path, path: &str) -> Command {
-    let mut c = Command::cargo_bin("agg").expect("agg binary built");
+/// never the developer's real `~/.rlt/judges`.
+fn rlt(dir: &Path, path: &str) -> Command {
+    let mut c = Command::cargo_bin("rlt").expect("rlt binary built");
     c.current_dir(dir).env("PATH", path).env("HOME", dir.join(".home"));
     c
 }
@@ -152,17 +152,17 @@ fn init_then_plan_shows_scoreboard() {
     // PATH doesn't matter for init/plan (no worker launched); keep the real one.
     let path = std::env::var("PATH").unwrap_or_default();
 
-    let out = agg(dir, &path).arg("init").output_bounded().unwrap();
-    assert!(out.status.success(), "agg init failed: {}", String::from_utf8_lossy(&out.stderr));
-    // init scaffolds agg.yaml + the committed AGG.md + the gitignored forward-state STATE.md + a
-    // starter judge. No goals.yaml, no AGG_RESUME.md (§7.1).
-    assert!(dir.join("agg/agg.yaml").exists(), "init should scaffold agg.yaml");
-    assert!(dir.join("agg/AGG.md").exists(), "init should scaffold the committed AGG.md");
-    assert!(agg::paths::agg_dir(dir).join("STATE.md").exists(), "init should scaffold the forward state file");
-    assert!(dir.join("agg/judges/tests_pass.sh").exists(), "init should scaffold a starter judge");
+    let out = rlt(dir, &path).arg("init").output_bounded().unwrap();
+    assert!(out.status.success(), "rlt init failed: {}", String::from_utf8_lossy(&out.stderr));
+    // init scaffolds rlt.yaml + the committed RLT.md + the gitignored forward-state STATE.md + a
+    // starter judge. No goals.yaml, no RLT_RESUME.md (§7.1).
+    assert!(dir.join("rlt/rlt.yaml").exists(), "init should scaffold rlt.yaml");
+    assert!(dir.join("rlt/RLT.md").exists(), "init should scaffold the committed RLT.md");
+    assert!(relentless::paths::rlt_dir(dir).join("STATE.md").exists(), "init should scaffold the forward state file");
+    assert!(dir.join("rlt/judges/tests_pass.sh").exists(), "init should scaffold a starter judge");
 
-    let out = agg(dir, &path).arg("plan").output_bounded().unwrap();
-    assert!(out.status.success(), "agg plan failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = rlt(dir, &path).arg("plan").output_bounded().unwrap();
+    assert!(out.status.success(), "rlt plan failed: {}", String::from_utf8_lossy(&out.stderr));
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -177,17 +177,17 @@ fn init_then_plan_shows_scoreboard() {
     );
 }
 
-/// `agg doctor` on a COMPLETE setup exits 0 and confirms the agent CLI is on PATH — the
-/// happy-path counterpart to `doctor_flags_a_broken_setup`. (`agg init` supplies the config, so
+/// `rlt doctor` on a COMPLETE setup exits 0 and confirms the agent CLI is on PATH — the
+/// happy-path counterpart to `doctor_flags_a_broken_setup`. (`rlt init` supplies the config, so
 /// this also proves the scaffold it writes is one doctor actually accepts.)
 #[test]
 fn doctor_passes_a_good_setup() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    let init = agg(dir, &path).arg("init").output_bounded().unwrap();
+    let init = rlt(dir, &path).arg("init").output_bounded().unwrap();
     assert!(init.status.success(), "init failed: {}", String::from_utf8_lossy(&init.stderr));
 
-    let out = agg(dir, &path).arg("doctor").output_bounded().unwrap();
+    let out = rlt(dir, &path).arg("doctor").output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -207,7 +207,7 @@ fn max_sessions_cap_exits_4_and_says_so() {
     write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "cap", "worked", "", "");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -222,10 +222,10 @@ fn max_sessions_cap_exits_4_and_says_so() {
 
 /// THE SPLIT, pinned end-to-end. `src/paths.rs` asserts the classification as a table and
 /// `isolation` proves the kernel denies the writes; neither proves the RUNNING binary puts each
-/// file on the side it claims. A real project driven by the real `agg` must end up with the gate
-/// ledger under the AGG-OWNED `agg/private/` and the worker's forward advice under the
-/// worker-writable `agg/state/` — and with BOTH roots ignored by git, since runtime churn in
-/// either one would pollute the user's history (and `agg/private/` is the newer entry, so an
+/// file on the side it claims. A real project driven by the real `rlt` must end up with the gate
+/// ledger under the RLT-OWNED `rlt/private/` and the worker's forward advice under the
+/// worker-writable `rlt/state/` — and with BOTH roots ignored by git, since runtime churn in
+/// either one would pollute the user's history (and `rlt/private/` is the newer entry, so an
 /// existing project's `.gitignore` has to gain it).
 #[test]
 fn runtime_state_splits_into_state_and_private_and_both_are_gitignored() {
@@ -234,20 +234,20 @@ fn runtime_state_splits_into_state_and_private_and_both_are_gitignored() {
     write_judge(dir, "did", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "splitproj", "did", "", "");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined); // the fake worker commits did_work → the DoD is met.
 
-    // ── 1) the gate ledger is AGG-OWNED. A confined worker can write everything in its cwd EXCEPT
+    // ── 1) the gate ledger is RLT-OWNED. A confined worker can write everything in its cwd EXCEPT
     //    `private/`, so a ledger left in `state/` would let it forge the rows `stalled` reads.
-    let ledger = agg::paths::verdicts_jsonl(dir);
-    assert!(ledger.starts_with(dir.join("agg/private")), "the ledger must live in the carve-out: {}", ledger.display());
+    let ledger = relentless::paths::verdicts_jsonl(dir);
+    assert!(ledger.starts_with(dir.join("rlt/private")), "the ledger must live in the carve-out: {}", ledger.display());
     assert!(!fs::read_to_string(&ledger).unwrap_or_default().trim().is_empty(), "the run must have written verdict rows:\n{combined}");
-    assert!(!dir.join("agg/state/verdicts.jsonl").exists(), "no ledger may be left in the worker-writable root");
+    assert!(!dir.join("rlt/state/verdicts.jsonl").exists(), "no ledger may be left in the worker-writable root");
 
     // ── 2) the worker's own files stay worker-writable, or a confined worker cannot do its job.
-    let state_md = agg::paths::agg_dir(dir).join("STATE.md");
-    assert!(state_md.starts_with(dir.join("agg/state")), "STATE.md must stay worker-writable: {}", state_md.display());
+    let state_md = relentless::paths::rlt_dir(dir).join("STATE.md");
+    assert!(state_md.starts_with(dir.join("rlt/state")), "STATE.md must stay worker-writable: {}", state_md.display());
     assert!(state_md.exists(), "the forward-advice file the brief points at must be there");
 
     // ── 3) both roots gitignored. Asked of GIT, not of the file's text, so any spelling that
@@ -263,26 +263,26 @@ fn runtime_state_splits_into_state_and_private_and_both_are_gitignored() {
 }
 
 #[test]
-fn config_lives_in_the_agg_folder() {
-    // ALL user config lives under the mandatory `agg/` folder and the loop finds + uses it:
-    // agg.yaml, the state file, and the judge (resolved by NAME from agg/judges/) all resolve
+fn config_lives_in_the_rlt_folder() {
+    // ALL user config lives under the mandatory `rlt/` folder and the loop finds + uses it:
+    // rlt.yaml, the state file, and the judge (resolved by NAME from rlt/judges/) all resolve
     // through config_base, while the judge SCRIPT still runs from the project root (so `did_work`
     // lands where the next judge looks for it). This is the end-to-end proof of the config folder.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
 
-    // judge `worked` lives under agg/judges/ and checks a root-level marker the worker creates.
+    // judge `worked` lives under rlt/judges/ and checks a root-level marker the worker creates.
     write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
     write_cfg(dir, "folded", "worked", "", "");
     write_state_md(dir, "create the file did_work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(out.status.success(), "foldered agg run failed:\n{combined}");
+    assert!(out.status.success(), "foldered rlt run failed:\n{combined}");
     assert!(dir.join("did_work").exists(), "worker should create did_work at the project root");
     assert!(
         combined.contains("done_if satisfied"),
@@ -312,28 +312,28 @@ fi
 
     // Cap sessions so a logic bug can't hang the test. One fake session should suffice:
     // baseline judge says not-met → launch worker (creates did_work) → judge met → stop.
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(out.status.success(), "agg run failed:\n{combined}");
+    assert!(out.status.success(), "rlt run failed:\n{combined}");
     assert!(dir.join("did_work").exists(), "the fake worker should have created did_work");
     assert!(
         combined.contains("done_if satisfied"),
         "loop should reach its Definition of Done, got:\n{combined}"
     );
 
-    // `agg status` and `dashboard --once` must read the snapshot the run just published —
+    // `rlt status` and `dashboard --once` must read the snapshot the run just published —
     // showing the met judge — WITHOUT re-running judges. (Both go through status::render.)
     for args in [vec!["status"], vec!["dashboard", "--once"]] {
-        let snap = agg(dir, &path).args(&args).output_bounded().unwrap();
+        let snap = rlt(dir, &path).args(&args).output_bounded().unwrap();
         let text = String::from_utf8_lossy(&snap.stdout).into_owned();
-        assert!(snap.status.success(), "`agg {args:?}` failed");
+        assert!(snap.status.success(), "`rlt {args:?}` failed");
         assert!(
             text.contains("itest") && text.contains("worked"),
-            "`agg {args:?}` should render the published snapshot (project + judge), got:\n{text}"
+            "`rlt {args:?}` should render the published snapshot (project + judge), got:\n{text}"
         );
     }
 }
@@ -347,19 +347,19 @@ fn run_stops_immediately_when_goal_already_met() {
     write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
     write_cfg(dir, "itest", "worked", "", "");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(out.status.success(), "agg run failed:\n{combined}");
+    assert!(out.status.success(), "rlt run failed:\n{combined}");
     assert!(
         combined.contains("already satisfied at launch"),
         "an already-met DoD should stop before any session, got:\n{combined}"
     );
     // and it burned ZERO sessions — the point of the baseline check is to spend nothing.
-    let snap = fs::read_to_string(agg::paths::state_json(dir)).expect("state.json published");
+    let snap = fs::read_to_string(relentless::paths::state_json(dir)).expect("state.json published");
     let v: serde_json::Value = serde_json::from_str(&snap).expect("state.json parses");
     assert_eq!(v["session"], 0, "a baseline-satisfied run must launch no worker:\n{snap}");
 }
@@ -369,11 +369,11 @@ fn run_without_config_gives_actionable_hint() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let path = std::env::var("PATH").unwrap_or_default();
-    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
+    let out = rlt(dir, &path).arg("run").output_bounded().unwrap();
     assert!(!out.status.success(), "run with no config must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("agg init") || err.contains("/agg:new"),
+        err.contains("rlt init") || err.contains("/rlt:new"),
         "missing-config error should point at init/new, got:\n{err}"
     );
 }
@@ -384,7 +384,7 @@ fn doctor_flags_a_broken_setup() {
     let dir = tmp.path();
     let path = std::env::var("PATH").unwrap_or_default();
     // No config at all → doctor should fail and name what's missing.
-    let out = agg(dir, &path).arg("doctor").output_bounded().unwrap();
+    let out = rlt(dir, &path).arg("doctor").output_bounded().unwrap();
     assert!(!out.status.success(), "doctor on an empty dir should report failures");
 }
 
@@ -408,7 +408,7 @@ fn doctor_inherits_the_notify_if_validation() {
         "",
     );
 
-    let out = agg(dir, &path).arg("doctor").output_bounded().unwrap();
+    let out = rlt(dir, &path).arg("doctor").output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(!out.status.success(), "a notify_if naming an unresolvable judge must fail doctor:\n{combined}");
     assert!(
@@ -429,17 +429,17 @@ fn judge_runs_one_name_and_prints_raw_verdict() {
     let path = std::env::var("PATH").unwrap_or_default(); // no worker → real PATH is fine
     // a judge is a FILE resolved by NAME now (§5.1) — no goals.yaml, no inline cmd.
     write_judge(dir, "ok", "#!/bin/sh\necho '{\"met\":true,\"rationale\":\"fine\"}'\n");
-    write(dir, "agg/agg.yaml", "project: jt\nsteps: { worker: {} }\nsequence: { steps: [worker], done_if: ok }\n");
+    write(dir, "rlt/rlt.yaml", "project: jt\nsteps: { worker: {} }\nsequence: { steps: [worker], done_if: ok }\n");
     write_state_md(dir, "noop\n");
 
     // a known judge: raw verdict JSON on stdout
-    let out = agg(dir, &path).args(["judge", "ok"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["judge", "ok"]).output_bounded().unwrap();
     assert!(out.status.success(), "judge ok failed: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\"met\":true"), "stdout should be the raw verdict, got: {stdout}");
 
     // an unknown judge: error that lists what IS available
-    let out = agg(dir, &path).args(["judge", "nope"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["judge", "nope"]).output_bounded().unwrap();
     assert!(!out.status.success(), "unknown judge name must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -464,7 +464,7 @@ fn dollar_budget_aborts_the_loop() {
     write_cfg(dir, "itest", "impossible", "  abort_if: \"over_cost\"\n  limits: { cost: 0 }\n", "");
 
     // generous session cap so the ABORT (not the cap) is what stops us.
-    let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "20"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -493,12 +493,12 @@ fn status_and_history_json_are_machine_readable() {
     write_state_md(dir, "create the file did_work\n");
 
     // run once so both the snapshot (state.json) and the ledger (project.json) exist.
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
 
     // status --json: the versioned live document (docs/schemas/status.v1.json; validated in
     // tests/status.rs), carrying the project and the usage totals.
-    let snap = agg(dir, &path).args(["status", "--json"]).output_bounded().unwrap();
+    let snap = rlt(dir, &path).args(["status", "--json"]).output_bounded().unwrap();
     assert!(snap.status.success(), "status --json failed: {}", String::from_utf8_lossy(&snap.stderr));
     let v: serde_json::Value = serde_json::from_slice(&snap.stdout).expect("status --json must be valid JSON");
     assert_eq!(v["schema_version"], 1);
@@ -512,7 +512,7 @@ fn status_and_history_json_are_machine_readable() {
     assert_eq!(v["phase"], "done", "…and its final phase is `done` (the state.json wire value)");
 
     // history --json: valid JSON with a runs array containing at least our run.
-    let hist = agg(dir, &path).args(["history", "--json"]).output_bounded().unwrap();
+    let hist = rlt(dir, &path).args(["history", "--json"]).output_bounded().unwrap();
     assert!(hist.status.success(), "history --json failed: {}", String::from_utf8_lossy(&hist.stderr));
     let h: serde_json::Value = serde_json::from_slice(&hist.stdout).expect("history --json must be valid JSON");
     assert_eq!(h["name"], "jsonproj");
@@ -527,24 +527,24 @@ fn status_and_history_json_are_machine_readable() {
         "history carries each run's usage totals — the same figures the status and report state"
     );
 
-    // The HUMAN renderers: `agg status` and the headless `agg dashboard --once` both read the same
+    // The HUMAN renderers: `rlt status` and the headless `rlt dashboard --once` both read the same
     // published snapshot and must name the project and the judge.
     for args in [vec!["status"], vec!["dashboard", "--once"]] {
-        let out = agg(dir, &path).args(&args).output_bounded().unwrap();
+        let out = rlt(dir, &path).args(&args).output_bounded().unwrap();
         let combined = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
         assert_exit(&out, 0, &combined);
-        assert!(combined.contains("jsonproj"), "`agg {args:?}` should render the project:\n{combined}");
-        assert!(combined.contains("worked"), "`agg {args:?}` should render the judge:\n{combined}");
+        assert!(combined.contains("jsonproj"), "`rlt {args:?}` should render the project:\n{combined}");
+        assert!(combined.contains("worked"), "`rlt {args:?}` should render the judge:\n{combined}");
     }
 }
 
 #[test]
 fn institutional_memory_is_written_without_worker_cooperation() {
-    // ENFORCEMENT FLOOR: the default fake worker writes NO memory note, yet agg must still produce
+    // ENFORCEMENT FLOOR: the default fake worker writes NO memory note, yet rlt must still produce
     // LOG.md from mechanical facts — the worker is never trusted to persist.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
@@ -552,12 +552,12 @@ fn institutional_memory_is_written_without_worker_cooperation() {
     write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "memproj", "impossible", "", "memory: { enabled: true, max_kb: 64, inject_kb: 8 }\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // DoD is `impossible` → reaches the session cap unmet.
 
-    // the durable memory file must exist under agg/private/ (AGG-OWNED audit trail), with a folded mechanical entry.
-    let mem = agg::core::memory::memory_file(dir);
+    // the durable memory file must exist under rlt/private/ (RLT-OWNED audit trail), with a folded mechanical entry.
+    let mem = relentless::core::memory::memory_file(dir);
     assert!(mem.exists(), "LOG.md must be written even when the worker writes no note");
     let text = fs::read_to_string(&mem).unwrap();
     assert!(text.contains("## session 1"), "session 1 folded into memory, got:\n{text}");
@@ -567,9 +567,9 @@ fn institutional_memory_is_written_without_worker_cooperation() {
 }
 
 #[test]
-fn worker_gets_a_pointer_and_agg_writes_the_full_brief_to_instructions_md() {
+fn worker_gets_a_pointer_and_rlt_writes_the_full_brief_to_instructions_md() {
     // §2/§3: the worker's `-p` is a tiny FIXED pointer; the whole brief is composed into
-    // agg/private/INSTRUCTIONS.md (regenerated every session), which the worker reads. This kills the
+    // rlt/private/INSTRUCTIONS.md (regenerated every session), which the worker reads. This kills the
     // argv size ceiling + the dash-safe fragility, and points at STATE.md rather than inlining it.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -599,31 +599,31 @@ exit 0
 
     write_judge(dir, "did", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "ptrproj", "did", "", "");
-    // a recognisable STATE body, to prove agg POINTS at it (§3 refinement 1) rather than inlining it.
+    // a recognisable STATE body, to prove rlt POINTS at it (§3 refinement 1) rather than inlining it.
     write_state_md(dir, "STATE-BODY-MARKER: fix the widget\n");
-    // a committed AGG.md so the brief also points at the standing project instructions.
-    write(dir, "agg/AGG.md", "# Project\nThe widget factory.\n");
+    // a committed RLT.md so the brief also points at the standing project instructions.
+    write(dir, "rlt/RLT.md", "# Project\nThe widget factory.\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined);
 
     // 1) the worker's `-p` was the tiny pointer — never the full brief, never the STATE body.
     let pval = fs::read_to_string(dir.join("pval.txt")).expect("fake worker captured its -p");
-    // the pointer must name the file agg ACTUALLY wrote, so derive the relative path from `paths`
+    // the pointer must name the file rlt ACTUALLY wrote, so derive the relative path from `paths`
     // rather than restating it — a pointer that drifts from the writer is a worker with no brief.
-    let brief_rel = agg::paths::instructions_md(Path::new("")).to_string_lossy().into_owned();
+    let brief_rel = relentless::paths::instructions_md(Path::new("")).to_string_lossy().into_owned();
     assert!(pval.contains(&brief_rel), "the -p must be the {brief_rel} pointer, got: {pval}");
     assert!(!pval.contains("STATE-BODY-MARKER"), "the STATE body must NOT be inlined into -p: {pval}");
     assert!(pval.len() < 200, "the -p must stay tiny (no argv ceiling), got {} bytes", pval.len());
 
-    // 2) agg composed the FULL brief into INSTRUCTIONS.md, pointing at STATE.md (not inlining it).
-    let instr = fs::read_to_string(agg::paths::instructions_md(dir)).expect("agg wrote INSTRUCTIONS.md");
+    // 2) rlt composed the FULL brief into INSTRUCTIONS.md, pointing at STATE.md (not inlining it).
+    let instr = fs::read_to_string(relentless::paths::instructions_md(dir)).expect("rlt wrote INSTRUCTIONS.md");
     assert!(instr.contains("# Session 1"), "brief carries the session header:\n{instr}");
-    assert!(instr.contains("agg/state/STATE.md"), "brief POINTS at STATE.md:\n{instr}");
-    assert!(instr.contains("agg/AGG.md"), "brief POINTS at the standing AGG.md:\n{instr}");
-    assert!(instr.contains("agg/state/wiki/"), "footer names the wiki (multi-session plans live there):\n{instr}");
+    assert!(instr.contains("rlt/state/STATE.md"), "brief POINTS at STATE.md:\n{instr}");
+    assert!(instr.contains("rlt/RLT.md"), "brief POINTS at the standing RLT.md:\n{instr}");
+    assert!(instr.contains("rlt/state/wiki/"), "footer names the wiki (multi-session plans live there):\n{instr}");
     // the wiki guidance must be SELF-CONTAINED: the OKF rules + a concrete template to copy, so a
     // worker that has never heard of OKF can still produce a linked, graph-able wiki.
     assert!(instr.contains("OKF"), "footer names the OKF format:\n{instr}");
@@ -635,26 +635,26 @@ exit 0
 #[test]
 fn lifetime_session_is_published_to_state_json() {
     // Regression for the publish!-macro bug: `lifetime_session` was never copied into state.json,
-    // so `agg status`/the dashboard always showed "#0 lifetime" and the "(of N)" total never
+    // so `rlt status`/the dashboard always showed "#0 lifetime" and the "(of N)" total never
     // rendered. A run that completes 2 sessions must publish lifetime_session >= 2.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
     write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "lifeproj", "impossible", "", "");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
 
     let state: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(agg::paths::state_json(dir)).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(relentless::paths::state_json(dir)).unwrap()).unwrap();
     let lifetime = state["lifetime_session"].as_u64().unwrap_or(0);
     assert!(lifetime >= 2, "lifetime_session must be published (was the publish! bug); got {lifetime}\nstate: {state}");
 }
 
 #[test]
 fn worker_written_memory_note_is_folded() {
-    // Tier 3a: when the worker writes agg/state/sessions/session-<N>.md on a clean session, agg folds
+    // Tier 3a: when the worker writes rlt/state/sessions/session-<N>.md on a clean session, rlt folds
     // that note (preferred over the mechanical fallback) into the durable LOG.md.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -669,8 +669,8 @@ fn worker_written_memory_note_is_folded() {
 for a in "$@"; do
   if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
 done
-mkdir -p agg/state/sessions
-printf 'GOTCHA: the frobnicator needs a warm cache before the second pass\n' > agg/state/sessions/session-1.md
+mkdir -p rlt/state/sessions
+printf 'GOTCHA: the frobnicator needs a warm cache before the second pass\n' > rlt/state/sessions/session-1.md
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
 exit 0
 "#,
@@ -682,11 +682,11 @@ exit 0
     write_cfg(dir, "memproj2", "impossible", "", "memory: { enabled: true }\n");
     git_init(dir); // mandatory session isolation needs a git base
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // DoD is `impossible` → reaches the session cap unmet.
 
-    let text = fs::read_to_string(agg::core::memory::memory_file(dir)).unwrap();
+    let text = fs::read_to_string(relentless::core::memory::memory_file(dir)).unwrap();
     assert!(text.contains("GOTCHA: the frobnicator"), "worker note folded into memory, got:\n{text}");
     // the worker note is appended as a fenced, lower-trust hint after the mechanical fact —
     // never standing alone — so the fold source is 'mechanical+worker'.
@@ -695,7 +695,7 @@ exit 0
     // exactly ONE entry for session 1 (the early floor was superseded, not double-folded).
     assert_eq!(text.matches("## session 1 (").count(), 1, "single entry per session, got:\n{text}");
     // the scratch note is cleaned up after folding.
-    assert!(!agg::core::memory::scratch_path(dir, 1).exists(), "scratch note deleted after fold");
+    assert!(!relentless::core::memory::scratch_path(dir, 1).exists(), "scratch note deleted after fold");
 }
 
 #[test]
@@ -741,7 +741,7 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     assert!(combined.contains("ROLLED BACK"), "the regressing merge must be rolled back:\n{combined}");
@@ -795,7 +795,7 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     // the flake must NOT have rolled anything back — the good work is KEPT on main.
@@ -851,7 +851,7 @@ exit 0
     write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: stallflip\ndefaults: { model: fake }\n\
          steps:\n  worker: {}\n\
          sequence:\n  steps:\n    - { step: worker, until: stalled, max: 4 }\n  \
@@ -861,7 +861,7 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     // the control judge's flip must NOT have rolled anything back — the good work is KEPT on main.
@@ -876,7 +876,7 @@ fn a_broken_judge_does_not_abort_the_run_wearing_a_regressions_clothes() {
     // The HALF the flake test above does not cover: it proves the gate KEEPS the merge, but says
     // nothing about `abort_if`. This is the shipped bug end-to-end. A previously-MET invariant judge
     // that CRASHES has `met:false` on its `Verdict::failed` — which USED to fold into
-    // `Lifecycle::Regressed`, which `any_regressed(invariants)` (the abort term `agg init` writes)
+    // `Lifecycle::Regressed`, which `any_regressed(invariants)` (the abort term `rlt init` writes)
     // turned into an ABORT (exit 3). The run died blaming a regression that never happened. With the
     // fix, a broken judge leaves the judge's state intact, nothing regresses, the run does NOT abort,
     // and it simply reaches the session cap (exit 4) like any run that hasn't met its DoD.
@@ -913,25 +913,25 @@ exit 0
     write_judge(dir, "build_ok", "#!/bin/sh\nif [ -f .flake ]; then echo 'judge crashed' >&2; exit 1; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
     // feature: never met, so the loop runs sessions and does not stop at baseline.
     write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
-    // abort_if carries `any_regressed(invariants)` — the exact term `agg init` ships that the bug
+    // abort_if carries `any_regressed(invariants)` — the exact term `rlt init` ships that the bug
     // fired through. build_ok is the invariant it ranges over.
     write_cfg(dir, "brokenjudge", "feature", "  invariants: [build_ok]\n  abort_if: \"any_regressed(invariants)\"\n", "memory: { enabled: false }\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // exit 4 (session cap), NOT 3 (ABORT). A crashed judge must not masquerade as a regression.
     assert_exit(&out, 4, &combined);
     assert!(!combined.contains("ABORT"), "a crashed judge must NOT abort the run as a phantom regression:\n{combined}");
 }
 
-/// The four deterministic outer-loop stages must be OBSERVABLE, in order, in `agg/private/state.json`
+/// The four deterministic outer-loop stages must be OBSERVABLE, in order, in `rlt/private/state.json`
 /// while the loop runs — the TUI's `phase_color` and the web UI's `phaseStatus` key off these
 /// exact strings, and nothing else asserts them.
 ///
 /// We don't poll (a race); instead each stage records the phase the loop had published at the
-/// moment that stage invoked it, through agg's OWN extension points:
+/// moment that stage invoked it, through rlt's OWN extension points:
 ///   `on_session_start` → INJECT · the worker → RUN · the judge → VERIFY · `on_session_end` → GATE
 fn record_phase_stub(dir: &Path) -> String {
     let bin = dir.join("bin");
@@ -942,7 +942,7 @@ fn record_phase_stub(dir: &Path) -> String {
         &bin,
         "rec",
         r#"#!/bin/sh
-printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' agg/private/state.json)" >> trace.txt
+printf '%s=%s\n' "$1" "$(sed -n 's/.*"phase":"\([a-z]*\)".*/\1/p' rlt/private/state.json)" >> trace.txt
 "#,
     );
     chmod_x(&bin.join("rec"));
@@ -995,7 +995,7 @@ fi
     write_state_md(dir, "create the file did_work\n");
     git_init(dir); // mandatory session isolation needs a git base
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1014,7 +1014,7 @@ fi
     );
 
     // and the run must settle on the terminal phase.
-    let state = fs::read_to_string(agg::paths::state_json(dir)).unwrap();
+    let state = fs::read_to_string(relentless::paths::state_json(dir)).unwrap();
     assert!(state.contains(r#""phase":"done""#), "finished run should publish phase=done:\n{state}");
 }
 
@@ -1043,7 +1043,7 @@ fn a_baseline_satisfied_run_enters_no_stage() {
     write_state_md(dir, "noop\n");
     git_init(dir); // mandatory session isolation needs a git base (did_work stays untracked → clean)
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1102,7 +1102,7 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
     git_init(dir); // mandatory session isolation needs a git base
 
     let log = dir.join("run.log");
-    let mut child = agg(dir, &path)
+    let mut child = rlt(dir, &path)
         .args(["run", "--max-sessions", "2"])
         .stdout(std::process::Stdio::from(fs::File::create(&log).unwrap()))
         .stderr(std::process::Stdio::from(fs::File::create(dir.join("run.err")).unwrap()))
@@ -1127,7 +1127,7 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
 
     let err = fs::read_to_string(dir.join("run.err")).unwrap_or_default();
     // ⚠ 5, not 0. An operator interrupt is a CLEAN stop but it is NOT a met goal, and it used to
-    // share exit 0 with `GoalsMet` — so `if agg run; then ship; fi` shipped on Ctrl-C. The codes are
+    // share exit 0 with `GoalsMet` — so `if rlt run; then ship; fi` shipped on Ctrl-C. The codes are
     // 0 = goals met · 3 = abort_if · 4 = max-sessions · 5 = stopped (`RunOutcome::exit_code`).
     assert_eq!(status.code(), Some(5), "an interrupt is a STOP, distinguishable from success:\n{err}");
     // The worker above sleeps 30s. The loop can only come back this fast if the signal path
@@ -1150,7 +1150,7 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
         !err.contains("exited (code"),
         "an interrupted session must not log a normal session-exit line:\n{err}"
     );
-    assert!(!agg::paths::run_pid(dir).exists(), "the Drop guard must clear run.pid");
+    assert!(!relentless::paths::run_pid(dir).exists(), "the Drop guard must clear run.pid");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -1167,13 +1167,13 @@ fn an_unknown_step_in_the_sequence_is_a_startup_error() {
     // `ghost` is named in the sequence but is not a key in `steps:`.
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: ghosts\ndefaults: { model: fake }\nsteps:\n  worker: {}\n\
          sequence:\n  steps: [worker, ghost]\n  done_if: \"worked\"\nsummary: { enabled: false }\n",
     );
     write_state_md(dir, "do work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     assert!(!out.status.success(), "an unknown step must refuse to start");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1191,13 +1191,13 @@ fn a_sequence_of_only_skip_judges_is_refused_at_startup() {
     write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":true}'\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: allskip\ndefaults: { model: fake }\nsteps:\n  stage: { skip_judges: true }\n\
          sequence:\n  steps: [stage]\n  done_if: \"worked\"\nsummary: { enabled: false }\n",
     );
     write_state_md(dir, "do work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     assert!(!out.status.success(), "an all-skip_judges sequence must refuse to start");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1248,7 +1248,7 @@ exit 0
     // stage (skip_judges) → worker (judged), in that order.
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: span\ndefaults: { model: fake }\nsteps:\n  stage: { skip_judges: true }\n  worker: {}\n\
          sequence:\n  steps: [stage, worker]\n  done_if: \"feature\"\nsummary: { enabled: false }\nmemory: { enabled: false }\n",
     );
@@ -1256,7 +1256,7 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "4"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "4"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined);
     assert!(combined.contains("done_if satisfied"), "the judged step gates the span to done:\n{combined}");
@@ -1286,7 +1286,7 @@ fn done_if_all_goals_ignores_an_until_condition_judge() {
     write_judge(dir, "stalled", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"still churning\"}'\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: dodset\ndefaults: { model: fake }\n\
          steps:\n  worker: {}\n\
          sequence:\n  steps:\n    - { step: worker, until: stalled, max: 3 }\n  \
@@ -1294,7 +1294,7 @@ fn done_if_all_goals_ignores_an_until_condition_judge() {
     );
     write_state_md(dir, "create the file did_work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // exit 0 — NOT 4. all_goals fired over the DoD-set {feature} despite stalled being unmet.
     assert_exit(&out, 0, &combined);
@@ -1342,10 +1342,10 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     // the `.md` judge IS the DoD (an LLM judge), never met — so ONLY over_budget can end the loop.
-    write(dir, "agg/judges/reviewed.md", "---\ninputs: []\n---\nDecide if the work is done. Output the verdict JSON on the last line.\n");
+    write(dir, "rlt/judges/reviewed.md", "---\ninputs: []\n---\nDecide if the work is done. Output the verdict JSON on the last line.\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: judgetok\ndefaults: { model: fake }\njudge: { agent: claude, model: fake }\n\
          steps:\n  worker: {}\n\
          sequence:\n  steps: [worker]\n  done_if: \"reviewed\"\n  abort_if: \"over_budget\"\n  limits: { tokens: 1000 }\n\
@@ -1354,7 +1354,7 @@ exit 0
     write_state_md(dir, "do work\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "20"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // over_budget aborts (exit 3) — NOT the session cap (exit 4). The ONLY way tokens reach 1000 is by
     // counting the judge's 600/run, so this asserts exactly the money path.
@@ -1382,7 +1382,7 @@ fn ceilings_are_checked_after_a_skip_judges_step_too() {
     write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: skipceil\ndefaults: { model: fake }\n\
          steps:\n  worker: {}\n  stage: { skip_judges: true }\n\
          sequence:\n  steps: [worker, stage]\n  done_if: \"feature\"\n  abort_if: \"over_iterations\"\n  limits: { sessions: 2 }\n\
@@ -1393,7 +1393,7 @@ fn ceilings_are_checked_after_a_skip_judges_step_too() {
     // No --max-sessions flag on purpose: the ceiling under test is `limits.sessions`, and a non-zero
     // flag would OVERRIDE it (§4.1). limits.sessions=2 ALSO backs the loop's own exit-4 precheck, so
     // if the skip-path ceiling check regressed the run still terminates (exit 4) rather than hanging.
-    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
+    let out = rlt(dir, &path).arg("run").output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 3, &combined);
     assert!(combined.contains("over_iterations"), "the ceiling must abort ON the skip step (exit 3):\n{combined}");
@@ -1442,7 +1442,7 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 3, &combined);
     assert!(
@@ -1461,7 +1461,7 @@ fn a_clean_not_met_judge_does_not_trip_any_judge_error() {
     write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"cleanly not yet\"}'\n");
     write_cfg(dir, "cleanjudge", "feature", "  abort_if: \"any_judge_error\"\n", "memory: { enabled: false }\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
     assert!(!combined.contains("ABORT"), "a cleanly not-met judge must NOT trip any_judge_error:\n{combined}");
@@ -1471,7 +1471,7 @@ fn a_clean_not_met_judge_does_not_trip_any_judge_error() {
 /// `sessions.txt` (one block per session, separated by `=== SESSION ===`), never meets the DoD, runs
 /// exactly two sessions (plan then build) and exits 4 at the cap. Returns the two recorded argv blocks
 /// `(plan_argv, build_argv)`. The worker echoing its own args is the only honest observation channel
-/// for per-step overrides — agg logs none of `--model`/`--effort`/`worker_args`. `defaults_body` /
+/// for per-step overrides — rlt logs none of `--model`/`--effort`/`worker_args`. `defaults_body` /
 /// `build_body` are the YAML flow-mapping bodies for `defaults:` and the `build` step.
 fn two_step_argv(defaults_body: &str, build_body: &str) -> (String, String) {
     let tmp = tempfile::tempdir().unwrap();
@@ -1493,7 +1493,7 @@ exit 0
     write_judge(dir, "nope", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         &format!(
             "project: argv\ndefaults: {defaults_body}\n\
              steps:\n  plan: {{}}\n  build: {build_body}\n\
@@ -1503,7 +1503,7 @@ exit 0
     );
     write_state_md(dir, "do work\n");
     git_init(dir);
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // never-met DoD → the 2-session cap ends it (plan, then build)
     let sessions = fs::read_to_string(dir.join("sessions.txt")).expect("the worker should have recorded its argv");
@@ -1606,10 +1606,10 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     write(dir, "evidence.txt", "INPUT_SENTINEL_ABC\n");
-    write(dir, "agg/judges/reviewed.md", "---\ninputs: [evidence.txt]\n---\nApply the rubric. Output the verdict JSON on the last line.\n");
+    write(dir, "rlt/judges/reviewed.md", "---\ninputs: [evidence.txt]\n---\nApply the rubric. Output the verdict JSON on the last line.\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: mdinputs\ndefaults: { model: fake }\njudge: { agent: claude, model: fake }\n\
          steps:\n  worker: {}\n\
          sequence:\n  steps: [worker]\n  done_if: \"reviewed\"\n\
@@ -1618,7 +1618,7 @@ exit 0
     write_state_md(dir, "create the file did_work\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "the llm-judged loop should reach done:\n{combined}");
     let jp = fs::read_to_string(dir.join("judge_prompt.txt")).expect("the ruler one-shot should have recorded its prompt");
@@ -1640,7 +1640,7 @@ fn a_run_set_only_until_condition_judge_is_evaluated_and_ends_its_repetition() {
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // the worker records the brief it actually reads (agg/private/INSTRUCTIONS.md — the `-p` is now
+    // the worker records the brief it actually reads (rlt/private/INSTRUCTIONS.md — the `-p` is now
     // just a tiny pointer at it) so the reconsider marker is observable, and on its first run COMMITS
     // `.signal` — which flips `stalled` to met on the next evaluation.
     write(
@@ -1648,7 +1648,7 @@ fn a_run_set_only_until_condition_judge_is_evaluated_and_ends_its_repetition() {
         "claude",
         r#"#!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat agg/private/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat rlt/private/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
 if [ ! -f .signal ]; then : > .signal; git add .signal >/dev/null 2>&1; git commit -qm signal >/dev/null 2>&1; fi
 printf '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 exit 0
@@ -1662,7 +1662,7 @@ exit 0
     write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: ifcond\ndefaults: { model: fake }\n\
          steps:\n  worker: {}\n  reconsider: { skip_judges: true, prompt: \"RECONSIDER_MARKER_888\" }\n\
          sequence:\n  steps:\n    - { step: worker, until: stalled, max: 3 }\n    - reconsider\n  done_if: \"feature\"\n\
@@ -1671,7 +1671,7 @@ exit 0
     write_state_md(dir, "do work\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // feature never met → the session cap ends it
     // (a) `stalled` actually EXECUTED — the run-set really contains it.
@@ -1687,12 +1687,12 @@ exit 0
 }
 
 /// FLAGSHIP CIRCUIT-BREAKER, end-to-end: the BUILTIN `stalled` judge — the one that ships inside the
-/// binary and reads `agg/private/verdicts.jsonl` (met when, across the last K=3 MERGED steps, no binary
+/// binary and reads `rlt/private/verdicts.jsonl` (met when, across the last K=3 MERGED steps, no binary
 /// judge changed `met` and no numeric judge changed `value`) — must actually flip to met on a
 /// no-progress run and end `worker`'s repetition so `reconsider` runs. Unlike `…ends_its_repetition`
 /// above (which
-/// FAKES `stalled` with a `.signal` file), this writes NO `agg/judges/stalled.sh`: it exercises the
-/// real library judge resolved from `~/.agg/judges/` (installed by `ensure_library`), driven purely
+/// FAKES `stalled` with a `.signal` file), this writes NO `rlt/judges/stalled.sh`: it exercises the
+/// real library judge resolved from `~/.rlt/judges/` (installed by `ensure_library`), driven purely
 /// by the verdict history the loop records.
 ///
 /// Setup: `done_if: feature`, and `feature` is NEVER met and constant → flat across every merged
@@ -1708,18 +1708,18 @@ fn the_builtin_stalled_judge_fires_reconsider_on_a_no_progress_run() {
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // The fake worker: (1) records the brief it actually reads (agg/private/INSTRUCTIONS.md — the `-p`
+    // The fake worker: (1) records the brief it actually reads (rlt/private/INSTRUCTIONS.md — the `-p`
     // is now a tiny pointer at it) to prompts.txt — left UNTRACKED so it survives session branch
     // resets and accumulates the reconsider marker; (2) commits a UNIQUE no-op line per session to a
     // TRACKED file so the worker step MERGES (the builtin stalled counts only `merged` verdict rows)
-    // while moving NO judge's met/value. `agg/private/` is auto-gitignored by agg, so the
+    // while moving NO judge's met/value. `rlt/private/` is auto-gitignored by rlt, so the
     // verdicts.jsonl stalled reads is never committed or clobbered.
     write(
         &bin,
         "claude",
         r#"#!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
-prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat agg/private/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
+prev=""; for a in "$@"; do [ "$prev" = "-p" ] && { cat rlt/private/INSTRUCTIONS.md >> prompts.txt 2>/dev/null; printf '\n===8<===\n' >> prompts.txt; }; prev="$a"; done
 n=$(cat noop.txt 2>/dev/null | wc -l | tr -d ' ')
 printf 'noop %s\n' "$n" >> noop.txt
 git add noop.txt >/dev/null 2>&1
@@ -1735,10 +1735,10 @@ exit 0
     // stalled sees no movement. It is the ONLY non-`stalled` judge in the run-set (stalled ignores
     // its own rows), so nothing masks the stall.
     write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
-    // NB: deliberately NO agg/judges/stalled.sh — `stalled` must resolve to the shipped library judge.
+    // NB: deliberately NO rlt/judges/stalled.sh — `stalled` must resolve to the shipped library judge.
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: stallfire\ndefaults: { model: fake }\n\
          steps:\n  worker: {}\n  reconsider: { skip_judges: true, prompt: \"RECONSIDER_FIRED_MARKER\" }\n\
          sequence:\n  steps:\n    - { step: worker, until: stalled, max: 8 }\n    - reconsider\n  done_if: \"feature\"\n\
@@ -1750,13 +1750,13 @@ exit 0
     // feature never met + no abort_if → the ONLY terminator is the session cap (exit 4). 8 is ample:
     // stalled fires during session 4's verify (it then sees 3 flat merged steps), so reconsider is
     // dispatched at session 5.
-    let out = agg(dir, &path).args(["run", "--max-sessions", "8"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "8"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
 
     // guard the SETUP: no project shadow may exist — the BUILTIN is the judge under test.
     assert!(
-        !dir.join("agg/judges/stalled.sh").exists(),
+        !dir.join("rlt/judges/stalled.sh").exists(),
         "this test must exercise the builtin stalled judge, not a project shadow"
     );
     // THE proof: the builtin stalled→reconsider circuit-breaker fired. reconsider's injected marker
@@ -1808,7 +1808,7 @@ exit 1
     write_cfg(dir, "rl", "impossible", "", "ratelimit_backoff_secs: 0\nmemory: { enabled: true, max_kb: 64, inject_kb: 8 }\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // one rate-limited session, then the cap → MaxSessions.
 
@@ -1838,21 +1838,21 @@ fn a_winning_session_still_folds_memory_and_fires_on_session_end() {
     write_judge(dir, "won", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "win", "won", "", "memory: { enabled: true, max_kb: 64, inject_kb: 8 }\nhooks:\n  on_session_end: [\"touch session_end_ran\"]\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined); // done_if fires on session 1 → GoalsMet.
 
     // the WINNING session still fired its on_session_end hook…
     assert!(dir.join("session_end_ran").exists(), "on_session_end must fire on the winning session:\n{combined}");
     // …and still folded session 1 into LOG.md (the fold precedes the run-stop decision).
-    let mem = fs::read_to_string(agg::core::memory::memory_file(dir)).unwrap_or_default();
+    let mem = fs::read_to_string(relentless::core::memory::memory_file(dir)).unwrap_or_default();
     assert!(mem.contains("## session 1"), "the winning session must still fold into LOG.md:\n{mem}\n{combined}");
     assert!(combined.contains("[memory] session #1 folded"), "the winning session's fold must be logged:\n{combined}");
 }
 
 #[test]
-fn agg_auto_commits_a_worker_that_forgets_to_commit() {
-    // GIT_REDESIGN §2: the worker EDITS a tracked file but never runs `git commit`. agg must
+fn rlt_auto_commits_a_worker_that_forgets_to_commit() {
+    // GIT_REDESIGN §2: the worker EDITS a tracked file but never runs `git commit`. rlt must
     // auto-commit the edit on the session branch (not discard it), so it merges to base and the goal
     // is met. Before GIT_REDESIGN, discard_uncommitted_tracked threw the edit away → never converged.
     let tmp = tempfile::tempdir().unwrap();
@@ -1884,29 +1884,29 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert_exit(&out, 0, &combined); // agg committed the edit → merged → answered met → done.
-    // the worker never ran git, yet its edit is on main (agg auto-committed it).
+    assert_exit(&out, 0, &combined); // rlt committed the edit → merged → answered met → done.
+    // the worker never ran git, yet its edit is on main (rlt auto-committed it).
     let on_main = std::process::Command::new("git").args(["show", "main:answer.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
-    assert!(content.contains("made-it"), "agg must auto-commit the worker's uncommitted edit onto main, got: {content:?}\n{combined}");
-    assert!(combined.contains("agg committed the worker's edits"), "the auto-commit must be logged:\n{combined}");
+    assert!(content.contains("made-it"), "rlt must auto-commit the worker's uncommitted edit onto main, got: {content:?}\n{combined}");
+    assert!(combined.contains("rlt committed the worker's edits"), "the auto-commit must be logged:\n{combined}");
 }
 
 #[test]
 fn a_worker_tampered_judge_is_rolled_back_and_base_judge_restored() {
     // GIT_REDESIGN §6 (the single most important moat test): a session whose worker TAMPERS a
     // committed judge AND regresses a DoD-set invariant must ROLL BACK — and because judges are
-    // committed and rollback restores base via `:(exclude)agg/{state,private}/**`, base's judge is the
-    // ORIGINAL, not the worker's tampered copy. agg (not the worker) makes the commit now, so this
+    // committed and rollback restores base via `:(exclude)rlt/{state,private}/**`, base's judge is the
+    // ORIGINAL, not the worker's tampered copy. rlt (not the worker) makes the commit now, so this
     // proves the moat still holds under GIT_REDESIGN's auto-commit.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     // worker: regress build_ok (drop .regressed) AND tamper its judge script (append a marker), and
-    // DO NOT commit — agg auto-commits. The tamper is a harmless trailing comment, so build_ok still
+    // DO NOT commit — rlt auto-commits. The tamper is a harmless trailing comment, so build_ok still
     // runs and still reports the regression (a self-hiding tamper is a deeper concern, out of scope).
     write(
         &bin,
@@ -1916,7 +1916,7 @@ for a in "$@"; do
   if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
 done
 touch .regressed
-printf '\n# TAMPERED-BY-WORKER\n' >> agg/judges/build_ok.sh
+printf '\n# TAMPERED-BY-WORKER\n' >> rlt/judges/build_ok.sh
 exit 0
 "#,
     );
@@ -1935,12 +1935,12 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // feature never met → cap; the regressing session rolled back.
     assert!(combined.contains("ROLLED BACK"), "the judge-tampering, regressing session must roll back:\n{combined}");
     // THE MOAT: base's committed judge is restored to the ORIGINAL — the worker's tamper is gone.
-    let judge_on_main = std::process::Command::new("git").args(["show", "main:agg/judges/build_ok.sh"]).current_dir(dir).output_bounded().unwrap();
+    let judge_on_main = std::process::Command::new("git").args(["show", "main:rlt/judges/build_ok.sh"]).current_dir(dir).output_bounded().unwrap();
     let judge = String::from_utf8_lossy(&judge_on_main.stdout);
     assert!(!judge.contains("TAMPERED"), "rollback must restore the committed judge — no worker tamper on base, got:\n{judge}");
     assert!(judge.contains(".regressed"), "base keeps the ORIGINAL judge logic");
@@ -1968,7 +1968,7 @@ fn a_sequence_entry_that_exhausts_max_without_converging_aborts_the_run() {
     write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: bounded\n\
          defaults: { model: fake }\n\
          steps:\n  worker: {}\n\
@@ -1977,7 +1977,7 @@ fn a_sequence_entry_that_exhausts_max_without_converging_aborts_the_run() {
     );
     write_state_md(dir, "do work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "9"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "9"]).output_bounded().unwrap();
     let combined =
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 3, &combined);
@@ -1987,7 +1987,7 @@ fn a_sequence_entry_that_exhausts_max_without_converging_aborts_the_run() {
 
 /// A step whose whole OUTPUT is gitignored worker-state must still be able to satisfy its `until:`.
 ///
-/// `agg/state/` is gitignored BY DESIGN — the OKF wiki and STATE.md are durable, multi-session and
+/// `rlt/state/` is gitignored BY DESIGN — the OKF wiki and STATE.md are durable, multi-session and
 /// first-class — so a `survey`/`spec`/`plan` step commits NOTHING every time and resolves as
 /// `NoChanges`. The gate's `_` arm used to `restore_goal_state` on that, throwing away the verdict
 /// the judge had just measured against the real filesystem and putting the pre-step value back.
@@ -2001,16 +2001,16 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
     // gitignore the worker-state dir, exactly as a real project does — so the worker's output is
-    // real, durable, and invisible to git. agg's auto-commit then finds nothing: `NoChanges`.
-    // `bin/` too, or agg's auto-commit sweeps the fake worker's own binary onto the session branch —
+    // real, durable, and invisible to git. rlt's auto-commit then finds nothing: `NoChanges`.
+    // `bin/` too, or rlt's auto-commit sweeps the fake worker's own binary onto the session branch —
     // the session then resolves as `Staged`, not `NoChanges`, and the bug under test cannot occur.
-    write(dir, ".gitignore", "agg/\nbin/\n.home/\n");
+    write(dir, ".gitignore", "rlt/\nbin/\n.home/\n");
     Command::new("git").args(["add", ".gitignore"]).current_dir(dir).output_bounded().unwrap();
-    Command::new("git").args(["commit", "-qm", "gitignore agg/"]).current_dir(dir).output_bounded().unwrap();
+    Command::new("git").args(["commit", "-qm", "gitignore rlt/"]).current_dir(dir).output_bounded().unwrap();
 
     // A worker that writes ONLY into the gitignored state dir, so its sessions commit nothing.
     //
-    // ⚠ It writes a COUNTER, not a marker, and the judge needs TWO. That is not padding: agg appends
+    // ⚠ It writes a COUNTER, not a marker, and the judge needs TWO. That is not padding: rlt appends
     // its own entries to `.gitignore` on the first run, so session #1 always has something to commit
     // and always resolves as `Staged`. A judge that flips on session #1 therefore converges through
     // the merge path and never touches the arm under test. The judge must become met on a LATER,
@@ -2021,14 +2021,14 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
         "claude",
         "#!/bin/sh\n\
          for a in \"$@\"; do if [ \"$a\" = \"--version\" ]; then echo 'fake 0.0.0'; exit 0; fi; done\n\
-         mkdir -p agg/state/wiki && echo x >> agg/state/wiki/spec.md\n\
+         mkdir -p rlt/state/wiki && echo x >> rlt/state/wiki/spec.md\n\
          printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"usage\":{\"output_tokens\":1}}'\n",
     );
     chmod_x(&dir.join("bin/claude"));
     write_judge(
         dir,
         "spec_ok",
-        "#!/bin/sh\nn=$(wc -l < agg/state/wiki/spec.md 2>/dev/null || echo 0)\n\
+        "#!/bin/sh\nn=$(wc -l < rlt/state/wiki/spec.md 2>/dev/null || echo 0)\n\
          if [ \"$n\" -ge 2 ]; then echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}'; \
          else echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'; fi\n",
     );
@@ -2037,7 +2037,7 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
     write_judge(dir, "never", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: statework\n\
          defaults: { model: fake }\n\
          steps:\n  worker: {}\n  second: {}\n\
@@ -2046,7 +2046,7 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
     );
     write_state_md(dir, "write the spec\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "4"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "4"]).output_bounded().unwrap();
     let combined =
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(

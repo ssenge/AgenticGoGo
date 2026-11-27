@@ -15,7 +15,7 @@
 //! for other users' / hardened processes.
 //!
 //! INTENTIONAL long tasks must NOT be reaped. A worker can deliberately leave a process
-//! running past its turn (a multi-hour sim it will poll in a later session) via `agg spawn`,
+//! running past its turn (a multi-hour sim it will poll in a later session) via `rlt spawn`,
 //! which records the task's pgid in the spawn registry. [`reap_pgid_except`] takes that set
 //! of PROTECTED pgids and spares them — so the straggler sweep still kills real leaks but
 //! never the legitimate background work. (Caveat to the "children keep the worker's pgid"
@@ -34,7 +34,7 @@ use std::collections::HashSet;
 /// whose own pgid is in `protected`. Best-effort: a process may exit between listing and
 /// killing. Returns the number of stragglers it signalled.
 ///
-/// The `protected` set is how an `agg spawn` long task survives the worker's post-session
+/// The `protected` set is how an `rlt spawn` long task survives the worker's post-session
 /// straggler sweep: the registry records the task's pgid as protected, and the reaper skips it
 /// instead of killing legitimate background work along with real leaks. A process is spared iff
 /// ITS pgid is protected, so a detached task that escaped into its own group is matched

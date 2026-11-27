@@ -2,7 +2,7 @@
 """Isolated browser check of the process page (A-39): can a human start a project, answer its checkpoint with a decision,
 read a step's overlay facts and stop the run, all from the web UI?
 
-Self-contained: a projects folder with fake agents, its own `agg serve --projects --process examples/process/process.yaml`
+Self-contained: a projects folder with fake agents, its own `rlt serve --projects --process examples/process/process.yaml`
 and SvelteKit app on free ports, Chromium driven through the page. Nothing is shared with the other web fixtures.
 
     scripts/web_process.py [--root <repo>] [--shots DIR]      exit 0 = every check passed
@@ -22,8 +22,8 @@ _ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent))
 _ap.add_argument("--shots", default="")
 A = _ap.parse_args()
 ROOT = Path(A.root)
-AGG = ROOT / "target/debug/agg"
-P = Path(os.environ.get("TMPDIR", "/tmp")) / f"agg-webprocess.{os.getpid()}"
+RLT = ROOT / "target/debug/rlt"
+P = Path(os.environ.get("TMPDIR", "/tmp")) / f"rlt-webprocess.{os.getpid()}"
 (P / "bin").mkdir(parents=True)
 (P / "home").mkdir()
 (P / "projects").mkdir()
@@ -54,11 +54,11 @@ def port():
 
 env = {**os.environ, "PATH": f"{P}/bin:{os.environ['PATH']}", "HOME": str(P / "home")}
 aport, wport = port(), port()
-srv = subprocess.Popen([str(AGG), "serve", "--port", str(aport), "--projects", str(P / "projects"), "--process",
+srv = subprocess.Popen([str(RLT), "serve", "--port", str(aport), "--projects", str(P / "projects"), "--process",
                         str(ROOT / "examples/process/process.yaml")], cwd=P / "projects", env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 web = subprocess.Popen(["node", "build/index.js"], cwd=ROOT / "src/web",
-                       env={**os.environ, "AGG_API": f"http://127.0.0.1:{aport}", "PORT": str(wport)},
+                       env={**os.environ, "RLT_API": f"http://127.0.0.1:{aport}", "PORT": str(wport)},
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 fails = []
 

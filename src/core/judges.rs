@@ -2,23 +2,23 @@
 //!
 //! ```text
 //! all_tests_pass
-//!   1. agg/judges/all_tests_pass.sh   → script judge      (THIS project's — shadows everything)
-//!   2. agg/judges/all_tests_pass.md   → LLM judge; the FILE IS THE RUBRIC
-//!   3. ~/.agg/judges/all_tests_pass.* → the STANDARD LIBRARY (below)
+//!   1. rlt/judges/all_tests_pass.sh   → script judge      (THIS project's — shadows everything)
+//!   2. rlt/judges/all_tests_pass.md   → LLM judge; the FILE IS THE RUBRIC
+//!   3. ~/.rlt/judges/all_tests_pass.* → the STANDARD LIBRARY (below)
 //!   4. else → HARD ERROR AT STARTUP, listing what IS available
 //! ```
 //! The **extension decides the kind**: `.sh` = script, `.md` = rubric ⇒ LLM. An `.md` judge
 //! declares its `inputs:` in its OWN yaml frontmatter — one self-contained file, no registry.
 //!
 //! # The standard library ships INSIDE the binary (§6.1)
-//! The judges are `include_str!`'d — exactly as [`crate::skills`] does the `/agg:*` skills — and
-//! agg writes them to `~/.agg/judges/` on `agg init`, and on `agg run` when a file is missing or
-//! has DRIFTED from the embedded copy. Install agg → the judges are installed. No `agg judges`
+//! The judges are `include_str!`'d — exactly as [`crate::skills`] does the `/rlt:*` skills — and
+//! rlt writes them to `~/.rlt/judges/` on `rlt init`, and on `rlt run` when a file is missing or
+//! has DRIFTED from the embedded copy. Install rlt → the judges are installed. No `rlt judges`
 //! subcommand, no HTTP client, no network.
 //!
 //! # Security (§6.1)
-//! `~/.agg/judges/` is worker-writable and outside git/rollback: one session that writes there
-//! corrupts the grader for every project on the machine. So (a) agg NEVER hands the worker that
+//! `~/.rlt/judges/` is worker-writable and outside git/rollback: one session that writes there
+//! corrupts the grader for every project on the machine. So (a) rlt NEVER hands the worker that
 //! path, and (b) [`ensure_library`] verifies every library file against its embedded copy on
 //! startup and rewrites any drift.
 
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 /// The standard judge library, embedded at compile time from the same `plugin/judges/` files the
 /// Claude plugin ships. `(filename, body)`. Parameterless by convention (§5.1); anything needing an
-/// argument is a three-line script in the project's own `agg/judges/`.
+/// argument is a three-line script in the project's own `rlt/judges/`.
 pub const LIBRARY: &[(&str, &str)] = &[
     ("cargo_test.sh", include_str!("../../plugin/judges/cargo_test.sh")),
     ("build_ok.sh", include_str!("../../plugin/judges/build_ok.sh")),
@@ -41,22 +41,22 @@ pub const LIBRARY: &[(&str, &str)] = &[
     ("grep_count.sh", include_str!("../../plugin/judges/grep_count.sh")),
 ];
 
-/// `~/.agg/judges/` — the user-home library dir. `None` if `$HOME` is unset.
+/// `~/.rlt/judges/` — the user-home library dir. `None` if `$HOME` is unset.
 pub fn home_judges_dir() -> Option<PathBuf> {
-    std::env::home_dir().map(|h| h.join(".agg").join("judges"))
+    std::env::home_dir().map(|h| h.join(".rlt").join("judges"))
 }
 
-/// A project's own judges dir: `<config_base>/judges/` (i.e. `agg/judges/`, COMMITTED).
+/// A project's own judges dir: `<config_base>/judges/` (i.e. `rlt/judges/`, COMMITTED).
 pub fn project_judges_dir(config_base: &Path) -> PathBuf {
     config_base.join("judges")
 }
 
-/// Write the embedded library to `~/.agg/judges/`, (re)writing any file that is missing or has
+/// Write the embedded library to `~/.rlt/judges/`, (re)writing any file that is missing or has
 /// DRIFTED from its embedded copy (§6.1 security). Best-effort: a home dir we cannot write is a
 /// warning, not a hard failure — the loop still runs against project judges.
 pub fn ensure_library() -> Result<()> {
     let Some(dir) = home_judges_dir() else {
-        eprintln!("  ⚠ no home directory — skipping the ~/.agg/judges standard library install");
+        eprintln!("  ⚠ no home directory — skipping the ~/.rlt/judges standard library install");
         return Ok(());
     };
     std::fs::create_dir_all(&dir)?;
@@ -74,7 +74,7 @@ pub fn ensure_library() -> Result<()> {
 }
 
 /// Resolve a judge NAME to its runnable [`JudgeKind`], searching (in order) the project's
-/// `agg/judges/`, then `~/.agg/judges/`. `.sh` before `.md` at each level. HARD ERROR listing what
+/// `rlt/judges/`, then `~/.rlt/judges/`. `.sh` before `.md` at each level. HARD ERROR listing what
 /// exists if nothing resolves (§5.1 step 4).
 pub fn resolve(name: &str, config_base: &Path) -> Result<JudgeKind> {
     let proj = project_judges_dir(config_base);
@@ -93,8 +93,8 @@ pub fn resolve(name: &str, config_base: &Path) -> Result<JudgeKind> {
         return Ok(kind_for(&path));
     }
     bail!(
-        "no judge named `{name}` — resolved neither agg/judges/{name}.{{sh,md}} nor \
-         ~/.agg/judges/{name}.{{sh,md}}.\n  available judges: {}",
+        "no judge named `{name}` — resolved neither rlt/judges/{name}.{{sh,md}} nor \
+         ~/.rlt/judges/{name}.{{sh,md}}.\n  available judges: {}",
         available(config_base).join(", ")
     );
 }

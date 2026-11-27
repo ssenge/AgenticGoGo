@@ -2,14 +2,14 @@
 //!
 //! `examples/workflow.rs` and `examples/selfimprove.rs` are cargo examples, so `cargo build
 //! --examples` is what keeps the Rust surface honest. `examples/workflow.yaml` has no compiler, so
-//! this file is its compiler: it loads the sample through the SAME `AggConfig::load` the binary
+//! this file is its compiler: it loads the sample through the SAME `RelentlessConfig::load` the binary
 //! uses and asserts the shape the sample's own comments promise.
 //!
 //! Why a test and not a doc line: the sample is the specification of the YAML surface. A key that
 //! quietly stopped existing (or a `deny_unknown_fields` struct that grew a required field) would
 //! otherwise be found by the first user who copied the file, not by CI.
 
-use agg::core::config::AggConfig;
+use relentless::core::config::RelentlessConfig;
 use std::path::PathBuf;
 
 fn sample(name: &str) -> PathBuf {
@@ -20,7 +20,7 @@ fn sample(name: &str) -> PathBuf {
 /// on a stale key rather than silently ignoring it — which is exactly what it is here to catch.
 #[test]
 fn the_yaml_sample_loads() {
-    let cfg = AggConfig::load(&sample("workflow.yaml")).expect("examples/workflow.yaml must load");
+    let cfg = RelentlessConfig::load(&sample("workflow.yaml")).expect("examples/workflow.yaml must load");
 
     assert_eq!(cfg.project, "rate-limiting");
 
@@ -50,14 +50,14 @@ fn the_yaml_sample_loads() {
     for s in ["implement", "fix", "harden"] {
         assert_eq!(
             cfg.steps[s].isolation,
-            Some(agg::isolation::Isolation::Sandbox),
+            Some(relentless::isolation::Isolation::Sandbox),
             "`{s}` must name a confining tier — readonly binds to nothing under `none`"
         );
         // the BODY keeps the author's spelling; `resolve_step` is where it is normalised, so the
         // two lists cannot miss each other by a trailing slash.
-        assert_eq!(cfg.steps[s].readonly, ["tests/", "agg/judges/"]);
+        assert_eq!(cfg.steps[s].readonly, ["tests/", "rlt/judges/"]);
         let r = cfg.resolve_step(s).unwrap();
-        assert_eq!(r.readonly, ["tests", "agg/judges"], "normalised by resolve_step, as the driver's builder does it");
+        assert_eq!(r.readonly, ["tests", "rlt/judges"], "normalised by resolve_step, as the driver's builder does it");
     }
     assert_eq!(cfg.resolve_step("implement").unwrap().writable, ["tests"], "the step that SHOULD add tests re-grants that one deny");
     assert!(cfg.steps["fix"].writable.is_empty(), "`fix` re-grants nothing — deleting a failing test is the shortcut it would take");
@@ -96,7 +96,7 @@ fn the_yaml_sample_loads() {
         .steps
         .iter()
         .filter_map(|e| e.until.as_deref())
-        .flat_map(|c| agg::core::stop::judge_names(c).expect("every sample `until:` must parse"))
+        .flat_map(|c| relentless::core::stop::judge_names(c).expect("every sample `until:` must parse"))
         .collect();
     assert!(
         from_until.iter().any(|n| n == "spec_sound"),
@@ -122,7 +122,7 @@ fn the_yaml_sample_loads() {
     assert!(!seq.gate_regressions, "`annotate` is the sample's policy: always merge, tell the next session");
 }
 
-/// The sample is not just parseable, it is RUNNABLE-shaped: `assemble()` is what `agg run` calls
+/// The sample is not just parseable, it is RUNNABLE-shaped: `assemble()` is what `rlt run` calls
 /// before the first session, and it is where an unknown step name, an unbounded `until:` or a judge
 /// that resolves to no file becomes a startup refusal.
 ///
@@ -133,13 +133,13 @@ fn the_yaml_sample_loads() {
 /// parsed and named the judges the sample says they do.
 #[test]
 fn the_yaml_samples_expressions_name_real_judges() {
-    let cfg = AggConfig::load(&sample("workflow.yaml")).unwrap();
-    let names = agg::core::stop::judge_names(&cfg.sequence.done_if).expect("done_if parses");
+    let cfg = RelentlessConfig::load(&sample("workflow.yaml")).unwrap();
+    let names = relentless::core::stop::judge_names(&cfg.sequence.done_if).expect("done_if parses");
     assert_eq!(names, ["tests_pass", "lint_clean", "load_ok", "p99_ok"]);
 
-    let names = agg::core::stop::judge_names(cfg.sequence.abort_if.as_deref().unwrap()).expect("abort_if parses");
+    let names = relentless::core::stop::judge_names(cfg.sequence.abort_if.as_deref().unwrap()).expect("abort_if parses");
     assert!(names.is_empty(), "over_budget/wall_hours are run-level scalars and any_regressed(invariants) is an aggregate, not a judge name: {names:?}");
 
-    let names = agg::core::stop::judge_names(cfg.sequence.steps[0].until.as_deref().unwrap()).unwrap();
+    let names = relentless::core::stop::judge_names(cfg.sequence.steps[0].until.as_deref().unwrap()).unwrap();
     assert_eq!(names, ["survey_good"], "`until:` judges join the run-set — they must execute every step");
 }

@@ -1,7 +1,7 @@
 //! The outer loop's stage enum, `Phase`, and its cross-version wire (de)serialization.
 //!
 //! Split out of the dashboard state module: `Phase` is a self-contained value type with its own
-//! hand-written serde impls (so an unknown stage from another `agg` build round-trips verbatim
+//! hand-written serde impls (so an unknown stage from another `rlt` build round-trips verbatim
 //! rather than crashing the reader). It carries no dependency on `DashboardState`.
 
 /// The outer loop's current stage. The four deterministic stages (INJECT → RUN → VERIFY → GATE)
@@ -14,10 +14,10 @@
 ///
 /// # state.json compatibility (REQUIRED, both directions)
 /// This serializes to and from exactly the lowercase strings it always did, because `state.json`
-/// is a cross-version contract: `agg dashboard` / `agg status` attach to a loop that may be
-/// running a DIFFERENT `agg` build than they are.
+/// is a cross-version contract: `rlt dashboard` / `rlt status` attach to a loop that may be
+/// running a DIFFERENT `rlt` build than they are.
 ///
-/// That is also why [`Phase::Other`] exists rather than a hard parse error. An older agg wrote
+/// That is also why [`Phase::Other`] exists rather than a hard parse error. An older rlt wrote
 /// `"phase":"judging"` — a stage this build has no variant for. Rejecting it would crash the
 /// dashboard against a running loop; mapping it to a catch-all `Unknown` would lie about what the
 /// loop is doing. `Other` keeps the text verbatim, so it round-trips and still renders.
@@ -33,7 +33,7 @@ pub enum Phase {
     /// a `skip_judges` step whose work is staged onto the span (§7.4).
     Staging,
     Done,
-    /// A stage name this build doesn't know — from a state.json written by another agg version.
+    /// A stage name this build doesn't know — from a state.json written by another rlt version.
     /// Held verbatim so it survives a read/write round-trip instead of being flattened.
     Other(String),
 }

@@ -1,6 +1,6 @@
 //! Blast-radius isolation — the OS sandbox wrapped around a worker process.
 //!
-//! This is a DIFFERENT axis from agg's git session isolation (see [`crate::git::session`] /
+//! This is a DIFFERENT axis from rlt's git session isolation (see [`crate::git::session`] /
 //! `SessionIsolation` in config): that one protects the repo HISTORY from bad work; THIS one
 //! protects the HOST (fs / creds / other processes) from an errant worker running in auto mode.
 //! They compose. See `internal/ISOLATION.md`.
@@ -13,17 +13,17 @@
 //! # The policy
 //! `sandbox` gives the worker: **write = cwd (+subfolders) + `$TMPDIR` + the agent's own state
 //! dir; read = everything; network = open** — unless the run sets an egress allow-list
-//! (`isolation_policy.network`, [`egress`]), which narrows every confining tier to agg's proxy.
+//! (`isolation_policy.network`, [`egress`]), which narrows every confining tier to rlt's proxy.
 //! `container` targets the same policy from the other side: the only host paths that exist inside
 //! the container are the ones bind-mounted, so read is confined too. The run-level additions —
 //! context dirs, the allow-list, what crosses into a container — come from [`policy`].
 //!
-//! # agg ALWAYS confines — no agent is exempt
+//! # rlt ALWAYS confines — no agent is exempt
 //! Under `sandbox` this module wraps EVERY agent, including Codex, which has a kernel sandbox of
 //! its own (`sandbox_mode=workspace-write`, still emitted by its backend). Those are two nested
-//! layers and agg owns the outer one: an agent's own sandbox is the agent's promise, and it also
-//! has no delivery channel for agg's per-path denies. See `internal/BUILD.md` §2.4 and the
-//! `an_agents_own_kernel_sandbox_nests_inside_aggs` spike below.
+//! layers and rlt owns the outer one: an agent's own sandbox is the agent's promise, and it also
+//! has no delivery channel for rlt's per-path denies. See `internal/BUILD.md` §2.4 and the
+//! `an_agents_own_kernel_sandbox_nests_inside_rlts` spike below.
 //! [`crate::backend::AgentBackend::self_sandboxes`] survives as a REPORTING flag only.
 //! [`Isolation`] itself is a LEAF type: it knows nothing about config or backends; they import it.
 //!
@@ -86,7 +86,7 @@ pub(crate) struct Jail<'a> {
     pub net: Option<NetRule>,
 }
 
-/// What a jail lets a process reach when the run has a network allow-list: TCP to agg's proxy on
+/// What a jail lets a process reach when the run has a network allow-list: TCP to rlt's proxy on
 /// loopback, plus the loopback ports `localhost` entries grant. Everything else is denied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NetRule {
@@ -96,7 +96,7 @@ pub(crate) struct NetRule {
 
 /// The per-step blast-radius isolation tier. `none` = direct subprocess (today); `sandbox` =
 /// kernel-enforced FS confinement; `container` = the command runs inside a container.
-/// Deserialized from the lowercase tier name in agg.yaml.
+/// Deserialized from the lowercase tier name in rlt.yaml.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Isolation {
@@ -106,7 +106,7 @@ pub enum Isolation {
     /// Kernel-enforced FS confinement: write = cwd + tmp + agent state; read = all; net = open.
     Sandbox,
     /// Re-hosted inside a container ([`container`]): write = the bind-mounted cwd (+ the agent's
-    /// state dirs); read = only what is mounted; net = open. The strongest tier agg ships.
+    /// state dirs); read = only what is mounted; net = open. The strongest tier rlt ships.
     Container,
 }
 
@@ -139,7 +139,7 @@ impl Isolation {
 /// Is the OS sandbox mechanism available on this host (the wrapper binary is present)?
 ///
 /// Linux probes `bwrap`; macOS probes `sandbox-exec`; every other OS is `false`. Used by
-/// [`crate::capability::check`] (refuse `sandbox` up front when unavailable) and `agg doctor`.
+/// [`crate::capability::check`] (refuse `sandbox` up front when unavailable) and `rlt doctor`.
 pub fn available() -> bool {
     imp::available()
 }
@@ -147,7 +147,7 @@ pub fn available() -> bool {
 /// Wrap a built [`Command`] in the OS sandbox, confining writes to `cwd` + `$TMPDIR` + `writable`
 /// (the agent's own state dirs) while leaving reads and network open.
 ///
-/// Used for the worker AND for a script judge — a confined worker can rewrite `agg/judges/*.sh`
+/// Used for the worker AND for a script judge — a confined worker can rewrite `rlt/judges/*.sh`
 /// (they live inside its writable cwd), so the judge must run in the same jail or it is a wide-open
 /// escape (ISOLATION.md §12). A script judge passes `writable: &[]`: it may write cwd/tmp but must
 /// not be able to write anywhere the worker couldn't.
@@ -162,7 +162,7 @@ pub fn available() -> bool {
 /// # Two deny channels, and the second never replaces the first
 /// `denies` is THIS STEP's `readonly` minus `writable` ([`crate::core::config::ResolvedStep::denied`]),
 /// project-relative. It is handed to [`deny_set`] as an ADDITION to the carve-out [`denied`] derives
-/// from `cwd` — a parameter is a thing a future call site can forget, and forgetting `agg/private/`
+/// from `cwd` — a parameter is a thing a future call site can forget, and forgetting `rlt/private/`
 /// is the one hole this module exists to keep shut (BUILD.md §3.8).
 pub fn wrap(cmd: Command, cwd: &Path, writable: &[PathBuf], denies: &[String]) -> Result<Command> {
     wrap_protected(cmd, cwd, writable, denies, &[])
@@ -186,7 +186,7 @@ pub fn wrap_protected(
     // Command without the caller knowing about sandboxing.
     let prog = cmd.get_program().to_owned();
     let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_owned()).collect();
-    // Carry env EXPLICITLY. The worker backends set none, but a script judge sets `AGG_*` — and a
+    // Carry env EXPLICITLY. The worker backends set none, but a script judge sets `RLT_*` — and a
     // rebuilt Command starts from the parent env with no per-command overrides, so those would be
     // silently dropped (the judge would run without its contract). `get_envs()` yields the
     // overrides layered on the inherited env: `Some` = set, `None` = a `.env_remove()`.
@@ -273,13 +273,13 @@ fn protect_channels(cwd: &Path, denies: &[String], protect: &[String]) -> Result
 ///
 /// # Why this exists at all
 /// `writable` SUBTRACTS from what `readonly` accumulated, and the subtraction compares STRINGS.
-/// Without this, `writable(["agg/judges"])` against `readonly(["agg/judges/"])` subtracts nothing
+/// Without this, `writable(["rlt/judges"])` against `readonly(["rlt/judges/"])` subtracts nothing
 /// while looking to its author like it worked — a step that believes it may write the graders and
 /// silently cannot, or (with the lists swapped) a deny the author thinks they lifted and did not.
 /// One spelling in, one spelling stored, one comparison that means what it reads like.
 ///
 /// The canonical form drops a trailing `/`, drops `.` and empty components (so `./src`, `src` and
-/// `src//` are one path), and resolves `..` lexically (`agg/judges/../judges` ⇒ `agg/judges`).
+/// `src//` are one path), and resolves `..` lexically (`rlt/judges/../judges` ⇒ `rlt/judges`).
 /// A leading `/` survives — an absolute entry stays absolute.
 ///
 /// # `None` = rejected
@@ -353,17 +353,17 @@ pub fn denied_paths(readonly: &[String], writable: &[String]) -> Vec<String> {
 }
 
 /// The write CARVE-OUT: paths that stay readable but are denied for WRITING, even though they sit
-/// inside the otherwise-writable `cwd`. Today that is exactly `agg/private/` — see [`crate::paths`]
+/// inside the otherwise-writable `cwd`. Today that is exactly `rlt/private/` — see [`crate::paths`]
 /// for what lives there and why.
 ///
 /// DERIVED FROM `cwd` rather than passed in, deliberately. `wrap` confines three different spawn
-/// surfaces (worker, script judge, `agg.yaml` hook) and every one of them is reachable by a worker
+/// surfaces (worker, script judge, `rlt.yaml` hook) and every one of them is reachable by a worker
 /// that edits files in its own cwd. A parameter is a thing a future call site can forget; deriving
 /// it here means adding a fourth surface cannot silently reopen the hole.
 ///
 /// Returned even when the directory does not exist yet (a fresh project, or a unit test whose cwd
 /// is a bare temp dir): both backends match on the path STRING, so denying a not-yet-created
-/// directory is correct and becomes effective the moment agg creates it.
+/// directory is correct and becomes effective the moment rlt creates it.
 fn denied(cwd: &Path) -> Vec<PathBuf> {
     let p = crate::paths::private_dir(cwd);
     // canonicalize when it resolves — macOS Seatbelt matches canonical paths ONLY, so an
@@ -377,10 +377,10 @@ fn denied(cwd: &Path) -> Vec<PathBuf> {
 ///
 /// The derived half comes FIRST and is never conditional on the step's list — that ordering is the
 /// invariant BUILD.md §3.8 pins down: the per-step list is a SECOND argument, never a replacement,
-/// so a step that lists nothing still cannot write `agg/private/`.
+/// so a step that lists nothing still cannot write `rlt/private/`.
 ///
 /// Both tiers share this so `readonly:` means one thing across `sandbox` and `container`, and a
-/// relative entry (`agg/judges`) resolves against the same cwd the wrapper already canonicalized.
+/// relative entry (`rlt/judges`) resolves against the same cwd the wrapper already canonicalized.
 pub(crate) fn deny_set(cwd: &Path, denies: &[String]) -> Vec<PathBuf> {
     let mut out = denied(cwd);
     for d in denies {
@@ -397,7 +397,7 @@ pub(crate) fn deny_set(cwd: &Path, denies: &[String]) -> Vec<PathBuf> {
 
 /// Make a deny path exist, because the two MOUNT-based backends cannot deny one that does not.
 ///
-/// Seatbelt denies by path STRING, so `(deny file-write* (subpath "…/agg/judges"))` binds whether
+/// Seatbelt denies by path STRING, so `(deny file-write* (subpath "…/rlt/judges"))` binds whether
 /// or not the directory is there yet — and keeps binding the moment it appears. `bwrap` and a
 /// container engine deny by READ-ONLY BIND, and a bind needs a mount point, so both used to SKIP a
 /// path that did not exist. That is the same driver getting two different security policies with no
@@ -408,7 +408,7 @@ pub(crate) fn deny_set(cwd: &Path, denies: &[String]) -> Vec<PathBuf> {
 /// mount point anyway — doing it ourselves just means it is owned by the user rather than by root.
 ///
 /// ponytail: an entry naming a not-yet-existing FILE materialises as an empty DIRECTORY. The
-/// ceiling is real but narrow (every deny list agg has ever written names directories); the upgrade
+/// ceiling is real but narrow (every deny list rlt has ever written names directories); the upgrade
 /// path when it bites is to carry the entry's kind on the list and `File::create` instead.
 pub(crate) fn materialize_deny(p: &Path) -> bool {
     p.exists() || std::fs::create_dir_all(p).is_ok()
@@ -467,11 +467,11 @@ mod tests {
     /// The trailing slash is the whole reason normalisation exists: `writable` subtracts by string.
     #[test]
     fn one_directory_has_exactly_one_spelling() {
-        for spelling in ["agg/judges", "agg/judges/", "./agg/judges", "agg//judges//", " agg/judges "] {
-            assert_eq!(normalize_path(spelling).as_deref(), Some("agg/judges"), "spelled `{spelling}`");
+        for spelling in ["rlt/judges", "rlt/judges/", "./rlt/judges", "rlt//judges//", " rlt/judges "] {
+            assert_eq!(normalize_path(spelling).as_deref(), Some("rlt/judges"), "spelled `{spelling}`");
         }
         // `..` resolves lexically rather than surviving into the comparison
-        assert_eq!(normalize_path("agg/judges/../judges").as_deref(), Some("agg/judges"));
+        assert_eq!(normalize_path("rlt/judges/../judges").as_deref(), Some("rlt/judges"));
         // an absolute entry stays absolute
         assert_eq!(normalize_path("/etc/").as_deref(), Some("/etc"));
     }
@@ -489,8 +489,8 @@ mod tests {
     /// `writable` subtracts from what `readonly` accumulated — and only ever exactly.
     #[test]
     fn writable_subtracts_from_readonly() {
-        let ro = normalize_paths(["tests/", "agg/judges/", "src/"]);
-        let w = normalize_paths(["agg/judges"]); // spelled WITHOUT the slash on purpose
+        let ro = normalize_paths(["tests/", "rlt/judges/", "src/"]);
+        let w = normalize_paths(["rlt/judges"]); // spelled WITHOUT the slash on purpose
         assert_eq!(denied_paths(&ro, &w), vec!["tests".to_string(), "src".to_string()]);
         // exact match only: a subtree does not carve a hole
         assert_eq!(denied_paths(&normalize_paths(["src/"]), &normalize_paths(["src/foo"])), vec!["src".to_string()]);
@@ -502,7 +502,7 @@ mod tests {
         let _: bool = available();
     }
 
-    /// ⛔ THE MOAT. The per-step list is a SECOND argument (BUILD.md §3.8): `agg/private/` is in the
+    /// ⛔ THE MOAT. The per-step list is a SECOND argument (BUILD.md §3.8): `rlt/private/` is in the
     /// deny set whether the step listed anything or not, and it stays FIRST so no future edit can
     /// make it conditional on the step's own list.
     #[test]
@@ -512,9 +512,9 @@ mod tests {
 
         assert_eq!(deny_set(cwd, &[]), vec![private.clone()], "no list ⇒ still the carve-out");
 
-        let with = deny_set(cwd, &["agg/judges".to_string(), "src".to_string()]);
+        let with = deny_set(cwd, &["rlt/judges".to_string(), "src".to_string()]);
         assert_eq!(with[0], private, "the derived carve-out comes first and is never dropped");
-        assert_eq!(with[1..], [cwd.join("agg/judges"), cwd.join("src")], "relative ⇒ under cwd");
+        assert_eq!(with[1..], [cwd.join("rlt/judges"), cwd.join("src")], "relative ⇒ under cwd");
 
         // an absolute entry stays absolute (`normalize_path` preserves the leading `/`) — and is
         // CANONICALIZED when it resolves, because Seatbelt matches canonical paths only and `/etc`
@@ -527,20 +527,20 @@ mod tests {
         assert_eq!(dup.len(), 1, "the same path twice is one deny: {dup:?}");
     }
 
-    /// BUILD.md §0.2 rule 4: a list on an UNCONFINED step is inert, and agg says so in the words
-    /// that describe the consequence. "Ignored" would read like agg made a choice; the operator
+    /// BUILD.md §0.2 rule 4: a list on an UNCONFINED step is inert, and rlt says so in the words
+    /// that describe the consequence. "Ignored" would read like rlt made a choice; the operator
     /// needs to read that the step can write the paths it thought it had protected.
     #[test]
     fn a_deny_list_without_a_tier_warns_that_the_step_can_write_the_paths() {
-        let ro = normalize_paths(["tests/", "agg/judges/"]);
+        let ro = normalize_paths(["tests/", "rlt/judges/"]);
         let w = normalize_paths(["tests"]);
 
         let msg = unenforced_denies("implement", Isolation::None, &ro, &w)
             .expect("a list under `none` must warn");
         assert!(msg.contains("implement"), "names the step: {msg}");
         assert!(msg.contains("CAN WRITE"), "states the consequence: {msg}");
-        assert!(!msg.contains("ignor"), "never `ignored` — agg did not choose this: {msg}");
-        assert!(msg.contains("agg/judges"), "names the path that is not protected: {msg}");
+        assert!(!msg.contains("ignor"), "never `ignored` — rlt did not choose this: {msg}");
+        assert!(msg.contains("rlt/judges"), "names the path that is not protected: {msg}");
         assert!(msg.contains("sandbox"), "names the fix: {msg}");
 
         // …and it is a WARNING, not a refusal: nothing here returns an Err. Under a confining tier
@@ -574,22 +574,22 @@ mod tests {
         assert_eq!(inner, vec!["claude", "-p", "do the thing"], "inner program + args survive in order after --");
     }
 
-    /// The wrapper MUST carry the inner command's env, or a wrapped script judge loses its `AGG_*`
+    /// The wrapper MUST carry the inner command's env, or a wrapped script judge loses its `RLT_*`
     /// contract (the exact regression this guards). A rebuilt Command otherwise keeps only the
     /// inherited parent env with none of the per-command overrides.
     #[test]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn wrap_carries_the_inner_command_env() {
         let mut inner = Command::new("/bin/sh");
-        inner.arg("-c").arg("true").env("AGG_JUDGE", "answered").env("AGG_SESSION", "3");
+        inner.arg("-c").arg("true").env("RLT_JUDGE", "answered").env("RLT_SESSION", "3");
         let cwd = std::env::temp_dir();
         let wrapped = wrap(inner, &cwd, &[], &[]).expect("supported OS builds a wrapper");
         let got: std::collections::HashMap<String, String> = wrapped
             .get_envs()
             .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
             .collect();
-        assert_eq!(got.get("AGG_JUDGE").map(String::as_str), Some("answered"), "judge env must survive the wrap");
-        assert_eq!(got.get("AGG_SESSION").map(String::as_str), Some("3"));
+        assert_eq!(got.get("RLT_JUDGE").map(String::as_str), Some("answered"), "judge env must survive the wrap");
+        assert_eq!(got.get("RLT_SESSION").map(String::as_str), Some("3"));
     }
 
     /// REAL kernel confinement, on a real host — the only test that proves the feature rather than
@@ -609,11 +609,11 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn real_sandbox_confines_writes() {
         assert!(available(), "no OS sandbox mechanism on this host — cannot prove confinement");
-        let jail = std::env::temp_dir().join(format!("agg-iso-real-{}", std::process::id()));
+        let jail = std::env::temp_dir().join(format!("rlt-iso-real-{}", std::process::id()));
         std::fs::create_dir_all(&jail).expect("create the jail dir");
         // "Outside" must be outside the jail AND outside $TMPDIR (which the policy grants). The
         // crate dir is neither — and if confinement is broken we notice a stray file and clean it.
-        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/agg-isolation-escape-probe.txt");
+        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/rlt-isolation-escape-probe.txt");
         let _ = std::fs::remove_file(&outside);
 
         let script = format!(
@@ -643,7 +643,7 @@ mod tests {
 
     /// THE CARVE-OUT, proven by the kernel rather than by reading the profile text. This is the
     /// test the `verdicts.jsonl` forgery has to fail against: a confined worker may still write its
-    /// own state (`agg/state/`) and the project source, but NOT `agg/private/` — and it may still
+    /// own state (`rlt/state/`) and the project source, but NOT `rlt/private/` — and it may still
     /// READ the private files, because a judge reads the ledger and the worker reads its brief.
     ///
     /// `#[ignore]`d like its siblings: it spawns the real OS sandbox, which a nested sandbox (CI,
@@ -654,9 +654,9 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn private_dir_is_carved_out_of_the_writable_cwd() {
         assert!(available(), "no OS sandbox on this host — cannot prove confinement");
-        let proj = std::env::temp_dir().join(format!("agg-carve-{}", std::process::id()));
+        let proj = std::env::temp_dir().join(format!("rlt-carve-{}", std::process::id()));
         let private = crate::paths::private_dir(&proj);
-        let state = crate::paths::agg_dir(&proj);
+        let state = crate::paths::rlt_dir(&proj);
         std::fs::create_dir_all(&private).unwrap();
         std::fs::create_dir_all(&state).unwrap();
         // a pre-existing ledger the worker will try to forge a row into, and read back
@@ -681,7 +681,7 @@ mod tests {
 
         // the worker's own world still works — a carve-out that breaks the loop is not a fix
         assert!(stdout.contains("SRC_OK"), "the worker must still write the project:\n{stdout}\n{stderr}");
-        assert!(stdout.contains("STATE_OK"), "…and its own agg/state/:\n{stdout}\n{stderr}");
+        assert!(stdout.contains("STATE_OK"), "…and its own rlt/state/:\n{stdout}\n{stderr}");
         assert!(stdout.contains("READ_OK"), "…and READ the ledger (a judge does):\n{stdout}\n{stderr}");
         // …and the hole is shut
         assert!(stdout.contains("FORGE_DENIED"), "the ledger forgery must be DENIED:\n{stdout}\n{stderr}");
@@ -694,10 +694,10 @@ mod tests {
     /// Everything upstream of here (`Step::readonly`'s accumulation, `writable`'s subtraction, the
     /// trailing-slash normalisation) is tested against strings. This is the one test that asks the
     /// OS whether any of it actually bound, and it exercises the whole chain in one shot: a driver's
-    /// template denies `tests/` and `agg/judges/`, a derived step adds `src/` and re-grants exactly
+    /// template denies `tests/` and `rlt/judges/`, a derived step adds `src/` and re-grants exactly
     /// `tests/`, and the kernel is asked which of the four the worker can write.
     ///
-    /// The fourth assertion is the load-bearing one: `agg/private/` is still carved out. The
+    /// The fourth assertion is the load-bearing one: `rlt/private/` is still carved out. The
     /// per-step list is a SECOND argument to [`wrap`], and if a future edit ever makes it a
     /// replacement, everything else here still passes while the moat is gone.
     ///
@@ -710,8 +710,8 @@ mod tests {
     fn a_steps_readonly_list_reaches_the_kernel() {
         use crate::driver::Step;
         assert!(available(), "no OS sandbox on this host — cannot prove confinement");
-        let proj = std::env::temp_dir().join(format!("agg-denylist-{}", std::process::id()));
-        for d in ["tests", "src", "docs", "agg/judges"] {
+        let proj = std::env::temp_dir().join(format!("rlt-denylist-{}", std::process::id()));
+        for d in ["tests", "src", "docs", "rlt/judges"] {
             std::fs::create_dir_all(proj.join(d)).unwrap();
         }
         std::fs::create_dir_all(crate::paths::private_dir(&proj)).unwrap();
@@ -722,11 +722,11 @@ mod tests {
         // The driver's own chain, verbatim from the sample: the family protects, the member
         // re-grants the ONE thing it legitimately needs.
         let sandboxed =
-            Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "agg/judges/"]);
+            Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/judges/"]);
         let step = sandboxed.create("implement").readonly(["src/"]).writable(["tests"]);
         assert_eq!(
             step.denied(),
-            ["agg/judges", "src"],
+            ["rlt/judges", "src"],
             "inherited from the template + its own, minus the one re-grant"
         );
 
@@ -734,7 +734,7 @@ mod tests {
             "echo t > '{p}/tests/new.txt' && echo TESTS_OK || echo TESTS_DENIED; \
              echo s > '{p}/src/new.txt' && echo SRC_OK || echo SRC_DENIED; \
              echo d > '{p}/docs/new.txt' && echo DOCS_OK || echo DOCS_DENIED; \
-             echo j > '{p}/agg/judges/evil.sh' && echo JUDGES_OK || echo JUDGES_DENIED; \
+             echo j > '{p}/rlt/judges/evil.sh' && echo JUDGES_OK || echo JUDGES_DENIED; \
              cat '{l}' >/dev/null && echo READ_OK; \
              echo forged >> '{l}' && echo FORGE_OK || echo FORGE_DENIED",
             p = proj.display(),
@@ -760,10 +760,10 @@ mod tests {
         // …the step's own `readonly` binds…
         assert!(text.contains("SRC_DENIED"), "the step's own `readonly([\"src/\"])`:\n{text}");
         // …and so does the one it INHERITED from the template it was created from.
-        assert!(text.contains("JUDGES_DENIED"), "`agg/judges/` inherited from the template:\n{text}");
+        assert!(text.contains("JUDGES_DENIED"), "`rlt/judges/` inherited from the template:\n{text}");
         // ⛔ and the DERIVED carve-out is still there beside the per-step list.
         assert!(text.contains("READ_OK"), "reads stay open — a judge reads the ledger:\n{text}");
-        assert!(text.contains("FORGE_DENIED"), "`agg/private/` is still carved out:\n{text}");
+        assert!(text.contains("FORGE_DENIED"), "`rlt/private/` is still carved out:\n{text}");
         assert_eq!(ledger_after, pristine, "the ledger was MODIFIED — the carve-out leaked");
     }
 
@@ -771,7 +771,7 @@ mod tests {
     ///
     /// This stands in for an agent that confines ITSELF — Codex's `sandbox_mode=workspace-write`
     /// (Seatbelt on macOS, Landlock on Linux, the same primitives). Deliberately permissive: the
-    /// spike below must attribute a denial to agg's OUTER jail, so the inner layer has to be one
+    /// spike below must attribute a denial to rlt's OUTER jail, so the inner layer has to be one
     /// that would allow the write on its own. A real `codex` binary is not used — it would need an
     /// auth'd account and a live model call to prove a property of the kernel, not of the agent.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -792,8 +792,8 @@ mod tests {
 
     /// ⚡ **THE NESTING SPIKE** (`internal/BUILD.md` §2.4) — and it comes back **RED on macOS**.
     ///
-    /// §2.4 makes agg wrap EVERY agent under `Isolation::Sandbox`, including one that then applies
-    /// its own kernel sandbox (Codex). Nothing in agg had ever exercised two nested kernel jails,
+    /// §2.4 makes rlt wrap EVERY agent under `Isolation::Sandbox`, including one that then applies
+    /// its own kernel sandbox (Codex). Nothing in rlt had ever exercised two nested kernel jails,
     /// and the ruling assumed they compose. Measured on a real host, 2026-08-05, macOS 15 (Darwin
     /// 25.5): **they do not.**
     ///
@@ -803,11 +803,11 @@ mod tests {
     /// **entirely unrestricted**. Probed one rule at a time: `(allow default)` nests fine;
     /// `(allow default)(deny nvram*)` — a deny on an operation nothing here touches — already
     /// fails, as does an inner profile that is strictly *more* restrictive than the outer. It is
-    /// not a missing clause in agg's profile; no operation name grants it (`sandbox-create` /
+    /// not a missing clause in rlt's profile; no operation name grants it (`sandbox-create` /
     /// `system-sandbox` do not even parse), and adding `system-privilege`, `job-creation`,
     /// `process-info*`, `system*` changes nothing. Any real confinement disables nesting.
     ///
-    /// **What that costs, measured with the real binary** (`codex exec` under agg's profile, with
+    /// **What that costs, measured with the real binary** (`codex exec` under rlt's profile, with
     /// `-c sandbox_mode=workspace-write` as §2.4 ships it): the codex PROCESS survives — it streams
     /// JSON, reaches the network, writes `~/.codex` — but every shell tool call it makes dies, and
     /// it answers *"I couldn't create the file because the shell sandbox denied the operation."*
@@ -815,9 +815,9 @@ mod tests {
     ///
     /// **What DOES deliver the ruling** (same run, inner layer dropped via
     /// `--dangerously-bypass-approvals-and-sandbox` — exactly what `Isolation::Container` already
-    /// does): real work succeeds AND agg's carve-out binds. Codex's own shell reported
-    /// `zsh:1: operation not permitted: agg/private/verdicts.jsonl` and the ledger stayed
-    /// byte-identical. **One layer — agg's — is both sufficient and strictly better than Codex's**
+    /// does): real work succeeds AND rlt's carve-out binds. Codex's own shell reported
+    /// `zsh:1: operation not permitted: rlt/private/verdicts.jsonl` and the ledger stayed
+    /// byte-identical. **One layer — rlt's — is both sufficient and strictly better than Codex's**
     /// (`workspace-write` has no per-path deny list at all). The fix is therefore to treat
     /// `Sandbox` like `Container` in `codex/mod.rs`; that file is frozen by BUILD.md §2.4 item (b),
     /// so this commit does not make the change. Owner's call.
@@ -827,15 +827,15 @@ mod tests {
     /// macOS answer carries.
     ///
     /// The test asserts what we WANT, so it stays red until the mechanism changes. The two
-    /// assertions before it pass today and are the load-bearing ones: agg's jail ALONE delivers
-    /// §2.4, and the control proves the denial is attributable to agg rather than to the inner
+    /// assertions before it pass today and are the load-bearing ones: rlt's jail ALONE delivers
+    /// §2.4, and the control proves the denial is attributable to rlt rather than to the inner
     /// layer. Run it: `cargo test --lib -- --ignored an_agents_own_kernel_sandbox_nests --nocapture`
     #[test]
     #[ignore = "KNOWN RED on macOS (nesting is refused by Seatbelt); spawns real OS sandboxes — run by hand"]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn an_agents_own_kernel_sandbox_nests_inside_aggs() {
+    fn an_agents_own_kernel_sandbox_nests_inside_rlts() {
         assert!(available(), "no OS sandbox on this host — cannot prove confinement");
-        let proj = std::env::temp_dir().join(format!("agg-nest-{}", std::process::id()));
+        let proj = std::env::temp_dir().join(format!("rlt-nest-{}", std::process::id()));
         std::fs::create_dir_all(crate::paths::private_dir(&proj)).unwrap();
         let ledger = crate::paths::verdicts_jsonl(&proj);
         let pristine = "{\"judge\":\"real\"}\n";
@@ -859,40 +859,40 @@ mod tests {
             (text, std::fs::read_to_string(&ledger).unwrap_or_default())
         };
 
-        // 1. THE SHAPE §2.4 SHIPS: agg's jail outside, the agent's own inside.
+        // 1. THE SHAPE §2.4 SHIPS: rlt's jail outside, the agent's own inside.
         let (nested, nested_ledger) =
             run(wrap(self_sandboxing_agent_shaped(&script), &proj, &[], &[]).expect("build the wrapper"));
-        // 2. agg's jail ALONE — the same worker with no inner layer.
+        // 2. rlt's jail ALONE — the same worker with no inner layer.
         let mut sh = Command::new("/bin/sh");
         sh.arg("-c").arg(&script);
         let (outer_only, outer_ledger) = run(wrap(sh, &proj, &[], &[]).expect("build the wrapper"));
-        // 3. CONTROL: the inner layer alone, so a denial in (1)/(2) is attributable to agg's.
+        // 3. CONTROL: the inner layer alone, so a denial in (1)/(2) is attributable to rlt's.
         let (control, _) = run(self_sandboxing_agent_shaped(&script));
 
         let _ = std::fs::remove_dir_all(&proj);
-        eprintln!("--- nested:\n{nested}\n--- agg's jail alone:\n{outer_only}\n--- control:\n{control}");
+        eprintln!("--- nested:\n{nested}\n--- rlt's jail alone:\n{outer_only}\n--- control:\n{control}");
 
-        // agg's own layer delivers the ruling on its own. This is the half that PASSES.
-        assert!(outer_only.contains("SRC_OK"), "real work must survive agg's jail:\n{outer_only}");
+        // rlt's own layer delivers the ruling on its own. This is the half that PASSES.
+        assert!(outer_only.contains("SRC_OK"), "real work must survive rlt's jail:\n{outer_only}");
         assert!(outer_only.contains("READ_OK"), "reads stay open:\n{outer_only}");
-        assert!(outer_only.contains("FORGE_DENIED"), "agg's carve-out must bind:\n{outer_only}");
-        assert_eq!(outer_ledger, pristine, "the ledger was MODIFIED under agg's jail");
+        assert!(outer_only.contains("FORGE_DENIED"), "rlt's carve-out must bind:\n{outer_only}");
+        assert_eq!(outer_ledger, pristine, "the ledger was MODIFIED under rlt's jail");
         assert!(
             control.contains("FORGE_OK"),
             "the CONTROL must be able to forge — an inner layer that denies on its own would prove \
-             nothing about agg's:\n{control}"
+             nothing about rlt's:\n{control}"
         );
 
         // ⚡ THE SPIKE. RED on macOS: Seatbelt refuses `sandbox_apply` from a restricted process.
         assert!(
             nested.contains("INNER_RAN"),
             "NESTING DOES NOT COMPOSE — the agent's own kernel sandbox could not start inside \
-             agg's, so a Codex step under `isolation: sandbox` can run no tool at all. §2.4 needs \
-             the inner layer DROPPED (as `Isolation::Container` already does), not stacked; agg's \
+             rlt's, so a Codex step under `isolation: sandbox` can run no tool at all. §2.4 needs \
+             the inner layer DROPPED (as `Isolation::Container` already does), not stacked; rlt's \
              own jail is sufficient and strictly stronger. See this test's doc comment.\n{nested}"
         );
         assert!(nested.contains("SRC_OK"), "real work must survive BOTH layers:\n{nested}");
-        assert!(nested.contains("FORGE_DENIED"), "agg's carve-out must survive the nesting:\n{nested}");
+        assert!(nested.contains("FORGE_DENIED"), "rlt's carve-out must survive the nesting:\n{nested}");
         assert_eq!(nested_ledger, pristine, "the ledger was MODIFIED through the nested sandbox");
     }
 

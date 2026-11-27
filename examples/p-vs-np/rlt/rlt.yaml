@@ -1,5 +1,5 @@
-# p-vs-np — full-feature showcase. Every agg mechanism on one famous problem.
-# A judge IS a goal, resolved by NAME from agg/judges/<name>.{sh,md}.
+# p-vs-np — full-feature showcase. Every rlt mechanism on one famous problem.
+# A judge IS a goal, resolved by NAME from rlt/judges/<name>.{sh,md}.
 project: "p-vs-np"
 
 # Inherited by EVERY step; a step body may override any of these.
@@ -9,7 +9,7 @@ defaults:
   effort: "max"                          # highest thinking effort — this is a HARD problem. `max` is Claude's
                                          # headless ceiling; the `reconsider` step below runs on codex, which
                                          # clamps `max`→`high` (its own ceiling). See docs/CONFIG.md.
-  state: "state/STATE.md"                # worker-curated forward advice; under gitignored agg/state/, survives a rollback
+  state: "state/STATE.md"                # worker-curated forward advice; under gitignored rlt/state/, survives a rollback
 
 # THE RULER — runs the LLM judge (paper_written) + the summarizer. Immutable across the run:
 # a grader that moves makes verdicts incomparable across cycles.
@@ -24,13 +24,13 @@ steps:
 
   # THE PERSPECTIVE-DIVERSITY STEP. When the run stalls, step back on a DIFFERENT VENDOR — a Claude
   # rabbit hole is not necessarily a Codex rabbit hole. skip_judges ⇒ nothing merges; the work stages
-  # and the next worker step gates it. (Swap `codex` for any installed agent; run `agg doctor` first.)
+  # and the next worker step gates it. (Swap `codex` for any installed agent; run `rlt doctor` first.)
   reconsider:
     agent: "codex"
     prompt: >
       Assume the current proof strategy is a dead end. Name 2-3 fundamentally different lemma
       routes, pick the most promising, and write the rejected routes and WHY they fail into your
-      scratch note — agg will persist them so no future session repeats them.
+      scratch note — rlt will persist them so no future session repeats them.
     skip_judges: true
 
 # The repeating sequence + the run-level ceilings and Definition of Done.
@@ -51,5 +51,5 @@ sequence:
   abort_if: "any_regressed(invariants) OR over_budget"   # bail on a smuggled gap or the token ceiling
 
 hooks:
-  on_start: ["lake build || true"]       # fetch/build the Lean project + Mathlib once (agg stays tool-agnostic)
+  on_start: ["lake build || true"]       # fetch/build the Lean project + Mathlib once (rlt stays tool-agnostic)
 summary: { enabled: true }               # rolling progress digests (runs on the ruler)

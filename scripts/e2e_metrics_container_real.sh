@@ -8,7 +8,7 @@
 # swe-metrics. This one needs the reference image, which is large (~2 GB) and built from a local
 # swe-metrics checkout, so it is run BY HAND:
 #
-#   docker/swe-metrics/build.sh ~/src/swe-metrics            # once → agg-swe-metrics
+#   docker/swe-metrics/build.sh ~/src/swe-metrics            # once → rlt-swe-metrics
 #   ./scripts/e2e_metrics_container_real.sh
 #   SWE_METRICS_IMAGE=my-judges ./scripts/e2e_metrics_container_real.sh
 #   KEEP=1 ./scripts/e2e_metrics_container_real.sh            # keep the workspace (under target/)
@@ -21,10 +21,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WS="$ROOT/target/agg-e2e-metrics-real.$$"
-AGG="$ROOT/target/debug/agg"
+WS="$ROOT/target/rlt-e2e-metrics-real.$$"
+RLT="$ROOT/target/debug/rlt"
 ENGINE="$(command -v docker || command -v podman || true)"
-IMAGE="${SWE_METRICS_IMAGE:-agg-swe-metrics}"
+IMAGE="${SWE_METRICS_IMAGE:-rlt-swe-metrics}"
 
 PASS=0; FAIL=0; declare -a FAILED=()
 sec()  { printf '\n\033[1m── %s\033[0m\n' "$*"; }
@@ -40,13 +40,13 @@ trap '[ -n "${KEEP:-}" ] || rm -rf "$WS"' EXIT
   echo "no image $IMAGE — build it first: docker/swe-metrics/build.sh <your swe-metrics checkout>"; exit 1; }
 mkdir -p "$WS"
 
-printf '\033[1mAgenticGoGo — REAL swe-metrics judges in the judges'"'"' image\033[0m\nworkspace: %s\nimage: %s\n' "$WS" "$IMAGE"
+printf '\033[1mRelentless — REAL swe-metrics judges in the judges'"'"' image\033[0m\nworkspace: %s\nimage: %s\n' "$WS" "$IMAGE"
 ( cd "$ROOT" && cargo build --quiet ) || { bad "cargo build"; exit 1; }
-"$ENGINE" build -q -t agg-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$WS/build.log" 2>&1
+"$ENGINE" build -q -t rlt-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$WS/build.log" 2>&1
 is "the fake-agent worker image builds" "$?" "0"
 
 sec "the fixture: cyclomatic max 5, one clone, a requirement with known vulnerabilities"
-D="$WS/proj"; mkdir -p "$D/agg/judges" "$D/agg/state" "$WS/hostbin"
+D="$WS/proj"; mkdir -p "$D/rlt/judges" "$D/rlt/state" "$WS/hostbin"
 cat > "$WS/hostbin/swe-metrics" <<EOF
 #!/bin/sh
 touch "$WS/HOST_SWE_METRICS_CALLED"; echo "host swe-metrics called" >&2; exit 1
@@ -88,16 +88,16 @@ def render(rows):
 EOF
 sed 's/Report A/Report B/' "$D/report_a.py" > "$D/report_b.py"
 printf 'requests==2.19.0\n' > "$D/requirements.txt"
-cat > "$D/agg/judges/worked.sh" <<'EOF'
+cat > "$D/rlt/judges/worked.sh" <<'EOF'
 #!/bin/sh
 [ -f src/work.txt ] && echo '{"met":true,"value":1,"max":1,"target":1}' || echo '{"met":false,"value":0,"max":1,"target":1}'
 EOF
-chmod +x "$D/agg/judges/worked.sh"
-echo work > "$D/agg/state/STATE.md"
-printf 'agg/state/\nagg/private/\n' > "$D/.gitignore"
-cat > "$D/agg/agg.yaml" <<EOF
+chmod +x "$D/rlt/judges/worked.sh"
+echo work > "$D/rlt/state/STATE.md"
+printf 'rlt/state/\nagg/private/\n' > "$D/.gitignore"
+cat > "$D/rlt/rlt.yaml" <<EOF
 project: metrics-real
-defaults: { model: fake, isolation: container, image: "agg-test-fake-agent:1" }
+defaults: { model: fake, isolation: container, image: "rlt-test-fake-agent:1" }
 judge: { image: "$IMAGE" }
 judges:
   cc_max:  { metric: { id: "complexity.cyclomatic", stat: "max", tool: "lizard" }, max: 10 }
@@ -112,26 +112,26 @@ EOF
 ( cd "$D" && git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init )
 HPATH="$WS/hostbin:$PATH"
 
-( cd "$D" && PATH="$HPATH" "$AGG" doctor --json > "$WS/doctor.json" 2>/dev/null )
+( cd "$D" && PATH="$HPATH" "$RLT" doctor --json > "$WS/doctor.json" 2>/dev/null )
 is "doctor --json: the judges' image has swe-metrics" \
    "$(python3 -c "import json;d=json.load(open('$WS/doctor.json'));print('yes' if any('swe-metrics' in i['clis'] and i['clis']['swe-metrics'] is not None for i in d['container_images']) else 'no')")" "yes"
 
-sec "agg run — every measurement in $IMAGE"
-( cd "$D" && PATH="$HPATH" "$AGG" run --max-sessions 1 > "$WS/run.log" 2>&1 )
-is "agg run reaches done_if (exit 0)" "$?" "0"
+sec "rlt run — every measurement in $IMAGE"
+( cd "$D" && PATH="$HPATH" "$RLT" run --max-sessions 1 > "$WS/run.log" 2>&1 )
+is "rlt run reaches done_if (exit 0)" "$?" "0"
 [ -e "$WS/HOST_SWE_METRICS_CALLED" ] && bad "swe-metrics never ran on the host" || ok "swe-metrics never ran on the host"
 value() { python3 -c "
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
 r = [r for r in rows if r['judge'] == sys.argv[2] and r.get('session') == int(sys.argv[3])]
-print(r[0].get('value') if r else 'none')" "$D/agg/private/verdicts.jsonl" "$1" "$2"; }
+print(r[0].get('value') if r else 'none')" "$D/rlt/private/verdicts.jsonl" "$1" "$2"; }
 error_of() { python3 -c "
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
-print(([r for r in rows if r['judge'] == sys.argv[2]][0].get('error') or ''))" "$D/agg/private/verdicts.jsonl" "$1"; }
+print(([r for r in rows if r['judge'] == sys.argv[2]][0].get('error') or ''))" "$D/rlt/private/verdicts.jsonl" "$1"; }
 is  "the fixture's known complexity: cyclomatic max 5" "$(value cc_max 1)" "5.0"
 is  "the fixture's known duplication: one clone"        "$(value clones 1)" "1.0"
-# where trivy on this host keeps its database — what agg mounts read-only (src/metrics/contained.rs)
+# where trivy on this host keeps its database — what rlt mounts read-only (src/metrics/contained.rs)
 host_trivy_db() {
   local d="${TRIVY_CACHE_DIR:-}"
   if [ -z "$d" ]; then
@@ -151,8 +151,8 @@ else
     *) bad "no host trivy database: the vulnerability judge fails closed" "error: $(error_of vulns)" ;; esac
 fi
 [ "$(value quality 1)" != none ] && ok "the score judge has a score ($(value quality 1))" || bad "the score judge has a score" "$(error_of quality)"
-[ -f "$D/agg/private/metrics/incumbent/target.json" ] && ok "the incumbent's report is kept under agg/private/" || bad "the incumbent's report is kept"
-ls "$D"/agg/private/evidence/*/1/cc_max/swe-metrics/target/report.json >/dev/null 2>&1 \
+[ -f "$D/rlt/private/metrics/incumbent/target.json" ] && ok "the incumbent's report is kept under rlt/private/" || bad "the incumbent's report is kept"
+ls "$D"/rlt/private/evidence/*/1/cc_max/swe-metrics/target/report.json >/dev/null 2>&1 \
   && ok "the shared report is kept as evidence" || bad "the shared report is kept as evidence"
 is  "the project tree is clean (swe-metrics wrote nothing into it)" "$(cd "$D" && git status --porcelain -- . ':!src' | wc -l | tr -d ' ')" "0"
 
@@ -161,4 +161,4 @@ if [ "$FAIL" -gt 0 ]; then
   for f in "${FAILED[@]}"; do printf '  • %s\n' "$f"; done
   exit 1
 fi
-printf '\033[32mall green\033[0m  (agg-test-fake-agent:1 and %s are left in the engine)\n' "$IMAGE"
+printf '\033[32mall green\033[0m  (rlt-test-fake-agent:1 and %s are left in the engine)\n' "$IMAGE"

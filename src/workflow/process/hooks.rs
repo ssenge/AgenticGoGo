@@ -119,7 +119,7 @@ fn label(command: &str) -> String {
     std::iter::once(stem).chain(words).collect::<Vec<_>>().join(" ")
 }
 
-/// The hooks of `scope` (`when`) as script judges, each told the step's key (`AGG_STEP`): what the run judges and
+/// The hooks of `scope` (`when`) as script judges, each told the step's key (`RLT_STEP`): what the run judges and
 /// what a worker runs to check itself. A wrapper that can't be written is left out.
 pub fn judges(flow: &Flow, commands: &[String], scope: &Scope, when: When, declared: &dyn Fn(&str) -> Option<Judge>) -> Vec<Judge> {
     let id = match scope {
@@ -131,7 +131,7 @@ pub fn judges(flow: &Flow, commands: &[String], scope: &Scope, when: When, decla
         if let Some(name) = c.strip_prefix(super::declared::HOOK) {
             return declared(name);
         }
-        let path = flow.wrapper(&format!("hook-{id}-{which}-{i}.sh"), &format!("env AGG_STEP='{id}' {c}")).ok()?;
+        let path = flow.wrapper(&format!("hook-{id}-{which}-{i}.sh"), &format!("env RLT_STEP='{id}' {c}")).ok()?;
         Some(Judge::script(format!("hook-{}", label(c)).replace(' ', "-"), path.as_str()))
     }).collect()
 }
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(commands((&process, home), (&none, dir), &step, When::After), ["@judge:parse", "/home/judges/b.py"]);
         assert_eq!(commands((&process, home), (&none, dir), &Scope::Phase("verify"), When::After), ["@judge:tests"]);
         assert!(serde_yaml::from_str::<File>("step: { after: [{ judge: a, run: b }] }\n").is_err(), "an unknown key");
-        let path = std::env::temp_dir().join(format!("agg-hooks-{}.yaml", std::process::id()));
+        let path = std::env::temp_dir().join(format!("rlt-hooks-{}.yaml", std::process::id()));
         std::fs::write(&path, "step: { after: [{ judge: parse }] }\nsteps:\n  build: { before: [{ judge: tests }, x.sh] }\n").unwrap();
         let mut names = judge_names(&path);
         names.sort();

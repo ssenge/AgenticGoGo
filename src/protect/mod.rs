@@ -2,12 +2,12 @@
 //!
 //! # Two layers, and which one is the guarantee
 //! 1. **The kernel** (first line): under `isolation: sandbox`/`container` the patterns reach the
-//!    same mechanism as `agg/private/` — Seatbelt deny rules on macOS, read-only binds under bwrap
+//!    same mechanism as `rlt/private/` — Seatbelt deny rules on macOS, read-only binds under bwrap
 //!    and in a container. A write is refused with `EPERM`/`EROFS` before it happens.
 //! 2. **The gate check** (the guarantee): a content-hash [`snapshot`] of every covered entry —
 //!    tracked, untracked AND gitignored — is taken before the worker starts and compared when it
-//!    exits. Any difference rolls the session back, the paths are put back from agg's own copies,
-//!    and a `protected_path_violation` row lands in `agg/private/violations.jsonl`. This works on
+//!    exits. Any difference rolls the session back, the paths are put back from rlt's own copies,
+//!    and a `protected_path_violation` row lands in `rlt/private/violations.jsonl`. This works on
 //!    EVERY tier, `none` included, whatever the sandbox did or failed to do.
 //!
 //! The kernel layer is what keeps a session's work from being thrown away for one stray write; the
@@ -83,7 +83,7 @@ pub fn union(defaults: &[String], step: &[String]) -> Vec<String> {
 }
 
 /// Does `root` sit on a case-insensitive filesystem? Probed by looking an existing entry up under
-/// its case-swapped name and comparing inodes — no file is written. Every agg project has an `agg/`
+/// its case-swapped name and comparing inodes — no file is written. Every rlt project has an `rlt/`
 /// directory, so there is always an entry with a letter in it to probe.
 pub fn case_insensitive(root: &Path) -> bool {
     let Ok(rd) = std::fs::read_dir(root) else { return false };
@@ -218,7 +218,7 @@ pub fn seatbelt_rules(root: &Path, patterns: &[String]) -> Result<Vec<String>> {
 
 /// The concrete project-relative paths a BIND-based tier re-mounts read-only for `patterns`.
 ///
-/// `dir/**` ⇒ `dir` (agg creates it first if absent — see [`materialize`]); a literal path ⇒ that
+/// `dir/**` ⇒ `dir` (rlt creates it first if absent — see [`materialize`]); a literal path ⇒ that
 /// path if it exists. A literal path that does NOT exist yet has no mount point and is left to the
 /// gate check, with a warning: binding its parent would deny the whole directory, and creating it
 /// would mean guessing whether it is meant to be a file or a directory. [`check_step`] has already
@@ -240,7 +240,7 @@ pub fn bind_paths(root: &Path, patterns: &[String]) -> Vec<String> {
 }
 
 /// Create every `dir/**` root that does not exist yet, BEFORE the session's snapshot, on a tier
-/// that [`binds`]: the bind needs a mount point, and a directory agg creates after the snapshot
+/// that [`binds`]: the bind needs a mount point, and a directory rlt creates after the snapshot
 /// would read as the worker's doing.
 pub fn materialize(root: &Path, tier: Isolation, patterns: &[String]) {
     if !binds(tier) {
@@ -257,7 +257,7 @@ pub fn materialize(root: &Path, tier: Isolation, patterns: &[String]) {
 // the ledger
 // ---------------------------------------------------------------------------------------------
 
-/// One row of `agg/private/violations.jsonl`.
+/// One row of `rlt/private/violations.jsonl`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViolationRecord {
     /// the session whose worker changed the paths (for `between_sessions`, the one before).
@@ -271,12 +271,12 @@ pub struct ViolationRecord {
     pub window: String,
     /// project-relative, sorted.
     pub paths: Vec<String>,
-    /// whether agg put every path back. `false` is followed by a hard stop of the run.
+    /// whether rlt put every path back. `false` is followed by a hard stop of the run.
     pub restored: bool,
     pub ts: u64,
 }
 
-/// `agg/private/violations.jsonl` ([`crate::paths::violations_jsonl`]).
+/// `rlt/private/violations.jsonl` ([`crate::paths::violations_jsonl`]).
 pub fn ledger_path(dir: &Path) -> PathBuf {
     crate::paths::violations_jsonl(dir)
 }

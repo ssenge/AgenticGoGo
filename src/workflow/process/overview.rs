@@ -1,4 +1,4 @@
-//! `agg process <file> --overview [--columns <key>,…] [--only-with <key>]`: the process as one Markdown table per
+//! `rlt process <file> --overview [--columns <key>,…] [--only-with <key>]`: the process as one Markdown table per
 //! phase, written from its steps' `meta` fields: a row per numbered step, its label first, then a cell per column.
 //! The columns are meta keys (default: every key that occurs, in order of first appearance); `--only-with` keeps
 //! the steps that have that key. A phase without a row is left out.
@@ -73,7 +73,7 @@ fn list_after(args: &[String], name: &str) -> Result<Vec<String>> {
     Ok(value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
 }
 
-/// `agg process <file> --overview …`: prints the tables.
+/// `rlt process <file> --overview …`: prints the tables.
 pub fn command(file: &std::path::Path, args: &[String]) -> Result<()> {
     let text = std::fs::read_to_string(file).map_err(|e| anyhow!("{}: {e}", file.display()))?;
     let process = Process::parse(&text).map_err(|e| anyhow!("{}: {e}", file.display()))?;

@@ -1,5 +1,5 @@
-//! `agg process` (A-37) against a real project: the example process (`examples/process/`), a git repo, a fake `claude`
-//! worker and a fake `codex` critic on PATH. Each test runs the `agg` binary and reads what the run produced: the step
+//! `rlt process` (A-37) against a real project: the example process (`examples/process/`), a git repo, a fake `claude`
+//! worker and a fake `codex` critic on PATH. Each test runs the `rlt` binary and reads what the run produced: the step
 //! history, the work on `main`, the files the scripts and hooks wrote.
 //!
 //! Unix-only (the fake agents are shell scripts), like the rest of the suite.
@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 
 /// The fake agents' `bin/` and a throwaway HOME, shared by the tests (each test's own project is apart).
 static ENV: LazyLock<(PathBuf, PathBuf)> = LazyLock::new(|| {
-    let root = std::env::temp_dir().join(format!("agg-process-env-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("rlt-process-env-{}", std::process::id()));
     let (bin, home) = (root.join("bin"), root.join("home"));
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&home).unwrap();
@@ -29,15 +29,15 @@ for a in "$@"; do
     *INSTRUCTIONS.md*) worker=1 ;;
   esac
 done
-if [ -n "$worker" ]; then cat agg/private/INSTRUCTIONS.md >> .git/agg-worker.args; fi
-answer=$(grep -o '/[^ ]*task-force\.yaml' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1)
-if [ -n "$answer" ] && [ -f task-force.answer ]; then cp task-force.answer "$answer"; [ -f .git/agg-keep-answer ] || rm task-force.answer; fi
+if [ -n "$worker" ]; then cat rlt/private/INSTRUCTIONS.md >> .git/rlt-worker.args; fi
+answer=$(grep -o '/[^ ]*task-force\.yaml' rlt/private/INSTRUCTIONS.md 2>/dev/null | tail -1)
+if [ -n "$answer" ] && [ -f task-force.answer ]; then cp task-force.answer "$answer"; [ -f .git/rlt-keep-answer ] || rm task-force.answer; fi
 # a task force session repairs the cause (the workers are no longer idle) unless the project says it is stubborn
-if grep -q '^## The failure' agg/private/INSTRUCTIONS.md 2>/dev/null && [ ! -f .git/agg-stubborn ]; then rm -f .git/agg-idle; fi
+if grep -q '^## The failure' rlt/private/INSTRUCTIONS.md 2>/dev/null && [ ! -f .git/rlt-stubborn ]; then rm -f .git/rlt-idle; fi
 # an exam's repairer disputes a finding when the project says so
-dispute=$(grep -o 'The disputes file: `[^`]*`' agg/private/INSTRUCTIONS.md 2>/dev/null | tail -1 | cut -d'`' -f2)
-if [ -n "$dispute" ] && [ -f .git/agg-dispute ]; then echo "t1 is wrong" > "$dispute"; fi
-if [ -n "$worker" ] && [ ! -f .git/agg-idle ] && [ -z "$dispute" -o ! -f .git/agg-dispute ]; then
+dispute=$(grep -o 'The disputes file: `[^`]*`' rlt/private/INSTRUCTIONS.md 2>/dev/null | tail -1 | cut -d'`' -f2)
+if [ -n "$dispute" ] && [ -f .git/rlt-dispute ]; then echo "t1 is wrong" > "$dispute"; fi
+if [ -n "$worker" ] && [ ! -f .git/rlt-idle ] && [ -z "$dispute" -o ! -f .git/rlt-dispute ]; then
   echo "session $$" >> work.log
   git add -A >/dev/null 2>&1
   git commit -qm "worker: did work" >/dev/null 2>&1
@@ -95,10 +95,10 @@ fn project_in(d: &Path, settings: &str) {
     git(d, &["commit", "-qm", "baseline"]);
 }
 
-/// `agg process <example> <project> <args>`.
+/// `rlt process <example> <project> <args>`.
 fn run(dir: &Path, args: &[&str]) -> Output {
     let (bin, home) = &*ENV;
-    Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(process_file()).arg(dir).args(args).current_dir(dir)
+    Command::new(env!("CARGO_BIN_EXE_rlt")).arg("process").arg(process_file()).arg(dir).args(args).current_dir(dir)
         .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("HOME", home)
         .output_bounded().unwrap()
 }
@@ -147,7 +147,7 @@ fn a_process_runs_in_file_order_with_numbers_from_position() {
     assert!(ids.contains(&("1.3 Survey".into(), "survey".into())));
     assert_eq!(std::fs::read_to_string(d.join("accepted.log")).unwrap(), "U1\nU2\n");
     let doc = read(d, "checkpoints/build.md");
-    assert!(doc.contains("U1 since refs/agg/before/construct-U1") && doc.contains("U2 since refs/agg/before/construct-U2"),
+    assert!(doc.contains("U1 since refs/rlt/before/construct-U1") && doc.contains("U2 since refs/rlt/before/construct-U2"),
             "a sibling step's ref is `{{{{ before.<id> }}}}`: {doc}");
     assert!(!steps(d).iter().any(|(s, _)| s == "2.4 CP2 Build approved document"), "a checkpoint without `prepare` has no document step");
     let phases = std::fs::read_to_string(d.join(".git/phase-hooks.log")).unwrap();
@@ -222,7 +222,7 @@ fn a_checkpoint_asks_a_human_and_a_decision_in_the_yes_goes_back_to_its_owner() 
         let a = common::wait_open_ask(&dir);
         std::fs::create_dir_all(dir.join("checkpoints")).unwrap();
         std::fs::write(dir.join("checkpoints/cp-survey-decisions.md"), "- keep the survey short\n").unwrap();
-        agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
+        relentless::core::asks::answer(&dir, &a.id, "yes", "test", relentless::util::now_epoch()).unwrap();
         a.question
     });
     let out = run(d, &["--until", "cp-survey"]);
@@ -232,7 +232,7 @@ fn a_checkpoint_asks_a_human_and_a_decision_in_the_yes_goes_back_to_its_owner() 
     let h = history(d);
     assert!(h.iter().any(|e| e["kind"] == "reentry" && e["step"] == "1.3 Survey"
         && e["rationale"].as_str().unwrap().contains("keep the survey short")), "{h:#?}");
-    let briefs = read(d, ".git/agg-worker.args");
+    let briefs = read(d, ".git/rlt-worker.args");
     assert!(briefs.contains("## Since your last result") && briefs.contains("+- keep the survey short"),
             "the survey's refresh shows the decision in what it reads: {briefs}");
     assert_eq!(h.iter().filter(|e| e["kind"] == "approval" && e["step"] == "1.4 CP1 Survey approved").count(), 2,
@@ -245,7 +245,7 @@ fn a_checkpoint_asks_a_human_and_a_decision_in_the_yes_goes_back_to_its_owner() 
 fn the_task_force_repairs_a_failed_step_in_place() {
     let tmp = project(AUTO);
     let d = tmp.path();
-    touch(d, ".git/agg-idle");
+    touch(d, ".git/rlt-idle");
     std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: the workers were idle\nnote: woke them\n").unwrap();
     let out = run(d, &["--until", "survey"]);
     assert!(out.status.success(), "{}", said(&out));
@@ -253,7 +253,7 @@ fn the_task_force_repairs_a_failed_step_in_place() {
     let fixed = h.iter().find(|e| e["kind"] == "task-force" && e["met"] == true).unwrap_or_else(|| panic!("{h:#?}"));
     assert!(fixed["rationale"].as_str().unwrap().starts_with("fixed in place"), "{fixed}");
     assert_eq!(fixed["id"], "survey");
-    let briefs = read(d, ".git/agg-worker.args");
+    let briefs = read(d, ".git/rlt-worker.args");
     assert!(briefs.contains("## What step 1.3 Survey must keep to") && briefs.contains("judges/survey-review.md"), "the rubric is in the task force's brief");
     assert!(briefs.contains("the app lives in `app/`"), "the process's own section is in it");
     assert!(steps(d).contains(&("1.3 Survey".to_string(), "done".to_string())));
@@ -265,9 +265,9 @@ fn the_task_force_repairs_a_failed_step_in_place() {
 fn a_repair_in_place_must_pass_the_task_forces_checks() {
     let tmp = project(AUTO);
     let d = tmp.path();
-    touch(d, ".git/agg-idle");
-    touch(d, ".git/agg-fix-reject");
-    touch(d, ".git/agg-keep-answer");
+    touch(d, ".git/rlt-idle");
+    touch(d, ".git/rlt-fix-reject");
+    touch(d, ".git/rlt-keep-answer");
     std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: the workers were idle\nnote: woke them\n").unwrap();
     let out = run(d, &["--until", "survey"]);
     assert!(out.status.success(), "{}", said(&out));
@@ -279,7 +279,7 @@ fn a_repair_in_place_must_pass_the_task_forces_checks() {
     assert_eq!(force.len(), 2, "{h:#?}");
     assert!(force[0]["rationale"].as_str().unwrap().contains("not accepted: fix-fix-check: the repair broke a gate in survey"), "{}", force[0]);
     assert_eq!((force[1]["met"].as_bool(), force[1]["id"].as_str()), (Some(true), Some("survey")));
-    let briefs = read(d, ".git/agg-worker.args");
+    let briefs = read(d, ".git/rlt-worker.args");
     assert!(briefs.contains("the task force's repair in place was not accepted: fix-fix-check: the repair broke a gate in survey"),
             "the verdict is in the next attempt's brief");
     let told = read(d, ".git/fix-check.log");
@@ -293,26 +293,26 @@ fn a_repair_in_place_must_pass_the_task_forces_checks() {
 }
 
 /// A step that starts while an orphaned session branch holds work of a session of the same step gets a section naming
-/// the branch with what it changed; a branch of another step is not named. agg merges nothing itself.
+/// the branch with what it changed; a branch of another step is not named. rlt merges nothing itself.
 #[test]
 fn a_step_is_told_of_the_work_a_stopped_session_left() {
     let tmp = project(AUTO);
     let d = tmp.path();
-    for (branch, step) in [("agg/old/orphaned-5/session-2", "survey"), ("agg/old/orphaned-5/session-3", "package")] {
+    for (branch, step) in [("rlt/old/orphaned-5/session-2", "survey"), ("rlt/old/orphaned-5/session-3", "package")] {
         git(d, &["checkout", "-q", "-b", branch]);
         std::fs::write(d.join(format!("{}.txt", &branch[branch.len() - 9..])), "stopped work\n").unwrap();
         git(d, &["add", "-A"]);
         git(d, &["commit", "-qm", "a stopped session"]);
-        git(d, &["config", &format!("branch.{branch}.agg-step"), step]);
+        git(d, &["config", &format!("branch.{branch}.rlt-step"), step]);
         git(d, &["checkout", "-q", "main"]);
     }
     let out = run(d, &["--until", "survey"]);
     assert!(out.status.success(), "{}", said(&out));
-    let briefs = read(d, ".git/agg-worker.args");
+    let briefs = read(d, ".git/rlt-worker.args");
     assert!(briefs.contains("## Work a stopped session left"), "{briefs}");
-    assert!(briefs.contains("### agg/old/orphaned-5/session-2 (changes against ") && briefs.contains("session-2.txt"), "{briefs}");
+    assert!(briefs.contains("### rlt/old/orphaned-5/session-2 (changes against ") && briefs.contains("session-2.txt"), "{briefs}");
     assert!(!briefs.contains("orphaned-5/session-3"), "another step's work is not offered");
-    assert!(!d.join("session-2.txt").exists(), "agg did not merge it");
+    assert!(!d.join("session-2.txt").exists(), "rlt did not merge it");
 }
 
 /// A failure the task force can't mend uses up its repairs for that step, and the run exits 6: a supervisor can't take it
@@ -321,9 +321,9 @@ fn a_step_is_told_of_the_work_a_stopped_session_left() {
 fn a_spent_limit_exits_6() {
     let tmp = project(AUTO);
     let d = tmp.path();
-    touch(d, ".git/agg-idle");
-    touch(d, ".git/agg-stubborn");
-    touch(d, ".git/agg-keep-answer");
+    touch(d, ".git/rlt-idle");
+    touch(d, ".git/rlt-stubborn");
+    touch(d, ".git/rlt-keep-answer");
     std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: guessed\nnote: changed x\n").unwrap();
     let out = run(d, &["--until", "survey"]);
     assert_eq!(out.status.code(), Some(6), "{}", said(&out));
@@ -349,7 +349,7 @@ fn a_trusted_proposal_re_enters_without_asking() {
     let tf = h.iter().find(|e| e["kind"] == "task-force" && e["met"] == true).unwrap_or_else(|| panic!("{h:#?}"));
     assert!(tf["rationale"].as_str().unwrap().contains("a proposal the driver trusts, no ask"), "{tf}");
     assert_eq!(tf["id"], "construct-U1");
-    let briefs = read(d, ".git/agg-worker.args");
+    let briefs = read(d, ".git/rlt-worker.args");
     assert!(briefs.contains("## Note from a later step") && briefs.contains("list every unit"), "the survey got the note");
     assert!(briefs.contains("Only files matching app/a/**"), "the failed unit's constraints are in the task force's brief");
     assert!(steps(d).contains(&("2.2-U1 Accept".to_string(), "tool".to_string())), "the run went on after the re-entry");
@@ -376,7 +376,7 @@ fn a_units_brief_holds_its_item_and_the_house_rules() {
     let d = tmp.path();
     let out = run(d, &["--until", "accept-U1"]);
     assert!(out.status.success(), "{}", said(&out));
-    let briefs = read(d, ".git/agg-worker.args");
+    let briefs = read(d, ".git/rlt-worker.args");
     let unit = briefs.rsplit("# Session ").next().unwrap();
     assert!(unit.contains("## Your unit") && unit.contains("id: U1") && unit.contains("note: first"), "{unit}");
     assert!(unit.contains("You are working on 2.1-U1 Construct (step id `construct`)"), "{unit}");
@@ -421,7 +421,7 @@ fn a_dispute_re_enters_the_exams_writer_once() {
     touch(d, "exam.fails");
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "exam"]);
-    touch(d, ".git/agg-dispute");
+    touch(d, ".git/rlt-dispute");
     let out = run(d, &["--from", "docs-exam", "--until", "docs-exam"]);
     assert!(!out.status.success() && said(&out).contains("after `package` wrote the exam again"), "{}", said(&out));
     let h = history(d);
@@ -433,7 +433,7 @@ fn a_dispute_re_enters_the_exams_writer_once() {
 fn on_fail_runs_when_the_step_ends_the_run_unmet() {
     let tmp = project(AUTO);
     let d = tmp.path();
-    touch(d, ".git/agg-idle");
+    touch(d, ".git/rlt-idle");
     let out = run(d, &["--from", "package", "--until", "package"]);
     assert!(!out.status.success(), "{}", said(&out));
     assert_eq!(read(d, ".git/on-fail.log"), "package failed\n");
@@ -448,21 +448,21 @@ fn check_and_list_read_only_the_file_and_a_bad_process_is_not_run() {
     let d = tmp.path();
     let bad = tempfile::tempdir().unwrap();
     std::fs::write(bad.path().join("process.yaml"), "version: 1\nphases:\n- id: p\n  name: P\n  steps:\n  - { id: s, name: S, kind: script, run: nowhere/x.sh }\n").unwrap();
-    let agg = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").args(args).current_dir(d).output_bounded().unwrap();
-    let checked = agg(&[bad.path().join("process.yaml").to_str().unwrap(), "--check"]);
+    let rlt = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_rlt")).arg("process").args(args).current_dir(d).output_bounded().unwrap();
+    let checked = rlt(&[bad.path().join("process.yaml").to_str().unwrap(), "--check"]);
     assert_eq!(checked.status.code(), Some(1));
     let verdict: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&checked.stdout).lines().last().unwrap()).unwrap();
     assert_eq!(verdict["met"], false);
     assert!(verdict["rationale"].as_str().unwrap().contains("nowhere/x.sh"), "{verdict}");
-    let ran = agg(&[bad.path().join("process.yaml").to_str().unwrap(), d.to_str().unwrap()]);
+    let ran = rlt(&[bad.path().join("process.yaml").to_str().unwrap(), d.to_str().unwrap()]);
     assert!(!ran.status.success() && said(&ran).contains("1 problem(s)"), "{}", said(&ran));
-    let listed = agg(&[process_file().to_str().unwrap(), "--list"]);
+    let listed = rlt(&[process_file().to_str().unwrap(), "--list"]);
     let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
     let labels: Vec<&str> = list.as_array().unwrap().iter().filter_map(|e| e["label"].as_str()).collect();
     assert!(labels.contains(&"1.4 CP1 Survey approved") && labels.contains(&"2.4 CP2 Build approved") && labels.contains(&"3.4 Handover"), "{labels:?}");
-    let ok = agg(&[process_file().to_str().unwrap(), "--check"]);
+    let ok = rlt(&[process_file().to_str().unwrap(), "--check"]);
     assert!(ok.status.success(), "{}", said(&ok));
-    let table = agg(&[process_file().to_str().unwrap(), "--overview", "--columns", "desc,done"]);
+    let table = rlt(&[process_file().to_str().unwrap(), "--overview", "--columns", "desc,done"]);
     let text = String::from_utf8_lossy(&table.stdout);
     assert!(text.starts_with("## Phase 1: ") && text.contains("| Step | Desc | Done |"), "{text}");
     assert!(text.contains("| 1.1 Fetch | Gets the sources | the sources are there |"), "{text}");
@@ -492,10 +492,10 @@ fn mini_home() -> tempfile::TempDir {
     tmp
 }
 
-/// `agg process <home>/process.yaml <project>`.
+/// `rlt process <home>/process.yaml <project>`.
 fn run_mini(home: &Path, dir: &Path) -> Output {
     let (bin, h) = &*ENV;
-    Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(home.join("process.yaml")).arg(dir).current_dir(dir)
+    Command::new(env!("CARGO_BIN_EXE_rlt")).arg("process").arg(home.join("process.yaml")).arg(dir).current_dir(dir)
         .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("HOME", h).output_bounded().unwrap()
 }
 
@@ -511,7 +511,7 @@ fn rationales(dir: &Path, kind: &str, label: &str) -> Vec<String> {
 fn the_inputs_are_committed_and_declared_files_are_checked() {
     let (home, tmp) = (mini_home(), project(""));
     let d = tmp.path();
-    git(d, &["checkout", "-q", "-b", "agg/session-left-over"]);
+    git(d, &["checkout", "-q", "-b", "rlt/session-left-over"]);
     std::fs::write(d.join("filled-in.md"), "an input").unwrap();
     let out = run_mini(home.path(), d);
     assert!(out.status.success(), "{}", said(&out));
@@ -576,10 +576,10 @@ fn scenario_folder(scenarios: &[(&str, &str)]) -> tempfile::TempDir {
     tmp
 }
 
-/// `agg process <example> --scenario <files> --projects <dir>/projects`.
+/// `rlt process <example> --scenario <files> --projects <dir>/projects`.
 fn play(dir: &Path, files: &[&str]) -> Output {
     let (_, home) = &*ENV;
-    Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(process_file()).arg("--scenario")
+    Command::new(env!("CARGO_BIN_EXE_rlt")).arg("process").arg(process_file()).arg("--scenario")
         .args(files.iter().map(|f| dir.join(f))).arg("--projects").arg(dir.join("projects")).current_dir(dir)
         .env("HOME", home).output_bounded().unwrap()
 }
@@ -617,7 +617,7 @@ fn a_scenario_with_an_unknown_key_is_refused() {
 
 // ---- A-38: the run report -----------------------------------------------------------------------------------------
 
-/// `agg process <file> <project> --report <kind> --json`, parsed.
+/// `rlt process <file> <project> --report <kind> --json`, parsed.
 fn report(dir: &Path, kind: &str) -> serde_json::Value {
     let out = run(dir, &["--report", kind, "--json"]);
     assert!(out.status.success(), "{}", said(&out));
@@ -626,7 +626,7 @@ fn report(dir: &Path, kind: &str) -> serde_json::Value {
 
 /// The report of a finished run: the map has each step in its phase with a state (an `each`'s steps once per item, a
 /// skipped step skipped, a checkpoint answered `auto`), the timeline a row per result with its totals, the profile
-/// the steps with their substeps; `agg serve`'s endpoint isn't needed to read them.
+/// the steps with their substeps; `rlt serve`'s endpoint isn't needed to read them.
 #[test]
 fn the_run_report_has_a_map_a_timeline_and_a_profile() {
     let tmp = project(AUTO);
@@ -650,17 +650,17 @@ fn the_run_report_has_a_map_a_timeline_and_a_profile() {
     let text = run(d, &["--report", "timeline"]);
     assert!(said(&text).contains("wall ") && said(&text).contains("repairs 0"), "{}", said(&text));
     assert!(!run(d, &["--report", "nonsense"]).status.success());
-    // what `agg serve` and `agg status` read: the project noted its process file
-    assert_eq!(agg::workflow::process::report::of(d, "map").unwrap()["ended"], true);
-    assert!(agg::workflow::process::report::of(d, "nonsense").is_none());
-    assert!(agg::workflow::process::report::of(tmp.path().join("nowhere").as_path(), "map").is_none());
+    // what `rlt serve` and `rlt status` read: the project noted its process file
+    assert_eq!(relentless::workflow::process::report::of(d, "map").unwrap()["ended"], true);
+    assert!(relentless::workflow::process::report::of(d, "nonsense").is_none());
+    assert!(relentless::workflow::process::report::of(tmp.path().join("nowhere").as_path(), "map").is_none());
 }
 
 // ---- A-38: standing texts ---------------------------------------------------------------------------------------------
 
-/// `--brief <step>` prints the process's parts of a worker's brief without running anything: agg's standing texts
+/// `--brief <step>` prints the process's parts of a worker's brief without running anything: rlt's standing texts
 /// (the system prompt, the shared machine, the notes with the project's file), the step's prompt, and the critic's scope
-/// with the file's own text after agg's; `--brief task-force` the task force's prompt (agg's, then the file's).
+/// with the file's own text after rlt's; `--brief task-force` the task force's prompt (rlt's, then the file's).
 #[test]
 fn a_brief_shows_the_standing_texts_and_the_files_that_follow_them() {
     let tmp = project(AUTO);
@@ -669,20 +669,20 @@ fn a_brief_shows_the_standing_texts_and_the_files_that_follow_them() {
     assert!(out.status.success(), "{}", said(&out));
     let brief = said(&out);
     let at = |needle: &str| brief.find(needle).unwrap_or_else(|| panic!("{needle} not in the brief:\n{brief}"));
-    assert!(at("Your brief is agg/private/INSTRUCTIONS.md") < at("the worker's prompt (prompts/survey.md)"), "{brief}");
+    assert!(at("Your brief is rlt/private/INSTRUCTIONS.md") < at("the worker's prompt (prompts/survey.md)"), "{brief}");
     assert!(at("the worker's prompt") < at("## Working on a shared machine"), "{brief}");
     assert!(brief.contains("`notes.md` holds what earlier steps learned") && brief.contains("## survey"), "{brief}");
-    assert!(at("## What you review, and what you never raise") < at("the critic's rubric"), "agg's scope, then the file's: {brief}");
+    assert!(at("## What you review, and what you never raise") < at("the critic's rubric"), "rlt's scope, then the file's: {brief}");
     let force = said(&run(d, &["--brief", "task-force"]));
-    assert!(force.find("## Goal").unwrap() < force.find("A step failed. Find its cause").unwrap(), "agg's text, then the file's: {force}");
+    assert!(force.find("## Goal").unwrap() < force.find("A step failed. Find its cause").unwrap(), "rlt's text, then the file's: {force}");
     assert!(force.contains("**`fixed`**"), "{force}");
     let script = run(d, &["--brief", "sources"]);
     assert!(!script.status.success() && said(&script).contains("only an agent step"), "{}", said(&script));
 }
 
-// ---- A-39: the process runs in `agg serve` --------------------------------------------------------------------------
+// ---- A-39: the process runs in `rlt serve` --------------------------------------------------------------------------
 
-/// `agg serve --projects <root> --process <example>` on a free port, ended when dropped.
+/// `rlt serve --projects <root> --process <example>` on a free port, ended when dropped.
 struct Served {
     child: std::process::Child,
     port: u16,
@@ -700,12 +700,12 @@ impl Served {
     fn start(root: &Path) -> Served {
         let (bin, home) = &*ENV;
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let child = Command::new(env!("CARGO_BIN_EXE_agg")).args(["serve", "--port", &port.to_string(), "--projects"])
+        let child = Command::new(env!("CARGO_BIN_EXE_rlt")).args(["serve", "--port", &port.to_string(), "--projects"])
             .arg(root).arg("--process").arg(process_file()).current_dir(root)
             .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("HOME", home)
             .stderr(std::process::Stdio::null()).spawn().unwrap();
         let served = Served { child, port };
-        wait_for(20, "agg serve answers", || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+        wait_for(20, "rlt serve answers", || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
         served
     }
 
@@ -809,7 +809,7 @@ fn the_web_api_makes_a_project_from_the_form_overlays_the_report_stops_and_resum
 
 // ---- the operator's settings `env` and the reachability preflight ---------------------------------------------------
 
-/// The example process in a folder of its own with its `agg:` line replaced by `agg`, a project, a settings folder
+/// The example process in a folder of its own with its `rlt:` line replaced by `rlt`, a project, a settings folder
 /// (`CLAUDE_CONFIG_DIR`) whose `env` block names a gateway and two more keys, and a `claude` that logs what it was
 /// started with and fails like an unreachable gateway when `ANTHROPIC_BASE_URL` is missing from its environment.
 struct Hosted {
@@ -817,14 +817,14 @@ struct Hosted {
 }
 
 impl Hosted {
-    fn new(agg: &str) -> Hosted {
+    fn new(rlt: &str) -> Hosted {
         let (bin, _) = &*ENV;
         let root = tempfile::tempdir().unwrap();
         let (home, shims, config) = (root.path().join("home"), root.path().join("shims"), root.path().join("config"));
         let copy = Command::new("cp").arg("-R").arg(process_file().parent().unwrap()).arg(&home).status().unwrap();
         assert!(copy.success());
         let file = std::fs::read_to_string(home.join("process.yaml")).unwrap();
-        std::fs::write(home.join("process.yaml"), file.replace("agg: { judge_timeout: 60 }", &format!("agg: {{ judge_timeout: 60{agg} }}"))).unwrap();
+        std::fs::write(home.join("process.yaml"), file.replace("rlt: { judge_timeout: 60 }", &format!("rlt: {{ judge_timeout: 60{rlt} }}"))).unwrap();
         std::fs::create_dir_all(&shims).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("settings.json"),
@@ -850,11 +850,11 @@ exec {bin}/claude "$@"
         std::fs::read_to_string(self.root.path().join("ue.log")).unwrap_or_default().lines().map(String::from).collect()
     }
 
-    /// `agg process <file> <project> <args>` with the shim first on PATH and the settings folder named.
+    /// `rlt process <file> <project> <args>` with the shim first on PATH and the settings folder named.
     fn run(&self, args: &[&str]) -> Output {
         let (bin, home) = &*ENV;
         let path = format!("{}:{}:{}", self.root.path().join("shims").display(), bin.display(), std::env::var("PATH").unwrap_or_default());
-        Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(self.root.path().join("home/process.yaml")).arg(self.project()).args(args)
+        Command::new(env!("CARGO_BIN_EXE_rlt")).arg("process").arg(self.root.path().join("home/process.yaml")).arg(self.project()).args(args)
             .current_dir(self.project()).env("PATH", path).env("HOME", home).env("CLAUDE_CONFIG_DIR", self.root.path().join("config"))
             .env("UE_LOG", self.root.path().join("ue.log")).env("TEST_UE_MINE", "shell").env_remove("ANTHROPIC_BASE_URL")
             .output_bounded().unwrap()
@@ -876,7 +876,7 @@ fn the_settings_env_reaches_the_workers_without_their_settings() {
     }
     let preflight = history(&all.project()).into_iter().filter(|e| e["kind"] == "preflight").count();
     assert_eq!(preflight, 1, "a preflight that passes is one entry of the record");
-    let report: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(all.project().join("agg/private/report.json")).unwrap()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(all.project().join("rlt/private/report.json")).unwrap()).unwrap();
     assert_eq!(report["session"]["setting_sources"], "project,local", "{report}");
     assert_eq!(report["session"]["user_env"], serde_json::json!(["ANTHROPIC_BASE_URL", "TEST_UE_OTHER"]), "{report}");
     assert!(!report.to_string().contains("gw.test"), "never a value");
@@ -895,7 +895,7 @@ fn an_unreachable_agent_stops_the_run_before_any_step_with_its_cause() {
     assert!(!out.status.success(), "{}", said(&out));
     let text = said(&out);
     assert!(text.contains("is not reachable") && text.contains("Invalid API key"), "{text}");
-    assert!(text.contains("the operator's settings env has ANTHROPIC_BASE_URL; set agg: { user_env: true } (or a list) in the process file"), "{text}");
+    assert!(text.contains("the operator's settings env has ANTHROPIC_BASE_URL; set rlt: { user_env: true } (or a list) in the process file"), "{text}");
     assert!(off.log()[0].starts_with("base=unset "), "the key of the block was not passed: {:#?}", off.log());
     assert_eq!(off.log().len(), 1, "one call, then the run was abandoned: {:#?}", off.log());
     assert!(steps(&off.project()).is_empty(), "no step ran: {:#?}", steps(&off.project()));

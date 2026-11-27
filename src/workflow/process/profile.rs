@@ -32,9 +32,9 @@ pub fn profile(run: &Run) -> Value {
 /// The profile, with the tool calls the sessions made when `log` (the driver's stdout log) is given.
 pub fn profile_with(run: &Run, log: Option<&Path>) -> Value {
     let p = &run.project;
-    let mut calls: Vec<Value> = std::fs::read_dir(p.join("agg/private")).into_iter().flatten().flatten().map(|e| e.path())
+    let mut calls: Vec<Value> = std::fs::read_dir(p.join("rlt/private")).into_iter().flatten().flatten().map(|e| e.path())
         .filter(|f| f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("calls.") && n.ends_with(".jsonl")))
-        .flat_map(|f| lines(&f)).chain(lines(&p.join("agg/private/calls.jsonl"))).collect();
+        .flat_map(|f| lines(&f)).chain(lines(&p.join("rlt/private/calls.jsonl"))).collect();
     calls.sort_by_key(|c| c["ts"].as_u64().unwrap_or(0));
     let record = &run.record;
     let start = calls.iter().filter_map(|c| c["ts"].as_f64()).chain(record.iter().filter_map(|r| r["at"].as_f64())).fold(f64::MAX, f64::min);
@@ -160,7 +160,7 @@ fn spans(calls: &[Value]) -> Vec<Value> {
                 out.push(json!({"cat": "driver", "label": "driver", "start": begin, "end": ts - secs}));
             }
             begin = begin.max(ts - secs);
-            // agg reports the run's running totals: a session's share is the growth since the one before
+            // rlt reports the run's running totals: a session's share is the growth since the one before
             let own = |now: f64, running: &mut f64| { let d = if now >= *running { now - *running } else { now }; *running = now; d };
             used = (own(num(outcome(c), "tokens"), &mut tokens), own(num(outcome(c), "cost"), &mut cost));
         }
@@ -193,7 +193,7 @@ fn assign(result: &mut [Value], spans: &[Value]) {
         if rest > 1.0 {
             let end = num(step, "end");
             if let Some(s) = step["segments"].as_array_mut() {
-                s.push(json!({"cat": "driver", "label": "not in agg's call log", "start": end - rest, "end": end}));
+                s.push(json!({"cat": "driver", "label": "not in rlt's call log", "start": end - rest, "end": end}));
             }
         }
     }
@@ -203,7 +203,7 @@ fn assign(result: &mut [Value], spans: &[Value]) {
 fn waits(project: &Path) -> Vec<(f64, f64, String)> {
     let mut open: Vec<Value> = vec![];
     let mut out = vec![];
-    for a in lines(&project.join("agg/private/asks.jsonl")) {
+    for a in lines(&project.join("rlt/private/asks.jsonl")) {
         match a["state"].as_str() {
             Some("open") => open.push(a),
             Some("answered") => {
@@ -221,7 +221,7 @@ fn waits(project: &Path) -> Vec<(f64, f64, String)> {
 }
 
 /// Marks each step's waits for a human answer (a resumed run's earlier part has no call log, so its waits show only
-/// in agg's asks): the part of a step's driver time inside a wait becomes a `human` segment.
+/// in rlt's asks): the part of a step's driver time inside a wait becomes a `human` segment.
 fn mark_waits(project: &Path, result: &mut [Value]) {
     for (from, to, question) in waits(project) {
         for step in result.iter_mut() {
@@ -260,9 +260,9 @@ fn outside(seg: &Value, lo: f64, hi: f64) -> Vec<Value> {
     out
 }
 
-/// Per agg session, the agents and models it ran with (agg's report: worker, and "ruler" the critic).
+/// Per rlt session, the agents and models it ran with (rlt's report: worker, and "ruler" the critic).
 fn used(project: &Path) -> std::collections::HashMap<u64, Vec<Value>> {
-    let report: Value = std::fs::read_to_string(project.join("agg/private/report.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let report: Value = std::fs::read_to_string(project.join("rlt/private/report.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     report["session_log"].as_array().into_iter().flatten().filter_map(|s| Some((s["session"].as_u64()?, s["usage"].as_array().into_iter().flatten()
         .map(|u| json!({"role": if u["role"] == "ruler" { json!("critic") } else { u["role"].clone() }, "agent": u["agent"], "model": u["model"]})).collect())))
         .collect()
@@ -291,7 +291,7 @@ fn add_files(project: &Path, result: &mut [Value]) {
     let mut before: Option<String> = None;
     for s in result.iter_mut() {
         let key = s["id"].as_str().unwrap_or_default().to_string();
-        let since = before.clone().unwrap_or_else(|| format!("refs/agg/before/{key}"));
+        let since = before.clone().unwrap_or_else(|| format!("refs/rlt/before/{key}"));
         let outputs: Vec<String> = match s["commit"].as_str().filter(|c| !c.is_empty()) {
             Some(commit) => std::process::Command::new("git").args(["-C", &project.display().to_string(), "diff", "--name-only", &since, commit])
                 .output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect()).unwrap_or_default(),
@@ -462,7 +462,7 @@ mod tests {
         assign(&mut result, &[json!({"cat": "agent", "label": "s", "start": 20.0, "end": 60.0})]);
         let cats: Vec<String> = result[0]["segments"].as_array().unwrap().iter().map(|s| text(s, "cat")).collect();
         assert_eq!(cats, ["agent", "driver"]);
-        assert_eq!(result[0]["segments"][1]["label"], "not in agg's call log");
+        assert_eq!(result[0]["segments"][1]["label"], "not in rlt's call log");
     }
 
     /// A wait for a human takes its time out of the step's driver time.
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(tool_of("$ Run the tests"), "shell");
         assert_eq!(tool_of("read src/a.rs"), "read");
         assert_eq!(call_label("read /x/proj/src/a.rs", "proj"), "src/a.rs");
-        let log = std::env::temp_dir().join(format!("agg-toolcalls-{}.log", std::process::id()));
+        let log = std::env::temp_dir().join(format!("rlt-toolcalls-{}.log", std::process::id()));
         std::fs::write(&log, "12:00:01 | 🔧 read a.rs\n12:00:03 |    ↳ 10 lines\n12:00:05 | 🔧 $ mvn test\n12:00:09 | ✅ RESULT\n").unwrap();
         let start = jiff::civil::date(2026, 1, 1).at(12, 0, 0, 0).to_zoned(jiff::tz::TimeZone::system()).unwrap().timestamp().as_second() as f64;
         let calls = tool_calls(&log, start, "proj");

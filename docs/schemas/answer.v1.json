@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/answer.v1.json",
-  "title": "agg answer result, schema_version 1",
-  "description": "`agg answer <id> <value> --json`. Exit 0 when accepted, 1 when refused (unknown id, already answered, a value off a bool/choose ask's options). An accepted answer reaches the worker's next brief, or the driver blocked on it.",
+  "$id": "https://github.com/ssenge/relentless/docs/schemas/answer.v1.json",
+  "title": "rlt answer result, schema_version 1",
+  "description": "`rlt answer <id> <value> --json`. Exit 0 when accepted, 1 when refused (unknown id, already answered, a value off a bool/choose ask's options). An accepted answer reaches the worker's next brief, or the driver blocked on it.",
   "type": "object",
   "additionalProperties": false,
   "required": [

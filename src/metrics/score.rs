@@ -7,10 +7,10 @@ use super::spec::ScoreJudge;
 use serde::Deserialize;
 use std::path::Path;
 
-/// The score schema this agg reads.
+/// The score schema this rlt reads.
 pub const SCORE_SCHEMA: &str = "swe-metrics/score/v1";
 
-/// The parts of a score document agg reads.
+/// The parts of a score document rlt reads.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScoreDoc {
     pub schema: String,
@@ -83,7 +83,7 @@ impl ScoreDoc {
         let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("not a swe-metrics score: {e}"))?;
         let schema = v.get("schema").and_then(|s| s.as_str()).unwrap_or_default();
         if schema != SCORE_SCHEMA {
-            return Err(format!("score schema `{schema}`, but this agg reads `{SCORE_SCHEMA}`"));
+            return Err(format!("score schema `{schema}`, but this rlt reads `{SCORE_SCHEMA}`"));
         }
         serde_json::from_value(v).map_err(|e| format!("not a swe-metrics score: {e}"))
     }

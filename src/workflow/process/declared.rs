@@ -106,7 +106,7 @@ mod tests {
         assert!(problems(&both, Path::new("/p"))[0].contains("is that and nothing else"));
     }
 
-    /// The shape problems of `agg.yaml`'s declarations hold here too, and an empty declaration is one.
+    /// The shape problems of `rlt.yaml`'s declarations hold here too, and an empty declaration is one.
     #[test]
     fn a_declarations_shape_problems_are_listed_at_their_keys() {
         let p = process("  a: { command: x, max: 1 }\n  b: {}\n  c: { metric: { id: a.b } }\n");

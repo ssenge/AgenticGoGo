@@ -12,7 +12,7 @@
 //! ```
 //! * `--rm` — no leaked containers, ever; a session is ephemeral by construction.
 //! * `--network host` — full internet, unless the run has an egress allow-list: then an
-//!   `--internal` network whose only way out is agg's proxy ([`super::egress::bridge`]).
+//!   `--internal` network whose only way out is rlt's proxy ([`super::egress::bridge`]).
 //! * mounts are CANONICALIZED first: a symlinked source silently mis-mounts, the same defect class
 //!   that silently denied every write under Seatbelt (§11 BUG 1). A source that is still relative
 //!   after that is a LOUD error — `docker` requires an absolute source, and a container that fails
@@ -42,13 +42,13 @@ const ENGINES: [&str; 2] = ["docker", "podman"];
 /// Is a container engine (docker or podman) runnable on this host?
 ///
 /// Used by [`crate::capability::check`] (refuse `isolation: container` up front when there is none)
-/// and by `agg doctor`.
+/// and by `rlt doctor`.
 pub fn container_available() -> bool {
     engine().is_some()
 }
 
 /// The container engine `isolation: container` would use (`docker`, else `podman`), if one runs.
-/// Reported by `agg doctor --json`.
+/// Reported by `rlt doctor --json`.
 pub fn container_engine() -> Option<&'static str> {
     engine()
 }
@@ -58,7 +58,7 @@ pub fn container_engine() -> Option<&'static str> {
 /// re-mount per denied one.
 ///
 /// `denies` is THIS STEP's `readonly` minus `writable`, and it is an ADDITION to the derived
-/// `agg/private/` carve-out, never a replacement for it — see [`super::deny_set`] and BUILD.md §3.8.
+/// `rlt/private/` carve-out, never a replacement for it — see [`super::deny_set`] and BUILD.md §3.8.
 ///
 /// The analogue of [`super::wrap`] for this tier, and it keeps that function's two contracts:
 /// the inner program + args survive IN ORDER (after the image name), and the uniform stdio is
@@ -66,7 +66,7 @@ pub fn container_engine() -> Option<&'static str> {
 /// the engine client — which is correct, since killing it tears down the attached run.
 ///
 /// Env is forwarded as `-e K=V`, not by setting it on the engine process: a container does NOT
-/// inherit the caller's environment, so anything the caller set (a script judge's `AGG_*` contract)
+/// inherit the caller's environment, so anything the caller set (a script judge's `RLT_*` contract)
 /// would otherwise be silently dropped. A `.env_remove()` needs no counterpart — the container
 /// starts from the image's environment, so the variable is absent already.
 ///
@@ -84,7 +84,7 @@ pub fn containerize(
     containerize_spec(cmd, cwd, &Spec { image, writable, denies, ..Spec::default() })
 }
 
-/// One container agg starts: the image, what it may write, and what crosses into it. The plain
+/// One container rlt starts: the image, what it may write, and what crosses into it. The plain
 /// [`containerize`] is the `Spec` with only the first three set; the agent runtime adds the rest.
 #[derive(Debug, Default)]
 pub struct Spec<'a> {
@@ -93,14 +93,14 @@ pub struct Spec<'a> {
     pub writable: &'a [PathBuf],
     /// extra host paths mounted READ-ONLY at the same path (a library judge's directory).
     pub readonly: &'a [PathBuf],
-    /// this step's `readonly` minus `writable` — added to the derived `agg/private/` carve-out.
+    /// this step's `readonly` minus `writable` — added to the derived `rlt/private/` carve-out.
     pub denies: &'a [String],
     /// mount the project READ-ONLY (a judge grades the tree, it never changes it).
     pub project_ro: bool,
     /// the container's `HOME`: a host dir mounted read-write at the same path. The agent's own
     /// state lives here, not in the host's `~` — which is not in the container at all.
     pub home: Option<&'a Path>,
-    /// env var NAMES passed by name when set in agg's environment (an agent's credentials). Added
+    /// env var NAMES passed by name when set in rlt's environment (an agent's credentials). Added
     /// to the run's `isolation_policy.pass_env`.
     pub env_names: &'a [&'a str],
     /// `~`-relative host files mounted read-only at the same place under `home` when they exist (an
@@ -119,7 +119,7 @@ pub struct Spec<'a> {
 /// contract (`docs/CONFIG.md`).
 ///
 /// Credentials cross by NAME: `-e NAME` makes the engine client read the value from ITS
-/// environment, which is agg's — so the secret is never on a command line (`ps`), and agg never
+/// environment, which is rlt's — so the secret is never on a command line (`ps`), and rlt never
 /// prints the argv. Files cross as read-only mounts. Neither is ever copied or baked into an image.
 pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Command> {
     let prog = cmd.get_program().to_owned();
@@ -135,7 +135,7 @@ pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Comman
         out.arg("-i");
     }
     // The network: the host's (open), or — under an allow-list — an `--internal` network whose only
-    // reachable address is the relay to agg's proxy ([`super::egress::bridge`]). NET_RAW goes too:
+    // reachable address is the relay to rlt's proxy ([`super::egress::bridge`]). NET_RAW goes too:
     // a raw socket has nowhere to go there anyway, and nothing an agent does needs one.
     let proxy_url = match &run.egress {
         None => {
@@ -159,13 +159,13 @@ pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Comman
     for r in spec.readonly {
         mount(&mut out, &canonical(r), true)?;
     }
-    // The DENIES: agg's private state and this step's `readonly` minus `writable` all sit inside the
+    // The DENIES: rlt's private state and this step's `readonly` minus `writable` all sit inside the
     // mounted cwd, so re-mount each of them READ-ONLY on top. The engine applies the more specific
     // mount, and `:ro` is enforced by the kernel inside the container exactly as the Seatbelt deny /
     // bwrap `--ro-bind` are on the other tiers.
     //
     // The derived carve-out comes from the SAME [`super::deny_set`] the `sandbox` tier uses, so the
-    // two tiers cannot drift about what `readonly:` means — or about `agg/private/` being in the set
+    // two tiers cannot drift about what `readonly:` means — or about `rlt/private/` being in the set
     // whether or not the step listed anything.
     //
     // A path that does not exist is materialized first rather than skipped ([`super::materialize_deny`]):
@@ -189,7 +189,7 @@ pub fn containerize_spec(cmd: Command, cwd: &Path, spec: &Spec) -> Result<Comman
         mount_at(&mut out, &c.host, &c.container_path(), true)?;
     }
     if let Some(home) = spec.home {
-        // mounted AFTER the read-only `agg/private/` it lives in: the engine mounts a deeper target
+        // mounted AFTER the read-only `rlt/private/` it lives in: the engine mounts a deeper target
         // over a shallower one, so the home is writable while the rest of `private/` is not.
         mount(&mut out, home, false)?;
         out.arg("-e").arg(format!("HOME={}", home.display()));
@@ -240,7 +240,7 @@ pub(crate) fn owner(dir: &Path) -> Option<String> {
 }
 
 /// The env var names to pass by name: the spec's and the run's, deduplicated, and only those SET in
-/// agg's environment — `-e NAME` for an unset one would hand the container an empty value that an
+/// rlt's environment — `-e NAME` for an unset one would hand the container an empty value that an
 /// agent may read as "authenticated with nothing".
 fn pass_names(spec: &[&str], run: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn containerize_mounts_every_writable_path() {
         let cwd = std::env::temp_dir();
-        let extra = cwd.join("agg-container-writable-probe");
+        let extra = cwd.join("rlt-container-writable-probe");
         let cmd =
             containerize(Command::new("true"), &cwd, std::slice::from_ref(&extra), &[], DEFAULT_IMAGE)
                 .expect("build the run");
@@ -398,18 +398,18 @@ mod tests {
     }
 
     /// A step's `readonly` minus `writable` reaches the engine as a `:ro` re-mount — and the DERIVED
-    /// `agg/private/` carve-out is still there beside it. The second argument never replaces the
+    /// `rlt/private/` carve-out is still there beside it. The second argument never replaces the
     /// first (BUILD.md §3.8), which is the assertion that keeps the moat from being one edit away
     /// from a step that lists nothing.
     #[test]
     fn containerize_denies_the_per_step_paths_and_still_carves_out_private() {
-        let cwd = std::env::temp_dir().join(format!("agg-container-deny-{}", std::process::id()));
-        std::fs::create_dir_all(cwd.join("agg/judges")).unwrap();
-        let cmd = containerize(Command::new("true"), &cwd, &[], &["agg/judges".to_string()], DEFAULT_IMAGE)
+        let cwd = std::env::temp_dir().join(format!("rlt-container-deny-{}", std::process::id()));
+        std::fs::create_dir_all(cwd.join("rlt/judges")).unwrap();
+        let cmd = containerize(Command::new("true"), &cwd, &[], &["rlt/judges".to_string()], DEFAULT_IMAGE)
             .expect("build the run");
         let args = argv(&cmd);
         let ro = |p: PathBuf| format!("{p}:{p}:ro", p = canonical(&p).display());
-        assert!(args.contains(&ro(cwd.join("agg/judges"))), "the step's deny is mounted :ro: {args:?}");
+        assert!(args.contains(&ro(cwd.join("rlt/judges"))), "the step's deny is mounted :ro: {args:?}");
         assert!(
             args.contains(&ro(crate::paths::private_dir(&canonical(&cwd)))),
             "the DERIVED carve-out survives the per-step list: {args:?}"
@@ -423,11 +423,11 @@ mod tests {
     /// Seatbelt denies by path string.
     #[test]
     fn containerize_denies_a_path_that_does_not_exist_yet() {
-        let cwd = std::env::temp_dir().join(format!("agg-container-absent-{}", std::process::id()));
+        let cwd = std::env::temp_dir().join(format!("rlt-container-absent-{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
-        let absent = cwd.join("agg/judges");
+        let absent = cwd.join("rlt/judges");
         assert!(!absent.exists(), "the point of the test is that it is not there");
-        let cmd = containerize(Command::new("true"), &cwd, &[], &["agg/judges".to_string()], DEFAULT_IMAGE)
+        let cmd = containerize(Command::new("true"), &cwd, &[], &["rlt/judges".to_string()], DEFAULT_IMAGE)
             .expect("build the run");
         let want = format!("{p}:{p}:ro", p = canonical(&absent).display());
         assert!(argv(&cmd).contains(&want), "an absent deny still binds: {:?}", argv(&cmd));
@@ -439,11 +439,11 @@ mod tests {
     #[test]
     fn containerize_forwards_the_inner_command_env() {
         let mut inner = Command::new("true");
-        inner.env("AGG_JUDGE", "answered").env_remove("SHOULD_BE_ABSENT");
+        inner.env("RLT_JUDGE", "answered").env_remove("SHOULD_BE_ABSENT");
         let cmd =
             containerize(inner, &std::env::temp_dir(), &[], &[], DEFAULT_IMAGE).expect("build the run");
         let args = argv(&cmd);
-        assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "AGG_JUDGE=answered"), "env forwarded: {args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "RLT_JUDGE=answered"), "env forwarded: {args:?}");
         // a removal needs no flag: the container starts from the image's env, so it is absent already
         assert!(!args.iter().any(|a| a.contains("SHOULD_BE_ABSENT")), "no flag for a removal: {args:?}");
     }
@@ -476,7 +476,7 @@ mod tests {
         );
         let args = argv(&containerize(Command::new("true"), proj.path(), &[], &[], DEFAULT_IMAGE).unwrap());
         assert!(args.contains(&format!("{}:/context/kb:ro", host.display())), "{args:?}");
-        assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "AGG_CONTEXT_KB=/context/kb"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "RLT_CONTEXT_KB=/context/kb"), "{args:?}");
     }
 
     #[test]

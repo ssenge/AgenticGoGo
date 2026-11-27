@@ -36,7 +36,7 @@ impl Proc {
         names.iter().find_map(|n| Some((file.clone(), off.get(n.as_str())?.as_str()?.to_string())))
     }
 
-    /// Whether the run has come to the step of `ctx`: it starts there or got past its `--from` (agg marks every step it
+    /// Whether the run has come to the step of `ctx`: it starts there or got past its `--from` (rlt marks every step it
     /// comes to as seen). A step before it is skipped, which says nothing about the step itself.
     pub fn reaches(&self, ctx: &Ctx) -> bool {
         reached(self.run.from.as_deref(), &ctx.key, &self.seen())
@@ -58,7 +58,7 @@ impl Proc {
     pub fn applies_to(&self, ctx: &Ctx) -> Result<bool, Fatal> {
         let Some(when) = &ctx.step.when else { return Ok(true) };
         if !self.reaches(ctx) {
-            return self.runs(&ctx.label).map(|_| true);   // agg marks it seen and runs nothing
+            return self.runs(&ctx.label).map(|_| true);   // rlt marks it seen and runs nothing
         }
         if !self.runs(&ctx.label)? {
             return Ok(false);

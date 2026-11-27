@@ -1,4 +1,4 @@
-//! The `metric:` / `score:` blocks of a `judges.<name>` entry as written in `agg.yaml`, the runtime
+//! The `metric:` / `score:` blocks of a `judges.<name>` entry as written in `rlt.yaml`, the runtime
 //! judges they become, and the startup checks of their SHAPE (the probe of swe-metrics itself is
 //! [`super::probe`]).
 
@@ -93,7 +93,7 @@ impl Stat {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScoreSel {
-    /// `swe-default` (swe-metrics' shipped one), a `.py` file (relative to `agg/`, or absolute)
+    /// `swe-default` (swe-metrics' shipped one), a `.py` file (relative to `rlt/`, or absolute)
     /// or `package.module:NAME`.
     pub definition: String,
     /// the version the definition must report; a score of any other version is refused.
@@ -102,7 +102,7 @@ pub struct ScoreSel {
     /// target. Not `changed`: a score is compared against the incumbent of the same files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    /// a script (relative to `agg/`, or absolute) that writes the build's reports before the measurement
+    /// a script (relative to `rlt/`, or absolute) that writes the build's reports before the measurement
     /// and prints `{kind: path}` as its last line: what swe-metrics reads as `--report kind=path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reports: Option<String>,
@@ -183,7 +183,7 @@ pub enum Definition {
 pub const DEFAULT_DEFINITION: &str = "swe-default";
 
 impl Definition {
-    /// Resolve a `definition:` value; a file is relative to `config_base` (the `agg/` folder).
+    /// Resolve a `definition:` value; a file is relative to `config_base` (the `rlt/` folder).
     pub fn parse(s: &str, config_base: &Path) -> Definition {
         if s == DEFAULT_DEFINITION {
             Definition::Default
@@ -301,7 +301,7 @@ impl ScoreJudge {
         self
     }
     /// The build's reports (tests, coverage, mutation, classes) come from `script`: run before the
-    /// measurement from the project root with `$AGG_REPORTS_DIR` to write them in, it prints
+    /// measurement from the project root with `$RLT_REPORTS_DIR` to write them in, it prints
     /// `{"jacoco": "path", "junit": ["path", …]}` as its last line; a relative path is the project's.
     pub fn reports(mut self, script: impl Into<PathBuf>) -> Self {
         self.reports = Some(script.into());
@@ -438,7 +438,7 @@ fn score_problems(s: &ScoreSel, config_base: &Path, at: &dyn Fn(&str) -> String)
     match Definition::parse(&s.definition, config_base) {
         Definition::File(p) if !p.is_file() => out.push(Problem::new(
             at(".score.definition"),
-            format!("scoring definition file {} does not exist (a relative path is taken from agg/)", p.display()),
+            format!("scoring definition file {} does not exist (a relative path is taken from rlt/)", p.display()),
         )),
         Definition::Module(m) if !m.contains(':') => out.push(Problem::new(
             at(".score.definition"),
@@ -456,7 +456,7 @@ fn score_problems(s: &ScoreSel, config_base: &Path, at: &dyn Fn(&str) -> String)
         Ok(_) => {}
     }
     if let Some(r) = s.reports.as_deref().map(|r| config_base.join(r)).filter(|r| !r.is_file()) {
-        out.push(Problem::new(at(".score.reports"), format!("reports script {} does not exist (a relative path is taken from agg/)", r.display())));
+        out.push(Problem::new(at(".score.reports"), format!("reports script {} does not exist (a relative path is taken from rlt/)", r.display())));
     }
     out
 }
@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(score_judge(&work, None, Some(80.0), Path::new("/x")).scope, Scope::Path("work".into()));
         let reports = ScoreSel { reports: Some("reports.sh".into()), ..score.clone() };
         assert_eq!(paths(&d(None, Some(&reports), None, Some(80.0))), ["judges.j.score.reports"], "a missing script");
-        assert_eq!(score_judge(&reports, None, None, Path::new("/x/agg")).reports, Some(PathBuf::from("/x/agg/reports.sh")));
+        assert_eq!(score_judge(&reports, None, None, Path::new("/x/rlt")).reports, Some(PathBuf::from("/x/rlt/reports.sh")));
     }
 
     /// A scope is the project, its changes, or a sub-path — never a glob, never outside.
@@ -571,12 +571,12 @@ mod tests {
         assert!(d.starts_with("path-src_core-") && d.len() == "path-src_core-".len() + 8, "{d}");
     }
 
-    /// A definition is the shipped default, a file under agg/, or a module path.
+    /// A definition is the shipped default, a file under rlt/, or a module path.
     #[test]
     fn definitions_resolve() {
-        let base = Path::new("/p/agg");
+        let base = Path::new("/p/rlt");
         assert_eq!(Definition::parse("swe-default", base), Definition::Default);
-        assert_eq!(Definition::parse("scoring.py", base), Definition::File("/p/agg/scoring.py".into()));
+        assert_eq!(Definition::parse("scoring.py", base), Definition::File("/p/rlt/scoring.py".into()));
         assert_eq!(Definition::parse("/abs/s.py", base), Definition::File("/abs/s.py".into()));
         assert_eq!(Definition::parse("team.scoring:DEF", base), Definition::Module("team.scoring:DEF".into()));
         assert!(Definition::Default.args().is_empty(), "swe-metrics refuses `--definition swe-default`");

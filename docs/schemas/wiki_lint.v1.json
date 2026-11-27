@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/wiki_lint.v1.json",
-  "title": "agg wiki lint result, schema_version 1",
-  "description": "`agg wiki lint [PATH] --json`: OKF v0.2 conformance of a knowledge wiki (default: the project's agg/state/wiki/). Exit 0 when `ok`, 1 on any problem or when PATH does not exist. Read-only: the lint writes nothing.",
+  "$id": "https://github.com/ssenge/relentless/docs/schemas/wiki_lint.v1.json",
+  "title": "rlt wiki lint result, schema_version 1",
+  "description": "`rlt wiki lint [PATH] --json`: OKF v0.2 conformance of a knowledge wiki (default: the project's rlt/state/wiki/). Exit 0 when `ok`, 1 on any problem or when PATH does not exist. Read-only: the lint writes nothing.",
   "type": "object",
   "additionalProperties": false,
   "required": [

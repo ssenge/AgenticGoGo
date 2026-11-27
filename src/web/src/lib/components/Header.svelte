@@ -6,15 +6,15 @@
     health.api_offline ? 'muted' : health.running ? phaseStatus(state?.phase) : 'muted'
   );
   const statusText = $derived(
-    health.api_offline ? 'agg serve offline' : health.running ? (state?.phase ?? 'run') : 'idle'
+    health.api_offline ? 'rlt serve offline' : health.running ? (state?.phase ?? 'run') : 'idle'
   );
 </script>
 
 <header class="hdr card">
   <div class="left">
     <div class="brand">
-      <span class="logo mono">agg</span>
-      <span class="name">AgenticGoGo</span>
+      <span class="logo mono">rlt</span>
+      <span class="name">Relentless</span>
     </div>
     {#if state && !state.waiting}
       <div class="proj mono">{state.project}</div>
@@ -47,7 +47,7 @@
     <span class="badge">⚑ FLAGGED</span>
     <span class="why">{state.notify_reason}</span>
     <span class="since mono">since session #{state.notify_session}</span>
-    <span class="calm">still running — agg never blocks on a human</span>
+    <span class="calm">still running — rlt never blocks on a human</span>
   </div>
 {/if}
 

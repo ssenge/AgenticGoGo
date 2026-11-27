@@ -1,4 +1,4 @@
-//! What a step was told when it gave its result (SR-P3): kept per step in `agg/private/instructions/`, so a later
+//! What a step was told when it gave its result (SR-P3): kept per step in `rlt/private/instructions/`, so a later
 //! call can say how its instructions changed since. A `--from` after a prompt change otherwise hands the worker
 //! its whole task beside a result that looks done, and it keeps the result as it is.
 
@@ -23,7 +23,7 @@ pub(crate) fn keep(project: &Path, key: &str, text: &str) {
 }
 
 /// How the instructions `now` differ from those the step's last result was given, as a diff; `None` when they
-/// are the same or none were kept (a step that gave no result yet, or one from before agg kept them).
+/// are the same or none were kept (a step that gave no result yet, or one from before rlt kept them).
 pub(crate) fn changed(project: &Path, key: &str, now: &str) -> Option<String> {
     let before = kept(project, key);
     let earlier = std::fs::read_to_string(&before).ok()?;

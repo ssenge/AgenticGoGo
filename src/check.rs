@@ -1,4 +1,4 @@
-//! `agg check` — validate `agg.yaml` and the judges it names exactly as `agg run` does at startup,
+//! `rlt check` — validate `rlt.yaml` and the judges it names exactly as `rlt run` does at startup,
 //! and report EVERY problem at once, each at its dotted config path. Runs no judge and no agent
 //! (the only subprocess is each agent CLI's `--version`, the same probe startup makes).
 //!
@@ -9,17 +9,17 @@
 //! runs when an earlier one found problems, as long as there is a config to run it on.
 
 use crate::assembly::{self, Assembly};
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::core::model::Judge;
 use crate::problem::{self, Problem};
 use serde::Serialize;
 use serde_yaml::Value as Yaml;
 use std::path::Path;
 
-/// Bumped on any breaking change to the JSON of `agg check --json` / `agg doctor --json`.
+/// Bumped on any breaking change to the JSON of `rlt check --json` / `rlt doctor --json`.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The machine-readable result of `agg check --json`.
+/// The machine-readable result of `rlt check --json`.
 #[derive(Debug, Serialize)]
 pub struct CheckReport {
     pub schema_version: u32,
@@ -33,10 +33,10 @@ pub struct CheckReport {
 }
 
 /// Everything startup validation learned — the config and assembly when they could be built,
-/// and the findings either way. `agg doctor` builds on this rather than repeating it.
+/// and the findings either way. `rlt doctor` builds on this rather than repeating it.
 #[derive(Default)]
 pub struct Validation {
-    pub cfg: Option<AggConfig>,
+    pub cfg: Option<RelentlessConfig>,
     pub assembly: Option<Assembly>,
     pub problems: Vec<Problem>,
     pub warnings: Vec<Problem>,
@@ -86,7 +86,7 @@ pub fn validate(config_base: &Path, config: &Path) -> Validation {
     v.warnings = a.warnings;
     v.images = a.images;
 
-    // `agg run`'s last startup check: every agent that runs on the HOST is on PATH (a container
+    // `rlt run`'s last startup check: every agent that runs on the HOST is on PATH (a container
     // step's agent is checked in its image, by the probe above).
     for (path, name) in crate::capability::host_agents(&cfg, &judges) {
         if let Ok(b) = crate::backend::for_name(&name) {
@@ -101,7 +101,7 @@ pub fn validate(config_base: &Path, config: &Path) -> Validation {
 
 /// Each distinct agent name with the FIRST key that names it (`defaults.agent`, `judge.agent`,
 /// `steps.<name>.agent`), so a missing CLI is reported once, where it is chosen.
-pub fn agent_sites(cfg: &AggConfig) -> Vec<(String, String)> {
+pub fn agent_sites(cfg: &RelentlessConfig) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = vec![
         ("defaults.agent".into(), cfg.defaults.agent.clone()),
         ("judge.agent".into(), cfg.judge.agent.clone()),
@@ -123,24 +123,24 @@ pub fn agent_sites(cfg: &AggConfig) -> Vec<(String, String)> {
 /// Read + parse the config, listing EVERY parse problem. Returns the config when one can be had —
 /// including when the only problems were unknown keys, which are then set aside so the later
 /// stages still run.
-fn parse(config: &Path, problems: &mut Vec<Problem>) -> Option<AggConfig> {
+fn parse(config: &Path, problems: &mut Vec<Problem>) -> Option<RelentlessConfig> {
     let text = match std::fs::read_to_string(config) {
         Ok(t) => t,
         Err(e) => {
             let why = if config.exists() { format!("reading {}: {e}", config.display()) } else {
-                format!("no {} here — run `agg init` to scaffold one", config.display())
+                format!("no {} here — run `rlt init` to scaffold one", config.display())
             };
             problems.push(Problem::new("", why));
             return None;
         }
     };
     let doc: Option<Yaml> = serde_yaml::from_str(&text).ok();
-    if let Err(e) = AggConfig::reject_removed_keys(config) {
+    if let Err(e) = RelentlessConfig::reject_removed_keys(config) {
         // a migration error, and the one startup gives FIRST: what follows it would be noise.
         problems.push(Problem::new(doc.as_ref().map(removed_key_path).unwrap_or_default(), format!("{e:#}")));
         return None;
     }
-    let first = match serde_path_to_error::deserialize::<_, AggConfig>(serde_yaml::Deserializer::from_str(&text)) {
+    let first = match serde_path_to_error::deserialize::<_, RelentlessConfig>(serde_yaml::Deserializer::from_str(&text)) {
         Ok(cfg) => return Some(cfg),
         Err(e) => e,
     };
@@ -166,7 +166,7 @@ fn parse(config: &Path, problems: &mut Vec<Problem>) -> Option<AggConfig> {
     // default), so one bad value does not hide the problems behind it. Bounded: every round
     // removes a key, and a refusal that names no removable key ends it.
     for _ in 0..MAX_PARSE_ROUNDS {
-        match serde_path_to_error::deserialize::<_, AggConfig>(doc.clone()) {
+        match serde_path_to_error::deserialize::<_, RelentlessConfig>(doc.clone()) {
             Ok(cfg) => return Some(cfg),
             Err(e) => {
                 let at = dotted(e.path());
@@ -180,7 +180,7 @@ fn parse(config: &Path, problems: &mut Vec<Problem>) -> Option<AggConfig> {
     None
 }
 
-/// How many refused values one `agg check` sets aside before giving up on the parse.
+/// How many refused values one `rlt check` sets aside before giving up on the parse.
 const MAX_PARSE_ROUNDS: usize = 64;
 
 /// `serde_path_to_error`'s path in our spelling: the root (`.`) is the empty string.
@@ -224,7 +224,7 @@ fn remove_at(doc: &mut Yaml, path: &str) -> bool {
     }
 }
 
-/// `agg check [--json]`: print the result and return whether the config is valid.
+/// `rlt check [--json]`: print the result and return whether the config is valid.
 pub fn run(config_base: &Path, config: &Path, json: bool) -> anyhow::Result<bool> {
     let v = validate(config_base, config);
     let r = v.report(config);
@@ -232,7 +232,7 @@ pub fn run(config_base: &Path, config: &Path, json: bool) -> anyhow::Result<bool
         println!("{}", serde_json::to_string_pretty(&r)?);
         return Ok(r.ok);
     }
-    eprintln!("agg check — {}", config.display());
+    eprintln!("rlt check — {}", config.display());
     for w in &r.warnings {
         eprintln!("  ⚠ {w}");
     }
@@ -241,7 +241,7 @@ pub fn run(config_base: &Path, config: &Path, json: bool) -> anyhow::Result<bool
     }
     match (&v.assembly, r.ok) {
         (Some(a), true) => eprintln!("✔ valid — {} judge(s) resolve; nothing was run.", a.engine.judges.len()),
-        _ => eprintln!("✗ {} problem(s) — `agg run` would refuse to start.", r.problems.len()),
+        _ => eprintln!("✗ {} problem(s) — `rlt run` would refuse to start.", r.problems.len()),
     }
     Ok(r.ok)
 }

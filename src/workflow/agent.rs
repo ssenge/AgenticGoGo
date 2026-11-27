@@ -53,7 +53,7 @@ impl Judges<'_> {
     }
 }
 
-/// Why a verdict grades nothing, if it doesn't: its judge failed to run (agg asked it twice). Never met: a step
+/// Why a verdict grades nothing, if it doesn't: its judge failed to run (rlt asked it twice). Never met: a step
 /// nobody graded goes to the task force, not on.
 fn not_graded(verdict: &Verdict) -> Option<String> {
     verdict.error().map(|e| format!("not graded, its judge failed to run: {e}"))
@@ -155,7 +155,7 @@ impl Flow {
     /// note at `--from`.
     fn news(&self, name: &str, since: Option<&str>, inputs: &[String]) -> Option<String> {
         if let Some(commit) = since {
-            let mut skip = vec!["agg".to_string()];
+            let mut skip = vec!["rlt".to_string()];
             skip.extend(self.own.iter().cloned());
             let (stat, diff) = changes_since(self.project(), commit, inputs, &skip, DIFF_LIMIT);
             return Some(format!(

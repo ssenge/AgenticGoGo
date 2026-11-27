@@ -186,7 +186,7 @@ impl Run {
     }
 }
 
-/// The run of the process a project last ran (`agg/private/process.json`); none when it never ran one.
+/// The run of the process a project last ran (`rlt/private/process.json`); none when it never ran one.
 pub fn of_project(project: &Path) -> Option<Run> {
     let note: Value = serde_json::from_str(&std::fs::read_to_string(crate::paths::private_dir(project).join("process.json")).ok()?).ok()?;
     Run::open(Path::new(note["file"].as_str()?), project).ok()
@@ -198,7 +198,7 @@ pub fn of(project: &Path, kind: &str) -> Option<Value> {
 }
 
 /// What `kind` says of the run of `project` under the process in `file` (a project that noted no process file of its
-/// own: `agg serve --process`); none for another kind or a file that doesn't open.
+/// own: `rlt serve --process`); none for another kind or a file that doesn't open.
 pub fn of_file(file: &Path, project: &Path, kind: &str) -> Option<Value> {
     kind_of(&Run::open(file, project).ok()?, kind)
 }
@@ -218,9 +218,9 @@ pub fn lines(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
 }
 
-/// The step a live run is in and whether the run has ended (`agg/private/state.json`; no such file: ended).
+/// The step a live run is in and whether the run has ended (`rlt/private/state.json`; no such file: ended).
 fn live(project: &Path) -> (Option<String>, bool) {
-    let state: Value = std::fs::read_to_string(project.join("agg/private/state.json")).ok()
+    let state: Value = std::fs::read_to_string(project.join("rlt/private/state.json")).ok()
         .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let finished = state["finished"].as_bool().unwrap_or(true);
     (state["step"].as_str().filter(|s| !finished && !s.is_empty()).map(String::from), finished)
@@ -360,11 +360,11 @@ fn text(kind: &str, report: &Value) -> String {
     }
 }
 
-/// `agg process <file> <project> --report map|timeline|profile [--json]`.
+/// `rlt process <file> <project> --report map|timeline|profile [--json]`.
 pub fn command(file: &Path, project: &Path, args: &[String]) -> Result<ExitCode> {
     let kind = args.iter().position(|a| a == "--report").and_then(|i| args.get(i + 1)).map(String::as_str).unwrap_or_default();
     if !["map", "timeline", "profile"].contains(&kind) {
-        bail!("agg process <file> <project> --report map|timeline|profile [--json] [--since <epoch seconds>] [--current <step>] [--stopped] [--log <driver log>]");
+        bail!("rlt process <file> <project> --report map|timeline|profile [--json] [--since <epoch seconds>] [--current <step>] [--stopped] [--log <driver log>]");
     }
     let mut run = Run::open(file, project)?;
     if let Some(since) = args.iter().position(|a| a == "--since").and_then(|i| args.get(i + 1)) {

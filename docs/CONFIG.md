@@ -1,6 +1,6 @@
-# `agg` configuration reference
+# `rlt` configuration reference
 
-One file, `agg/agg.yaml`, holds everything: `defaults` / `judge` / `steps` / `sequence` plus a few
+One file, `rlt/rlt.yaml`, holds everything: `defaults` / `judge` / `steps` / `sequence` plus a few
 top-level survivors. A judge IS a goal, resolved by name from disk
 (see [Judges](#judges-resolved-by-name)). Every struct is parsed with `deny_unknown_fields`, so a
 misspelled or misplaced key is a **hard error at startup**, never a silent no-op. (That guard is what
@@ -10,26 +10,26 @@ loudly instead of becoming a decorative spend ceiling.)
 The only required key is `project`. Everything else has a default (a file with no `sequence:` is a
 Rust-driver project — see [`docs/RUST_API.md`](RUST_API.md)).
 
-### Validating a config without running it — `agg check` · `agg schema`
+### Validating a config without running it — `rlt check` · `rlt schema`
 
-- **`agg check [--json]`** runs EVERY startup check `agg run` makes — parse, step and judge
+- **`rlt check [--json]`** runs EVERY startup check `rlt run` makes — parse, step and judge
   resolution, the condition grammar, what the agents can do, the isolation tier's availability, each
   agent CLI on PATH — and lists **all** problems at once instead of stopping at the first. It runs no
   judge and no agent. Each problem carries a dotted path into this file (`steps.worker.isolation`,
   `sequence.steps[1].until`; `""` = the file as a whole) and the message startup would print. Exit
   **0** valid · **1** any problem. `--json`:
   ```json
-  {"schema_version": 1, "ok": false, "config": "agg/agg.yaml",
+  {"schema_version": 1, "ok": false, "config": "rlt/rlt.yaml",
    "problems": [{"path": "defaults.agnet", "message": "unknown field `agnet`, expected one of `agent`, …"},
                 {"path": "sequence.done_if", "message": "no judge named `ghost` …"}],
    "warnings": []}
   ```
   `warnings` are non-fatal (a dollar guard inert on an agent that caps itself).
-- **`agg schema`** prints the JSON Schema (draft 2020-12) of this file. It is generated from the very
-  types agg parses into, so it cannot drift: every `deny_unknown_fields` struct is
-  `additionalProperties: false`, and `$comment` names the agg version that produced it. Point an
-  editor's YAML language server at it, or validate a generated config before handing it to agg.
-  The schema checks structure and types; `agg check` additionally checks what only agg can know
+- **`rlt schema`** prints the JSON Schema (draft 2020-12) of this file. It is generated from the very
+  types rlt parses into, so it cannot drift: every `deny_unknown_fields` struct is
+  `additionalProperties: false`, and `$comment` names the rlt version that produced it. Point an
+  editor's YAML language server at it, or validate a generated config before handing it to rlt.
+  The schema checks structure and types; `rlt check` additionally checks what only rlt can know
   (judge files exist, the agents and tiers are available on this host).
 
 ```yaml
@@ -41,9 +41,9 @@ defaults:
   model: "claude-opus-4-8[1m]"     # None ⇒ the agent's own default (codex: OMIT; copilot: auto)
   effort: "high"                   # low|medium|high|xhigh|max — None ⇒ backend default; "" ⇒ none
   worker_args: []                  # extra flags passed VERBATIM to the worker (the sandbox constraint)
-  state: "state/STATE.md"          # the forward-advice file under agg/ (gitignored)
+  state: "state/STATE.md"          # the forward-advice file under rlt/ (gitignored)
   isolation: none                  # none (default) | sandbox | container — the blast-radius jail
-  image: "agg-claude"              # the image an `isolation: container` step runs IN (agent CLI inside)
+  image: "rlt-claude"              # the image an `isolation: container` step runs IN (agent CLI inside)
   write_deny: ["tests/oracles/**"] # PROTECTED paths: readable, never changed — on EVERY tier (below)
 
 # THE RULER — runs LLM judges + the summarizer. Run-level and IMMUTABLE: naming any of these keys
@@ -52,7 +52,7 @@ judge:
   agent: "claude"
   model: "claude-haiku-4-5-20251001"   # None ⇒ the ruler's cheap default. A cheap model grades.
   timeout: 300                         # seconds — EVERY judge, script and LLM alike
-  image: "agg-claude"                  # the judges' image when a step is `container` (default: defaults.image)
+  image: "rlt-claude"                  # the judges' image when a step is `container` (default: defaults.image)
 
 # Per-judge config: a timeout override, or a judge DECLARED here instead of as a file — a metric or
 # score judge over swe-metrics (optional; needs `swe-metrics` on PATH only when one is declared).
@@ -100,7 +100,7 @@ sequence:
 heartbeat_secs: 30
 watchdog: { idle_secs: 900, cpu_grace: 180 }
 ratelimit_backoff_secs: 1800       # claude + codex; copilot cannot flag a rate-limit. Used when no reset time is reported
-ratelimit_min_gap_secs: 60         # least time between a rate-limited attempt and the next (`agg send wake` waits it out)
+ratelimit_min_gap_secs: 60         # least time between a rate-limited attempt and the next (`rlt send wake` waits it out)
 summary: { enabled: true, min_interval_secs: 300 }   # runs on the RULER — no model: here
 memory:  { enabled: true, max_kb: 64, inject_kb: 8 }
 session_isolation: {}              # MANDATORY; keys: branch_prefix, base_branch, red_file
@@ -122,7 +122,7 @@ isolation_policy:                  # run-level confinement beyond the tier
 | `model` | none | none ⇒ the agent's own default. **Codex: omit** (naming one is a hard 400). **Copilot: `auto`.** |
 | `effort` | none | `low\|medium\|high\|xhigh\|max`. none ⇒ backend default; `""` ⇒ pass no effort flag. Codex clamps `max`→`high`. |
 | `worker_args` | `[]` | extra flags passed **verbatim** to the worker CLI — the sandbox constraint. Inheritable so you set it once. |
-| `state` | `state/STATE.md` | the forward-advice file (see [State](#state-and-memory)) — under `agg/state/` (gitignored), resolved against `agg/`. |
+| `state` | `state/STATE.md` | the forward-advice file (see [State](#state-and-memory)) — under `rlt/state/` (gitignored), resolved against `rlt/`. |
 | `role_prompt` | none | generic **role** framing composed *above* a step's `prompt:`. Inheritable; a step body may override it. |
 | `role_prompt_file` | none | `role_prompt` read from a **file** ([Prompts from files](#prompts-from-files--prompt_file-role_prompt_file)). An alternative to `role_prompt` — set one. |
 | `isolation` | `none` | `none` \| `sandbox` \| `container` — blast-radius jail (below). Inheritable; a step may override. |
@@ -140,11 +140,11 @@ block precisely because it is immutable: a moving grader makes verdicts incompar
 | `agent` | `claude` | usually the same as `defaults.agent`, but need not be — a Codex worker with a Claude ruler is valid. |
 | `model` | none | none ⇒ the ruler's cheap-model default. |
 | `timeout` | `300` | seconds, enforced for **every** judge (script and LLM) with a process-group kill. |
-| `evidence_max_mb` | `100` | the most judge evidence (MiB) one run copies into `agg/private/evidence/` ([below](#evidence--what-agg-keeps)). A disk bound, not a run limit: a file that does not fit is skipped and recorded, and the run goes on. |
+| `evidence_max_mb` | `100` | the most judge evidence (MiB) one run copies into `rlt/private/evidence/` ([below](#evidence--what-rlt-keeps)). A disk bound, not a run limit: a file that does not fit is skipped and recorded, and the run goes on. |
 | `image` | see notes | the image EVERY judge runs in when a step of the run is `isolation: container` ([the container tier](#the-container-tier-runs-the-agent)). Default: `defaults.image`, else the one image the container steps share; several different ones with neither key set is refused. |
 
-A Rust driver sets `agent` / `model` / `timeout` with `Agg::judge_agent` / `Agg::judge_model` /
-`Agg::judge_timeout`.
+A Rust driver sets `agent` / `model` / `timeout` with `Relentless::judge_agent` / `Relentless::judge_model` /
+`Relentless::judge_timeout`.
 
 If the ruler is rate-limited or unreachable, the run **parks in backoff and merges nothing** — it
 never fails over to another agent (that would move the ruler) and never fabricates a verdict.
@@ -172,7 +172,7 @@ survived because it is not flow and not gating: a judge slower than 300s simply 
 
 ⚠ It does not make an expensive judge cheap — in YAML every run-set judge runs after every judged
 step, so a 45-minute judge costs 45 minutes per step. Short-circuiting an expensive judge behind
-cheap ones is a Rust-path feature (`agg.judge(&tests).met() && agg.judge(&load).met()`); see
+cheap ones is a Rust-path feature (`rlt.judge(&tests).met() && rlt.judge(&load).met()`); see
 `examples/workflow.yaml`, which spells out that trade in full.
 
 ## Command judges — `command:`
@@ -195,14 +195,14 @@ process file's `judges:` (`docs/PROCESS.md`).
 
 A judge declared with `template: { doc, from, placeholder? }` checks that a document was filled in from a template: its
 headings in the template's order, no empty section, nothing of the template left (placeholders, HTML comments, instruction
-lines). It is declared in a process file's `judges:` (`docs/PROCESS.md`, "The template judge"); `agg.yaml` refuses it.
+lines). It is declared in a process file's `judges:` (`docs/PROCESS.md`, "The template judge"); `rlt.yaml` refuses it.
 
 ## Judges built on swe-metrics — `metric:` and `score:`
 
 [swe-metrics](https://github.com/ssenge/swe-metrics) is a separate, stateless measuring tool: it
 turns a file, directory or repository into a JSON report of metrics (complexity, duplication,
 vulnerabilities, secrets, IaC findings, documentation, …), tool-tagged, with the tools' SARIF as
-details, and it never judges them. agg does the judging. A judge DECLARED in `judges:` reads the
+details, and it never judges them. rlt does the judging. A judge DECLARED in `judges:` reads the
 report — no script to write, parse or keep consistent across projects:
 
 ```yaml
@@ -221,8 +221,8 @@ sequence:
 ```
 
 A declared judge is referenced by its NAME like any other (`done_if`, `invariants`, `ratchet`,
-`groups`, `until:`, `.value`), runs from `agg judge <name>`, and is listed by `agg check`. A name may
-not be declared here AND be a file in `agg/judges/` (refused at startup).
+`groups`, `until:`, `.value`), runs from `rlt judge <name>`, and is listed by `rlt check`. A name may
+not be declared here AND be a file in `rlt/judges/` (refused at startup).
 
 **`metric:` — the selector**
 
@@ -246,7 +246,7 @@ keyed on the tree (HEAD, the diff against it, untracked files) and on its scope,
 (`target`, `changed`, a sub-path) is measured once; the judges of one scope pass one `--only` set (the
 union of their families; every family when a score judge is in the run). The report and the tools'
 details land in the session's judge scratch, and each verdict cites the report plus the SARIF of its
-metric's family as **evidence** — kept under `agg/private/evidence/` like any judge's.
+metric's family as **evidence** — kept under `rlt/private/evidence/` like any judge's.
 
 **Fail closed.** A value that is not there is an **error** carrying the report's reason — never met:
 the metric's analyzer was skipped (`trivy skipped: no applicable files`) or failed (`jscpd failed:
@@ -269,12 +269,12 @@ reason text exactly; were it ever reworded, the judge would error again — clos
 ratchet on a `scope: changed` judge is refused: it would compare different files every session.
 
 **`score:` — swe-metrics' quality score.** `swe-metrics score` (0–100) of the session's shared report,
-by `definition` — `swe-default` (shipped with swe-metrics), a `.py` file (relative to `agg/`, or
-absolute — keep it under `agg/` and in `write_deny`, it is part of the grader) or `package.module:NAME`
+by `definition` — `swe-default` (shipped with swe-metrics), a `.py` file (relative to `rlt/`, or
+absolute — keep it under `rlt/` and in `write_deny`, it is part of the grader) or `package.module:NAME`
 — at `version`:
 
-- **Against the incumbent.** agg keeps the report of the last KEPT state — the incumbent — at
-  `agg/private/metrics/incumbent/<scope>.json`, next to the ratchet state: the baseline pass measures
+- **Against the incumbent.** rlt keeps the report of the last KEPT state — the incumbent — at
+  `rlt/private/metrics/incumbent/<scope>.json`, next to the ratchet state: the baseline pass measures
   it, every kept gate replaces it. Every session is scored with it as `--baseline`, so a metric that got
   worse costs points even when another improved. The baseline pass itself is scored without one.
 - `value` is the score. A score **capped by a failed gate** (a secret found, a critical vulnerability)
@@ -283,8 +283,8 @@ absolute — keep it under `agg/` and in `write_deny`, it is part of the grader)
 - **`scope`** (optional, `target` by default): a project-relative sub-path scores that path alone, measured as
   its own target and compared with its own incumbent — `score: { definition: swe-default, version: "2",
   scope: work }`. `changed` is refused: the incumbent would be other files.
-- **`reports`** (optional): a script (relative to `agg/`, or absolute) that writes the build's reports —
-  tests, coverage, mutation, compiled classes — which swe-metrics reads but never produces. agg runs it before
+- **`reports`** (optional): a script (relative to `rlt/`, or absolute) that writes the build's reports —
+  tests, coverage, mutation, compiled classes — which swe-metrics reads but never produces. rlt runs it before
   the measurement, like a judge, with a fresh folder in the judge scratch as its argument; its last line names
   the reports, `{"jacoco": "path", "junit": ["path", …]}` (a kind of `swe-metrics measure --report`; a relative
   path is the project's). A failed script, a named report that isn't there or none named leaves the score
@@ -292,7 +292,7 @@ absolute — keep it under `agg/` and in `write_deny`, it is part of the grader)
 - A **missed** score names its costliest parts — `most points lost: complexity.cognitive [p95] = 12 (good 5,
   bad 15), …` — the (at most three) components that cost the most points, worst first.
 - **Comparability.** A score names its definition and version; one that differs from the configured
-  ones is **refused** — at startup (agg scores an empty report to ask) and on every run. A changed
+  ones is **refused** — at startup (rlt scores an empty report to ask) and on every run. A changed
   `definition`/`version` **resets the ratchet reference** on `--resume` (scores of two definitions are
   not comparable): the reference becomes what the resumed run's baseline pass measured.
 - A **`null` score** (incomplete — a required part unavailable, a tool missing) is an **error** with the
@@ -307,18 +307,18 @@ and `min` must state the direction. With `combine: all`, tools that moved in **d
 since the incumbent (one better, one worse) are **no improvement** for the ratchet — the verdict is
 `mixed`, which `merge_requires_improvement` does not count, even if the reported value got better.
 
-**Optional dependency.** agg works without swe-metrics. A config that declares a metric or score
-judge in its run-set is **refused at startup** (`agg run`, `agg check`) when `swe-metrics` is missing
-**where it will run**, when its report (or score) schema is not the one this agg reads
+**Optional dependency.** rlt works without swe-metrics. A config that declares a metric or score
+judge in its run-set is **refused at startup** (`rlt run`, `rlt check`) when `swe-metrics` is missing
+**where it will run**, when its report (or score) schema is not the one this rlt reads
 (`swe-metrics/report/v1`, `swe-metrics/score/v1`), or when a score's definition/version differs from
 the configured one. Where it runs is the run's judge tier: on a `none` or `sandbox` run, the host's
-`PATH` (refused at `judges.<first>`); on a `container` run, **`judge.image`** — agg asks the image, in
+`PATH` (refused at `judges.<first>`); on a `container` run, **`judge.image`** — rlt asks the image, in
 short probe containers (no network, the project read-only, as the project owner), and refuses at the
 key that chose the image (`judge.image`, else `defaults.image`); the host then need not have
-swe-metrics at all. `agg doctor --json` lists it under `container_images[].clis`.
+swe-metrics at all. `rlt doctor --json` lists it under `container_images[].clis`.
 
 **Confinement.** swe-metrics runs as a script judge does — from the project root, stdin closed, the
-`AGG_*` env — in the run's strongest tier:
+`RLT_*` env — in the run's strongest tier:
 
 - **`sandbox`**: in the OS jail with the project read-only, `TMPDIR` in the judge scratch. Unlike a
   script judge its `XDG_CACHE_HOME` is not redirected — its tools keep machine-wide caches there
@@ -327,23 +327,23 @@ swe-metrics at all. `agg doctor --json` lists it under `container_images[].clis`
 - **`container`**: in `judge.image` (reference image: [`docker/swe-metrics`](#the-swe-metrics-judges-image)),
   like every judge of a container run — the project read-only, the context dirs at `/context/<as>`,
   `pass_env`, the run's network policy, as the project owner. It writes only the session's judge
-  scratch (`agg/private/container/judge/scratch-<n>/`: the report, the details, the score) and a
-  **fresh** `HOME` per call (`agg/private/container/home/metrics-*`); `TMPDIR` is the container's own
+  scratch (`rlt/private/container/judge/scratch-<n>/`: the report, the details, the score) and a
+  **fresh** `HOME` per call (`rlt/private/container/home/metrics-*`); `TMPDIR` is the container's own
   `/tmp`, and no cache survives the call (`PYTHONDONTWRITEBYTECODE=1`) — swe-metrics runs the measured
   project's own tool configs, so nothing one session's measurement can write may reach the next one's.
-  The incumbent's report is read where it is kept (`agg/private/metrics/incumbent/`, inside the
+  The incumbent's report is read where it is kept (`rlt/private/metrics/incumbent/`, inside the
   read-only project); a scoring definition file outside the project is mounted read-only.
-  `agg judge` and `agg plan` measure in `judge.image` too on a container run.
+  `rlt judge` and `rlt plan` measure in `judge.image` too on a container run.
 - **trivy's vulnerability database under `container`** is the **host's**, mounted read-only:
   `$TRIVY_CACHE_DIR`, else trivy's default (`~/Library/Caches/trivy` on macOS, `$XDG_CACHE_HOME/trivy`
   or `~/.cache/trivy` elsewhere), with updates off (`TRIVY_SKIP_DB_UPDATE`, `TRIVY_SKIP_JAVA_DB_UPDATE`).
   The container downloads nothing, so an allow-list needs no entry for it. Seed and refresh it on the
   host — `trivy image --download-db-only`, or with the image itself:
-  `docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v ~/.cache/trivy:/c agg-swe-metrics trivy
+  `docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v ~/.cache/trivy:/c rlt-swe-metrics trivy
   --cache-dir /c image --download-db-only` (use your platform's path; the directory must exist). Without one, startup warns, and every `dependencies.*` value — and a
   score's vulnerability gate — **fails closed** (`trivy failed: … --skip-db-update cannot be specified
   on the first run`). Keep it where the engine can see it (colima: under your home). Why not a cache
-  of agg's own: per project it is ~1.5 GB downloaded per project; shared and writable, one project's
+  of rlt's own: per project it is ~1.5 GB downloaded per project; shared and writable, one project's
   measurement could rewrite the database another project's vulnerability gate trusts.
 
 **Shape refusals at startup**, each at its key: `metric:` and `score:` together; no threshold;
@@ -369,7 +369,7 @@ Each NAME maps to a body of overrides. **The complete legal key list** (anything
 | `skip_judges` | `false` | `true` ⇒ no judges run after this step, so nothing merges — the work **stages** (below). |
 | `isolation` | `defaults.isolation` | `none` \| `sandbox` \| `container` — the blast-radius jail for this step (below). |
 | `image` | `defaults.image` | the image this step runs in under `isolation: container` (the [image contract](#the-container-tier-runs-the-agent)). |
-| `readonly` | `[]` | project paths this step may read but not write — **kernel only**: inert under `isolation: none` (agg warns). No `defaults.readonly`. ([below](#protected-paths--write_deny-readonly-writable)) |
+| `readonly` | `[]` | project paths this step may read but not write — **kernel only**: inert under `isolation: none` (rlt warns). No `defaults.readonly`. ([below](#protected-paths--write_deny-readonly-writable)) |
 | `writable` | `[]` | paths subtracted from this step's `readonly` (exact match). Never touches `write_deny`. |
 | `write_deny` | `[]` | MORE protected paths for this step, **unioned** with `defaults.write_deny`. Nothing subtracts from it. |
 
@@ -380,7 +380,7 @@ tooling, instead of living as a YAML string:
 
 ```yaml
 defaults:
-  role_prompt_file: "roles/worker.md"          # relative to agg/ — or an absolute path
+  role_prompt_file: "roles/worker.md"          # relative to rlt/ — or an absolute path
 steps:
   implement: { prompt_file: "steps/implement.md" }
   review:    { role_prompt_file: "roles/reviewer.md", prompt: "Review the last change." }
@@ -388,13 +388,13 @@ steps:
 
 - **One form per key.** Naming `prompt` and `prompt_file` (or `role_prompt` and `role_prompt_file`)
   in the same block is a startup error, located at the `…_file` key, and so is a file that cannot be
-  read. `agg check` lists both.
+  read. `rlt check` lists both.
 - **Read at every session start.** The text is read when the session's brief is composed, so an edit
   applies from the next session — no restart. A file that has gone missing mid-run ends the run with
   an `error`: a brief without its task would send the worker off on the wrong work.
-- **Hashed per session.** Each file read is recorded in `agg/private/prompts.jsonl` — one row per
+- **Hashed per session.** Each file read is recorded in `rlt/private/prompts.jsonl` — one row per
   session: `{session, step, files: [{key, path, sha256}], ts}` — so a run shows which version of a
-  prompt each session was given. Inline prompts are in `agg.yaml` itself and record nothing.
+  prompt each session was given. Inline prompts are in `rlt.yaml` itself and record nothing.
 - The brief is **the same** as with the inline keys: the file's text is used exactly as an inline
   string would be.
 
@@ -415,19 +415,19 @@ that, **per step**:
 | tier | what the worker may do |
 |---|---|
 | `none` *(default)* | no confinement — full host access, today's behaviour. |
-| `sandbox` | **write** = the project dir (+subfolders) **minus `agg/private/`** + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open unless [`isolation_policy.network`](#network-egress--isolation_policynetwork) narrows it. Kernel-enforced. Also confines this step's judges + hooks. |
-| `container` | the worker — the agent CLI itself — runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir **minus `agg/private/`** + a fresh `HOME` + the container's own tmp; **read** = only what is mounted; **network** = fully open unless [`isolation_policy.network`](#network-egress--isolation_policynetwork) narrows it. Its judges run in a container too. |
+| `sandbox` | **write** = the project dir (+subfolders) **minus `rlt/private/`** + `$TMPDIR` + the agent's own state dir; **read** = everything; **network** = fully open unless [`isolation_policy.network`](#network-egress--isolation_policynetwork) narrows it. Kernel-enforced. Also confines this step's judges + hooks. |
+| `container` | the worker — the agent CLI itself — runs **inside a container** (`docker run` / `podman run`) with the project dir bind-mounted: **write** = the project dir **minus `rlt/private/`** + a fresh `HOME` + the container's own tmp; **read** = only what is mounted; **network** = fully open unless [`isolation_policy.network`](#network-egress--isolation_policynetwork) narrows it. Its judges run in a container too. |
 
 `sandbox` uses the OS jail — **`sandbox-exec` (Seatbelt) on macOS**, `bwrap` (bubblewrap) on Linux —
-except Codex, which has its own kernel sandbox agg drives with flags. It confines the **worker, its
+except Codex, which has its own kernel sandbox rlt drives with flags. It confines the **worker, its
 script + LLM judges, and its foreground hooks** in one jail, so nothing a confined worker can rewrite
 in the project dir becomes an escape. It does not restrict the network unless
 [`isolation_policy.network`](#network-egress--isolation_policynetwork) says so.
 
-**The one hole punched in "the project dir is writable" is `agg/private/`** — agg's own runtime state
+**The one hole punched in "the project dir is writable" is `rlt/private/`** — rlt's own runtime state
 (the verdict ledger, the command bus, the pidfile, the worker's brief). It stays fully **readable**; only
 writes are denied, on both confining tiers. Without that carve-out a confined worker could append forged
-rows to `agg/private/verdicts.jsonl` and make `stalled` report met — ending its own run under
+rows to `rlt/private/verdicts.jsonl` and make `stalled` report met — ending its own run under
 `abort_if: "stalled"`. See [State and memory](#state-and-memory) for what lives on each side and why.
 
 `container` confines from the other side: instead of jailing a host process it re-hosts the command
@@ -439,7 +439,7 @@ container boundary *is* the confinement.
 for the image contract, credentials and what judges do on this tier.
 
 If `sandbox` is requested but the OS mechanism is unavailable — or `container` is requested and no
-container engine answers — agg **refuses at startup**, never a silent downgrade to `none`. `agg
+container engine answers — rlt **refuses at startup**, never a silent downgrade to `none`. `rlt
 doctor` reports whether the tooling the config asks for is present.
 
 > **Platform status:** macOS (`sandbox-exec`) is verified end-to-end. The Linux `bwrap` path is
@@ -452,16 +452,16 @@ compose.
 ### The container tier runs the agent
 
 Under `isolation: container` the agent CLI runs **inside** the step's `image:` — the host's `~`, its
-other repositories and its agent logins are simply not there. agg builds every container the same
+other repositories and its agent logins are simply not there. rlt builds every container the same
 way:
 
 | | worker | LLM judge (the ruler's one-shot) | script judge | metric / score judge (`swe-metrics`) |
 |---|---|---|---|---|
 | image | the step's `image:` | `judge.image` | `judge.image` | `judge.image` |
-| project | read-write, minus `agg/private/` and `write_deny` (`:ro`) | **read-only** | **read-only** | **read-only** |
-| `HOME` | a FRESH empty dir every session | its own (`agg/private/container/home/ruler`) | its own (`…/home/judge`) | a FRESH empty dir every call (`…/home/metrics-*`) |
+| project | read-write, minus `rlt/private/` and `write_deny` (`:ro`) | **read-only** | **read-only** | **read-only** |
+| `HOME` | a FRESH empty dir every session | its own (`rlt/private/container/home/ruler`) | its own (`…/home/judge`) | a FRESH empty dir every call (`…/home/metrics-*`) |
 | credentials | its agent's, + `isolation_policy` | the ruler's, + `isolation_policy` | `isolation_policy` only | `isolation_policy` only |
-| writes | the project, its `HOME`, the container's tmp | its `HOME` | `$AGG_JUDGE_SCRATCH` + the toolchain cache | `$AGG_JUDGE_SCRATCH`, its `HOME`, the container's tmp |
+| writes | the project, its `HOME`, the container's tmp | its `HOME` | `$RLT_JUDGE_SCRATCH` + the toolchain cache | `$RLT_JUDGE_SCRATCH`, its `HOME`, the container's tmp |
 
 Every container runs as the **owner of the project dir** (`--user uid:gid`), never root: files it
 writes are yours, and Claude Code refuses auto-approval as root. Context dirs are mounted read-only at
@@ -473,14 +473,14 @@ writes are yours, and Claude Code refuses auto-approval as root. Context dirs ar
 - the agent CLI on `PATH` **for any uid** (installed system-wide, not under `/root`), and `/bin/sh`;
 - everything the worker's tasks and your judges run — the judges run in `judge.image`, so a
   `cargo_test` judge needs `cargo` there (`judge.image` may be a different image from the worker's);
-- **no credentials** baked in, and nothing that relies on a passwd entry — `HOME` is agg's to set;
-- no `ENTRYPOINT`, or one that execs its arguments: agg runs `<cli> <args…>` as the command.
+- **no credentials** baked in, and nothing that relies on a passwd entry — `HOME` is rlt's to set;
+- no `ENTRYPOINT`, or one that execs its arguments: rlt runs `<cli> <args…>` as the command.
 
 ```sh
-docker build -t agg-claude docker/claude      # or docker/codex; add your toolchain to the Dockerfile
+docker build -t rlt-claude docker/claude      # or docker/codex; add your toolchain to the Dockerfile
 ```
 ```yaml
-defaults: { agent: "claude", isolation: "container", image: "agg-claude" }
+defaults: { agent: "claude", isolation: "container", image: "rlt-claude" }
 ```
 
 #### The swe-metrics judges' image
@@ -494,15 +494,15 @@ local venv), records it in the image label `org.opencontainers.image.revision`, 
 (BuildKit or not) and podman:
 
 ```sh
-docker/swe-metrics/build.sh ~/src/swe-metrics                       # → agg-swe-metrics (~2 GB)
+docker/swe-metrics/build.sh ~/src/swe-metrics                       # → rlt-swe-metrics (~2 GB)
 SWE_METRICS_REF=<commit|tag> docker/swe-metrics/build.sh ~/src/swe-metrics my-judges:1
 ```
 ```yaml
-judge: { image: "agg-swe-metrics" }   # the steps keep their own `image:`
+judge: { image: "rlt-swe-metrics" }   # the steps keep their own `image:`
 ```
 
 `judge.image` is the one image **every** judge of the run uses: when the run also has script judges,
-add their toolchain to that Dockerfile (or build your judges' image `FROM agg-swe-metrics`). Not in
+add their toolchain to that Dockerfile (or build your judges' image `FROM rlt-swe-metrics`). Not in
 it: a JDK (`jdeps`, for Java class files — the analyzer then reports itself not installed), and trivy's
 database, which is the host's ([above](#judges-built-on-swe-metrics--metric-and-score)). The image
 turns off its tools' update checks and telemetry (a measurement must not depend on the network), and
@@ -510,13 +510,13 @@ lets node tools run for a uid without a passwd entry. `scripts/e2e_metrics_conta
 real image against a fixture with known values, behind an allow-list, with a failing `swe-metrics`
 first on the host's `PATH`.
 
-**Credentials** cross at run time and are never written anywhere agg keeps:
+**Credentials** cross at run time and are never written anywhere rlt keeps:
 
-- **by name** — each agent's own variables, whenever they are set in agg's environment:
+- **by name** — each agent's own variables, whenever they are set in rlt's environment:
   Claude `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`;
   Codex `CODEX_API_KEY`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`; Copilot `COPILOT_GITHUB_TOKEN`,
-  `GH_TOKEN`, `GITHUB_TOKEN` — plus every name in `isolation_policy.pass_env`. agg passes `-e NAME`
-  and the engine client reads the value from agg's environment: the secret is never on a command
+  `GH_TOKEN`, `GITHUB_TOKEN` — plus every name in `isolation_policy.pass_env`. rlt passes `-e NAME`
+  and the engine client reads the value from rlt's environment: the secret is never on a command
   line, in a log, a ledger or the report.
 - **as read-only mounts** — each agent's credential file when it exists (`~/.codex/auth.json`;
   `~/.claude/.credentials.json`, which only Linux has), plus every path in
@@ -528,19 +528,19 @@ first on the host's `PATH`.
 
 | key | default | notes |
 |---|---|---|
-| `isolation_policy.pass_env` | `[]` | environment variable NAMES passed into every container (a `NAME=value` is refused: the value belongs in the environment, not in `agg.yaml`). |
+| `isolation_policy.pass_env` | `[]` | environment variable NAMES passed into every container (a `NAME=value` is refused: the value belongs in the environment, not in `rlt.yaml`). |
 | `isolation_policy.credentials` | `[]` | host files or directories mounted read-only into every container. |
 
 **Judges run in the run's strongest tier — there is no opt-out.** When any step is `container`, every
 script judge and every LLM judge runs in `judge.image` with the project read-only. A container worker
-can rewrite `agg/judges/*.sh` in its bind-mounted tree; run on the host, that rewrite would be an
-escape. A judge's scratch and toolchain cache then live under `agg/private/container/judge/` (not
+can rewrite `rlt/judges/*.sh` in its bind-mounted tree; run on the host, that rewrite would be an
+escape. A judge's scratch and toolchain cache then live under `rlt/private/container/judge/` (not
 `$TMPDIR`), which the worker can read but not write. **Hooks and `notify.cmd` stay host tooling** on
 this tier — they run on the host, unconfined, like the summarizer (which runs no tools).
 
-**Refused at startup** (`agg check` lists each at its key, `agg doctor --json` reports
+**Refused at startup** (`rlt check` lists each at its key, `rlt doctor --json` reports
 `container_images`): an image that cannot be started, or that lacks the CLI a step (or the ruler, for
-an LLM judge, or `swe-metrics`, for a metric or score judge) runs in it — agg runs a short probe container per image as the project owner; container
+an LLM judge, or `swe-metrics`, for a metric or score judge) runs in it — rlt runs a short probe container per image as the project owner; container
 steps on several images with no `judge.image`; and a mounted path the engine cannot see. A VM-backed
 engine (colima, lima) shares only some host directories with its VM — colima only your home by
 default — and a bind of one it cannot see is not an error, it is an **empty directory** inside the
@@ -550,8 +550,8 @@ Only the CLIs that run on the host must be on its `PATH`: a container step's age
 installed on the host at all, and the ruler only when something it runs stays there (the summarizer —
 `summary: { enabled: false }` if the host has no CLI — or LLM judges on a non-container run).
 
-A Rust driver sets these with `Agg::image`, `Step::image`, `Agg::judge_image`, `Agg::pass_env` and
-`Agg::credentials`.
+A Rust driver sets these with `Relentless::image`, `Step::image`, `Relentless::judge_image`, `Relentless::pass_env` and
+`Relentless::credentials`.
 
 ### Network egress — `isolation_policy.network`
 
@@ -578,7 +578,7 @@ isolation_policy:
 
 No URLs, paths or CIDR ranges — such an entry is refused at startup, at its index.
 
-**How it is enforced.** One enforcement point: a small proxy inside the agg process. Every confined
+**How it is enforced.** One enforcement point: a small proxy inside the rlt process. Every confined
 process gets `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (both cases) pointing at it, `NO_PROXY` for its own
 loopback, and `NODE_USE_ENV_PROXY=1`; the tier then makes the proxy the **only** way out, so a process
 that ignores or rewrites those variables gains nothing. The proxy checks the name the client asked for
@@ -592,15 +592,15 @@ allow-list`.
 
 | tier · platform | enforced by | names or IPs | DNS inside the jail | covers |
 |---|---|---|---|---|
-| `container` · any Docker engine (**the reference**) | an `--internal` network with no route out; its one reachable address is a relay (busybox `nc` in the base image) to agg's proxy; `NET_RAW` dropped | names (the proxy resolves them); IPs only by IP entry | none — the engine's DNS answers no outside name there | worker, script judges, LLM judges |
+| `container` · any Docker engine (**the reference**) | an `--internal` network with no route out; its one reachable address is a relay (busybox `nc` in the base image) to rlt's proxy; `NET_RAW` dropped | names (the proxy resolves them); IPs only by IP entry | none — the engine's DNS answers no outside name there | worker, script judges, LLM judges |
 | `sandbox` · macOS | Seatbelt: outbound TCP only to the proxy's loopback port (+ granted `localhost` ports); UDP, raw sockets and unix sockets outside the project and `$TMPDIR` denied | names (the proxy resolves them); IPs only by IP entry | none — `mDNSResponder` is denied (`localhost` still resolves) | worker, script judges, LLM judges, hooks except `on_start`, `notify.cmd` |
 | `sandbox` · Linux | **refused at startup** — `bwrap` cannot narrow the host network to one port; use `container` | | | |
 | `container` · podman | **refused at startup** — the network is built on Docker's `--internal` networks | | | |
 | `none` | **refused at startup** — nothing would stop a direct connection | | | |
 
-**Not covered, and said so at startup (`agg check` warnings):** hooks on a `container` run (they are
+**Not covered, and said so at startup (`rlt check` warnings):** hooks on a `container` run (they are
 host tooling), `on_start` on any tier (it runs before any worker, unconfined), `background` hooks
-(never confined). The summarizer runs on the host too; it is agg's own tools-off call and executes
+(never confined). The summarizer runs on the host too; it is rlt's own tools-off call and executes
 nothing the worker wrote.
 
 **What each bypass meets** (measured; `tests/egress.rs`, `scripts/e2e.sh` §9r):
@@ -611,8 +611,8 @@ nothing the worker wrote.
 | DNS-over-HTTPS to an unlisted resolver | proxy `403` · direct: refused | proxy `403` · direct: no route |
 | a plain DNS lookup | fails (no resolver reachable) | fails (no outside name resolves) |
 | a raw socket / UDP, from a child process | refused | no route (`NET_RAW` dropped) |
-| the worker sets its own `HTTPS_PROXY` | refused (only agg's proxy is reachable) | no route |
-| an unlisted name through agg's proxy | `403` | `403` |
+| the worker sets its own `HTTPS_PROXY` | refused (only rlt's proxy is reachable) | no route |
+| an unlisted name through rlt's proxy | `403` | `403` |
 | the host's own services | only `localhost` entries | unreachable |
 
 **Metric and score judges need no entry of their own.** swe-metrics in `judge.image` reads trivy's
@@ -623,7 +623,7 @@ trivy resolving a Maven `pom.xml`'s remote parents (`repo.maven.apache.org`). Re
 fails and its judges fail closed; list those hosts, or keep the run open, if you measure such projects.
 
 **The agent's own endpoint must be listed** — a worker that cannot reach its model is not confined, it
-is broken. agg checks at startup (and the driver at `step()`) that every step's agent, and the ruler
+is broken. rlt checks at startup (and the driver at `step()`) that every step's agent, and the ruler
 when the run has LLM judges, can reach: Claude `api.anthropic.com` (or `ANTHROPIC_BASE_URL`'s host);
 Codex `api.openai.com` with an API key in the environment, `chatgpt.com` with a ChatGPT login (or
 `OPENAI_BASE_URL`'s host); Copilot `api.githubcopilot.com` and `api.github.com`. Missing ⇒ refused at
@@ -636,20 +636,20 @@ and your mirrors, not a general-purpose host. The proxy decides on the `CONNECT`
 tunnel is opaque to it, so a CDN that serves an unlisted name from the same address as a listed one
 (domain fronting) is not distinguished.
 
-`agg doctor --json` reports `network: {mode, allow, sandbox, container}` — how this host would enforce
-the list on each tier. A Rust driver sets it with `Agg::network(Network::Allow(vec![…]))`.
+`rlt doctor --json` reports `network: {mode, allow, sandbox, container}` — how this host would enforce
+the list on each tier. A Rust driver sets it with `Relentless::network(Network::Allow(vec![…]))`.
 
 ### Protected paths — `write_deny`, `readonly`, `writable`
 
 An agent that cannot pass a test will, given the chance, edit the test: delete it, special-case it,
 or weaken the golden file it compares against. Committed judges are restored by a rollback, but an
-oracle **outside** `agg/judges/` that the worker weakens makes the judges pass — and the session
+oracle **outside** `rlt/judges/` that the worker weakens makes the judges pass — and the session
 merges. Three keys say which project paths the worker may read but not change:
 
 | key | where | what binds it | under `isolation: none` |
 |---|---|---|---|
 | `write_deny` | `defaults` + each step (**union**) | the **kernel** (confining tiers) **and the gate check** (every tier) | **enforced** — the gate rolls the session back |
-| `readonly` | each step | the kernel only | inert — agg warns that the step *can write* them |
+| `readonly` | each step | the kernel only | inert — rlt warns that the step *can write* them |
 | `writable` | each step | subtracts from that step's `readonly` (exact spelling) | — |
 
 **Use `write_deny` for anything a judge trusts** — oracles, golden masters, contract tests, rule
@@ -669,7 +669,7 @@ steps:
 component, `**` matches zero or more whole components. `dir/` is shorthand for `dir/**`, and
 `dir/**` covers the directory **itself** too, so swapping it for a symlink or deleting and recreating
 it counts as a change. Refused at startup, on every tier: an absolute path, `..`, a pattern naming the
-project root, and syntax agg does not implement (`[…]`, `{…}`, a leading `!`, `\`) — read literally,
+project root, and syntax rlt does not implement (`[…]`, `{…}`, a leading `!`, `\`) — read literally,
 those would protect nothing while looking like they did. Matching is on **canonical** paths (a file
 reached through a symlinked directory is matched where it really lives) and **case-insensitive** on a
 case-insensitive volume (the macOS default), where `TESTS/X.JSON` *is* `tests/x.json`.
@@ -682,17 +682,17 @@ accumulates down a template chain the same way.
 #### Two layers — and the gate check is the guarantee
 
 1. **The kernel (first line).** Under `sandbox`/`container` the patterns go to the same mechanism as
-   `agg/private/`: the write is refused (`EPERM` / `EROFS`) before it happens. Reads stay open, so
+   `rlt/private/`: the write is refused (`EPERM` / `EROFS`) before it happens. Reads stay open, so
    judges and the worker still read every protected file.
-2. **The gate check (the guarantee, every tier).** Right before the worker starts, agg fingerprints
+2. **The gate check (the guarantee, every tier).** Right before the worker starts, rlt fingerprints
    every covered entry — **tracked, untracked and gitignored** (a `git diff` would miss the last two):
    a file's bytes (SHA-256) and permission bits, a directory's permission bits, a symlink's target.
    The moment the worker exits it does it again. Any difference — a path changed, appeared or
    disappeared — is a **`protected_path_violation`**:
-   - the paths are **restored** from agg's own copies (`agg/private/protected/<sha256>`, each checked
-     against the hash agg holds in memory) **before any judge runs**, so nothing is ever graded
+   - the paths are **restored** from rlt's own copies (`rlt/private/protected/<sha256>`, each checked
+     against the hash rlt holds in memory) **before any judge runs**, so nothing is ever graded
      against a weakened oracle;
-   - a row is appended to **`agg/private/violations.jsonl`**:
+   - a row is appended to **`rlt/private/violations.jsonl`**:
      `{"session":3,"step":"implement","reason":"protected_path_violation","window":"session","paths":["tests/oracles/x.json"],"restored":true,"ts":…}`;
    - the gate **rolls the session back** — the whole span, if it was staged — whatever the judges
      said, and whatever `gate_regressions` (or a driver's `on_regression`) is set to.
@@ -705,7 +705,7 @@ accumulates down a template chain the same way.
 
 | tier | platform | `write_deny` is… | how |
 |---|---|---|---|
-| `none` | any | **gate check only** — agg warns at startup | snapshot + compare + restore + rollback |
+| `none` | any | **gate check only** — rlt warns at startup | snapshot + compare + restore + rollback |
 | `sandbox` | macOS | **kernel-enforced** + gate check | one Seatbelt `(deny file-write* (regex …))` per pattern — any glob — case-folded on a case-insensitive volume, plus an unlink deny on each ancestor of the pattern's literal directory |
 | `sandbox` | Linux | **kernel-enforced** for a literal path or `dir/**`; any other glob is **refused** at startup; + gate check | `bwrap --ro-bind` of the directory or file (a `dir/**` root that does not exist yet is created first; a literal path that does not exist yet has no mount point and is left to the gate, with a warning) |
 | `container` | any host | same as Linux `sandbox` | a `:ro` bind mount per directory or file |
@@ -737,7 +737,7 @@ write and the rest of the session's work is judged normally. Linux `sandbox` (bw
 bind mechanism as the container column and is expected to behave like it; it is not yet verified on a
 real Linux host. The suite that produced this table is `tests/protected_paths.rs`.
 
-**What is NOT covered.** `.git/` and `agg/private/` are never part of the check — agg owns both and
+**What is NOT covered.** `.git/` and `rlt/private/` are never part of the check — rlt owns both and
 writes them during a session. Judges and hooks are operator code: a change they make is caught at the
 next session start (above), not attributed to the session that ran them.
 
@@ -756,7 +756,7 @@ context:
 
 | key | rule |
 |---|---|
-| `path` | absolute, `~/…`, or relative to the project dir. Must exist and be a directory, and must not overlap the project (inside it, or containing it — which also keeps `agg/private/` out). |
+| `path` | absolute, `~/…`, or relative to the project dir. Must exist and be a directory, and must not overlap the project (inside it, or containing it — which also keeps `rlt/private/` out). |
 | `as` | a short name: lowercase letters, digits, `-`, `_` (≤ 64, starting with a letter or digit), unique. |
 | `mode` | `ro` — the only mode. Anything else is refused. |
 
@@ -770,18 +770,18 @@ What each process sees:
 | `none` | — | nothing — so a run that names a context and has an unconfined step is **refused at startup** |
 
 - **The brief lists them.** `INSTRUCTIONS.md` gets a `## Context (read-only)` section naming each
-  directory where the step's tier shows it, with a pointer to its `index.md` when it has one. agg never
+  directory where the step's tier shows it, with a pointer to its `index.md` when it has one. rlt never
   reads or interprets the contents.
-- **Every confined process finds them by name**: `AGG_CONTEXT_<AS>` (uppercased, `-` → `_`) holds the
+- **Every confined process finds them by name**: `RLT_CONTEXT_<AS>` (uppercased, `-` → `_`) holds the
   path — `/context/brain` in a container, the host path otherwise. Judges run in the run's strongest
   tier and get the same read-only view as the worker; so do hooks and `notify.cmd` under `sandbox`
-  (under `container` they are host tooling — see the isolation table). A judge run by hand (`agg
-  judge`, `agg plan`) gets the variables too, unconfined.
-- **Refused at startup** (`agg check` lists each at its key, `context[i].path` / `context[i].as`): a
+  (under `container` they are host tooling — see the isolation table). A judge run by hand (`rlt
+  judge`, `rlt plan`) gets the variables too, unconfined.
+- **Refused at startup** (`rlt check` lists each at its key, `context[i].path` / `context[i].as`): a
   missing path, a file, an overlap with the project, a malformed or duplicate `as` (two names that map
   to the same variable count as duplicates), a `mode` other than `ro`, and an unconfined step.
 
-A Rust driver adds one with `Agg::open(dir)?.context("~/kb/brain", "brain")`; `step()` then refuses an
+A Rust driver adds one with `Relentless::open(dir)?.context("~/kb/brain", "brain")`; `step()` then refuses an
 `Isolation::None` step.
 
 ## `sequence` — the loop
@@ -817,8 +817,8 @@ steps:
 
 The sequence repeats from the top, forever, until `done_if` fires (exit **0**) or `abort_if` fires
 (exit **3**). When both hold at the end of the same session, **`done_if` wins**; an operator stop
-(`agg stop`, SIGTERM, SIGINT) that arrived during that session beats both. Every ending writes
-[`agg/private/report.json`](#the-run-report-aggprivatereportjson). Before session 1, every judge in the run-set runs once against the untouched repo (the
+(`rlt stop`, SIGTERM, SIGINT) that arrived during that session beats both. Every ending writes
+[`rlt/private/report.json`](#the-run-report-aggprivatereportjson). Before session 1, every judge in the run-set runs once against the untouched repo (the
 **baseline**), so a run can end immediately as already-done or already-aborting.
 
 A judge named in an `until` condition joins the **run-set** (it has to execute, or the condition
@@ -829,9 +829,9 @@ could never become true) but never the **DoD-set** — it is machinery, not a go
 | key | default | notes |
 |---|---|---|
 | `limits: { tokens, cost, sessions }` | all unlimited | The run-level ceilings, unified. Each key `null`/absent = unlimited. The three subkeys below. **No ceiling is implied:** with no `limits` at all a run ends only on `done_if`, `abort_if` or a stop. |
-| `limits.tokens` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. Output only: cache writes are input and are not counted (agg ≤ 0.0.15 added Claude's cache writes to output, so the same work now counts far fewer tokens). |
+| `limits.tokens` | unlimited | **output-token** ceiling → `over_budget`. Counts **worker AND judge** spend, summed across all agents. Works on every agent. Output only: cache writes are input and are not counted (rlt ≤ 0.0.15 added Claude's cache writes to output, so the same work now counts far fewer tokens). |
 | `limits.cost` | unlimited | **dollar** ceiling → `over_cost`. **CLAUDE-ONLY** — see [Choosing an agent](#agent-specific-rules). |
-| `limits.sessions` | unlimited (`null`) | session cap → `over_iterations`. A **non-zero** `agg run --max-sessions <n>` overrides it; the flag's default `0` falls back to this key (not to unlimited). |
+| `limits.sessions` | unlimited (`null`) | session cap → `over_iterations`. A **non-zero** `rlt run --max-sessions <n>` overrides it; the flag's default `0` falls back to this key (not to unlimited). |
 | `limits.wall_time` | unlimited | **END-TO-END wall ceiling in SECONDS**, human waiting INCLUDED — a *deadline*. ⚠ Replaces `wall_hours`; the unit changed by 3600×, so the old key is a **hard error at startup**, never an alias. |
 | `limits.work_time` | unlimited | **EFFORT ceiling in SECONDS**: `wall_time` minus time spent blocked on a human. The ceiling a run with humans in it actually wants — see [the clock](#the-clock--three-terms-all-in-seconds). |
 | `gate_regressions` | `true` | roll a session back if a previously-met judge now fails. The rename of the old `rollback_on_regression`. |
@@ -869,7 +869,7 @@ done_if: "tests_pass AND coverage.value >= 80"   # ✅  read the number the cove
 done_if: "tests_pass AND coverage >= 80"         # ✗  HARD ERROR — a judge name is a BOOL
 ```
 
-A bare judge name is its `met` boolean; comparing a bool to a number is meaningless, so agg **refuses
+A bare judge name is its `met` boolean; comparing a bool to a number is meaningless, so rlt **refuses
 it at startup** and tells you to use `coverage.value >= 80`. A threshold has one owner — the condition
 — so the judge's own `target` is presentational only (it drives progress bars, nothing more).
 
@@ -951,7 +951,7 @@ sequence:
 - **Terms:** `ratchet_regressed` is true when the most recent judged gate recorded a ratchet regression;
   `<judge>.ref` is a ratcheted judge's current reference (no reference yet ⇒ every comparison is false).
 
-The ratchet's state lives in agg's memory and is persisted to `agg/private/gate.json` (and, on the Rust
+The ratchet's state lives in rlt's memory and is persisted to `rlt/private/gate.json` (and, on the Rust
 driver path, on every `gate` record of the call ledger, which is what a `--resume` restores it from).
 It is never read back from `verdicts.jsonl`, so the worker cannot move its own reference.
 
@@ -1029,7 +1029,7 @@ sequence:
 ## The clock — three terms, all in seconds
 
 `wall_time`, `human_wait_time` and `work_time` are condition terms *and* `limits:` keys. All three are
-**seconds**, all three are computed by agg from its own state (so a worker cannot forge them), and
+**seconds**, all three are computed by rlt from its own state (so a worker cannot forge them), and
 `wall_time` is **end-to-end across resumes** — it is read from a persisted start epoch, not from
 process uptime.
 
@@ -1046,14 +1046,14 @@ abort_if: "work_time >= 28800"   # EFFORT   — 8h of actual looping; a slow hum
 
 All three exist as separate terms because the [condition grammar](#the-condition-grammar) has
 comparisons but **no arithmetic**: `wall_time - human_wait_time >= 28800` cannot be written, so the
-difference has to be its own term. Which one you want is a real choice, and agg does not make it for
+difference has to be its own term. Which one you want is a real choice, and rlt does not make it for
 you: a run that must ship by tomorrow wants `wall_time`; a run that must not burn more than eight
 hours of *agent* effort wants `work_time`, because ceilings keep firing while a
 [human call](#asking-a-human-hil) is blocked and an overnight question would otherwise consume the
 whole allowance.
 
 > ⚠ **`wall_hours` was removed, not renamed.** The unit changed by 3600×, so a compatibility alias
-> would let `wall_hours: 8` become `wall_time: 8` — an eight-**second** ceiling. agg hard-errors on
+> would let `wall_hours: 8` become `wall_time: 8` — an eight-**second** ceiling. rlt hard-errors on
 > the old key and prints the converted value. It also **warns** when a clock term is compared against
 > anything under 60, because a fresh config has no old key to catch and `work_time >= 8` is almost
 > always somebody thinking in hours.
@@ -1061,17 +1061,17 @@ whole allowance.
 ## Asking a human (`hil`)
 
 > **The default is that there is no human.** A project with no `hil_*` call in its driver and no
-> opt-in paragraph in its `AGG.md` behaves exactly as it did before this feature existed: fully
+> opt-in paragraph in its `RLT.md` behaves exactly as it did before this feature existed: fully
 > unattended, start to finish. Nothing below is on unless you turn it on, and that is the point —
-> agg exists because a raw coding agent stops every few minutes to ask.
+> rlt exists because a raw coding agent stops every few minutes to ask.
 
 HiL is opt-in **twice over**, once per channel:
 
 | channel | how it is turned on | can it stop the loop? |
 |---|---|---|
 | a **driver** `hil_*` call | by existing — a Rust author writes the call site | **yes**, it blocks there |
-| the **worker**'s `agg hil` | by the project adding the paragraph [below](#letting-the-worker-ask) to its `AGG.md` | **no**, ever — it records and the session ends |
-| `agg.yaml` | ⛔ not at all — there is no `hil` key | — |
+| the **worker**'s `rlt hil` | by the project adding the paragraph [below](#letting-the-worker-ask) to its `RLT.md` | **no**, ever — it records and the session ends |
+| `rlt.yaml` | ⛔ not at all — there is no `hil` key | — |
 
 Note the asymmetry in the last column, because it is the whole safety argument: the only thing that
 can make the loop *wait* is a line of Rust a human wrote. A worker with the channel turned on can
@@ -1080,26 +1080,26 @@ that sits idle.
 
 ### Letting the worker ask
 
-**Nothing tells the worker this exists.** The scaffolded `AGG.md` says *"There is NO human to answer
+**Nothing tells the worker this exists.** The scaffolded `RLT.md` says *"There is NO human to answer
 questions"* and leaves it there, deliberately: a worker shown an escape hatch in every session's brief
 will reach for it, and a loop that asks instead of working is the failure this whole design is
 against. Exactly like the [`blocked` judge](#blocked--the-workers-self-report-a-hint-not-a-fact), the
-channel is real but unadvertised until **you** add it to your project's `AGG.md`:
+channel is real but unadvertised until **you** add it to your project's `RLT.md`:
 
 ```markdown
 - If you hit something ONLY a human can resolve — a missing credential, a decision you are not
   allowed to make, a real-world action (provision an account, open a firewall, sign something) —
-  ask through agg and END YOUR SESSION IMMEDIATELY: `agg hil bool "…"` / `agg hil choose "…"
-  --option a --option b` / `agg hil input "…"`. It records and exits at once; the answer is at the
+  ask through rlt and END YOUR SESSION IMMEDIATELY: `rlt hil bool "…"` / `rlt hil choose "…"
+  --option a --option b` / `rlt hil input "…"`. It records and exits at once; the answer is at the
   top of your next brief. Do NOT guess, fabricate, or poll for it. This is a LAST RESORT — if you
   can make progress on anything else, do that instead.
 - Never ask for a secret's VALUE. Ask for the credential to be PLACED (environment, keychain,
-  `.env`) and confirm with `agg hil bool`.
+  `.env`) and confirm with `rlt hil bool`.
 ```
 
 Add it when your project genuinely has human-only steps in it (credentials, a real-world action, an
 irreversible decision). Leave it out otherwise. Under `isolation: sandbox` the CLI still works — it
-writes to `agg/state/asks/`, which is the worker's own directory.
+writes to `rlt/state/asks/`, which is the worker's own directory.
 
 Two guards apply, because a worker re-reads the same unresolved situation every session and *will*
 ask again: a repeat of a question that is **already open** is dropped rather than paging you twice,
@@ -1107,50 +1107,50 @@ and at most **five** worker asks may be open at once. Neither is a permission bo
 cannot stop the loop whatever it does — they just stop the channel becoming a pager loop. An answered
 question may be asked again, because the situation can genuinely recur.
 
-### The worker: `agg hil` records and exits
+### The worker: `rlt hil` records and exits
 
 A worker that hits something only a person can resolve runs one of:
 
 ```bash
-agg hil bool   "Request firewall piercing for :443. Done?"
-agg hil choose "Which store?" --option postgres --option sqlite
-agg hil input  "Which instance is prod?"
+rlt hil bool   "Request firewall piercing for :443. Done?"
+rlt hil choose "Which store?" --option postgres --option sqlite
+rlt hil input  "Which instance is prod?"
 ```
 
 These **never wait.** They record the question, print an id, and exit — a worker session is a paid
-subprocess holding a git branch, so a worker that waited on a human would be the exact failure agg
-exists to replace. The worker ends its session; agg pages you; the answer arrives in the **next**
+subprocess holding a git branch, so a worker that waited on a human would be the exact failure rlt
+exists to replace. The worker ends its session; rlt pages you; the answer arrives in the **next**
 session's brief, scoped to that id. There is deliberately no `--wait` flag.
 
-⛔ **Never `agg hil input` for a secret.** The answer is written to the ask ledger and to the next
+⛔ **Never `rlt hil input` for a secret.** The answer is written to the ask ledger and to the next
 session's instructions, both files on disk. Ask for it to be placed where credentials go and confirm
-with `agg hil bool`: *an answer may NAME a secret, never CONTAIN one.*
+with `rlt hil bool`: *an answer may NAME a secret, never CONTAIN one.*
 
 ### The driver: `hil_*` blocks until answered
 
 This is the channel that can stop the loop, which is why it is reachable **only** from Rust, only at a
-call site a human wrote, and never from `agg.yaml` (there is no `hil` key — the YAML path never
+call site a human wrote, and never from `rlt.yaml` (there is no `hil` key — the YAML path never
 blocks). A driver with no `hil_*` call runs unattended, exactly like every driver written before this
 existed:
 
 ```rust
-let i  = agg.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize
-let v  = agg.hil_input("Which instance is prod?")?;                  // -> String
-let ok = agg.hil_bool("Deploy to prod?")?;                           // -> bool
+let i  = rlt.hil_choose("Which store?", &["postgres", "sqlite"])?;   // -> usize
+let v  = rlt.hil_input("Which instance is prod?")?;                  // -> String
+let ok = rlt.hil_bool("Deploy to prod?")?;                           // -> bool
 ```
 
-They block until a human answers. **No timeout, no default, no ending the run** — an idle agg process
+They block until a human answers. **No timeout, no default, no ending the run** — an idle rlt process
 spends no tokens, and waiting is cheaper than the machinery that avoids waiting. Two things make that
-safe: `agg stop` and Ctrl-C interrupt a wait (the bus is drained on every poll), and `work_time` does
+safe: `rlt stop` and Ctrl-C interrupt a wait (the bus is drained on every poll), and `work_time` does
 not count the waiting. Full detail in [docs/RUST_API.md](RUST_API.md).
 
 ### Answering
 
 ```bash
-agg status                        # lists every open ask, its age, and the command to answer it
-agg answer <id> "value"           # any ask. For a choice: an option, or its 1-based number
-agg answer <id> yes               # a yes/no ask takes yes/no (or 1/2)
-agg answer <id> 2 --json          # for a program: {schema_version, accepted, reason, id, answer}
+rlt status                        # lists every open ask, its age, and the command to answer it
+rlt answer <id> "value"           # any ask. For a choice: an option, or its 1-based number
+rlt answer <id> yes               # a yes/no ask takes yes/no (or 1/2)
+rlt answer <id> 2 --json          # for a program: {schema_version, accepted, reason, id, answer}
 ```
 
 `--json` prints the result as [`docs/schemas/answer.v1.json`](schemas/answer.v1.json) whether or not
@@ -1164,7 +1164,7 @@ exists next to `hil_input`, which is open and should be paired with a judge inst
 wins: a second one is refused rather than silently rewriting a decision the run may already have
 acted on.
 
-An answer is recorded in `agg/private/asks.jsonl` — [agg-owned](#state-and-memory), carved out of
+An answer is recorded in `rlt/private/asks.jsonl` — [rlt-owned](#state-and-memory), carved out of
 the worker's writable set under `isolation: sandbox`/`container`. **That asymmetry is the point:** the
 *request* may be worker-authored and is untrusted text, but the *answer* provably came from outside
 the worker, which is what makes "a human approved the prod deploy" mean anything.
@@ -1172,12 +1172,12 @@ the worker, which is what makes "a human approved the prod deploy" mean anything
 It is deliberately **not** put on the steering bus. An answer is a durable fact that outlives the
 workflow that asked — a worker asks, its session ends, the workflow may reach its goal and exit while
 the question is still open — so it must not depend on something running to be recorded. That is why
-it is `agg answer`, a peer of `agg send` rather than a member of it, and why answering needs no
+it is `rlt answer`, a peer of `rlt send` rather than a member of it, and why answering needs no
 running workflow while [every `send` does](#the-bus-only-exists-while-a-workflow-runs).
 
 ### The bus only exists while a workflow runs
 
-`agg send` steers a **running** workflow. Sending with none running is an **error** naming the missing
+`rlt send` steers a **running** workflow. Sending with none running is an **error** naming the missing
 prerequisite, not a silent enqueue — the files can sit on disk with nothing listening, but a steering
 message with nothing to steer is a landmine: a `stop` written now would fire at the startup of
 whatever runs next, hours later, with nobody connecting the two. Anything stale is **purged** when a
@@ -1187,55 +1187,55 @@ The rule lives in one place that every channel goes through, so the CLI and `POS
 disagree about it. Answering is exempt only because it is not a `send` at all — see above.
 
 > ⚠ **A forgotten ask waits forever.** That is the accepted cost of having no timeout. `notify.cmd`
-> fires when an ask opens, `agg status` shows it with its age, and `agg stop` ends a run nobody
+> fires when an ask opens, `rlt status` shows it with its age, and `rlt stop` ends a run nobody
 > intends to answer. A worker-opened ask cannot hang anything — it never blocks the loop.
 
 ## Rate limits — wait, wake, resume
 
 A subscription limit is a time window, not a budget. When a worker session ends on one ("You've hit
-your session limit · resets 2:20pm"), agg treats that session as **incomplete**: it is never judged and
-never merged. agg then:
+your session limit · resets 2:20pm"), rlt treats that session as **incomplete**: it is never judged and
+never merged. rlt then:
 
 1. **saves its work** — tracked edits, new files, and any commits the worker made — under
-   `refs/agg/partial/<run_id>/<session>` and resets the tree to where the session started. Nothing is
-   lost and nothing leaks into the next session. `git diff main refs/agg/partial/<run>/<n>` shows it;
+   `refs/rlt/partial/<run_id>/<session>` and resets the tree to where the session started. Nothing is
+   lost and nothing leaks into the next session. `git diff main refs/rlt/partial/<run>/<n>` shows it;
    `git cherry-pick`/`git checkout <ref> -- <path>` takes it.
 2. **waits** until the reported reset + 90 s (or `ratelimit_backoff_secs` when no reset was named), then
    starts the next session. Still limited ⇒ it detects that and waits again.
 
-**The wait is visible.** `state.json` / `agg status --json` carry
+**The wait is visible.** `state.json` / `rlt status --json` carry
 `waiting: {reason: "rate_limit", agent, until}` (`until` = epoch seconds; `null` while working), and
-`agg/private/waits.jsonl` gets a `wait` row when it starts (with the partial ref, if any) and a
+`rlt/private/waits.jsonl` gets a `wait` row when it starts (with the partial ref, if any) and a
 `wait_end` row when it ends — `how`: `elapsed` · `woken` · `stopped` · `interrupted` · `ceiling`.
 
 **The wait drains the bus** — a waiting loop is a running workflow:
 
 | command | during the wait |
 |---|---|
-| `agg send wake` | end the wait and start the next session now — but no sooner than `ratelimit_min_gap_secs` (default 60) after the limited attempt, so an eager wake never hammers the provider |
-| `agg send resume` | the same as `wake` while waiting (and unpauses, as always, otherwise) |
-| `agg stop` / `agg send stop` | end the run: exit **5**, `outcome: stopped` |
+| `rlt send wake` | end the wait and start the next session now — but no sooner than `ratelimit_min_gap_secs` (default 60) after the limited attempt, so an eager wake never hammers the provider |
+| `rlt send resume` | the same as `wake` while waiting (and unpauses, as always, otherwise) |
+| `rlt stop` / `rlt send stop` | end the run: exit **5**, `outcome: stopped` |
 | anything else | kept, in order, for the next session boundary |
 
-Outside a wait, `agg send wake` is a logged no-op.
+Outside a wait, `rlt send wake` is a logged no-op.
 
 **Waiting is never a limit.** Its seconds are excluded from `work_time` (like a human's), and nothing
-about waiting ends the run: without a signal agg waits as long as the provider requires. A ceiling
+about waiting ends the run: without a signal rlt waits as long as the provider requires. A ceiling
 that trips on its own while waiting — a `wall_time` deadline — still ends it.
 
-**Exit contract.** Exit 0 means only "`done_if` met". SIGINT/SIGTERM or `agg stop` during a session
+**Exit contract.** Exit 0 means only "`done_if` met". SIGINT/SIGTERM or `rlt stop` during a session
 or a wait exit **5** with `outcome: stopped`; a run that ended while waiting has `waiting` in its
 [report](#the-run-report-aggprivatereportjson).
 
-### `agg run --resume`
+### `rlt run --resume`
 
 Continues the project's last interrupted run — the same `run_id`, session counter, ratchet state and
 call ledger. It reuses the [driver's call-ledger resume](RUST_API.md): the YAML loop records a `step`
-row per session and a `gate` row per judged session in `agg/private/calls.jsonl`, and a resume keeps
+row per session and a `gate` row per judged session in `rlt/private/calls.jsonl`, and a resume keeps
 them back to the **last kept gate** — the only point it is sound to skip to, because everything after
 it was never merged. From there:
 
-- the sequence walk continues at the step after that gate (an `agg.yaml` whose `sequence.steps` no
+- the sequence walk continues at the step after that gate (an `rlt.yaml` whose `sequence.steps` no
   longer matches the ledger is refused: re-run without `--resume`);
 - the ratchet references and gate history are those of that gate;
 - session numbers **continue** after the interrupted session `n` — the resumed run starts with `n+1` —
@@ -1251,8 +1251,8 @@ A human's answer unblocks the **step**; a **judge** still owns the **verdict**. 
 satisfy a goal directly — re-run the check that looks at the world:
 
 ```rust
-while !agg.judge(&dns_ok).met() {
-    agg.hil_bool("Create the A record for billing.prod. Done?")?;
+while !rlt.judge(&dns_ok).met() {
+    rlt.hil_bool("Create the A record for billing.prod. Done?")?;
 }
 ```
 
@@ -1263,7 +1263,7 @@ A human sign-off that *binds* `done_if` — a verdict row rather than a branch �
 
 A loop gets stuck two ways: a **hard blocker only a human can resolve** (a missing credential, an
 ambiguous requirement, a call the agent isn't allowed to make), or a **soft stall** — it keeps running
-but stops making progress. agg detects both with machinery you already have, because **a stuck detector
+but stops making progress. rlt detects both with machinery you already have, because **a stuck detector
 is just a judge**: it emits `{met, value, rationale}`, resolves by name from disk, and gets named in a
 condition, exactly like `coverage`. There is no detection engine, no confidence model, no `kind:` tag.
 
@@ -1271,7 +1271,7 @@ The only net-new clause is **`notify_if` — the non-terminal twin of `abort_if`
 validator, the same startup hard error on a typo'd judge name. What differs is what happens when it is
 true: `abort_if` stops the run; `notify_if` runs `sequence.notify.cmd` and **the loop keeps running**.
 
-> **The anti-goal, and it is load-bearing.** agg exists because a raw coding agent stops every few
+> **The anti-goal, and it is load-bearing.** rlt exists because a raw coding agent stops every few
 > minutes to ask a human what to do. "Stuck ⇒ stop ⇒ ask" is a regression to exactly that. So the loop
 > **never waits for a human**: notification is a *side-channel*, not a gate. Stopping stays available —
 > it is spelled `abort_if`, it is explicit, and it is never the mechanism by which a human is involved.
@@ -1296,7 +1296,7 @@ the same detector, the same delivery, one word of difference:
 | set | non-empty | **notify + keep going** — fires `notify.cmd`, exit code unchanged, **loop continues** |
 | absent | non-empty | **stop + notify** — no live ping; it fires once when `abort_if` halts, including an `abort_if` already true at launch |
 | absent | absent | **no human at all** — pure autonomy |
-| set | absent/empty | ✗ **hard error at startup** — nothing would fire, so agg refuses the silent no-op |
+| set | absent/empty | ✗ **hard error at startup** — nothing would fire, so rlt refuses the silent no-op |
 
 ### The escalation ladder is composition, not a config object
 
@@ -1347,7 +1347,7 @@ sequence:
 notify:
   cmd:                                    # shell commands, run in order
     - "curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"
-    - "timeout 10 ./agg/notify.sh {{project}} {{session}}"
+    - "timeout 10 ./rlt/notify.sh {{project}} {{session}}"
   cooldown_sessions: 3                    # default 3. Minimum sessions between two notify_if fires.
 ```
 
@@ -1356,18 +1356,18 @@ and **best-effort** — a command that is missing, fails, or exits non-zero is l
 run. A notification is auxiliary; the loop's job is the loop.
 
 > ⚠ **Foreground means untimed. Bound every command yourself.** Delivery is synchronous on purpose —
-> the page goes out before the loop moves on — and agg imposes **no timeout**, so a `curl` against a
+> the page goes out before the loop moves on — and rlt imposes **no timeout**, so a `curl` against a
 > host that accepts and then stalls hangs the gate until a human notices. Write
 > `curl --max-time 10`, or wrap anything else in `timeout 10 …`. An unbounded delivery turns a
 > side-channel into the [anti-goal](#stuck-detection-and-notification): a loop waiting on a human
 > channel. (Same exposure as every other hook — this is just the one you point at the network.)
 
-`cooldown_sessions` debounces `notify_if` only. One agg **session is one step execution**, so
+`cooldown_sessions` debounces `notify_if` only. One rlt **session is one step execution**, so
 `cooldown_sessions: 3` means "at most one ping per three steps" — the point is not to nag a human awake
 on every cycle of an overnight run. `0` fires on every qualifying cycle. **The `abort_if` ping ignores
 the cooldown** and does not consume it: a halt happens once, and it is the message you most want.
 
-### The `{{…}}` variables — agg quotes them, so you must not
+### The `{{…}}` variables — rlt quotes them, so you must not
 
 | var | value |
 |---|---|
@@ -1377,7 +1377,7 @@ the cooldown** and does not consume it: a halt happens once, and it is the messa
 | `{{step}}` | the step that just ran (empty string if there was none) |
 
 ```yaml
-cmd: ["curl -s -m 10 -d {{reason}} ntfy.sh/my-topic"]      # ✅ agg POSIX-shell-quotes it for you
+cmd: ["curl -s -m 10 -d {{reason}} ntfy.sh/my-topic"]      # ✅ rlt POSIX-shell-quotes it for you
 cmd: ["curl -s -m 10 -d '{{reason}}' ntfy.sh/my-topic"]    # ✗ the message arrives wrapped in ' '
 ```
 
@@ -1396,13 +1396,13 @@ substitution is a **single pass**, so a value that happens to contain `{{project
 | `notify_if`, no usable rationale | the **`notify_if` expression text** — when every named judge's rationale is empty, or the expression names only run-scalars (`over_iterations`, `work_time`). |
 | an `abort_if` halt | the **`abort_if` expression text**, plus that same winning rationale when the expression names a judge: `blocked OR over_iterations — BLOCKED: need the prod deploy key`. A ceiling-only expression (`over_budget OR work_time >= 28800`) names no judge, so it arrives as just the expression. |
 
-**It is a heuristic, not an attribution.** agg does not evaluate *which subterm* made the expression
+**It is a heuristic, not an attribution.** rlt does not evaluate *which subterm* made the expression
 true — `met`-first is a proxy for "this detector has something to say". A judge whose own `met`
 threshold differs from the one you wrote (`stuck.value >= 50` against a rubric that sets `met` at 85)
 can still lose to a met judge that is not the reason you were paged. Put detectors in one `notify_if`
 only if you would want to hear from either of them.
 
-Because that text is worker-authored, agg normalises it before it reaches you: whitespace collapses,
+Because that text is worker-authored, rlt normalises it before it reaches you: whitespace collapses,
 control characters are stripped, and it is capped at 400 characters. `{{reason}}` is always **one
 line** — every sink you would send it to (ntfy, syslog, `>> file`, a phone notification) is
 line-oriented, and none of them should be repaintable by the worker.
@@ -1410,11 +1410,11 @@ line-oriented, and none of them should be repaintable by the worker.
 ### Isolation: `notify.cmd` runs in the current step's jail
 
 `notify.cmd` gets the [`isolation`](#isolation--blast-radius-jail-a-different-axis-from-session-isolation)
-tier of the step that just ran — the same rule as hooks, for the same reason: it lives in `agg/agg.yaml`
+tier of the step that just ran — the same rule as hooks, for the same reason: it lives in `rlt/rlt.yaml`
 inside the worker's writable cwd and typically execs a project script, both of which a confined worker
 could rewrite.
 
-- **`sandbox`** — the delivery is confined too. A command agg **cannot** confine is **SKIPPED, loudly**,
+- **`sandbox`** — the delivery is confined too. A command rlt **cannot** confine is **SKIPPED, loudly**,
   never run unconfined. Writes are limited to the project dir + `$TMPDIR`, so a notify command that
   writes outside it (a log in `~`) fails. The network is open on this tier unless an
   [allow-list](#network-egress--isolation_policynetwork) narrows it — then list your notification
@@ -1433,13 +1433,13 @@ ending, success or abort:
 
 ```yaml
 hooks:
-  on_stop: ["curl -s --max-time 10 -d 'agg finished' ntfy.sh/my-topic"]
+  on_stop: ["curl -s --max-time 10 -d 'rlt finished' ntfy.sh/my-topic"]
 ```
 
 ### The moat — a worker-authored signal belongs in `notify_if`, not `abort_if`
 
-`blocked` reads `agg/state/BLOCKED.md`, a file the **worker** writes. Put that judge in `abort_if` and
-the worker can end its own run by declaring itself blocked — precisely the failure agg exists to
+`blocked` reads `rlt/state/BLOCKED.md`, a file the **worker** writes. Put that judge in `abort_if` and
+the worker can end its own run by declaring itself blocked — precisely the failure rlt exists to
 prevent, and the same reason a worker never grades its own `done_if`.
 
 ```yaml
@@ -1456,27 +1456,27 @@ it is never "the agent ended the run."
 
 | tier | example terms | what stops the worker |
 |---|---|---|
-| **process-internal** | `over_budget`, `over_cost`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_regressed(invariants)`, `rollbacks`, `consecutive_rollbacks`, `oscillating`, `ratchet_regressed`, `<judge>.ref` | agg computes them from its own in-memory run state. Nothing on disk. **Genuinely unfakeable** — these are what termination should stand on. |
-| **agg-owned file** | `stalled`, `stuck` — both read `agg/private/verdicts.jsonl` | **depends on the isolation tier.** Under `sandbox`/`container` this is a real **permission** boundary: the ledger lives in `agg/private/`, which is carved out of the worker's writable set, so a write is refused by the kernel. Under the default `isolation: none` it is only a **protocol** boundary — agg writes that ledger and a worker has no sanctioned reason to touch it, so appending is unambiguously tampering, but nothing stops it and the ledger carries no integrity check. Forging three flat `merged` rows makes `stalled` report met. |
-| **worker-authored** | `blocked` over `agg/state/BLOCKED.md` | nothing, on any tier. `agg/state/` is the worker's own directory — the worker is *supposed* to write this file. |
+| **process-internal** | `over_budget`, `over_cost`, `over_iterations`, `wall_time`, `human_wait_time`, `work_time`, `any_regressed(invariants)`, `rollbacks`, `consecutive_rollbacks`, `oscillating`, `ratchet_regressed`, `<judge>.ref` | rlt computes them from its own in-memory run state. Nothing on disk. **Genuinely unfakeable** — these are what termination should stand on. |
+| **rlt-owned file** | `stalled`, `stuck` — both read `rlt/private/verdicts.jsonl` | **depends on the isolation tier.** Under `sandbox`/`container` this is a real **permission** boundary: the ledger lives in `rlt/private/`, which is carved out of the worker's writable set, so a write is refused by the kernel. Under the default `isolation: none` it is only a **protocol** boundary — rlt writes that ledger and a worker has no sanctioned reason to touch it, so appending is unambiguously tampering, but nothing stops it and the ledger carries no integrity check. Forging three flat `merged` rows makes `stalled` report met. |
+| **worker-authored** | `blocked` over `rlt/state/BLOCKED.md` | nothing, on any tier. `rlt/state/` is the worker's own directory — the worker is *supposed* to write this file. |
 
 `stalled`/`stuck` are a **meaningfully higher bar** than `blocked` on every tier — the worker must break
 the protocol rather than use it, and that is visible after the fact — and under `sandbox`/`container` the
-bar becomes a wall the kernel holds. Row 1 is unfakeable regardless of tier, because agg never puts those
+bar becomes a wall the kernel holds. Row 1 is unfakeable regardless of tier, because rlt never puts those
 values on disk at all. Detect on any row; **terminate on row 1 unqualified, or on row 2 if you are running
 confined and accept that the moat is only as strong as the tier you configured.**
 
-**agg does not enforce any of this.** There is no startup guard refusing a worker-writable judge in
+**rlt does not enforce any of this.** There is no startup guard refusing a worker-writable judge in
 `abort_if`, and no integrity check on the ledger: "stop when the worker says it is blocked" is a
 legitimate policy for a run you are watching, and the config is yours. It is a tradeoff you make
-explicitly, not one agg makes for you.
+explicitly, not one rlt makes for you.
 
 ### Rollbacks and oscillation — the gate's own detectors
 
 Besides stagnation (`stalled`), three failure shapes need a stop rule in any long loop: **damage** — the
 worker keeps making things worse and the gate keeps rolling it back — **oscillation** — it fixes A
 and breaks B, then fixes B and breaks A — and **idling** — the worker believes it is finished while a
-judge is still unmet, and changes nothing session after session. agg answers them with **built-in
+judge is still unmet, and changes nothing session after session. rlt answers them with **built-in
 terms**, not judges:
 
 | term | type | what it counts |
@@ -1496,9 +1496,9 @@ notify_if: "rollbacks >= 2"                               # or just tell a human
 ```
 
 **Why terms and not library judges like `stalled`.** `stalled` reads `verdicts.jsonl`, which is only a
-protocol boundary under `isolation: none`. These are computed from what the gate decided, in agg's own
+protocol boundary under `isolation: none`. These are computed from what the gate decided, in rlt's own
 memory — the same tier as `over_iterations` — so they are unfakeable on every tier and belong in
-`abort_if` without the caveat. They are persisted to `agg/private/gate.json` only so a resume can
+`abort_if` without the caveat. They are persisted to `rlt/private/gate.json` only so a resume can
 restore them. Requirement-style spellings like `rollbacks.value >= 2` are refused with the right one:
 a built-in number has no accessor, so write `rollbacks >= 2`.
 
@@ -1530,15 +1530,15 @@ A judge NAME in a condition resolves to a **file on disk** — there is no regis
 
 ```
 coverage
-  1. agg/judges/coverage.sh   → a script judge         (THIS project's — shadows everything)
-  2. agg/judges/coverage.md   → an LLM judge; the FILE IS THE RUBRIC
-  3. ~/.agg/judges/coverage.* → the STANDARD LIBRARY
+  1. rlt/judges/coverage.sh   → a script judge         (THIS project's — shadows everything)
+  2. rlt/judges/coverage.md   → an LLM judge; the FILE IS THE RUBRIC
+  3. ~/.rlt/judges/coverage.* → the STANDARD LIBRARY
   4. else → HARD ERROR AT STARTUP, listing every available judge name
 ```
 
 **The extension decides the kind.** `.sh` = script, `.md` = rubric ⇒ LLM.
 
-A judge prints a **verdict JSON** to stdout (agg reads the *last* JSON object, so it may log freely):
+A judge prints a **verdict JSON** to stdout (rlt reads the *last* JSON object, so it may log freely):
 
 ```jsonc
 {
@@ -1547,7 +1547,7 @@ A judge prints a **verdict JSON** to stdout (agg reads the *last* JSON object, s
   "max":       100,         // optional — the denominator
   "target":    80,          // optional — presentational only
   "rationale": "one line",  // optional — shown on the dashboard
-  "evidence":  ["…"],       // optional — files the verdict cites; agg KEEPS a copy (see Evidence)
+  "evidence":  ["…"],       // optional — files the verdict cites; rlt KEEPS a copy (see Evidence)
   "mixed":     false,       // optional — true: the judge's own measurements moved in different
                             //   directions, so a ratchet does not count this as an improvement
   "vacuous":   false        // optional — true: met because there was nothing to measure; moves
@@ -1561,13 +1561,13 @@ crashes / times out / prints garbage is an **`error`** — never counted as a re
 
 ### Script judges
 
-Run from the **project root** (cwd = project root, stdin = `/dev/null`), with env `AGG_SESSION`,
-`AGG_STEP`, `AGG_JUDGE`, `AGG_PROJECT_DIR`, `AGG_JUDGE_SCRATCH` set. Just a file that prints the
+Run from the **project root** (cwd = project root, stdin = `/dev/null`), with env `RLT_SESSION`,
+`RLT_STEP`, `RLT_JUDGE`, `RLT_PROJECT_DIR`, `RLT_JUDGE_SCRATCH` set. Just a file that prints the
 verdict:
 
 ```bash
 #!/usr/bin/env bash
-# agg/judges/coverage.sh
+# rlt/judges/coverage.sh
 pct=$(coverage report | awk '/TOTAL/ {print $NF}' | tr -d '%')
 met=$([ "$pct" -ge 80 ] && echo true || echo false)
 printf '{"met":%s,"value":%s,"max":100,"target":80,"rationale":"%s%% covered"}\n' "$met" "$pct" "$pct"
@@ -1576,24 +1576,24 @@ printf '{"met":%s,"value":%s,"max":100,"target":80,"rationale":"%s%% covered"}\n
 #### ⚠ A judge MAY NOT WRITE THE PROJECT TREE
 
 Under `isolation: sandbox` (or `container`, where the judge runs in `judge.image` with the project
-mounted read-only) a judge reads everything and writes **only** `$AGG_JUDGE_SCRATCH`. The project tree is read-only to it, and `agg/private/` + `agg/judges/` are
+mounted read-only) a judge reads everything and writes **only** `$RLT_JUDGE_SCRATCH`. The project tree is read-only to it, and `rlt/private/` + `rlt/judges/` are
 denied outright. The reason is short: a judge that can write the tree it grades can edit its way to
 a pass, which is the same hole as letting a judge choose its own writable paths.
 
-**agg does not guess which folders your judge needs — it relocates the writes.** Before every judge
+**rlt does not guess which folders your judge needs — it relocates the writes.** Before every judge
 it points the standard toolchain variables at a scratch directory, so the common cases need no
 change from you:
 
 | variable | scope | for |
 |---|---|---|
-| `AGG_JUDGE_SCRATCH`, `TMPDIR` | per **session**, shared by that step's judges; removed when the run ends (a verdict's `evidence` is copied out first; `AGG_KEEP_JUDGE_SCRATCH=1` keeps it, for debugging a judge) | your own temp files, and measurement hand-off |
+| `RLT_JUDGE_SCRATCH`, `TMPDIR` | per **session**, shared by that step's judges; removed when the run ends (a verdict's `evidence` is copied out first; `RLT_KEEP_JUDGE_SCRATCH=1` keeps it, for debugging a judge) | your own temp files, and measurement hand-off |
 | `CARGO_TARGET_DIR`, `GOCACHE`, `XDG_CACHE_HOME`, `PYTHONPYCACHEPREFIX`, `npm_config_cache` | per **project**, persistent | build caches — kept across sessions so nothing rebuilds cold |
 | `PYTEST_ADDOPTS=-p no:cacheprovider` | — | pytest insists on a rootdir cache dir and has no variable for it |
 
 Two consequences worth knowing:
 
 - **A judge that still writes in-tree gets `EPERM` and fails loudly.** That is intended — it is a bug
-  whether or not a sandbox catches it. Export your own variable from `$AGG_JUDGE_SCRATCH`, or copy
+  whether or not a sandbox catches it. Export your own variable from `$RLT_JUDGE_SCRATCH`, or copy
   what you need there and work on the copy.
 - **The scratch is SHARED between the judges of one step**, which is how a *measure → threshold* pair
   works: one judge runs the benchmark and writes `bench.json`, another reads it and applies the
@@ -1602,19 +1602,19 @@ Two consequences worth knowing:
 Under `isolation: none` nothing is confined and the variables are still set, so a judge written for
 the sandbox works identically either way.
 
-#### Evidence — what agg keeps
+#### Evidence — what rlt keeps
 
 The scratch does not last, so a file a verdict cites there would be gone by the time someone asks
 why the gate passed. After every judging pass (the baseline, each judged session, each driver
-`agg.judge()`), agg **copies** each file in a verdict's `evidence` list to
+`rlt.judge()`), rlt **copies** each file in a verdict's `evidence` list to
 
 ```
-agg/private/evidence/<run_id>/<session>/<judge>/<path>      # <session> is `baseline` for the baseline pass
+rlt/private/evidence/<run_id>/<session>/<judge>/<path>      # <session> is `baseline` for the baseline pass
 ```
 
 ```bash
-# agg/judges/complexity.sh — measure into the scratch, cite the file
-lizard src --xml > "$AGG_JUDGE_SCRATCH/cc.xml"
+# rlt/judges/complexity.sh — measure into the scratch, cite the file
+lizard src --xml > "$RLT_JUDGE_SCRATCH/cc.xml"
 printf '{"met":true,"value":%s,"rationale":"…","evidence":["cc.xml"]}\n' "$n"
 ```
 
@@ -1624,7 +1624,7 @@ printf '{"met":true,"value":%s,"rationale":"…","evidence":["cc.xml"]}\n' "$n"
 - **Confinement.** The path — with every symlink resolved — must lie inside the scratch or the
   project, and be a regular file. `../../.ssh/id_rsa`, `/etc/hosts`, or a scratch symlink pointing out
   of both roots is **refused**, never copied: a judge reads worker-written content, and its verdict
-  must not turn into a copy agg makes of something outside the work.
+  must not turn into a copy rlt makes of something outside the work.
 - **The cap.** `judge.evidence_max_mb` (default 100) bounds what one run copies. A file that does not
   fit is skipped with a warning; the run goes on.
 - **Where it is recorded.** Each `verdicts.jsonl` row carries `evidence_saved` (the kept copies,
@@ -1632,7 +1632,7 @@ printf '{"met":true,"value":%s,"rationale":"…","evidence":["cc.xml"]}\n' "$n"
   report lists the kept copies on each verdict (`judges.<name>.last.evidence`, `…baseline.evidence`,
   absolute) and names the run's directory in `paths.evidence_dir`.
 
-agg never deletes kept evidence; clear `agg/private/evidence/` yourself when it is no longer needed.
+rlt never deletes kept evidence; clear `rlt/private/evidence/` yourself when it is no longer needed.
 
 **Which tier applies to a judge?** The RUN's, never the tier of whichever step invoked it — a judge is
 an evaluator, and the paths a worker must not change are exactly the ones a judge needs to read and
@@ -1659,22 +1659,22 @@ Valid `inputs` tokens: `"diff"`, `"diff:<rev>"`, `"status"`, `"log:<path>"` (a t
 
 ### The embedded standard library
 
-A set of **parameterless** judges ships **inside the agg binary** and installs to `~/.agg/judges/` on
-`agg init` (and on `agg run` if a file is missing or has drifted from the embedded copy). Install agg →
-the judges are installed; update agg → they're updated. No network, no `agg judges` subcommand.
+A set of **parameterless** judges ships **inside the rlt binary** and installs to `~/.rlt/judges/` on
+`rlt init` (and on `rlt run` if a file is missing or has drifted from the embedded copy). Install rlt →
+the judges are installed; update rlt → they're updated. No network, no `rlt judges` subcommand.
 
 ```
 cargo_test  build_ok  lint_clean  git_clean  no_regression  stalled  cmd_exit  grep_count
 ```
 
 Name any of them in a condition and it just resolves — no file needed. To customise one, copy it into
-your `agg/judges/<name>.sh`; a project file **shadows** the library by name. Anything that needs an
-argument is a three-line script in your own `agg/judges/` — library judges take no parameters.
+your `rlt/judges/<name>.sh`; a project file **shadows** the library by name. Anything that needs an
+argument is a three-line script in your own `rlt/judges/` — library judges take no parameters.
 
 ### `stalled` — the shipped stall detector
 
 `stalled` is the detector behind `until: "NOT stalled"` and the zero-authoring `notify_if: "stalled"`. It
-reads `agg/private/verdicts.jsonl` and is **met** when, across the last **K = 3 steps** (merged, no_changes
+reads `rlt/private/verdicts.jsonl` and is **met** when, across the last **K = 3 steps** (merged, no_changes
 or no_improvement), no binary judge changed its `met` and no numeric judge changed its `value`. The
 details that decide whether it fires when you expect:
 
@@ -1697,7 +1697,7 @@ details that decide whether it fires when you expect:
   is silent at the start of a run.
 
 **K is hardcoded**, because library judges are parameterless. To change it — or the whole heuristic —
-drop your own `agg/judges/stalled.sh`: a project file **shadows** the library by name. Or write
+drop your own `rlt/judges/stalled.sh`: a project file **shadows** the library by name. Or write
 `stalled_hard.sh` and name that instead, leaving `stalled` intact.
 
 It is **binary** (it emits no `value`), so name it bare — `notify_if: "stalled"`, not `stalled.value`.
@@ -1710,8 +1710,8 @@ first one ships:
 
 | detector | ships? | signal | can the worker fake it? | put it in |
 |---|---|---|---|---|
-| `stalled` | ✅ embedded in the binary | judge values flat over the last 3 merged (or no-change) steps | **not without tampering**, and not at all under `sandbox`/`container` — `verdicts.jsonl` lives in the carved-out `agg/private/` | `if … then`, `notify_if` |
-| `stuck` | ✗ **you author it** | a 0–100 confidence over agg's own ledger | **not without tampering** — same file, same tier-dependence | `notify_if` (or `abort_if`, if you accept [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s middle row) |
+| `stalled` | ✅ embedded in the binary | judge values flat over the last 3 merged (or no-change) steps | **not without tampering**, and not at all under `sandbox`/`container` — `verdicts.jsonl` lives in the carved-out `rlt/private/` | `if … then`, `notify_if` |
+| `stuck` | ✗ **you author it** | a 0–100 confidence over rlt's own ledger | **not without tampering** — same file, same tier-dependence | `notify_if` (or `abort_if`, if you accept [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s middle row) |
 | `blocked` | ✗ **you author it** | the worker declaring a human-only blocker | **yes** — the worker writes the file | `notify_if` — see [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if) |
 
 **A config naming `stuck` or `blocked` is a hard error at startup until the file exists.** Only
@@ -1721,38 +1721,38 @@ first one ships:
 
 ```bash
 #!/usr/bin/env bash
-# agg/judges/blocked.sh — WORKER-AUTHORED evidence. Wire it to notify_if, not abort_if.
-[ -s agg/state/BLOCKED.md ] \
-  && echo "{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"$(head -1 agg/state/BLOCKED.md | sed 's/\\/\\\\/g; s/"/\\"/g; s/[[:cntrl:]]/ /g')\"}" \
+# rlt/judges/blocked.sh — WORKER-AUTHORED evidence. Wire it to notify_if, not abort_if.
+[ -s rlt/state/BLOCKED.md ] \
+  && echo "{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"$(head -1 rlt/state/BLOCKED.md | sed 's/\\/\\\\/g; s/"/\\"/g; s/[[:cntrl:]]/ /g')\"}" \
   || echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"no blocker declared"}'
 ```
 
 The `sed` escapes backslashes, then quotes, then flattens control characters to spaces. All three
 rules are load-bearing: the rationale is a line the *worker* wrote, and JSON forbids a raw tab, CR or
-ESC inside a string just as firmly as an unescaped quote. Emit any of them and agg scores the judge
+ESC inside a string just as firmly as an unescaped quote. Emit any of them and rlt scores the judge
 as an **`error`** — false, not a blocker — so the one channel a worker has for reaching a human fails
 silently and closed on an everyday indented line. The quote rule is also what stops the file's
 content from forging `met` or `value`: `","met":false` arrives as text, not as JSON.
 
-Plus one line in the project's `agg/AGG.md`, so the worker knows the channel exists:
+Plus one line in the project's `rlt/RLT.md`, so the worker knows the channel exists:
 
 > If you hit something ONLY a human can resolve (missing creds, an ambiguous requirement, a decision
-> you are not allowed to make), write one line describing it to `agg/state/BLOCKED.md` and stop — do
+> you are not allowed to make), write one line describing it to `rlt/state/BLOCKED.md` and stop — do
 > NOT guess or fabricate.
 
-`agg/state/` is gitignored runtime state, so the file survives a session rollback — and a crash, and a
+`rlt/state/` is gitignored runtime state, so the file survives a session rollback — and a crash, and a
 reboot. Delete it once you have unblocked the run: a stale `BLOCKED.md` under `abort_if: "blocked"`
 halts the *next* launch at the baseline judge pass (it pings, but it never gets a session in).
 
-#### `stuck` — a confidence score over agg's own ledger
+#### `stuck` — a confidence score over rlt's own ledger
 
-`agg/private/verdicts.jsonl` is the append-only record of every verdict — session, step, the verdict
+`rlt/private/verdicts.jsonl` is the append-only record of every verdict — session, step, the verdict
 fields, the gate decision. A rubric judge reads it through the existing `log:<path>` input, so there is
 no new plumbing:
 
 ```markdown
 ---
-inputs: ["log:agg/private/verdicts.jsonl", "log:agg/private/LOG.md", "diff"]
+inputs: ["log:rlt/private/verdicts.jsonl", "log:rlt/private/LOG.md", "diff"]
 ---
 You are a STUCK detector. From the verdict history (each session's judge values over time), the
 memory log, and the latest diff, score 0–100 how confident you are that this loop is GENUINELY
@@ -1762,7 +1762,7 @@ Output `value` = that confidence; `met` = (value >= 85).
 ```
 
 A **script** version is equally valid and cheaper — e.g. `python3` over `verdicts.jsonl` computing "max
-goal value unchanged for N sessions" → a confidence. Either way it reads **agg-owned** data instead of
+goal value unchanged for N sessions" → a confidence. Either way it reads **rlt-owned** data instead of
 a worker-authored file, which is the higher bar of [the moat](#the-moat--a-worker-authored-signal-belongs-in-notify_if-not-abort_if)'s
 middle row. Putting `stuck` in `abort_if` is a reasonable way to let the loop give up on its own — under
 `isolation: sandbox`/`container` the kernel is what stops the worker from writing that ledger; under the
@@ -1780,50 +1780,50 @@ startup** — checked for **every** agent the sequence names. The full matrix is
 | | rule |
 |---|---|
 | `model:` | **Codex: omit it** (naming a model you aren't entitled to is a hard 400). **Copilot: `auto`.** Applies to both `defaults.model` and `judge.model`. |
-| `effort:` | Levels `low<medium<high<xhigh<max`, per-step (unset ⇒ the backend's default). **Defaults: Claude `max`, Codex `high`, Copilot none** — so the two you'd pick for a hard task are *already at their ceiling* without setting anything. Claude's `max` is the highest reachable **headlessly**: the top `ultracode` tier is interactive-only (not a valid `-p` value), so a worker can't select it — `max` is the ceiling. **Codex** clamps `xhigh`/`max`→`high` (it has no level above `high`). **Copilot** cannot combine `effort:` with `model: auto` (its default) — agg refuses the pair; name a concrete model to use an effort. |
-| `limits.cost` / `over_cost` | **Claude only.** Codex reports no dollars; Copilot bills in AI Credits. **Checked per step** — even one `agent: codex` step makes a `limits.cost` guard uncoverable, so agg refuses it. Use `sequence.limits.tokens`; Copilot can self-cap with `worker_args: ["--max-ai-credits", "50"]`. |
+| `effort:` | Levels `low<medium<high<xhigh<max`, per-step (unset ⇒ the backend's default). **Defaults: Claude `max`, Codex `high`, Copilot none** — so the two you'd pick for a hard task are *already at their ceiling* without setting anything. Claude's `max` is the highest reachable **headlessly**: the top `ultracode` tier is interactive-only (not a valid `-p` value), so a worker can't select it — `max` is the ceiling. **Codex** clamps `xhigh`/`max`→`high` (it has no level above `high`). **Copilot** cannot combine `effort:` with `model: auto` (its default) — rlt refuses the pair; name a concrete model to use an effort. |
+| `limits.cost` / `over_cost` | **Claude only.** Codex reports no dollars; Copilot bills in AI Credits. **Checked per step** — even one `agent: codex` step makes a `limits.cost` guard uncoverable, so rlt refuses it. Use `sequence.limits.tokens`; Copilot can self-cap with `worker_args: ["--max-ai-credits", "50"]`. |
 
 ### The operator's environment: model stand-ins and Codex's provider
 
-Three variables of the environment agg runs in change its agent calls, whichever step or judge makes it, so
+Three variables of the environment rlt runs in change its agent calls, whichever step or judge makes it, so
 switching between environments (a subscription, a cloud provider, another account) changes no config file:
 
 | variable | effect |
 |---|---|
-| `AGG_MODELS` | Model stand-ins, `<model>=<stand-in>` comma-separated: a session, judge or summary that names `<model>` calls `<stand-in>`. E.g. `claude-fable-5-1=claude-opus-5-5` where the provider has no Fable. |
-| `AGG_CODEX_CONFIG` | Codex `-c` overrides, one `key=value` per line, on every Codex session and one-shot, e.g. `model_provider="amazon-bedrock-runtime"` and `model="global.openai.gpt-6-luna"`. A Codex judge reads no config file (`--ignore-user-config`), so its provider can only come from here. |
-| `AGG_CLAUDE_MCP_CONFIG` | Claude Code's `--mcp-config` (a file, or its JSON) for every Claude worker that runs without the user's settings (`user_settings: false`, the default): such a worker loads none of the user's MCP servers, so this is how it gets one, e.g. a web search where the provider has none. |
-| `AGG_CLAUDE_SETTINGS` | Claude Code's `--settings` (a file, or its JSON) for every Claude worker that runs without the user's settings: such a worker loads none of the user's hooks, so this is how it gets one, e.g. a hook that shortens its shell commands' output. |
+| `RLT_MODELS` | Model stand-ins, `<model>=<stand-in>` comma-separated: a session, judge or summary that names `<model>` calls `<stand-in>`. E.g. `claude-fable-5-1=claude-opus-5-5` where the provider has no Fable. |
+| `RLT_CODEX_CONFIG` | Codex `-c` overrides, one `key=value` per line, on every Codex session and one-shot, e.g. `model_provider="amazon-bedrock-runtime"` and `model="global.openai.gpt-6-luna"`. A Codex judge reads no config file (`--ignore-user-config`), so its provider can only come from here. |
+| `RLT_CLAUDE_MCP_CONFIG` | Claude Code's `--mcp-config` (a file, or its JSON) for every Claude worker that runs without the user's settings (`user_settings: false`, the default): such a worker loads none of the user's MCP servers, so this is how it gets one, e.g. a web search where the provider has none. |
+| `RLT_CLAUDE_SETTINGS` | Claude Code's `--settings` (a file, or its JSON) for every Claude worker that runs without the user's settings: such a worker loads none of the user's hooks, so this is how it gets one, e.g. a hook that shortens its shell commands' output. |
 
 Claude Code takes its provider from its own variables (`CLAUDE_CODE_USE_BEDROCK`, `AWS_PROFILE`, …), which
-every agent agg starts inherits.
+every agent rlt starts inherits.
 
-A worker that runs without the user's settings (`user_settings: false`, the default of `agg process` and of
-`Agg::user_settings(false)`) does not read the `env` block of the user-scope settings file either, so a gateway
-or a telemetry switch set only there is missing. `agg: { user_env: true }` in a process file (or a list of key names;
-`Agg::user_env(..)` in a driver) passes that block's string keys to every Claude worker and one-shot call, and no
-plugin, hook or MCP server of the file; a variable of agg's own environment wins, `AGG_*` keys are never taken, and only
-key names are ever logged ([PROCESS.md](PROCESS.md#the-agg-runs-own-settings-agg)). `agg run` loads the user's settings in
+A worker that runs without the user's settings (`user_settings: false`, the default of `rlt process` and of
+`Relentless::user_settings(false)`) does not read the `env` block of the user-scope settings file either, so a gateway
+or a telemetry switch set only there is missing. `rlt: { user_env: true }` in a process file (or a list of key names;
+`Relentless::user_env(..)` in a driver) passes that block's string keys to every Claude worker and one-shot call, and no
+plugin, hook or MCP server of the file; a variable of rlt's own environment wins, `RLT_*` keys are never taken, and only
+key names are ever logged ([PROCESS.md](PROCESS.md#the-rlt-runs-own-settings-rlt)). `rlt run` loads the user's settings in
 full and has no such switch. Codex and Copilot take nothing from it yet.
 
 **A Codex provider of your own** (an OpenAI-compatible gateway) that `~/.codex/config.toml` defines reaches
 your Codex workers but **not your Codex judges**: a judge reads no config file, and calls the default OpenAI
-endpoint instead. Carry the provider in `AGG_CODEX_CONFIG`, the same keys as in the file, one per line:
+endpoint instead. Carry the provider in `RLT_CODEX_CONFIG`, the same keys as in the file, one per line:
 
 ```sh
-export AGG_CODEX_CONFIG='model_provider="gw"
+export RLT_CODEX_CONFIG='model_provider="gw"
 model_providers.gw.name="gateway"
 model_providers.gw.base_url="https://gateway.example.com/v1"
 model_providers.gw.env_key="GATEWAY_API_KEY"
 model_providers.gw.wire_api="responses"'
 ```
 
-`agg doctor` warns when your Codex config sets a `model_provider` that `AGG_CODEX_CONFIG` doesn't carry.
+`rlt doctor` warns when your Codex config sets a `model_provider` that `RLT_CODEX_CONFIG` doesn't carry.
 
 ## Session isolation (mandatory) and the gate
 
 Every session **always** branches off `base`, does its work, and is gated — there is no master switch.
-`agg run` therefore **refuses to start** without a git repo, a clean tree, and a non-detached HEAD.
+`rlt run` therefore **refuses to start** without a git repo, a clean tree, and a non-detached HEAD.
 The gate rule: **auto-accept a session's work, UNLESS a judge that was previously met now fails, or a
 [ratcheted](#the-ratchet--numeric-no-regression) value got worse beyond its tolerance — then roll that
 session back** (`gate_regressions: true`). Four things can suppress a merge, in this
@@ -1832,7 +1832,7 @@ precedence (plus a fifth, opt-in):
 0. **a protected-path violation** — the session changed a [`write_deny`](#protected-paths--write_deny-readonly-writable)
    path ⇒ roll back, regardless of `gate_regressions`, of `merge_requires_improvement` and of every
    verdict. It counts as a rollback.
-1. **`red_file`** (`.agg_red` at the project root) — the worker's own veto. Present ⇒ do not merge. Not a
+1. **`red_file`** (`.rlt_red` at the project root) — the worker's own veto. Present ⇒ do not merge. Not a
    rollback and not a `no_improvement`: nothing was staged to decide about.
 2. **`skip_judges`** — nothing was judged, so nothing merges; the work stages. The next judged step's
    gate decides the whole span, and that is where 3 and 4 look — a skip step's work can improve (or
@@ -1844,14 +1844,14 @@ precedence (plus a fifth, opt-in):
    Applied only to a session no earlier rule stopped: a session that regressed AND improved nothing is a
    **rollback** (rule 3 wins), so it counts for `rollbacks`, never for `no_improvements`.
 
-`session_isolation` surviving keys: `branch_prefix` (default `agg`), `base_branch` (default: the
-current branch), `red_file` (default `.agg_red`).
+`session_isolation` surviving keys: `branch_prefix` (default `rlt`), `base_branch` (default: the
+current branch), `red_file` (default `.rlt_red`).
 
 ### A session that changes nothing — `no_changes`
 
 A session whose worker changed nothing git-visible made no commit, so there is nothing to merge and
-nothing to discard: base is exactly the tree the judges just graded. agg keeps those verdicts as the
-current reading (a step whose whole output is gitignored worker state, like `agg/state/wiki/`, can
+nothing to discard: base is exactly the tree the judges just graded. rlt keeps those verdicts as the
+current reading (a step whose whole output is gitignored worker state, like `rlt/state/wiki/`, can
 still satisfy an `until:`), and records the session's rows in `verdicts.jsonl` with
 `"outcome": "no_changes"`:
 
@@ -1861,7 +1861,7 @@ still satisfy an `until:`), and records the session's rows in `verdicts.jsonl` w
 - **It is a step in which nothing moved.** It counts for [`stalled`](#stalled--the-shipped-stall-detector)
   with its own readings, and for the gate's own terms `no_changes` and `consecutive_no_changes` (since
   the last kept gate) — process-internal, so safe in `abort_if`.
-- The report and `agg status --json` count these sessions in `sessions.no_changes`.
+- The report and `rlt status --json` count these sessions in `sessions.no_changes`.
 
 This is what ends a run whose worker believes it is finished while a judge is still unmet: it would
 otherwise change nothing forever. `abort_if: "consecutive_no_changes >= 3"` bounds that on every
@@ -1869,7 +1869,7 @@ isolation tier; `stalled` catches it too, once its window holds three steps in w
 
 ## Hooks and prompt includes
 
-`agg` is tool-agnostic: it runs *your* shell commands at lifecycle moments and prepends *your* text to
+`rlt` is tool-agnostic: it runs *your* shell commands at lifecycle moments and prepends *your* text to
 the worker prompt. Use this for a code-graph builder, a memory cache, a linter — whatever you use.
 
 ```yaml
@@ -1880,7 +1880,7 @@ hooks:
   on_stop:          ["mytool export ."]     # once when the loop stops
   background:       ["mytool --watch ."]    # long-lived; reaped automatically on stop
 prompt_includes:
-  - "AGG_TOOLING.md"                        # your text, prepended to every worker prompt
+  - "RLT_TOOLING.md"                        # your text, prepended to every worker prompt
 ```
 
 A failing hook is logged, never fatal. `background` processes are spawned in the loop's reaping
@@ -1912,70 +1912,70 @@ read-only`; Copilot by withholding `--allow-all-tools`.
 
 ## State and memory
 
-Everything agg **reads** as config is under `agg/` (committed). Runtime state is split across **two**
+Everything rlt **reads** as config is under `rlt/` (committed). Runtime state is split across **two**
 gitignored, auto-created directories — and the split is by **who may write them**:
 
 | directory | written by | contents |
 |---|---|---|
-| **`agg/state/`** | the **worker** (agg reads it as untrusted input) | `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/`, `BLOCKED.md` |
-| **`agg/private/`** | **agg only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `calls.jsonl`, `gate.json`, `clock.json`, `violations.jsonl`, `waits.jsonl`, `protected/`, `evidence/`, `prompts.jsonl`, `bus/`, `run.pid`, `run.log`, `report.json` |
+| **`rlt/state/`** | the **worker** (rlt reads it as untrusted input) | `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/`, `BLOCKED.md` |
+| **`rlt/private/`** | **rlt only** | `INSTRUCTIONS.md`, `LOG.md`, `state.json`, `project.json`, `verdicts.jsonl`, `calls.jsonl`, `gate.json`, `clock.json`, `violations.jsonl`, `waits.jsonl`, `protected/`, `evidence/`, `prompts.jsonl`, `bus/`, `run.pid`, `run.log`, `report.json` |
 
 **The one rule that decides which is which:** *if the worker writing it could change when the loop ends,
-what it may spend, or what agg believes happened, it is private.* Everything the worker is **supposed** to
-author lives in `agg/state/`.
+what it may spend, or what rlt believes happened, it is private.* Everything the worker is **supposed** to
+author lives in `rlt/state/`.
 
-- **`agg/AGG.md`** (committed) — the **stable** scope/goals/architecture the worker reads for
-  orientation. Human-owned, rarely edited; this is where `AGG_STATE.md`'s stable header content now lives.
-- **`agg/state/STATE.md`** — the forward state file (`what to do next`). **Worker-curated**: the worker
+- **`rlt/RLT.md`** (committed) — the **stable** scope/goals/architecture the worker reads for
+  orientation. Human-owned, rarely edited; this is where `RLT_STATE.md`'s stable header content now lives.
+- **`rlt/state/STATE.md`** — the forward state file (`what to do next`). **Worker-curated**: the worker
   rewrites this advice each session. Gitignored, so it **survives a session rollback** — the code
   attempt is thrown away, the advice about it is not.
-- **`agg/state/wiki/`** · **`agg/state/sessions/`** — the worker's durable knowledge base and its
+- **`rlt/state/wiki/`** · **`rlt/state/sessions/`** — the worker's durable knowledge base and its
   transient per-session scratch notes. Worker-owned by design. The wiki is an
-  [OKF v0.2](#the-wiki-okf-v02-and-agg-wiki-lint) bundle, checked with `agg wiki lint`.
-- **`agg/state/spawns.json`** · **`agg/state/spawns/`** — the long-task registry and per-spawn logs.
-  Worker-writable because `agg spawn` is a command the **worker** invokes; its blast radius is bounded
+  [OKF v0.2](#the-wiki-okf-v02-and-rlt-wiki-lint) bundle, checked with `rlt wiki lint`.
+- **`rlt/state/spawns.json`** · **`rlt/state/spawns/`** — the long-task registry and per-spawn logs.
+  Worker-writable because `rlt spawn` is a command the **worker** invokes; its blast radius is bounded
   (what to reap, what to tell the next session — nothing that gates the run).
-- **`agg/private/INSTRUCTIONS.md`** — regenerated by **agg** every session; it is the worker's **entire
-  `-p` input**. The worker's `-p` is a tiny fixed pointer ("read `agg/private/INSTRUCTIONS.md` in full and
-  follow it"); agg composes the file from operator steering, the step's role framing + its `prompt:`, a
-  recent-tail excerpt of memory, pointers to `STATE.md` and `AGG.md`, the wiki, and a standing footer.
+- **`rlt/private/INSTRUCTIONS.md`** — regenerated by **rlt** every session; it is the worker's **entire
+  `-p` input**. The worker's `-p` is a tiny fixed pointer ("read `rlt/private/INSTRUCTIONS.md` in full and
+  follow it"); rlt composes the file from operator steering, the step's role framing + its `prompt:`, a
+  recent-tail excerpt of memory, pointers to `STATE.md` and `RLT.md`, the wiki, and a standing footer.
   Private *even though the worker reads it every session*: it is the worker's **orders**, and a worker
   able to rewrite its own brief mid-run could launder instructions past you.
-- **`agg/private/LOG.md`** — durable institutional memory (`what we tried and rejected`). Written
-  by **agg**, never the worker — never tell the worker to maintain it. The worker's contribution arrives
-  as a scratch note in `agg/state/sessions/` that agg sanitizes on the way in; a direct edit would bypass
+- **`rlt/private/LOG.md`** — durable institutional memory (`what we tried and rejected`). Written
+  by **rlt**, never the worker — never tell the worker to maintain it. The worker's contribution arrives
+  as a scratch note in `rlt/state/sessions/` that rlt sanitizes on the way in; a direct edit would bypass
   exactly that sanitizing.
-- **`agg/private/state.json`** — the live scoreboard snapshot (the TUI, `agg serve`, `/agg:status` read it).
-- **`agg/private/verdicts.jsonl`** — the append-only, safety-critical GATE record.
-- **`agg/private/prompts.jsonl`** — per session, the SHA-256 of every [prompt file](#prompts-from-files--prompt_file-role_prompt_file)
+- **`rlt/private/state.json`** — the live scoreboard snapshot (the TUI, `rlt serve`, `/rlt:status` read it).
+- **`rlt/private/verdicts.jsonl`** — the append-only, safety-critical GATE record.
+- **`rlt/private/prompts.jsonl`** — per session, the SHA-256 of every [prompt file](#prompts-from-files--prompt_file-role_prompt_file)
   its brief was read from. Private because it is the audit trail of what the worker was told.
-- **`agg/private/evidence/`** — the files each verdict cited, kept after its judge ran
-  ([Evidence](#evidence--what-agg-keeps)). Private because a verdict CITES them: a worker able to swap
+- **`rlt/private/evidence/`** — the files each verdict cited, kept after its judge ran
+  ([Evidence](#evidence--what-rlt-keeps)). Private because a verdict CITES them: a worker able to swap
   a kept file would rewrite why a gate passed.
-- **`agg/private/project.json`** — the run-history ledger (`agg history`): lifetime sessions/tokens.
-- **`agg/private/run.pid` · `run.log`** — the loop's liveness, and its log: every run stamps its
+- **`rlt/private/project.json`** — the run-history ledger (`rlt history`): lifetime sessions/tokens.
+- **`rlt/private/run.pid` · `run.log`** — the loop's liveness, and its log: every run stamps its
   `run_id` here, and `--detach` / `--report-json` send the whole process output here.
-- **`agg/private/report.json`** — the end-of-run report, the stable interface for programs that
-  embed agg. See [below](#the-run-report-aggprivatereportjson).
-- **`agg/private/bus/`** — the steering queue (`agg send …` writes here; the loop drains it at `INJECT`,
+- **`rlt/private/report.json`** — the end-of-run report, the stable interface for programs that
+  embed rlt. See [below](#the-run-report-aggprivatereportjson).
+- **`rlt/private/bus/`** — the steering queue (`rlt send …` writes here; the loop drains it at `INJECT`,
   and every second during a [rate-limit wait](#rate-limits--wait-wake-resume)).
   Private because the bus is the **operator's** channel: a worker writing here would raise its own token
-  ceiling with `agg send budget`, unpause itself, or inject its own next-session instructions.
-- **`agg/private/waits.jsonl`** — every rate-limit wait: its start (agent, `until`, partial ref) and how
+  ceiling with `rlt send budget`, unpause itself, or inject its own next-session instructions.
+- **`rlt/private/waits.jsonl`** — every rate-limit wait: its start (agent, `until`, partial ref) and how
   it ended.
 
-### The wiki: OKF v0.2 and `agg wiki lint`
+### The wiki: OKF v0.2 and `rlt wiki lint`
 
-`agg/state/wiki/` is the worker's knowledge base, kept across sessions and rollbacks, in the
+`rlt/state/wiki/` is the worker's knowledge base, kept across sessions and rollbacks, in the
 [Open Knowledge Format v0.2](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md):
 a directory of markdown concepts, each with YAML frontmatter carrying a non-empty `type`, plus the
-reserved `index.md` (a listing) and `log.md` (newest-first history). agg **writes nothing into it**.
-The worker writes it, agg reads it as untrusted input, and the brief's standing footer shows the
-worker the shape (a concept, an index and a log it can copy). agg never writes `generated` or
-`verified`: verification is a reviewer's act, outside agg.
+reserved `index.md` (a listing) and `log.md` (newest-first history). rlt **writes nothing into it**.
+The worker writes it, rlt reads it as untrusted input, and the brief's standing footer shows the
+worker the shape (a concept, an index and a log it can copy). rlt never writes `generated` or
+`verified`: verification is a reviewer's act, outside rlt.
 
-`agg wiki lint [PATH] [--json]` checks a wiki against the spec's conformance rules (§11) without
-changing it. `PATH` defaults to the project's `agg/state/wiki/`; any other OKF bundle works too.
+`rlt wiki lint [PATH] [--json]` checks a wiki against the spec's conformance rules (§11) without
+changing it. `PATH` defaults to the project's `rlt/state/wiki/`; any other OKF bundle works too.
 
 | rule | level | checks |
 |---|---|---|
@@ -1986,7 +1986,7 @@ changing it. `PATH` defaults to the project's `agg/state/wiki/`; any other OKF b
 | `log.date` · `log.order` · `log.entry` | problem | in a `log.md`, every heading below the `#` title is a real `YYYY-MM-DD` date, the dates are strictly newest first (one group per date), and no entry precedes the first date (§9) |
 | `file.encoding` · `file.unreadable` | problem | the file is readable UTF-8 (§4) |
 | `status.unknown` · `generated.*` · `verified.shape` · `sources.*` · `timestamp.format` · `timestamp.legacy` | warning | the optional §5 families: `status` is `draft`/`stable`/`deprecated`; `generated` has `by`; `verified` entries have `by` and `at`; every `sources` entry has `resource`; timestamps are ISO 8601 with an offset (`2026-06-30T14:00:00Z`); `timestamp` is v0.1 (`generated.at` in v0.2) |
-| `verified.worker` | warning | only in the project's own wiki: a `verified` key there is a claim of review that neither agg nor the worker can make |
+| `verified.worker` | warning | only in the project's own wiki: a `verified` key there is a claim of review that neither rlt nor the worker can make |
 | `index.text` · `log.empty` · `file.symlink` | warning | free text in an index; a log without date groups; a symlink, which is not followed |
 
 Problems make the wiki non-conformant: `ok: false`, exit code **1**. Warnings never do (§11 forbids a
@@ -2000,80 +2000,80 @@ Schema: [`docs/schemas/wiki_lint.v1.json`](schemas/wiki_lint.v1.json).
 
 ### What the split actually buys you — and on which tier
 
-`agg/state/` sits inside the worker's cwd, so under `isolation: sandbox` the worker could write **every**
+`rlt/state/` sits inside the worker's cwd, so under `isolation: sandbox` the worker could write **every**
 file in it. Three of those files decide when the loop ends or what it costs — `verdicts.jsonl` (the ledger
-`stalled`/`stuck` read), `bus/` (steering + budget), `run.pid` (the double-run guard and `agg stop` target).
-Moving them under one subpath lets agg carve that subpath **out of the sandbox's writable set**: a
+`stalled`/`stuck` read), `bus/` (steering + budget), `run.pid` (the double-run guard and `rlt stop` target).
+Moving them under one subpath lets rlt carve that subpath **out of the sandbox's writable set**: a
 `deny file-write*` rule after the allow on macOS (Seatbelt), a read-only rebind on Linux (bubblewrap), a
 `:ro` remount in the container tier. It is derived from the worker's cwd inside the wrapper, so it covers
-every confined spawn — worker, script judge, and `agg.yaml` hook alike.
+every confined spawn — worker, script judge, and `rlt.yaml` hook alike.
 
 > **This binds only under `isolation: sandbox` and `isolation: container`.** Under the default
 > `isolation: none` the worker has your whole filesystem and **no directory layout changes that** — it can
-> write `agg/private/` as easily as anything else. The layout is what *makes the confinement expressible*;
+> write `rlt/private/` as easily as anything else. The layout is what *makes the confinement expressible*;
 > the isolation tier is what enforces it. See
 > [`isolation`](#isolation--blast-radius-jail-a-different-axis-from-session-isolation).
 
 **Reads are untouched.** The carve-out denies writes only. The worker still reads its brief from
-`agg/private/INSTRUCTIONS.md`, a `stuck` judge still reads `log:agg/private/verdicts.jsonl`, and the TUI
+`rlt/private/INSTRUCTIONS.md`, a `stuck` judge still reads `log:rlt/private/verdicts.jsonl`, and the TUI
 still reads `state.json`.
 
 ### Migrating an existing project
 
-The `agg/state/` → `agg/private/` move is **breaking** — agg does not migrate for you, and a run started
+The `rlt/state/` → `rlt/private/` move is **breaking** — rlt does not migrate for you, and a run started
 against the old layout starts with an empty ledger and no run history.
 
 ```bash
 cd <project>
-mkdir -p agg/private
-# nothing under agg/state/ is tracked, so a plain mv is the whole migration
-mv agg/state/{verdicts.jsonl,state.json,project.json,run.pid,run.log,LOG.md} agg/private/ 2>/dev/null
-mv agg/state/bus agg/private/ 2>/dev/null
-rm -f agg/state/INSTRUCTIONS.md          # regenerated every session; no need to keep it
+mkdir -p rlt/private
+# nothing under rlt/state/ is tracked, so a plain mv is the whole migration
+mv rlt/state/{verdicts.jsonl,state.json,project.json,run.pid,run.log,LOG.md} rlt/private/ 2>/dev/null
+mv rlt/state/bus rlt/private/ 2>/dev/null
+rm -f rlt/state/INSTRUCTIONS.md          # regenerated every session; no need to keep it
 ```
 
 Leave `STATE.md`, `wiki/`, `sessions/`, `spawns.json`, `spawns/` and `BLOCKED.md` where they are — those are
 the worker's. `INSTRUCTIONS.md` is regenerated every session, so dropping it instead of moving it is fine.
 
 Then update anything of **yours** that names a moved path: a `stuck`/`stalled` judge's
-`inputs: ["log:agg/state/verdicts.jsonl", …]`, a `notify.cmd` or hook that greps the ledger, CI that tails
+`inputs: ["log:rlt/state/verdicts.jsonl", …]`, a `notify.cmd` or hook that greps the ledger, CI that tails
 `run.log`. A judge pointed at the old path reads an empty file and scores `error`, not a loud failure —
-grep your `agg/` for `state/` once after the move.
+grep your `rlt/` for `state/` once after the move.
 
-Both directories are gitignored. `agg run` appends `agg/private/` to your `.gitignore` on startup if it is
-missing, alongside the `agg/state/` entry it has always written — an existing project picks the new entry up
+Both directories are gitignored. `rlt run` appends `rlt/private/` to your `.gitignore` on startup if it is
+missing, alongside the `rlt/state/` entry it has always written — an existing project picks the new entry up
 on the next run. It writes the same entries to the repository's `.git/info/exclude` too: on a base branch
-that never committed a `.gitignore`, session 1 commits the one agg wrote, and a rollback of that session
-deletes it again — `info/exclude` is outside the work tree, so no checkout, merge or reset can remove it. `agg/` itself stays committed: the judges must be in git so a rollback can restore a grader
+that never committed a `.gitignore`, session 1 commits the one rlt wrote, and a rollback of that session
+deletes it again — `info/exclude` is outside the work tree, so no checkout, merge or reset can remove it. `rlt/` itself stays committed: the judges must be in git so a rollback can restore a grader
 a worker tampered with.
 
 `memory:` keys: `enabled` (default true), `max_kb` (cap on the stored file), `inject_kb` (how much is
 injected per prompt). `0` for either disables that cap.
 
-## The run report: `agg/private/report.json`
+## The run report: `rlt/private/report.json`
 
-Every ending agg can observe writes one report: `done_if` met, `abort_if` fired, a session cap, an
-operator stop (`agg stop`, SIGTERM, SIGINT), an error, and a panic inside agg itself. It is the
-**stable** interface for a program that embeds agg — unlike `state.json`, `verdicts.jsonl` and
+Every ending rlt can observe writes one report: `done_if` met, `abort_if` fired, a session cap, an
+operator stop (`rlt stop`, SIGTERM, SIGINT), an error, and a panic inside rlt itself. It is the
+**stable** interface for a program that embeds rlt — unlike `state.json`, `verdicts.jsonl` and
 `project.json`, which are internal and change without notice.
 
 ```bash
-agg run --report-json | jq -r .outcome      # logs go to agg/private/run.log; stdout is the report
+rlt run --report-json | jq -r .outcome      # logs go to rlt/private/run.log; stdout is the report
 ```
 
 | field | meaning |
 |---|---|
-| `schema_version` · `agg_version` · `run_id` · `project` | identity. `run_id` is fresh per run (kept by `agg run --resume`) and also in `run.log`. |
+| `schema_version` · `rlt_version` · `run_id` · `project` | identity. `run_id` is fresh per run (kept by `rlt run --resume`) and also in `run.log`. |
 | `outcome` | **authoritative**: `done` · `aborted` · `stopped` · `error`. |
-| `exit_code` | what `agg run` exited with: 0 done · 3 `abort_if` · 4 session cap (`outcome: aborted`) · 5 stopped · 1 error. |
+| `exit_code` | what `rlt run` exited with: 0 done · 3 `abort_if` · 4 session cap (`outcome: aborted`) · 5 stopped · 1 error. |
 | `stop_reason` · `error` | human-readable reason (the `abort_if` expression, the cap, the stop reason); the error chain or panic message when `outcome` is `error`. |
 | `started_at` · `finished_at` | epoch seconds. |
 | `sessions` | `total`, `merged`, `rolled_back` (discarded: a regression, a veto, a conflict), `no_improvement` (not merged because nothing improved — [`merge_requires_improvement`](#sequence--the-loop)), `no_changes` (changed nothing git-visible, so nothing to merge — [`no_changes`](#a-session-that-changes-nothing--no_changes)), `staged_unmerged` (staged on a span no gate decided). |
 | `time` | `wall_time_s`, `work_time_s`, `human_wait_time_s` — the [clock](#the-clock--three-terms-all-in-seconds). |
-| `judges` | by name: `last` and `baseline` verdicts (`met`, `value`, `max`, `target`, `rationale`, `error`, and `evidence` — the absolute paths of the [kept](#evidence--what-agg-keeps) evidence copies, omitted when none); `null` where there is none. The driver path has no baseline. |
+| `judges` | by name: `last` and `baseline` verdicts (`met`, `value`, `max`, `target`, `rationale`, `error`, and `evidence` — the absolute paths of the [kept](#evidence--what-rlt-keeps) evidence copies, omitted when none); `null` where there is none. The driver path has no baseline. |
 | `result` | `base_branch`, `final_commit` (the base's tip after the last gate), `staged_branch` (an ungated span's tip — `git merge` it to land that work). |
 | `open_asks` | questions still waiting on a human: `id`, `kind`, `question`, `options` (the allowed answers of a `bool`/`choose` ask; `null` for `input`), `age_s`. |
-| `paths` | absolute paths of `report`, `ledger` (`verdicts.jsonl`), `log`, `evidence_dir` (this run's `agg/private/evidence/<run_id>`; `null` when no evidence was kept). |
+| `paths` | absolute paths of `report`, `ledger` (`verdicts.jsonl`), `log`, `evidence_dir` (this run's `rlt/private/evidence/<run_id>`; `null` when no evidence was kept). |
 | `detectors` | the stop detectors as the run ended: `stalled` (the last verdict of a judge named `stalled`; `null` if there is none or it never ran), `oscillating`, `rollbacks`, `consecutive_rollbacks`, `ratchet_regressed`. |
 | `usage` | the run's totals: `total`, `worker`, `ruler` — each `{tokens, cost_usd, cost_source}` (see [usage](#usage-tokens-and-cost)). |
 | `session_log` | every session that made an agent call, in order: `{session, step, usage: [{role, agent, model, tokens, cost_usd, cost_source}]}`. Session `0` is the baseline pass (its LLM judges); `step` is empty there. One line per role and model: `worker` is the session's agent, `ruler` the LLM judges and the summarizer. |
@@ -2085,7 +2085,7 @@ is `null` only for a judge that never ran — an unmet judge reports its verdict
 
 ### Usage: tokens and cost
 
-agg runs the agents, so it records what each call **reported** — never an estimate, never the
+rlt runs the agents, so it records what each call **reported** — never an estimate, never the
 configured model:
 
 | field | meaning |
@@ -2095,8 +2095,8 @@ configured model:
 | `cost_usd` | dollars as the agent priced itself — the API-equivalent price, not a subscription bill. Only Claude reports one. |
 | `cost_source` | `reported` (every call in the figure priced itself) · `partial` (some did — `cost_usd` is their sum, a lower bound) · `unknown` (none did — `cost_usd` is `null`). |
 
-Recording usage never caps a run. `agg history --json` carries the same `usage` totals for every
-run; `agg status --json` shows them live.
+Recording usage never caps a run. `rlt history --json` carries the same `usage` totals for every
+run; `rlt status --json` shows them live.
 
 **Outcome precedence** — when several hold at the end of one session: `error` > `stopped` > `done` >
 `aborted`.
@@ -2105,20 +2105,20 @@ run; `agg status --json` shows them live.
 - Written **atomically** (temp file, fsync, rename): a partial report is never readable.
 - Deleted when a run **starts**, so a report on disk is always the latest run's — never a stale one.
 - A refused start (bad config, unknown `--base-branch`, dirty tree) still writes an `error` report.
-  So does a panic. If the report cannot be written, `agg run` exits **1** with the reason on stderr.
+  So does a panic. If the report cannot be written, `rlt run` exits **1** with the reason on stderr.
 - **SIGKILL, an OOM kill or a power cut leave no report.** A consumer MUST treat a missing report as
   `outcome: error`.
 - The schema is published at [`docs/schemas/report.v3.json`](schemas/report.v3.json). Any change to
   the shape bumps `schema_version` and ships a new file. `schema_version` 1
-  ([`report.v1.json`](schemas/report.v1.json), agg 0.0.15) and 2 ([`report.v2.json`](schemas/report.v2.json))
+  ([`report.v1.json`](schemas/report.v1.json), rlt 0.0.15) and 2 ([`report.v2.json`](schemas/report.v2.json))
   are superseded: v2 added `detectors`, `usage`, `session_log`, `waiting`, each judge's `ratchet` and each
-  open ask's `options`; v3 adds `session` (`{agg_version, setting_sources, user_env}`: how the run's agent
+  open ask's `options`; v3 adds `session` (`{rlt_version, setting_sources, user_env}`: how the run's agent
   sessions were set up, `user_env` as key names only; `null` for a run that ended before it started). Neither removes
   anything.
 
-## The live status: `agg status --json`
+## The live status: `rlt status --json`
 
-Where a run stands **now**, for a program watching it from another process (`agg --project <dir>
+Where a run stands **now**, for a program watching it from another process (`rlt --project <dir>
 status --json`). It is cheap: it reads the snapshot the loop publishes, the ask ledger and
 `run.pid`, and never runs a judge. Its field names are the report's wherever the two say the same
 thing, so one parser reads both. Schema: [`docs/schemas/status.v1.json`](schemas/status.v1.json).
@@ -2126,11 +2126,11 @@ Exit 1 with a hint when no run has ever published a snapshot in the project.
 
 | field | meaning |
 |---|---|
-| `schema_version` · `agg_version` · `run_id` · `project` | identity. `run_id` is the one the report will carry. |
+| `schema_version` · `rlt_version` · `run_id` · `project` | identity. `run_id` is the one the report will carry. |
 | `running` | a loop process is alive for this project right now. |
 | `finished` · `stop_reason` | the run published its ending, and why (`null` while it runs). Neither `running` nor `finished`: it was killed. |
 | `phase` | where the loop is: `starting` · `inject` · `run` · `verify` · `gate` · `backoff` · `staging` · `done`. |
-| `current_step` | `{name, agent, model}` of the step being run (`model` is what agg asked for, `null` = the agent's default); `null` before the first. |
+| `current_step` | `{name, agent, model}` of the step being run (`model` is what rlt asked for, `null` = the agent's default); `null` before the first. |
 | `session` · `lifetime_session` | the session number in this run, and across every run of the project. |
 | `time` · `sessions` | as in the report; `time` ticks while the run is alive. |
 | `judges` | by name: `last` (latest verdict, `null` until it ran), `in_dod` (counted toward `done_if`), `ratchet` (as in the report). |
@@ -2142,7 +2142,7 @@ Exit 1 with a hint when no run has ever published a snapshot in the project.
 Values change between two reads only at stage boundaries (and `time` continuously): the loop
 publishes on every stage change, and a worker session's usage lands when the session ends.
 
-`agg status` without `--json` is for humans, and its text changes without notice.
+`rlt status` without `--json` is for humans, and its text changes without notice.
 
 ## Environment overrides (CI-friendly)
 
@@ -2150,11 +2150,11 @@ These override the config at load time:
 
 | env var | overrides |
 |---|---|
-| `AGG_MODEL` | `defaults.model` (not a step that names its own model) |
-| `AGG_COST_TOTAL` | `sequence.limits.cost` |
-| `AGG_TOKEN_BUDGET` | `sequence.limits.tokens` |
-| `AGG_HEARTBEAT_SECS`, `AGG_WATCHDOG_IDLE_SECS`, `AGG_WATCHDOG_CPU_GRACE`, `AGG_RATELIMIT_BACKOFF`, `AGG_MEMORY_MAX_KB`, `AGG_MEMORY_INJECT_KB` | the matching top-level keys |
+| `RLT_MODEL` | `defaults.model` (not a step that names its own model) |
+| `RLT_COST_TOTAL` | `sequence.limits.cost` |
+| `RLT_TOKEN_BUDGET` | `sequence.limits.tokens` |
+| `RLT_HEARTBEAT_SECS`, `RLT_WATCHDOG_IDLE_SECS`, `RLT_WATCHDOG_CPU_GRACE`, `RLT_RATELIMIT_BACKOFF`, `RLT_MEMORY_MAX_KB`, `RLT_MEMORY_INJECT_KB` | the matching top-level keys |
 
-> **Platform note.** `agg` is **unix-first** (macOS + Linux). The Windows binary builds and the core
+> **Platform note.** `rlt` is **unix-first** (macOS + Linux). The Windows binary builds and the core
 > outer loop runs, but two safety features are **not** implemented there: the **CPU-flat half of the
-> watchdog** and **process-group reaping**. `agg run` prints a one-line notice on Windows.
+> watchdog** and **process-group reaping**. `rlt run` prints a one-line notice on Windows.

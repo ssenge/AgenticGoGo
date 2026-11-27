@@ -1,11 +1,11 @@
 //! Judge GROUPS on the driver path — `sequence.groups` and `count_met(<group>)` spelled in Rust.
 //!
-//! A [`Group`] names a list of judges; [`crate::driver::Agg::group`] asks every member (each through
-//! the same lazy, memoized cache as `agg.judge()`) and returns a [`GroupVerdict`] to count over. The
-//! group carries no threshold: "two of three" is `agg.group(&quality).at_least(2)`, written where
+//! A [`Group`] names a list of judges; [`crate::driver::Relentless::group`] asks every member (each through
+//! the same lazy, memoized cache as `rlt.judge()`) and returns a [`GroupVerdict`] to count over. The
+//! group carries no threshold: "two of three" is `rlt.group(&quality).at_least(2)`, written where
 //! the driver branches, exactly as the YAML path writes `count_met(quality) >= 2` in the condition.
 //!
-//! At [`crate::driver::Agg::gate`], a judge asked ONLY through a group is judged with its group,
+//! At [`crate::driver::Relentless::gate`], a judge asked ONLY through a group is judged with its group,
 //! net — the rule `crate::core::groups` documents — while one the driver also asked on its own is
 //! held one by one.
 

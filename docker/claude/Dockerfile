@@ -1,15 +1,15 @@
-# Reference image: Claude Code as an agg worker (and LLM-judge ruler) under `isolation: container`.
+# Reference image: Claude Code as an rlt worker (and LLM-judge ruler) under `isolation: container`.
 #
-#   docker build -t agg-claude docker/claude
-#   # agg.yaml:  defaults: { agent: "claude", isolation: "container", image: "agg-claude" }
+#   docker build -t rlt-claude docker/claude
+#   # rlt.yaml:  defaults: { agent: "claude", isolation: "container", image: "rlt-claude" }
 #
-# It follows agg's IMAGE CONTRACT (docs/CONFIG.md → "The container tier runs the agent"):
-#   - the agent CLI on PATH for ANY uid — agg runs the container as the project's owner, never root;
+# It follows rlt's IMAGE CONTRACT (docs/CONFIG.md → "The container tier runs the agent"):
+#   - the agent CLI on PATH for ANY uid — rlt runs the container as the project's owner, never root;
 #   - /bin/sh, plus whatever your worker's tasks and your judges run (add your toolchain below);
-#   - NO credentials: agg passes them at run time, by name (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN)
+#   - NO credentials: rlt passes them at run time, by name (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN)
 #     or as read-only mounts — never bake a key or a login into an image;
-#   - no ENTRYPOINT (or one that execs its arguments): agg runs `claude <args…>` as the command;
-#   - HOME is agg's to set (a fresh one per worker session) — nothing may rely on a passwd entry.
+#   - no ENTRYPOINT (or one that execs its arguments): rlt runs `claude <args…>` as the command;
+#   - HOME is rlt's to set (a fresh one per worker session) — nothing may rely on a passwd entry.
 FROM node:22-bookworm-slim
 
 RUN apt-get update \

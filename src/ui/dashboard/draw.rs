@@ -11,10 +11,10 @@ pub(super) fn draw(f: &mut Frame, dir: &Path, state: Option<&DashboardState>, ui
     let area = f.area();
     let Some(s) = state else {
         let msg = Paragraph::new(format!(
-            "waiting for `agg run`…\n\n(no {} yet — start the loop in another terminal)",
+            "waiting for `rlt run`…\n\n(no {} yet — start the loop in another terminal)",
             DashboardState::path(dir).display()
         ))
-        .block(title_block(" AgenticGoGo "))
+        .block(title_block(" Relentless "))
         .wrap(Wrap { trim: true });
         f.render_widget(msg, area);
         return;
@@ -25,7 +25,7 @@ pub(super) fn draw(f: &mut Frame, dir: &Path, state: Option<&DashboardState>, ui
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // title row: "AgenticGoGo" only
+            Constraint::Length(1), // title row: "Relentless" only
             Constraint::Length(4), // Info  (border + 2 lines: run/step + spend/conditions)
             Constraint::Length(6), // band: Progress | Per-agent (border + 4 lines)
             Constraint::Min(8),    // Judges (scrollable scoreboard)
@@ -58,7 +58,7 @@ pub(super) fn title_block(title: &str) -> Block<'_> {
 /// centered banner with no border to keep it light.
 pub(super) fn draw_title(f: &mut Frame, area: Rect) {
     let title = Paragraph::new(Line::from(Span::styled(
-        "AgenticGoGo",
+        "Relentless",
         Style::default().fg(Color::Cyan).bold(),
     )))
     .alignment(Alignment::Center);
@@ -92,7 +92,7 @@ pub(super) fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
     // usage string ($ = the API-equivalent price Claude reports as `total_cost_usd`, NOT a
     // subscription charge — on a Max/Pro plan this is a usage proxy, not money billed). Shown on
     // the info line only when a cap is set or any spend exists (so a token-only run stays
-    // uncluttered). Mirrors the `agg status` rule.
+    // uncluttered). Mirrors the `rlt status` rule.
     let cost = match s.cost_limit {
         Some(t) => Some(format!("${:.2} / ${:.2} (API-eq)", s.cost_spent, t)),
         None if s.cost_spent > 0.0 => Some(format!("${:.2} (API-eq)", s.cost_spent)),
@@ -118,7 +118,7 @@ pub(super) fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
         sep(),
         label("session "),
         // "#<this-run>" plus the cumulative lifetime total when it differs (i.e. the
-        // project has run across more than one `agg run`), so a restart no longer
+        // project has run across more than one `rlt run`), so a restart no longer
         // looks like the work started over: e.g. "#4 (of 23)".
         Span::styled(
             if s.lifetime_session > s.session {
@@ -257,7 +257,7 @@ pub(super) fn draw_per_agent(f: &mut Frame, area: Rect, s: &DashboardState) {
             label("all "),
             Span::raw(human(s.tokens_spent)),
             Span::raw(" tok  "),
-            Span::styled(money(agg_cost(s)), Style::default().fg(Color::Magenta)),
+            Span::styled(money(rlt_cost(s)), Style::default().fg(Color::Magenta)),
         ]));
         lines.push(Line::from(Span::styled(
             "  (single agent — no per-agent split)",
@@ -274,7 +274,7 @@ pub(super) fn draw_per_agent(f: &mut Frame, area: Rect, s: &DashboardState) {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<9}", "total"), Style::default().bold()),
             Span::styled(format!("{:>8} tok  ", human(s.tokens_spent)), Style::default().fg(Color::Cyan).bold()),
-            Span::styled(money(agg_cost(s)), Style::default().fg(Color::Magenta).bold()),
+            Span::styled(money(rlt_cost(s)), Style::default().fg(Color::Magenta).bold()),
         ]));
     }
     let p = Paragraph::new(lines).block(title_block(" Per-agent "));
@@ -470,7 +470,7 @@ pub(super) fn draw_summary(f: &mut Frame, area: Rect, s: &DashboardState, ui: &D
                 Span::styled("▏", Style::default().fg(Color::Yellow)), // caret
             ]),
             Line::from(Span::styled(
-                "prepended to the NEXT worker session (same as `agg send inject`)",
+                "prepended to the NEXT worker session (same as `rlt send inject`)",
                 Style::default().fg(Color::DarkGray),
             )),
         ])

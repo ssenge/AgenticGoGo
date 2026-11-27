@@ -1,4 +1,4 @@
-<!-- A process's own facts (its `ui.overlay`): generic key and value rows; agg knows nothing of what they mean. -->
+<!-- A process's own facts (its `ui.overlay`): generic key and value rows; rlt knows nothing of what they mean. -->
 <script>
   let { facts } = $props();
 

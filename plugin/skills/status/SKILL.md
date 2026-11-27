@@ -1,32 +1,32 @@
 ---
-name: agg-status
-description: Show the current status of the AgenticGoGo loop for this project — the judge scoreboard, what's met/blocked, tokens spent, and the latest progress summary. Use when the user asks how the loop / agg run is doing.
+name: rlt-status
+description: Show the current status of the Relentless loop for this project — the judge scoreboard, what's met/blocked, tokens spent, and the latest progress summary. Use when the user asks how the loop / rlt run is doing.
 disable-model-invocation: false
 ---
 
-# /agg:status — report the AgenticGoGo loop status
+# /rlt:status — report the Relentless loop status
 
-Give the user a concise, accurate status of the running (or last) `agg run` loop.
+Give the user a concise, accurate status of the running (or last) `rlt run` loop.
 
 ## Step 1 — Read the live state
 
-The loop writes a compact snapshot to `agg/private/state.json` in the project. Read it:
+The loop writes a compact snapshot to `rlt/private/state.json` in the project. Read it:
 
 ```bash
-cat agg/private/state.json 2>/dev/null
+cat rlt/private/state.json 2>/dev/null
 ```
 
-(`agg/private/` is agg's own runtime state — the half of the layout a confined worker cannot write.
-The worker's own files live next door in `agg/state/`. Reading either is always fine.)
+(`rlt/private/` is rlt's own runtime state — the half of the layout a confined worker cannot write.
+The worker's own files live next door in `rlt/state/`. Reading either is always fine.)
 
-If it's missing, the loop hasn't been started — tell the user to run `/agg:new` (to set up)
-or `agg run` (if already configured), and stop here.
+If it's missing, the loop hasn't been started — tell the user to run `/rlt:new` (to set up)
+or `rlt run` (if already configured), and stop here.
 
 You can also run the dry-run scoreboard directly (re-evaluates every judge right now):
 ```bash
-agg plan
+rlt plan
 ```
-Use `agg plan` when the user wants a FRESH evaluation; use `agg/private/state.json` when they
+Use `rlt plan` when the user wants a FRESH evaluation; use `rlt/private/state.json` when they
 want the state of the currently-running loop without re-judging.
 
 ## Step 2 — Report
@@ -38,8 +38,8 @@ Summarize from the state JSON:
   scoreboard: report the question, how long it has been waiting (`age_secs`), whether the `driver`
   or the `worker` asked, and the exact command to unblock it:
   ```bash
-  agg answer <id> "<value>"        # a choice takes an option name or its 1-based number
-  agg answer <id> yes              # a yes/no ask (or 1/2)
+  rlt answer <id> "<value>"        # a choice takes an option name or its 1-based number
+  rlt answer <id> yes              # a yes/no ask (or 1/2)
   ```
   A `worker`-origin ask does NOT block the loop (the worker asked and ended its session); a
   `driver`-origin one does. Say which. If an ask is hours old, lead with that — a forgotten ask is
@@ -60,13 +60,13 @@ Summarize from the state JSON:
 - **If `finished: true`**: report the `finish_reason` (stopped/aborted/done).
 
 Keep it tight — a scoreboard the user can read at a glance, not a wall of JSON. For the live
-view, suggest `agg dashboard` in a second terminal.
+view, suggest `rlt dashboard` in a second terminal.
 
 ## Step 3 — If asked "what should I do?"
 
 - A regressed invariant → the loop likely aborted; investigate that judge's rationale.
 - Stalled (high idle, no token growth) → the watchdog should auto-recover; if not, the
-  worker may be wedged — suggest checking `agg/private/run.log` / restarting `agg run`.
+  worker may be wedged — suggest checking `rlt/private/run.log` / restarting `rlt run`.
 - Close to done (e.g. `met_fraction` high) → let it run.
-- Out of budget (`over_budget`) → raise `sequence.limits.tokens` in `agg/agg.yaml` and restart,
+- Out of budget (`over_budget`) → raise `sequence.limits.tokens` in `rlt/rlt.yaml` and restart,
   or accept the partial result.

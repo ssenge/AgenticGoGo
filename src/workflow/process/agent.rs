@@ -136,7 +136,7 @@ impl Proc {
         }
     }
 
-    /// The step as agg runs it: its brief's standing sections, its script first, and what it reads.
+    /// The step as rlt runs it: its brief's standing sections, its script first, and what it reads.
     fn build_task(&self, ctx: &Ctx, step: &Step, s: &StepSettings) -> Result<Task, Fatal> {
         let brief = &self.shared.spec.run.brief;
         let mut task = Task::new(step.clone()).named(&ctx.label);
@@ -190,7 +190,7 @@ impl Proc {
     }
 
     /// The code-quality floor of what step `ctx` changes (`quality: true`, with the floor set in the settings): the
-    /// score of the files changed since the step's base, with the build's reports, through agg's score judge, and the
+    /// score of the files changed since the step's base, with the build's reports, through rlt's score judge, and the
     /// worker's guideline to it; none when no floor is set.
     fn quality(&self, ctx: &Ctx) -> Result<Option<(Judge, String)>, Fatal> {
         let q = self.settings.quality();

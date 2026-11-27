@@ -2,24 +2,24 @@
 //! front ends (`loop_::run_with`, the driver's `boot`) make before anything is confined.
 //!
 //! [`resolve`] is ALSO what startup validation reports from ([`crate::capability::assess`]), so
-//! `agg check` and the run cannot disagree about what is wrong. Registering re-checks and fails
+//! `rlt check` and the run cannot disagree about what is wrong. Registering re-checks and fails
 //! CLOSED — a run whose policy cannot be enforced does not start, even for a caller that skipped
 //! the check.
 
 use super::policy::{self, PolicyGuard, RunPolicy};
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::problem::Problem;
 use anyhow::Result;
 use std::path::Path;
 
 /// Resolve `cfg`'s run-level confinement for the project in `dir` and register it until the
 /// returned guard drops.
-pub fn register(cfg: &AggConfig, dir: &Path) -> Result<PolicyGuard> {
+pub fn register(cfg: &RelentlessConfig, dir: &Path) -> Result<PolicyGuard> {
     Ok(policy::register(dir, build(cfg, dir)?))
 }
 
 /// The policy `cfg` asks for, or the problems that refuse it.
-pub fn build(cfg: &AggConfig, dir: &Path) -> Result<RunPolicy> {
+pub fn build(cfg: &RelentlessConfig, dir: &Path) -> Result<RunPolicy> {
     let (policy, problems) = resolve(cfg, dir);
     if !problems.is_empty() {
         anyhow::bail!(crate::problem::render(&problems));
@@ -28,7 +28,7 @@ pub fn build(cfg: &AggConfig, dir: &Path) -> Result<RunPolicy> {
 }
 
 /// The policy `cfg` asks for, plus every problem with it, each at its config key.
-pub fn resolve(cfg: &AggConfig, dir: &Path) -> (RunPolicy, Vec<Problem>) {
+pub fn resolve(cfg: &RelentlessConfig, dir: &Path) -> (RunPolicy, Vec<Problem>) {
     let (contexts, mut problems) = super::context::resolve(&cfg.context, dir);
     // a container mounts each context with `-v host:/context/<as>:ro`, which a `:` in the path splits
     let containerized = cfg.steps.keys().filter_map(|s| cfg.resolve_step(s).ok()).any(|s| s.isolation == super::Isolation::Container);
@@ -48,7 +48,7 @@ pub fn resolve(cfg: &AggConfig, dir: &Path) -> (RunPolicy, Vec<Problem>) {
         } else {
             problems.push(Problem::new(
                 format!("isolation_policy.pass_env[{i}]"),
-                format!("`{n}` is not an environment variable NAME — list names only (`NPM_TOKEN`); the value is read from agg's environment"),
+                format!("`{n}` is not an environment variable NAME — list names only (`NPM_TOKEN`); the value is read from rlt's environment"),
             ));
         }
     }
@@ -97,7 +97,7 @@ fn is_env_name(n: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn cfg(yaml: &str) -> AggConfig {
+    fn cfg(yaml: &str) -> RelentlessConfig {
         serde_yaml::from_str(yaml).unwrap()
     }
 
@@ -123,7 +123,7 @@ mod tests {
         assert!(err.contains("does not exist"), "{err}");
     }
 
-    /// `pass_env` takes NAMES (a `NAME=value` would put the secret in agg.yaml); `credentials` must
+    /// `pass_env` takes NAMES (a `NAME=value` would put the secret in rlt.yaml); `credentials` must
     /// exist. Each refusal at its own key.
     #[test]
     fn pass_env_and_credentials_are_validated_at_their_keys() {

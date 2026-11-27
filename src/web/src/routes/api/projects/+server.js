@@ -1,9 +1,9 @@
 import { json } from '@sveltejs/kit';
-import { aggGet, aggPost } from '$lib/server/agg.js';
+import { rltGet, rltPost } from '$lib/server/rlt.js';
 
-// Proxy: /api/projects → agg serve, with the query (`p`, the project) passed on.
+// Proxy: /api/projects → rlt serve, with the query (`p`, the project) passed on.
 export async function GET({ url }) {
-  const { status, body } = await aggGet(`/api/projects${url.search}`);
+  const { status, body } = await rltGet(`/api/projects${url.search}`);
   return json(body ?? {}, { status: status === 0 ? 502 : status });
 }
 
@@ -14,6 +14,6 @@ export async function POST({ request, url }) {
   } catch {
     return json({ error: 'invalid JSON' }, { status: 400 });
   }
-  const { status, body } = await aggPost(`/api/projects${url.search}`, payload);
+  const { status, body } = await rltPost(`/api/projects${url.search}`, payload);
   return json(body ?? {}, { status: status === 0 ? 502 : status });
 }

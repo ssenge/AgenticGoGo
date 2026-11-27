@@ -1,6 +1,6 @@
 //! The step engine: run the run-set judges, fold verdicts into the judges, evaluate done/abort.
 //!
-//! This is the judge logic the loop calls once per STEP (after a worker session exits). `agg plan`
+//! This is the judge logic the loop calls once per STEP (after a worker session exits). `rlt plan`
 //! exercises it for a single dry-run step. There is NO recheck caching — every run-set judge runs
 //! every step (§5.5's ponytail note); `skip_judges` is the only lever, and the caching upgrade path
 //! is ROADMAP #8, landing INSIDE [`Engine::run_judges`] and nowhere else.
@@ -133,7 +133,7 @@ pub struct Engine {
     /// the Definition of Done (success stop).
     ///
     /// `None` = **there is no DoD** — the Rust driver path, where flow lives in the driver's own
-    /// `if`/`break` and nothing is declared to agg (BUILD.md §3.6). An empty string cannot express
+    /// `if`/`break` and nothing is declared to rlt (BUILD.md §3.6). An empty string cannot express
     /// that: it fails the expression parser. A `None` short-circuits the DoD read (`stop` is always
     /// false) and prints nothing in the scoreboard header.
     pub done_if: Option<String>,
@@ -149,7 +149,7 @@ pub struct Engine {
     pub groups: crate::core::groups::Groups,
     /// the base branch the judges grade against — what a `scope: changed` metric judge measures
     /// since, and a native judge's diff is taken against. Set once the run resolved it; `None`
-    /// (`agg plan`, `agg judge`) = `HEAD`.
+    /// (`rlt plan`, `rlt judge`) = `HEAD`.
     pub base: Option<String>,
 }
 
@@ -403,7 +403,7 @@ impl Engine {
             gate: Some(&self.gate),
             groups: &self.groups,
         };
-        // No `done_if` ⇒ never a DoD stop. That is the driver path: agg is not told what "done"
+        // No `done_if` ⇒ never a DoD stop. That is the driver path: rlt is not told what "done"
         // means there, so it must never claim the run succeeded.
         let stop = self.done_if.as_deref().is_some_and(|d| eval_or_log(d, &ctx, "done_if"));
         let (halt, halt_reason) = match &self.abort_if {
@@ -530,7 +530,7 @@ mod tests {
     }
 
     /// THE feature, in one assertion (§2.1/§8.2): a fired `notify_if` is PURE SIGNAL. If this
-    /// regresses, agg has silently become the thing it exists to avoid — a loop that halts to ask a
+    /// regresses, rlt has silently become the thing it exists to avoid — a loop that halts to ask a
     /// human. The reason travels on its own field; `stop`/`halt` do not move.
     #[test]
     fn a_fired_notify_if_is_non_terminal_the_loop_keeps_running() {

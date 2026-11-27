@@ -1,7 +1,7 @@
 //! `context:` end to end — READ-ONLY context directories from outside the project, through the real
-//! `agg` binary and a FAKE agent.
+//! `rlt` binary and a FAKE agent.
 //!
-//! Two halves. What startup REFUSES (every config agg cannot enforce, located at its key). And what
+//! Two halves. What startup REFUSES (every config rlt cannot enforce, located at its key). And what
 //! a run DOES on this host's kernel sandbox: the brief lists each directory with a pointer to its
 //! `index.md`, the worker and its judge read it, and every way of changing it — a write, a new file,
 //! renaming its parent away to put a forged one in its place — is refused by the kernel.
@@ -31,22 +31,22 @@ fn git(dir: &Path, args: &[&str]) {
     Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
 }
 
-/// The fake agent: keeps its brief, reads the context through `$AGG_CONTEXT_KB`, then tries each way
+/// The fake agent: keeps its brief, reads the context through `$RLT_CONTEXT_KB`, then tries each way
 /// of changing it and logs the outcome of each.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 for a in "$@"; do
   if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
 done
-cp agg/private/INSTRUCTIONS.md brief.txt
-cat "$AGG_CONTEXT_KB/index.md" > read.txt 2>&1
+cp rlt/private/INSTRUCTIONS.md brief.txt
+cat "$RLT_CONTEXT_KB/index.md" > read.txt 2>&1
 t() { if sh -c "$2" 2>/dev/null; then echo "$1 OK"; else echo "$1 DENIED"; fi; }
 {
-  t write "echo evil > '$AGG_CONTEXT_KB/index.md'"
-  t append "echo evil >> '$AGG_CONTEXT_KB/index.md'"
-  t new_file "echo evil > '$AGG_CONTEXT_KB/new.md'"
-  t delete "rm '$AGG_CONTEXT_KB/index.md'"
-  t rename_self "mv '$AGG_CONTEXT_KB' '$AGG_CONTEXT_KB.moved'"
-  t rename_parent "mv \"\$(dirname '$AGG_CONTEXT_KB')\" \"\$(dirname '$AGG_CONTEXT_KB').moved\""
+  t write "echo evil > '$RLT_CONTEXT_KB/index.md'"
+  t append "echo evil >> '$RLT_CONTEXT_KB/index.md'"
+  t new_file "echo evil > '$RLT_CONTEXT_KB/new.md'"
+  t delete "rm '$RLT_CONTEXT_KB/index.md'"
+  t rename_self "mv '$RLT_CONTEXT_KB' '$RLT_CONTEXT_KB.moved'"
+  t rename_parent "mv \"\$(dirname '$RLT_CONTEXT_KB')\" \"\$(dirname '$RLT_CONTEXT_KB').moved\""
 } > attacks.log
 echo work > src.txt
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"output_tokens":1},"total_cost_usd":0.01}'
@@ -55,8 +55,8 @@ exit 0
 
 /// The judge reads the context (it must see the same material) and tries to write it.
 const JUDGE: &str = r#"#!/bin/sh
-if echo judge > "$AGG_CONTEXT_KB/judge.md" 2>/dev/null; then echo JUDGE_WROTE > "$AGG_JUDGE_SCRATCH/j.log"; fi
-if grep -q knowledge "$AGG_CONTEXT_KB/index.md" && [ -f src.txt ]; then
+if echo judge > "$RLT_CONTEXT_KB/judge.md" 2>/dev/null; then echo JUDGE_WROTE > "$RLT_JUDGE_SCRATCH/j.log"; fi
+if grep -q knowledge "$RLT_CONTEXT_KB/index.md" && [ -f src.txt ]; then
   echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"read the context"}'
 else
   echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"cannot read the context"}'
@@ -74,11 +74,11 @@ fn project(tier: &str, context: &str) -> (tempfile::TempDir, tempfile::TempDir, 
     git(d, &["init", "-q", "-b", "main"]);
     git(d, &["config", "user.email", "t@t"]);
     git(d, &["config", "user.name", "t"]);
-    write(d, ".gitignore", "agg/state/\nagg/private/\nbin/\n.home/\nbrief.txt\nread.txt\nattacks.log\n");
+    write(d, ".gitignore", "rlt/state/\nagg/private/\nbin/\n.home/\nbrief.txt\nread.txt\nattacks.log\n");
     let context = context.replace("{KB}", &kb.display().to_string());
     write(
         d,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         &format!(
             "project: \"ctx\"\n\
              defaults: {{ model: \"fake\", isolation: \"{tier}\" }}\n\
@@ -87,9 +87,9 @@ fn project(tier: &str, context: &str) -> (tempfile::TempDir, tempfile::TempDir, 
              summary: {{ enabled: false }}\n{context}"
         ),
     );
-    write(d, "agg/judges/read_kb.sh", JUDGE);
-    chmod_x(&d.join("agg/judges/read_kb.sh"));
-    write(d, "agg/state/STATE.md", "do work\n");
+    write(d, "rlt/judges/read_kb.sh", JUDGE);
+    chmod_x(&d.join("rlt/judges/read_kb.sh"));
+    write(d, "rlt/state/STATE.md", "do work\n");
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "init"]);
     write(d, "bin/claude", FAKE_CLAUDE);
@@ -98,12 +98,12 @@ fn project(tier: &str, context: &str) -> (tempfile::TempDir, tempfile::TempDir, 
     (tmp, kb_parent, path)
 }
 
-fn agg(dir: &Path, path: &str, args: &[&str]) -> std::process::Output {
-    Command::cargo_bin("agg").unwrap().args(args).current_dir(dir).env("PATH", path).env("HOME", dir.join(".home")).output_bounded().unwrap()
+fn rlt(dir: &Path, path: &str, args: &[&str]) -> std::process::Output {
+    Command::cargo_bin("rlt").unwrap().args(args).current_dir(dir).env("PATH", path).env("HOME", dir.join(".home")).output_bounded().unwrap()
 }
 
 fn check_problems(dir: &Path, path: &str) -> Vec<(String, String)> {
-    let out = agg(dir, path, &["check", "--json"]);
+    let out = rlt(dir, path, &["check", "--json"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("check --json prints JSON");
     v["problems"]
         .as_array()
@@ -121,13 +121,13 @@ fn a_context_with_an_unconfined_step_is_refused() {
     let (tmp, _kb, path) = project("none", KB);
     let p = check_problems(tmp.path(), &path);
     assert!(p.iter().any(|(at, m)| at == "defaults.isolation" && m.contains("context")), "{p:#?}");
-    // …and `agg run` refuses it before any session.
-    let out = agg(tmp.path(), &path, &["run", "--max-sessions", "1"]);
+    // …and `rlt run` refuses it before any session.
+    let out = rlt(tmp.path(), &path, &["run", "--max-sessions", "1"]);
     assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(!tmp.path().join("brief.txt").exists(), "no worker ran");
 }
 
-/// Every entry agg cannot enforce, each at its own key; `mode` other than `ro` is a parse refusal.
+/// Every entry rlt cannot enforce, each at its own key; `mode` other than `ro` is a parse refusal.
 #[test]
 fn each_bad_entry_is_refused_at_its_key() {
     let ctx = "context:\n  - { path: \"{KB}\", as: \"kb\" }\n  - { path: \"{KB}\", as: \"kb\" }\n  \
@@ -169,7 +169,7 @@ fn under_the_sandbox_a_context_is_listed_readable_and_never_writable() {
     let (tmp, kb_parent, path) = project("sandbox", KB);
     let d = tmp.path();
     let kb = fs::canonicalize(kb_parent.path().join("kb")).unwrap();
-    let out = agg(d, &path, &["run", "--max-sessions", "1"]);
+    let out = rlt(d, &path, &["run", "--max-sessions", "1"]);
     let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_eq!(out.status.code(), Some(0), "the judge read the context, so the run is done:\n{log}");
 

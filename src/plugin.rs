@@ -1,7 +1,7 @@
 //! The reusable plugin framework — the types a plugin author imports.
 
 use crate::context::LoopState;
-use crate::core::config::AggConfig;
+use crate::core::config::RelentlessConfig;
 use crate::state::Phase;
 use anyhow::Result;
 use std::path::Path;
@@ -15,10 +15,10 @@ pub enum RunOutcome {
     Halt,
     /// The `--max-sessions` cap was reached with the DoD not met.
     MaxSessions,
-    /// The operator stopped the run — `agg stop`, `agg send stop`, or Ctrl-C.
+    /// The operator stopped the run — `rlt stop`, `rlt send stop`, or Ctrl-C.
     ///
     /// ⚠ This used to share exit **0** with [`RunOutcome::GoalsMet`], which made an abandoned run
-    /// indistinguishable from a met goal: `if agg run; then ship; fi` shipped on `agg stop`. It is
+    /// indistinguishable from a met goal: `if rlt run; then ship; fi` shipped on `rlt stop`. It is
     /// its own code (5) since the HiL work, where "a human ended it" is an everyday outcome rather
     /// than a corner case. BREAKING for any wrapper that treated a stop as success — deliberately.
     Stopped,
@@ -78,8 +78,8 @@ pub enum End {
 }
 
 /// A type-keyed bag: one value per Rust type (anymap-style). The loop is single-threaded, so no
-/// Send/Sync needed. This is the generic extension store (LOOPSTATE_REDESIGN §3): agg's own features
-/// use it via `AGGState`/`AGGScratch`, and a third-party plugin stashes ITS OWN type the same way —
+/// Send/Sync needed. This is the generic extension store (LOOPSTATE_REDESIGN §3): rlt's own features
+/// use it via `RLTState`/`RLTScratch`, and a third-party plugin stashes ITS OWN type the same way —
 /// `ctx.ext.get::<FooState>()` — without ever editing the core struct.
 #[derive(Default)]
 pub struct Extensions {
@@ -115,8 +115,8 @@ pub trait Handler {
     fn name(&self) -> &'static str;
 }
 
-/// A `pre_start` handler: agg's run-start git preconditions (recover a stranded merge, require a
-/// clean git repo, ensure `agg/{state,private}` gitignored, resolve the isolation base branch). Runs before the
+/// A `pre_start` handler: rlt's run-start git preconditions (recover a stranded merge, require a
+/// clean git repo, ensure `rlt/{state,private}` gitignored, resolve the isolation base branch). Runs before the
 /// loop state exists, so it takes `Bootstrap`, not `LoopState`.
 pub trait PreStart {
     fn run(&self, boot: &mut Bootstrap) -> Result<()>;
@@ -128,7 +128,7 @@ pub trait PreStart {
 /// minimal handler protocol for state-BUILDING (vs `Handler`, which operates on the built state).
 pub struct Bootstrap<'a> {
     pub dir: &'a Path,
-    pub cfg: &'a AggConfig,
+    pub cfg: &'a RelentlessConfig,
     /// this run CONTINUES a previous one (`Opts { resume: true }`). It changes exactly one
     /// precondition: a dirty tree is DISCARDED loudly instead of refusing to start (BUILD.md §3.9
     /// rule 2). A power cut mid-worker leaves uncommitted tracked changes by construction —

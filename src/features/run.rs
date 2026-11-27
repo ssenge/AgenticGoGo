@@ -1,12 +1,12 @@
 //! The RUN feature — launch the fresh worker for this step's (agent, model, effort). ONE plugin on
-//! `on_run`: the unknown-agent and SIGINT early returns forbid splitting. Reads `AGGScratch::prompt`,
-//! writes `AGGScratch::outcome`. `Flow::Stop(finish_interrupted())` on SIGINT is the RUN stage's only
+//! `on_run`: the unknown-agent and SIGINT early returns forbid splitting. Reads `RLTScratch::prompt`,
+//! writes `RLTScratch::outcome`. `Flow::Stop(finish_interrupted())` on SIGINT is the RUN stage's only
 //! control-flow exit.
 
 use anyhow::Result;
 
 use crate::backend::worker::{self, SessionOutcome};
-use crate::loop_::{AGGScratch, AGGState, Flow, Handler, LoopState};
+use crate::loop_::{RLTScratch, RLTState, Flow, Handler, LoopState};
 
 /// A session that failed without a word: not rate-limited, a non-zero exit, no output.
 fn is_dud(outcome: &SessionOutcome) -> bool {
@@ -16,7 +16,7 @@ fn is_dud(outcome: &SessionOutcome) -> bool {
 pub struct LaunchWorker;
 impl Handler for LaunchWorker {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        let prompt = ctx.scratch.get::<AGGScratch>().prompt.take().expect("WriteInstructions set scratch.prompt");
+        let prompt = ctx.scratch.get::<RLTScratch>().prompt.take().expect("WriteInstructions set scratch.prompt");
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
         // `static_backend`, not `backend`: the stream-reader thread below needs the backend to be
         // `&'static`, which a driver's own `Arc`-held one is not (see `ResolvedStep::static_backend`).
@@ -24,8 +24,8 @@ impl Handler for LaunchWorker {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("  step `{}` names an unknown agent: {e}", step.name);
-                ctx.ext.get::<AGGState>().worker.dud_streak += 1;
-                ctx.scratch.get::<AGGScratch>().outcome = Some(SessionOutcome::failed());
+                ctx.ext.get::<RLTState>().worker.dud_streak += 1;
+                ctx.scratch.get::<RLTScratch>().outcome = Some(SessionOutcome::failed());
                 return Ok(Flow::Continue);
             }
         };
@@ -37,7 +37,7 @@ impl Handler for LaunchWorker {
         // paths"), because the failure mode is a step that believes it is protected.
         //
         // ponytail: this fires once per SESSION, so a long run repeats it. The ceiling is noise, not
-        // correctness; the upgrade path when it bites is a once-per-step-name set on `AGGState`.
+        // correctness; the upgrade path when it bites is a once-per-step-name set on `RLTState`.
         if let Some(w) =
             crate::isolation::unenforced_denies(&step.name, isolation, &step.readonly, &step.writable)
         {
@@ -100,15 +100,15 @@ impl Handler for LaunchWorker {
         // warn (loudly) if the agent never touched its forward state file (§5.6 / OQ3).
         if let (Some(step), false) = (ctx.cur_step.as_ref().filter(|s| s.memory), outcome.rate_limited) {
             let now = std::fs::read_to_string(ctx.config_base.join(&step.state)).ok();
-            if now == ctx.ext.get::<AGGState>().inject.state_before {
+            if now == ctx.ext.get::<RLTState>().inject.state_before {
                 eprintln!("  ⚠ the worker did not update `{}` this session — the next session inherits stale forward-state.", step.state);
             }
         }
 
         let dud = is_dud(&outcome);
-        let w = &mut ctx.ext.get::<AGGState>().worker;
+        let w = &mut ctx.ext.get::<RLTState>().worker;
         w.dud_streak = if dud { w.dud_streak + 1 } else { 0 };
-        ctx.scratch.get::<AGGScratch>().outcome = Some(outcome);
+        ctx.scratch.get::<RLTScratch>().outcome = Some(outcome);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {

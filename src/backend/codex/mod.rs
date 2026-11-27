@@ -39,8 +39,8 @@ use events::{clean, result_event, think, tool, tool_result};
 /// Naming a default here is actively harmful. `gpt-5-codex` looks like the obvious choice and
 /// fails at runtime with *"The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT
 /// account"* — the model a Codex user may use depends on how they AUTHENTICATED (ChatGPT plan vs.
-/// API key), which agg cannot know. Codex already picks a model appropriate to the account; an
-/// operator who wants a specific one sets `model:` in agg.yaml explicitly.
+/// API key), which rlt cannot know. Codex already picks a model appropriate to the account; an
+/// operator who wants a specific one sets `model:` in rlt.yaml explicitly.
 pub const DEFAULT_MODEL: &str = "";
 /// The summarizer/judge model. EMPTY on purpose: Codex must not be handed a model name (a hard
 /// 400 on a ChatGPT account), so the flag is omitted entirely and Codex picks its own.
@@ -101,10 +101,10 @@ impl AgentBackend for Codex {
     /// Codex has a REAL kernel sandbox of its own (`sandbox_mode=workspace-write`), which
     /// [`Self::session_command`] switches on — the INNER of two layers.
     ///
-    /// ⛔ It does **not** buy Codex an exemption from agg's wrapper: under `isolation: sandbox`
+    /// ⛔ It does **not** buy Codex an exemption from rlt's wrapper: under `isolation: sandbox`
     /// [`crate::backend::worker::run_session`] wraps every agent, Codex included. It used to skip
     /// Codex here, which meant `.readonly()` on a Codex step was inert (workspace-write is
-    /// workspace-granular, with no per-path deny list) and, more to the point, that agg's jail was
+    /// workspace-granular, with no per-path deny list) and, more to the point, that rlt's jail was
     /// whatever Codex said it was. See `internal/BUILD.md` §2.4.
     fn self_sandboxes(&self) -> bool {
         true
@@ -134,7 +134,7 @@ impl AgentBackend for Codex {
     /// `~/.codex` — REQUIRED as of §2.4, and it was not before.
     ///
     /// While Codex was exempt from the OS wrapper this was correctly empty: nothing confined the
-    /// `codex` process, so its own state dir was writable by default. Now that agg wraps it, the
+    /// `codex` process, so its own state dir was writable by default. Now that rlt wraps it, the
     /// deny-default profile takes that dir away — and Codex writes to it on every run (`sessions/`
     /// rollouts, `history.jsonl`, the sqlite WAL, and `auth.json` on token refresh), OUTSIDE its
     /// own `workspace-write` jail, which confines the tools it runs rather than itself. Without
@@ -143,7 +143,7 @@ impl AgentBackend for Codex {
         crate::backend::state_paths_that_exist(&[".codex"])
     }
 
-    /// `high` — the most reasoning Codex offers. (agg's blanket `max` is Claude's vocabulary; see
+    /// `high` — the most reasoning Codex offers. (rlt's blanket `max` is Claude's vocabulary; see
     /// [`effort_arg`] for how the levels map.)
     fn default_effort(&self) -> &'static str {
         "high"
@@ -162,21 +162,21 @@ impl AgentBackend for Codex {
         }
         command.arg("--json");
         // ⛔ CODEX'S OWN KERNEL SANDBOX IS OFF ON EVERY TIER, AND THAT IS NOT A WEAKENING.
-        // agg's OS wrapper now confines every agent (§2.4) — agg owns the jail and does not
+        // rlt's OS wrapper now confines every agent (§2.4) — rlt owns the jail and does not
         // delegate it. The double layer we WANTED here is not available: kernel sandboxes DO NOT
         // NEST. Measured on a real host (`isolation::tests::an_agents_own_kernel_sandbox_nests_
-        // inside_aggs`): Seatbelt permits a second `sandbox_apply` only from a process whose
-        // current profile is entirely unrestricted, so agg's wrapper + Codex's own apply =
+        // inside_rlts`): Seatbelt permits a second `sandbox_apply` only from a process whose
+        // current profile is entirely unrestricted, so rlt's wrapper + Codex's own apply =
         // `sandbox-exec: sandbox_apply: Operation not permitted`, and the worker dies at launch.
         // Even `(allow default)(deny nvram*)` outside — a deny on an operation nothing touches —
         // is enough to break the inner apply. No profile clause grants it.
         //
-        // So the flag below disables CODEX's sandbox, not agg's: the process is still inside
-        // agg's kernel jail on the `sandbox` tier. Its alarming name describes Codex's own
-        // approval prompts and confinement, which agg has deliberately replaced.
-        //   none      → agg does not confine either. Genuinely unconfined; that is the tier.
-        //   sandbox   → AGG's Seatbelt/bwrap jail is the confinement (worker.rs).
-        //   container → the CONTAINER is the jail; agg re-hosts the whole command inside it.
+        // So the flag below disables CODEX's sandbox, not rlt's: the process is still inside
+        // rlt's kernel jail on the `sandbox` tier. Its alarming name describes Codex's own
+        // approval prompts and confinement, which rlt has deliberately replaced.
+        //   none      → rlt does not confine either. Genuinely unconfined; that is the tier.
+        //   sandbox   → RLT's Seatbelt/bwrap jail is the confinement (worker.rs).
+        //   container → the CONTAINER is the jail; rlt re-hosts the whole command inside it.
         //
         // ⚠ OWNER REVIEW WANTED — this is the one place the 2026-08-04 always-confine ruling met a
         // hardware fact and lost a detail. The ruling asked for BOTH layers ("we can also pass the
@@ -190,7 +190,7 @@ impl AgentBackend for Codex {
         // reshapes argv into that subcommand — so the flag form would kill every resumed confined
         // session on argv parsing. The config form parses identically on both shapes.
         command.arg("--dangerously-bypass-approvals-and-sandbox");
-        let _ = spec.isolation; // every tier: agg's wrapper is the confinement, or there is none
+        let _ = spec.isolation; // every tier: rlt's wrapper is the confinement, or there is none
         // don't refuse to run outside a git repo (headless), under either isolation tier.
         command.arg("--skip-git-repo-check");
         // Only pass --model if the operator actually named one. Empty = let Codex decide, which is
@@ -284,7 +284,7 @@ impl AgentBackend for Codex {
     /// counted within output tokens), `reasoning_output_tokens` is a breakdown of `output_tokens`.
     /// Summing them would DOUBLE-COUNT and make the budget guard fire early.
     ///
-    /// For the same reason `input` is `input_tokens − cached_input_tokens`: agg's kinds do not
+    /// For the same reason `input` is `input_tokens − cached_input_tokens`: rlt's kinds do not
     /// overlap, and the cached part is `cache_read`. Codex reports no cache-write figure at all.
     fn parse_usage(&self, line: &str) -> Option<crate::usage::Tokens> {
         let v: Value = serde_json::from_str(line).ok()?;
@@ -386,7 +386,7 @@ impl AgentBackend for Codex {
         }
         // Wrapped like every other backend (§2.4) — this used to no-op for Codex on the grounds
         // that `--sandbox read-only` already confines the judge more tightly. That is Codex's own
-        // report of its own flag; agg's outer jail is not conditional on it.
+        // report of its own flag; rlt's outer jail is not conditional on it.
         let out = self
             .confine_one_shot(command, cwd, isolation)
             .and_then(|command| crate::os::proc::run_with_input(command, prompt.as_bytes(), timeout_secs));
@@ -413,7 +413,7 @@ impl AgentBackend for Codex {
             anyhow::bail!(
                 // PARALLEL with claude.rs / copilot.rs — install, login, HEADLESS check.
                 "the OpenAI Codex CLI (`{}`) was not found on your PATH.\n  \
-                 AgenticGoGo drives it to run the inner workers. Install it with\n    \
+                 Relentless drives it to run the inner workers. Install it with\n    \
                  npm install -g @openai/codex\n  \
                  then run `codex login` (or set OPENAI_API_KEY), and make sure\n  \
                  `codex exec \"hello\"` answers.",
@@ -428,14 +428,14 @@ impl AgentBackend for Codex {
 /// file). The caller removes it after the call.
 fn schema_file(text: &str) -> Result<std::path::PathBuf, String> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("agg-schema-{}-{nanos}.json", std::process::id()));
+    let path = std::env::temp_dir().join(format!("rlt-schema-{}-{nanos}.json", std::process::id()));
     std::fs::write(&path, text).map_err(|e| format!("cannot write the answer's schema {}: {e}", path.display()))?;
     Ok(path)
 }
 
-/// Map agg's effort level onto Codex's `model_reasoning_effort` value. `None` = pass nothing.
+/// Map rlt's effort level onto Codex's `model_reasoning_effort` value. `None` = pass nothing.
 ///
-/// agg speaks Claude's vocabulary (`low|medium|high|xhigh|max`); Codex's tops out at `high`. The
+/// rlt speaks Claude's vocabulary (`low|medium|high|xhigh|max`); Codex's tops out at `high`. The
 /// two above it are CLAMPED to `high` rather than rejected: "max" means *"think as hard as this
 /// agent can"*, and `high` is as hard as Codex thinks. That is an honest clamp, not a silent
 /// downgrade — asking for more reasoning than the model offers can only ever give you its most.

@@ -2,9 +2,9 @@
 //! waits for the limit to reset, and goes round again.
 //!
 //! The wait is a state of a RUNNING workflow, not a pause in it (decision 6):
-//! - it is VISIBLE — `waiting: {reason, agent, until}` in `state.json` / `agg status --json`, a row
-//!   in `agg/private/waits.jsonl` when it starts and another when it ends;
-//! - it DRAINS THE BUS — `agg send wake` (or `resume`) ends it now, `agg stop` ends the run;
+//! - it is VISIBLE — `waiting: {reason, agent, until}` in `state.json` / `rlt status --json`, a row
+//!   in `rlt/private/waits.jsonl` when it starts and another when it ends;
+//! - it DRAINS THE BUS — `rlt send wake` (or `resume`) ends it now, `rlt stop` ends the run;
 //! - it is NOT WORK and NOT A LIMIT — its seconds never count against `work_time`, and nothing about
 //!   waiting ends the run. Ceilings already tripped (a deadline) still end it.
 
@@ -14,7 +14,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::bus::Command;
-use crate::loop_::{AGGScratch, Flow, Handler, LifecycleEvent, LoopState, RunOutcome};
+use crate::loop_::{RLTScratch, Flow, Handler, LifecycleEvent, LoopState, RunOutcome};
 use crate::state::{Waiting, RATE_LIMIT};
 
 /// Slack added to a reported reset time, so the next attempt lands after the boundary, not on it.
@@ -29,9 +29,9 @@ const POLL: Duration = Duration::from_secs(1);
 pub enum WaitEnd {
     /// the reset time (or the fixed backoff) passed.
     Elapsed,
-    /// `agg send wake` / `agg send resume`.
+    /// `rlt send wake` / `rlt send resume`.
     Woken,
-    /// `agg stop` / `agg send stop`.
+    /// `rlt stop` / `rlt send stop`.
     Stopped,
     /// SIGINT / SIGTERM.
     Interrupted,
@@ -39,7 +39,7 @@ pub enum WaitEnd {
     Ceiling,
 }
 
-/// One row of `agg/private/waits.jsonl`.
+/// One row of `rlt/private/waits.jsonl`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum WaitRow {
@@ -102,7 +102,7 @@ impl Handler for RateLimitBackoff {
             Some(_) => eprintln!("  rate limit detected — waiting {}m{:02}s until it resets", secs / 60, secs % 60),
             None => eprintln!("  rate limit detected — backing off {secs}s (no reset time reported)"),
         }
-        eprintln!("  (`agg send wake` ends the wait early; `agg stop` ends the run)");
+        eprintln!("  (`rlt send wake` ends the wait early; `rlt stop` ends the run)");
         if ctx.cfg.memory.enabled {
             crate::core::memory::clear_scratch(&ctx.dir, ctx.session);
         }
@@ -133,7 +133,7 @@ impl Handler for RateLimitBackoff {
 /// `Some(reset)` when the session that just ended was rate-limited (`reset` = the reported reset
 /// epoch, if the agent named one); `None` for a normal session.
 fn rate_limit(ctx: &mut LoopState) -> Option<Option<u64>> {
-    let o = ctx.scratch.get::<AGGScratch>().outcome.as_ref()?;
+    let o = ctx.scratch.get::<RLTScratch>().outcome.as_ref()?;
     o.rate_limited.then_some(o.rate_limit_reset)
 }
 
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn wait_rows_round_trip_with_flat_fields() {
         let w = Waiting { reason: RATE_LIMIT.into(), agent: "claude".into(), until: 9 };
-        let row = WaitRow::Wait { session: 2, waiting: w, partial: Some("refs/agg/partial/r/2".into()), ts: 1 };
+        let row = WaitRow::Wait { session: 2, waiting: w, partial: Some("refs/rlt/partial/r/2".into()), ts: 1 };
         let j = serde_json::to_value(&row).unwrap();
         assert_eq!(j["event"], "wait");
         assert_eq!(j["reason"], "rate_limit");

@@ -29,7 +29,7 @@ export function judgeMeasure(j) {
 
 /** The §7.4 per-judge scoreboard the UI renders. Prefers the native `judges` (Option value/max,
  *  explicit `met`, broken-judge `error`, run-set judges like `stalled`); falls back to mapping the
- *  legacy `goals` so a state.json written by a pre-§7.4 `agg` still renders — mirrors the Rust
+ *  legacy `goals` so a state.json written by a pre-§7.4 `rlt` still renders — mirrors the Rust
  *  `DashboardState::judge_views()` / `JudgeView::from_goal` bridge. */
 export function judgeViews(state) {
   const j = state?.judges;

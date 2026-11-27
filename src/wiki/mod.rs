@@ -1,7 +1,7 @@
-//! `agg wiki lint` — check a knowledge wiki against the Open Knowledge Format, OKF v0.2
+//! `rlt wiki lint` — check a knowledge wiki against the Open Knowledge Format, OKF v0.2
 //! (<https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md>).
 //!
-//! The default target is the project's own `agg/state/wiki/`, which the WORKER writes and agg only
+//! The default target is the project's own `rlt/state/wiki/`, which the WORKER writes and rlt only
 //! reads (as untrusted input). So this module READS and REPORTS; it never writes a byte into the
 //! wiki — no frontmatter, no `generated`, and above all no `verified`, which is a reviewer's act.
 //!
@@ -21,7 +21,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-/// Bumped on any breaking change to `agg wiki lint --json` (`docs/schemas/wiki_lint.v1.json`).
+/// Bumped on any breaking change to `rlt wiki lint --json` (`docs/schemas/wiki_lint.v1.json`).
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// One finding, located by file (relative to the wiki root, `/`-separated) and line when known.
@@ -34,7 +34,7 @@ pub struct Finding {
     pub message: String,
 }
 
-/// The machine-readable result of `agg wiki lint --json`.
+/// The machine-readable result of `rlt wiki lint --json`.
 #[derive(Debug, Serialize)]
 pub struct LintReport {
     pub schema_version: u32,
@@ -164,7 +164,7 @@ fn rel(root: &Path, path: &Path) -> String {
     r.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
 }
 
-/// `agg wiki lint [PATH] [--json]`: lint `path`, or the project's `agg/state/wiki/`, print the
+/// `rlt wiki lint [PATH] [--json]`: lint `path`, or the project's `rlt/state/wiki/`, print the
 /// report, and return whether it is conformant. A missing default wiki is conformant (there is
 /// nothing to check yet); a missing explicit `path` is an error.
 pub fn run(project_dir: &Path, path: Option<&Path>, json: bool) -> Result<bool> {
@@ -197,7 +197,7 @@ pub fn render(r: &LintReport) -> String {
     if !r.exists {
         return format!("no wiki at {} yet: nothing to lint\n", r.wiki);
     }
-    let mut s = format!("agg wiki lint: {} (OKF v0.2)\n", r.wiki);
+    let mut s = format!("rlt wiki lint: {} (OKF v0.2)\n", r.wiki);
     for (glyph, f) in r.problems.iter().map(|f| ("✗", f)).chain(r.warnings.iter().map(|f| ("⚠", f))) {
         let at = f.line.map(|l| format!(":{l}")).unwrap_or_default();
         s.push_str(&format!("  {glyph} {}{at} [{}] {}\n", f.file, f.rule, f.message));

@@ -1,7 +1,7 @@
 //! The numeric RATCHET and the gate's own terms (`rollbacks`, `consecutive_rollbacks`,
 //! `oscillating`, `ratchet_regressed`, `<judge>.ref`) — end to end, on both front ends.
 //!
-//! The YAML half drives the real `agg` binary with a fake `claude` whose sessions follow a PLAN: one
+//! The YAML half drives the real `rlt` binary with a fake `claude` whose sessions follow a PLAN: one
 //! shell line per session, run in the project, then committed. The plan sits OUTSIDE the project so
 //! a rollback cannot restore it (a rolled-back session must not replay its own line).
 //!
@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
-use agg::core::verdicts::{rows_for, Outcome, RatchetMark};
-use agg::prelude::*;
+use relentless::core::verdicts::{rows_for, Outcome, RatchetMark};
+use relentless::prelude::*;
 
 fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
     let p = dir.join(name);
@@ -39,7 +39,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn write_judge(dir: &Path, name: &str, body: &str) {
-    chmod_x(&write(dir, &format!("agg/judges/{name}.sh"), body));
+    chmod_x(&write(dir, &format!("rlt/judges/{name}.sh"), body));
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -84,20 +84,20 @@ exit 0
 
 /// Commit the fixture as `main`. The `.gitignore` is committed WITH it: on a project whose base has
 /// none, the first session branch is what commits it, so rolling that session back deletes it from
-/// the work tree and the next worker's `git add -A` commits `agg/private/` (a pre-existing trap that
+/// the work tree and the next worker's `git add -A` commits `rlt/private/` (a pre-existing trap that
 /// these tests, which roll back on session 1 by design, would otherwise walk into).
 fn commit_base(dir: &Path) {
-    write(dir, ".gitignore", "agg/state/\nagg/private/\n.obsidian/\n");
+    write(dir, ".gitignore", "rlt/state/\nagg/private/\n.obsidian/\n");
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "base"]);
 }
 
-/// `agg.yaml` with one judged `worker` step, a never-met `feature` DoD, and `seq_extra` under
+/// `rlt.yaml` with one judged `worker` step, a never-met `feature` DoD, and `seq_extra` under
 /// `sequence:`.
 fn write_cfg(dir: &Path, seq_extra: &str) {
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         &format!(
             "project: ratchet\ndefaults: {{ model: fake }}\nsteps:\n  worker: {{}}\n\
              sequence:\n  steps: [worker]\n  done_if: \"feature\"\n{seq_extra}\
@@ -113,7 +113,7 @@ fn metric_judge(dir: &Path) {
 }
 
 fn run(dir: &Path, path: &str, sessions: &str) -> (std::process::Output, String) {
-    let out = Command::cargo_bin("agg")
+    let out = Command::cargo_bin("rlt")
         .unwrap()
         .current_dir(dir)
         .env("PATH", path)
@@ -161,7 +161,7 @@ fn the_ratchet_rolls_back_beyond_tolerance_keeps_within_it_and_moves_on_improvem
     assert!(combined.contains("ratchet `cc`: 10.4 → 11.5"), "the operator is told which judge, old and new:\n{combined}");
     assert_eq!(git(&dir, &["show", "main:metric.txt"]), "9", "the improvement landed, the regression did not");
 
-    let state = agg::core::ratchet::load(&dir).expect("the gate state is persisted under agg/private/");
+    let state = relentless::core::ratchet::load(&dir).expect("the gate state is persisted under rlt/private/");
     assert_eq!(state.reference("cc"), Some(9.0), "an improvement moves the reference");
     assert_eq!((state.rollbacks, state.consecutive_rollbacks), (1, 0));
 }
@@ -243,7 +243,7 @@ fn oscillating_stops_an_a_b_a_run() {
     let (out, combined) = run(&dir, &path, "6");
     assert_eq!(out.status.code(), Some(3), "{combined}");
     assert!(combined.contains("ABORT") && combined.contains("oscillating"), "{combined}");
-    let state = agg::core::ratchet::load(&dir).unwrap();
+    let state = relentless::core::ratchet::load(&dir).unwrap();
     assert_eq!(state.signatures.len(), 3, "it fired on the third judged session, not later");
     assert!(state.oscillating(4));
 }
@@ -263,7 +263,7 @@ fn a_monotonically_improving_run_trips_neither_detector() {
     }
     write(
         &dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: mono\ndefaults: { model: fake }\nsteps:\n  worker: {}\n\
          sequence:\n  steps: [worker]\n  done_if: \"a AND b AND c\"\n  abort_if: \"oscillating OR rollbacks >= 1\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
@@ -272,7 +272,7 @@ fn a_monotonically_improving_run_trips_neither_detector() {
 
     let (out, combined) = run(&dir, &path, "6");
     assert_eq!(out.status.code(), Some(0), "done, never aborted:\n{combined}");
-    let state = agg::core::ratchet::load(&dir).unwrap();
+    let state = relentless::core::ratchet::load(&dir).unwrap();
     assert_eq!(state.rollbacks, 0);
     assert!(!state.oscillating(4));
 }
@@ -282,7 +282,7 @@ fn a_monotonically_improving_run_trips_neither_detector() {
 /// A fake `claude` that appends one line to `work.log` per worker session and commits it — set on
 /// the process PATH exactly once (tests run in parallel threads).
 static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
-    let root = std::env::temp_dir().join(format!("agg-ratchet-env-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("rlt-ratchet-env-{}", std::process::id()));
     let bin = root.join("bin");
     let home = root.join("home");
     fs::create_dir_all(&home).unwrap();
@@ -318,13 +318,13 @@ fn driver_project() -> (tempfile::TempDir, Judge) {
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
         git(tmp.path(), args);
     }
-    git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "agg baseline"]);
+    git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "rlt baseline"]);
     write_judge(
         tmp.path(),
         "size",
         "#!/bin/sh\nn=$(cat work.log 2>/dev/null | wc -l | tr -d ' ')\nprintf '{\"met\":true,\"value\":%s}\\n' \"$n\"\n",
     );
-    let j = Judge::script("size", "agg/judges/size.sh");
+    let j = Judge::script("size", "rlt/judges/size.sh");
     (tmp, j)
 }
 
@@ -339,47 +339,47 @@ fn work() -> Step {
 fn a_driver_ratchet_keeps_improvements_and_rolls_back_regressions() {
     // higher is better: every session's work is an improvement.
     let (tmp, size) = driver_project();
-    let agg = Agg::open(tmp.path()).unwrap().ratchet("size", Ratchet::up(0.0));
-    assert_eq!(agg.judge(&size).value(), Some(0.0), "the pre-step ask IS the baseline");
-    assert_eq!(agg.gate_state().reference("size"), Some(0.0));
-    agg.step(&work()).unwrap();
-    agg.judge(&size);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
-    assert_eq!(agg.gate_state().reference("size"), Some(1.0), "the improvement is the new reference");
-    drop(agg);
+    let rlt = Relentless::open(tmp.path()).unwrap().ratchet("size", Ratchet::up(0.0));
+    assert_eq!(rlt.judge(&size).value(), Some(0.0), "the pre-step ask IS the baseline");
+    assert_eq!(rlt.gate_state().reference("size"), Some(0.0));
+    rlt.step(&work()).unwrap();
+    rlt.judge(&size);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
+    assert_eq!(rlt.gate_state().reference("size"), Some(1.0), "the improvement is the new reference");
+    drop(rlt);
 
     // lower is better: the same work is a regression beyond tolerance 0 …
     let (tmp, size) = driver_project();
-    let agg = Agg::open(tmp.path()).unwrap().ratchet("size", Ratchet::down(0.0));
-    agg.judge(&size);
-    agg.step(&work()).unwrap();
-    agg.judge(&size);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack);
-    let st = agg.gate_state();
+    let rlt = Relentless::open(tmp.path()).unwrap().ratchet("size", Ratchet::down(0.0));
+    rlt.judge(&size);
+    rlt.step(&work()).unwrap();
+    rlt.judge(&size);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack);
+    let st = rlt.gate_state();
     assert_eq!((st.rollbacks, st.consecutive_rollbacks, st.reference("size")), (1, 1, Some(0.0)));
     assert!(st.ratchet_regressed());
     let row = &rows_for(tmp.path(), "size", false)[0];
     assert_eq!(row.ratchet, Some(RatchetMark { from: Some(0.0), to: Some(1.0) }));
-    drop(agg);
+    drop(rlt);
 
     // … and within tolerance 1 it is kept.
     let (tmp, size) = driver_project();
-    let agg = Agg::open(tmp.path()).unwrap().ratchet("size", Ratchet::down(1.0));
-    agg.judge(&size);
-    agg.step(&work()).unwrap();
-    agg.judge(&size);
-    assert_eq!(agg.gate().unwrap(), GateOutcome::Kept);
+    let rlt = Relentless::open(tmp.path()).unwrap().ratchet("size", Ratchet::down(1.0));
+    rlt.judge(&size);
+    rlt.step(&work()).unwrap();
+    rlt.judge(&size);
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
 }
 
 /// A SEED holds the first gate even when the driver never asked before its first step.
 #[test]
 fn a_driver_seed_holds_the_first_gate() {
     let (tmp, size) = driver_project();
-    let agg = Agg::open(tmp.path()).unwrap().ratchet("size", Ratchet::up(0.0).baseline(5.0));
-    assert_eq!(agg.gate_state().reference("size"), Some(5.0), "seeded before the run even started");
-    agg.step(&work()).unwrap();
-    assert_eq!(agg.judge(&size).value(), Some(1.0));
-    assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack, "1 is below the seeded 5");
+    let rlt = Relentless::open(tmp.path()).unwrap().ratchet("size", Ratchet::up(0.0).baseline(5.0));
+    assert_eq!(rlt.gate_state().reference("size"), Some(5.0), "seeded before the run even started");
+    rlt.step(&work()).unwrap();
+    assert_eq!(rlt.judge(&size).value(), Some(1.0));
+    assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "1 is below the seeded 5");
 }
 
 /// RESUME restores the gate state AS OF THE LAST KEPT GATE — the reference it set, and NOT the
@@ -389,33 +389,33 @@ fn a_driver_seed_holds_the_first_gate() {
 fn a_resumed_driver_restores_the_reference_as_of_the_last_kept_gate() {
     let (tmp, size) = driver_project();
     let dir = tmp.path();
-    let open = |resume: bool| Agg::open_with(dir, Opts { resume }).unwrap().ratchet("size", Ratchet::down(1.0));
-    let flow_to_kept = |agg: &Agg| {
-        agg.judge(&size);
-        agg.step(&work()).unwrap();
-        agg.judge(&size);
-        assert_eq!(agg.gate().unwrap(), GateOutcome::Kept, "1 is within tolerance 1 of 0");
+    let open = |resume: bool| Relentless::open_with(dir, Opts { resume }).unwrap().ratchet("size", Ratchet::down(1.0));
+    let flow_to_kept = |rlt: &Relentless| {
+        rlt.judge(&size);
+        rlt.step(&work()).unwrap();
+        rlt.judge(&size);
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "1 is within tolerance 1 of 0");
     };
-    let regress = |agg: &Agg| {
-        agg.step(&work()).unwrap();
-        agg.step(&work()).unwrap();
-        agg.judge(&size);
-        assert_eq!(agg.gate().unwrap(), GateOutcome::RolledBack, "3 is 2 worse than 1");
+    let regress = |rlt: &Relentless| {
+        rlt.step(&work()).unwrap();
+        rlt.step(&work()).unwrap();
+        rlt.judge(&size);
+        assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "3 is 2 worse than 1");
     };
 
     {
-        let agg = open(false);
-        flow_to_kept(&agg);
-        regress(&agg);
-        assert_eq!(agg.gate_state().rollbacks, 1);
+        let rlt = open(false);
+        flow_to_kept(&rlt);
+        regress(&rlt);
+        assert_eq!(rlt.gate_state().rollbacks, 1);
     }
-    assert_eq!(agg::core::ratchet::load(dir).unwrap().rollbacks, 1, "the file is AHEAD of the truncation point");
+    assert_eq!(relentless::core::ratchet::load(dir).unwrap().rollbacks, 1, "the file is AHEAD of the truncation point");
 
-    let agg = open(true);
-    flow_to_kept(&agg); // fast-forwarded
-    let st = agg.gate_state();
+    let rlt = open(true);
+    flow_to_kept(&rlt); // fast-forwarded
+    let st = rlt.gate_state();
     assert_eq!(st.reference("size"), Some(1.0), "the reference survives the restart");
     assert_eq!(st.rollbacks, 0, "the dropped gate's rollback is not carried over");
-    regress(&agg); // re-executes for real
-    assert_eq!(agg.gate_state().rollbacks, 1, "counted once, not twice");
+    regress(&rlt); // re-executes for real
+    assert_eq!(rlt.gate_state().rollbacks, 1, "counted once, not twice");
 }

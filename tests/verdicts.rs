@@ -1,9 +1,9 @@
 //! `verdicts.jsonl` end-to-end (§5.8): the durable, append-only GATE record is written by a real
-//! `agg run`, with the right `outcome` per session disposition, and it SURVIVES across separate
+//! `rlt run`, with the right `outcome` per session disposition, and it SURVIVES across separate
 //! invocations. A fake, committing `claude` on PATH drives the loop — no model, no network.
 //!
 //! A judge IS a goal now (§7.1): there is no `goals.yaml`; the judge is a file at
-//! `agg/judges/<name>.sh` resolved by the NAME in `done_if` / `invariants`.
+//! `rlt/judges/<name>.sh` resolved by the NAME in `done_if` / `invariants`.
 //!
 //! Unix-only (the stub + PATH shimming use sh), like `tests/cli.rs`.
 
@@ -33,10 +33,10 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
-/// Write a script judge to `agg/judges/<name>.sh` (the project judges dir, §5.1) and make it
+/// Write a script judge to `rlt/judges/<name>.sh` (the project judges dir, §5.1) and make it
 /// executable. The NAME is what `done_if` / `invariants` reference.
 fn write_judge(dir: &Path, name: &str, body: &str) {
-    let p = write(dir, &format!("agg/judges/{name}.sh"), body);
+    let p = write(dir, &format!("rlt/judges/{name}.sh"), body);
     chmod_x(&p);
 }
 
@@ -45,20 +45,20 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// A clean git repo on `main` with one empty commit — mandatory session isolation needs it. The
-/// empty commit keeps `bin/`, `agg/`, `judges/` UNTRACKED (which `is_clean` ignores), so sessions
+/// empty commit keeps `bin/`, `rlt/`, `judges/` UNTRACKED (which `is_clean` ignores), so sessions
 /// branch from a born `main`.
 fn git_init(dir: &Path) {
     git(dir, &["init", "-q", "-b", "main"]);
     git(dir, &["config", "user.email", "t@t"]);
     git(dir, &["config", "user.name", "t"]);
-    git(dir, &["commit", "-q", "--allow-empty", "-m", "agg baseline"]);
+    git(dir, &["commit", "-q", "--allow-empty", "-m", "rlt baseline"]);
 }
 
-/// `agg` rooted at `dir` with the fake agent on PATH. HOME is redirected into the project temp so
-/// `ensure_library` writes the `~/.agg/judges` standard library there (never the real home) — the
+/// `rlt` rooted at `dir` with the fake agent on PATH. HOME is redirected into the project temp so
+/// `ensure_library` writes the `~/.rlt/judges` standard library there (never the real home) — the
 /// tests stay hermetic and never touch the developer's machine.
-fn agg(dir: &Path, path: &str) -> Command {
-    let mut c = Command::cargo_bin("agg").expect("agg binary built");
+fn rlt(dir: &Path, path: &str) -> Command {
+    let mut c = Command::cargo_bin("rlt").expect("rlt binary built");
     c.current_dir(dir).env("PATH", path).env("HOME", dir.join(".home"));
     c
 }
@@ -67,11 +67,11 @@ fn combined(out: &std::process::Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 
-/// Parse every line of the gate ledger into a JSON value. Located through `agg::paths` — the
-/// ledger is AGG-OWNED (`agg/private/`, carved out of a confined worker's writable set), and going
+/// Parse every line of the gate ledger into a JSON value. Located through `relentless::paths` — the
+/// ledger is RLT-OWNED (`rlt/private/`, carved out of a confined worker's writable set), and going
 /// through the helper means a future layout move never needs a hunt through the tests again.
 fn read_rows(dir: &Path) -> Vec<serde_json::Value> {
-    let text = fs::read_to_string(agg::paths::verdicts_jsonl(dir)).unwrap_or_default();
+    let text = fs::read_to_string(relentless::paths::verdicts_jsonl(dir)).unwrap_or_default();
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).expect("each verdicts.jsonl line must be valid JSON"))
@@ -116,8 +116,8 @@ exit 0
     chmod_x(&bin.join("claude"));
 
     write_judge(dir, "feature", "#!/bin/sh\n[ -f feature_done ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
-    write(dir, "agg/agg.yaml", &base_config(project));
-    write(dir, "agg/state/STATE.md", "create feature_done\n");
+    write(dir, "rlt/rlt.yaml", &base_config(project));
+    write(dir, "rlt/state/STATE.md", "create feature_done\n");
     git_init(dir);
 
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
@@ -133,7 +133,7 @@ fn baseline_and_merged_rows_are_written_and_survive_a_restart() {
     let (tmp, path) = committing_project("verd");
     let dir = tmp.path();
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let c = combined(&out);
     assert_eq!(out.status.code(), Some(0), "the worker meets the goal → exit 0:\n{c}");
 
@@ -168,7 +168,7 @@ fn baseline_and_merged_rows_are_written_and_survive_a_restart() {
     assert!(n_run1 >= 2, "run 1 writes at least a baseline + a merged row, got {n_run1}");
 
     // ── restart ─────────────────────────────────────────────────────────────────────────────
-    let out2 = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
+    let out2 = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let c2 = combined(&out2);
     assert_eq!(out2.status.code(), Some(0), "feature is already met on base → exit 0:\n{c2}");
     assert!(c2.contains("already satisfied at launch"), "run 2 stops at the baseline:\n{c2}");
@@ -226,16 +226,16 @@ exit 0
     // defaults ON, so the regression rolls the session back.
     write(
         dir,
-        "agg/agg.yaml",
+        "rlt/rlt.yaml",
         "project: rbkv\ndefaults: { model: fake }\nsteps:\n  worker: {}\n\
          sequence:\n  steps: [worker]\n  done_if: \"feature\"\n  invariants: [build_ok]\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
-    write(dir, "agg/state/STATE.md", "do work\n");
+    write(dir, "rlt/state/STATE.md", "do work\n");
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
+    let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let c = combined(&out);
     assert_eq!(out.status.code(), Some(4), "`feature` never met → session cap (exit 4):\n{c}");
     assert!(c.contains("ROLLED BACK"), "the regressing merge must be rolled back:\n{c}");

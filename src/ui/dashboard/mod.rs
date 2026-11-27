@@ -1,12 +1,12 @@
-//! `agg dashboard` — the live TUI. A separate viewer process that polls
-//! `agg/private/state.json` (written by `agg run` + its worker) and repaints in place
+//! `rlt dashboard` — the live TUI. A separate viewer process that polls
+//! `rlt/private/state.json` (written by `rlt run` + its worker) and repaints in place
 //! with color.
 //!
 //! It is a *view*: it never drives the loop, never reads the firehose. If the
-//! state file is missing it shows "waiting for `agg run`…". Quit with `q`/Esc.
+//! state file is missing it shows "waiting for `rlt run`…". Quit with `q`/Esc.
 //!
 //! Layout (top→bottom):
-//!   title  : "AgenticGoGo" only
+//!   title  : "Relentless" only
 //!   Info   : project · started · up · model · stop/halt · tokens/budget · session#
 //!   Progress: a segmented blocks bar (custom, not the crude ratatui Gauge)
 //!   Goals  : scrollable list, one detail line + wrapped rationale per goal
@@ -72,9 +72,9 @@ pub fn run(dir: &Path) -> Result<()> {
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
     {
         anyhow::bail!(
-            "agg dashboard needs an interactive terminal.\n\
+            "rlt dashboard needs an interactive terminal.\n\
              Run it directly in a terminal (not piped/backgrounded).\n\
-             The plain loop log on `agg run`'s stdout always works as a fallback."
+             The plain loop log on `rlt run`'s stdout always works as a fallback."
         );
     }
 
@@ -106,7 +106,7 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, dir: &Path) -> Result<()> {
                 match handle_key(&mut ui, k.code) {
                     KeyAction::Quit => break,
                     // The only key that does I/O: send the typed instruction to the loop's bus,
-                    // exactly as `agg send inject` does — the loop drains it at the next session.
+                    // exactly as `rlt send inject` does — the loop drains it at the next session.
                     KeyAction::Inject(text) => {
                         ui.flash = Some(
                             match crate::bus::queue_command(dir, &crate::bus::Command::InjectInstruction { text }) {
@@ -340,7 +340,7 @@ pub fn sample_state() -> DashboardState {
         summary_cumulative: "17 lifetime sessions. Endpoints wired, build green since session 2. Coverage climbing (52%→64%). no_todos judge broken since session 2. Codex handled the implement steps; Claude handles reconsider + rules the judges.".into(),
         summary_windowed: "This run: brought build to 0 warnings, raised coverage to 64%, hit a stall — now in a reconsider step to repair the judge.".into(),
         memory_bytes: 14_208,
-        // the sample drives `agg dashboard --demo` and the SVG doc shots — flagged, because the
+        // the sample drives `rlt dashboard --demo` and the SVG doc shots — flagged, because the
         // whole point of the flag is that it must be impossible to miss.
         notify_session: Some(17),
         notify_reason: "STALLED — no judge moved across the last 3 merged steps".into(),

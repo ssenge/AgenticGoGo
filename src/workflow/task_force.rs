@@ -186,7 +186,7 @@ fn reentered(flow: &Flow, name: &str, reason: &str, a: Answer) -> Result<(), Fat
 /// Where the task force's re-entries and repairs are kept between the driver's processes: a re-entry starts a new
 /// one, and so does an operator's restart `--from` a step; the limit holds for each failed step of the run, not for
 /// one process.
-pub const SPENT: &str = "agg/private/task-force.json";
+pub const SPENT: &str = "rlt/private/task-force.json";
 
 /// The re-entries and repairs a run starting as `run` has spent already: none for a run from the start (which
 /// begins the count anew), else what the processes before it kept, and at least the `--reentries` it was given.
@@ -256,7 +256,7 @@ fn answer(file: &std::path::Path) -> Answer {
     Answer { outcome, at, cause, note: field("note") }
 }
 
-/// Runs a workflow driver (`agg::driver::run`), an error that ends it recorded in the history against the step
+/// Runs a workflow driver (`relentless::driver::run`), an error that ends it recorded in the history against the step
 /// running then; when the task force sent it back, starts it again at the step it chose, with the note and one more
 /// re-entry, keeping the call log the new run would replace.
 pub fn run(drive: impl FnOnce() -> Result<(), Fatal>) -> ExitCode {
@@ -271,11 +271,11 @@ pub fn run(drive: impl FnOnce() -> Result<(), Fatal>) -> ExitCode {
     let Some((at, note, project, decided)) = REENTRY.get() else {
         return code;
     };
-    let calls = project.join("agg/private/calls.jsonl");
+    let calls = project.join("rlt/private/calls.jsonl");
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let _ = std::fs::copy(&calls, calls.with_file_name(format!("calls.{secs}.jsonl")));
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let again = Command::new(std::env::current_exe().unwrap_or_else(|_| "agg-driver".into()))
+    let again = Command::new(std::env::current_exe().unwrap_or_else(|_| "rlt-driver".into()))
         .args(rerun(&args, at, note, *decided)).status();
     match again {
         Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),

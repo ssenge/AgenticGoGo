@@ -1,5 +1,5 @@
 // Preloaded into every node tool of the image (NODE_OPTIONS): node's os.userInfo() throws for a uid
-// with no passwd entry — and agg runs the container as the project's owner, whose uid an image
+// with no passwd entry — and rlt runs the container as the project's owner, whose uid an image
 // cannot know (likec4 calls it at start-up). Fall back to what the process and its env say.
 'use strict';
 const os = require('os');

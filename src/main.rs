@@ -1,15 +1,15 @@
-//! AgenticGoGo (`agg`) — the CLI entry point.
+//! Relentless (`rlt`) — the CLI entry point.
 //!
-//! A thin clap front-end over the `agg` library: it parses subcommands (init/doctor/plan/
+//! A thin clap front-end over the `rlt` library: it parses subcommands (init/doctor/plan/
 //! status/run/dashboard/stop/spawn/send/wiki), resolves the project paths, and dispatches into the
 //! harness. The orchestration itself lives in the library crate.
 
-// The harness lives in the library crate (`agg`); `main.rs` is the thin CLI over it. Only the
+// The harness lives in the library crate (`rlt`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.
-use agg::core::{config, engine, judge};
-use agg::os::{detach, spawns};
-use agg::ui::{dashboard, status};
-use agg::{bus, doctor, init, loop_, project, skills, state};
+use relentless::core::{config, engine, judge};
+use relentless::os::{detach, spawns};
+use relentless::ui::{dashboard, status};
+use relentless::{bus, doctor, init, loop_, project, skills, state};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -17,13 +17,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
-#[command(name = "agg", version, about = "AgenticGoGo — a generic agent-loop harness")]
+#[command(name = "rlt", version, about = "Relentless - The Agentic Workflow Engine")]
 struct Cli {
     /// project directory (defaults to current dir). `--project` is the same flag, for callers that
-    /// name the project they drive from another process (`agg stop --project <dir>`).
+    /// name the project they drive from another process (`rlt stop --project <dir>`).
     #[arg(long, global = true, visible_alias = "project")]
     dir: Option<PathBuf>,
-    /// path to harness config (default: <dir>/agg/agg.yaml)
+    /// path to harness config (default: <dir>/rlt/rlt.yaml)
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -33,7 +33,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scaffold a starter agg.yaml + AGG.md + state/STATE.md + a judge in this dir.
+    /// Scaffold a starter rlt.yaml + RLT.md + state/STATE.md + a judge in this dir.
     Init {
         /// which agent the scaffold should target (default: the agent whose shell you are in,
         /// else claude). The template differs: codex omits `model:`, and only claude may set `cost:`.
@@ -53,13 +53,13 @@ enum Cmd {
     },
     /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
     Plan,
-    /// Print the JSON Schema of agg.yaml, generated from the config types agg parses into; `agg schema process` prints the
+    /// Print the JSON Schema of rlt.yaml, generated from the config types rlt parses into; `rlt schema process` prints the
     /// schema of a process file.
     Schema {
-        /// `process`: the schema of a process file (`agg process`), instead of agg.yaml's
+        /// `process`: the schema of a process file (`rlt process`), instead of rlt.yaml's
         which: Option<String>,
     },
-    /// Validate agg.yaml and its judges exactly as `agg run` does at startup, listing EVERY
+    /// Validate rlt.yaml and its judges exactly as `rlt run` does at startup, listing EVERY
     /// problem at once. Runs no judge and no agent. Exits 1 if there is any problem.
     Check {
         /// emit `{schema_version, ok, config, problems: [{path, message}], warnings}` as JSON.
@@ -67,7 +67,7 @@ enum Cmd {
         json: bool,
     },
     /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
-    /// re-run judges; reads agg/private/state.json, same as the /agg:status skill).
+    /// re-run judges; reads rlt/private/state.json, same as the /rlt:status skill).
     Status {
         /// emit the live status document (docs/schemas/status.v1.json) — the stable interface for a
         /// program watching a run.
@@ -79,11 +79,11 @@ enum Cmd {
         /// stop after this many sessions regardless (0 = unlimited)
         #[arg(long, default_value_t = 0)]
         max_sessions: u32,
-        /// run in the background: detach, write agg/private/run.pid, log to agg/private/run.log.
+        /// run in the background: detach, write rlt/private/run.pid, log to rlt/private/run.log.
         #[arg(long, short = 'd')]
         detach: bool,
-        /// headless: send every log line to agg/private/run.log and print ONLY the run report
-        /// (agg/private/report.json) on stdout when the run ends.
+        /// headless: send every log line to rlt/private/run.log and print ONLY the run report
+        /// (rlt/private/report.json) on stdout when the run ends.
         #[arg(long, conflicts_with = "detach")]
         report_json: bool,
         /// the branch the run bases its sessions on and merges into; overrides
@@ -92,37 +92,37 @@ enum Cmd {
         base_branch: Option<String>,
         /// continue the project's last interrupted run: same run id, session counter, ratchet state
         /// and call ledger (sound back to its last kept gate). The interrupted session's work is on
-        /// `refs/agg/partial/<run>/<session>`, not judged.
+        /// `refs/rlt/partial/<run>/<session>`, not judged.
         #[arg(long)]
         resume: bool,
     },
     /// Run ONE judge once (resolved by NAME from disk) and print its raw verdict JSON + a human
     /// line — for authoring or debugging a single judge without running the whole `plan`.
     Judge {
-        /// the judge name to resolve (agg/judges/<name>.{sh,md} → ~/.agg/judges/<name>.*)
+        /// the judge name to resolve (rlt/judges/<name>.{sh,md} → ~/.rlt/judges/<name>.*)
         name: String,
     },
     /// Run a process file: phases of standard steps (scripts, agents judged by checks and a critic, approvals,
-    /// loops over a list, exams) from YAML. `agg process <file> <project> [--from <step> …]`, `--check`, `--list`.
+    /// loops over a list, exams) from YAML. `rlt process <file> <project> [--from <step> …]`, `--check`, `--list`.
     Process {
         /// the file, the project and the run's flags (`--from`, `--note`, `--until`, `--resume`, …)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
-    /// A check through the judge cache: `agg cached [--ignore <path>]... -- <command>...` (what `agg process` wraps its
+    /// A check through the judge cache: `rlt cached [--ignore <path>]... -- <command>...` (what `rlt process` wraps its
     /// script checks in).
     #[command(hide = true)]
     Cached {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
-    /// A scripted coding agent for `agg process --scenario` (installed as `claude` and `codex`).
+    /// A scripted coding agent for `rlt process --scenario` (installed as `claude` and `codex`).
     #[command(hide = true)]
     ScriptedAgent {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
-    /// Show this project's run history (every `agg run`, newest first) + lifetime totals.
+    /// Show this project's run history (every `rlt run`, newest first) + lifetime totals.
     History {
         /// emit the history ledger as JSON (the full Project record, with each run's usage totals).
         #[arg(long)]
@@ -156,7 +156,7 @@ enum Cmd {
         once: bool,
     },
     /// Stop a running loop gracefully after its current session (alias of `send stop`).
-    /// The ONE blessed top-level alias — every other steering verb lives under `agg send`.
+    /// The ONE blessed top-level alias — every other steering verb lives under `rlt send`.
     Stop {
         /// reason (recorded in the finish banner)
         #[arg(default_value = "operator requested stop")]
@@ -182,7 +182,7 @@ enum Cmd {
     /// not queued, it is a landmine that fires at some unrelated future startup.
     #[command(subcommand)]
     Send(SendCmd),
-    /// Answer an open human ask (`agg status` lists the ids).
+    /// Answer an open human ask (`rlt status` lists the ids).
     ///
     /// NOT under `send`, deliberately: an answer is not a steering message. It is a durable fact
     /// recorded in the ask ledger, it outlives the workflow that asked, and it therefore works
@@ -190,7 +190,7 @@ enum Cmd {
     /// anything else is refused and the options re-printed, so a driver can never be handed a value
     /// it did not offer. A yes/no ask takes `yes`/`no` (or `1`/`2`).
     Answer {
-        /// the ask id, as printed by `agg status` or by the workflow
+        /// the ask id, as printed by `rlt status` or by the workflow
         id: String,
         /// the answer: a value, an option name, or the option's 1-based number
         value: String,
@@ -205,22 +205,22 @@ enum Cmd {
     /// Ask a human for something — for the WORKER to invoke. Records the ask and exits immediately.
     #[command(subcommand)]
     Hil(HilCmd),
-    /// Install the `/agg:*` setup skills where your agent will actually find them.
+    /// Install the `/rlt:*` setup skills where your agent will actually find them.
     #[command(subcommand)]
     Skills(SkillsCmd),
-    /// Check a knowledge wiki (default: the worker's `agg/state/wiki/`) against OKF v0.2. Read-only.
+    /// Check a knowledge wiki (default: the worker's `rlt/state/wiki/`) against OKF v0.2. Read-only.
     #[command(subcommand)]
     Wiki(WikiCmd),
 }
 
-/// The worker's knowledge wiki (`agg/state/wiki/`, an Open Knowledge Format bundle).
+/// The worker's knowledge wiki (`rlt/state/wiki/`, an Open Knowledge Format bundle).
 #[derive(Subcommand)]
 enum WikiCmd {
     /// Check OKF v0.2 conformance: every concept has frontmatter with a non-empty `type`; `index.md`
     /// lists entries under headings; `log.md` is `## YYYY-MM-DD` groups, newest first. Writes
     /// nothing. Exits 1 on any violation (warnings do not count).
     Lint {
-        /// the wiki directory to check (default: the project's `agg/state/wiki/`; a missing default
+        /// the wiki directory to check (default: the project's `rlt/state/wiki/`; a missing default
         /// wiki has nothing to violate, a missing PATH is an error)
         path: Option<PathBuf>,
         /// emit `{schema_version, ok, wiki, exists, files, concepts, problems, warnings}`
@@ -230,17 +230,17 @@ enum WikiCmd {
     },
 }
 
-/// Managing the `/agg:*` skills (`/agg:new`, `/agg:status`, `/agg:supervise`).
+/// Managing the `/rlt:*` skills (`/rlt:new`, `/rlt:status`, `/rlt:supervise`).
 #[derive(Subcommand)]
 enum SkillsCmd {
-    /// Copy the `/agg:*` skills into the directory the chosen agent discovers.
+    /// Copy the `/rlt:*` skills into the directory the chosen agent discovers.
     ///
     /// claude reads `.claude/skills/`; codex and copilot read `.agents/skills/`. Claude and Copilot
-    /// invoke them as slash commands (`/agg-new`); codex uses a DOLLAR prefix (`$agg-new`).
+    /// invoke them as slash commands (`/rlt-new`); codex uses a DOLLAR prefix (`$rlt-new`).
     Install {
-        /// which agent to install for. Default: the `agent:` key in agg.yaml if it exists, else
+        /// which agent to install for. Default: the `agent:` key in rlt.yaml if it exists, else
         /// the agent whose shell you are running in. Installing for the wrong agent puts the files
-        /// where it will never look, so agg asks rather than guess.
+        /// where it will never look, so rlt asks rather than guess.
         #[arg(long)]
         agent: Option<String>,
         /// install for your whole user account (under $HOME) instead of just this project
@@ -284,7 +284,7 @@ enum SendCmd {
 ///
 /// ⛔ These RECORD AND EXIT. They never wait, and there is deliberately no `--wait`: a worker session
 /// is a paid subprocess holding a git branch, so a worker that waits on a human is the exact failure
-/// agg exists to replace. Only a driver author — in Rust, at a call site they wrote — can make the
+/// rlt exists to replace. Only a driver author — in Rust, at a call site they wrote — can make the
 /// loop block. Ask, end your session, and the answer arrives in the NEXT session's brief.
 #[derive(Subcommand)]
 enum HilCmd {
@@ -300,14 +300,14 @@ enum HilCmd {
     ///
     /// ⛔ NEVER for a secret. The answer is written to the ask ledger and to the next session's
     /// brief, both files on disk. Ask the human to put the credential where credentials go and
-    /// confirm with `agg hil bool` instead: an answer may NAME a secret, never CONTAIN one.
+    /// confirm with `rlt hil bool` instead: an answer may NAME a secret, never CONTAIN one.
     Input { question: String },
 }
 
 struct Paths {
-    /// project root (cwd for judges + worker; runtime state lives in `<dir>/agg/{state,private}/`).
+    /// project root (cwd for judges + worker; runtime state lives in `<dir>/rlt/{state,private}/`).
     dir: PathBuf,
-    /// where user inputs live: `<dir>/agg/`. The state file, project judges, and LLM-judge rubric
+    /// where user inputs live: `<dir>/rlt/`. The state file, project judges, and LLM-judge rubric
     /// files resolve against this base.
     config_base: PathBuf,
     config: PathBuf,
@@ -316,9 +316,9 @@ struct Paths {
 impl Cli {
     fn paths(&self) -> Paths {
         let dir = self.dir.clone().unwrap_or_else(|| PathBuf::from("."));
-        let config_base = agg::paths::config_base(&dir);
-        // An explicit --config wins; otherwise resolve inside the mandatory `agg/` folder.
-        let config = self.config.clone().unwrap_or_else(|| config_base.join("agg.yaml"));
+        let config_base = relentless::paths::config_base(&dir);
+        // An explicit --config wins; otherwise resolve inside the mandatory `rlt/` folder.
+        let config = self.config.clone().unwrap_or_else(|| config_base.join("rlt.yaml"));
         Paths { dir, config_base, config }
     }
 }
@@ -335,7 +335,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// The real CLI body. `agg run` maps its [`loop_::RunOutcome`] to an exit code so automation can
+/// The real CLI body. `rlt run` maps its [`loop_::RunOutcome`] to an exit code so automation can
 /// branch on the result; every other subcommand exits 0 on success (errors bubble up as 1).
 fn run_cli() -> Result<ExitCode> {
     let cli = Cli::parse();
@@ -349,50 +349,50 @@ fn run_cli() -> Result<ExitCode> {
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
         Cmd::Check { json } => {
-            let ok = agg::check::run(&p.config_base, &p.config, *json)?;
+            let ok = relentless::check::run(&p.config_base, &p.config, *json)?;
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
         Cmd::Wiki(WikiCmd::Lint { path, json }) => {
-            let ok = agg::wiki::run(&p.dir, path.as_deref(), *json)?;
+            let ok = relentless::wiki::run(&p.dir, path.as_deref(), *json)?;
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
-        Cmd::Process { args } => return agg::workflow::process::command(args),
-        Cmd::Cached { args } => return Ok(agg::workflow::process::cache::command(args)),
+        Cmd::Process { args } => return relentless::workflow::process::command(args),
+        Cmd::Cached { args } => return Ok(relentless::workflow::process::cache::command(args)),
         #[cfg(unix)]
-        Cmd::ScriptedAgent { args } => return Ok(agg::workflow::process::scripted::command(args)),
+        Cmd::ScriptedAgent { args } => return Ok(relentless::workflow::process::scripted::command(args)),
         #[cfg(not(unix))]
-        Cmd::ScriptedAgent { .. } => anyhow::bail!("agg scripted-agent needs Unix"),
+        Cmd::ScriptedAgent { .. } => anyhow::bail!("rlt scripted-agent needs Unix"),
         Cmd::Schema { which } => {
             let schema = match which.as_deref() {
-                None | Some("agg") => agg::schema::config_schema(),
-                Some("process") => agg::workflow::process::schema(),
-                Some(other) => anyhow::bail!("agg schema: `{other}` is not a schema (agg, process)"),
+                None | Some("rlt") => relentless::schema::config_schema(),
+                Some("process") => relentless::workflow::process::schema(),
+                Some(other) => anyhow::bail!("rlt schema: `{other}` is not a schema (rlt, process)"),
             };
             println!("{}", serde_json::to_string_pretty(&schema)?);
             Ok(())
         }
         Cmd::Plan => {
             no_config_hint(&p.config)?;
-            let cfg = config::AggConfig::load(&p.config)?;
+            let cfg = config::RelentlessConfig::load(&p.config)?;
             // build the run-set engine exactly as the loop does (resolves judges by name).
             let asm = loop_::assemble(&cfg, &p.config_base)?;
             // `plan` RE-RUNS the judges, so an LLM judge would make a real model call — refuse a
             // config the chosen agent(s) cannot honour first.
-            agg::capability::check(&cfg, &asm.engine.judges, &p.dir)?;
-            // the judges find the run's context dirs (`AGG_CONTEXT_*`) exactly as in a run.
-            let _policy = agg::isolation::run::register(&cfg, &p.dir)?;
+            relentless::capability::check(&cfg, &asm.engine.judges, &p.dir)?;
+            // the judges find the run's context dirs (`RLT_CONTEXT_*`) exactly as in a run.
+            let _policy = relentless::isolation::run::register(&cfg, &p.dir)?;
             let ruler = cfg.ruler_backend()?;
             let jm = cfg.judge_model(ruler);
             let mut eng = asm.engine;
-            eprintln!("agg: evaluating {} judge(s) once (dry run)…", eng.judges.len());
+            eprintln!("rlt: evaluating {} judge(s) once (dry run)…", eng.judges.len());
             // ponytail: UNCONFINED, unlike the baseline pass (features/setup.rs) which now uses the
             // run-level tier. Two things make that safe here and not there: `plan` never writes
             // `verdicts.jsonl`, so a tampered judge has no ledger to forge; and it is
             // OPERATOR-invoked, so running it is the same act of trust as running any script in a
             // repo you are working on. The residual is that a judge tampered with by an earlier
             // sandboxed run is arbitrary code on the operator's host. Upgrade path if that matters:
-            // pass `cfg.run_isolation()` here and in `agg judge` below, exactly as Baseline does.
-            let res = eng.run_step(&p.dir, &engine::RunState::default(), ruler, &jm, cfg.judge.timeout, "plan", None, false, agg::isolation::Isolation::None);
+            // pass `cfg.run_isolation()` here and in `rlt judge` below, exactly as Baseline does.
+            let res = eng.run_step(&p.dir, &engine::RunState::default(), ruler, &jm, cfg.judge.timeout, "plan", None, false, relentless::isolation::Isolation::None);
             print!("{}", eng.scoreboard());
             // Non-terminal, so it is reported ALONGSIDE the verdict, not instead of it: knowing a
             // detector already fires is worth having before committing to an overnight run.
@@ -405,7 +405,7 @@ fn run_cli() -> Result<ExitCode> {
                 println!("\n✔ done_if already satisfied — nothing to run.");
             } else {
                 let (met, total) = eng.tally();
-                println!("\n→ {met}/{total} met; loop would continue. Run `agg run` to start.");
+                println!("\n→ {met}/{total} met; loop would continue. Run `rlt run` to start.");
             }
             Ok(())
         }
@@ -430,17 +430,17 @@ fn run_cli() -> Result<ExitCode> {
         Cmd::Judge { name } => {
             // resolve the judge by NAME from disk (§5.1) — no goals.yaml. Ensure the standard
             // library exists so a library judge name resolves.
-            let _ = agg::core::judges::ensure_library();
-            let cfg = config::AggConfig::load(&p.config).ok();
+            let _ = relentless::core::judges::ensure_library();
+            let cfg = config::RelentlessConfig::load(&p.config).ok();
             // a judge DECLARED in `judges:` (a `metric:`/`score:` block) first, else a file.
-            let kind = match cfg.as_ref().map(|c| agg::metrics::declare::declare(c, std::slice::from_ref(name), &p.config_base, true)) {
+            let kind = match cfg.as_ref().map(|c| relentless::metrics::declare::declare(c, std::slice::from_ref(name), &p.config_base, true)) {
                 Some(d) if d.kinds.contains_key(name) => {
                     if !d.problems.is_empty() {
-                        anyhow::bail!("{}", agg::problem::render(&d.problems));
+                        anyhow::bail!("{}", relentless::problem::render(&d.problems));
                     }
                     d.kinds[name].clone()
                 }
-                _ => agg::core::judges::resolve(name, &p.config_base)?,
+                _ => relentless::core::judges::resolve(name, &p.config_base)?,
             };
             // run it exactly as the loop would (scripts from the project root, rubric on the RULER).
             let ruler = ruler_for(&p.config)?;
@@ -448,14 +448,14 @@ fn run_cli() -> Result<ExitCode> {
                 Some(c) => (c.judge_model(ruler), c.judges.get(name).and_then(|j| j.timeout).unwrap_or(c.judge.timeout)),
                 None => (ruler.default_summary_model().to_string(), 300),
             };
-            // the judge finds the run's context dirs (`AGG_CONTEXT_*`) exactly as in a run.
+            // the judge finds the run's context dirs (`RLT_CONTEXT_*`) exactly as in a run.
             let _policy = match &cfg {
-                Some(c) => Some(agg::isolation::run::register(c, &p.dir)?),
+                Some(c) => Some(relentless::isolation::run::register(c, &p.dir)?),
                 None => None,
             };
-            // Manual `agg judge` — no worker ran this session, so no confinement is needed.
+            // Manual `rlt judge` — no worker ran this session, so no confinement is needed.
             // No run-set here (this is one judge, by hand), so a native judge's ctx would have
-            // nothing to consult — and `agg judge` resolves by file extension, which cannot
+            // nothing to consult — and `rlt judge` resolves by file extension, which cannot
             // produce one. `None` iso_base ⇒ `diff()` is the working tree against HEAD.
             let (verdict, _spend) = judge::run(
                 &kind,
@@ -467,8 +467,8 @@ fn run_cli() -> Result<ExitCode> {
                 timeout,
                 None,
                 "judge",
-                agg::isolation::Isolation::None,
-                &agg::core::judge::NoJudges,
+                relentless::isolation::Isolation::None,
+                &relentless::core::judge::NoJudges,
                 None,
             );
             // raw verdict JSON (the judge contract), then a one-line human summary.
@@ -495,7 +495,7 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Serve { port, cors_origin, token, projects, process } => {
             let absolute = |p: &Option<PathBuf>| p.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
-            agg::ui::serve::run(agg::ui::serve::ServeConfig {
+            relentless::ui::serve::run(relentless::ui::serve::ServeConfig {
                 dir: p.dir.clone(),
                 port: *port,
                 cors_origin: cors_origin.clone(),
@@ -537,91 +537,91 @@ fn run_cli() -> Result<ExitCode> {
         Cmd::Skills(SkillsCmd::Install { agent, user }) => {
             // Resolving the agent is the whole correctness of this command: install for the wrong
             // one and the files land in a directory that agent never reads, so the user sees no
-            // skill and NO ERROR. This runs at SETUP time, so agg.yaml usually does not exist yet —
-            // and `AggConfig::agent_name` answers `claude` for a missing file. Silently trusting it
+            // skill and NO ERROR. This runs at SETUP time, so rlt.yaml usually does not exist yet —
+            // and `RelentlessConfig::agent_name` answers `claude` for a missing file. Silently trusting it
             // sent every Codex user's skills to `.claude/skills/`. So: config first (explicit
             // intent), then the agent we are actually RUNNING inside, and only then give up.
             let agent = match agent.clone() {
                 Some(a) => a,
-                None if p.config.exists() => config::AggConfig::agent_name(&p.config),
+                None if p.config.exists() => config::RelentlessConfig::agent_name(&p.config),
                 None => skills::host_agent()
                     .map(str::to_string)
                     .context(
                         "cannot tell which agent to install the skills for.\n  \
-                         There is no agg.yaml yet (so no `agent:` key), and this shell is not \
+                         There is no rlt.yaml yet (so no `agent:` key), and this shell is not \
                          inside a known agent.\n  Name it explicitly:\n    \
-                         agg skills install --agent claude|codex|copilot",
+                         rlt skills install --agent claude|codex|copilot",
                     )?,
             };
             let root = skills::install(&agent, &p.dir, *user)?;
-            eprintln!("installed the /agg:* skills for `{agent}` → {}", root.display());
+            eprintln!("installed the /rlt:* skills for `{agent}` → {}", root.display());
             for (name, _) in skills::SKILLS {
                 eprintln!("  ✔ {name}");
             }
             // The PREFIX is not the same on each agent, and telling someone to type a command their
             // agent does not have is the difference between "it works" and "that does nothing".
-            // Claude: `/agg-new` here (the `agg:` in `/agg:new` comes from the PLUGIN namespace, so
+            // Claude: `/rlt-new` here (the `rlt:` in `/rlt:new` comes from the PLUGIN namespace, so
             // a copy-in install does not get it). Copilot: every skill is a slash command
             // (`userInvocable` in its own SDK = "can be invoked by the user as a slash command").
-            // Codex: `$agg-new` — it uses `$`, NOT `/`; a `/agg-new` there is "Unrecognized command"
+            // Codex: `$rlt-new` — it uses `$`, NOT `/`; a `/rlt-new` there is "Unrecognized command"
             // (openai/codex#11817, closed as not planned).
             match agent.as_str() {
                 "codex" => eprintln!(
-                    "\nInvoke them with `$agg-new`, `$agg-status`, `$agg-supervise` \
+                    "\nInvoke them with `$rlt-new`, `$rlt-status`, `$rlt-supervise` \
                      — codex uses `$`, not `/`."
                 ),
                 "claude" => eprintln!(
-                    "\nInvoke them with `/agg-new`, `/agg-status`, `/agg-supervise`.\n\
-                     (From the plugin marketplace instead, they are `/agg:new` etc.)"
+                    "\nInvoke them with `/rlt-new`, `/rlt-status`, `/rlt-supervise`.\n\
+                     (From the plugin marketplace instead, they are `/rlt:new` etc.)"
                 ),
-                _ => eprintln!("\nInvoke them with `/agg-new`, `/agg-status`, `/agg-supervise`."),
+                _ => eprintln!("\nInvoke them with `/rlt-new`, `/rlt-status`, `/rlt-supervise`."),
             }
             eprintln!(
                 "Or just ask — every agent also picks a skill by matching your request against its\n\
-                 description: \"set up AgenticGoGo for this project\" → agg-new."
+                 description: \"set up Relentless for this project\" → rlt-new."
             );
             Ok(())
         }
     }
-    // Every non-`run` subcommand yields `()` on success → exit 0. `agg run` returns its outcome
+    // Every non-`run` subcommand yields `()` on success → exit 0. `rlt run` returns its outcome
     // code earlier via an explicit `return`, so it never reaches here.
     .map(|()| ExitCode::SUCCESS)
 }
 
 /// Load, override, assemble and preflight a run — everything that can refuse it before it starts.
-fn prepare_run(p: &Paths, base_branch: Option<&str>) -> Result<(config::AggConfig, loop_::Assembly)> {
+fn prepare_run(p: &Paths, base_branch: Option<&str>) -> Result<(config::RelentlessConfig, loop_::Assembly)> {
     no_config_hint(&p.config)?;
-    let mut agg_cfg = config::AggConfig::load(&p.config)?;
+    let mut rlt_cfg = config::RelentlessConfig::load(&p.config)?;
     if let Some(b) = base_branch {
         // refused here rather than at the first `git checkout -b`, which would fail every session.
-        if agg::git::rev_parse(&p.dir, b).is_none() {
+        if relentless::git::rev_parse(&p.dir, b).is_none() {
             anyhow::bail!("--base-branch `{b}` does not name a commit in {}", p.dir.display());
         }
-        agg_cfg.session_isolation.base_branch = b.to_string();
+        rlt_cfg.session_isolation.base_branch = b.to_string();
     }
     // build the run-set engine + parse the sequence (validates step names / judge files / the
     // not-all-skip rule).
-    let asm = loop_::assemble(&agg_cfg, &p.config_base)?;
+    let asm = loop_::assemble(&rlt_cfg, &p.config_base)?;
     // …then REFUSE anything the config asks for that the chosen agent(s) cannot do.
-    agg::capability::check(&agg_cfg, &asm.engine.judges, &p.dir)?;
+    relentless::capability::check(&rlt_cfg, &asm.engine.judges, &p.dir)?;
     // EVERY agent that runs on the host must be on PATH (§7.3), before launching the loop — a
     // container step's agent was checked in its image by `capability::check`.
-    for (_, name) in agg::capability::host_agents(&agg_cfg, &asm.engine.judges) {
-        agg::backend::for_name(&name)?.preflight()?;
+    for (_, name) in relentless::capability::host_agents(&rlt_cfg, &asm.engine.judges) {
+        relentless::backend::for_name(&name)?.preflight()?;
     }
-    Ok((agg_cfg, asm))
+    Ok((rlt_cfg, asm))
 }
 
-/// A foreground `agg run`, under the report contract: whatever happens — a refused config, a fault,
-/// a panic inside agg — it ends with `agg/private/report.json` and the exit code that report states.
+/// A foreground `rlt run`, under the report contract: whatever happens — a refused config, a fault,
+/// a panic inside rlt — it ends with `rlt/private/report.json` and the exit code that report states.
 fn run_reported(p: &Paths, opts: loop_::RunOpts, report_json: bool, base_branch: Option<&str>) -> u8 {
-    use agg::report::headless::{conclude, Headless};
-    // only once `agg/` exists: a directory that is not a project has nowhere to put a log.
+    use relentless::report::headless::{conclude, Headless};
+    // only once `rlt/` exists: a directory that is not a project has nowhere to put a log.
     let headless = if report_json && p.config_base.is_dir() {
         match Headless::redirect(&p.dir) {
             Ok(h) => Some(h),
             Err(e) => {
-                eprintln!("error: cannot send the logs to {}: {e}", agg::paths::run_log(&p.dir).display());
+                eprintln!("error: cannot send the logs to {}: {e}", relentless::paths::run_log(&p.dir).display());
                 return 1;
             }
         }
@@ -629,11 +629,11 @@ fn run_reported(p: &Paths, opts: loop_::RunOpts, report_json: bool, base_branch:
         None
     };
     // Another live run owns the report file, so a refused second start must not touch it; and a
-    // directory that is not a project gets no `agg/private/` scaffolded into it.
+    // directory that is not a project gets no `rlt/private/` scaffolded into it.
     let may_write =
         p.config_base.is_dir() && detach::live_pid(&p.dir).is_none_or(|pid| pid == std::process::id());
     if may_write {
-        agg::report::clear(&p.dir);
+        relentless::report::clear(&p.dir);
     }
     let mut project = String::new();
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -641,7 +641,7 @@ fn run_reported(p: &Paths, opts: loop_::RunOpts, report_json: bool, base_branch:
         project = cfg.project.clone();
         loop_::run(cfg, asm, &p.dir, &p.config_base, opts)
     }))
-    .unwrap_or_else(|panic| Err(anyhow::anyhow!("panic inside agg: {}", agg::report::panic_message(&*panic))));
+    .unwrap_or_else(|panic| Err(anyhow::anyhow!("panic inside rlt: {}", relentless::report::panic_message(&*panic))));
     // `--report-json` outside a project still answers on stdout, through a printer on the real fds.
     let printer = match (&headless, report_json) {
         (None, true) => Headless::redirect_none().ok(),
@@ -651,14 +651,14 @@ fn run_reported(p: &Paths, opts: loop_::RunOpts, report_json: bool, base_branch:
 }
 
 /// The RULER — the backend that runs LLM judges — for a command that may have a missing/broken
-/// agg.yaml (`judge` resolves the ruler even without a full parse). Reads `judge.agent`.
-fn ruler_for(config: &std::path::Path) -> Result<&'static dyn agg::backend::AgentBackend> {
-    agg::backend::for_name(&config::AggConfig::ruler_name(config))
+/// rlt.yaml (`judge` resolves the ruler even without a full parse). Reads `judge.agent`.
+fn ruler_for(config: &std::path::Path) -> Result<&'static dyn relentless::backend::AgentBackend> {
+    relentless::backend::for_name(&config::RelentlessConfig::ruler_name(config))
 }
 
-/// Queue one steering command onto a running loop's bus. Shared by `agg send …` and
-/// the `agg stop` convenience alias.
-/// `agg answer <id> <value>` — record a human's answer to an open ask.
+/// Queue one steering command onto a running loop's bus. Shared by `rlt send …` and
+/// the `rlt stop` convenience alias.
+/// `rlt answer <id> <value>` — record a human's answer to an open ask.
 ///
 /// Writes the ask ledger DIRECTLY; nothing goes on the bus. An answer is a durable fact, not a
 /// steering message: it outlives the workflow that raised the question (a worker asks, its session
@@ -667,10 +667,10 @@ fn ruler_for(config: &std::path::Path) -> Result<&'static dyn agg::backend::Agen
 /// it the one command needing an exemption from the liveness rule.
 ///
 /// Not a hole in the moat: this is the OPERATOR's command, run outside the worker's jail. A confined
-/// worker invoking it is refused by the kernel exactly as before — `agg/private/` is carved out of
+/// worker invoking it is refused by the kernel exactly as before — `rlt/private/` is carved out of
 /// its writable set.
 fn answer_ask(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<()> {
-    use agg::core::asks;
+    use relentless::core::asks;
     let canonical = record_answer(dir, id, value, by)?;
     if let Some(ask) = asks::get(dir, id) {
         eprintln!("answered `{id}`: {}", asks::one_line(&ask.question, 100));
@@ -679,7 +679,7 @@ fn answer_ask(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<
     Ok(())
 }
 
-/// `agg answer … --json`: the result as `docs/schemas/answer.v1.json`, printed whether or not the
+/// `rlt answer … --json`: the result as `docs/schemas/answer.v1.json`, printed whether or not the
 /// answer was accepted — the caller reads `accepted`, and the exit code (1 when refused) says it too.
 fn answer_ask_json(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<bool> {
     let recorded = record_answer(dir, id, value, by);
@@ -696,21 +696,21 @@ fn answer_ask_json(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Re
 
 /// Validate and record one answer; the canonical value recorded, or why it was refused.
 fn record_answer(dir: &std::path::Path, id: &str, value: &str, by: &str) -> Result<String> {
-    use agg::core::asks;
+    use relentless::core::asks;
     // ONE validator, shared with `POST /api/answer`, so a value off a closed option list is refused
     // identically whichever channel it arrives on.
     let canonical = asks::validate_answer(dir, id, value).map_err(|e| anyhow::anyhow!("{e}"))?;
-    asks::answer(dir, id, &canonical, by, agg::util::now_epoch())?;
+    asks::answer(dir, id, &canonical, by, relentless::util::now_epoch())?;
     Ok(canonical)
 }
 
-/// `agg hil …` — the worker's ask front-end. Writes a REQUEST and returns immediately.
+/// `rlt hil …` — the worker's ask front-end. Writes a REQUEST and returns immediately.
 ///
-/// The request lands in `agg/state/asks/` (worker-writable, so it survives `isolation: sandbox`);
-/// agg promotes it into the private ledger at the next session boundary and pages the human. The
+/// The request lands in `rlt/state/asks/` (worker-writable, so it survives `isolation: sandbox`);
+/// rlt promotes it into the private ledger at the next session boundary and pages the human. The
 /// request is untrusted either way — only the answer's channel decides trust.
 fn worker_ask(dir: &std::path::Path, hil: &HilCmd) -> Result<()> {
-    use agg::core::asks::AskCase;
+    use relentless::core::asks::AskCase;
 
     let (case, question, options) = match hil {
         HilCmd::Bool { question } => (AskCase::Bool, question, Some(vec!["yes".to_string(), "no".to_string()])),
@@ -723,13 +723,13 @@ fn worker_ask(dir: &std::path::Path, hil: &HilCmd) -> Result<()> {
         HilCmd::Input { question } => (AskCase::Input, question, None),
     };
 
-    let req = agg::core::asks::WorkerRequest {
+    let req = relentless::core::asks::WorkerRequest {
         case,
         question: question.clone(),
         options,
-        ts: agg::util::now_epoch(),
+        ts: relentless::util::now_epoch(),
     };
-    let path = agg::core::asks::write_worker_request(dir, &req)?;
+    let path = relentless::core::asks::write_worker_request(dir, &req)?;
 
     // What the worker is told to do next is the whole contract: it must NOT wait.
     println!(
@@ -745,7 +745,7 @@ fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
     // The "is a workflow running" rule lives in `bus::queue_command`, so this channel and the web
     // API cannot disagree about it — they used to, and did: the CLI queued with a warning while the
     // API refused, for the very same command.
-    let path = agg::bus::queue_command(dir, &cmd)?;
+    let path = relentless::bus::queue_command(dir, &cmd)?;
     eprintln!("queued → {} (applied at the next session boundary)", path.display());
     Ok(())
 }
@@ -753,15 +753,15 @@ fn send_to_bus(dir: &std::path::Path, cmd: bus::Command) -> Result<()> {
 /// Launch a long-running task detached, in its OWN process group, with its own log file,
 /// and register it so (a) the straggler reaper spares its pgid and (b) the next worker
 /// session is told it is running and why. This is the blessed alternative to a hand-rolled
-/// `nohup` — agg launches it, so agg knows its pid/pgid directly (no env marker needed,
+/// `nohup` — rlt launches it, so rlt knows its pid/pgid directly (no env marker needed,
 /// which is good because macOS blocks reading a process's env).
 fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -> Result<()> {
     use std::process::{Command, Stdio};
     if cmd.is_empty() {
-        anyhow::bail!("nothing to spawn — pass the command after `--`, e.g. `agg spawn --name x --reason y -- sleep 60`");
+        anyhow::bail!("nothing to spawn — pass the command after `--`, e.g. `rlt spawn --name x --reason y -- sleep 60`");
     }
     let log_dir = spawns::Registry::log_dir(dir);
-    std::fs::create_dir_all(&log_dir).with_context(|| "creating agg/state/spawns log dir")?;
+    std::fs::create_dir_all(&log_dir).with_context(|| "creating rlt/state/spawns log dir")?;
     let log_path = log_dir.join(format!("{name}.log"));
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -786,7 +786,7 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
         use std::os::unix::process::CommandExt;
         // new session → new process group (child is leader) → no controlling tty.
         unsafe {
-            c.pre_exec(agg::os::proc::setsid);
+            c.pre_exec(relentless::os::proc::setsid);
         }
     }
     let child = c.spawn().with_context(|| format!("spawning `{}`", cmd.join(" ")))?;
@@ -809,7 +809,7 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
         started_session,
         status: "running".into(),
     })
-    .with_context(|| "registering spawn in agg/state/spawns.json")?;
+    .with_context(|| "registering spawn in rlt/state/spawns.json")?;
 
     eprintln!(
         "▶ spawned `{name}` (pid {pid}, pgid {pgid}) — survives session boundaries.\n  \
@@ -824,13 +824,13 @@ fn spawn_task(dir: &std::path::Path, name: &str, reason: &str, cmd: &[String]) -
 }
 
 /// If the required config file is missing, exit with an actionable hint instead of
-/// a cryptic "No such file" — point the user at `agg init` / `/agg:new`.
+/// a cryptic "No such file" — point the user at `rlt init` / `/rlt:new`.
 fn no_config_hint(path: &std::path::Path) -> Result<()> {
     if !path.exists() {
         anyhow::bail!(
             "no {} here — this directory isn't set up yet.\n  \
-             • run `agg init` to scaffold a starter project, or\n  \
-             • in Claude Code, run `/agg:new` to generate config from your existing plans.",
+             • run `rlt init` to scaffold a starter project, or\n  \
+             • in Claude Code, run `/rlt:new` to generate config from your existing plans.",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("config")
         );
     }

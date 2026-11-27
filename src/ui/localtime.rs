@@ -1,4 +1,4 @@
-//! Local-time helpers for the display surfaces (dashboard, `agg history`, status).
+//! Local-time helpers for the display surfaces (dashboard, `rlt history`, status).
 //!
 //! Every wall-clock timestamp we render comes off a raw UTC epoch, so without a zone conversion
 //! a user in CEST (UTC+2) would see times two hours behind their wall clock while the code
@@ -33,7 +33,7 @@ pub fn hhmmss(epoch_utc: u64) -> String {
     format!("{h:02}:{m:02}:{s:02}")
 }
 
-/// Format a UTC epoch as a local `YYYY-MM-DD HH:MM` string. Used by `agg history`, where runs
+/// Format a UTC epoch as a local `YYYY-MM-DD HH:MM` string. Used by `rlt history`, where runs
 /// span days so a date is needed (unlike the time-only `hhmmss`). 0 → "—" (no timestamp).
 pub fn ymd_hms(epoch_utc: u64) -> String {
     if epoch_utc == 0 {

@@ -130,7 +130,7 @@ impl Proc {
         }
         let slug: String = tool.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
         let command = self.render(ctx, &spec.tool_run)?.replace("{tool}", tool);
-        // the item in the name: agg memoizes a verdict by its judge's name, and one item's run isn't another's
+        // the item in the name: rlt memoizes a verdict by its judge's name, and one item's run isn't another's
         let judge = self.judge(ctx, Some(&format!("tool-tier-{}-{slug}", item.key)), &command)?;
         let ran = self.judge_now(&judge);
         let commits = spec.tool_commits.iter().map(|p| self.render(ctx, p)).collect::<Result<Vec<_>, _>>()?;
@@ -153,9 +153,9 @@ impl Proc {
         Ok(Outcome::Done)
     }
 
-    /// agg's judge call on a judge (the flow derefs to it; named apart from a step's own `judge` here).
+    /// rlt's judge call on a judge (the flow derefs to it; named apart from a step's own `judge` here).
     pub(super) fn judge_now(&self, j: &Judge) -> Verdict {
-        crate::driver::Agg::judge(self, j)
+        crate::driver::Relentless::judge(self, j)
     }
 
     /// The tools' result, its checks met, before the step's critic too: a task with a script first that leaves nothing
@@ -223,7 +223,7 @@ impl Proc {
     }
 }
 
-/// The tier's credit by its `done` record: agg's "without a session", or the tool tier's own "… alone".
+/// The tier's credit by its `done` record: rlt's "without a session", or the tool tier's own "… alone".
 fn met_by(done: &str) -> String {
     if done.starts_with("without a session") || done.split(':').next().is_some_and(|s| s.ends_with(" alone")) {
         "met by the tools alone".into()
