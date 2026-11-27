@@ -4,13 +4,16 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn agg(dir: &Path, args: &[&str]) -> Output {
-    Command::cargo_bin("agg").unwrap().current_dir(dir).args(args).output().unwrap()
+    Command::cargo_bin("agg").unwrap().current_dir(dir).args(args).output_bounded().unwrap()
 }
 
 fn validator() -> jsonschema::Validator {

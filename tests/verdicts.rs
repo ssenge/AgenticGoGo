@@ -9,6 +9,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::Path;
@@ -38,7 +41,7 @@ fn write_judge(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    Command::new("git").args(args).current_dir(dir).output().unwrap();
+    Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
 }
 
 /// A clean git repo on `main` with one empty commit — mandatory session isolation needs it. The
@@ -130,7 +133,7 @@ fn baseline_and_merged_rows_are_written_and_survive_a_restart() {
     let (tmp, path) = committing_project("verd");
     let dir = tmp.path();
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let c = combined(&out);
     assert_eq!(out.status.code(), Some(0), "the worker meets the goal → exit 0:\n{c}");
 
@@ -165,7 +168,7 @@ fn baseline_and_merged_rows_are_written_and_survive_a_restart() {
     assert!(n_run1 >= 2, "run 1 writes at least a baseline + a merged row, got {n_run1}");
 
     // ── restart ─────────────────────────────────────────────────────────────────────────────
-    let out2 = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out2 = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let c2 = combined(&out2);
     assert_eq!(out2.status.code(), Some(0), "feature is already met on base → exit 0:\n{c2}");
     assert!(c2.contains("already satisfied at launch"), "run 2 stops at the baseline:\n{c2}");
@@ -232,7 +235,7 @@ exit 0
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let c = combined(&out);
     assert_eq!(out.status.code(), Some(4), "`feature` never met → session cap (exit 4):\n{c}");
     assert!(c.contains("ROLLED BACK"), "the regressing merge must be rolled back:\n{c}");

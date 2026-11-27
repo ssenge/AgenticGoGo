@@ -12,6 +12,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,7 +43,7 @@ fn write_judge(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -116,7 +119,7 @@ fn run(dir: &Path, path: &str, sessions: &str) -> (std::process::Output, String)
         .env("PATH", path)
         .env("HOME", dir.join(".home"))
         .args(["run", "--max-sessions", sessions])
-        .output()
+        .output_bounded()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     (out, combined)

@@ -7,6 +7,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use serde_json::Value;
 use std::fs;
@@ -29,7 +32,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -249,7 +252,7 @@ fn the_published_schema_is_versioned_complete_and_strict() {
 fn done_prints_only_the_report_on_stdout_and_logs_to_run_log() {
     let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
     let dir = tmp.path();
-    let out = agg(dir, &path).args(["run", "--report-json"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--report-json"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
 
     // the WHOLE of stdout parses as one JSON document: no banner, no worker stream around it.
@@ -281,14 +284,14 @@ fn abort_if_reports_aborted_and_loses_to_done_in_the_same_session() {
     let dir = tmp.path();
     write(&dir.join("agg/judges/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
     chmod_x(&dir.join("agg/judges/never_met.sh"));
-    let out = agg(dir, &path).arg("run").output().unwrap();
+    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     let r = report(dir);
     assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("aborted"), Some(3)));
     assert!(r["stop_reason"].as_str().unwrap().contains("worked"), "name the term that fired: {r}");
 
     let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n  abort_if: \"worked\"\n");
-    let out = agg(tmp.path(), &path).arg("run").output().unwrap();
+    let out = agg(tmp.path(), &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "done must beat aborted:\n{}", text(&out));
     assert_eq!(report(tmp.path())["outcome"], "done");
 }
@@ -297,7 +300,7 @@ fn abort_if_reports_aborted_and_loses_to_done_in_the_same_session() {
 #[test]
 fn the_session_cap_reports_aborted_with_exit_4() {
     let (tmp, path) = project(": > started\n", "  done_if: \"worked\"\n");
-    let out = agg(tmp.path(), &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out = agg(tmp.path(), &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(4), "{}", text(&out));
     let r = report(tmp.path());
     assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("aborted"), Some(4)));
@@ -341,7 +344,7 @@ fn agg_stop_from_another_process_beats_done_in_the_same_session() {
     let child = agg(dir, &path).arg("run").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     wait_for(&dir.join("started"));
     let elsewhere = tempfile::tempdir().unwrap();
-    let stop = agg(elsewhere.path(), &path).args(["stop", "--project"]).arg(dir).output().unwrap();
+    let stop = agg(elsewhere.path(), &path).args(["stop", "--project"]).arg(dir).output_bounded().unwrap();
     assert!(stop.status.success(), "agg stop --project failed: {}", text(&stop));
     fs::write(dir.join("go"), "").unwrap();
     let out = child.wait_with_output().unwrap();
@@ -357,7 +360,7 @@ fn agg_stop_from_another_process_beats_done_in_the_same_session() {
 fn an_internal_fault_during_verify_reports_error() {
     for (fault, needle) in [("verify-error", "injected fault at verify"), ("verify-panic", "injected panic at verify")] {
         let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
-        let out = agg(tmp.path(), &path).env("AGG_TEST_FAULT", fault).args(["run", "--report-json"]).output().unwrap();
+        let out = agg(tmp.path(), &path).env("AGG_TEST_FAULT", fault).args(["run", "--report-json"]).output_bounded().unwrap();
         assert_eq!(out.status.code(), Some(1), "{fault}: {}", text(&out));
         let r = report(tmp.path());
         assert_eq!((r["outcome"].as_str(), r["exit_code"].as_u64()), (Some("error"), Some(1)), "{fault}");
@@ -377,7 +380,7 @@ fn a_refused_start_replaces_the_previous_report_with_an_error() {
     assert_eq!(agg(dir, &path).arg("run").status().unwrap().code(), Some(0));
     let first = report(dir);
 
-    let out = agg(dir, &path).args(["run", "--report-json", "--base-branch", "no-such-branch"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--report-json", "--base-branch", "no-such-branch"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     let r = report(dir);
     assert_eq!(r["outcome"], "error");
@@ -420,7 +423,7 @@ fn base_branch_flag_overrides_the_config() {
     let dir = tmp.path();
     git(dir, &["branch", "release"]);
     let main_before = git(dir, &["rev-parse", "main"]);
-    let out = agg(dir, &path).args(["run", "--base-branch", "release"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--base-branch", "release"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let r = report(dir);
     assert_eq!(r["result"]["base_branch"], "release");
@@ -434,7 +437,7 @@ fn a_run_without_limits_runs_until_done() {
     // the third session's work is the first that meets the judge.
     let worker = ": > started\necho x >> tally\nif [ \"$(wc -l < tally)\" -ge 3 ]; then : > did_work; git add did_work >/dev/null 2>&1; git commit -qm w >/dev/null 2>&1; fi\n";
     let (tmp, path) = project(worker, "  done_if: \"worked\"\n");
-    let out = agg(tmp.path(), &path).arg("run").output().unwrap();
+    let out = agg(tmp.path(), &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let r = report(tmp.path());
     assert_eq!((r["outcome"].as_str(), r["sessions"]["total"].as_u64()), (Some("done"), Some(3)));
@@ -464,7 +467,7 @@ fn two_parallel_runs_in_different_directories_do_not_interfere() {
 #[test]
 fn report_json_outside_a_project_prints_an_error_report() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = agg(tmp.path(), "/usr/bin:/bin").args(["run", "--report-json"]).output().unwrap();
+    let out = agg(tmp.path(), "/usr/bin:/bin").args(["run", "--report-json"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_valid(&v);
@@ -488,7 +491,7 @@ fn a_judge_evidence_file_is_kept_and_referenced() {
          echo \"{\\\"met\\\":$m,\\\"value\\\":1,\\\"max\\\":1,\\\"rationale\\\":\\\"r\\\",\\\"evidence\\\":[\\\"cc.sarif\\\",\\\"/etc/hosts\\\",\\\"link\\\"]}\"\n",
     );
     chmod_x(&judge);
-    let out = agg(dir, &path).arg("run").output().unwrap();
+    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
 
     let r = report(dir);
@@ -550,7 +553,7 @@ fn usage_per_session_matches_what_the_agents_reported() {
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "judges"]);
 
-    let out = agg(dir, &path).arg("run").output().unwrap();
+    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let r = report(dir);
     assert_eq!(r["schema_version"], agg::report::SCHEMA_VERSION);
@@ -580,7 +583,7 @@ fn usage_per_session_matches_what_the_agents_reported() {
     let text = r.to_string();
     assert!(!text.contains("configured-ruler") && !text.contains("\"fake\""), "only reported models are named: {r:#}");
 
-    let hist = agg(dir, &path).args(["history", "--json"]).output().unwrap();
+    let hist = agg(dir, &path).args(["history", "--json"]).output_bounded().unwrap();
     let h: Value = serde_json::from_slice(&hist.stdout).unwrap();
     assert_eq!(h["runs"][0]["usage"], r["usage"], "history carries the run's totals");
 }

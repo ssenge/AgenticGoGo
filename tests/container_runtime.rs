@@ -16,6 +16,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,7 +39,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -51,7 +54,7 @@ fn image() -> Option<&'static str> {
             let tag = "agg-test-fake-agent:1".to_string();
             let ctx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/container/fake-agent");
             let engine = agg::isolation::container_engine().unwrap_or("docker");
-            let out = Command::new(engine).args(["build", "-q", "-t", &tag]).arg(&ctx).output().unwrap();
+            let out = Command::new(engine).args(["build", "-q", "-t", &tag]).arg(&ctx).output_bounded().unwrap();
             assert!(out.status.success(), "building the fake-agent image: {}", String::from_utf8_lossy(&out.stderr));
             Some(tag)
         })
@@ -152,7 +155,7 @@ fn run(d: &Path, home: &Path, envs: &[(&str, &str)]) -> (Option<i32>, String) {
             c.env("DOCKER_CONFIG", Path::new(&h).join(".docker"));
         }
     }
-    let out = c.output().unwrap();
+    let out = c.output_bounded().unwrap();
     (out.status.code(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
@@ -273,7 +276,7 @@ fn behind_an_allow_list_the_worker_cannot_reach_out_and_the_run_still_completes(
     // this test binary, and cargo runs test binaries one at a time)
     let engine = agg::isolation::container_engine().unwrap();
     for what in [&["ps", "-aq"][..], &["network", "ls", "-q"][..]] {
-        let out = Command::new(engine).args(what).args(["--filter", "label=agg.egress"]).output().unwrap();
+        let out = Command::new(engine).args(what).args(["--filter", "label=agg.egress"]).output_bounded().unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).trim().is_empty(), "left behind ({what:?}): {}", String::from_utf8_lossy(&out.stdout));
     }
 }

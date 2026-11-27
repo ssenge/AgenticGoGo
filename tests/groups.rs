@@ -11,6 +11,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,7 +43,7 @@ fn write_judge(dir: &Path, name: &str, body: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -110,7 +113,7 @@ fn run(dir: &Path, path: &str, sessions: &str) -> (Option<i32>, String) {
         .env("PATH", path)
         .env("HOME", dir.join(".home"))
         .args(["run", "--max-sessions", sessions])
-        .output()
+        .output_bounded()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     (out.status.code(), combined)
@@ -295,7 +298,7 @@ fn stalled_counts_no_improvement_sessions_as_steps_where_nothing_moved() {
     let dir = tmp.path();
     let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/judges/stalled.sh");
     let judge = |dir: &Path| -> serde_json::Value {
-        let out = Command::new("bash").arg(&stalled).env("AGG_PROJECT_DIR", dir).output().unwrap();
+        let out = Command::new("bash").arg(&stalled).env("AGG_PROJECT_DIR", dir).output_bounded().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
     };
     let row = |s: u32, v: f64, o: Outcome| {
@@ -316,7 +319,7 @@ fn stalled_counts_no_improvement_sessions_as_steps_where_nothing_moved() {
 fn stalled_counts_no_changes_sessions_with_their_own_readings() {
     let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/judges/stalled.sh");
     let judge = |dir: &Path| -> serde_json::Value {
-        let out = Command::new("bash").arg(&stalled).env("AGG_PROJECT_DIR", dir).output().unwrap();
+        let out = Command::new("bash").arg(&stalled).env("AGG_PROJECT_DIR", dir).output_bounded().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
     };
     let row = |dir: &Path, s: u32, v: f64, o: Outcome| {

@@ -17,6 +17,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use agg::isolation::egress::{allow::AllowList, Egress};
 use agg::isolation::policy::{self, RunPolicy};
 use assert_cmd::cargo::CommandCargoExt;
@@ -68,7 +71,7 @@ fn kernel_sandbox_usable() -> bool {
     cfg!(target_os = "macos")
         && Command::new("sandbox-exec")
             .args(["-p", "(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow mach*)", "/usr/bin/true"])
-            .output()
+            .output_bounded()
             .map(|o| o.status.success())
             .unwrap_or(false)
 }
@@ -101,7 +104,7 @@ t localhost_resolves "python3 -c 'import socket; socket.getaddrinfo(\"localhost\
     );
     let mut inner = Command::new("/bin/sh");
     inner.arg("-c").arg(&script);
-    let out = agg::isolation::wrap(inner, tmp.path(), &[], &[]).unwrap().output().unwrap();
+    let out = agg::isolation::wrap(inner, tmp.path(), &[], &[]).unwrap().output_bounded().unwrap();
     let text = outcomes(&out);
     assert_outcomes(
         &text,
@@ -139,7 +142,7 @@ t own_server "python3 -c 'import socket; s=socket.socket(); s.bind((\"127.0.0.1\
         let _g = register(tmp.path(), &entries);
         let mut inner = Command::new("/bin/sh");
         inner.arg("-c").arg(&script);
-        let text = outcomes(&agg::isolation::wrap(inner, tmp.path(), &[], &[]).unwrap().output().unwrap());
+        let text = outcomes(&agg::isolation::wrap(inner, tmp.path(), &[], &[]).unwrap().output_bounded().unwrap());
         assert!(text.contains(want), "{entries:?} ⇒ {want}:\n{text}");
     }
 }
@@ -175,7 +178,7 @@ t worker_set_proxy "http_proxy=http://1.1.1.1:3128 wget -q -T 3 -O /dev/null htt
     );
     let mut inner = Command::new("/bin/sh");
     inner.arg("-c").arg(&script);
-    let out = agg::isolation::containerize(inner, tmp.path(), &[], &[], agg::isolation::DEFAULT_IMAGE).unwrap().output().unwrap();
+    let out = agg::isolation::containerize(inner, tmp.path(), &[], &[], agg::isolation::DEFAULT_IMAGE).unwrap().output_bounded().unwrap();
     let text = outcomes(&out);
     drop(g); // removes the relay and the internal network
     assert_outcomes(
@@ -194,7 +197,7 @@ fn check_problems(yaml: &str) -> Vec<(String, String)> {
     std::fs::create_dir_all(d.join("agg/state")).unwrap();
     std::fs::write(d.join("agg/agg.yaml"), yaml).unwrap();
     std::fs::write(d.join("agg/judges/ok.sh"), "#!/bin/sh\necho '{\"met\":true}'\n").unwrap();
-    let out = Command::cargo_bin("agg").unwrap().args(["check", "--json"]).current_dir(d).env("HOME", d).output().unwrap();
+    let out = Command::cargo_bin("agg").unwrap().args(["check", "--json"]).current_dir(d).env("HOME", d).output_bounded().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     v["problems"].as_array().unwrap().iter().map(|p| (p["path"].as_str().unwrap().into(), p["message"].as_str().unwrap().into())).collect()
 }

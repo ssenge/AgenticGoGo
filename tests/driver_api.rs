@@ -17,6 +17,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -96,7 +99,7 @@ fn chmod_x(p: &Path) {
 fn project() -> tempfile::TempDir {
     LazyLock::force(&ENV);
     let tmp = tempfile::tempdir().unwrap();
-    let g = |args: &[&str]| Command::new("git").args(args).current_dir(tmp.path()).output().unwrap();
+    let g = |args: &[&str]| Command::new("git").args(args).current_dir(tmp.path()).output_bounded().unwrap();
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -135,7 +138,7 @@ fn runs(dir: &Path, name: &str) -> usize {
 // ── the gate's helpers ───────────────────────────────────────────────────────────────────────
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -150,7 +153,7 @@ fn agg_branches(dir: &Path) -> Vec<String> {
 /// written by the fake agent. A commit count would also move for merge commits; this counts WORK.
 fn work_on(dir: &Path, rev: &str) -> usize {
     let out =
-        Command::new("git").args(["show", &format!("{rev}:work.log")]).current_dir(dir).output().unwrap();
+        Command::new("git").args(["show", &format!("{rev}:work.log")]).current_dir(dir).output_bounded().unwrap();
     if !out.status.success() {
         return 0;
     }
@@ -664,11 +667,11 @@ fn a_dirty_tree_refuses_a_fresh_start_and_is_set_aside_on_a_resume() {
     let refs = std::process::Command::new("git")
         .args(["for-each-ref", "--format=%(refname)", "refs/agg/partial/"])
         .current_dir(dir)
-        .output()
+        .output_bounded()
         .unwrap();
     let refs = String::from_utf8_lossy(&refs.stdout).to_string();
     let saved = refs.lines().next().unwrap_or_else(|| panic!("no partial ref was written: {refs:?}"));
-    let show = std::process::Command::new("git").args(["show", &format!("{saved}:seed.txt")]).current_dir(dir).output().unwrap();
+    let show = std::process::Command::new("git").args(["show", &format!("{saved}:seed.txt")]).current_dir(dir).output_bounded().unwrap();
     assert_eq!(String::from_utf8_lossy(&show.stdout), "a crashed worker's half-finished edit\n", "…and saved, not lost");
 }
 
@@ -1166,28 +1169,23 @@ fn answer_from_outside(dir: &Path, want_case: &str, value: &str) -> std::thread:
     let want_case = want_case.to_string();
     let value = value.to_string();
     std::thread::spawn(move || {
-        // Poll for the ask to appear rather than sleeping a fixed time: the driver has to boot the
+        // Wait for the ask to appear rather than sleeping a fixed time: the driver has to boot the
         // run first, and a fixed sleep would either be flaky or slow.
-        for _ in 0..600 {
-            if let Some(a) = agg::core::asks::open(&dir).into_iter().next() {
-                let id = a.id.clone();
-                assert_eq!(
-                    match a.case {
-                        agg::core::asks::AskCase::Bool => "bool",
-                        agg::core::asks::AskCase::Choose => "choose",
-                        agg::core::asks::AskCase::Input => "input",
-                    },
-                    want_case
-                );
-                // Straight to the ledger, which is what `agg answer` and `POST /api/answer` both
-                // do. An answer is a durable fact, not a bus message — the driver's wait loop polls
-                // the ledger, so there is nothing for a queue to carry.
-                agg::core::asks::answer(&dir, &id, &value, "test", agg::util::now_epoch()).unwrap();
-                return id;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("no ask ever appeared in the ledger");
+        let a = common::wait_open_ask(&dir);
+        let id = a.id.clone();
+        assert_eq!(
+            match a.case {
+                agg::core::asks::AskCase::Bool => "bool",
+                agg::core::asks::AskCase::Choose => "choose",
+                agg::core::asks::AskCase::Input => "input",
+            },
+            want_case
+        );
+        // Straight to the ledger, which is what `agg answer` and `POST /api/answer` both
+        // do. An answer is a durable fact, not a bus message — the driver's wait loop polls
+        // the ledger, so there is nothing for a queue to carry.
+        agg::core::asks::answer(&dir, &id, &value, "test", agg::util::now_epoch()).unwrap();
+        id
     })
 }
 
@@ -1235,15 +1233,8 @@ fn a_blocked_hil_call_is_interruptible_by_agg_stop() {
     let tmp = project();
     let dir = tmp.path().to_path_buf();
     let stopper = std::thread::spawn(move || {
-        for _ in 0..600 {
-            if !agg::core::asks::open(&dir).is_empty() {
-                agg::bus::queue_command(&dir, &agg::bus::Command::Stop { reason: "test".into() })
-                    .unwrap();
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("no ask appeared");
+        common::wait_open_ask(&dir);
+        agg::bus::queue_command(&dir, &agg::bus::Command::Stop { reason: "test".into() }).unwrap();
     });
 
     let agg = Agg::open(tmp.path()).unwrap();
@@ -1290,7 +1281,7 @@ fn an_answer_off_the_recorded_option_list_is_refused_and_the_ask_stays_open() {
             .args(["--dir", dir.to_str().unwrap()])
             .args(args)
             .env("PATH", format!("{}:{}", ENV.join("bin").display(), std::env::var("PATH").unwrap()))
-            .output()
+            .output_bounded()
             .unwrap()
     };
 
@@ -1328,7 +1319,7 @@ fn the_workers_hil_command_records_a_request_and_returns_immediately() {
 
     let out = Command::new(env!("CARGO_BIN_EXE_agg"))
         .args(["--dir", dir.to_str().unwrap(), "hil", "bool", "Is the firewall open?"])
-        .output()
+        .output_bounded()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let said = String::from_utf8_lossy(&out.stdout);
@@ -1433,15 +1424,9 @@ fn time_spent_blocked_is_banked_as_human_wait_not_as_work() {
     // Answer only after the wait has had to poll at least once, so a chunk of wait is banked.
     let dir = tmp.path().to_path_buf();
     let h = std::thread::spawn(move || {
-        for _ in 0..600 {
-            if let Some(a) = agg::core::asks::open(&dir).into_iter().next() {
-                std::thread::sleep(std::time::Duration::from_millis(5_200));
-                agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("no ask appeared");
+        let a = common::wait_open_ask(&dir);
+        std::thread::sleep(std::time::Duration::from_millis(5_200));
+        agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
     });
     assert!(agg.hil_bool("waiting on purpose?").unwrap());
     h.join().unwrap();

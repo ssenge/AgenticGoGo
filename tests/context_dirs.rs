@@ -8,6 +8,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::Path;
@@ -25,7 +28,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    Command::new("git").args(args).current_dir(dir).output().unwrap();
+    Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
 }
 
 /// The fake agent: keeps its brief, reads the context through `$AGG_CONTEXT_KB`, then tries each way
@@ -96,7 +99,7 @@ fn project(tier: &str, context: &str) -> (tempfile::TempDir, tempfile::TempDir, 
 }
 
 fn agg(dir: &Path, path: &str, args: &[&str]) -> std::process::Output {
-    Command::cargo_bin("agg").unwrap().args(args).current_dir(dir).env("PATH", path).env("HOME", dir.join(".home")).output().unwrap()
+    Command::cargo_bin("agg").unwrap().args(args).current_dir(dir).env("PATH", path).env("HOME", dir.join(".home")).output_bounded().unwrap()
 }
 
 fn check_problems(dir: &Path, path: &str) -> Vec<(String, String)> {
@@ -147,9 +150,9 @@ fn kernel_sandbox_usable() -> bool {
     let probe = if cfg!(target_os = "macos") {
         Command::new("sandbox-exec")
             .args(["-p", "(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow mach*)", "/usr/bin/true"])
-            .output()
+            .output_bounded()
     } else {
-        Command::new("bwrap").args(["--ro-bind", "/", "/", "--dev", "/dev", "--", "/bin/true"]).output()
+        Command::new("bwrap").args(["--ro-bind", "/", "/", "--dev", "/dev", "--", "/bin/true"]).output_bounded()
     };
     probe.map(|o| o.status.success()).unwrap_or(false)
 }

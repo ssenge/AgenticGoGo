@@ -10,6 +10,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use serde_json::{json, Value};
 use std::fs;
@@ -31,7 +34,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -137,7 +140,7 @@ impl Project {
             .env("PATH", &self.path)
             .env("HOME", self.dir.join(".home"))
             .args(args)
-            .output()
+            .output_bounded()
             .unwrap();
         (out.status.code(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
     }
@@ -480,7 +483,7 @@ fn a_ratchet_against_the_metrics_direction_errors() {
 
 /// Is the real swe-metrics on the inherited PATH? Prints why a test is skipped when not.
 fn real_swe_metrics() -> bool {
-    let ok = Command::new("swe-metrics").args(["schema", "report"]).output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = Command::new("swe-metrics").args(["schema", "report"]).output_bounded().map(|o| o.status.success()).unwrap_or(false);
     if !ok {
         eprintln!("SKIPPED: `swe-metrics` is not on PATH — install it (github.com/ssenge/swe-metrics) to run this test");
     }
@@ -495,7 +498,7 @@ fn run_real(p: &Project, sessions: &str) -> (Option<i32>, String) {
         .env("PATH", format!("{}:{}", p.bin.display(), std::env::var("PATH").unwrap_or_default()))
         .env("HOME", p.dir.join(".home"))
         .args(["run", "--max-sessions", sessions])
-        .output()
+        .output_bounded()
         .unwrap();
     (out.status.code(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }

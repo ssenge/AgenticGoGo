@@ -10,6 +10,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,7 +40,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let o = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let o = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
@@ -140,12 +143,12 @@ impl Project {
     }
 
     fn status(&self) -> serde_json::Value {
-        let out = self.agg().args(["status", "--json"]).output().unwrap();
+        let out = self.agg().args(["status", "--json"]).output_bounded().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null)
     }
 
     fn send(&self, args: &[&str]) {
-        let out = self.agg().arg("send").args(args).output().unwrap();
+        let out = self.agg().arg("send").args(args).output_bounded().unwrap();
         assert!(out.status.success(), "agg send {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
@@ -263,7 +266,7 @@ fn sigint_during_the_wait_exits_5_and_resume_continues_with_the_next_session() {
     assert_eq!(git(&p.dir, &["show", &format!("{r}:wip.txt")]), "half done", "the partial work is on {r}");
     assert_eq!(git(&p.dir, &["show", &format!("{r}:tracked.txt")]), "base\nedited");
 
-    let out = p.agg().args(["run", "--resume"]).output().unwrap();
+    let out = p.agg().args(["run", "--resume"]).output_bounded().unwrap();
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "the resumed run finishes:\n{err}");
     assert!(err.contains("session #3") && err.contains("step `second`"), "session n+1, same step:\n{err}");
@@ -293,7 +296,7 @@ fn sigint_during_a_session_saves_its_work_to_a_partial_ref() {
 #[test]
 fn resume_without_a_previous_run_is_refused() {
     let p = project(&["worker"], &["finish"], "");
-    let out = p.agg().args(["run", "--resume"]).output().unwrap();
+    let out = p.agg().args(["run", "--resume"]).output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no previous run"), "{}", String::from_utf8_lossy(&out.stderr));
 }

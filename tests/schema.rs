@@ -7,13 +7,16 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::path::Path;
 use std::process::Command;
 
 /// The schema exactly as a consumer gets it: the stdout of `agg schema`.
 fn published_schema() -> serde_json::Value {
-    let out = Command::cargo_bin("agg").unwrap().arg("schema").output().unwrap();
+    let out = Command::cargo_bin("agg").unwrap().arg("schema").output_bounded().unwrap();
     assert!(out.status.success(), "agg schema failed: {}", String::from_utf8_lossy(&out.stderr));
     serde_json::from_slice(&out.stdout).expect("agg schema prints JSON")
 }
@@ -66,7 +69,7 @@ fn the_scaffold_validates_for_every_agent() {
             .current_dir(tmp.path())
             .env("HOME", tmp.path())
             .args(["init", "--agent", agent])
-            .output()
+            .output_bounded()
             .unwrap();
         assert!(out.status.success(), "init --agent {agent}: {}", String::from_utf8_lossy(&out.stderr));
         let text = std::fs::read_to_string(tmp.path().join("agg/agg.yaml")).unwrap();

@@ -16,6 +16,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::Path;
@@ -33,7 +36,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -112,7 +115,7 @@ fn run(dir: &Path, path: &str, attack: &str, sessions: &str) -> (Option<i32>, St
         .env("PATH", path)
         .env("HOME", dir.join(".home"))
         .env("AGG_TEST_ATTACK", attack)
-        .output()
+        .output_bounded()
         .unwrap();
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     (out.status.code(), text)
@@ -124,9 +127,9 @@ fn kernel_sandbox_usable() -> bool {
     let probe = if cfg!(target_os = "macos") {
         Command::new("sandbox-exec")
             .args(["-p", "(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow mach*)", "/usr/bin/true"])
-            .output()
+            .output_bounded()
     } else {
-        Command::new("bwrap").args(["--ro-bind", "/", "/", "--dev", "/dev", "--", "/bin/true"]).output()
+        Command::new("bwrap").args(["--ro-bind", "/", "/", "--dev", "/dev", "--", "/bin/true"]).output_bounded()
     };
     probe.map(|o| o.status.success()).unwrap_or(false)
 }
@@ -362,7 +365,7 @@ fn real_container_denies_writes_to_a_protected_directory() {
         t outside 'echo ok > src.txt'";
     let mut inner = Command::new("/bin/sh");
     inner.arg("-c").arg(script);
-    let out = agg::isolation::containerize(inner, &d, &[], &denies, "alpine:3.20").unwrap().output().unwrap();
+    let out = agg::isolation::containerize(inner, &d, &[], &denies, "alpine:3.20").unwrap().output_bounded().unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let after = fs::read_to_string(d.join("tests/oracles/x.json")).unwrap_or_default();
     let _ = fs::remove_dir_all(&d);

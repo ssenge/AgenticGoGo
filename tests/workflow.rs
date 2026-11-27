@@ -6,6 +6,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -408,14 +410,8 @@ fn a_driver_reenters_at_a_step_it_ran_and_not_at_one_it_didnt() {
 fn answer_yes(dir: &Path) -> std::thread::JoinHandle<()> {
     let dir = dir.to_path_buf();
     std::thread::spawn(move || {
-        for _ in 0..1200 {
-            if let Some(a) = agg::core::asks::open(&dir).into_iter().next() {
-                agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("no ask appeared");
+        let a = common::wait_open_ask(&dir);
+        agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
     })
 }
 

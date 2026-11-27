@@ -6,6 +6,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::LazyLock;
@@ -59,7 +62,7 @@ fn write_exe(p: &Path, text: &str) {
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
@@ -97,7 +100,7 @@ fn run(dir: &Path, args: &[&str]) -> Output {
     let (bin, home) = &*ENV;
     Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(process_file()).arg(dir).args(args).current_dir(dir)
         .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("HOME", home)
-        .output().unwrap()
+        .output_bounded().unwrap()
 }
 
 fn said(out: &Output) -> String {
@@ -216,16 +219,11 @@ fn a_checkpoint_asks_a_human_and_a_decision_in_the_yes_goes_back_to_its_owner() 
     let d = tmp.path();
     let dir = d.to_path_buf();
     let human = std::thread::spawn(move || {
-        for _ in 0..2400 {
-            if let Some(a) = agg::core::asks::open(&dir).into_iter().next() {
-                std::fs::create_dir_all(dir.join("checkpoints")).unwrap();
-                std::fs::write(dir.join("checkpoints/cp-survey-decisions.md"), "- keep the survey short\n").unwrap();
-                agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
-                return a.question;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        panic!("no ask appeared");
+        let a = common::wait_open_ask(&dir);
+        std::fs::create_dir_all(dir.join("checkpoints")).unwrap();
+        std::fs::write(dir.join("checkpoints/cp-survey-decisions.md"), "- keep the survey short\n").unwrap();
+        agg::core::asks::answer(&dir, &a.id, "yes", "test", agg::util::now_epoch()).unwrap();
+        a.question
     });
     let out = run(d, &["--until", "cp-survey"]);
     let question = human.join().unwrap_or_else(|_| panic!("no ask appeared; the run said:\n{}", said(&out)));
@@ -450,7 +448,7 @@ fn check_and_list_read_only_the_file_and_a_bad_process_is_not_run() {
     let d = tmp.path();
     let bad = tempfile::tempdir().unwrap();
     std::fs::write(bad.path().join("process.yaml"), "version: 1\nphases:\n- id: p\n  name: P\n  steps:\n  - { id: s, name: S, kind: script, run: nowhere/x.sh }\n").unwrap();
-    let agg = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").args(args).current_dir(d).output().unwrap();
+    let agg = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").args(args).current_dir(d).output_bounded().unwrap();
     let checked = agg(&[bad.path().join("process.yaml").to_str().unwrap(), "--check"]);
     assert_eq!(checked.status.code(), Some(1));
     let verdict: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&checked.stdout).lines().last().unwrap()).unwrap();
@@ -498,7 +496,7 @@ fn mini_home() -> tempfile::TempDir {
 fn run_mini(home: &Path, dir: &Path) -> Output {
     let (bin, h) = &*ENV;
     Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(home.join("process.yaml")).arg(dir).current_dir(dir)
-        .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("HOME", h).output().unwrap()
+        .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())).env("HOME", h).output_bounded().unwrap()
 }
 
 /// The rationale of the history's entries of `kind` for the step labelled `label`.
@@ -583,7 +581,7 @@ fn play(dir: &Path, files: &[&str]) -> Output {
     let (_, home) = &*ENV;
     Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(process_file()).arg("--scenario")
         .args(files.iter().map(|f| dir.join(f))).arg("--projects").arg(dir.join("projects")).current_dir(dir)
-        .env("HOME", home).output().unwrap()
+        .env("HOME", home).output_bounded().unwrap()
 }
 
 /// A scenario plays the example's first steps on a copy of a project with scripted agents: the worker writes what its rule
@@ -859,7 +857,7 @@ exec {bin}/claude "$@"
         Command::new(env!("CARGO_BIN_EXE_agg")).arg("process").arg(self.root.path().join("home/process.yaml")).arg(self.project()).args(args)
             .current_dir(self.project()).env("PATH", path).env("HOME", home).env("CLAUDE_CONFIG_DIR", self.root.path().join("config"))
             .env("UE_LOG", self.root.path().join("ue.log")).env("TEST_UE_MINE", "shell").env_remove("ANTHROPIC_BASE_URL")
-            .output().unwrap()
+            .output_bounded().unwrap()
     }
 }
 

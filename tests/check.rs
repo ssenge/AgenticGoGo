@@ -8,6 +8,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use serde_json::Value;
 use std::fs;
@@ -46,7 +49,7 @@ fn agg(dir: &Path, path: &str, args: &[&str]) -> Output {
         .env("PATH", path)
         .env("HOME", dir.join(".home"))
         .args(args)
-        .output()
+        .output_bounded()
         .unwrap()
 }
 

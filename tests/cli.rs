@@ -17,6 +17,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::Path;
@@ -82,7 +85,7 @@ fn write_cfg(dir: &Path, project: &str, done_if: &str, seq_extra: &str, top_extr
 /// reads clean and sessions branch from a born `main`.
 fn git_init(dir: &Path) {
     let g = |args: &[&str]| {
-        Command::new("git").args(args).current_dir(dir).output().unwrap()
+        Command::new("git").args(args).current_dir(dir).output_bounded().unwrap()
     };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
@@ -149,7 +152,7 @@ fn init_then_plan_shows_scoreboard() {
     // PATH doesn't matter for init/plan (no worker launched); keep the real one.
     let path = std::env::var("PATH").unwrap_or_default();
 
-    let out = agg(dir, &path).arg("init").output().unwrap();
+    let out = agg(dir, &path).arg("init").output_bounded().unwrap();
     assert!(out.status.success(), "agg init failed: {}", String::from_utf8_lossy(&out.stderr));
     // init scaffolds agg.yaml + the committed AGG.md + the gitignored forward-state STATE.md + a
     // starter judge. No goals.yaml, no AGG_RESUME.md (§7.1).
@@ -158,7 +161,7 @@ fn init_then_plan_shows_scoreboard() {
     assert!(agg::paths::agg_dir(dir).join("STATE.md").exists(), "init should scaffold the forward state file");
     assert!(dir.join("agg/judges/tests_pass.sh").exists(), "init should scaffold a starter judge");
 
-    let out = agg(dir, &path).arg("plan").output().unwrap();
+    let out = agg(dir, &path).arg("plan").output_bounded().unwrap();
     assert!(out.status.success(), "agg plan failed: {}", String::from_utf8_lossy(&out.stderr));
     let combined = format!(
         "{}{}",
@@ -181,10 +184,10 @@ fn init_then_plan_shows_scoreboard() {
 fn doctor_passes_a_good_setup() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    let init = agg(dir, &path).arg("init").output().unwrap();
+    let init = agg(dir, &path).arg("init").output_bounded().unwrap();
     assert!(init.status.success(), "init failed: {}", String::from_utf8_lossy(&init.stderr));
 
-    let out = agg(dir, &path).arg("doctor").output().unwrap();
+    let out = agg(dir, &path).arg("doctor").output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -204,7 +207,7 @@ fn max_sessions_cap_exits_4_and_says_so() {
     write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "cap", "worked", "", "");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -231,7 +234,7 @@ fn runtime_state_splits_into_state_and_private_and_both_are_gitignored() {
     write_judge(dir, "did", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "splitproj", "did", "", "");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined); // the fake worker commits did_work → the DoD is met.
 
@@ -273,7 +276,7 @@ fn config_lives_in_the_agg_folder() {
     write_cfg(dir, "folded", "worked", "", "");
     write_state_md(dir, "create the file did_work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -309,7 +312,7 @@ fi
 
     // Cap sessions so a logic bug can't hang the test. One fake session should suffice:
     // baseline judge says not-met → launch worker (creates did_work) → judge met → stop.
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -325,7 +328,7 @@ fi
     // `agg status` and `dashboard --once` must read the snapshot the run just published —
     // showing the met judge — WITHOUT re-running judges. (Both go through status::render.)
     for args in [vec!["status"], vec!["dashboard", "--once"]] {
-        let snap = agg(dir, &path).args(&args).output().unwrap();
+        let snap = agg(dir, &path).args(&args).output_bounded().unwrap();
         let text = String::from_utf8_lossy(&snap.stdout).into_owned();
         assert!(snap.status.success(), "`agg {args:?}` failed");
         assert!(
@@ -344,7 +347,7 @@ fn run_stops_immediately_when_goal_already_met() {
     write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
     write_cfg(dir, "itest", "worked", "", "");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -366,7 +369,7 @@ fn run_without_config_gives_actionable_hint() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let path = std::env::var("PATH").unwrap_or_default();
-    let out = agg(dir, &path).arg("run").output().unwrap();
+    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
     assert!(!out.status.success(), "run with no config must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -381,7 +384,7 @@ fn doctor_flags_a_broken_setup() {
     let dir = tmp.path();
     let path = std::env::var("PATH").unwrap_or_default();
     // No config at all → doctor should fail and name what's missing.
-    let out = agg(dir, &path).arg("doctor").output().unwrap();
+    let out = agg(dir, &path).arg("doctor").output_bounded().unwrap();
     assert!(!out.status.success(), "doctor on an empty dir should report failures");
 }
 
@@ -405,7 +408,7 @@ fn doctor_inherits_the_notify_if_validation() {
         "",
     );
 
-    let out = agg(dir, &path).arg("doctor").output().unwrap();
+    let out = agg(dir, &path).arg("doctor").output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(!out.status.success(), "a notify_if naming an unresolvable judge must fail doctor:\n{combined}");
     assert!(
@@ -430,13 +433,13 @@ fn judge_runs_one_name_and_prints_raw_verdict() {
     write_state_md(dir, "noop\n");
 
     // a known judge: raw verdict JSON on stdout
-    let out = agg(dir, &path).args(["judge", "ok"]).output().unwrap();
+    let out = agg(dir, &path).args(["judge", "ok"]).output_bounded().unwrap();
     assert!(out.status.success(), "judge ok failed: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\"met\":true"), "stdout should be the raw verdict, got: {stdout}");
 
     // an unknown judge: error that lists what IS available
-    let out = agg(dir, &path).args(["judge", "nope"]).output().unwrap();
+    let out = agg(dir, &path).args(["judge", "nope"]).output_bounded().unwrap();
     assert!(!out.status.success(), "unknown judge name must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -461,7 +464,7 @@ fn dollar_budget_aborts_the_loop() {
     write_cfg(dir, "itest", "impossible", "  abort_if: \"over_cost\"\n  limits: { cost: 0 }\n", "");
 
     // generous session cap so the ABORT (not the cap) is what stops us.
-    let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -490,12 +493,12 @@ fn status_and_history_json_are_machine_readable() {
     write_state_md(dir, "create the file did_work\n");
 
     // run once so both the snapshot (state.json) and the ledger (project.json) exist.
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
 
     // status --json: the versioned live document (docs/schemas/status.v1.json; validated in
     // tests/status.rs), carrying the project and the usage totals.
-    let snap = agg(dir, &path).args(["status", "--json"]).output().unwrap();
+    let snap = agg(dir, &path).args(["status", "--json"]).output_bounded().unwrap();
     assert!(snap.status.success(), "status --json failed: {}", String::from_utf8_lossy(&snap.stderr));
     let v: serde_json::Value = serde_json::from_slice(&snap.stdout).expect("status --json must be valid JSON");
     assert_eq!(v["schema_version"], 1);
@@ -509,7 +512,7 @@ fn status_and_history_json_are_machine_readable() {
     assert_eq!(v["phase"], "done", "…and its final phase is `done` (the state.json wire value)");
 
     // history --json: valid JSON with a runs array containing at least our run.
-    let hist = agg(dir, &path).args(["history", "--json"]).output().unwrap();
+    let hist = agg(dir, &path).args(["history", "--json"]).output_bounded().unwrap();
     assert!(hist.status.success(), "history --json failed: {}", String::from_utf8_lossy(&hist.stderr));
     let h: serde_json::Value = serde_json::from_slice(&hist.stdout).expect("history --json must be valid JSON");
     assert_eq!(h["name"], "jsonproj");
@@ -527,7 +530,7 @@ fn status_and_history_json_are_machine_readable() {
     // The HUMAN renderers: `agg status` and the headless `agg dashboard --once` both read the same
     // published snapshot and must name the project and the judge.
     for args in [vec!["status"], vec!["dashboard", "--once"]] {
-        let out = agg(dir, &path).args(&args).output().unwrap();
+        let out = agg(dir, &path).args(&args).output_bounded().unwrap();
         let combined = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -549,7 +552,7 @@ fn institutional_memory_is_written_without_worker_cooperation() {
     write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "memproj", "impossible", "", "memory: { enabled: true, max_kb: 64, inject_kb: 8 }\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // DoD is `impossible` → reaches the session cap unmet.
 
@@ -602,7 +605,7 @@ exit 0
     write(dir, "agg/AGG.md", "# Project\nThe widget factory.\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined);
 
@@ -639,7 +642,7 @@ fn lifetime_session_is_published_to_state_json() {
     write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "lifeproj", "impossible", "", "");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
 
@@ -679,7 +682,7 @@ exit 0
     write_cfg(dir, "memproj2", "impossible", "", "memory: { enabled: true }\n");
     git_init(dir); // mandatory session isolation needs a git base
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // DoD is `impossible` → reaches the session cap unmet.
 
@@ -724,7 +727,7 @@ exit 0
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
     // a clean git repo on `main` with one committed file — isolation requires a clean repo.
-    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output_bounded().unwrap(); };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -738,12 +741,12 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     assert!(combined.contains("ROLLED BACK"), "the regressing merge must be rolled back:\n{combined}");
     // base must be pristine: the worker's "broke-it" line must NOT be on main.
-    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();
+    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
     assert!(!content.contains("broke-it"), "base must NOT contain the rolled-back change, got: {content:?}");
     assert!(content.contains("ok"), "base keeps its original content");
@@ -778,7 +781,7 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output_bounded().unwrap(); };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -792,12 +795,12 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     // the flake must NOT have rolled anything back — the good work is KEPT on main.
     assert!(!combined.contains("ROLLED BACK"), "a transient judge flake must NOT trigger rollback:\n{combined}");
-    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();
+    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
     assert!(content.contains("good-work"), "the worker's good work must be KEPT despite the judge flake, got: {content:?}");
 }
@@ -834,7 +837,7 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output_bounded().unwrap(); };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -858,12 +861,12 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     // the control judge's flip must NOT have rolled anything back — the good work is KEPT on main.
     assert!(!combined.contains("ROLLED BACK"), "a run-set-only control judge flipping must NOT trigger rollback:\n{combined}");
-    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();
+    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
     assert!(content.contains("good-work"), "the worker's good work must be KEPT despite `stalled` flipping, got: {content:?}");
 }
@@ -900,7 +903,7 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output_bounded().unwrap(); };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -916,7 +919,7 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // exit 4 (session cap), NOT 3 (ABORT). A crashed judge must not masquerade as a regression.
     assert_exit(&out, 4, &combined);
@@ -992,7 +995,7 @@ fi
     write_state_md(dir, "create the file did_work\n");
     git_init(dir); // mandatory session isolation needs a git base
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1040,7 +1043,7 @@ fn a_baseline_satisfied_run_enters_no_stage() {
     write_state_md(dir, "noop\n");
     git_init(dir); // mandatory session isolation needs a git base (did_work stays untracked → clean)
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -1170,7 +1173,7 @@ fn an_unknown_step_in_the_sequence_is_a_startup_error() {
     );
     write_state_md(dir, "do work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     assert!(!out.status.success(), "an unknown step must refuse to start");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1194,7 +1197,7 @@ fn a_sequence_of_only_skip_judges_is_refused_at_startup() {
     );
     write_state_md(dir, "do work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     assert!(!out.status.success(), "an all-skip_judges sequence must refuse to start");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1234,7 +1237,7 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output_bounded().unwrap(); };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -1253,7 +1256,7 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "4"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "4"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined);
     assert!(combined.contains("done_if satisfied"), "the judged step gates the span to done:\n{combined}");
@@ -1261,7 +1264,7 @@ exit 0
     // the WHOLE span merged: BOTH the skipped step's commit (work-0) and the judged step's (work-1)
     // are now on base. If the span logic branched the judged step off `base` instead of the span
     // tip, work-0 would be missing.
-    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output().unwrap();
+    let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
     assert!(
         content.contains("work-0") && content.contains("work-1"),
@@ -1291,7 +1294,7 @@ fn done_if_all_goals_ignores_an_until_condition_judge() {
     );
     write_state_md(dir, "create the file did_work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // exit 0 — NOT 4. all_goals fired over the DoD-set {feature} despite stalled being unmet.
     assert_exit(&out, 0, &combined);
@@ -1351,7 +1354,7 @@ exit 0
     write_state_md(dir, "do work\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "20"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // over_budget aborts (exit 3) — NOT the session cap (exit 4). The ONLY way tokens reach 1000 is by
     // counting the judge's 600/run, so this asserts exactly the money path.
@@ -1390,7 +1393,7 @@ fn ceilings_are_checked_after_a_skip_judges_step_too() {
     // No --max-sessions flag on purpose: the ceiling under test is `limits.sessions`, and a non-zero
     // flag would OVERRIDE it (§4.1). limits.sessions=2 ALSO backs the loop's own exit-4 precheck, so
     // if the skip-path ceiling check regressed the run still terminates (exit 4) rather than hanging.
-    let out = agg(dir, &path).arg("run").output().unwrap();
+    let out = agg(dir, &path).arg("run").output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 3, &combined);
     assert!(combined.contains("over_iterations"), "the ceiling must abort ON the skip step (exit 3):\n{combined}");
@@ -1426,7 +1429,7 @@ exit 0
     );
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    let g = |args: &[&str]| { Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    let g = |args: &[&str]| { Command::new("git").args(args).current_dir(dir).output_bounded().unwrap(); };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -1439,7 +1442,7 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 3, &combined);
     assert!(
@@ -1458,7 +1461,7 @@ fn a_clean_not_met_judge_does_not_trip_any_judge_error() {
     write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"cleanly not yet\"}'\n");
     write_cfg(dir, "cleanjudge", "feature", "  abort_if: \"any_judge_error\"\n", "memory: { enabled: false }\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
     assert!(!combined.contains("ABORT"), "a cleanly not-met judge must NOT trip any_judge_error:\n{combined}");
@@ -1500,7 +1503,7 @@ exit 0
     );
     write_state_md(dir, "do work\n");
     git_init(dir);
-    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // never-met DoD → the 2-session cap ends it (plan, then build)
     let sessions = fs::read_to_string(dir.join("sessions.txt")).expect("the worker should have recorded its argv");
@@ -1615,7 +1618,7 @@ exit 0
     write_state_md(dir, "create the file did_work\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "the llm-judged loop should reach done:\n{combined}");
     let jp = fs::read_to_string(dir.join("judge_prompt.txt")).expect("the ruler one-shot should have recorded its prompt");
@@ -1668,7 +1671,7 @@ exit 0
     write_state_md(dir, "do work\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // feature never met → the session cap ends it
     // (a) `stalled` actually EXECUTED — the run-set really contains it.
@@ -1747,7 +1750,7 @@ exit 0
     // feature never met + no abort_if → the ONLY terminator is the session cap (exit 4). 8 is ample:
     // stalled fires during session 4's verify (it then sees 3 flat merged steps), so reconsider is
     // dispatched at session 5.
-    let out = agg(dir, &path).args(["run", "--max-sessions", "8"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "8"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
 
@@ -1805,7 +1808,7 @@ exit 1
     write_cfg(dir, "rl", "impossible", "", "ratelimit_backoff_secs: 0\nmemory: { enabled: true, max_kb: 64, inject_kb: 8 }\n");
     git_init(dir);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // one rate-limited session, then the cap → MaxSessions.
 
@@ -1835,7 +1838,7 @@ fn a_winning_session_still_folds_memory_and_fires_on_session_end() {
     write_judge(dir, "won", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "win", "won", "", "memory: { enabled: true, max_kb: 64, inject_kb: 8 }\nhooks:\n  on_session_end: [\"touch session_end_ran\"]\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined); // done_if fires on session 1 → GoalsMet.
 
@@ -1872,7 +1875,7 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output_bounded().unwrap(); };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -1881,11 +1884,11 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined); // agg committed the edit → merged → answered met → done.
     // the worker never ran git, yet its edit is on main (agg auto-committed it).
-    let on_main = std::process::Command::new("git").args(["show", "main:answer.txt"]).current_dir(dir).output().unwrap();
+    let on_main = std::process::Command::new("git").args(["show", "main:answer.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
     assert!(content.contains("made-it"), "agg must auto-commit the worker's uncommitted edit onto main, got: {content:?}\n{combined}");
     assert!(combined.contains("agg committed the worker's edits"), "the auto-commit must be logged:\n{combined}");
@@ -1920,7 +1923,7 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output().unwrap(); };
+    let g = |args: &[&str]| { std::process::Command::new("git").args(args).current_dir(dir).output_bounded().unwrap(); };
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
@@ -1932,17 +1935,17 @@ exit 0
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // feature never met → cap; the regressing session rolled back.
     assert!(combined.contains("ROLLED BACK"), "the judge-tampering, regressing session must roll back:\n{combined}");
     // THE MOAT: base's committed judge is restored to the ORIGINAL — the worker's tamper is gone.
-    let judge_on_main = std::process::Command::new("git").args(["show", "main:agg/judges/build_ok.sh"]).current_dir(dir).output().unwrap();
+    let judge_on_main = std::process::Command::new("git").args(["show", "main:agg/judges/build_ok.sh"]).current_dir(dir).output_bounded().unwrap();
     let judge = String::from_utf8_lossy(&judge_on_main.stdout);
     assert!(!judge.contains("TAMPERED"), "rollback must restore the committed judge — no worker tamper on base, got:\n{judge}");
     assert!(judge.contains(".regressed"), "base keeps the ORIGINAL judge logic");
     // base is pristine: the worker's .regressed marker is NOT tracked on base.
-    let ls = std::process::Command::new("git").args(["ls-files", ".regressed"]).current_dir(dir).output().unwrap();
+    let ls = std::process::Command::new("git").args(["ls-files", ".regressed"]).current_dir(dir).output_bounded().unwrap();
     assert!(String::from_utf8_lossy(&ls.stdout).trim().is_empty(), "the regressing session's marker must not be on base");
 }
 
@@ -1974,7 +1977,7 @@ fn a_sequence_entry_that_exhausts_max_without_converging_aborts_the_run() {
     );
     write_state_md(dir, "do work\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "9"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "9"]).output_bounded().unwrap();
     let combined =
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 3, &combined);
@@ -2002,8 +2005,8 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
     // `bin/` too, or agg's auto-commit sweeps the fake worker's own binary onto the session branch —
     // the session then resolves as `Staged`, not `NoChanges`, and the bug under test cannot occur.
     write(dir, ".gitignore", "agg/\nbin/\n.home/\n");
-    Command::new("git").args(["add", ".gitignore"]).current_dir(dir).output().unwrap();
-    Command::new("git").args(["commit", "-qm", "gitignore agg/"]).current_dir(dir).output().unwrap();
+    Command::new("git").args(["add", ".gitignore"]).current_dir(dir).output_bounded().unwrap();
+    Command::new("git").args(["commit", "-qm", "gitignore agg/"]).current_dir(dir).output_bounded().unwrap();
 
     // A worker that writes ONLY into the gitignored state dir, so its sessions commit nothing.
     //
@@ -2043,7 +2046,7 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
     );
     write_state_md(dir, "write the spec\n");
 
-    let out = agg(dir, &path).args(["run", "--max-sessions", "4"]).output().unwrap();
+    let out = agg(dir, &path).args(["run", "--max-sessions", "4"]).output_bounded().unwrap();
     let combined =
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(

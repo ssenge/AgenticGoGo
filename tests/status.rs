@@ -5,6 +5,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use serde_json::Value;
 use std::fs;
@@ -23,7 +26,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -105,7 +108,7 @@ fn agg_from_outside(dir: &Path, path: &str, args: &[&str]) -> Output {
         .arg("--project")
         .arg(dir)
         .stdin(Stdio::null())
-        .output()
+        .output_bounded()
         .unwrap()
 }
 

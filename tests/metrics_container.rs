@@ -18,6 +18,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,7 +39,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -51,7 +54,7 @@ fn images() -> Option<(&'static str, &'static str)> {
             let engine = agg::isolation::container_engine().unwrap_or("docker");
             let build = |tag: &str, dir: &str| {
                 let ctx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/container").join(dir);
-                let out = Command::new(engine).args(["build", "-q", "-t", tag]).arg(&ctx).output().unwrap();
+                let out = Command::new(engine).args(["build", "-q", "-t", tag]).arg(&ctx).output_bounded().unwrap();
                 assert!(out.status.success(), "building {tag}: {}", String::from_utf8_lossy(&out.stderr));
                 tag.to_string()
             };
@@ -143,7 +146,7 @@ impl Ctr {
                 c.env("DOCKER_CONFIG", Path::new(&h).join(".docker"));
             }
         }
-        let out = c.output().unwrap();
+        let out = c.output_bounded().unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         (out.status.code(), stdout.clone(), format!("{stdout}{}", String::from_utf8_lossy(&out.stderr)))
     }

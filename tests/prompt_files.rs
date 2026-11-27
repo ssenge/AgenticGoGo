@@ -7,6 +7,9 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use common::Bounded;
 use assert_cmd::cargo::CommandCargoExt;
 use std::fs;
 use std::path::Path;
@@ -23,7 +26,7 @@ fn chmod_x(p: &Path) {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+    let out = Command::new("git").args(args).current_dir(dir).output_bounded().unwrap();
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
@@ -75,7 +78,7 @@ fn agg(dir: &Path, out: &Path, edit: Option<&Path>, args: &[&str]) -> Output {
         Some(p) => c.env("EDIT", p),
         None => c.env_remove("EDIT"),
     };
-    c.args(args).output().unwrap()
+    c.args(args).output_bounded().unwrap()
 }
 
 fn text(o: &Output) -> String {
