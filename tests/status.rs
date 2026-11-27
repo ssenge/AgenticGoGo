@@ -80,9 +80,9 @@ fn live_project() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
     let claude = tmp.path().join("bin/claude");
     write(&claude, &worker(&ctl, Path::new(env!("CARGO_BIN_EXE_rlt"))));
     chmod_x(&claude);
-    let judge = dir.join("rlt/judges/worked.sh");
-    write(&judge, "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1}'\n");
-    chmod_x(&judge);
+    let verifier = dir.join("rlt/verifiers/worked.sh");
+    write(&verifier, "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1}'\n");
+    chmod_x(&verifier);
     write(
         &dir.join("rlt/rlt.yaml"),
         "project: \"live\"\ndefaults: { model: \"configured-model\" }\nsteps:\n  worker: {}\nsequence:\n  steps: [\"worker\"]\n  done_if: \"worked\"\nsummary: { enabled: false }\n",
@@ -116,7 +116,7 @@ fn status(dir: &Path, path: &str) -> Value {
     let out = rlt_from_outside(dir, path, &["status", "--json"]);
     assert!(out.status.success(), "status --json failed: {}", String::from_utf8_lossy(&out.stderr));
     let v: Value = serde_json::from_slice(&out.stdout).expect("status --json prints one JSON document");
-    assert_valid("status.v1.json", &v);
+    assert_valid("status.v2.json", &v);
     v
 }
 
@@ -151,7 +151,7 @@ fn status_follows_a_live_run_and_an_answer_reaches_the_next_brief() {
     assert_eq!(s["current_step"]["name"], "worker");
     assert_eq!(s["current_step"]["model"], "configured-model", "the step names what rlt asked for");
     assert_eq!(s["stop_reason"], Value::Null);
-    assert_eq!(s["judges"]["worked"]["last"]["met"], false, "the baseline verdict is the latest so far");
+    assert_eq!(s["verifiers"]["worked"]["last"]["met"], false, "the baseline verdict is the latest so far");
     assert!(s["run_id"].as_str().is_some_and(|r| r.starts_with("run-")), "{s}");
 
     fs::write(ctl.join("go_1"), "").unwrap();
@@ -187,7 +187,7 @@ fn status_follows_a_live_run_and_an_answer_reaches_the_next_brief() {
     assert_eq!((s["running"].as_bool(), s["finished"].as_bool(), s["phase"].as_str()), (Some(false), Some(true), Some("done")));
     assert!(s["stop_reason"].is_string());
     assert_eq!(s["usage"]["worker"]["tokens"]["output"], 150, "three sessions × 50");
-    assert_eq!(s["judges"]["worked"]["last"]["met"], true);
+    assert_eq!(s["verifiers"]["worked"]["last"]["met"], true);
 }
 
 /// Before any run there is no snapshot: `status --json` fails loudly instead of printing an empty

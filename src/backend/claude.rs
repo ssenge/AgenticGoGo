@@ -7,7 +7,7 @@
 //! Claude is the only backend that reports a DOLLAR cost (`total_cost_usd`), which is why
 //! `cost.total` / `over_cost` are Claude-only. It is NOT the only one that can run a read-only
 //! one-shot call — Codex (`--sandbox read-only`) and Copilot (withhold `--allow-all-tools`) can
-//! too, so LLM judges and summaries work on all three. Read-only is what an LLM judge HAS to be, or
+//! too, so rubric verifiers and summaries work on all three. Read-only is what an rubric verifier HAS to be, or
 //! it could go and edit the thing it is grading. See [`super::Capabilities`] for the full matrix.
 
 use super::{stream, AgentBackend, Capabilities, OneShot, SessionReport, SessionSpec};
@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 
 /// Default worker model (rlt.yaml `model:`).
 pub const DEFAULT_MODEL: &str = "claude-opus-4-8[1m]";
-/// Default summarizer / LLM-judge model — the cheap one.
+/// Default summarizer / rubric verifier model — the cheap one.
 pub const DEFAULT_SUMMARY_MODEL: &str = "haiku";
 
 /// The Claude Code CLI, driven headlessly.
@@ -155,8 +155,8 @@ impl AgentBackend for Claude {
     /// authenticates) and is isolated two ways: `--strict-mcp-config` (no MCP servers) and
     /// `--setting-sources user` (load ONLY the operator's own settings, never the worker-mutated
     /// repo's `.claude/settings.json` or hooks). Together these stop a worker from steering its
-    /// own judge via repo config, while preserving auth. (CLAUDE.md auto-discovery in cwd is the
-    /// documented residual — see judge.rs's trust-boundary note.)
+    /// own verifier via repo config, while preserving auth. (CLAUDE.md auto-discovery in cwd is the
+    /// documented residual — see verifier.rs's trust-boundary note.)
     fn one_shot(
         &self,
         prompt: &str,
@@ -187,7 +187,7 @@ impl AgentBackend for Claude {
             command.current_dir(dir);
         }
         command.envs(super::user_env::passed());
-        // Confine the judge under `Sandbox` (ISOLATION.md §12). Claude's permission layer already
+        // Confine the verifier under `Sandbox` (ISOLATION.md §12). Claude's permission layer already
         // denies tool writes here, but that is not a kernel jail — the OS wrapper is.
         let command = self.confine_one_shot(command, cwd, isolation)?;
         let out: Captured = proc::run_with_input(command, prompt.as_bytes(), timeout_secs)?;
@@ -274,7 +274,7 @@ fn unwrap_envelope(stdout: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// The envelope unwrap was duplicated in judge.rs and summary.rs and tested in neither.
+    /// The envelope unwrap was duplicated in verifier.rs and summary.rs and tested in neither.
     #[test]
     fn unwrap_envelope_extracts_result_and_falls_back() {
         assert_eq!(unwrap_envelope(br#"{"result":"the answer","cost":1}"#), "the answer");

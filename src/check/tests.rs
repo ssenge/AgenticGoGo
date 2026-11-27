@@ -1,18 +1,18 @@
 use super::*;
 
-/// A throwaway `rlt/` folder holding `rlt.yaml` = `body` and one script judge per name.
-fn project(body: &str, judges: &[&str]) -> tempfile::TempDir {
+/// A throwaway `rlt/` folder holding `rlt.yaml` = `body` and one script verifier per name.
+fn project(body: &str, verifiers: &[&str]) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join("judges")).unwrap();
-    for n in judges {
-        std::fs::write(tmp.path().join(format!("judges/{n}.sh")), "#!/bin/sh\necho '{\"met\":true}'\n").unwrap();
+    std::fs::create_dir_all(tmp.path().join("verifiers")).unwrap();
+    for n in verifiers {
+        std::fs::write(tmp.path().join(format!("verifiers/{n}.sh")), "#!/bin/sh\necho '{\"met\":true}'\n").unwrap();
     }
     std::fs::write(tmp.path().join("rlt.yaml"), body).unwrap();
     tmp
 }
 
-fn check(body: &str, judges: &[&str]) -> Validation {
-    let tmp = project(body, judges);
+fn check(body: &str, verifiers: &[&str]) -> Validation {
+    let tmp = project(body, verifiers);
     validate(tmp.path(), &tmp.path().join("rlt.yaml"))
 }
 
@@ -30,20 +30,20 @@ fn a_missing_config_is_one_problem_at_the_root() {
 }
 
 /// THE acceptance criterion: problems from EVERY stage, in one pass — two unknown keys (parse), an
-/// unbounded `until:` and a judge with no file (assembly), and an unknown step agent (capability).
+/// unbounded `until:` and a verifier with no file (assembly), and an unknown step agent (capability).
 #[test]
 fn every_stage_reports_in_one_pass() {
     let v = check(
-        "project: p\ndefaults: { agnet: claude }\nsteps: { w: { agent: robot, judge_x: 1 } }\n\
+        "project: p\ndefaults: { agnet: claude }\nsteps: { w: { agent: robot, verifier_x: 1 } }\n\
          sequence:\n  steps: [w, { step: w, until: goal }]\n  done_if: \"ghost\"\n",
         &["goal"],
     );
     let ps = paths(&v);
-    for want in ["defaults.agnet", "steps.w.judge_x", "sequence.steps[1].until", "sequence.done_if", "steps.w.agent"] {
+    for want in ["defaults.agnet", "steps.w.verifier_x", "sequence.steps[1].until", "sequence.done_if", "steps.w.agent"] {
         assert!(ps.contains(&want), "missing `{want}` in {ps:?}");
     }
     let ghost = v.problems.iter().find(|p| p.path == "sequence.done_if").unwrap();
-    assert!(ghost.message.contains("ghost"), "the judge problem names the judge: {}", ghost.message);
+    assert!(ghost.message.contains("ghost"), "the verifier problem names the verifier: {}", ghost.message);
     assert!(v.cfg.is_some(), "unknown keys are set aside, so the later stages still ran");
     assert!(!v.report(Path::new("x")).ok);
 }
@@ -53,10 +53,10 @@ fn every_stage_reports_in_one_pass() {
 #[test]
 fn type_errors_beside_unknown_keys_are_all_reported() {
     let v = check(
-        "project: p\nbogus: 1\njudge: { timeout: \"soon\" }\nheartbeat_secs: \"often\"\nsteps: { w: {} }\nsequence: { steps: [w], done_if: \"ghost\" }\n",
+        "project: p\nbogus: 1\nverifier: { timeout: \"soon\" }\nheartbeat_secs: \"often\"\nsteps: { w: {} }\nsequence: { steps: [w], done_if: \"ghost\" }\n",
         &[],
     );
-    assert_eq!(&paths(&v)[..4], ["bogus", "judge.timeout", "heartbeat_secs", "sequence.done_if"]);
+    assert_eq!(&paths(&v)[..4], ["bogus", "verifier.timeout", "heartbeat_secs", "sequence.done_if"]);
     assert!(v.problems[1].message.contains("invalid type"), "{}", v.problems[1].message);
     assert!(v.cfg.is_some(), "the refused values fall back to their defaults so checking goes on");
 }
@@ -81,8 +81,8 @@ fn a_file_that_is_not_yaml_is_one_problem() {
 /// With no unknown key to set aside, the parse problem is serde's own startup message, located.
 #[test]
 fn a_lone_type_error_keeps_the_startup_message() {
-    let v = check("project: p\njudge: { timeout: \"soon\" }\n", &[]);
-    assert_eq!(paths(&v), ["judge.timeout"]);
+    let v = check("project: p\nverifier: { timeout: \"soon\" }\n", &[]);
+    assert_eq!(paths(&v), ["verifier.timeout"]);
     assert!(v.problems[0].message.contains("at line 2"), "the startup text carries the location: {}", v.problems[0].message);
 }
 
@@ -100,7 +100,7 @@ fn a_valid_config_assembles_and_reports_ok_json() {
     let v = check("project: p\nsummary: { enabled: false }\nsteps: { w: {} }\nsequence: { steps: [w], done_if: \"goal\" }\n", &["goal"]);
     // the agent CLI may be absent on this host; that is the ONLY problem a valid config may have.
     assert!(v.problems.iter().all(|p| p.path == "defaults.agent"), "{:?}", v.problems);
-    assert_eq!(v.assembly.as_ref().map(|a| a.engine.judges.len()), Some(1));
+    assert_eq!(v.assembly.as_ref().map(|a| a.engine.verifiers.len()), Some(1));
     let json = serde_json::to_value(v.report(Path::new("rlt/rlt.yaml"))).unwrap();
     assert_eq!(json["schema_version"], SCHEMA_VERSION);
     assert_eq!(json["config"], "rlt/rlt.yaml");
@@ -110,7 +110,7 @@ fn a_valid_config_assembles_and_reports_ok_json() {
 #[test]
 fn agent_sites_name_each_agent_once_at_its_first_key() {
     let cfg: RelentlessConfig = serde_yaml::from_str(
-        "project: p\ndefaults: { agent: claude }\njudge: { agent: claude }\nsteps: { a: { agent: codex }, b: { agent: codex } }\n",
+        "project: p\ndefaults: { agent: claude }\nverifier: { agent: claude }\nsteps: { a: { agent: codex }, b: { agent: codex } }\n",
     )
     .unwrap();
     let sites = agent_sites(&cfg);

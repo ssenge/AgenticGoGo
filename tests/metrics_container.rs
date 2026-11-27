@@ -1,16 +1,16 @@
-//! Metric and score judges (A-20) on the container tier (A-11), end to end: the real `rlt` binary, a
-//! REAL container engine, the worker in the fake-agent image and swe-metrics in a judges' test image
+//! Metric and score verifiers (A-20) on the container tier (A-11), end to end: the real `rlt` binary, a
+//! REAL container engine, the worker in the fake-agent image and swe-metrics in a verifiers' test image
 //! with a FAKE `swe-metrics` baked in (`tests/fixtures/container/fake-metrics`).
 //!
 //! What this proves:
-//! - every `swe-metrics` call runs INSIDE `judge.image` — the host's PATH has a stub that fails and
+//! - every `swe-metrics` call runs INSIDE `verifier.image` — the host's PATH has a stub that fails and
 //!   leaves a mark if anything calls it, startup probe included;
-//! - the project is READ-ONLY to it, its home is fresh, it writes the session's judge scratch;
-//! - ONE measurement per judged tree, shared by a metric and a score judge;
+//! - the project is READ-ONLY to it, its home is fresh, it writes the session's verifier scratch;
+//! - ONE measurement per verified tree, shared by a metric and a score verifier;
 //! - a score is taken against the incumbent's report, which the container reads from
 //!   `rlt/private/metrics/incumbent/`, and rlt keeps it as before;
 //! - the host's trivy database is mounted READ-ONLY, with updates off;
-//! - startup refuses a judges' image without swe-metrics at `judge.image`, once, and `rlt doctor
+//! - startup refuses a verifiers' image without swe-metrics at `verifier.image`, once, and `rlt doctor
 //!   --json` reports swe-metrics under `container_images`.
 //!
 //! Skipped LOUDLY without a running engine. Projects live under `target/`, which every engine rlt
@@ -43,7 +43,7 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
-/// `(worker image, judges' image)`, built once per test process. `None` = no engine (skip).
+/// `(worker image, verifiers' image)`, built once per test process. `None` = no engine (skip).
 fn images() -> Option<(&'static str, &'static str)> {
     static IMAGES: OnceLock<Option<(String, String)>> = OnceLock::new();
     IMAGES
@@ -92,10 +92,10 @@ struct Ctr {
 }
 
 impl Ctr {
-    /// A container-tier project: the worker in `worker`, the judges in `judges`, a metric judge
-    /// (`sessions ≥ 2`) and a score judge (`≥ 60`), the host stub first on PATH, and a seeded trivy
+    /// A container-tier project: the worker in `worker`, the verifiers in `verifiers`, a metric verifier
+    /// (`sessions ≥ 2`) and a score verifier (`≥ 60`), the host stub first on PATH, and a seeded trivy
     /// cache the run is pointed at.
-    fn new(name: &str, worker: &str, judges: &str) -> Ctr {
+    fn new(name: &str, worker: &str, verifiers: &str) -> Ctr {
         let root = root(name);
         let d = root.0.join("proj");
         chmod_x(&{
@@ -107,15 +107,15 @@ impl Ctr {
         git(&root.0, &["init", "-q", "-b", "main", d.to_str().unwrap()]);
         git(&d, &["config", "user.email", "t@t"]);
         git(&d, &["config", "user.name", "t"]);
-        write(&d, ".gitignore", "rlt/state/\nagg/private/\n");
+        write(&d, ".gitignore", "rlt/state/\nrlt/private/\n");
         write(
             &d,
             "rlt/rlt.yaml",
             &format!(
                 "project: \"mctr\"\n\
                  defaults: {{ model: \"fake\", isolation: \"container\", image: \"{worker}\" }}\n\
-                 judge: {{ image: \"{judges}\" }}\n\
-                 judges:\n  \
+                 verifier: {{ image: \"{verifiers}\" }}\n\
+                 verifiers:\n  \
                    sessions: {{ metric: {{ id: \"work.sessions\" }}, min: 2 }}\n  \
                    quality: {{ score: {{ definition: \"swe-default\", version: \"2\" }}, min: 60 }}\n\
                  steps: {{ worker: {{}} }}\n\
@@ -139,7 +139,7 @@ impl Ctr {
     fn rlt_split(&self, args: &[&str]) -> (Option<i32>, String, String) {
         let mut c = Command::cargo_bin("rlt").unwrap();
         c.args(args).current_dir(&self.dir).env("PATH", &self.path).env("HOME", self.root.0.join("home")).env("TRIVY_CACHE_DIR", &self.trivy)
-            .env("RLT_KEEP_JUDGE_SCRATCH", "1"); // the fake logs into the scratch, read after the run
+            .env("RLT_KEEP_VERIFIER_SCRATCH", "1"); // the fake logs into the scratch, read after the run
         // HOME is redirected, which would hide the engine client's config (colima's context).
         if std::env::var_os("DOCKER_CONFIG").is_none() {
             if let Some(h) = std::env::var_os("HOME") {
@@ -157,18 +157,18 @@ impl Ctr {
 
     /// The fake's log of one session's scratch (`0` = the baseline pass).
     fn log(&self, session: u32) -> String {
-        let p = self.dir.join(format!("rlt/private/container/judge/scratch-{session}/swe-metrics.log"));
+        let p = self.dir.join(format!("rlt/private/container/verifier/scratch-{session}/swe-metrics.log"));
         fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
     }
 }
 
 #[test]
-fn metric_and_score_judges_measure_in_the_judges_image_never_on_the_host() {
-    let Some((worker, judges)) = images() else {
+fn metric_and_score_verifiers_measure_in_the_verifiers_image_never_on_the_host() {
+    let Some((worker, verifiers)) = images() else {
         eprintln!("SKIPPED: no container engine");
         return;
     };
-    let p = Ctr::new("run", worker, judges);
+    let p = Ctr::new("run", worker, verifiers);
     let (code, out) = p.rlt(&["run", "--max-sessions", "3"]);
     assert_eq!(code, Some(0), "two sessions meet `sessions AND quality`:\n{out}");
     assert!(!p.host_called(), "swe-metrics ran on the HOST:\n{out}");
@@ -179,7 +179,7 @@ fn metric_and_score_judges_measure_in_the_judges_image_never_on_the_host() {
     };
     for s in 0..=2 {
         let log = p.log(s);
-        assert_eq!(log.matches("measure ").count(), 1, "ONE measurement per judged tree, shared by both judges (scratch-{s}):\n{log}");
+        assert_eq!(log.matches("measure ").count(), 1, "ONE measurement per verified tree, shared by both verifiers (scratch-{s}):\n{log}");
         for want in [
             "MEASURE_IN_CONTAINER",
             "MEASURE_PROJECT_WRITE_DENIED",
@@ -209,19 +209,19 @@ fn metric_and_score_judges_measure_in_the_judges_image_never_on_the_host() {
     let ev = fs::read_dir(p.dir.join("rlt/private/evidence")).unwrap().flatten().next().unwrap().path();
     assert!(ev.join("2/sessions/swe-metrics/target/report.json").is_file(), "the report is kept as evidence: {}", ev.display());
 
-    // `rlt judge` on a container run measures in the image too — the host need not have swe-metrics
-    let (code, out) = p.rlt(&["judge", "sessions"]);
+    // `rlt verifier` on a container run measures in the image too — the host need not have swe-metrics
+    let (code, out) = p.rlt(&["verify", "sessions"]);
     assert!(code == Some(0) && out.contains("work.sessions"), "{out}");
-    assert!(!p.host_called(), "`rlt judge` ran swe-metrics on the host:\n{out}");
+    assert!(!p.host_called(), "`rlt verifier` ran swe-metrics on the host:\n{out}");
 }
 
 #[test]
-fn startup_refuses_a_judges_image_without_swe_metrics_and_doctor_reports_it() {
-    let Some((worker, judges)) = images() else {
+fn startup_refuses_a_verifiers_image_without_swe_metrics_and_doctor_reports_it() {
+    let Some((worker, verifiers)) = images() else {
         eprintln!("SKIPPED: no container engine");
         return;
     };
-    // the worker's image has no swe-metrics: refused at the key that chose the judges' image, once
+    // the worker's image has no swe-metrics: refused at the key that chose the verifiers' image, once
     let bad = Ctr::new("refuse", worker, worker);
     let (code, json, out) = bad.rlt_split(&["check", "--json"]);
     assert_eq!(code, Some(1), "{out}");
@@ -229,17 +229,17 @@ fn startup_refuses_a_judges_image_without_swe_metrics_and_doctor_reports_it() {
     let missing: Vec<&serde_json::Value> =
         v["problems"].as_array().unwrap().iter().filter(|p| p["message"].as_str().unwrap_or("").contains("has no `swe-metrics` on PATH")).collect();
     assert_eq!(missing.len(), 1, "listed exactly once: {v:#}");
-    assert_eq!(missing[0]["path"], "judge.image", "{v:#}");
+    assert_eq!(missing[0]["path"], "verifier.image", "{v:#}");
     let (code, out) = bad.rlt(&["run", "--max-sessions", "1"]);
     assert_ne!(code, Some(0), "the run must not start:\n{out}");
     assert!(out.contains("has no `swe-metrics` on PATH"), "{out}");
     assert!(!bad.host_called(), "the probe asked the HOST:\n{out}");
 
     // the image that has it passes, and doctor says so under container_images
-    let good = Ctr::new("doctor", worker, judges);
+    let good = Ctr::new("doctor", worker, verifiers);
     let (_, json, out) = good.rlt_split(&["doctor", "--json"]);
     let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}\n{out}"));
-    let img = v["container_images"].as_array().unwrap().iter().find(|i| i["image"] == judges).unwrap_or_else(|| panic!("{v:#}"));
+    let img = v["container_images"].as_array().unwrap().iter().find(|i| i["image"] == verifiers).unwrap_or_else(|| panic!("{v:#}"));
     assert_eq!(img["clis"]["swe-metrics"], "fake-swe-metrics 1.0.0", "{v:#}");
     assert!(v["problems"].as_array().unwrap().is_empty(), "{v:#}");
     assert!(!good.host_called());

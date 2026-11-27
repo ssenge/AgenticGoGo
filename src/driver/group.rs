@@ -1,26 +1,26 @@
-//! Judge GROUPS on the driver path — `sequence.groups` and `count_met(<group>)` spelled in Rust.
+//! Verifier GROUPS on the driver path — `sequence.groups` and `count_met(<group>)` spelled in Rust.
 //!
-//! A [`Group`] names a list of judges; [`crate::driver::Relentless::group`] asks every member (each through
-//! the same lazy, memoized cache as `rlt.judge()`) and returns a [`GroupVerdict`] to count over. The
+//! A [`Group`] names a list of verifiers; [`crate::driver::Relentless::group`] asks every member (each through
+//! the same lazy, memoized cache as `rlt.verifier()`) and returns a [`GroupVerdict`] to count over. The
 //! group carries no threshold: "two of three" is `rlt.group(&quality).at_least(2)`, written where
 //! the driver branches, exactly as the YAML path writes `count_met(quality) >= 2` in the condition.
 //!
-//! At [`crate::driver::Relentless::gate`], a judge asked ONLY through a group is judged with its group,
+//! At [`crate::driver::Relentless::gate`], a verifier asked ONLY through a group is verified with its group,
 //! net — the rule `crate::core::groups` documents — while one the driver also asked on its own is
 //! held one by one.
 
-use crate::core::model::{Judge, Verdict};
+use crate::core::model::{Verifier, Verdict};
 
-/// A named list of judges: `Group::new("quality", [sonar, codescene, lizard])`.
+/// A named list of verifiers: `Group::new("quality", [sonar, codescene, lizard])`.
 #[derive(Clone)]
 pub struct Group {
     pub(crate) name: String,
-    pub(crate) members: Vec<Judge>,
+    pub(crate) members: Vec<Verifier>,
 }
 
 impl Group {
     /// A group of `members`. The name is what the gate and the logs call it.
-    pub fn new(name: impl Into<String>, members: impl IntoIterator<Item = Judge>) -> Group {
+    pub fn new(name: impl Into<String>, members: impl IntoIterator<Item = Verifier>) -> Group {
         Group { name: name.into(), members: members.into_iter().collect() }
     }
 
@@ -29,7 +29,7 @@ impl Group {
         &self.name
     }
 
-    /// The member judges' names, in order.
+    /// The member verifiers' names, in order.
     pub fn member_names(&self) -> Vec<String> {
         self.members.iter().map(|j| j.name.clone()).collect()
     }
@@ -114,7 +114,7 @@ mod tests {
         let mut v = gv(&[true]);
         v.verdicts.push(("broken".into(), Verdict::failed("boom")));
         assert_eq!(v.errored(), vec!["broken"]);
-        let g = Group::new("q", [Judge::script("a", "a.sh"), Judge::script("b", "b.sh")]);
+        let g = Group::new("q", [Verifier::script("a", "a.sh"), Verifier::script("b", "b.sh")]);
         assert_eq!((g.name(), g.member_names()), ("q", vec!["a".to_string(), "b".to_string()]));
     }
 }

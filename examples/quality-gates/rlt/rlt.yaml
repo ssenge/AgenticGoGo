@@ -1,15 +1,15 @@
-# rlt.yaml — quality gates without writing a judge script: metric and score judges over swe-metrics
+# rlt.yaml — quality gates without writing a verifier script: metric and score verifiers over swe-metrics
 # (https://github.com/ssenge/swe-metrics — install it and put `swe-metrics` on PATH; rlt refuses this
-# config at startup without it). A judge DECLARED under `judges:` needs no file in rlt/judges/.
+# config at startup without it). A verifier DECLARED under `verifiers:` needs no file in rlt/verifiers/.
 project: "quality-gates"
 
 defaults:
   agent: "claude"
   model: "claude-haiku-4-5-20251001"
 
-judges:
+verifiers:
   # one number of the swe-metrics report, held to a threshold. All of these share ONE measurement
-  # per session; a metric whose analyzer was skipped or failed makes its judge ERROR, never pass.
+  # per session; a metric whose analyzer was skipped or failed makes its verifier ERROR, never pass.
   cc_max:  { metric: { id: "complexity.cyclomatic", stat: "max", tool: "lizard" }, max: 5 }
   cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 5 }
   cog_p95: { metric: { id: "complexity.cognitive", stat: "p95", combine: "strictest" }, max: 8 }

@@ -1,4 +1,4 @@
-//! The `template` judge (A-38 3.9): a document filled in from a template. Met when the document has the template's
+//! The `template` verifier (A-38 3.9): a document filled in from a template. Met when the document has the template's
 //! headings in the template's order (a heading's level and text; the template's placeholders in a heading match any
 //! text), no section is empty, and nothing of the template is left: its placeholders, an HTML comment, an instruction
 //! line (a `> Instruction:` line, or a blockquote line the template has). The rationale names the first three problems
@@ -125,7 +125,7 @@ pub fn rationale(problems: &[String], doc: &str, sections: usize) -> String {
     format!("{doc}: {}{}", problems.iter().take(3).cloned().collect::<Vec<_>>().join("; "), if more > 0 { format!(" (and {more} more)") } else { String::new() })
 }
 
-/// The judge's verdict on `doc` (relative to `project`) against the template file.
+/// The verifier's verdict on `doc` (relative to `project`) against the template file.
 pub fn verdict(project: &Path, doc: &str, template: &Path, placeholder: &str) -> Verdict {
     let Ok(text) = std::fs::read_to_string(project.join(doc)) else {
         return Verdict::binary(false).with_rationale(format!("{doc} is missing"));

@@ -18,15 +18,15 @@
 //! Aggregates: all_goals, count_met, total, met_fraction, any_regressed, count_regressed. **Bare,
 //! they range over the DoD-set** (`done_if` ∪ `invariants`) — NOT the whole run-set — so `done_if:
 //! all_goals` cannot mean "done when stuck" (§5.3). The `(invariants)` subset restricts one to the
-//! invariant judges; a `(<group>)` subset to that group's members (`sequence.groups`,
+//! invariant verifiers; a `(<group>)` subset to that group's members (`sequence.groups`,
 //! [`crate::core::groups`]) — "k of n" is `count_met(group) >= k`. `weighted_fraction` is DROPPED.
 //!
-//! A bare judge id is its **`met` bool**, resolved over the WHOLE run-set (so `if stalled` reads
-//! `stalled`). To compare the NUMBER a judge emitted, use the dotted accessor — `coverage.value >=
+//! A bare verifier id is its **`met` bool**, resolved over the WHOLE run-set (so `if stalled` reads
+//! `stalled`). To compare the NUMBER a verifier emitted, use the dotted accessor — `coverage.value >=
 //! 80`, never `coverage >= 80` (the latter is a hard error: see [`Val::GoalBool`]).
 
 use crate::core::groups::Groups;
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use anyhow::{bail, Context, Result};
 
 /// The facts the evaluator needs about the current run-set + run.
@@ -37,13 +37,13 @@ use lex::{tokenize, Tok};
 use parse::Parser;
 
 pub struct StopContext<'a> {
-    /// the WHOLE run-set. Aggregates filter to `judge.in_dod` (the DoD-set); bare names / accessors
+    /// the WHOLE run-set. Aggregates filter to `verifier.in_dod` (the DoD-set); bare names / accessors
     /// resolve over all of them.
-    pub judges: &'a [Judge],
-    /// ids of the judges that RAN this step and returned an `error` (backs `any_judge_error`).
-    /// Empty when no judge ran — a step whose judges were skipped is not "stale true", it is
-    /// honestly false: no judge ran, so no judge errored.
-    pub judge_errors: &'a [String],
+    pub verifiers: &'a [Verifier],
+    /// ids of the verifiers that RAN this step and returned an `error` (backs `any_verifier_error`).
+    /// Empty when no verifier ran — a step whose verifiers were skipped is not "stale true", it is
+    /// honestly false: no verifier ran, so no verifier errored.
+    pub verifier_errors: &'a [String],
     /// cumulative output tokens spent this run (for budget guards)
     pub tokens_spent: u64,
     /// budget ceiling, if configured (source: `sequence.limits.tokens`)
@@ -70,19 +70,19 @@ pub struct StopContext<'a> {
     pub rate_limit_wait_secs: f64,
     /// the gate's ratchet config and history (backs `rollbacks`, `consecutive_rollbacks`,
     /// `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes`,
-    /// `oscillating`, `ratchet_regressed`, `<judge>.ref`). `None` = a context with no gate behind
+    /// `oscillating`, `ratchet_regressed`, `<verifier>.ref`). `None` = a context with no gate behind
     /// it, which reads as a run that has gated nothing — and `.ref` on it is an error.
     pub gate: Option<&'a crate::core::ratchet::Gate>,
-    /// the configured judge groups (`sequence.groups`) — what a `(<group>)` subset resolves against.
+    /// the configured verifier groups (`sequence.groups`) — what a `(<group>)` subset resolves against.
     pub groups: &'a Groups,
 }
 
 impl<'a> StopContext<'a> {
-    /// Convenience for callers that only have the judge set (plan/validate paths).
-    pub fn from_judges(judges: &'a [Judge]) -> Self {
+    /// Convenience for callers that only have the verifier set (plan/validate paths).
+    pub fn from_verifiers(verifiers: &'a [Verifier]) -> Self {
         StopContext {
-            judges,
-            judge_errors: &[],
+            verifiers,
+            verifier_errors: &[],
             tokens_spent: 0,
             budget_total: None,
             cost_spent: 0.0,
@@ -107,11 +107,11 @@ pub(super) enum Subset<'s> {
 }
 
 impl<'a> StopContext<'a> {
-    /// The judges an aggregate ranges over (§5.3): the DoD-set bare, the invariants under
+    /// The verifiers an aggregate ranges over (§5.3): the DoD-set bare, the invariants under
     /// `(invariants)` (a subset of the DoD-set), or a group's members — looked up over the WHOLE
     /// run-set, since a group named only in `abort_if` puts its members in the run-set alone.
-    fn scope<'s>(&'s self, subset: Subset<'s>) -> impl Iterator<Item = &'s Judge> + 's {
-        self.judges.iter().filter(move |g| match subset {
+    fn scope<'s>(&'s self, subset: Subset<'s>) -> impl Iterator<Item = &'s Verifier> + 's {
+        self.verifiers.iter().filter(move |g| match subset {
             Subset::Dod => g.in_dod,
             Subset::Invariants => g.invariant,
             Subset::Group(members) => members.iter().any(|m| m == &g.name),
@@ -128,11 +128,11 @@ impl<'a> StopContext<'a> {
     }
     /// Bare-name lookup ranges over the WHOLE run-set (an `if stalled` condition must read `stalled`,
     /// which is not in the DoD-set).
-    fn judge_met(&self, id: &str) -> Option<bool> {
-        self.judges.iter().find(|g| g.name == id).map(|g| g.met())
+    fn verifier_met(&self, id: &str) -> Option<bool> {
+        self.verifiers.iter().find(|g| g.name == id).map(|g| g.met())
     }
-    fn judge(&self, id: &str) -> Option<&Judge> {
-        self.judges.iter().find(|g| g.name == id)
+    fn verifier(&self, id: &str) -> Option<&Verifier> {
+        self.verifiers.iter().find(|g| g.name == id)
     }
 }
 
@@ -149,23 +149,23 @@ pub fn evaluate(expr: &str, ctx: &StopContext) -> Result<bool> {
 
 /// Validate an expression at config-load time (with a dummy context: no verdicts yet).
 ///
-/// This is where `coverage >= 80` — a judge's `met` bool compared to a number, which coerces to a
+/// This is where `coverage >= 80` — a verifier's `met` bool compared to a number, which coerces to a
 /// silently-always-false `1.0 >= 80.0` — is caught. The type error lives in [`Parser::parse_cmp`],
 /// so it fires here at STARTUP rather than 3 sessions into a run.
-pub fn validate(expr: &str, judges: &[Judge]) -> Result<()> {
-    validate_with(expr, judges, None, Groups::none())
+pub fn validate(expr: &str, verifiers: &[Verifier]) -> Result<()> {
+    validate_with(expr, verifiers, None, Groups::none())
 }
 
-/// [`validate`] against a gate and the configured groups, so `<judge>.ref` on a ratcheted judge is
-/// accepted and on any other judge is refused, and `count_met(<group>)` resolves (or names the
+/// [`validate`] against a gate and the configured groups, so `<verifier>.ref` on a ratcheted verifier is
+/// accepted and on any other verifier is refused, and `count_met(<group>)` resolves (or names the
 /// groups that exist) — at startup, not three sessions in.
 pub fn validate_with(
     expr: &str,
-    judges: &[Judge],
+    verifiers: &[Verifier],
     gate: Option<&crate::core::ratchet::Gate>,
     groups: &Groups,
 ) -> Result<()> {
-    let ctx = StopContext { gate, groups, ..StopContext::from_judges(judges) };
+    let ctx = StopContext { gate, groups, ..StopContext::from_verifiers(verifiers) };
     evaluate(expr, &ctx).map(|_| ()).with_context(|| format!("invalid condition `{expr}`"))
 }
 
@@ -173,23 +173,23 @@ pub fn validate_with(
 const AGGREGATES: &[&str] = &["all_goals", "count_met", "count_regressed", "total", "met_fraction", "any_regressed"];
 
 /// Is the identifier at `i` a SUBSET argument — `x` in `count_met(x)`? Then it names a group (or the
-/// invariants), never a judge.
+/// invariants), never a verifier.
 fn is_subset_arg(tokens: &[Tok], i: usize) -> bool {
     i >= 2
         && matches!(tokens[i - 1], Tok::LParen)
         && matches!(&tokens[i - 2], Tok::Ident(a) if AGGREGATES.contains(&a.as_str()))
 }
 
-/// The judge NAMES an expression references — everything that is neither an aggregate, a run-level
+/// The verifier NAMES an expression references — everything that is neither an aggregate, a run-level
 /// term, nor a subset argument (`invariants`, a group). Used to compute the run-set / DoD-set (§5.3):
-/// resolve each returned name against the judge library. Dotted accessors (`coverage.value`) yield
+/// resolve each returned name against the verifier library. Dotted accessors (`coverage.value`) yield
 /// `coverage`. A group's members are NOT returned here — see [`subsets`].
-pub fn judge_names(expr: &str) -> Result<Vec<String>> {
+pub fn verifier_names(expr: &str) -> Result<Vec<String>> {
     const RESERVED: &[&str] = &[
         "all_goals", "count_met", "count_regressed", "total", "met_fraction", "any_regressed",
         "tokens_spent", "budget_total", "wall_time", "human_wait_time", "work_time",
         "over_budget", "cost_spent", "cost_limit",
-        "over_cost", "iterations", "max_iterations", "over_iterations", "any_judge_error",
+        "over_cost", "iterations", "max_iterations", "over_iterations", "any_verifier_error",
         "invariants", "rollbacks", "consecutive_rollbacks", "oscillating", "ratchet_regressed",
         "no_improvements", "consecutive_no_improvements", "no_changes", "consecutive_no_changes",
     ];

@@ -1,8 +1,8 @@
 # Hooks: scripts before and after every step and every phase (docs/PROCESS.md). The process's own, here; a project's go
 # in the file `run.hooks.project` names, in the project.
 step:
-  after: [judges/hook.sh]
+  after: [verifiers/hook.sh]
 steps:
-  survey: { after: [{ judge: worked }] }   # a declared judge as a hook
+  survey: { after: [{ verifier: worked }] }   # a declared verifier as a hook
 phases:
-  build: { before: [judges/phase-hook.sh before], after: [judges/phase-hook.sh after] }
+  build: { before: [verifiers/phase-hook.sh before], after: [verifiers/phase-hook.sh after] }

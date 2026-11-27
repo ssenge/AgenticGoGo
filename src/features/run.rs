@@ -81,7 +81,7 @@ impl Handler for LaunchWorker {
         ctx.charge_usage(crate::usage::Role::Worker, &step.agent, &outcome.usage);
 
         if crate::os::signals::interrupted() {
-            // an interrupted session is incomplete: never judged, never lost (A-18.3).
+            // an interrupted session is incomplete: never verified, never lost (A-18.3).
             crate::features::partial::save_and_reset(ctx);
             return Ok(Flow::Stop(ctx.finish_interrupted()));
         }

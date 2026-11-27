@@ -5,7 +5,7 @@
 version: 1
 vars: { app: app }
 roles: { file: tools.yaml }
-rlt: { judge_timeout: 60 }
+rlt: { verifier_timeout: 60 }
 run:
   history: reports/steps.jsonl
   own: [task.md, tools.yaml, reports/steps.jsonl]
@@ -17,7 +17,7 @@ run:
   scripts_runnable: [scripts]                         # a script a step wrote under scripts/ can run
   hooks: { process: hooks.yaml, project: hooks.yaml }
   auto_note: scripts/waiting.sh
-  judge_cache: { ignore: [notes.md] }
+  verifier_cache: { ignore: [notes.md] }
   brief:
     shared_machine: true                               # a standing section: this machine is shared with other runs
     sections: [{ file: prompts/house-rules.md }]
@@ -34,7 +34,7 @@ settings:
   defaults: { repairs: 1 }
   skip: [extras]
   models: { small: fake-small }
-judges:   # declared judges (A-38): a command met by its exit code (or a `metric:` or `score:` over swe-metrics)
+verifiers:   # declared verifiers (A-38): a command met by its exit code (or a `metric:` or `score:` over swe-metrics)
   worked: { command: "test -s work.log" }   # what the worker leaves behind
   report-form: { template: { doc: reports/summary.md, from: templates/summary.md } }   # a document filled in from a template
 deny:
@@ -60,7 +60,7 @@ phases:
     name: Survey
     kind: agent
     review: true
-    checks: [judges/survey.sh, { judge: worked }]
+    checks: [verifiers/survey.sh, { verifier: worked }]
     deny: [inputs]
     settings: { inputs: [task.md, checkpoints/cp-survey-decisions.md], outputs: [survey.md] }
   - { id: cp-survey, name: Survey approved, kind: checkpoint, prepare: scripts/doc.sh survey,
@@ -77,25 +77,25 @@ phases:
       name: Construct
       kind: agent
       prompt: prompts/construct.md
-      checks: ["judges/unit.sh {{ item }}", { run: judges/all-built.sh, when: last, name: all-built }]
+      checks: ["verifiers/unit.sh {{ item }}", { run: verifiers/all-built.sh, when: last, name: all-built }]
       sections: [{ text: "## Your unit\n\n```yaml\n{{ item.yaml }}```" }]
       constraints: "Only files matching {{ item.scope }} may change."
       deny: [inputs, "{{ app }}-frozen/**"]
     - { id: accept, name: Accept, kind: script, run: "scripts/accept.sh {{ item }} {{ before.construct }}" }
-  - { id: lint, name: Lint, kind: script, run: scripts/lint.sh, when: "judges/has.sh lint" }
+  - { id: lint, name: Lint, kind: script, run: scripts/lint.sh, when: "verifiers/has.sh lint" }
   - { id: cp-build, name: Build approved, kind: checkpoint,
       doc: checkpoints/build.md, question: "{{ cp.cp-build }}: approve the build?", go_live: true }
 - id: ship
   name: Ship
   steps:
-  - { id: package, name: Package, kind: agent, checks: [judges/package.sh], repairs: 1, on_fail: scripts/cleanup.sh }
+  - { id: package, name: Package, kind: agent, checks: [verifiers/package.sh], repairs: 1, on_fail: scripts/cleanup.sh }
   - id: docs-exam
     name: Docs exam
     kind: exam
-    checks: [judges/docs.sh]
+    checks: [verifiers/docs.sh]
     examinee: { prompt: prompts/examinee.md, sections: [{ run: scripts/exam-copy.sh }] }
-    answers: judges/answers.sh
-    grader: judges/grader.md
+    answers: verifiers/answers.sh
+    grader: verifiers/grader.md
     repairer: { prompt: prompts/repairer.md }
     rounds: 3
     fresh: [exam/answers.yaml]

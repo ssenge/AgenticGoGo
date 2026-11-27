@@ -60,7 +60,7 @@ fn a_ratchet_that_cannot_mean_anything_is_refused() {
 #[test]
 fn a_seed_wins_over_the_baseline_pass_and_drift_is_warned() {
     let mut g = gate(&[("mutation", Ratchet::up(1.0).baseline(71.0))]);
-    assert_eq!(g.state.reference("mutation"), Some(71.0), "seeded before any judge ran");
+    assert_eq!(g.state.reference("mutation"), Some(71.0), "seeded before any verifier ran");
 
     let quiet = g.seed(&fresh(&[("mutation", val(71.5))])).unwrap();
     assert!(quiet.is_empty(), "within tolerance is not drift: {quiet:?}");
@@ -73,7 +73,7 @@ fn a_seed_wins_over_the_baseline_pass_and_drift_is_warned() {
     assert!(errored[0].contains("using the seed"), "{errored:?}");
 }
 
-/// Without a seed, the baseline pass measures the reference — and a judge that cannot be measured
+/// Without a seed, the baseline pass measures the reference — and a verifier that cannot be measured
 /// refuses the run instead of leaving the ratchet inert.
 #[test]
 fn without_a_seed_the_baseline_pass_sets_the_reference_or_refuses() {
@@ -90,11 +90,11 @@ fn without_a_seed_the_baseline_pass_sets_the_reference_or_refuses() {
     let err = g.seed(&fresh(&[("cc", Verdict::failed("timeout"))])).unwrap_err().to_string();
     assert!(err.contains("no `baseline:` seed"), "{err}");
 
-    // a numberless judge is refused even WITH a seed: no gate could ever hold it.
+    // a numberless verifier is refused even WITH a seed: no gate could ever hold it.
     let mut g = gate(&[("cc", Ratchet::down(0.0).baseline(3.0))]);
     assert!(g.seed(&fresh(&[("cc", Verdict::binary(true))])).is_err());
 
-    // a judge absent from the pass (the driver has none) is left alone.
+    // a verifier absent from the pass (the driver has none) is left alone.
     let mut g = gate(&[("cc", Ratchet::down(0.0))]);
     assert!(g.seed(&[]).unwrap().is_empty());
     assert_eq!(g.state.reference("cc"), None);
@@ -107,7 +107,7 @@ fn a_pre_step_ask_is_the_driver_baseline() {
     assert!(g.observe_pre_step("cc", &val(5.0)).is_none());
     assert!(g.observe_pre_step("cc", &val(9.0)).is_none());
     assert_eq!(g.state.reference("cc"), Some(5.0), "the FIRST pre-step value is the baseline");
-    assert!(g.observe_pre_step("other", &val(1.0)).is_none(), "an unratcheted judge is ignored");
+    assert!(g.observe_pre_step("other", &val(1.0)).is_none(), "an unratcheted verifier is ignored");
 
     let mut g = gate(&[("cc", Ratchet::down(0.0).baseline(5.0))]);
     assert!(g.observe_pre_step("cc", &val(8.0)).unwrap().contains("drift"));
@@ -118,19 +118,19 @@ fn a_pre_step_ask_is_the_driver_baseline() {
     assert!(w.contains("no `value`") && w.contains("ratchet regression"), "{w}");
 }
 
-/// `check` names the judge with its old and new value; an errored or numberless ratcheted judge
-/// never passes; an unratcheted judge or one with no reference yet is never a ratchet regression.
+/// `check` names the verifier with its old and new value; an errored or numberless ratcheted verifier
+/// never passes; an unratcheted verifier or one with no reference yet is never a ratchet regression.
 #[test]
-fn check_reports_judge_old_and_new_and_never_passes_an_unmeasured_value() {
+fn check_reports_verifier_old_and_new_and_never_passes_an_unmeasured_value() {
     let g = gate(&[("cc", Ratchet::down(0.5).baseline(10.0)), ("cov", Ratchet::up(0.0))]);
     let regs = g.check(&fresh(&[("cc", val(11.0)), ("cov", val(1.0)), ("other", val(99.0))]));
-    assert_eq!(regs, vec![RatchetRegression { judge: "cc".into(), from: Some(10.0), to: Some(11.0) }]);
+    assert_eq!(regs, vec![RatchetRegression { verifier: "cc".into(), from: Some(10.0), to: Some(11.0) }]);
 
     assert!(g.check(&fresh(&[("cc", val(10.4))])).is_empty(), "within tolerance");
 
     for unmeasured in [Verdict::failed("boom"), Verdict::binary(true), val(f64::NAN)] {
         let regs = g.check(&fresh(&[("cc", unmeasured.clone()), ("cov", unmeasured)]));
-        assert_eq!(regs.len(), 2, "an unmeasured ratcheted judge never passes, reference or not");
+        assert_eq!(regs.len(), 2, "an unmeasured ratcheted verifier never passes, reference or not");
         assert!(regs.iter().all(|r| r.to.is_none()));
     }
     assert_eq!(describe(&regs_of(&g)), vec!["ratchet `cc`: 10 → 12".to_string()]);
@@ -195,14 +195,14 @@ fn oscillating_is_a_b_a_within_the_window() {
 }
 
 #[test]
-fn the_signature_is_failing_in_scope_judges_plus_ratchet_regressions() {
+fn the_signature_is_failing_in_scope_verifiers_plus_ratchet_regressions() {
     let f = fresh(&[
         ("b", Verdict::binary(false)),
         ("a", Verdict::failed("x")),
         ("ok", Verdict::binary(true)),
         ("detector", Verdict::binary(false)),
     ]);
-    let reg = [RatchetRegression { judge: "cc".into(), from: Some(1.0), to: Some(2.0) }];
+    let reg = [RatchetRegression { verifier: "cc".into(), from: Some(1.0), to: Some(2.0) }];
     assert_eq!(signature(&f, |n| n != "detector", &reg), sig(&["a", "b", "cc"]));
 }
 
@@ -240,9 +240,9 @@ fn improved_is_better_beyond_tolerance() {
     assert!(!up.improved(0.3, 0.1 + 0.2), "float noise is not an improvement");
 }
 
-/// The gate's list: only ratcheted judges with a reference and a graded number can improve.
+/// The gate's list: only ratcheted verifiers with a reference and a graded number can improve.
 #[test]
-fn the_gate_lists_the_ratcheted_judges_that_improved() {
+fn the_gate_lists_the_ratcheted_verifiers_that_improved() {
     let mut g = gate(&[("cc", Ratchet::down(0.5)), ("cov", Ratchet::up(1.0)), ("fresh", Ratchet::up(0.0))]);
     g.state.refs.insert("cc".into(), 10.0);
     g.state.refs.insert("cov".into(), 70.0);
@@ -291,7 +291,7 @@ fn a_no_changes_gate_counts_in_its_own_terms_and_a_keep_resets_the_streak() {
     assert_eq!(g.state.consecutive_no_changes, 2, "a veto or conflict is not a no-change session");
     g.record(GateDecision::Kept, &fresh(&[("cc", val(9.0))]), &[], sig(&[]));
     assert_eq!((g.state.no_changes, g.state.consecutive_no_changes), (2, 0));
-    assert_eq!(g.state.signatures.len(), 6, "every judged gate still records where the worker was");
+    assert_eq!(g.state.signatures.len(), 6, "every verified gate still records where the worker was");
 }
 
 /// A `mixed` verdict — its own tools moved in different directions — is never an improvement,
@@ -308,9 +308,9 @@ fn a_mixed_verdict_is_no_improvement_but_can_still_regress() {
     assert_eq!(g.check(&fresh(&[("cc", worse)])).len(), 1, "…but a regression is still one");
 }
 
-/// A YAML ratchet may leave its direction to its judge; a driver's always states one.
+/// A YAML ratchet may leave its direction to its verifier; a driver's always states one.
 #[test]
-fn a_ratchet_cfg_resolves_with_the_judges_direction() {
+fn a_ratchet_cfg_resolves_with_the_verifiers_direction() {
     let cfg = RatchetCfg { direction: None, tolerance: 0.5, tolerance_pct: None, baseline: Some(3.0) };
     assert_eq!(cfg.resolve(None), None, "nobody states a direction");
     assert_eq!(cfg.resolve(Some(Direction::Down)), Some(Ratchet::down(0.5).baseline(3.0)));
@@ -343,7 +343,7 @@ fn a_reference_of_another_scoring_definition_is_reset_on_restore() {
     assert_eq!(warned.len(), 1, "{warned:?}");
     assert!(warned[0].contains("swe-default@1") && warned[0].contains("swe-default@2"), "{warned:?}");
     assert_eq!(changed.state.reference("q"), Some(60.0), "the incomparable 75 is gone");
-    assert_eq!(changed.state.reference("cc"), Some(8.0), "a judge without a basis is restored as is");
+    assert_eq!(changed.state.reference("cc"), Some(8.0), "a verifier without a basis is restored as is");
     assert_eq!(changed.state.bases["q"], "swe-default@2");
 
     // …and without a measurement of its own, no reference at all until the next keep.

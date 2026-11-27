@@ -8,7 +8,7 @@
     {
       "name": "rlt",
       "source": "./plugin",
-      "description": "Relentless — turn a plan/spec into an autonomous agent loop. /rlt:new sets up judges + a Definition of Done (done_if/abort_if); /rlt:status and /rlt:supervise watch and steer the run. (The `rlt` CLI itself installs via the install script or GitHub Releases — see the repo README.)"
+      "description": "Relentless — turn a plan/spec into an autonomous agent loop. /rlt:new sets up verifiers + a Definition of Done (done_if/abort_if); /rlt:status and /rlt:supervise watch and steer the run. (The `rlt` CLI itself installs via the install script or GitHub Releases — see the repo README.)"
     }
   ]
 }

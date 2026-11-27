@@ -1,5 +1,5 @@
 //! The checks rlt runs around every step when the process file asks (A-38): the inputs and outputs
-//! a step declares (`run.declared`), and the scripts it wrote (`run.scripts_runnable`). Each is a judge whose verdict
+//! a step declares (`run.declared`), and the scripts it wrote (`run.scripts_runnable`). Each is a verifier whose verdict
 //! goes to the run record like any hook's; a worker runs it as its own check too.
 
 use std::collections::BTreeSet;
@@ -10,13 +10,13 @@ use super::format::{Phase, Step};
 use super::hooks::When;
 use super::proc::Shared;
 use super::template;
-use crate::core::model::{Judge, Verdict};
+use crate::core::model::{Verifier, Verdict};
 
 /// A record entry with one of these kinds, met, is a step with a result.
 const RESULTS: [&str; 3] = ["done", "tool", "unchanged"];
 
 /// The built-in checks of step `key` (its id `id`) before or after it, as the process file asks for them.
-pub fn judges(shared: &Shared, key: &str, id: &str, when: When) -> Vec<Judge> {
+pub fn verifiers(shared: &Shared, key: &str, id: &str, when: When) -> Vec<Verifier> {
     let mut out = vec![];
     if shared.spec.run.declared {
         match when {
@@ -24,7 +24,7 @@ pub fn judges(shared: &Shared, key: &str, id: &str, when: When) -> Vec<Judge> {
                 let written = written(shared);
                 let inputs: Vec<String> = declared(shared, key, id, false).into_iter().filter(|p| written.contains(p)).collect();
                 if !inputs.is_empty() {
-                    out.push(Judge::native("declared-inputs", move |ctx| {
+                    out.push(Verifier::native("declared-inputs", move |ctx| {
                         missing(ctx.dir(), &inputs, "inputs an earlier step wrote are missing", "")
                     }));
                 }
@@ -32,7 +32,7 @@ pub fn judges(shared: &Shared, key: &str, id: &str, when: When) -> Vec<Judge> {
             When::After => {
                 let outputs = declared(shared, key, id, true);
                 if !outputs.is_empty() {
-                    out.push(Judge::native("declared-outputs", move |ctx| {
+                    out.push(Verifier::native("declared-outputs", move |ctx| {
                         missing(ctx.dir(), &outputs, "declared outputs missing", "; write them")
                     }));
                 }
@@ -41,7 +41,7 @@ pub fn judges(shared: &Shared, key: &str, id: &str, when: When) -> Vec<Judge> {
     }
     if let (When::After, Some(notes)) = (when, &shared.spec.run.notes) {
         let (notes, id) = (notes.clone(), id.to_string());
-        out.push(Judge::native("notes", move |ctx| {
+        out.push(Verifier::native("notes", move |ctx| {
             let text = std::fs::read_to_string(ctx.dir().join(&notes)).unwrap_or_default();
             match super::standing::notes_problem(&text, &id) {
                 Some(problem) => Verdict::binary(false).with_rationale(problem),
@@ -52,7 +52,7 @@ pub fn judges(shared: &Shared, key: &str, id: &str, when: When) -> Vec<Judge> {
     if when == When::After && !shared.spec.run.scripts_runnable.is_empty() {
         let folders = shared.spec.run.scripts_runnable.iter().filter_map(|f| render(shared, f)).collect::<Vec<_>>();
         let key = key.to_string();
-        out.push(Judge::native("scripts-runnable", move |ctx| runnable(ctx.dir(), &key, &folders)));
+        out.push(Verifier::native("scripts-runnable", move |ctx| runnable(ctx.dir(), &key, &folders)));
     }
     out
 }

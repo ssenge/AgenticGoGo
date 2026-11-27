@@ -2,7 +2,7 @@
 //! metric's value per tool out of it — pure, so every rule is a unit test.
 //!
 //! The selection rules mirror swe-metrics' own scoring lookup (`swe_metrics/scoring/values.py`), so
-//! a metric judge and a score read the same report the same way:
+//! a metric verifier and a score read the same report the same way:
 //! - only TARGET-level rows count (module/file/function rows are details);
 //! - without `labels`, the unlabeled total; with them, every row whose labels match (any accepted
 //!   value), SUMMED — `severity: [critical, high]` is the two rows added;
@@ -49,7 +49,7 @@ pub struct Subject {
 /// The reason swe-metrics' runner gives an analyzer that found no file it applies to
 /// (`runner/measure.py`). There is no reason CODE in the report, so this exact constant is the
 /// signal; if swe-metrics ever words it differently, [`nothing_to_measure`] stops matching and the
-/// judge errors again — it fails closed, never open.
+/// verifier errors again — it fails closed, never open.
 pub const NO_APPLICABLE_FILES: &str = "no applicable files";
 
 /// One analyzer's run.
@@ -152,7 +152,7 @@ impl Report {
     }
 }
 
-/// What a metric judge selects.
+/// What a metric verifier selects.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selector {
     pub id: String,
@@ -200,7 +200,7 @@ impl Selector {
 /// The selected metric's value from each tool that reports it — or WHY there is none.
 ///
 /// Fail closed: a missing value is an `Err` with the report's reason. With values present but an
-/// analyzer of the metric's family FAILED, it is still an `Err` unless the judge names its `tool`:
+/// analyzer of the metric's family FAILED, it is still an `Err` unless the verifier names its `tool`:
 /// the report does not say which analyzer measures which metric, so a failed one may be the one
 /// whose value is missing, and a fault is never a reason to pass.
 pub fn select(report: &Report, sel: &Selector) -> Result<Vec<ToolValue>, String> {
@@ -253,7 +253,7 @@ pub fn nothing_to_measure(report: &Report, sel: &Selector) -> Option<Vec<String>
     }
     let fam = family(&sel.id);
     let mine: Vec<&Analyzer> = report.analyzers_of(fam, sel.tool.as_deref()).collect();
-    // a FAILED sibling fails closed even when the judge names its tool's (skipped) analyzer.
+    // a FAILED sibling fails closed even when the verifier names its tool's (skipped) analyzer.
     if mine.is_empty() || report.analyzers_of(fam, None).any(|a| a.status == "failed") {
         return None;
     }
@@ -396,8 +396,8 @@ pub(crate) mod tests {
         assert!(e.contains("not in the report"), "{e}");
     }
 
-    /// A FAILED sibling analyzer fails a judge that does not name its tool; naming the tool scopes
-    /// the judge to that tool — and that tool's own skip is then the error.
+    /// A FAILED sibling analyzer fails a verifier that does not name its tool; naming the tool scopes
+    /// the verifier to that tool — and that tool's own skip is then the error.
     #[test]
     fn a_failed_sibling_analyzer_fails_closed_unless_the_tool_is_named() {
         let rows = serde_json::json!([row("complexity.cognitive", "lizard", serde_json::json!({"stats": {"p95": 4.0}}))]);
@@ -409,7 +409,7 @@ pub(crate) mod tests {
         assert_eq!(select(&r, &named).unwrap()[0].value, 4.0);
         let gone = Selector { tool: Some("complexipy".into()), ..s };
         assert!(select(&r, &gone).unwrap_err().contains("complexipy is not installed"));
-        // a SKIPPED sibling (not applicable) does not fail a judge whose value is there.
+        // a SKIPPED sibling (not applicable) does not fail a verifier whose value is there.
         let r = report(&[("lizard", "ran", "", CX), ("complexipy", "skipped", "no applicable files", CX)], rows);
         assert!(select(&r, &Selector { stat: Some(Stat::P95), ..sel("complexity.cognitive") }).is_ok());
     }

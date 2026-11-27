@@ -213,7 +213,7 @@ fn codex_declares_what_it_genuinely_cannot_do() {
     assert!(c.reports_output_tokens && c.supports_resume);
     assert!(!c.reports_cost_usd, "codex reports no dollar cost anywhere");
     assert!(c.supports_effort, "via -c model_reasoning_effort= (verified working)");
-    assert!(c.supports_one_shot, "read-only sandbox = can host a judge that cannot WRITE");
+    assert!(c.supports_one_shot, "read-only sandbox = can host a verifier that cannot WRITE");
     assert_eq!(Codex.default_effort(), "high", "codex's ceiling — rlt's `max` clamps to it");
     assert!(c.detects_rate_limits, "turn.failed/error carry the text, same as Claude");
     // the level mapping: rlt speaks Claude's vocabulary; codex tops out at `high`.

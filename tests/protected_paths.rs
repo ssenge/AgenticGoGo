@@ -2,7 +2,7 @@
 //! protected path per run, on `isolation: none` and on this host's kernel sandbox.
 //!
 //! The project is built so that, WITHOUT protection, every attack would MERGE: the fake worker also
-//! makes the honest change the one judge wants, so `done_if` is met after session 1. With
+//! makes the honest change the one verifier wants, so `done_if` is met after session 1. With
 //! protection, each attack must end one of two ways, and never a third:
 //!
 //! * **blocked** — the kernel refused the write (the attack's own shell reports failure), nothing
@@ -54,9 +54,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"d
 exit 0
 "#;
 
-/// The judge needs the honest change AND reads the protected oracle — so a met verdict also proves
-/// a judge can still READ a write-denied path on this tier.
-const JUDGE: &str = r#"#!/bin/sh
+/// The verifier needs the honest change AND reads the protected oracle — so a met verdict also proves
+/// a verifier can still READ a write-denied path on this tier.
+const VERIFIER: &str = r#"#!/bin/sh
 if grep -q work src/lib.txt && grep -q orig tests/oracles/x.json; then
   echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"worked, oracle readable"}'
 else
@@ -79,7 +79,7 @@ fn project(tier: &str, top_extra: &str) -> (tempfile::TempDir, String) {
     write(d, "tests/oracles/x.json", "orig\n");
     write(d, "tests/oracles/cache.gen", "generated\n");
     write(d, "src/lib.txt", "base\n");
-    write(d, ".gitignore", "rlt/state/\nagg/private/\nbin/\n.home/\n*.gen\nattack.log\nattack.err\npre_hl\n");
+    write(d, ".gitignore", "rlt/state/\nrlt/private/\nbin/\n.home/\n*.gen\nattack.log\nattack.err\npre_hl\n");
     write(
         d,
         "rlt/rlt.yaml",
@@ -91,8 +91,8 @@ fn project(tier: &str, top_extra: &str) -> (tempfile::TempDir, String) {
              summary: {{ enabled: false }}\n{top_extra}"
         ),
     );
-    write(d, "rlt/judges/worked.sh", JUDGE);
-    chmod_x(&d.join("rlt/judges/worked.sh"));
+    write(d, "rlt/verifiers/worked.sh", VERIFIER);
+    chmod_x(&d.join("rlt/verifiers/worked.sh"));
     write(d, "rlt/state/STATE.md", "do work\n");
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "oracle + config"]);
@@ -263,10 +263,10 @@ fn a_direct_write_gets_eperm_under_the_sandbox() {
     assert_eq!(code, Some(0), "blocked, so the honest work still merges:\n{text}");
 }
 
-/// …and with no attack at all, a protected project runs exactly as before — the judge READS the
+/// …and with no attack at all, a protected project runs exactly as before — the verifier READS the
 /// protected oracle and the work merges, on both tiers.
 #[test]
-fn an_honest_session_is_untouched_and_judges_still_read_protected_paths() {
+fn an_honest_session_is_untouched_and_verifiers_still_read_protected_paths() {
     let mut tiers = vec!["none"];
     if kernel_sandbox_usable() {
         tiers.push("sandbox");
@@ -276,7 +276,7 @@ fn an_honest_session_is_untouched_and_judges_still_read_protected_paths() {
         let (code, text) = run(tmp.path(), &path, "", "1");
         assert_eq!(code, Some(0), "[{tier}]\n{text}");
         assert!(relentless::protect::read(tmp.path()).is_empty(), "[{tier}] no violation:\n{text}");
-        assert!(text.contains("worked, oracle readable"), "[{tier}] the judge read the oracle:\n{text}");
+        assert!(text.contains("worked, oracle readable"), "[{tier}] the verifier read the oracle:\n{text}");
         if tier == "none" {
             assert!(text.contains("only the GATE CHECK applies"), "none warns at startup:\n{text}");
         }
@@ -293,8 +293,8 @@ fn a_change_between_sessions_is_caught_at_the_next_session() {
     // so session 2 starts and runs its check.
     let yaml = fs::read_to_string(d.join("rlt/rlt.yaml")).unwrap().replace("done_if: \"worked\"", "done_if: \"never\"");
     write(d, "rlt/rlt.yaml", &yaml);
-    write(d, "rlt/judges/never.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
-    chmod_x(&d.join("rlt/judges/never.sh"));
+    write(d, "rlt/verifiers/never.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    chmod_x(&d.join("rlt/verifiers/never.sh"));
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "never"]);
 
@@ -305,7 +305,7 @@ fn a_change_between_sessions_is_caught_at_the_next_session() {
     assert_eq!(between[0].paths, ["tests/oracles/x.json"]);
     assert_eq!(between[0].session, 1, "attributed to the session before the gap");
     // the hook runs again after session 2, so the file is only guaranteed restored at session
-    // start — which is when the next worker and its judges would read it.
+    // start — which is when the next worker and its verifiers would read it.
     assert!(text.contains("BETWEEN sessions"), "{text}");
 }
 

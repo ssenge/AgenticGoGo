@@ -6,7 +6,7 @@
 #   2. Smuggled axioms — a hand-declared `axiom foo : P ≠ NP`, or reaching a result through an
 #      unsound escape hatch (`sorryAx`, `native_decide` / `Lean.ofReduceBool`). These make
 #      `lake build` + a no-`sorry` grep pass while the statement is ASSUMED, not proven —
-#      exactly the loophole a "just make the judge green" worker will find.
+#      exactly the loophole a "just make the verifier green" worker will find.
 #
 # We strip Lean comments first (line `-- …` and block `/- … -/`) so matches are real tactics /
 # declarations, not prose. Any hit halts the loop (this goal is an invariant in rlt.yaml).

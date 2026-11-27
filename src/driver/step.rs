@@ -13,7 +13,7 @@
 //! | `write_deny` | **ACCUMULATES**, and nothing subtracts from it — not even `writable` |
 //!
 //! That asymmetry is the whole reason templates are worth having. A YAML project repeats
-//! `isolation: sandbox` + `readonly: [tests/, rlt/judges/]` on every step that needs it, and the
+//! `isolation: sandbox` + `readonly: [tests/, rlt/verifiers/]` on every step that needs it, and the
 //! fourth such step, added six months later, quietly forgets the line. A template makes the
 //! protection the default of the family and the re-grant the exception a reader can see.
 
@@ -227,7 +227,7 @@ impl Step {
     /// ADD paths this step may read but not write. Accumulates over whatever a template already set.
     ///
     /// Every entry is normalised on the way in ([`crate::isolation::normalize_path`]), so
-    /// `"rlt/judges/"`, `"rlt/judges"` and `"./rlt/judges"` are one path and [`Step::writable`]'s
+    /// `"rlt/verifiers/"`, `"rlt/verifiers"` and `"./rlt/verifiers"` are one path and [`Step::writable`]'s
     /// subtraction cannot miss by a trailing slash. An entry with no canonical form (one that climbs
     /// above the project root, or names the root itself) is dropped with a warning.
     pub fn readonly<I, S>(mut self, paths: I) -> Step
@@ -320,7 +320,7 @@ mod tests {
         let sandboxed = Step::template()
             .agent(Agent::Claude)
             .isolation(Isolation::Sandbox)
-            .readonly(["tests/", "rlt/judges/"]);
+            .readonly(["tests/", "rlt/verifiers/"]);
 
         let a = sandboxed.create("implement");
         let b = sandboxed.create("fix");
@@ -329,8 +329,8 @@ mod tests {
         assert_eq!(b.name.as_deref(), Some("fix"));
         assert_eq!(sandboxed.name, None, "a template stays unnamed and reusable");
         assert_eq!(a.isolation, Isolation::Sandbox);
-        assert_eq!(a.readonly, ["tests", "rlt/judges"]);
-        assert_eq!(b.readonly, ["tests", "rlt/judges"]);
+        assert_eq!(a.readonly, ["tests", "rlt/verifiers"]);
+        assert_eq!(b.readonly, ["tests", "rlt/verifiers"]);
     }
 
     /// Scalars OVERRIDE: the derived step wins, and the template is untouched.
@@ -349,30 +349,30 @@ mod tests {
     /// `readonly` ACCUMULATES: a derived step cannot silently drop a deny its template set.
     #[test]
     fn readonly_accumulates_down_a_template_chain() {
-        let tmpl = Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/judges/"]);
-        let derived = tmpl.create("author_judge").readonly(["src/"]);
+        let tmpl = Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/verifiers/"]);
+        let derived = tmpl.create("author_verifier").readonly(["src/"]);
 
-        assert_eq!(derived.readonly, ["tests", "rlt/judges", "src"]);
-        assert_eq!(tmpl.readonly, ["tests", "rlt/judges"], "the template keeps its own list");
+        assert_eq!(derived.readonly, ["tests", "rlt/verifiers", "src"]);
+        assert_eq!(tmpl.readonly, ["tests", "rlt/verifiers"], "the template keeps its own list");
         // repeating a path the template already denies is not a second deny
-        assert_eq!(tmpl.create("x").readonly(["tests"]).readonly(["tests/"]).readonly, ["tests", "rlt/judges"]);
+        assert_eq!(tmpl.create("x").readonly(["tests"]).readonly(["tests/"]).readonly, ["tests", "rlt/verifiers"]);
     }
 
     /// `writable` SUBTRACTS from what accumulated — re-grant one deny, keep the rest.
     #[test]
     fn writable_subtracts_from_what_readonly_accumulated() {
-        let sandboxed = Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/judges/"]);
+        let sandboxed = Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/verifiers/"]);
 
-        // the step that SHOULD add tests re-grants exactly that one; `rlt/judges/` stays denied.
+        // the step that SHOULD add tests re-grants exactly that one; `rlt/verifiers/` stays denied.
         let implement = sandboxed.create("implement").writable(["tests/"]);
-        assert_eq!(implement.denied(), ["rlt/judges"]);
+        assert_eq!(implement.denied(), ["rlt/verifiers"]);
 
         // the only step that may write graders — and `src/` is denied on top.
-        let author = sandboxed.create("author_judge").readonly(["src/"]).writable(["rlt/judges/"]);
+        let author = sandboxed.create("author_verifier").readonly(["src/"]).writable(["rlt/verifiers/"]);
         assert_eq!(author.denied(), ["tests", "src"]);
 
         // a sibling that re-grants nothing keeps both.
-        assert_eq!(sandboxed.create("fix").denied(), ["tests", "rlt/judges"]);
+        assert_eq!(sandboxed.create("fix").denied(), ["tests", "rlt/verifiers"]);
     }
 
     /// ⚠ THE TRAILING SLASH. Subtraction compares strings; without normalisation on input, this
@@ -381,11 +381,11 @@ mod tests {
     fn a_trailing_slash_cannot_break_the_subtraction() {
         let s = Step::template()
             .isolation(Isolation::Sandbox)
-            .readonly(["rlt/judges/", "src"])   // WITH the slash
-            .create("author_judge")
-            .writable(["rlt/judges", "./src/"]); // WITHOUT it, and with a `./`
+            .readonly(["rlt/verifiers/", "src"])   // WITH the slash
+            .create("author_verifier")
+            .writable(["rlt/verifiers", "./src/"]); // WITHOUT it, and with a `./`
 
-        assert_eq!(s.writable, ["rlt/judges", "src"]);
+        assert_eq!(s.writable, ["rlt/verifiers", "src"]);
         assert!(s.denied().is_empty(), "both denies were re-granted: {:?}", s.denied());
     }
 
@@ -393,8 +393,8 @@ mod tests {
     /// deny list that no `writable` spelling can ever subtract.
     #[test]
     fn an_uncanonical_path_is_dropped() {
-        let s = Step::new("x").readonly(["../escape", "src/", ".", "rlt/judges/../judges"]);
-        assert_eq!(s.readonly, ["src", "rlt/judges"]);
+        let s = Step::new("x").readonly(["../escape", "src/", ".", "rlt/verifiers/../verifiers"]);
+        assert_eq!(s.readonly, ["src", "rlt/verifiers"]);
     }
 
     /// `write_deny` ACCUMULATES and `writable` cannot touch it — the one list a derived step can

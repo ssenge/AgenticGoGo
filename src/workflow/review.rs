@@ -1,4 +1,4 @@
-//! The judging side of an agent step: the critic's rubric in the worker's brief, the critic with the worker's
+//! The verifying side of an agent step: the critic's rubric in the worker's brief, the critic with the worker's
 //! task below its rubric, the narrowed re-review after a repair, and the checks the worker runs itself.
 
 use std::path::Path;
@@ -7,7 +7,7 @@ use anyhow::anyhow;
 
 use super::brief::{task, with_section};
 use super::flow::Flow;
-use crate::core::model::{Judge, JudgeKind};
+use crate::core::model::{Verifier, VerifierKind};
 use crate::driver::{Fatal, Step};
 
 /// What the last review found, and what the worker said against it, for the next round.
@@ -19,8 +19,8 @@ pub(crate) struct Earlier {
 }
 
 /// The step with the critic's criteria in hand, so its first result aims at what the review checks.
-pub(crate) fn with_rubric(step: &Step, critic: &Judge) -> Result<Step, Fatal> {
-    let JudgeKind::Llm { path, .. } = &critic.kind else { return Ok(step.clone()) };
+pub(crate) fn with_rubric(step: &Step, critic: &Verifier) -> Result<Step, Fatal> {
+    let VerifierKind::Llm { path, .. } = &critic.kind else { return Ok(step.clone()) };
     let rubric = read(path)?;
     let body = match rubric.strip_prefix("---") {
         Some(rest) => rest.split_once("\n---").map_or(rest, |(_, after)| after),
@@ -33,16 +33,16 @@ pub(crate) fn with_rubric(step: &Step, critic: &Judge) -> Result<Step, Fatal> {
          repair round.\n\n> {}", body.trim().replace('\n', "\n> ")))
 }
 
-/// The critic with `context` and the worker's task below its rubric, so the rubric judges against the task's
+/// The critic with `context` and the worker's task below its rubric, so the rubric verifiers against the task's
 /// policy instead of restating it (a restated policy drifts from the task).
-pub(crate) fn with_task(flow: &Flow, critic: &Judge, context: &str, step: &Step) -> Result<Judge, Fatal> {
+pub(crate) fn with_task(flow: &Flow, critic: &Verifier, context: &str, step: &Step) -> Result<Verifier, Fatal> {
     rewritten(flow, critic, &format!("{}-rubric.md", critic.name), |rubric| Ok(format!(
         "{rubric}\n\n{context}\n\n## The worker's task\n\nWhat the worker was asked, with the policy it follows. \
-         Judge the result against it; it is context, not a list of points.\n\n{}\n", task(step)?)))
+         Verifier the result against it; it is context, not a list of points.\n\n{}\n", task(step)?)))
 }
 
 /// The critic's re-review: its rubric narrowed to its earlier points and the worker's disputes.
-pub(crate) fn focused(flow: &Flow, critic: &Judge, e: &Earlier) -> Result<Judge, Fatal> {
+pub(crate) fn focused(flow: &Flow, critic: &Verifier, e: &Earlier) -> Result<Verifier, Fatal> {
     let disputes = if e.disputes.trim().is_empty() { "None." } else { e.disputes.trim() };
     rewritten(flow, critic, &format!("{}-rereview-{}.md", critic.name, e.round), |rubric| Ok(format!(
         "{rubric}\n\n## This is a re-review\n\nYou reviewed this result before; the worker has repaired it. \
@@ -54,22 +54,22 @@ pub(crate) fn focused(flow: &Flow, critic: &Judge, e: &Earlier) -> Result<Judge,
 }
 
 /// The critic with its rubric rewritten by `f` into the scratch file `file`.
-fn rewritten(flow: &Flow, critic: &Judge, file: &str, f: impl FnOnce(&str) -> Result<String, Fatal>)
-             -> Result<Judge, Fatal> {
-    let mut judge = critic.clone();
-    let JudgeKind::Llm { path, .. } = &mut judge.kind else { return Ok(judge) };
+fn rewritten(flow: &Flow, critic: &Verifier, file: &str, f: impl FnOnce(&str) -> Result<String, Fatal>)
+             -> Result<Verifier, Fatal> {
+    let mut verifier = critic.clone();
+    let VerifierKind::Llm { path, .. } = &mut verifier.kind else { return Ok(verifier) };
     let text = f(&read(path)?)?;
     let out = flow.scratch(file)?;
     std::fs::write(&out, text).map_err(|e| anyhow!("writing {}: {e}", out.display()))?;
     *path = out;
-    Ok(judge)
+    Ok(verifier)
 }
 
 /// The step with its checks in hand: the worker runs them before it finishes and fixes what they report,
 /// in seconds, instead of a whole repair round after the session.
-pub(crate) fn self_checked(step: &Step, checks: &[Judge]) -> Result<Step, Fatal> {
+pub(crate) fn self_checked(step: &Step, checks: &[Verifier]) -> Result<Step, Fatal> {
     let scripts: Vec<String> = checks.iter().filter_map(|c| match &c.kind {
-        JudgeKind::Script { path } => Some(format!("`{}`", path.display())),
+        VerifierKind::Script { path } => Some(format!("`{}`", path.display())),
         _ => None,
     }).collect();
     if scripts.is_empty() {
@@ -77,7 +77,7 @@ pub(crate) fn self_checked(step: &Step, checks: &[Judge]) -> Result<Step, Fatal>
     }
     with_section(step, &format!(
         "## Check your result\n\nBefore you finish, run {} in your working directory. Each prints a verdict as \
-         JSON; while `met` is false, fix what its `rationale` says and run it again. The same checks judge your \
+         JSON; while `met` is false, fix what its `rationale` says and run it again. The same checks verifier your \
          result afterwards. A rationale says what is missing: act on it, and never read the checks' code to \
          find out how they work.", scripts.join(", ")))
 }
@@ -127,10 +127,10 @@ mod tests {
         let rubric = dir.path().join("review.md");
         std::fs::write(&rubric, "---\ninputs: [a]\n---\nIs it right?\n").unwrap();
         let step = Step::new("1 Do").prompt("Do it.");
-        let critic = Judge::rubric("review", rubric.display().to_string());
+        let critic = Verifier::rubric("review", rubric.display().to_string());
         let briefed = with_rubric(&step, &critic).unwrap().prompt.unwrap();
         assert!(briefed.contains("> Is it right?") && !briefed.contains("inputs: [a]"));
-        let checked = self_checked(&step, &[Judge::script("c", "/x/check.sh"), critic]).unwrap().prompt.unwrap();
+        let checked = self_checked(&step, &[Verifier::script("c", "/x/check.sh"), critic]).unwrap().prompt.unwrap();
         assert!(checked.contains("run `/x/check.sh` in your working directory"));
         assert_eq!(self_checked(&step, &[]).unwrap().prompt.as_deref(), Some("Do it."));
     }

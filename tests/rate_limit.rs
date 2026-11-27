@@ -50,7 +50,7 @@ fn reset_in_an_hour() -> String {
     at.strftime("%H:%M").to_string()
 }
 
-/// A project on `main` with one committed file, the fake worker, a `finished` judge and `seq` as
+/// A project on `main` with one committed file, the fake worker, a `finished` verifier and `seq` as
 /// the sequence. `plan` is the worker's script, one word per session.
 fn project(seq: &[&str], plan: &[&str], extra_cfg: &str) -> Project {
     let tmp = tempfile::tempdir().unwrap();
@@ -94,13 +94,13 @@ printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"
         ),
     );
     write(&dir.join("rlt/state/STATE.md"), "do work\n");
-    let judge = dir.join("rlt/judges/finished.sh");
+    let verifier = dir.join("rlt/verifiers/finished.sh");
     write(
-        &judge,
+        &verifier,
         "#!/bin/sh\nif [ -f finished ]; then echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"y\"}'; \
          else echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"n\"}'; fi\n",
     );
-    chmod_x(&judge);
+    chmod_x(&verifier);
     for args in [
         &["init", "-q", "-b", "main"][..],
         &["config", "user.email", "t@t"],

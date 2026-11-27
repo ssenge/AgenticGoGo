@@ -1,12 +1,12 @@
 //! SAMPLE — "Recursively Self-Improving Software": a workflow in which rlt improves **rlt**.
 //!
 //! ✅ **THIS COMPILES.** It is a cargo example (`cargo build --example selfimprove`). Like its
-//! sibling `examples/workflow.rs` it is not meant to be RUN as-is — the judge files it names are
+//! sibling `examples/workflow.rs` it is not meant to be RUN as-is — the verifier files it names are
 //! illustrative — but every call and type below is compiler-checked against the shipped API.
 //!
 //! REVISION 4 (2026-08-05): compiled for the first time against the shipped API. Two changes, both
-//! annotated where they happen — `MINUTES` was never a real constant, and a native judge's closure
-//! is `'static`, so the judge it consults is cloned in rather than borrowed.
+//! annotated where they happen — `MINUTES` was never a real constant, and a native verifier's closure
+//! is `'static`, so the verifier it consults is cloned in rather than borrowed.
 //!
 //! REVISION 3 (2026-08-04). REWRITTEN 2026-08-03 against the rev-6 API (`examples/workflow.rs`,
 //! HANDOFF §4b), amended
@@ -26,9 +26,9 @@
 //!     cargo test           ~60s       }
 //!     scripts/e2e.sh       ~10 MINUTES   the suite you cannot afford to run per step
 //!
-//! A 60-step run that judges everything after every step spends TEN HOURS in the e2e suite alone.
-//! The old design bought that back with a `gate:` field on the judge. There is no `gate:` field
-//! any more — ANYWHERE, since the 2026-08-04 owner simplification cut it from YAML too: judges are
+//! A 60-step run that verifiers everything after every step spends TEN HOURS in the e2e suite alone.
+//! The old design bought that back with a `gate:` field on the verifier. There is no `gate:` field
+//! any more — ANYWHERE, since the 2026-08-04 owner simplification cut it from YAML too: verifiers are
 //! LAZY and memoized per step, so `&&` in the flow short-circuits and the e2e is simply never
 //! reached on the ~55 steps where the build is red. Same saving, no mechanism — see VERIFY below.
 //! This loop is the evidence for the whole ruling, and it cuts both ways: it is also why a ladder
@@ -40,15 +40,15 @@
 //! for the NEXT run; the final act is merge + tag, never restart-myself.
 //!
 //! That is a FEATURE, not an implementation gap. A loop that rebuilt and re-exec'd itself would be
-//! judging its new self with its new judges under its new gate — and if any of those three were
+//! verifying its new self with its new verifiers under its new gate — and if any of those three were
 //! broken by the change, nothing would be left to notice. The boundary is what keeps the previous
-//! generation's guardrails in force over the next one. It applies to judges too: the judge written by
-//! the `author_judge` step in LAND does not grade this run. Do not "fix" this.
+//! generation's guardrails in force over the next one. It applies to verifiers too: the verifier written by
+//! the `author_verifier` step in LAND does not grade this run. Do not "fix" this.
 
 use relentless::prelude::*;
 
 /// `main` is the ENTRY POINT ONLY — where to run and how many generations. The sample itself (steps,
-/// judges, the flow) is [`drive`], so a harness can run THIS driver against a scratch project
+/// verifiers, the flow) is [`drive`], so a harness can run THIS driver against a scratch project
 /// (`scripts/samples_real.sh`) instead of a copy of it that drifts.
 ///
 ///   ./selfimprove                   # cwd, 12 generations — today's values, unchanged
@@ -73,7 +73,7 @@ fn real_main() -> Result<(), Fatal> {
     let rlt = Relentless::open_with(dir, Opts { resume })?
         // Declared here, ENFORCED by `rlt.check_limits()?` at the top of each generation. No
         // condition strings: there is no `.abort_if()` on the Rust path, because a driver that
-        // wants to stop on a judge writes `if rlt.judge(&x).met() { return Ok(()); }`.
+        // wants to stop on a verifier writes `if rlt.verifier(&x).met() { return Ok(()); }`.
         // SECONDS. `work_time` excludes time blocked on a human (`hil_*`); this driver has no
         // human calls, so a plain e2e deadline is the honest ceiling here.
         .limits(Limits { tokens: Some(60_000_000), cost: None, sessions: Some(300),
@@ -108,16 +108,16 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
     // ⚠ THE TIER IS NOT OPTIONAL HERE. `readonly` is delivered by the OS wrapper, and the wrapper
     // only runs under `sandbox`/`container` — under the default `none` this deny list would bind
     // NOTHING and the comment below would be a lie. rlt warns on `readonly` without a tier.
-    let reading = Step::template()             // reads and judges; edits no source
+    let reading = Step::template()             // reads and verifiers; edits no source
         .agent(Agent::Claude)
         .effort(Effort::High)
         .isolation(Isolation::Sandbox)
-        .readonly(["src/", "tests/", "rlt/judges/"]);
+        .readonly(["src/", "tests/", "rlt/verifiers/"]);
 
     let sandboxed = Step::template()           // edits rlt's OWN source
         .agent(Agent::Claude)
         .isolation(Isolation::Sandbox)
-        .readonly(["tests/", "rlt/judges/"]);
+        .readonly(["tests/", "rlt/verifiers/"]);
 
     // Picking a roadmap item is reading and judgement — but it is reading TWO REAL FILES, so it
     // needs a harness. What keeps it cheap and safe is the inherited deny on `src/`: the step can
@@ -144,27 +144,27 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
     let implement = sandboxed.create("implement")
         .model(model("claude-opus-4-8[1m]", "RLT_SAMPLE_HEAVY_MODEL"))
         .effort(Effort::Max)
-        .writable(["tests/"])                  // it SHOULD add tests; `rlt/judges/` stays denied
+        .writable(["tests/"])                  // it SHOULD add tests; `rlt/verifiers/` stays denied
         .prompt("Implement the contract in the design doc. Add tests alongside.");
 
     // Inherits the denies and re-grants NOTHING. "Make the tests pass" has an obvious shortcut,
     // and this is the step that would take it — so `tests/` is kernel-read-only for it, and
-    // `rlt/judges/` is too. The prompt below is a courtesy; the deny is the enforcement.
+    // `rlt/verifiers/` is too. The prompt below is a courtesy; the deny is the enforcement.
     let repair = sandboxed.create("repair")
         .model(model("claude-sonnet-5", "RLT_SAMPLE_GRIND_MODEL"))   // the grind runs cheap
         .prompt("Make the failing tests and lints pass. Do not delete or ignore tests.");
 
     // The ONLY step that may write graders — a real use of `writable` subtracting. Every landed
-    // feature ships with the judge that keeps it honest in later runs; that judge has to be written
-    // by something, and this is it. It cannot touch source, and nothing else can touch judges.
-    // Accumulate then subtract, in one step: `src/` joins the inherited denies, `rlt/judges/` comes
+    // feature ships with the verifier that keeps it honest in later runs; that verifier has to be written
+    // by something, and this is it. It cannot touch source, and nothing else can touch verifiers.
+    // Accumulate then subtract, in one step: `src/` joins the inherited denies, `rlt/verifiers/` comes
     // back out of them. Net writable: everything but `src/`, `tests/` and `rlt/private/`.
-    let author_judge = sandboxed.create("author_judge")
+    let author_verifier = sandboxed.create("author_verifier")
         .readonly(["src/"])
-        .writable(["rlt/judges/"])             // spelled EXACTLY as the template's deny — `writable`
+        .writable(["rlt/verifiers/"])             // spelled EXACTLY as the template's deny — `writable`
                                                // subtracts, and a trailing-slash mismatch subtracts
                                                // nothing while looking like it worked
-        .prompt("Write a judge under rlt/judges/ that fails if this feature regresses. \
+        .prompt("Write a verifier under rlt/verifiers/ that fails if this feature regresses. \
                  Exit 0 = met. Do not touch src/.");
 
     // The step-back gets a different reviewer on the theory that whoever dug the hole is the least
@@ -180,39 +180,39 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         .prompt("Mark the item done in internal/ROADMAP.md, write a release note, tag the build.");
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
-    // JUDGES — rlt's own ladder, cheapest first. Nothing is registered and nothing runs here.
+    // VERIFIERS — rlt's own ladder, cheapest first. Nothing is registered and nothing runs here.
     // ═════════════════════════════════════════════════════════════════════════════════════════
 
-    let builds = Judge::script("builds",     "rlt/judges/build_ok.sh");      // ~5s
-    let lint   = Judge::script("lint_clean", "rlt/judges/lint_clean.sh");    // ~15s
-    let tests  = Judge::script("tests_pass", "rlt/judges/cargo_test.sh");    // ~60s
+    let builds = Verifier::script("builds",     "rlt/verifiers/build_ok.sh");      // ~5s
+    let lint   = Verifier::script("lint_clean", "rlt/verifiers/lint_clean.sh");    // ~15s
+    let tests  = Verifier::script("tests_pass", "rlt/verifiers/cargo_test.sh");    // ~60s
 
     // ~10 minutes. No `gate` field — the `&&` in VERIFY is the gate.
-    let e2e = Judge::script("e2e", "rlt/judges/e2e.sh")
+    let e2e = Verifier::script("e2e", "rlt/verifiers/e2e.sh")
         // SECONDS — there is no `MINUTES` constant; earlier revisions of this file assumed one.
         .timeout(20 * 60);                // the run-level 300s default would kill it
 
-    // ⛔ THERE IS NO `stalled` JUDGE HERE ANY MORE, and the reason is worth more than the judge was.
+    // ⛔ THERE IS NO `stalled` VERIFIER HERE ANY MORE, and the reason is worth more than the verifier was.
     //
-    // The shipped `rlt/judges/stalled.sh` is MET WHEN THINGS ARE BAD — the one judge in the library
+    // The shipped `rlt/verifiers/stalled.sh` is MET WHEN THINGS ARE BAD — the one verifier in the library
     // that inverts the convention every other one follows (`tests_pass`, `builds`, `lint_clean`,
     // `no_shrink`, `e2e`: met = good). It inverts it because YAML's `notify_if: stalled` reads
     // naturally that way. On the Rust path there is no `notify_if`, so the inversion buys nothing —
-    // and it costs something real: a judge that flips met→unmet when the loop RECOVERS is read by
+    // and it costs something real: a verifier that flips met→unmet when the loop RECOVERS is read by
     // `gate()` as a regression, so an `on_regression: Rollback` driver would discard the very work
     // that escaped the stall, and `landed_met` (which reads only MERGED rows) would keep the stale
     // `true` forever, so every later gate would roll back too. The run would never merge again.
     //
     // Two fixes, and this file takes the second:
-    //   (1) invert it — a `not_stalled` judge, met = good. Flipping to unmet then means "we got
+    //   (1) invert it — a `not_stalled` verifier, met = good. Flipping to unmet then means "we got
     //       stuck", which IS a regression, and recovery is unmet→met, which is not. Self-healing.
-    //   (2) do not make it a judge at all. Stall is a property of THIS loop's progress, the driver
+    //   (2) do not make it a verifier at all. Stall is a property of THIS loop's progress, the driver
     //       can see it directly, and a local variable is replay-safe by construction. Below.
     //
-    // The rule that generalises: on the Rust path a judge's `met` should mean GOOD. An inverted
+    // The rule that generalises: on the Rust path a verifier's `met` should mean GOOD. An inverted
     // detector belongs only in `notify_if`/`abort_if`, which this path does not have.
 
-    let design_sound = Judge::rubric("design_sound", "rlt/judges/design_sound.md");
+    let design_sound = Verifier::rubric("design_sound", "rlt/verifiers/design_sound.md");
 
     // THE ANTI-CHEAT INVARIANT: the test count must never decrease. It is a QUALITY invariant, not
     // a security one — the security answer to "delete the failing test" is the kernel deny on
@@ -221,24 +221,24 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
     //
     // Native because it needs HISTORY across steps, and reading it in Rust means no subprocess, no
     // hand-parsing of verdicts.jsonl, and a comparison the compiler checks. NOT because Rust sees
-    // more than a script: script judges already get `RLT_SESSION`/`RLT_STEP` (core/judge.rs:88) and
+    // more than a script: script verifiers already get `RLT_SESSION`/`RLT_STEP` (core/verifier.rs:88) and
     // can be handed whatever else they need.
-    // `JudgeCtx` gives a native judge the other judges (`met/value/verdict/previous/history`) plus
+    // `VerifierCtx` gives a native verifier the other verifiers (`met/value/verdict/previous/history`) plus
     // `session()`, `step()`, `dir()`, `read()` and `diff()` — and NO clock, NO RNG, NO network, NO
-    // env. That exclusion is the point: a judge that reads the wall clock returns a different
+    // env. That exclusion is the point: a verifier that reads the wall clock returns a different
     // verdict on replay, and `--resume` would fast-forward past a divergence it cannot see.
-    // ⚠ THIS IS AN ORDINARY JUDGE, ASKED IN THE FLOW (see VERIFY below). There is no `.invariants()`
+    // ⚠ THIS IS AN ORDINARY VERIFIER, ASKED IN THE FLOW (see VERIFY below). There is no `.invariants()`
     // to register it with — that key is YAML-only now, along with `abort_if`/`notify_if` — so
-    // "an invariant" on the Rust path just means a judge the driver asks before it gates. It joins
+    // "an invariant" on the Rust path just means a verifier the driver asks before it gates. It joins
     // the regression set by virtue of having been asked, which is the whole rule. Note it is
-    // met = GOOD, like every other judge here; that convention is what makes the rule safe.
+    // met = GOOD, like every other verifier here; that convention is what makes the rule safe.
     //
-    // ⚠ A native judge's closure is `Fn + Send + Sync + 'static` — rlt keeps it for the whole run,
-    // so it cannot BORROW another judge out of `main`'s frame. Clone the one it consults into the
-    // closure; `Judge` is `Clone` for exactly this, and a clone is a name plus a kind, not a run.
+    // ⚠ A native verifier's closure is `Fn + Send + Sync + 'static` — rlt keeps it for the whole run,
+    // so it cannot BORROW another verifier out of `main`'s frame. Clone the one it consults into the
+    // closure; `Verifier` is `Clone` for exactly this, and a clone is a name plus a kind, not a run.
     let tests_for_shrink = tests.clone();
-    let no_shrink = Judge::native("no_shrink", move |c| {
-        // `value()` is Option<f64> because a BINARY judge emits no number, and conflating "no
+    let no_shrink = Verifier::native("no_shrink", move |c| {
+        // `value()` is Option<f64> because a BINARY verifier emits no number, and conflating "no
         // number" with 0 is a bug rlt has already had once. None here means `tests_pass` was not
         // consulted on this step — not that the suite shrank to nothing.
         let Some(now) = c.value(&tests_for_shrink) else {
@@ -283,10 +283,10 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         rlt.step(&select)?;
         for _ in 0..3 {
             rlt.step(&design)?;
-            // `value_or(d)`, not `value()`: the reader is `Option<f64>` (a binary judge emits no
+            // `value_or(d)`, not `value()`: the reader is `Option<f64>` (a binary verifier emits no
             // number — see `no_shrink` below, which depends on exactly that), so a comparison needs
             // the driver to STATE its default rather than have rlt fabricate a 0.
-            if rlt.judge(&design_sound).value_or(0.0) >= 85.0 {
+            if rlt.verifier(&design_sound).value_or(0.0) >= 85.0 {
                 break;
             }
             rlt.info("design still vague — redrafting");
@@ -294,7 +294,7 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // Re-testing is free (memoized for this step), so there is no `drafted_ok` bool and no
         // `Status::Exhausted` to match on. Three vague drafts means the ROADMAP item was
         // underspecified, so the right move is a different item — not implementing from a fog.
-        if rlt.judge(&design_sound).value_or(0.0) < 85.0 {
+        if rlt.verifier(&design_sound).value_or(0.0) < 85.0 {
             rlt.info("3 drafts and still vague — picking a different roadmap item next cycle");
             continue 'cycle;
         }
@@ -302,15 +302,15 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // ── BUILD — first cut, then grind to green ─────────────────────────────────────────
         let r = rlt.step(&implement)?;
         rlt.log(&format!("implement: {} tokens, landed={:?}", r.tokens, r.landed));   // Debug: no Display on `Landing`
-        if !rlt.judge(&builds).met() {
+        if !rlt.verifier(&builds).met() {
             rlt.info("first cut does not compile — starting over next cycle");
             continue 'cycle;
         }
 
         // STALL DETECTION, IN THE DRIVER. Two laps that fix nothing means the same vendor is going
-        // in circles, so the next lap goes to a different one. This is what the `stalled` judge used
+        // in circles, so the next lap goes to a different one. This is what the `stalled` verifier used
         // to do, and here it is three lines of Rust that (a) can change WITHIN the loop, which a
-        // verdict-file-backed judge cannot — rows land per `gate()`, not per step (OD-26) — (b)
+        // verdict-file-backed verifier cannot — rows land per `gate()`, not per step (OD-26) — (b)
         // never reaches `gate()`'s regression set, so it cannot be mistaken for a goal, and (c) is
         // replay-safe: on `--resume` the memoized verdicts feed the same comparison and the loop
         // takes the same branches.
@@ -324,7 +324,7 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
             } else {
                 rlt.step(&repair)?;
             }
-            let green = [&builds, &lint, &tests].iter().filter(|j| rlt.judge(j).met()).count();
+            let green = [&builds, &lint, &tests].iter().filter(|j| rlt.verifier(j).met()).count();
             if green == 3 {
                 break;
             }
@@ -332,28 +332,28 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
             if green <= last_green { flat_laps += 1; } else { flat_laps = 0; }
             last_green = green;
         }
-        if !(rlt.judge(&tests).met() && rlt.judge(&lint).met()) {
+        if !(rlt.verifier(&tests).met() && rlt.verifier(&lint).met()) {
             // The work is NOT lost by leaving without a gate: every session is committed on its own
             // branch and session N+1 branches off session N, so the next cycle's worker still opens
             // the partial implementation. What has not happened is a merge to base.
             rlt.ask(&format!("cycle {c} did not converge in 15 laps — different approach?"));
             continue 'cycle;
         }
-        if !rlt.judge(&no_shrink).met() {
-            rlt.ask(rlt.judge(&no_shrink).rationale());   // memoized: the second ask is free
+        if !rlt.verifier(&no_shrink).met() {
+            rlt.ask(rlt.verifier(&no_shrink).rationale());   // memoized: the second ask is free
             continue 'cycle;
         }
 
         // ── VERIFY — the centrepiece ───────────────────────────────────────────────────────
-        // Four judges, `&&`, one line. The three cheap ones were already consulted this step so
+        // Four verifiers, `&&`, one line. The three cheap ones were already consulted this step so
         // re-listing them costs nothing, and `&&` short-circuits before `e2e` unless all three are
         // green. Across a 60-step run that is ~20 minutes of e2e instead of ~10 hours. There is no
-        // `gate:` field, no `when:` on the judge and no run-set to declare — the flow already says
+        // `gate:` field, no `when:` on the verifier and no run-set to declare — the flow already says
         // it, in the language the reader already knows.
-        if !(rlt.judge(&builds).met()
-            && rlt.judge(&lint).met()
-            && rlt.judge(&tests).met()
-            && rlt.judge(&e2e).met())
+        if !(rlt.verifier(&builds).met()
+            && rlt.verifier(&lint).met()
+            && rlt.verifier(&tests).met()
+            && rlt.verifier(&e2e).met())
         {
             rlt.info("e2e red after a green cheap ladder — not landable this cycle");
             continue 'cycle;
@@ -363,10 +363,10 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // `gate()` closes the span and hands rlt the keep/rollback call over every verdict consulted
         // since the last gate, under the `on_regression` set in `main`. The driver says WHEN, the
         // policy says WHAT — an `rlt.rollback()` was proposed and rejected for inverting exactly
-        // that. Note this is unrelated to the deleted judge-level `gate:` field above.
+        // that. Note this is unrelated to the deleted verifier-level `gate:` field above.
         //
         // ⚠ AT THIS GATE THE POLICY IS A BACKSTOP, NOT THE MECHANISM. The `&&` ladder above already
-        // refused to reach here with any judge unmet, so this span's regression set is all-met by
+        // refused to reach here with any verifier unmet, so this span's regression set is all-met by
         // construction and `Rollback` cannot fire. That is not a defect — the ladder is the STRICTER
         // rule (it blocks red work whether or not it ever landed green). `Rollback` earns its keep at
         // the SECOND gate below, where the span is graded after the work instead of before it.
@@ -374,13 +374,13 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // THE REGRESSION SET IS SIMPLY WHAT THIS DRIVER ASKED: `builds`, `lint`, `tests`, `e2e`,
         // `no_shrink` — every one of them met = GOOD, so "was met, now unmet" always means "worse".
         // No exclusion rule and no marker are needed, because there is no inverted detector in the
-        // span: the stall check above is a local variable, not a judge (see the block where the
-        // `stalled` judge used to be). That is the whole reason it is a local variable.
+        // span: the stall check above is a local variable, not a verifier (see the block where the
+        // `stalled` verifier used to be). That is the whole reason it is a local variable.
         rlt.gate()?;
 
         // ── LAND — merge and tag. NOT restart. ─────────────────────────────────────────────
-        // The new judge grades the NEXT run, never this one: this driver is already compiled.
-        rlt.step(&author_judge)?;
+        // The new verifier grades the NEXT run, never this one: this driver is already compiled.
+        rlt.step(&author_verifier)?;
 
         // The one human gate, and the only one. Landing is autonomous; deciding that a generation
         // is the one the next run picks up is not. `block` is USER-driven — the worker can never
@@ -390,7 +390,7 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 
         rlt.step(&land)?;
 
-        // GRADE THE SECOND SPAN BEFORE IT LANDS. This span writes a NEW JUDGE and the tag the next
+        // GRADE THE SECOND SPAN BEFORE IT LANDS. This span writes a NEW VERIFIER and the tag the next
         // generation boots from — the one merge in the whole driver that must never go in unverified.
         // Asking here is what puts any verdict in the span AT ALL: with none, `gate()`'s regression
         // set is empty, `verdicts::append` returns early on the empty slice (no `verdicts.jsonl` row
@@ -398,10 +398,10 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // `OnRegression::Rollback` can fire in this driver — `builds`/`tests` were landed-met one
         // gate ago, so a generation that breaks its own build is DISCARDED here rather than tagged
         // as the next rlt. The policy does the discarding; this `if` only names the reason.
-        if !(rlt.judge(&builds).met() && rlt.judge(&tests).met()) {
-            rlt.info("authoring the judge or tagging broke the tree — this generation is not landable");
+        if !(rlt.verifier(&builds).met() && rlt.verifier(&tests).met()) {
+            rlt.info("authoring the verifier or tagging broke the tree — this generation is not landable");
         }
-        rlt.gate()?;                       // second span: author_judge + land, same policy
+        rlt.gate()?;                       // second span: author_verifier + land, same policy
         rlt.log(&format!(
             "generation {c} landed. The NEXT `rlt run` uses it; this process does not."
         ));
@@ -422,15 +422,15 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 //                                   re-grants nothing — a deny, not a prompt       (design, §4b.5)
 //   disable a test from inside a    `no_shrink`: the count must not fall. A        always — but it
 //   file it may legitimately write  detector, cleared by a human `rlt send inject` detects, not bars
-//   suborn a script judge into      A JUDGE IS CONFINED AS A JUDGE (§2.5): the    sandbox|container
+//   suborn a script verifier into      A VERIFIER IS CONFINED AS A VERIFIER (§2.5): the    sandbox|container
 //   met:true                        project tree is READ-ONLY to it, so it can    — SHIPPED
-//                                   neither rewrite `rlt/judges/` nor edit the
+//                                   neither rewrite `rlt/verifiers/` nor edit the
 //                                   `src/` it grades into passing. Its writes are
-//                                   RELOCATED to `$RLT_JUDGE_SCRATCH`, so this
-//                                   costs no judge anything. ⚠ What turns it on
+//                                   RELOCATED to `$RLT_VERIFIER_SCRATCH`, so this
+//                                   costs no verifier anything. ⚠ What turns it on
 //                                   is `.isolation()` on a STEP — the run's tier
 //                                   is the strongest any step declared, and the
-//                                   judges take that, never the current step's.
+//                                   verifiers take that, never the current step's.
 //   forge verdicts.jsonl to fake    `rlt/private/` carve-out, derived from cwd in  sandbox|container
 //   progress — or a stall           `wrap()` (isolation/mod.rs:151), no knob.      — SHIPPED cc30d43
 //                                   Proven by `isolation::tests::private_dir_
@@ -439,7 +439,7 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 //   own token ceiling               (paths.rs:135) — the same carve-out
 //   weaken src/isolation/, escape   THE GENERATION BOUNDARY: this run's            structural, always
 //                                   confinement was compiled before the change
-//   break the gate or the judges    the generation boundary again                  structural, always
+//   break the gate or the verifiers    the generation boundary again                  structural, always
 //   scope creep across 200 files    NOTHING in code. The `select` prompt asks for  unenforced — said
 //                                   one-run items; the rest is review at the tag   so it is not
 //                                                                                  mistaken for one
@@ -449,10 +449,10 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 // `isolation: sandbox` means trusting the worker not to touch the machinery grading it. Under
 // `none` the moat is a protocol boundary, not a permission one (HANDOFF §5).
 //
-// THE RESIDUAL WITH SANDBOX: `rlt/judges/` is committed by design, so that a rollback can restore a
-// tampered grader — and `author_judge` deliberately punches a hole in the deny for exactly one
+// THE RESIDUAL WITH SANDBOX: `rlt/verifiers/` is committed by design, so that a rollback can restore a
+// tampered grader — and `author_verifier` deliberately punches a hole in the deny for exactly one
 // step. That step is the narrowest form of the problem that still lets a self-improving loop write
-// its own graders; it is not zero. `no_shrink` is not an answer to it (a native judge is not
+// its own graders; it is not zero. `no_shrink` is not an answer to it (a native verifier is not
 // safer, it is just faster) — the answer is that the hole is one named step wide and the diff is
 // reviewed at the tag.
 //

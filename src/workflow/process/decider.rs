@@ -28,7 +28,7 @@ struct Answer {
     why: Option<String>,
 }
 
-/// What the step may pick: every mode its judges support, the project's sizes, and on an item of an `each` the
+/// What the step may pick: every mode its verifiers support, the project's sizes, and on an item of an `each` the
 /// process's tools plus the ones the project enabled.
 pub fn allowed(p: &Proc, l: &Ladder) -> Allowed {
     let modes = if l.critic.is_some() { vec![Mode::Once, Mode::Dccr, Mode::Converge] } else { vec![Mode::Once, Mode::Converge] };
@@ -87,12 +87,12 @@ fn brief(p: &Proc, l: &Ladder, ok: &Allowed, last: &str, file: &str) -> String {
         .map(|e| format!("- {}: {}", e["kind"].as_str().unwrap_or(""), clip(e["rationale"].as_str().unwrap_or(""))))
         .collect();
     let modes: Vec<String> = ok.modes.iter().map(|m| format!("{m:?}").to_lowercase()).collect();
-    format!("# Pick the next attempt at step {name}\n\nStep {name} hasn't met its judges yet. You don't do the step; \
+    format!("# Pick the next attempt at step {name}\n\nStep {name} hasn't met its verifiers yet. You don't do the step; \
         you pick how its next attempt runs, from its history. Read nothing else, change nothing.\n\n\
         ## Its attempts in this run\n\n{h}\n\n## The last verdict\n\n{last}\n\n## What you may pick\n\n\
         - an agent attempt: `tier: {{ mode: <{m}>, model: <{models}>, effort: <low | medium | high>, repairs: <n>, \
         max: <n> }}` (once: its checks only; dccr: checks and critic; converge: repairs until met or stalled, at \
-        most max){tools}\n- or `stop: <why>`, when no attempt can meet the judges (the fault is in an earlier \
+        most max){tools}\n- or `stop: <why>`, when no attempt can meet the verifiers (the fault is in an earlier \
         step's result, or outside the step).\n\nPick more effort (a stronger model, converge) where the failure \
         needs judgment, never the same tier that failed the same way again.\n\n## Your answer\n\nWrite it to {file} \
         as YAML, with `why:` in one line, like:\n\n```yaml\ntier: {{ mode: converge, model: <a size>, max: 5 }}\n\
@@ -132,7 +132,7 @@ mod tests {
     fn a_pick_keeps_to_what_the_step_allows() {
         assert!(valid(&tier("{ mode: converge, model: small, max: 4 }"), &ok()));
         assert!(valid(&tier("{ tool: transform.recipes }"), &ok()));
-        assert!(!valid(&tier("{ mode: dccr }"), &ok()), "a mode the step's judges don't support");
+        assert!(!valid(&tier("{ mode: dccr }"), &ok()), "a mode the step's verifiers don't support");
         assert!(!valid(&tier("{ mode: once, model: huge }"), &ok()), "a size the project doesn't name");
         assert!(!valid(&tier("{ mode: once, agent: codex }"), &ok()), "the decider never changes the agent");
         assert!(!valid(&tier("{ tool: other }"), &ok()));

@@ -4,8 +4,8 @@
 
 The YAML path is a *list of steps that laps forever* until `done_if` fires. That covers most of what
 people build. The Rust API exists for the runs where the shape of the work is a program: a branch
-that depends on a judge's number, a retry ladder whose bound changes with what it learned, a loop
-that asks an expensive judge only when three cheap ones already passed.
+that depends on a verifier's number, a retry ladder whose bound changes with what it learned, a loop
+that asks an expensive verifier only when three cheap ones already passed.
 
 Everything below is the same engine. `rlt.step()` dispatches through the identical primitive the
 YAML walk does — one execution model, two ways to drive it. What you gain is `if`, `for`, `?` and
@@ -31,7 +31,7 @@ this shape, stop here — `examples/workflow.yaml` is a heavily-commented refere
 
 ## A process of standard steps: a process file
 
-When the flow is a **process** — phases of steps, each a script, an agent's work judged by checks and a critic, a human's
+When the flow is a **process** — phases of steps, each a script, an agent's work verified by checks and a critic, a human's
 approval, a loop over a list or an exam — it needs no Rust either: write a **process file** and run `rlt process <file>
 <project>` ([PROCESS.md](PROCESS.md)). It composes the blocks of [`relentless::workflow`](#workflow-building-blocks-aggworkflow); the YAML has no logic of its own.
 
@@ -41,13 +41,13 @@ Four things YAML deliberately cannot do, each of which is a `for`/`if` in Rust:
 
 | you want | YAML | Rust |
 |---|---|---|
-| skip a step based on a verdict | ✗ — a lap runs every entry (`if:` was cut) | `if rlt.judge(&x).met() { continue }` |
-| **not run** an expensive judge unless cheap ones pass | ✗ — every run-set judge runs after every judged step | `rlt.judge(&cheap).met() && rlt.judge(&slow).met()` |
+| skip a step based on a verdict | ✗ — a lap runs every entry (`if:` was cut) | `if rlt.verifier(&x).met() { continue }` |
+| **not run** an expensive verifier unless cheap ones pass | ✗ — every run-set verifier runs after every verified step | `rlt.verifier(&cheap).met() && rlt.verifier(&slow).met()` |
 | a bound that changes with what the run learned | ✗ — `max:` is a literal | any expression |
 | state that changes *within* a cycle | ✗ — verdict rows land per gate | a local variable |
 
 The second row is the one that costs money. A 40-minute load test in a YAML run-set executes after
-**every** judged step; in a driver, `&&` short-circuits and it runs only where it matters.
+**every** verified step; in a driver, `&&` short-circuits and it runs only where it matters.
 
 ---
 
@@ -56,7 +56,7 @@ The second row is the one that costs money. A 40-minute load test in a YAML run-
 Eleven calls. `Relentless::open(dir)` then a self-consuming builder chain, then ordinary Rust.
 
 ```rust
-use relentless::driver::{Relentless, Judge, Limits, OnRegression, Step, Verdict};
+use relentless::driver::{Relentless, Verifier, Limits, OnRegression, Step, Verdict};
 
 fn main() -> Result<(), relentless::driver::Fatal> {
     let rlt = Relentless::open(".")?
@@ -66,8 +66,8 @@ fn main() -> Result<(), relentless::driver::Fatal> {
         .on_regression(OnRegression::Rollback);
 
     let implement = Step::new("implement").prompt("Make the failing tests pass.");
-    let tests     = Judge::script("tests_pass", "rlt/judges/tests.sh");
-    let slow      = Judge::script("load_ok", "rlt/judges/loadtest.sh").timeout(45 * 60);
+    let tests     = Verifier::script("tests_pass", "rlt/verifiers/tests.sh");
+    let slow      = Verifier::script("load_ok", "rlt/verifiers/loadtest.sh").timeout(45 * 60);
 
     let cycle = rlt.pos("cycle", 20);          // the breadcrumb readers render
     for c in 1..=20 {
@@ -75,7 +75,7 @@ fn main() -> Result<(), relentless::driver::Fatal> {
         rlt.check_limits()?;                   // ceilings are OPT-IN — this is where they fire
 
         rlt.step(&implement)?;                 // stages work on a session branch; nothing merged
-        if !(rlt.judge(&tests).met() && rlt.judge(&slow).met()) {
+        if !(rlt.verifier(&tests).met() && rlt.verifier(&slow).met()) {
             continue;                          // `&&` IS the cost gate: `slow` never runs when red
         }
         rlt.gate()?;                           // close the span: merge it, or apply on_regression
@@ -87,18 +87,18 @@ fn main() -> Result<(), relentless::driver::Fatal> {
 | call | what it does |
 |---|---|
 | `Relentless::open(dir)` | opens the project; normalises git; **boots lazily** — nothing is published until real work happens |
-| `.limits()` `.on_regression()` `.ratchet()` `.merge_requires_improvement()` `.instructions()` | the builder chain (self-consuming; build judges *above* it) |
+| `.limits()` `.on_regression()` `.ratchet()` `.merge_requires_improvement()` `.instructions()` | the builder chain (self-consuming; build verifiers *above* it) |
 | `.user_settings(bool)` | whether workers load the operator's own agent settings (plugins, MCP servers, hooks, personal instructions). On by default; off, Claude workers start with `--setting-sources project,local`, and an agent that can't leave them out says so |
 | `.user_env(false \| true \| [keys])` | which keys of the operator's settings `env` block (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`) every Claude worker and one-shot call gets as environment variables without the rest of those settings: none (default), every key, or the named ones. A variable rlt's own environment has wins; `RLT_*` keys are never taken; string values only; only names are logged. Process-wide like `RLT_MODELS`. Other agents: no-op |
 | `.reachable(&step)` | one tiny call with the step's agent and model, its settings and `user_env` as the run has them, before the run starts: `Ok` with what answered, or an error naming the agent's cause (and, for an authentication error where the operator's settings hold `ANTHROPIC_*` keys the run does not pass, the setting that passes them). `rlt process` calls it before its first step (`rlt: { preflight: false }` skips it) |
 | `.system_prompt(text)` | text every worker's agent adds to its system prompt, for a rule that must hold for the whole session rather than the first turn (A-34). Claude: `--append-system-prompt`; an agent that can't take it runs without it and says so |
-| `.vars([(name, value), ..])` | the workflow's variables: `{{ name }}` in every step's prompt **file** (the role prompt's too) and every LLM judge's rubric (its `inputs:` frontmatter too) is filled in where rlt reads it; a name the map lacks fails that step or judge. Inline prompts a driver builds aren't templates (they may carry a project's own `{{ … }}`; code has `format!`), and other `{{` (no plain name inside) stays as it is. `relentless::prelude::render(text, &vars)` renders a file of the driver's own (its config) the same way |
+| `.vars([(name, value), ..])` | the workflow's variables: `{{ name }}` in every step's prompt **file** (the role prompt's too) and every rubric verifier's rubric (its `inputs:` frontmatter too) is filled in where rlt reads it; a name the map lacks fails that step or verifier. Inline prompts a driver builds aren't templates (they may carry a project's own `{{ … }}`; code has `format!`), and other `{{` (no plain name inside) stays as it is. `relentless::prelude::render(text, &vars)` renders a file of the driver's own (its config) the same way |
 | `.memory(bool)` | the run's default for `Step::memory`: whether sessions keep rlt's working memory (forward state, wiki, memory log, summary). On by default; a step's own setting wins |
-| `.judge_agent(Agent::Codex)` `.judge_model(m)` `.judge_timeout(secs)` | the ruler — YAML's `judge.agent` / `judge.model` / `judge.timeout` ([CONFIG](CONFIG.md#judge--the-ruler)). `Agent::Custom` is refused when the run boots: the ruler is resolved by name |
-| `.context(path, name)` `.network(Network::Allow(..))` `.image()` `.judge_image()` `.pass_env([..])` `.credentials([..])` | the run's confinement: read-only context dirs, the egress allow-list, the container images and what crosses into a container — YAML's `context:` / `isolation_policy:` / `image:` / `judge.image` ([CONFIG](CONFIG.md#network-egress--isolation_policynetwork)) |
+| `.verifier_agent(Agent::Codex)` `.verifier_model(m)` `.verifier_timeout(secs)` | the ruler — YAML's `verifier.agent` / `verifier.model` / `verifier.timeout` ([CONFIG](CONFIG.md#verifier--the-ruler)). `Agent::Custom` is refused when the run boots: the ruler is resolved by name |
+| `.context(path, name)` `.network(Network::Allow(..))` `.image()` `.verifier_image()` `.pass_env([..])` `.credentials([..])` | the run's confinement: read-only context dirs, the egress allow-list, the container images and what crosses into a container — YAML's `context:` / `isolation_policy:` / `image:` / `verifier.image` ([CONFIG](CONFIG.md#network-egress--isolation_policynetwork)) |
 | `rlt.step(&s)` | run one session. Commits on a session branch — **stages**, never merges |
-| `rlt.judge(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
-| `rlt.group(&g)` | every member of a `Group`'s verdict, through `judge()`'s memoized cache — count over it: `.at_least(2)`, `.all()`, `.any()` |
+| `rlt.verifier(&j)` | this step's verdict, running it if not yet asked. **Memoized per step** |
+| `rlt.group(&g)` | every member of a `Group`'s verdict, through `verifier()`'s memoized cache — count over it: `.at_least(2)`, `.all()`, `.any()` |
 | `rlt.gate()` | close the span: merge everything staged since the last gate, or discard it per policy |
 | `rlt.gate_state()` | the gate's own history: ratchet references, `rollbacks`, `consecutive_rollbacks`, `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes`, `oscillating(k)` |
 | `rlt.check_limits()` | enforce ceilings, drain the operator bus, honour Ctrl-C |
@@ -138,16 +138,16 @@ record: a step must still pass started fresh. Not to be confused with resuming a
 own gets it in its opening message after the pointer to the brief (cut at 4000 characters), since it takes
 the rest of the brief for known; a fresh or forked session gets the pointer alone.
 
-### Judges
+### Verifiers
 
 Three kinds, one type:
 
 ```rust
-Judge::script("tests_pass", "rlt/judges/tests.sh")     // any executable; verdict JSON on stdout
-Judge::rubric("spec_sound", "rlt/judges/spec.md")      // the .md IS the prompt; graded by the ruler
-Judge::rubric("review", "rlt/judges/review.md")       // …asking its OWN agent, model and effort,
+Verifier::script("tests_pass", "rlt/verifiers/tests.sh")     // any executable; verdict JSON on stdout
+Verifier::rubric("spec_sound", "rlt/verifiers/spec.md")      // the .md IS the prompt; graded by the ruler
+Verifier::rubric("review", "rlt/verifiers/review.md")       // …asking its OWN agent, model and effort,
     .agent(Agent::Codex).model("gpt-5").effort(Effort::Low) // not the run's ruler (a reviewer ≠ the worker)
-Judge::native("p99_ok", |c| {                          // a Rust closure over a JudgeCtx
+Verifier::native("p99_ok", |c| {                          // a Rust closure over a VerifierCtx
     let ms = std::fs::read_to_string(c.scratch().join("bench.json"))
         .ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v["p99_ms"].as_f64()).unwrap_or(f64::MAX);
@@ -155,49 +155,49 @@ Judge::native("p99_ok", |c| {                          // a Rust closure over a 
 })
 ```
 
-⛔ `JudgeCtx` offers **no clock, no randomness, no network and no environment** — deliberately. A
-judge that reads the wall clock returns a different verdict on replay, and resume would silently
+⛔ `VerifierCtx` offers **no clock, no randomness, no network and no environment** — deliberately. A
+verifier that reads the wall clock returns a different verdict on replay, and resume would silently
 diverge from the run it claims to reproduce. A check that genuinely needs the clock is a
-`Judge::script`, where the impurity sits in a file a reviewer can see.
+`Verifier::script`, where the impurity sits in a file a reviewer can see.
 
-`c.scratch()` is the per-session directory judges may write — **shared between them**, so one judge
-can measure and another apply a threshold. A judge able to write the tree it grades can make the code
+`c.scratch()` is the per-session directory verifiers may write — **shared between them**, so one verifier
+can measure and another apply a threshold. A verifier able to write the tree it grades can make the code
 pass, so under a confining tier the project tree is read-only to it and writes are relocated:
-`$RLT_JUDGE_SCRATCH` for working files, a persistent per-project dir for toolchain caches
+`$RLT_VERIFIER_SCRATCH` for working files, a persistent per-project dir for toolchain caches
 (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, `GOCACHE`, …). Full table in
-[docs/CONFIG.md](CONFIG.md#-a-judge-may-not-write-the-project-tree).
+[docs/CONFIG.md](CONFIG.md#-a-verifier-may-not-write-the-project-tree).
 
-A verdict's `.with_evidence([...])` paths are KEPT: when the driver asks a judge, rlt copies each
+A verdict's `.with_evidence([...])` paths are KEPT: when the driver asks a verifier, rlt copies each
 named file (relative paths resolve in `c.scratch()` first, then the project) to
-`rlt/private/evidence/<run_id>/<session>/<judge>/` — under the session it was JUDGED in, since a later
+`rlt/private/evidence/<run_id>/<session>/<verifier>/` — under the session it was VERIFIED in, since a later
 `gate()` sees another scratch — and names the copies on the gate's ledger row and in the report.
-`Relentless::evidence_max_mb(n)` bounds one run's copies (default 100, the twin of `judge.evidence_max_mb`).
+`Relentless::evidence_max_mb(n)` bounds one run's copies (default 100, the twin of `verifier.evidence_max_mb`).
 
-⚠ **What confines a driver's judges is `.isolation()` on its STEPS.** There is no separate knob: the
-run's tier is the strongest tier any step has declared, and judges take that — never the tier of
-whichever step happens to be current, because a judge's confinement follows from its role, not from
+⚠ **What confines a driver's verifiers is `.isolation()` on its STEPS.** There is no separate knob: the
+run's tier is the strongest tier any step has declared, and verifiers take that — never the tier of
+whichever step happens to be current, because a verifier's confinement follows from its role, not from
 its caller.
 
 ```rust
-let build = Step::new("implement").isolation(Isolation::Sandbox);   // ← this confines the JUDGES too
+let build = Step::new("implement").isolation(Isolation::Sandbox);   // ← this confines the VERIFIERS too
 ```
 
 A context dir or a network allow-list needs EVERY step confined: `rlt.step()` refuses an
 `Isolation::None` step when the run has either, and refuses a step whose agent's endpoint is not on
 the allow-list (a driver's steps never reach the YAML startup check, so the rule runs per step).
-`Step::image("…")` picks a container step's image; under `Isolation::Container` the judges run in
-`.judge_image()` (else `.image()`, else the base image), with the project read-only.
+`Step::image("…")` picks a container step's image; under `Isolation::Container` the verifiers run in
+`.verifier_image()` (else `.image()`, else the base image), with the project read-only.
 
-A driver that declares no tier anywhere runs its judges unconfined, exactly as it runs its workers
+A driver that declares no tier anywhere runs its verifiers unconfined, exactly as it runs its workers
 unconfined. That is the default and it is the honest one — but if you sandbox the worker and not the
-judges, the judge script is the way out, because a confined worker can rewrite `rlt/judges/*.sh` in
+verifiers, the verifier script is the way out, because a confined worker can rewrite `rlt/verifiers/*.sh` in
 its own writable cwd.
 
 ---
 
 ### The ratchet and the gate's history
 
-`gate()`'s boolean rule protects `met`. A ratchet protects a NUMBER: a ratcheted judge's `value` may not
+`gate()`'s boolean rule protects `met`. A ratchet protects a NUMBER: a ratcheted verifier's `value` may not
 get worse than at the last kept gate by more than its tolerance, or the gate counts a regression and,
 under `OnRegression::Rollback`, discards the span. Same engine, same body as the YAML
 [`sequence.ratchet`](CONFIG.md#the-ratchet--numeric-no-regression):
@@ -207,11 +207,11 @@ let rlt = Relentless::open(".")?
     .ratchet("cc_p95", Ratchet::down(0.5))                        // lower is better, ±0.5
     .ratchet("mutation", Ratchet::up(1.0).baseline(71.0));        // higher is better, seeded
 
-rlt.judge(&cc_p95);              // asked BEFORE the first step() = the driver's baseline pass
+rlt.verifier(&cc_p95);              // asked BEFORE the first step() = the driver's baseline pass
 for _ in 0..20 {
     rlt.step(&implement)?;
-    rlt.judge(&cc_p95);          // the ratchet applies to the judges ASKED since the last gate
-    rlt.judge(&mutation);
+    rlt.verifier(&cc_p95);          // the ratchet applies to the verifiers ASKED since the last gate
+    rlt.verifier(&mutation);
     rlt.gate()?;                 // a regression beyond tolerance ⇒ GateOutcome::RolledBack
     let g = rlt.gate_state();
     if g.consecutive_rollbacks >= 3 || g.oscillating(4) { break; }   // YAML's abort_if terms, in Rust
@@ -220,45 +220,45 @@ for _ in 0..20 {
 
 - **The reference** before the first keep is the seed, else the first value asked before the first
   `step()`; without either, the first kept gate sets it. A kept gate moves it; a rollback never does.
-- **A ratcheted judge that errored or emitted no number never passes** — it rolls the span back.
-- **`gate_state()`** is what `ratchet_regressed`, `<judge>.ref`, `rollbacks`, `consecutive_rollbacks`,
+- **A ratcheted verifier that errored or emitted no number never passes** — it rolls the span back.
+- **`gate_state()`** is what `ratchet_regressed`, `<verifier>.ref`, `rollbacks`, `consecutive_rollbacks`,
   `no_improvements`, `no_changes` (and their `consecutive_` forms) and `oscillating` read on the YAML path.
   A span with no commits returns `GateOutcome::Nothing` from `gate()`, but it is still a gate: its rows
   are stamped `no_changes` and it counts for `no_changes` / `consecutive_no_changes` — bound an idle
-  worker with `rlt.gate_state().consecutive_no_changes >= 3`. The signature `oscillating` compares is every judge asked since the
+  worker with `rlt.gate_state().consecutive_no_changes >= 3`. The signature `oscillating` compares is every verifier asked since the
   last gate that was unmet, plus every ratchet regression.
 - **On resume** the state is restored from the last replayed `gate` record — i.e. as of the last kept
   gate — not from `rlt/private/gate.json`, which may be ahead of it by gates that will re-execute.
 
-### Metric and score judges (swe-metrics)
+### Metric and score verifiers (swe-metrics)
 
-The YAML `judges.<name>.metric` / `.score` declarations
-([CONFIG](CONFIG.md#judges-built-on-swe-metrics--metric-and-score)) are two more judge constructors —
-the same engine, so judges asked in one span share ONE `swe-metrics measure` of the tree:
+The YAML `verifiers.<name>.metric` / `.score` declarations
+([CONFIG](CONFIG.md#verifiers-built-on-swe-metrics--metric-and-score)) are two more verifier constructors —
+the same engine, so verifiers asked in one span share ONE `swe-metrics measure` of the tree:
 
 ```rust
 use relentless::prelude::*;
-let cc = Judge::metric("cc_p95", MetricJudge::new("complexity.cyclomatic").stat(Stat::P95).tool("lizard").max(10.0));
-let vulns = Judge::metric("vulns", MetricJudge::new("dependencies.vulnerabilities").label("severity", &["critical", "high"]).max(0.0));
-let quality = Judge::score("quality", ScoreJudge::new("swe-default", "2").min(80.0));
+let cc = Verifier::metric("cc_p95", MetricVerifier::new("complexity.cyclomatic").stat(Stat::P95).tool("lizard").max(10.0));
+let vulns = Verifier::metric("vulns", MetricVerifier::new("dependencies.vulnerabilities").label("severity", &["critical", "high"]).max(0.0));
+let quality = Verifier::score("quality", ScoreVerifier::new("swe-default", "2").min(80.0));
 let rlt = Relentless::open(".")?.ratchet("cc_p95", Ratchet::down(0.5));   // the driver states the direction
 ```
 
-`MetricJudge` also takes `.combine(Combine::All)`, `.scope(Scope::Changed)` and `.min(..)`; `ScoreJudge` takes
+`MetricVerifier` also takes `.combine(Combine::All)`, `.scope(Scope::Changed)` and `.min(..)`; `ScoreVerifier` takes
 `.scope(Scope::Path("work".into()))` (never `Scope::Changed`), and both take `Scope::ChangedIn { path, since }`:
 the files of `path` changed since the Git ref `since` (a step's own changes; a score of them has no incumbent,
-and is vacuously met when nothing changed). `ScoreJudge::reports(script)` scores the build's reports too (see
+and is vacuously met when nothing changed). `ScoreVerifier::reports(script)` scores the build's reports too (see
 `score.reports` in CONFIG.md); a relative
-`ScoreJudge` definition file is resolved against the project dir. A missing value fails closed exactly
+`ScoreVerifier` definition file is resolved against the project dir. A missing value fails closed exactly
 as on the YAML path. When the run's tier is `container` (a step with `Isolation::Container`),
-swe-metrics runs in `.judge_image()` like every judge. Two differences: a driver has no startup, so a
+swe-metrics runs in `.verifier_image()` like every verifier. Two differences: a driver has no startup, so a
 missing or incompatible `swe-metrics` shows as an ERRORED verdict, not a refusal; and a driver run has no incumbent until its
 first kept gate — a score asked before that is computed without `--baseline`.
 
 ### Groups and the improvement rule
 
-A [`Group`](CONFIG.md#judge-groups--k-of-n) names judges that measure one thing; `rlt.group(&g)` asks
-every member (each through the same memoized cache as `rlt.judge()`) and returns a `GroupVerdict` to
+A [`Group`](CONFIG.md#verifier-groups--k-of-n) names verifiers that measure one thing; `rlt.group(&g)` asks
+every member (each through the same memoized cache as `rlt.verifier()`) and returns a `GroupVerdict` to
 count over. The threshold lives where you branch, never on the group:
 
 ```rust
@@ -274,12 +274,12 @@ for _ in 0..20 {
 }
 ```
 
-- **At `gate()`, a judge asked ONLY through `group()` is judged with its group, net**: one member going
-  met→unmet while another goes unmet→met is not a regression; a net loss is. A judge the driver also
-  asked by name (`rlt.judge`) is held to the per-judge rule. A driver that never asks a group sees no
+- **At `gate()`, a verifier asked ONLY through `group()` is verified with its group, net**: one member going
+  met→unmet while another goes unmet→met is not a regression; a net loss is. A verifier the driver also
+  asked by name (`rlt.verifier`) is held to the per-verifier rule. A driver that never asks a group sees no
   change.
-- **`merge_requires_improvement(true)`** — `gate()` keeps a span only if a judge asked since the last
-  gate went unmet→met (a group: gained ground net) or a ratcheted judge moved the good way beyond its
+- **`merge_requires_improvement(true)`** — `gate()` keeps a span only if a verifier asked since the last
+  gate went unmet→met (a group: gained ground net) or a ratcheted verifier moved the good way beyond its
   tolerance; otherwise it returns `GateOutcome::NoImprovement` and discards the span. That is **not** a
   rollback: `rollbacks` does not move, `no_improvements` / `consecutive_no_improvements` do. A regression
   under `OnRegression::Rollback` wins over it (`RolledBack`).
@@ -305,8 +305,8 @@ wait, that asymmetry is the only thing standing between this and the interactive
 
 Four rules, and they are the whole design:
 
-1. **A human's answer unblocks the STEP; a judge still owns the VERDICT.** Never let a "done" satisfy
-   a goal — `while !rlt.judge(&dns_ok).met() { rlt.hil_bool("created the record?")?; }`.
+1. **A human's answer unblocks the STEP; a verifier still owns the VERDICT.** Never let a "done" satisfy
+   a goal — `while !rlt.verifier(&dns_ok).met() { rlt.hil_bool("created the record?")?; }`.
 2. **An answer may NAME a secret, never CONTAIN one.** `hil_input` writes to the ask ledger and the
    next session's brief. Ask for the credential to be *placed*, and confirm with `hil_bool`.
 3. **`gate()` before you block for a human who will touch the tree.** `step()` only stages, so a
@@ -342,7 +342,7 @@ report; a consumer reads a missing report as `error`.
 
 ## Workflow building blocks (`relentless::workflow`)
 
-A process of named steps — a script, an agent's work judged and repaired, a condition, a human's approval —
+A process of named steps — a script, an agent's work verified and repaired, a condition, a human's approval —
 needs the same few blocks in every driver. `relentless::workflow` has them, built on the calls above (no second
 execution model). A step's **key** is the first word of its name (`"2.5"` of `"2.5 Resolve bindings"`).
 
@@ -361,10 +361,10 @@ fn drive() -> Result<(), Fatal> {
         .history("reports/steps.jsonl")        // default rlt/private/steps.jsonl; a tracked path is committed
         .own(["task.md"])                      // what --reset never takes back
         .on_failure(roles.step("worker", "task-force", "/abs/task-force.md"), 3);
-    flow.script_step("1 Fetch", &Judge::script("fetch", "scripts/fetch.sh"))?;
+    flow.script_step("1 Fetch", &Verifier::script("fetch", "scripts/fetch.sh"))?;
     let design = Task::new(roles.step("worker", "2 Design", "/abs/design.md"))
-        .check(Judge::script("design-ok", "judges/design.py"))
-        .critic(roles.judge("critic", "design-review", "/abs/design-review.md"))
+        .check(Verifier::script("design-ok", "verifiers/design.py"))
+        .critic(roles.verifier("critic", "design-review", "/abs/design-review.md"))
         .repairs(2);
     if let workflow::Outcome::Accepted(point) = flow.task(&design)? {
         // the critic's point after its repair round: the work is kept; put it before the next approval
@@ -379,8 +379,8 @@ fn drive() -> Result<(), Fatal> {
 | `Flow::new(rlt, Run)` | the run: `Run::from_args` reads `--from <key> [--note t | --note-file f [--decided]] [--reset] [--until <key>] [--reentries n]`; a step before `from` doesn't run, the `from` step gets the note leading its brief (`--decided`: the note is the humans' decision, and the `from` step refreshes against it like a later step, unchanged when it doesn't concern it), every later step refreshes; `--until` ends the run after that step |
 | `.history(path)` `.own(paths)` `.hooks(f)` `.on_start(f)` `.on_failure(step, max)` `.trust(rule)` | the step history; files `--reset` keeps; checks before and after every step (recorded as `hook`); what the driver does as a step starts; the task force (at most `max` re-entries and repairs in place per failed step of a run, kept in `rlt/private/task-force.json` across the driver's processes, a restart `--from` a step included; a run from the start begins the count anew; past it the run exits 6); which of the task force's proposals go ahead without a human's yes (`rule(failed step, re-enter at)`) |
 | `.order(keys)` `.constraints(f)` | every step key of the driver in order, built or not, so `--until` ends the run before the first step after it even when the steps up to it never run; what a failed step must keep to (`f(flow, step) -> Option<String>`: its scope, its rubric), in the task force's brief |
-| `flow.script_step(name, &judge)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails, and after the task force's repair in place the script runs again |
-| `flow.recover(name, why, &again)` | the driver's own failure that `again` can judge again (`Ok(None)`: met now): the task force may repair it in place, and when `again` is met the call returns and the step goes on; `flow.fail(name, why)` for one it can't judge again |
+| `flow.script_step(name, &verifier)` | a script does the step; met: its changes are committed, recorded `tool`; unmet: the step fails, and after the task force's repair in place the script runs again |
+| `flow.recover(name, why, &again)` | the driver's own failure that `again` can verifier again (`Ok(None)`: met now): the task force may repair it in place, and when `again` is met the call returns and the step goes on; `flow.fail(name, why)` for one it can't verifier again |
 | `flow.applies(name, &when)` | the step applies when `when` is met; otherwise recorded `skipped` with the reason, no session; a condition that errs fails the step |
 | `flow.task(&Task)` | an agent step: `Task::new(step)` `.check(j)` (several, in order) `.critic(j)` `.critic_context(t)` `.repairs(n)` `.first(script)` `.inputs(paths)` `.section(text)` `.voices(roles)`; returns `Outcome::{Done, Unchanged, Accepted(point), NotReached}` |
 | `flow.approval(name, doc, question, decisions, inputs)` | a human approves `doc`, writing their decisions first; after a re-entry, unchanged inputs (else the document) stand without asking |
@@ -389,7 +389,7 @@ fn drive() -> Result<(), Fatal> {
 | `Roles::load(file, names)` | named roles (`agent`, `model`, `effort`) from a YAML file; an agent that isn't installed is an error at load |
 
 An agent step, in order: a refresh whose `inputs` didn't change is `unchanged` without a session; the `first`
-script does what it can (nothing left and the judges met: done without a session); the worker's brief gets
+script does what it can (nothing left and the verifiers met: done without a session); the worker's brief gets
 what is new first (the note, the changes since its result, the review to address), then its task, the
 driver's sections, the critic's rubric, the checks to run before finishing and a file for "I can't fix this";
 every session starts fresh, its repairs' too: what a step knows is in its brief and the project's files; then
@@ -399,7 +399,7 @@ repair is a fresh session with the review leading the brief and a file for dispu
 round, after which its open point is accepted and returned. No further round when the worker can't fix it, a
 check fails exactly as before, or a check's verdict is `blocked_by` another step's result. A failed step goes
 to the task force: its agent writes `outcome`, `reenter`, `cause` and `note` to the file its brief names. `fixed`: it
-repaired the cause in place, and the step's judges (a script step: its script) judge it again; met, the step
+repaired the cause in place, and the step's verifiers (a script step: its script) verifier it again; met, the step
 is done and the run goes on, recorded `task-force` with the files it changed; still unmet, the run ends.
 `reenter`: an approval is never a re-entry point; a yes ends the run, and `workflow::run` starts it again.
 `escalate` (or no step): the run ends for a human. Repairs in place and re-entries share the task force's limit.
@@ -453,9 +453,9 @@ Three consequences worth designing around:
 
 ## Two rules that are easy to get wrong
 
-**A judge's `met` must mean GOOD.** `gate()`'s regression rule is *"was met, now unmet"*, which only
+**A verifier's `met` must mean GOOD.** `gate()`'s regression rule is *"was met, now unmet"*, which only
 means "worse" under that convention. An inverted detector (met-when-bad, like the shipped `stalled`)
-has to be inverted before it is used as a driver judge.
+has to be inverted before it is used as a driver verifier.
 
 **`step()` stages; `gate()` lands.** A driver that never gates loses nothing — every session is
 committed on its own branch and the span tip holds them all — but the base branch never moves
@@ -468,7 +468,7 @@ the right default.
 
 | | |
 |---|---|
-| `examples/workflow.rs` | the full surface in use — steps, all three judge kinds, `&&` gating, `block()` |
+| `examples/workflow.rs` | the full surface in use — steps, all three verifier kinds, `&&` gating, `block()` |
 | `examples/selfimprove.rs` | a driver that improves the tool that runs it, and the hazards that come with it |
 | `examples/workflow.yaml` | the same workflow in YAML, with an honest list of what it loses |
 | `docs/CONFIG.md` | every `rlt.yaml` key |

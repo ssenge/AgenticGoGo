@@ -42,7 +42,7 @@ use events::{clean, result_event, think, tool, tool_result};
 /// API key), which rlt cannot know. Codex already picks a model appropriate to the account; an
 /// operator who wants a specific one sets `model:` in rlt.yaml explicitly.
 pub const DEFAULT_MODEL: &str = "";
-/// The summarizer/judge model. EMPTY on purpose: Codex must not be handed a model name (a hard
+/// The summarizer/verifier model. EMPTY on purpose: Codex must not be handed a model name (a hard
 /// 400 on a ChatGPT account), so the flag is omitted entirely and Codex picks its own.
 pub const DEFAULT_SUMMARY_MODEL: &str = "";
 
@@ -80,10 +80,10 @@ impl AgentBackend for Codex {
             // (turn.failed / bare error), never tool output, so a command that merely prints "429"
             // cannot trip a false backoff.
             detects_rate_limits: true,
-            // YES — via `--sandbox read-only`, which is the property a judge actually needs.
+            // YES — via `--sandbox read-only`, which is the property a verifier actually needs.
             //
-            // The requirement was never "tools must be absent". It is "the judge must not be able
-            // to MODIFY the artifact it is grading" — a judge SHOULD read the repo; that is its
+            // The requirement was never "tools must be absent". It is "the verifier must not be able
+            // to MODIFY the artifact it is grading" — a verifier SHOULD read the repo; that is its
             // job. Read-only is exactly that, and it is enforced by the sandbox rather than by
             // hoping the model behaves. (Claude gets the same property a different way: its
             // one-shot call omits `--dangerously-skip-permissions`, so tool execution is denied.)
@@ -328,17 +328,17 @@ impl AgentBackend for Codex {
         })
     }
 
-    /// A judging / summarizing call: the model may READ, but it cannot WRITE.
+    /// A verifying / summarizing call: the model may READ, but it cannot WRITE.
     ///
     /// # trust boundary
     /// Two things are defended, mirroring what Claude's one-shot does:
-    /// - **`--sandbox read-only`** — the judge can inspect the repo (its job) but cannot modify the
+    /// - **`--sandbox read-only`** — the verifier can inspect the repo (its job) but cannot modify the
     ///   artifact it is grading. Enforced by the sandbox, not by asking the model nicely.
     /// - **`--ignore-user-config --ignore-rules`** — do NOT load `AGENTS.md` or any repo rules. The
-    ///   worker writes those files, so loading them would let the worker reconfigure its own judge.
+    ///   worker writes those files, so loading them would let the worker reconfigure its own verifier.
     ///   This is Codex's equivalent of Claude's `--setting-sources user`.
     ///
-    /// `--ephemeral` keeps a judge call from polluting the resumable-session history.
+    /// `--ephemeral` keeps a verifier call from polluting the resumable-session history.
     fn one_shot(
         &self,
         prompt: &str,
@@ -354,9 +354,9 @@ impl AgentBackend for Codex {
             .arg("exec")
             .arg("--json")
             .arg("--sandbox")
-            .arg("read-only") // CANNOT write — the judge's core guarantee
+            .arg("read-only") // CANNOT write — the verifier's core guarantee
             .arg("--skip-git-repo-check")
-            .arg("--ignore-user-config") // the worker must not steer its own judge
+            .arg("--ignore-user-config") // the worker must not steer its own verifier
             .arg("--ignore-rules")
             .arg("--ephemeral");
         if !model.is_empty() {
@@ -369,8 +369,8 @@ impl AgentBackend for Codex {
         for kv in super::overrides::codex_config() {
             command.arg("-c").arg(kv);
         }
-        // the schema goes as a file; shortcut: a containerized judge cannot read a host file, so it goes
-        // without one (the verdict parser stays tolerant) — mount it if Codex judges ever run in containers
+        // the schema goes as a file; shortcut: a containerized verifier cannot read a host file, so it goes
+        // without one (the verdict parser stays tolerant) — mount it if Codex verifiers ever run in containers
         let schema_file = match schema {
             Some(text) if isolation != crate::isolation::Isolation::Container => Some(schema_file(text)?),
             _ => None,
@@ -385,7 +385,7 @@ impl AgentBackend for Codex {
             command.current_dir(dir);
         }
         // Wrapped like every other backend (§2.4) — this used to no-op for Codex on the grounds
-        // that `--sandbox read-only` already confines the judge more tightly. That is Codex's own
+        // that `--sandbox read-only` already confines the verifier more tightly. That is Codex's own
         // report of its own flag; rlt's outer jail is not conditional on it.
         let out = self
             .confine_one_shot(command, cwd, isolation)
@@ -468,7 +468,7 @@ fn rate_limited(v: &Value, ty: &str) -> bool {
 /// The model's ANSWER from a `--json` stream: the LAST `agent_message` item. Codex emits its
 /// reasoning and progress as separate items; the final agent_message is the reply. Falls back to
 /// the raw bytes so a schema change degrades to "pass the text through" rather than to an empty
-/// verdict (a judge that silently returns nothing would read as "not met").
+/// verdict (a verifier that silently returns nothing would read as "not met").
 fn last_agent_message(stdout: &[u8]) -> String {
     let text = String::from_utf8_lossy(stdout);
     let last = text

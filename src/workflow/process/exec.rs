@@ -1,5 +1,5 @@
 //! Running the commands of a process file (A-37): a step's context (its key, label, item), the `{{ names }}` of its
-//! strings, a command made absolute and wrapped with the environment every script gets, and a script judge from it.
+//! strings, a command made absolute and wrapped with the environment every script gets, and a script verifier from it.
 
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -8,7 +8,7 @@ use super::format::Step;
 use super::number::Numbered;
 use super::proc::{Proc, Shared};
 use super::template;
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::driver::Fatal;
 
 /// The item of an `each` a step instance is for.
@@ -102,13 +102,13 @@ impl Proc {
         env.join(" ")
     }
 
-    /// A script judge from `command`: a wrapper that runs it with the step's environment, named `name` or after the
+    /// A script verifier from `command`: a wrapper that runs it with the step's environment, named `name` or after the
     /// step and the command.
-    pub fn judge(&self, ctx: &Ctx, name: Option<&str>, command: &str) -> Result<Judge, Fatal> {
+    pub fn verifier(&self, ctx: &Ctx, name: Option<&str>, command: &str) -> Result<Verifier, Fatal> {
         let command = self.command(ctx, command)?;
         let name = name.map(String::from).unwrap_or_else(|| format!("{}-{}", ctx.key, slug(&command)));
         let wrapper = self.wrapper(&format!("{name}.sh"), &format!("env {} {command}", self.env(ctx)))?;
-        Ok(Judge::script(name, wrapper.as_str()))
+        Ok(Verifier::script(name, wrapper.as_str()))
     }
 
     /// Runs `command` for `ctx` to its end in the project; its stdout, or why it failed.
@@ -141,10 +141,10 @@ pub fn run_plain(shared: &Shared, command: &str, phase: &str) -> Result<(), Stri
     Err(format!("`{command}` failed ({}): {}", out.status.code().unwrap_or(-1), said.trim().lines().last().unwrap_or_default()))
 }
 
-/// The judges of `task_force.checks` for a repair of failed step `name`: each command run in the project like a step's
+/// The verifiers of `task_force.checks` for a repair of failed step `name`: each command run in the project like a step's
 /// check, with `RLT_STEP` (the step's id), `RLT_STEP_KEY`, `RLT_STEP_LABEL`, `RLT_PROCESS_HOME` and `RLT_FIX_BASE`
 /// (the commit before the repair). A command that can't be rendered, or a wrapper that can't be written, is left out.
-pub fn fix_judges(shared: &Shared, flow: &crate::workflow::Flow, name: &str, base: &str) -> Vec<Judge> {
+pub fn fix_verifiers(shared: &Shared, flow: &crate::workflow::Flow, name: &str, base: &str) -> Vec<Verifier> {
     let key = flow.key_of(name);
     let id = shared.ids.borrow().get(&key).cloned().unwrap_or_else(|| key.clone());
     let mut vars = shared.vars.clone();
@@ -157,7 +157,7 @@ pub fn fix_judges(shared: &Shared, flow: &crate::workflow::Flow, name: &str, bas
     tf.checks.iter().enumerate().filter_map(|(i, c)| {
         let command = absolutize(shared, &template::render(c, &vars).ok()?);
         let wrapper = flow.wrapper(&format!("fix-check-{i}.sh"), &format!("env {env} {command}")).ok()?;
-        Some(Judge::script(format!("fix-{}", slug(&command)), wrapper.as_str()))
+        Some(Verifier::script(format!("fix-{}", slug(&command)), wrapper.as_str()))
     }).collect()
 }
 
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn a_relative_script_is_made_absolute_and_a_plain_command_stays() {
         let s = shared();
-        assert_eq!(absolutize(&s, "judges/has.py ui"), "/home/judges/has.py ui");
+        assert_eq!(absolutize(&s, "verifiers/has.py ui"), "/home/verifiers/has.py ui");
         assert_eq!(absolutize(&s, "/abs/x.sh a/b"), "/abs/x.sh a/b");
         assert_eq!(absolutize(&s, "sh -c 'echo a/b'"), "sh -c 'echo a/b'");
     }
@@ -210,7 +210,7 @@ mod tests {
     /// A command is named by its script's stem and arguments; a quote is one shell word.
     #[test]
     fn a_command_has_a_name_and_a_quote_is_one_word() {
-        assert_eq!(slug("/home/judges/capture.py record --since refs/x"), "capture-record-since-refs-x");
+        assert_eq!(slug("/home/verifiers/capture.py record --since refs/x"), "capture-record-since-refs-x");
         assert_eq!(quote("it's"), "'it'\\''s'");
     }
 }

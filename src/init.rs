@@ -1,8 +1,8 @@
 //! `rlt init` — scaffold a working Relentless project.
 //!
-//! `rlt.yaml` (defaults/judge/steps/sequence), a committed `RLT.md` (stable scope), the gitignored
-//! forward-state file `state/STATE.md`, and a starter judge. `goals.yaml` is gone: a judge IS a
-//! goal, resolved by name from `rlt/judges/` (§7.1). Config + RLT.md are COMMITTED under `rlt/`;
+//! `rlt.yaml` (defaults/verifier/steps/sequence), a committed `RLT.md` (stable scope), the gitignored
+//! forward-state file `state/STATE.md`, and a starter verifier. `goals.yaml` is gone: a verifier IS a
+//! goal, resolved by name from `rlt/verifiers/` (§7.1). Config + RLT.md are COMMITTED under `rlt/`;
 //! runtime state is gitignored and split by who writes it — the worker's own files (STATE.md,
 //! `wiki/`) in `rlt/state/`, rlt's bookkeeping (INSTRUCTIONS.md, the verdict ledger, the bus) in
 //! `rlt/private/`. `init` only ever scaffolds the former; `rlt/private/` is created by the loop.
@@ -28,9 +28,9 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         "" => "  effort: \"\"                       # this agent cannot combine effort with model: auto\n".to_string(),
         e => format!("  effort: \"{e}\"                  # thinking effort: low|medium|high|xhigh|max\n"),
     };
-    let judge_model = match b.default_summary_model() {
+    let verifier_model = match b.default_summary_model() {
         "" => "  # model:                        # codex omits it, same hard-400 reason\n".to_string(),
-        m => format!("  model: \"{m}\"                 # the cheap RULER model for LLM judges\n"),
+        m => format!("  model: \"{m}\"                 # the cheap RULER model for rubric verifiers\n"),
     };
     let (cost_line, over_cost) = if b.capabilities().reports_cost_usd {
         ("    cost: null                     # dollar ceiling (null = unlimited) → over_cost\n".to_string(), " OR over_cost")
@@ -45,7 +45,7 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         .replace("{{AGENT}}", agent)
         .replace("{{MODEL_LINE}}", &model_line)
         .replace("{{EFFORT_LINE}}", &effort_line)
-        .replace("{{JUDGE_MODEL}}", &judge_model)
+        .replace("{{VERIFIER_MODEL}}", &verifier_model)
         .replace("{{COST_LINE}}", &cost_line)
         .replace("{{OVER_COST}}", over_cost);
 
@@ -53,7 +53,7 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         ("rlt.yaml", rlt_yaml.as_str(), false),
         ("RLT.md", RLT_MD, false),
         ("state/STATE.md", STATE_MD, false),
-        ("judges/tests_pass.sh", JUDGE_SH, true),
+        ("verifiers/tests_pass.sh", VERIFIER_SH, true),
     ];
 
     if !force {
@@ -82,9 +82,9 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
         eprintln!("  created {}/{}", crate::paths::CONFIG_DIR, name);
     }
 
-    // install the standard judge library to ~/.rlt/judges/ so a library-named judge resolves.
-    if let Err(e) = crate::core::judges::ensure_library() {
-        eprintln!("  ⚠ could not install the ~/.rlt/judges library: {e}");
+    // install the standard verifier library to ~/.rlt/verifiers/ so a library-named verifier resolves.
+    if let Err(e) = crate::core::verifiers::ensure_library() {
+        eprintln!("  ⚠ could not install the ~/.rlt/verifiers library: {e}");
     }
 
     if crate::git::is_repo(dir) {
@@ -94,7 +94,7 @@ pub fn run(dir: &Path, force: bool, agent: Option<&str>) -> Result<()> {
     eprintln!(
         "\n✔ Scaffolded an Relentless starter in {}.\n\n\
          Next steps:\n  \
-         1. Edit rlt/rlt.yaml `done_if` + rlt/judges/ to match YOUR project.\n  \
+         1. Edit rlt/rlt.yaml `done_if` + rlt/verifiers/ to match YOUR project.\n  \
          2. Edit rlt/RLT.md — the standing project instructions each worker reads (committed).\n  \
          3. Edit rlt/state/STATE.md — the forward \"what to do next\" advice (rlt regenerates the\n     \
             per-session brief at rlt/private/INSTRUCTIONS.md from these; both gitignored).\n  \
@@ -120,8 +120,8 @@ fn make_executable(_path: &Path) {}
 // ---- starter file contents ----
 //
 // The scaffolds live as REAL files under `plugin/scaffold/` and are `include_str!`'d — the same
-// pattern this crate already uses for the `/rlt:*` skills (`crate::skills`) and the judge library
-// (`crate::core::judges`). Editing a scaffold means editing an actual .md/.yaml/.sh file (syntax
+// pattern this crate already uses for the `/rlt:*` skills (`crate::skills`) and the verifier library
+// (`crate::core::verifiers`). Editing a scaffold means editing an actual .md/.yaml/.sh file (syntax
 // highlighting, no Rust-string escaping) rather than an inline `r#"…"#` blob. They still compile INTO
 // the binary — a change is a behavior change and must go through the gate; the file just reads better.
 // The `{{…}}` placeholders in `rlt.yaml` are filled by the `.replace()` calls in `run` (no template
@@ -130,4 +130,4 @@ fn make_executable(_path: &Path) {}
 const RLT_YAML: &str = include_str!("../plugin/scaffold/rlt.yaml");
 const RLT_MD: &str = include_str!("../plugin/scaffold/RLT.md");
 const STATE_MD: &str = include_str!("../plugin/scaffold/STATE.md");
-const JUDGE_SH: &str = include_str!("../plugin/scaffold/tests_pass.sh");
+const VERIFIER_SH: &str = include_str!("../plugin/scaffold/tests_pass.sh");

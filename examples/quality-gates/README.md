@@ -1,17 +1,17 @@
-# quality-gates — judges you declare instead of write
+# quality-gates — verifiers you declare instead of write
 
 Most quality gates measure software: complexity, duplication, secrets, vulnerabilities. With
-[swe-metrics](https://github.com/ssenge/swe-metrics) installed, such a judge is a few lines of
+[swe-metrics](https://github.com/ssenge/swe-metrics) installed, such a verifier is a few lines of
 `rlt/rlt.yaml` — no script that runs a tool and parses its output:
 
 ```yaml
-judges:
+verifiers:
   cc_max:  { metric: { id: "complexity.cyclomatic", stat: "max", tool: "lizard" }, max: 5 }
   quality: { score: { definition: "swe-default", version: "2" }, min: 70 }
 ```
 
 `pricing.py` starts with one function of cyclomatic complexity 12, so `cc_max` is unmet and the worker
-has something to refactor. Every session, rlt runs **one** `swe-metrics measure` that all six judges
+has something to refactor. Every session, rlt runs **one** `swe-metrics measure` that all six verifiers
 share, keeps the report and the tools' SARIF as evidence under `rlt/private/evidence/`, scores the
 session against the report of the last kept state, and rolls a session back if it makes `cc_p95` or
 the score worse (the ratchet), or leaks a secret (the `secrets` invariant).
@@ -20,10 +20,10 @@ the score worse (the ratchet), or leaks a secret (the `secrets` invariant).
 
 ```bash
 cp -r examples/quality-gates /tmp/qg && cd /tmp/qg
-git init -q -b main && printf 'rlt/state/\nagg/private/\n' > .gitignore && git add -A && git commit -qm base
+git init -q -b main && printf 'rlt/state/\nrlt/private/\n' > .gitignore && git add -A && git commit -qm base
 rlt check              # refuses if swe-metrics is missing or incompatible
-rlt judge cc_max       # one judge, by hand: {"met":false,"value":12,…}
+rlt verifier cc_max       # one verifier, by hand: {"met":false,"value":12,…}
 rlt run
 ```
 
-Details: [`docs/CONFIG.md` — judges built on swe-metrics](../../docs/CONFIG.md#judges-built-on-swe-metrics--metric-and-score).
+Details: [`docs/CONFIG.md` — verifiers built on swe-metrics](../../docs/CONFIG.md#verifiers-built-on-swe-metrics--metric-and-score).

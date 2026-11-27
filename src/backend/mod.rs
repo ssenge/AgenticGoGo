@@ -7,16 +7,16 @@
 //!
 //! # Why there is no `active()` singleton
 //! There was one: a `OnceLock` that latched on FIRST READ and **silently defaulted to Claude**.
-//! The config's `model` / `effort` / `summary.model` / LLM-judge `model` defaults resolved
+//! The config's `model` / `effort` / `summary.model` / rubric verifier `model` defaults resolved
 //! THROUGH it — so `rlt.yaml` could not be PARSED without already knowing the agent, and any
 //! parse in the wrong order pinned the wrong agent, silently, first-wins. It shipped that bug
 //! three times: `rlt init --agent codex` (fixed by using `for_name` locally), `rlt doctor` on a
-//! `copilot` project (reported `claude`), and `rlt judge <id>`, which never selected a backend at
-//! all and so ran the LLM judge on Claude for every non-Claude project.
+//! `copilot` project (reported `claude`), and `rlt verifier <id>`, which never selected a backend at
+//! all and so ran the rubric verifier on Claude for every non-Claude project.
 //!
 //! Those defaults are now `Option`s, resolved at **use time** against the backend actually doing
 //! that piece of work (see [`crate::core::config::RelentlessConfig::model`]). Which also means the
-//! worker and the **ruler** — the backend that runs LLM judges and the summarizer — are separate
+//! worker and the **ruler** — the backend that runs rubric verifiers and the summarizer — are separate
 //! values that can differ, instead of one latched global that cannot.
 //!
 //! # Why this is a trait and not a set of free functions
@@ -122,7 +122,7 @@ pub trait AgentBackend: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     /// default worker model (rlt.yaml `model:`).
     fn default_model(&self) -> &'static str;
-    /// default cheap model for the summarizer / LLM judge.
+    /// default cheap model for the summarizer / rubric verifier.
     fn default_summary_model(&self) -> &'static str;
 
     /// Build the `Command` for one interactive worker session. The caller spawns and supervises
@@ -203,10 +203,10 @@ pub trait AgentBackend: Send + Sync {
     fn parse_result(&self, line: &str) -> Option<SessionReport>;
 
     /// A single NON-AGENTIC prompt→text call, tools/MCP off, project config ignored. Used by the
-    /// LLM judge and the summarizer.
+    /// rubric verifier and the summarizer.
     ///
-    /// `isolation` confines it exactly like a worker session (ISOLATION.md §12): a judge grading a
-    /// sandboxed step must not itself be an escape hatch. The LLM judge already denies tool writes
+    /// `isolation` confines it exactly like a worker session (ISOLATION.md §12): a verifier grading a
+    /// sandboxed step must not itself be an escape hatch. The rubric verifier already denies tool writes
     /// at the agent-permission layer, but that is defense-in-depth, "NOT a host jail" — so under
     /// `Sandbox` EVERY backend gets the real OS wrapper here too (§2.4; Codex's own
     /// `--sandbox read-only` no longer exempts it). Requires a `cwd` to anchor the jail; a `None`
@@ -215,7 +215,7 @@ pub trait AgentBackend: Send + Sync {
     /// Only called when [`Capabilities::supports_one_shot`] is true — [`crate::capability::check`]
     /// refuses the run otherwise, so a backend that cannot do this may simply `unreachable!()`.
     /// `effort` is the reasoning effort in rlt's vocabulary; empty = the agent's own default.
-    /// `schema` is a JSON Schema the answer must match (the judge's verdict), for an agent that can
+    /// `schema` is a JSON Schema the answer must match (the verifier's verdict), for an agent that can
     /// enforce one; the answer then comes back as that JSON text. An agent that cannot ignores it.
     #[allow(clippy::too_many_arguments)] // one call's independent facts; every backend reads each of them
     fn one_shot(
@@ -233,7 +233,7 @@ pub trait AgentBackend: Send + Sync {
     /// shared tail of every `one_shot`. A `None` cwd cannot be jailed (no anchor), so it is
     /// returned unwrapped.
     ///
-    /// **Applied to EVERY backend, including one that confines itself.** A judge that runs under
+    /// **Applied to EVERY backend, including one that confines itself.** A verifier that runs under
     /// the agent's own `--sandbox read-only` is confined by the agent's promise; rlt's carve-out
     /// (`rlt/private/`, the verdict ledger it is about to append to) exists precisely because that
     /// promise is not rlt's to make. The two layers compose — the outer one is ours.
@@ -250,7 +250,7 @@ pub trait AgentBackend: Send + Sync {
                 crate::isolation::wrap(command, dir, &self.writable_state_paths(), &[])
                     .map_err(|e| e.to_string())
             }
-            // the judges' image, the project READ-ONLY, the ruler's own credentials (§2.5: a judge
+            // the verifiers' image, the project READ-ONLY, the ruler's own credentials (§2.5: a verifier
             // runs in the run's strongest tier — here, a container like the worker it grades).
             Some(dir) if isolation == crate::isolation::Isolation::Container => {
                 crate::isolation::runtime::one_shot(command, dir, self.container_env(), self.container_credential_files())
@@ -306,7 +306,7 @@ pub trait AgentBackend: Send + Sync {
     /// ```
     ///
     /// Every worker session then dies in ~4s with exit 1 and zero tokens, while the loop happily
-    /// runs sessions, judges them, and halts on `over_iterations` having achieved nothing. Before
+    /// runs sessions, verifiers them, and halts on `over_iterations` having achieved nothing. Before
     /// this hook, `rlt doctor` printed "✔ agent `copilot` can do everything this config asks" for
     /// exactly that config — a green light on a run that cannot work.
     ///

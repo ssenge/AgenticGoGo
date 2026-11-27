@@ -27,7 +27,7 @@ use crate::loop_::{Bootstrap, PreStart};
 ///    power cut mid-worker leaves uncommitted changes by construction (rlt commits a session's work
 ///    only after it ends), so refusing makes the one scenario resume exists for the one scenario
 ///    that cannot start — and discarding them (what this did before A-18) threw the operator's
-///    work away. They land on `refs/rlt/partial/<run>/<session>`, never judged.
+///    work away. They land on `refs/rlt/partial/<run>/<session>`, never verified.
 /// 3. **Do not eat the previous run's span.** Session numbering restarts per run and
 ///    `create_branch` opens with `git branch -D`, so a fresh run's session-1..N would delete the
 ///    previous run's same-named branches — including the tip the run-end warning just told the
@@ -147,7 +147,7 @@ fn save_crashed_session(dir: &Path) -> Result<()> {
     }
     eprintln!(
         "  ⚠ [iso] RESUME with a dirty work tree — session #{session}'s unfinished work is saved under\n\
-         \x20       {r} (NOT judged) and the tracked files are reset; that session's step re-executes."
+         \x20       {r} (NOT verified) and the tracked files are reset; that session's step re-executes."
     );
     crate::git::reset_work_tree(dir, None);
     Ok(())

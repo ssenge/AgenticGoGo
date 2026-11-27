@@ -10,7 +10,7 @@ use anyhow::anyhow;
 
 use super::git::{before, commit, git};
 use super::history::{History, DEFAULT};
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::driver::{Relentless, Fatal, Step};
 use crate::plugin::RunOutcome;
 
@@ -61,14 +61,14 @@ impl Run {
     pub const VALUED: [&'static str; 8] = ["--from", "--note", "--note-file", "--until", "--reentries", "--brief", "--columns", "--only-with"];
 }
 
-/// When a step's checks run: before its work, or after it, before its own judges.
+/// When a step's checks run: before its work, or after it, before its own verifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum When {
     Before,
     After,
 }
 
-type Hooks = Box<dyn Fn(&Flow, &str, When) -> Vec<Judge>>;
+type Hooks = Box<dyn Fn(&Flow, &str, When) -> Vec<Verifier>>;
 type OnStart = Box<dyn Fn(&Flow, &str) -> Result<(), String>>;
 
 /// A rule over the task force's proposals: (the failed step, the step to re-enter) → go ahead without a human's yes.
@@ -76,8 +76,8 @@ pub(crate) type Trust = dyn Fn(&str, &str) -> bool;
 /// What a failed step must keep to, as the driver knows it (its scope, its rubric): the task force's repair too.
 pub(crate) type Constraints = dyn Fn(&Flow, &str) -> Option<String>;
 /// The checks a task force's repair in place must pass, as the driver knows them: given the failed step and the commit
-/// before the repair, the judges that run after it (an unmet one rejects the repair).
-pub(crate) type FixChecks = dyn Fn(&Flow, &str, &str) -> Vec<Judge>;
+/// before the repair, the verifiers that run after it (an unmet one rejects the repair).
+pub(crate) type FixChecks = dyn Fn(&Flow, &str, &str) -> Vec<Verifier>;
 
 /// A workflow run on rlt: what every block of [`super`] works through.
 pub struct Flow {
@@ -146,8 +146,8 @@ impl Flow {
     }
 
     /// The checks around every step: `f(flow, step, when)`; each verdict is recorded (kind `hook`), and an
-    /// unmet one fails the step (before: without its work; after: before its own judges read the result).
-    pub fn hooks(mut self, f: impl Fn(&Flow, &str, When) -> Vec<Judge> + 'static) -> Flow {
+    /// unmet one fails the step (before: without its work; after: before its own verifiers read the result).
+    pub fn hooks(mut self, f: impl Fn(&Flow, &str, When) -> Vec<Verifier> + 'static) -> Flow {
         self.hooks = Some(Box::new(f));
         self
     }
@@ -167,9 +167,9 @@ impl Flow {
     }
 
     /// The checks a repair in place must pass, `f(flow, name, base)` (the failed step, the commit before the repair):
-    /// run after the step is judged again and met; an unmet one rejects the repair, which counts against the limit
+    /// run after the step is verified again and met; an unmet one rejects the repair, which counts against the limit
     /// and whose verdict goes into the next attempt's brief.
-    pub fn fix_checks(mut self, f: impl Fn(&Flow, &str, &str) -> Vec<Judge> + 'static) -> Flow {
+    pub fn fix_checks(mut self, f: impl Fn(&Flow, &str, &str) -> Vec<Verifier> + 'static) -> Flow {
         self.fix_checks = Some(Box::new(f));
         self
     }
@@ -275,9 +275,9 @@ impl Flow {
     /// Runs the hooks of step `name` (`when`), recording each verdict; the unmet ones' rationales joined.
     pub fn check(&self, name: &str, when: When) -> Result<(), String> {
         let which = if when == When::Before { "before" } else { "after" };
-        let judges = self.hook_judges(name, when);
-        let failed: Vec<String> = judges.iter().filter_map(|j| {
-            let verdict = self.rlt.judge(j);
+        let verifiers = self.hook_verifiers(name, when);
+        let failed: Vec<String> = verifiers.iter().filter_map(|j| {
+            let verdict = self.rlt.verifier(j);
             self.record(name, "hook", verdict.met(), &format!("{which} {}: {}", j.name, verdict.rationale()));
             (!verdict.met()).then(|| format!("{}: {}", j.name, verdict.rationale()))
         }).collect();
@@ -285,7 +285,7 @@ impl Flow {
     }
 
     /// The hooks of step `name` (`when`), as the driver gives them.
-    pub(crate) fn hook_judges(&self, name: &str, when: When) -> Vec<Judge> {
+    pub(crate) fn hook_verifiers(&self, name: &str, when: When) -> Vec<Verifier> {
         self.hooks.as_ref().map(|f| f(self, name, when)).unwrap_or_default()
     }
 
@@ -300,15 +300,15 @@ impl Flow {
         }
     }
 
-    /// The rubric judge with its file as rlt resolves it (relative: under the project).
-    pub(crate) fn absolute_judge(&self, judge: &Judge) -> Judge {
-        let mut judge = judge.clone();
-        if let crate::core::model::JudgeKind::Llm { path, .. } = &mut judge.kind {
+    /// The rubric verifier with its file as rlt resolves it (relative: under the project).
+    pub(crate) fn absolute_verifier(&self, verifier: &Verifier) -> Verifier {
+        let mut verifier = verifier.clone();
+        if let crate::core::model::VerifierKind::Llm { path, .. } = &mut verifier.kind {
             if path.is_relative() {
                 *path = self.project.join(&*path);
             }
         }
-        judge
+        verifier
     }
 
     /// The step failed: the task force looks for its origin when the run has one (A-30), else the run ends.
@@ -316,7 +316,7 @@ impl Flow {
         super::task_force::fail(self, name, why, None)
     }
 
-    /// The step failed, and `again` judges it again (`None`: met now, else why not): the task force may repair the
+    /// The step failed, and `again` verifiers it again (`None`: met now, else why not): the task force may repair the
     /// cause in place (A-35), and when the step is met then, this returns and the step goes on. Otherwise as
     /// [`Flow::fail`].
     pub fn recover(&self, name: &str, why: &str, again: super::task_force::Again) -> Result<(), Fatal> {
@@ -343,7 +343,7 @@ impl Flow {
     }
 
     /// An executable script `file` in the scratch folder that runs `command` with its arguments: how a
-    /// script judge gets a parameter.
+    /// script verifier gets a parameter.
     pub fn wrapper(&self, file: &str, command: &str) -> Result<String, Fatal> {
         let path = self.scratch(file)?;
         std::fs::write(&path, format!("#!/bin/sh\nexec {command} \"$@\"\n"))
@@ -360,7 +360,7 @@ impl Flow {
     /// A script step (A-27): `script` does the work and gives the verdict. Met, what it wrote is committed and
     /// the step recorded (kind `tool`); unmet, the step fails, and after the task force's repair in place the script
     /// runs again.
-    pub fn script_step(&self, name: &str, script: &Judge) -> Result<(), Fatal> {
+    pub fn script_step(&self, name: &str, script: &Verifier) -> Result<(), Fatal> {
         if !self.runs(name)? {
             return Ok(());
         }
@@ -369,7 +369,7 @@ impl Flow {
         }
         let said = RefCell::new(String::new());
         let attempt = || {
-            let verdict = self.rlt.judge(script);
+            let verdict = self.rlt.verifier(script);
             said.replace(verdict.rationale().to_string());
             if verdict.met() { self.check(name, When::After).err() } else { Some(verdict.rationale().into()) }
         };
@@ -385,7 +385,7 @@ impl Flow {
     /// Whether step `name` applies (A-27): `when` (a script) is met. One that doesn't is recorded as skipped
     /// with the reason and costs no session; a condition that errs fails the step instead of skipping it. The
     /// condition is asked as one ([`Relentless::condition`]): its flip between runs is no regression of the work.
-    pub fn applies(&self, name: &str, when: &Judge) -> Result<bool, Fatal> {
+    pub fn applies(&self, name: &str, when: &Verifier) -> Result<bool, Fatal> {
         if !self.runs(name)? {
             return Ok(false);
         }

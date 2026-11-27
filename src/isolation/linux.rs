@@ -52,7 +52,7 @@ pub fn build(jail: &super::Jail, prog: &OsStr, args: &[OsString]) -> Result<Comm
     // come AFTER `--bind <cwd>` — reversing them lets the later writable bind win and silently
     // reopens the hole.
     //
-    // `--ro-bind`, not `--tmpfs`: reads must keep working (a judge reads `verdicts.jsonl`, the
+    // `--ro-bind`, not `--tmpfs`: reads must keep working (a verifier reads `verdicts.jsonl`, the
     // worker reads its brief).
     //
     // A path that does not exist is MATERIALIZED first rather than skipped. bwrap fails the whole

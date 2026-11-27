@@ -1,4 +1,4 @@
-//! Gate feature: the on_gate keep/rollback plugins (ceiling-poison guard + judged merge keep/rollback).
+//! Gate feature: the on_gate keep/rollback plugins (ceiling-poison guard + verified merge keep/rollback).
 
 use anyhow::Result;
 
@@ -17,12 +17,12 @@ impl Handler for CeilingPoisonGuard {
     // ponytail: this `Flow::Stop` short-circuits the rest of on_gate, so `NotifyOnStuck` never runs
     // and a run ending here does NOT fire `notify.cmd` (STUCK_NOTIFY §12.6). Accepted: the guard
     // needs `res.deltas.is_empty()`, which only holds with an EMPTY run-set, and a config with no
-    // judges at all cannot express a notify condition worth delivering. Upgrade path if a real run
+    // verifiers at all cannot express a notify condition worth delivering. Upgrade path if a real run
     // ever lands here: `notify::halt_ping(ctx, res.halt_reason.as_deref())` before the Stop.
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         let sc = ctx.scratch.get::<RLTScratch>();
         let res = sc.res.as_ref().expect("an on_verify handler set scratch.res");
-        if sc.skip_judges
+        if sc.skip_verifiers
             && res.halt
             && sc.staged.is_none()
             && res.fresh_verdicts.is_empty()
@@ -37,37 +37,37 @@ impl Handler for CeilingPoisonGuard {
     }
 }
 
-/// Keep / roll back the judged merge. `emit(Gate)` is its FIRST line (fires for skip + judged; the
+/// Keep / roll back the verified merge. `emit(Gate)` is its FIRST line (fires for skip + verified; the
 /// poison path never reaches here, so it stays Gate-free — R10). Runs on skip steps too (an internal
-/// `if skip_judges` guard makes the keep/rollback a no-op there — a skip step emits Gate but merges
+/// `if skip_verifiers` guard makes the keep/rollback a no-op there — a skip step emits Gate but merges
 /// nothing). On a rollback it REWRITES `scratch.res` and sets `scratch.rolled_back`. The
 /// `verdicts::append` `?` is a HARD disk Err that bubbles out of `run()` (R7) — NOT a clean Halt.
 ///
 /// The decision itself lives in [`keep_or_rollback`], because the Rust driver's `gate()` makes the
-/// same one and this handler is a NO-OP on that path (every driver step is `skip_judges`, so the
+/// same one and this handler is a NO-OP on that path (every driver step is `skip_verifiers`, so the
 /// guard above returns first).
 pub struct GateKeepRollback;
 impl Handler for GateKeepRollback {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         ctx.emit(LifecycleEvent::Gate);
-        if ctx.scratch.get::<RLTScratch>().skip_judges {
+        if ctx.scratch.get::<RLTScratch>().skip_verifiers {
             return Ok(Flow::Continue); // a skip step: the span was staged in VERIFY; nothing to gate.
         }
         let mut res = ctx.scratch.get::<RLTScratch>().res.take().expect("an on_verify handler set scratch.res");
         let staged = ctx.scratch.get::<RLTScratch>().staged.take();
         let pre_cycle_goals = std::mem::take(&mut ctx.scratch.get::<RLTScratch>().pre_cycle_goals);
 
-        // the regression gate: a DoD-set judge MET before (durable, §5.7) that now fails. Scope to
+        // the regression gate: a DoD-set verifier MET before (durable, §5.7) that now fails. Scope to
         // the DoD-set exactly as `any_regressed`/`count_regressed` do (stop.rs `scope` →
-        // `g.in_dod`). A run-set-only control judge like `stalled` is DESIGNED to flip met→unmet —
+        // `g.in_dod`). A run-set-only control verifier like `stalled` is DESIGNED to flip met→unmet —
         // that flip is the very signal that fired `reconsider` — so counting its flip as a
         // regression would roll back the work that escaped the stall (and, because rolled-back rows
-        // never land, livelock the loop). §5.7 protects the DoD-set; a judge named only in an `if`
-        // condition is not in it. A judge in the DoD-set only through a `done_if` GROUP is judged
+        // never land, livelock the loop). §5.7 protects the DoD-set; a verifier named only in an `if`
+        // condition is not in it. A verifier in the DoD-set only through a `done_if` GROUP is verified
         // with its group, net (`core::groups`): a swap inside a k-of-n group is not a regression.
         //
         // ⚠ This is exactly the half the DRIVER path spells differently (BUILD.md §3.5 item 5:
-        // every judge asked since the last gate, no DoD scope), which is why it lives HERE and not
+        // every verifier asked since the last gate, no DoD scope), which is why it lives HERE and not
         // in the shared body below.
         let is_staged = matches!(staged, Some((_, StagedSession::Staged)));
         let progress = if is_staged {
@@ -76,7 +76,7 @@ impl Handler for GateKeepRollback {
             crate::core::groups::assess(
                 &res.fresh_verdicts,
                 &landed,
-                |n| eng.judges.iter().any(|g| g.in_dod && g.name == n) && !eng.groups.group_only(n),
+                |n| eng.verifiers.iter().any(|g| g.in_dod && g.name == n) && !eng.groups.group_only(n),
                 &eng.groups.gated_members(),
             )
         } else {
@@ -89,10 +89,10 @@ impl Handler for GateKeepRollback {
         // the DoD-set, scoped exactly as the boolean rule above: a detector flipping is not a state.
         let signature = crate::core::ratchet::signature(
             &res.fresh_verdicts,
-            |n| ctx.eng.judges.iter().any(|g| g.in_dod && g.name == n),
+            |n| ctx.eng.verifiers.iter().any(|g| g.in_dod && g.name == n),
             &ratchet,
         );
-        let judged = Judged {
+        let verified = Verified {
             fresh: &res.fresh_verdicts,
             regressed: progress.regressed || !ratchet.is_empty(),
             improved,
@@ -100,14 +100,14 @@ impl Handler for GateKeepRollback {
             signature,
         };
 
-        let gated = keep_or_rollback(ctx, staged.as_ref(), judged, &pre_cycle_goals)?;
+        let gated = keep_or_rollback(ctx, staged.as_ref(), verified, &pre_cycle_goals)?;
         let rs = ctx.run_state();
         if gated == Gated::Merged {
             // the verdicts stand, but the GATE just moved its own state (the rollback streak, the
             // ratchet references, the oscillation history), so the terms that read it are re-read.
             ctx.eng.reevaluate(&rs, &mut res);
         } else {
-            // nothing landed: the judged verdicts describe base, not a merge, so re-derive the
+            // nothing landed: the verified verdicts describe base, not a merge, so re-derive the
             // conditions against RESTORED base truth. `NotifyOnStuck` runs after this handler, so it
             // flags what was kept, never what was rolled back.
             let recomputed = ctx.eng.conditions_only(&rs);
@@ -118,7 +118,7 @@ impl Handler for GateKeepRollback {
                 notify: recomputed.notify,
                 deltas: Vec::new(),
                 fresh_verdicts: Vec::new(),
-                judge_usage: Vec::new(),
+                verifier_usage: Vec::new(),
             };
         }
         ctx.scratch.get::<RLTScratch>().res = Some(res);
@@ -131,10 +131,10 @@ impl Handler for GateKeepRollback {
     }
 }
 
-/// What the caller judged about the span, handed to [`keep_or_rollback`]. Each path computes it its
-/// own way (DoD-scoped on the YAML path, every judge asked on the driver path); the body that acts
+/// What the caller verified about the span, handed to [`keep_or_rollback`]. Each path computes it its
+/// own way (DoD-scoped on the YAML path, every verifier asked on the driver path); the body that acts
 /// on it is shared.
-pub(crate) struct Judged<'a> {
+pub(crate) struct Verified<'a> {
     /// the verdicts the gate decides on (and appends to `verdicts.jsonl`).
     pub fresh: &'a [(String, Verdict)],
     /// the span regressed — the boolean rule OR the ratchet.
@@ -144,7 +144,7 @@ pub(crate) struct Judged<'a> {
     pub improved: bool,
     /// the ratchet regressions among `fresh` (marked on their ledger rows).
     pub ratchet: Vec<RatchetRegression>,
-    /// this gate's judge-state signature, for `oscillating`.
+    /// this gate's verifier-state signature, for `oscillating`.
     pub signature: Vec<String>,
 }
 
@@ -167,13 +167,13 @@ pub(crate) enum Gated {
 /// The keep / roll-back BODY: the git finalization, the `verdicts.jsonl` row and the span teardown.
 ///
 /// ⚠ **Two call sites, not one lifted out.** [`GateKeepRollback`] runs it on the YAML path; on the
-/// driver path every step is `skip_judges`, so that handler returns at its guard and never gets
+/// driver path every step is `skip_verifiers`, so that handler returns at its guard and never gets
 /// here, and [`crate::driver::Relentless::gate`] calls this directly instead. Keeping the body inline in
 /// the handler would have left the driver free to grow a second, drifting copy of the one decision
 /// in the loop that can lose the worker's commits.
 ///
 /// What the two callers do NOT share stays outside: what counts as a regression (DoD-scoped on the
-/// YAML path, every judge asked since the last gate on the driver path) is computed by the caller
+/// YAML path, every verifier asked since the last gate on the driver path) is computed by the caller
 /// and passed in as `regressed`, and the YAML path's `scratch.res` rewrite happens on the way out.
 /// The `keep` DECISION is shared, because `ctx.gate_regressions` carries both paths' policy —
 /// `sequence.gate_regressions` from YAML, `OnRegression::Rollback` from the builder — and
@@ -181,10 +181,10 @@ pub(crate) enum Gated {
 pub(crate) fn keep_or_rollback(
     ctx: &mut LoopState,
     staged: Option<&(String, StagedSession)>,
-    judged: Judged<'_>,
+    verified: Verified<'_>,
     pre_goals: &[GoalRuntime],
 ) -> Result<Gated> {
-    let Judged { fresh, regressed, improved, ratchet, signature } = judged;
+    let Verified { fresh, regressed, improved, ratchet, signature } = verified;
     let step_name = ctx.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();
     // ⛔ A protected-path violation anywhere in the span vetoes the merge — before the regression
     // policy, and regardless of it: `gate_regressions: false` relaxes what a REGRESSION means, it
@@ -217,7 +217,7 @@ pub(crate) fn keep_or_rollback(
             }
             if fate == Gated::NoImprovement {
                 eprintln!(
-                    "  [gate] NOT MERGED — no_improvement: no DoD-set judge and no ratchet improved \
+                    "  [gate] NOT MERGED — no_improvement: no DoD-set verifier and no ratchet improved \
                      (sequence.merge_requires_improvement)"
                 );
             }
@@ -254,14 +254,14 @@ pub(crate) fn keep_or_rollback(
             fate
         }
         // ⚠ `NoChanges` IS NOT A DISCARD. Nothing was committed because nothing GIT-VISIBLE changed,
-        // so base is byte-for-byte the tree the judges just graded and their verdicts describe it
+        // so base is byte-for-byte the tree the verifiers just graded and their verdicts describe it
         // EXACTLY. Restoring the pre-step state overwrites a true reading with a stale one.
         //
         // It bites the moment a step's whole output is worker-state rather than source. `rlt/state/`
         // is gitignored BY DESIGN — the OKF wiki and STATE.md are durable, multi-session and
         // first-class — so a `survey`/`spec`/`plan` step produces zero commits EVERY time, and such a
         // step could therefore never satisfy an `until:`. A real run of examples/workflow.yaml
-        // surfaced it: `spec` wrote rlt/state/wiki/spec.md, the judge read it and scored 100/100, the
+        // surfaced it: `spec` wrote rlt/state/wiki/spec.md, the verifier read it and scored 100/100, the
         // restore put 75 back, `until: spec_sound` read the stale 75 and re-dispatched — twice, then
         // aborted on `max: 2` reporting that a condition which HAD held "never held".
         //
@@ -271,12 +271,12 @@ pub(crate) fn keep_or_rollback(
         //
         // And it is a STEP, with its own ledger tag `no_changes`: a session in which nothing moved.
         // Recorded as `rolled_back` it counted for nothing — not for `stalled`, not for any gate
-        // term — so a worker that believed it was finished while a judge stayed unmet idled forever
+        // term — so a worker that believed it was finished while a verifier stayed unmet idled forever
         // under `abort_if: stalled`. It counts for `stalled` (with these readings, which are base's)
         // and for `no_changes` / `consecutive_no_changes`. (This supersedes OD-13 for `NoChanges`
         // only: a veto and a conflict are still recorded `rolled_back`.)
         Some((br, StagedSession::NoChanges)) => {
-            // ⚠ NO `restore_goal_state`: the ENGINE's live judge state is a reading of the
+            // ⚠ NO `restore_goal_state`: the ENGINE's live verifier state is a reading of the
             // filesystem, and this one is current.
             crate::report::record_gate(ctx, Outcome::NoChanges, Some(br));
             clear_span(ctx, Some(br));
@@ -291,7 +291,7 @@ pub(crate) fn keep_or_rollback(
         }
         _ => {
             // Vetoed / Conflict / CheckoutFailed: work EXISTED and did not reach base — it was
-            // discarded, or it is stranded on a branch. Either way the judged verdicts describe a
+            // discarded, or it is stranded on a branch. Either way the verified verdicts describe a
             // tree that base is not, so record them rolled_back and restore base truth, or the next
             // step is gated against a phantom.
             ctx.eng.restore_goal_state(pre_goals);

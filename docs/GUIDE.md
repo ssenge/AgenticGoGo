@@ -1,7 +1,7 @@
 # The rlt guide
 
 Everything past the [README](../README.md)'s two examples: installing, choosing an agent, writing
-judges, sequences, state and memory, the interfaces and the full CLI.
+verifiers, sequences, state and memory, the interfaces and the full CLI.
 
 > Config reference → [CONFIG.md](CONFIG.md) · Rust driver API → [RUST_API.md](RUST_API.md)
 
@@ -88,11 +88,11 @@ way it turns *your* DoD into config. Point it at a spec you already have (a PRD,
 > `/rlt:new` — done = `python3 calc.py` prints `2` **and** `pytest -q` passes
 
 It reads that plus your code, shows the `rlt/rlt.yaml` it proposes, and lets you edit before writing.
-Each judge is a small file in `rlt/judges/` named for the check it makes — a judge that passes IS a
+Each verifier is a small file in `rlt/verifiers/` named for the check it makes — a verifier that passes IS a
 met goal. The config the skill writes might look like:
 
 ```yaml
-# rlt/rlt.yaml — the whole config: defaults / judge / steps / sequence
+# rlt/rlt.yaml — the whole config: defaults / verifier / steps / sequence
 project: "calc"
 
 defaults:
@@ -100,7 +100,7 @@ defaults:
   model: "claude-opus-4-8[1m]"     # claude only. On codex: OMIT this line. On copilot: `auto`.
   state: "state/STATE.md"          # the worker's forward "what to do next" advice
 
-judge:                             # THE RULER — runs LLM judges + the summarizer
+verifier:                             # THE RULER — runs rubric verifiers + the summarizer
   agent: "claude"
   model: "claude-haiku-4-5-20251001"   # a cheap model grades; the worker stays on Opus
   timeout: 300
@@ -111,7 +111,7 @@ steps:
 sequence:
   steps:
     - "worker"                     # run `worker`, forever, until done_if fires
-  done_if: "outputs_two AND tests_pass"        # your Definition of Done — a boolean over judge names
+  done_if: "outputs_two AND tests_pass"        # your Definition of Done — a boolean over verifier names
   abort_if: "over_iterations OR work_time >= 3600"   # a ceiling, not part of the DoD
 ```
 
@@ -121,22 +121,22 @@ and follow it"* — and `rlt` **composes that file anew at every `INJECT`** from
 (the stable scope/goals — "fix `calc.py` so `python3 calc.py` prints 2 and the tests pass") and
 `rlt/state/STATE.md`, the forward "what to do next" advice the agent rewrites each session to track
 progress (see [State and memory](#state-and-memory)).
-Note the `done_if: "outputs_two AND tests_pass"` line: it composes two judges with `AND`, and each
-name resolves to a file in `rlt/judges/`. The next step writes them.
+Note the `done_if: "outputs_two AND tests_pass"` line: it composes two verifiers with `AND`, and each
+name resolves to a file in `rlt/verifiers/`. The next step writes them.
 
-**3 — Have the agent write the judges.** A judge is a **file named for the judge** that prints a
-verdict as JSON — `outputs_two` → `rlt/judges/outputs_two.sh` (see [Building judges](#building-judges)).
+**3 — Have the agent write the verifiers.** A verifier is a **file named for the verifier** that prints a
+verdict as JSON — `outputs_two` → `rlt/verifiers/outputs_two.sh` (see [Building verifiers](#building-verifiers)).
 You can write one by hand, but asking your agent is the easy way:
 
-> **Prompt:** Write the judge `rlt/judges/outputs_two.sh`: run `python3 calc.py`, print `{"met":true}` if its
+> **Prompt:** Write the verifier `rlt/verifiers/outputs_two.sh`: run `python3 calc.py`, print `{"met":true}` if its
 > output is exactly `2`, else `{"met":false,"rationale":"calc.py did not print 2"}`. Nothing else on
-> stdout. And `rlt/judges/tests_pass.sh`: `pytest -q` must exit 0.
+> stdout. And `rlt/verifiers/tests_pass.sh`: `pytest -q` must exit 0.
 
 The result might look like:
 
 ```bash
 #!/usr/bin/env bash
-# rlt/judges/outputs_two.sh — VERIFY. rlt runs this; the agent never does.
+# rlt/verifiers/outputs_two.sh — VERIFY. rlt runs this; the agent never does.
 [ "$(python3 calc.py 2>/dev/null)" = "2" ] \
   && echo '{"met":true}' \
   || echo '{"met":false,"rationale":"calc.py did not print 2"}'
@@ -144,14 +144,14 @@ The result might look like:
 
 ```bash
 #!/usr/bin/env bash
-# rlt/judges/tests_pass.sh — the whole suite is green
+# rlt/verifiers/tests_pass.sh — the whole suite is green
 pytest -q >/dev/null 2>&1 && echo '{"met":true}' || echo '{"met":false}'
 ```
 
 The `done_if: "outputs_two AND tests_pass"` line requires **both**. Why chain them? Each catches
 what the other misses: `outputs_two` alone is gameable — the agent could just hardcode `print(2)` —
-but `tests_pass`, which checks `add(2, 3) == 5`, would still be red. That `AND` is judge chaining:
-any boolean of judge names (`AND` / `OR` / `NOT`, with parentheses) is a valid `done_if`. (Need a
+but `tests_pass`, which checks `add(2, 3) == 5`, would still be red. That `AND` is verifier chaining:
+any boolean of verifier names (`AND` / `OR` / `NOT`, with parentheses) is a valid `done_if`. (Need a
 numeric threshold? Use the accessor: `done_if: "tests_pass AND coverage.value >= 80"`.)
 
 **4 — Run it, and watch.**
@@ -163,7 +163,7 @@ rlt dashboard           # live TUI  (or: rlt serve + the web UI — see Interfac
 ```
 
 `VERIFY` rejects the broken `calc.py` → the agent fixes `a * b` → `a + b` → `VERIFY` re-runs both
-judges → `GATE` sees `done_if` met → the loop stops. This toy finishes in a **single iteration**,
+verifiers → `GATE` sees `done_if` met → the loop stops. This toy finishes in a **single iteration**,
 and there's no knob to force more — the loop stops the moment `done_if` is true. Real projects run
 as many iterations as it takes to satisfy every clause, sometimes hundreds, each a fresh session.
 
@@ -196,8 +196,8 @@ Supported features:
 | | Claude | Codex | Copilot |
 |---|---|---|---|
 | Runs the loop, edits files | ✅ | ✅ | ✅ |
-| Script judges (a `.sh` file) | ✅ | ✅ | ✅ |
-| **LLM judges** (a `.md` rubric file) | ✅ | ✅ | ✅ |
+| Script verifiers (a `.sh` file) | ✅ | ✅ | ✅ |
+| **rubric verifiers** (a `.md` rubric file) | ✅ | ✅ | ✅ |
 | **Progress summaries** (`summary.enabled`) | ✅ | ✅ | ✅ |
 | Token budget (`sequence.limits.tokens`, `over_budget`) | ✅ | ✅ | ✅ |
 | Thinking effort (`effort:`) | ✅ | ✅ | ⚠️ ¹ |
@@ -242,26 +242,26 @@ The high-level capabilities at a glance — deeper detail lives in the linked se
 **Correctness — the moat**
 - **Deterministic four-stage loop** — INJECT → RUN → VERIFY → GATE; only RUN is stochastic.
 - **Fresh session every iteration** — no context degradation; git + memory carry state, not a long chat.
-- **Incorruptible judges** — rlt runs them, the agent never grades itself ([script or LLM-as-judge](#building-judges)).
-- **Judges-as-DoD** — compose judge names with `AND` / `OR` / `NOT` (plus numeric accessors like `coverage.value >= 80`) into one `done_if` expression; resolved by name from disk, no registry.
+- **Incorruptible verifiers** — rlt runs them, the agent never grades itself ([script or rubric verifier](#building-verifiers)).
+- **Verifiers-as-DoD** — compose verifier names with `AND` / `OR` / `NOT` (plus numeric accessors like `coverage.value >= 80`) into one `done_if` expression; resolved by name from disk, no registry.
 - **Per-step agents + sequences** — a repeating list of steps, each with its own agent/model, so a stall can step back on a *different vendor* ([Steps and sequences](#steps-and-sequences)). Making that step-back **conditional** ("only when stalled") is the [Rust driver API](#when-yaml-is-not-enough-the-rust-driver-api) — YAML has no `if:`.
-- **Post-merge rollback gate** — a session that regresses a previously-met judge is reverted; the base never advances broken.
+- **Post-merge rollback gate** — a session that regresses a previously-met verifier is reverted; the base never advances broken.
 - **Numeric ratchet** *(`sequence.ratchet`)* — a tracked number (complexity, coverage, latency) may not get worse than at the last kept gate beyond a tolerance, so the agent cannot trade one metric for another; seed the first reference or let the baseline pass measure it ([details](CONFIG.md#the-ratchet--numeric-no-regression)).
-- **Judge groups, k of n** *(`sequence.groups`)* — name several judges that measure one thing (three static-analysis tools that disagree) and count over just them: `count_met(static_quality) >= 2`, `all_goals(security)`. At the gate a `done_if` group is judged net, so one tool flipping while another catches up is not a regression ([details](CONFIG.md#judge-groups--k-of-n)).
-- **Judges built on swe-metrics** *(`judges.<name>.metric` / `.score`, optional)* — declare a judge as one number of a [swe-metrics](https://github.com/ssenge/swe-metrics) report (cyclomatic complexity p95 from lizard, duplication %, critical+high vulnerabilities) or as its 0–100 quality score, with a `max:`/`min:` threshold — no script to write. Every such judge of a session shares **one** measurement; a skipped or failed analyzer makes the judge error, never pass; several tools are merged with `combine: strictest | all | majority`; `scope: changed` judges only new code (and is vacuously met when there is none); the score is computed against the incumbent's report. Works with the ratchet without a `direction:`. rlt works without swe-metrics; declaring such a judge without it is refused at startup — checked where it will run: the host, or `judge.image` on a container run, which needs no swe-metrics on the host (reference image `docker/swe-metrics`) ([details](CONFIG.md#judges-built-on-swe-metrics--metric-and-score)).
+- **Verifier groups, k of n** *(`sequence.groups`)* — name several verifiers that measure one thing (three static-analysis tools that disagree) and count over just them: `count_met(static_quality) >= 2`, `all_goals(security)`. At the gate a `done_if` group is verified net, so one tool flipping while another catches up is not a regression ([details](CONFIG.md#verifier-groups--k-of-n)).
+- **Verifiers built on swe-metrics** *(`verifiers.<name>.metric` / `.score`, optional)* — declare a verifier as one number of a [swe-metrics](https://github.com/ssenge/swe-metrics) report (cyclomatic complexity p95 from lizard, duplication %, critical+high vulnerabilities) or as its 0–100 quality score, with a `max:`/`min:` threshold — no script to write. Every such verifier of a session shares **one** measurement; a skipped or failed analyzer makes the verifier error, never pass; several tools are merged with `combine: strictest | all | majority`; `scope: changed` verifiers only new code (and is vacuously met when there is none); the score is computed against the incumbent's report. Works with the ratchet without a `direction:`. rlt works without swe-metrics; declaring such a verifier without it is refused at startup — checked where it will run: the host, or `verifier.image` on a container run, which needs no swe-metrics on the host (reference image `docker/swe-metrics`) ([details](CONFIG.md#verifiers-built-on-swe-metrics--metric-and-score)).
 - **Merge only on improvement** *(`sequence.merge_requires_improvement`, opt-in)* — a session that regressed nothing but improved nothing either (a reformat) is not merged and is recorded `no_improvement`; not a rollback, but it counts for `stalled` and `consecutive_no_improvements` ([details](CONFIG.md#merge-only-on-improvement--merge_requires_improvement)).
-- **Damage, oscillation and idle stops** — `rollbacks`, `consecutive_rollbacks`, `oscillating` (fix A, break B, fix B, break A) and `consecutive_no_changes` (the worker thinks it is done while a judge is unmet, and changes nothing) are built-in condition terms computed by the gate itself, so they are unfakeable and safe in `abort_if` ([details](CONFIG.md#rollbacks-and-oscillation--the-gates-own-detectors)). A session that changes nothing is recorded `no_changes` and counts for `stalled` too ([details](CONFIG.md#a-session-that-changes-nothing--no_changes)).
-- **A Rust driver API, when the flow is a program** — `rlt.step()` / `rlt.judge()` / `rlt.gate()` from ordinary Rust, for control flow `rlt.yaml` cannot express: branch on a verdict's number, step back only when stalled, or short-circuit a 40-minute judge behind three cheap ones with `&&`. Same engine, same judges — heavier, and Rust-only, so **use YAML unless you need it** ([when YAML is not enough](#when-yaml-is-not-enough-the-rust-driver-api)).
+- **Damage, oscillation and idle stops** — `rollbacks`, `consecutive_rollbacks`, `oscillating` (fix A, break B, fix B, break A) and `consecutive_no_changes` (the worker thinks it is done while a verifier is unmet, and changes nothing) are built-in condition terms computed by the gate itself, so they are unfakeable and safe in `abort_if` ([details](CONFIG.md#rollbacks-and-oscillation--the-gates-own-detectors)). A session that changes nothing is recorded `no_changes` and counts for `stalled` too ([details](CONFIG.md#a-session-that-changes-nothing--no_changes)).
+- **A Rust driver API, when the flow is a program** — `rlt.step()` / `rlt.verifier()` / `rlt.gate()` from ordinary Rust, for control flow `rlt.yaml` cannot express: branch on a verdict's number, step back only when stalled, or short-circuit a 40-minute verifier behind three cheap ones with `&&`. Same engine, same verifiers — heavier, and Rust-only, so **use YAML unless you need it** ([when YAML is not enough](#when-yaml-is-not-enough-the-rust-driver-api)).
 - **Crash-resumable driver runs** — every completed `rlt.*` call is recorded, so a driver that dies at hour six replays its finished work in seconds and spends nothing on it. Your loop is never serialized: it runs from the top and its own `if`/`for` walk it back. Fast-forward reaches back to the last gate that landed on base — never past it, because staged work lives on a branch the ledger cannot describe ([details](#when-yaml-is-not-enough-the-rust-driver-api)).
 
 **Guardrails for unattended runs**
-- **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its judges + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail — the agent CLI itself runs in there (reference images in `docker/`, credentials passed by name, never baked in), and so do its judges. On both tiers `rlt/private/` is carved back **out** of the writable set, so a confined worker cannot forge the verdict ledger that decides when its own run ends. ⚠ **A JUDGE is confined more tightly than the worker**: the project tree is **read-only** to it — a judge able to write what it grades can edit its way to a pass — and its writes are *relocated* to `$RLT_JUDGE_SCRATCH` plus a persistent toolchain cache (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, …), so a well-behaved judge needs no change ([details](CONFIG.md)). Refused at startup if the mechanism is missing, never a silent downgrade ([details](CONFIG.md)). *macOS verified; Linux experimental.*
+- **Blast-radius isolation** *(`isolation: sandbox | container`, per step)* — confines what an auto-mode worker (and its verifiers + hooks) can do to the **host** (`rm -rf ~`, read `~/.ssh`), orthogonal to session isolation. Two tiers: **`sandbox`** — an OS jail (`sandbox-exec` on macOS, `bwrap` on Linux) limiting **writes** to the project dir + tmp, reads and network open; **`container`** — re-hosts the worker inside a **Docker/Podman** image (`image:` key) with the project dir bind-mounted, the container boundary as the jail — the agent CLI itself runs in there (reference images in `docker/`, credentials passed by name, never baked in), and so do its verifiers. On both tiers `rlt/private/` is carved back **out** of the writable set, so a confined worker cannot forge the verdict ledger that decides when its own run ends. ⚠ **A VERIFIER is confined more tightly than the worker**: the project tree is **read-only** to it — a verifier able to write what it grades can edit its way to a pass — and its writes are *relocated* to `$RLT_VERIFIER_SCRATCH` plus a persistent toolchain cache (`CARGO_TARGET_DIR`, `PYTHONPYCACHEPREFIX`, …), so a well-behaved verifier needs no change ([details](CONFIG.md)). Refused at startup if the mechanism is missing, never a silent downgrade ([details](CONFIG.md)). *macOS verified; Linux experimental.*
 - **Read-only context** *(`context:`)* — directories from **outside** the project (a knowledge base, reference architectures) that every session reads and none may change: kernel-denied under `sandbox`, mounted `:ro` at `/context/<as>` under `container`, listed in the brief with a pointer to each `index.md` ([details](CONFIG.md#context-directories--context-read-only-material-from-outside-the-project)).
-- **Network egress allow-list** *(`isolation_policy.network: { allow: [...] }`)* — the worker and its judges reach only the listed hosts, through rlt's own proxy: an `--internal` network under `container` (the reference), Seatbelt under macOS `sandbox`; refused where it cannot be enforced, and refused when the agent's own endpoint is missing from the list ([platform matrix](CONFIG.md#network-egress--isolation_policynetwork)).
-- **Protected paths** *(`write_deny`, in `defaults` and per step)* — globs the worker may **read but never change**: oracles, golden files, rule files, gate config. An agent that cannot pass a test will edit the test; this is what stops it. Enforced on **every** tier, `none` included, by a content-hash check at the gate over every covered file — tracked, untracked and gitignored: a session that changed one is **rolled back**, the files are restored from rlt's own copies before any judge runs, and a `protected_path_violation` row with the paths lands in `rlt/private/violations.jsonl`. Under `sandbox`/`container` the kernel also denies the write itself. A step's list is added to the default, never subtracted from. Tested against a fake agent that tries direct writes, symlinks, hard links, renames, `chmod`, `git checkout`, case variants and more ([details + platform matrix](CONFIG.md#protected-paths--write_deny-readonly-writable)).
-- **Rate-limit wait** *(Claude + Codex)* — detects a usage/429 limit, saves the incomplete session's work under `refs/rlt/partial/<run>/<session>` (never judged), waits for the reset and retries fresh. The wait shows in `rlt status` (`waiting: {reason, agent, until}`), `rlt send wake` ends it early, it never counts against `work_time`, and `rlt run --resume` continues an interrupted run ([details](CONFIG.md#rate-limits--wait-wake-resume)).
+- **Network egress allow-list** *(`isolation_policy.network: { allow: [...] }`)* — the worker and its verifiers reach only the listed hosts, through rlt's own proxy: an `--internal` network under `container` (the reference), Seatbelt under macOS `sandbox`; refused where it cannot be enforced, and refused when the agent's own endpoint is missing from the list ([platform matrix](CONFIG.md#network-egress--isolation_policynetwork)).
+- **Protected paths** *(`write_deny`, in `defaults` and per step)* — globs the worker may **read but never change**: oracles, golden files, rule files, gate config. An agent that cannot pass a test will edit the test; this is what stops it. Enforced on **every** tier, `none` included, by a content-hash check at the gate over every covered file — tracked, untracked and gitignored: a session that changed one is **rolled back**, the files are restored from rlt's own copies before any verifier runs, and a `protected_path_violation` row with the paths lands in `rlt/private/violations.jsonl`. Under `sandbox`/`container` the kernel also denies the write itself. A step's list is added to the default, never subtracted from. Tested against a fake agent that tries direct writes, symlinks, hard links, renames, `chmod`, `git checkout`, case variants and more ([details + platform matrix](CONFIG.md#protected-paths--write_deny-readonly-writable)).
+- **Rate-limit wait** *(Claude + Codex)* — detects a usage/429 limit, saves the incomplete session's work under `refs/rlt/partial/<run>/<session>` (never verified), waits for the reset and retries fresh. The wait shows in `rlt status` (`waiting: {reason, agent, until}`), `rlt send wake` ends it early, it never counts against `work_time`, and `rlt run --resume` continues an interrupted run ([details](CONFIG.md#rate-limits--wait-wake-resume)).
 - **Stall watchdog** — kills a worker that's gone both idle *and* CPU-flat.
-- **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `rlt` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just judges — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](CONFIG.md)).
+- **Stuck detection + async human notification** *(`sequence.notify_if` + `notify`)* — the non-terminal twin of `abort_if`: when a detector fires, `rlt` runs your `notify.cmd` (a push, a webhook, a log line) and **the loop keeps running**. Detectors are just verifiers — the shipped `stalled`, or a `stuck` rubric you write over the verdict history — so there's no new machinery, and a human stays a *side-channel*, never a gate. Debounced by `notify.cooldown_sessions` ([details](CONFIG.md)).
 - **No orphaned compute** — process-group reaping sweeps stragglers when a session or the loop ends.
 - **Token ceilings on every agent, dollar ceilings on Claude** — `over_budget` / `over_iterations` / `wall_time`/`work_time` everywhere; `over_cost` only where the agent reports dollars. Asking for a guard your agent can't report is refused at startup, never silently ignored.
 - **Long-task tracking** — `rlt spawn` keeps a sim/build alive across sessions so the reaper spares it.
@@ -365,7 +365,7 @@ rules keep that safe:
 - **`work_time` excludes waiting.** Ceilings keep firing while blocked, so bound a run with humans in
   it on `work_time` (effort), not just `wall_time` (a deadline) — otherwise an overnight question
   aborts a healthy run. Both are **seconds**.
-- **An answer unblocks the step; a judge still owns the verdict.** Never let a human's "done" satisfy
+- **An answer unblocks the step; a verifier still owns the verdict.** Never let a human's "done" satisfy
   a goal — re-run the check that looks at the world.
 
 ⛔ **Never ask for a secret's value.** The question and answer are written to disk. Ask for the
@@ -373,9 +373,9 @@ credential to be *placed* (env, keychain, `.env`) and confirm with `rlt hil bool
 
 → [Asking a human](CONFIG.md#asking-a-human-hil) · worked driver: [`examples/hil.rs`](../examples/hil.rs)
 
-## Building judges
+## Building verifiers
 
-A judge is any command that prints a **verdict** as JSON to stdout. Only `met` is required; the rest
+A verifier is any command that prints a **verdict** as JSON to stdout. Only `met` is required; the rest
 are optional:
 
 ```jsonc
@@ -389,49 +389,49 @@ are optional:
 }
 ```
 
-So a **binary** judge can print just `{"met": true}`; a numeric one might print, as **one** example:
+So a **binary** verifier can print just `{"met": true}`; a numeric one might print, as **one** example:
 
 ```json
 {"met": false, "value": 18, "max": 28, "target": 28, "rationale": "18/28 tests pass"}
 ```
 
-**Evidence survives the judge.** A judge writes its working files (a SARIF report, a benchmark, a
-diff) to `$RLT_JUDGE_SCRATCH`, which is per session and transient. Name a file in `evidence` and rlt
-copies it to `rlt/private/evidence/<run_id>/<session>/<judge>/` after judging, records the copy on the
+**Evidence survives the verifier.** A verifier writes its working files (a SARIF report, a benchmark, a
+diff) to `$RLT_VERIFIER_SCRATCH`, which is per session and transient. Name a file in `evidence` and rlt
+copies it to `rlt/private/evidence/<run_id>/<session>/<verifier>/` after verifying, records the copy on the
 verdict's ledger row, and lists it in the run report — so a pull request can show *why* a gate
 passed or failed. Only regular files inside the scratch or the project are kept; anything else is
-refused and recorded. One run copies at most `judge.evidence_max_mb` (default 100)
+refused and recorded. One run copies at most `verifier.evidence_max_mb` (default 100)
 ([details](CONFIG.md#evidence--what-rlt-keeps)).
 
-`rlt` uses the last JSON object on stdout, so a judge can log freely and print its verdict last. There
-is no `type:` field — a judge that emits a `value` shows partial progress; one that emits only `met`
+`rlt` uses the last JSON object on stdout, so a verifier can log freely and print its verdict last. There
+is no `type:` field — a verifier that emits a `value` shows partial progress; one that emits only `met`
 is binary.
 
-**Two flavours, chosen by extension.** A judge is a **file whose name is the judge name**, resolved
-from `rlt/judges/<name>.{sh,md}`, then the standard library at `~/.rlt/judges/`:
+**Two flavours, chosen by extension.** A verifier is a **file whose name is the verifier name**, resolved
+from `rlt/verifiers/<name>.{sh,md}`, then the standard library at `~/.rlt/verifiers/`:
 
-- **`.sh` → a script judge.** Its stdout is the verdict JSON. It runs from the project root with
-  `RLT_SESSION` / `RLT_STEP` / `RLT_JUDGE` / `RLT_PROJECT_DIR` in the env (a script judge can even
+- **`.sh` → a script verifier.** Its stdout is the verdict JSON. It runs from the project root with
+  `RLT_SESSION` / `RLT_STEP` / `RLT_VERIFIER` / `RLT_PROJECT_DIR` in the env (a script verifier can even
   shell out to `claude -p` itself).
-- **`.md` → an LLM judge, and the file IS the rubric.** It declares the files it reads in its own YAML
+- **`.md` → an rubric verifier, and the file IS the rubric.** It declares the files it reads in its own YAML
   **frontmatter** (`inputs: ["diff", "src/main.rs"]`) — one self-contained file, no `kind:` tag, no
   registry. `rlt` builds the prompt from your rubric plus those inputs (wrapped so the repo content is
-  fed as *untrusted data* the judge is told never to obey), runs it **isolated** on the RULER (the
-  `judge:` block) — `--setting-sources user` + `--strict-mcp-config`, no `--dangerously-skip-permissions`
-  — and extracts the verdict. The judge model is the RULER's, set once for the whole run.
+  fed as *untrusted data* the verifier is told never to obey), runs it **isolated** on the RULER (the
+  `verifier:` block) — `--setting-sources user` + `--strict-mcp-config`, no `--dangerously-skip-permissions`
+  — and extracts the verdict. The verifier model is the RULER's, set once for the whole run.
 
-Ready-made **parameterless** judges ship inside the binary and install to `~/.rlt/judges/`
+Ready-made **parameterless** verifiers ship inside the binary and install to `~/.rlt/verifiers/`
 (`cargo_test`, `build_ok`, `lint_clean`, `git_clean`, `no_regression`, `stalled`, `cmd_exit`,
-`grep_count`) — name any of them in a condition and it just resolves. Copy one into `rlt/judges/` to
-shadow it by name. The source lives in [`plugin/judges/`](../plugin/judges/) + [`plugin/rubrics/`](../plugin/rubrics/).
+`grep_count`) — name any of them in a condition and it just resolves. Copy one into `rlt/verifiers/` to
+shadow it by name. The source lives in [`plugin/verifiers/`](../plugin/verifiers/) + [`plugin/rubrics/`](../plugin/rubrics/).
 
-**Compose judges into your DoD.** Each judge checks **one clause**; `done_if` composes them into the
-whole of it — any boolean of judge names (`a AND b`, `a OR b`, `NOT c`, with parentheses), plus numeric
+**Compose verifiers into your DoD.** Each verifier checks **one clause**; `done_if` composes them into the
+whole of it — any boolean of verifier names (`a AND b`, `a OR b`, `NOT c`, with parentheses), plus numeric
 accessors (`coverage.value >= 80`) and aggregates (`met_fraction >= 0.75`, `count_met >= 3`). So
 `done_if` *is* your DoD, as an expression.
 
 `abort_if` takes the same grammar but is **not** part of your DoD: it is a ceiling (budget, time,
-a regressed invariant, a judge error) that aborts the run as a failure. Done is one thing; giving up
+a regressed invariant, a verifier error) that aborts the run as a failure. Done is one thing; giving up
 is another:
 
 `notify_if` takes the same grammar again, and is the one clause that **doesn't end the run**: when it's
@@ -448,7 +448,7 @@ sequence:
     cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"]   # bound it: delivery is FOREGROUND
 ```
 
-`{{reason}}` is the rationale of a judge named in the expression (`met` first, then highest `value`) —
+`{{reason}}` is the rationale of a verifier named in the expression (`met` first, then highest `value`) —
 a heuristic, not proof of which subterm fired. It, plus `{{project}}` / `{{session}}` / `{{step}}`, is
 substituted **shell-quoted by `rlt`** — so never wrap a placeholder in quotes of your own. Which clause
 a detector sits in *is* your human policy: none = pure autonomy, `notify_if` = tell me but keep going,
@@ -457,7 +457,7 @@ a detector sits in *is* your human policy: none = pure autonomy, `notify_if` = t
 tradeoff, and the copy-ready `stuck` / `blocked` detectors, are in [`docs/CONFIG.md`](CONFIG.md).
 
 **Numbers that may only get better: the ratchet.** An invariant keeps a `met` from flipping back; a
-ratchet keeps a *number* from sliding back. Name the judge under `sequence.ratchet` with the direction
+ratchet keeps a *number* from sliding back. Name the verifier under `sequence.ratchet` with the direction
 that is better and a tolerance for noise, and a session that makes it worse beyond that is rolled back
 like any other regression:
 
@@ -476,12 +476,12 @@ file the worker could touch — so unlike `stalled` they are safe in `abort_if` 
 The full rules (references, drift warnings, which sessions count) are in
 [`docs/CONFIG.md`](CONFIG.md#the-ratchet--numeric-no-regression).
 
-**Measured judges without a script: swe-metrics.** Most quality gates measure software — complexity,
+**Measured verifiers without a script: swe-metrics.** Most quality gates measure software — complexity,
 duplication, vulnerabilities, secrets. With [swe-metrics](https://github.com/ssenge/swe-metrics) on
-`PATH`, declare such a judge in `judges:` instead of writing a script that runs a tool and parses it:
+`PATH`, declare such a verifier in `verifiers:` instead of writing a script that runs a tool and parses it:
 
 ```yaml
-judges:
+verifiers:
   cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 10 }
   vulns:   { metric: { id: "dependencies.vulnerabilities", labels: { severity: ["critical", "high"] } }, max: 0 }
   quality: { score: { definition: "swe-default", version: "2" }, min: 80 }
@@ -491,13 +491,13 @@ sequence:
     cc_p95: { tolerance: 0.5 }   # `max:` already says lower is better
 ```
 
-All such judges of a session share ONE `swe-metrics measure` (and its SARIF is kept as evidence). A
-metric that was not measured — its analyzer skipped or failed — makes the judge **error** with the
+All such verifiers of a session share ONE `swe-metrics measure` (and its SARIF is kept as evidence). A
+metric that was not measured — its analyzer skipped or failed — makes the verifier **error** with the
 analyzer's reason; it is never met. The score is computed against the report of the last kept state,
 so a metric that got worse costs points. Selectors, `combine`, `scope: changed` and the score's
-comparability rules are in [`docs/CONFIG.md`](CONFIG.md#judges-built-on-swe-metrics--metric-and-score).
+comparability rules are in [`docs/CONFIG.md`](CONFIG.md#verifiers-built-on-swe-metrics--metric-and-score).
 
-On a `container` run swe-metrics runs where every judge does — in `judge.image`, on a read-only
+On a `container` run swe-metrics runs where every verifier does — in `verifier.image`, on a read-only
 project, with a fresh home per call — so it must be in that image, not on the host. The reference image
 holds it with all its pinned tools; it is built from your swe-metrics checkout, and trivy reads the
 host's vulnerability database read-only (seed it with `trivy image --download-db-only`):
@@ -506,7 +506,7 @@ host's vulnerability database read-only (seed it with `trivy image --download-db
 docker/swe-metrics/build.sh ~/src/swe-metrics      # → rlt-swe-metrics
 ```
 ```yaml
-judge: { image: "rlt-swe-metrics" }                # add your script judges' toolchain to it
+verifier: { image: "rlt-swe-metrics" }                # add your script verifiers' toolchain to it
 ```
 
 **Several tools for one question: groups.** When three tools measure the same thing and disagree, name
@@ -520,13 +520,13 @@ sequence:
   merge_requires_improvement: true                         # optional: merge only sessions that improved something
 ```
 
-A group named in `done_if` is part of your DoD, and the gate judges it **net**: a session in which one
+A group named in `done_if` is part of your DoD, and the gate verifies it **net**: a session in which one
 tool flips to unmet while another flips to met is not a regression; one that loses ground is rolled back.
 With `merge_requires_improvement`, a session that regressed nothing but also moved no goal and no ratchet
 (a pure reformat) is not merged — recorded `no_improvement`, which is not a rollback. Details in
-[`docs/CONFIG.md`](CONFIG.md#judge-groups--k-of-n).
+[`docs/CONFIG.md`](CONFIG.md#verifier-groups--k-of-n).
 
-The rule that makes it a moat: **`rlt` runs the judges, never the agent.** So make the judges check
+The rule that makes it a moat: **`rlt` runs the verifiers, never the agent.** So make the verifiers check
 the resulting artifacts — tests, a compiler, a proof checker — not the agent's claim about it — the agent will often enough hallucinate that a job is done.
 
 ## Steps and sequences
@@ -546,7 +546,7 @@ steps:
     prompt: >
       Assume the current approach is wrong. Name 2-3 fundamentally different approaches,
       pick one, and write the rejected ones and WHY into your scratch note.
-    skip_judges: true              # no DoD judges run → nothing merges; this step's work STAGES
+    skip_verifiers: true              # no DoD verifiers run → nothing merges; this step's work STAGES
 
 sequence:
   steps:
@@ -572,7 +572,7 @@ dispatch, and it belongs to the [Rust driver API](RUST_API.md), where it is an o
 **`max:` is a contract, not a budget.** An entry that spends its whole bound with the condition still
 false has failed, and the run **aborts** naming the bound and the condition — it does not quietly
 advance. Exhaustion and convergence used to take the same branch, which meant a step burning four
-sessions against a judge that was *timing out* looked exactly like a step that had succeeded. Pick
+sessions against a verifier that was *timing out* looked exactly like a step that had succeeded. Pick
 these numbers as the point at which a human should be told, because that is what they now mean.
 
 **Why per-step *agents* is the headline, not a bonus.** The clearest finding in the reflection
@@ -588,9 +588,9 @@ sessions **costs nothing** — there is no conversation to hand over.
 the strong one only on the step-back. The repeated `worker` on a cheap agent, `reconsider` on the
 expensive one.
 
-The `stalled` builtin (a library judge over the verdict history) is what BOUNDS the grunt repeat —
+The `stalled` builtin (a library verifier over the verdict history) is what BOUNDS the grunt repeat —
 it does not *trigger* the next entry, since every entry runs every lap; a
-`skip_judges: true` step **stages** its work rather than merging it, and the next judged step gates the
+`skip_verifiers: true` step **stages** its work rather than merging it, and the next verified step gates the
 whole span — so a red-team detour can never get the *next* session rolled back in its place. See
 [`examples/p-vs-np/`](../examples/p-vs-np/) for a full sequence, and [`docs/CONFIG.md`](CONFIG.md)
 for the complete grammar.
@@ -603,16 +603,16 @@ deliberately cannot do, each of which is an `if` or a `for` in Rust:
 
 | you want | YAML | Rust |
 |---|---|---|
-| skip a step based on a verdict | ✗ — a lap runs every entry | `if rlt.judge(&x).met() { continue }` |
-| **not run** an expensive judge unless cheap ones pass | ✗ — every run-set judge runs after every judged step | `rlt.judge(&cheap).met() && rlt.judge(&slow).met()` |
+| skip a step based on a verdict | ✗ — a lap runs every entry | `if rlt.verifier(&x).met() { continue }` |
+| **not run** an expensive verifier unless cheap ones pass | ✗ — every run-set verifier runs after every verified step | `rlt.verifier(&cheap).met() && rlt.verifier(&slow).met()` |
 | a bound that changes with what the run learned | ✗ — `max:` is a literal | any expression |
 | state that changes *within* a cycle | ✗ — verdict rows land per gate | a local variable |
 
 The second row is the one that costs money: a 40-minute load test in a YAML run-set executes after
-**every** judged step; in a driver, `&&` short-circuits and it runs only where it matters.
+**every** verified step; in a driver, `&&` short-circuits and it runs only where it matters.
 
 It is the **same engine** — `rlt.step()` dispatches through the identical primitive the YAML walk
-does, so session isolation, the keep/rollback gate, memory, judges and the ledger all behave
+does, so session isolation, the keep/rollback gate, memory, verifiers and the ledger all behave
 identically. What you gain is ordinary Rust; what you pay is a compiled binary instead of a config
 file.
 
@@ -628,7 +628,7 @@ for c in 1..=20 {
     rlt.check_limits()?;                       // ceilings are OPT-IN — they fire here
 
     rlt.step(&implement)?;                     // stages on a session branch; nothing merged yet
-    if !(rlt.judge(&tests).met() && rlt.judge(&load).met()) {
+    if !(rlt.verifier(&tests).met() && rlt.verifier(&load).met()) {
         continue;                              // `&&` IS the cost gate: `load` never runs when red
     }
     rlt.gate()?;                               // land the whole span, or discard it per policy
@@ -638,10 +638,10 @@ for c in 1..=20 {
 Protected paths work the same way on this path: `Step::template().write_deny(["tests/oracles/"])`
 accumulates down the template chain like `readonly`, but nothing — not `.writable()` — subtracts from
 it. A step that changed a protected path makes the next `gate()` return `RolledBack`, whatever the
-judges and `on_regression` say.
+verifiers and `on_regression` say.
 
 Eleven calls in total. **`step()` stages, `gate()` lands** — a driver that never gates loses nothing
-(every session is committed on its own branch) but never advances the base branch either. Judges are
+(every session is committed on its own branch) but never advances the base branch either. Verifiers are
 **lazy and memoized per step**, which is what makes `&&` a real cost gate rather than a style choice.
 
 A crashed run resumes with `Relentless::open_with(".", Opts { resume: true })`: completed calls are answered
@@ -657,7 +657,7 @@ of what it loses.
 ## State and memory
 
 `rlt` keeps **no state in a database or a long-running daemon**. Config lives under `<project>/rlt/`
-(committed: `rlt.yaml`, `RLT.md`, judges); runtime state lives in **two** gitignored, auto-created
+(committed: `rlt.yaml`, `RLT.md`, verifiers); runtime state lives in **two** gitignored, auto-created
 directories beside it — plus git itself. The loop is the single *writer* of the private half; every
 *reader* (the TUI, the web UI, `/rlt:supervise`, `rlt status`) reads the same files, so you can attach
 any number of views to a running loop without coupling any of them to it.
@@ -667,14 +667,14 @@ the loop ends, what it may spend, or what rlt believes happened, it is private:*
 
 ```text
 <project>/rlt/
-  rlt.yaml · RLT.md · judges/     COMMITTED — your config, your graders
+  rlt.yaml · RLT.md · verifiers/     COMMITTED — your config, your graders
   state/                          GITIGNORED — the WORKER writes it (rlt reads it as untrusted input)
     STATE.md  wiki/  sessions/  spawns.json  spawns/  BLOCKED.md
   private/                        GITIGNORED — RLT writes it; a CONFINED worker cannot
     INSTRUCTIONS.md  LOG.md  state.json  project.json  verdicts.jsonl  bus/  run.pid  run.log
 ```
 
-- **`rlt/private/state.json`** — the live scoreboard snapshot (judges, the current step + its agent,
+- **`rlt/private/state.json`** — the live scoreboard snapshot (verifiers, the current step + its agent,
   tokens, phase, activity tail), written atomically after each change. The TUI, `rlt serve`, and the
   supervisor read this.
 - **`rlt/private/verdicts.jsonl`** — the append-only, safety-critical GATE record: one line per verdict,
@@ -711,7 +711,7 @@ see [the wiki](CONFIG.md#the-wiki-okf-v02-and-rlt-wiki-lint).
 `container`, the worker may write the project dir and its own `rlt/state/` but writes to `rlt/private/`
 are refused by the kernel — otherwise a confined worker could append forged `merged` rows to
 `verdicts.jsonl`, make `stalled` report met, and end its own run under `abort_if: "stalled"`. **Reads
-are untouched**: the worker still reads its brief and judges still read the ledger. Under the default
+are untouched**: the worker still reads its brief and verifiers still read the ledger. Under the default
 `isolation: none` the worker has your whole filesystem and no directory layout changes that — see
 [isolation](CONFIG.md#isolation--blast-radius-jail-a-different-axis-from-session-isolation).
 
@@ -748,7 +748,7 @@ Running an agent headlessly does impose real limits — worth knowing up front:
   to your agent** — so use that agent's own vocabulary (e.g. Claude's `--allowedTools Edit,Bash`,
   Copilot's `--max-ai-credits 50`).
 - **MCP servers that need interactive auth** (an OAuth login, say) may be unavailable in a headless run.
-- The **judge & summarizer** sessions are deliberately **read-only**, so the agent can't steer the
+- The **verifier & summarizer** sessions are deliberately **read-only**, so the agent can't steer the
   process that grades it. Same guarantee, three mechanisms: Claude `--strict-mcp-config` +
   `--setting-sources user`; Codex `--sandbox read-only`; Copilot by withholding `--allow-all-tools`.
 
@@ -782,15 +782,15 @@ Global flags, valid on every subcommand: `--dir <path>` (project root, default `
 
 | Command | What it does | Flags |
 |---|---|---|
-| `rlt init` | Scaffold **placeholder** config you must then edit — a blank-slate fallback. Prefer `/rlt:new`, which fills it in from your project. Writes `rlt/rlt.yaml` + `rlt/RLT.md` + a starter judge. | `--agent <a>` shape it for that agent · `--force` overwrite |
-| `rlt doctor` | Diagnose the setup: **every agent the sequence names** is on PATH, config parses, conditions valid, judges resolve, **the agents can do what the config asks**, skills installed | `--json` versioned report: every backend (installed, path, version, capability flags), the isolation tiers this host offers, every problem with its config path |
-| `rlt check` | Validate `rlt/rlt.yaml` + its judges exactly as `rlt run` would at startup, listing **every** problem at once (each with a dotted config path). Runs no judge, no agent. Exit 1 on any problem | `--json` |
+| `rlt init` | Scaffold **placeholder** config you must then edit — a blank-slate fallback. Prefer `/rlt:new`, which fills it in from your project. Writes `rlt/rlt.yaml` + `rlt/RLT.md` + a starter verifier. | `--agent <a>` shape it for that agent · `--force` overwrite |
+| `rlt doctor` | Diagnose the setup: **every agent the sequence names** is on PATH, config parses, conditions valid, verifiers resolve, **the agents can do what the config asks**, skills installed | `--json` versioned report: every backend (installed, path, version, capability flags), the isolation tiers this host offers, every problem with its config path |
+| `rlt check` | Validate `rlt/rlt.yaml` + its verifiers exactly as `rlt run` would at startup, listing **every** problem at once (each with a dotted config path). Runs no verifier, no agent. Exit 1 on any problem | `--json` |
 | `rlt schema` | Print the JSON Schema of `rlt.yaml`, generated from the config types | |
 | `rlt skills install` | Install the `rlt-*` skills where your agent looks (`.claude/skills/` for Claude, `.agents/skills/` for Codex + Copilot) | `--agent <a>` (default: rlt.yaml's `agent:`) · `--user` install under `$HOME` |
-| `rlt plan` | Run every run-set judge once and print the starting scoreboard (a dry run) | |
+| `rlt plan` | Run every run-set verifier once and print the starting scoreboard (a dry run) | |
 | `rlt run` | Drive the loop until `done_if` is met (or a guard fires). Writes `rlt/private/report.json` on every ending | `--max-sessions <n>` (0 = unlimited) · `--detach` / `-d` · `--report-json` logs to `rlt/private/run.log`, prints only the report · `--base-branch <ref>` overrides `session_isolation.base_branch` · `--resume` continues the last interrupted run (same run id, next session, back to its last kept gate) |
-| `rlt judge <name>` | Resolve **one** judge by name and print its raw verdict — for authoring judges | |
-| `rlt status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no judges) | `--json` the versioned live status (`docs/schemas/status.v1.json`) |
+| `rlt verify <name>` | Resolve **one** verifier by name and print its raw verdict — for authoring verifiers | |
+| `rlt status` | The loop's latest scoreboard, from its snapshot (cheap; re-runs no verifiers) | `--json` the versioned live status (`docs/schemas/status.v1.json`) |
 | `rlt history` | This project's run history, newest first, plus lifetime totals | `--json` (each run with its usage totals) |
 | `rlt dashboard` | Live TUI | `--once` one-shot text snapshot |
 | `rlt serve` | JSON API for the web UI: `/api/state`, `/api/history`, `/api/health`, `/api/process`, `/api/checkpoint`, `/api/reviews`, `/api/projects`, `/api/ui`, `POST /api/send`, `POST /api/answer`, `POST /api/run`, `POST /api/projects` | `--port <n>` (7878) · `--cors-origin <url>` · `--token <t>` · `--projects <folder>` · `--process <file>` ([PROCESS.md](PROCESS.md#the-web-ui-of-a-process-a-39)) |
@@ -821,15 +821,15 @@ breaking change, so ignore unknown fields.
 
 | Interface | Contract |
 |---|---|
-| **`rlt/private/report.json`** | How the run ended: `outcome` (`done` · `aborted` · `stopped` · `error`), the reason, session counts, clock, every judge's last and baseline verdict (with the paths of its kept evidence) and ratchet, the stop detectors, the result commit, open asks, how the sessions were set up (`session`: setting sources, the names of the settings `env` keys passed), and usage — per session (`session_log`: worker and ruler apart, the model each agent reported, `input`/`output`/`cache_write`/`cache_read` tokens, `cost_usd` + `cost_source`) and in total. Schema: [`docs/schemas/report.v2.json`](schemas/report.v2.json) (v1 superseded). Field reference: [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson). `rlt run --report-json` prints it on stdout. |
+| **`rlt/private/report.json`** | How the run ended: `outcome` (`done` · `aborted` · `stopped` · `error`), the reason, session counts, clock, every verifier's last and baseline verdict (with the paths of its kept evidence) and ratchet, the stop detectors, the result commit, open asks, how the sessions were set up (`session`: setting sources, the names of the settings `env` keys passed), and usage — per session (`session_log`: worker and ruler apart, the model each agent reported, `input`/`output`/`cache_write`/`cache_read` tokens, `cost_usd` + `cost_source`) and in total. Schema: [`docs/schemas/report.v2.json`](schemas/report.v2.json) (v1 superseded). Field reference: [CONFIG.md](CONFIG.md#the-run-report-aggprivatereportjson). `rlt run --report-json` prints it on stdout. |
 | **`rlt run` exit codes** | 0 done · 3 `abort_if` · 4 session cap · 5 stopped · 1 error. The report's `outcome` is authoritative. |
-| **`rlt status --json`** | Where a run stands now, from another process, without re-judging: `running`, `phase`, `current_step`, `session`, `time`, `sessions`, each judge's `last` verdict and `ratchet` reference, `detectors` (`stalled`, `oscillating`, `rollbacks`, `consecutive_rollbacks`, `ratchet_regressed`), `open_asks` with `options`, running `usage` totals, `waiting` (`{reason, agent, until}` during a rate-limit wait, else `null`). Field names match the report. Schema: [`docs/schemas/status.v1.json`](schemas/status.v1.json). Reference: [CONFIG.md](CONFIG.md#the-live-status-rlt-status---json). |
+| **`rlt status --json`** | Where a run stands now, from another process, without re-verifying: `running`, `phase`, `current_step`, `session`, `time`, `sessions`, each verifier's `last` verdict and `ratchet` reference, `detectors` (`stalled`, `oscillating`, `rollbacks`, `consecutive_rollbacks`, `ratchet_regressed`), `open_asks` with `options`, running `usage` totals, `waiting` (`{reason, agent, until}` during a rate-limit wait, else `null`). Field names match the report. Schema: [`docs/schemas/status.v1.json`](schemas/status.v1.json). Reference: [CONFIG.md](CONFIG.md#the-live-status-rlt-status---json). |
 | **`rlt answer <id> <value> --json`** | `{schema_version, accepted, reason, id, answer}`; exit 0 accepted · 1 refused (unknown id, already answered, a value off the options). The answer reaches the worker's next brief, or the driver waiting on it. Schema: [`docs/schemas/answer.v1.json`](schemas/answer.v1.json). |
 | `rlt check --json` | `{schema_version, ok, config, problems: [{path, message}], warnings: [{path, message}]}`. `path` is dotted (`steps.worker.isolation`, `sequence.steps[1].until`; `""` = the whole file). Exit 0 valid · 1 any problem. Runs nothing. |
-| `rlt doctor --json` | `{schema_version, rlt_version, ok, config: {path, found, valid, judges}, backends: [{name, bin, used, installed, path, version, self_sandboxes, capabilities: {reports_output_tokens, reports_cost_usd, supports_resume, supports_effort, detects_rate_limits, supports_one_shot}}], isolation: {none, sandbox, container: {available, mechanism, requested}}, container_engine, container_images: [{image, clis: {<bin>: <version line> \| null}, invisible, error}], network: {mode: open\|allow, allow, sandbox, container}, problems, warnings}`. Exit 0 ok · 1 otherwise. |
+| `rlt doctor --json` | `{schema_version, rlt_version, ok, config: {path, found, valid, verifiers}, backends: [{name, bin, used, installed, path, version, self_sandboxes, capabilities: {reports_output_tokens, reports_cost_usd, supports_resume, supports_effort, detects_rate_limits, supports_one_shot}}], isolation: {none, sandbox, container: {available, mechanism, requested}}, container_engine, container_images: [{image, clis: {<bin>: <version line> \| null}, invisible, error}], network: {mode: open\|allow, allow, sandbox, container}, problems, warnings}`. Exit 0 ok · 1 otherwise. |
 | `rlt schema` | The JSON Schema (draft 2020-12) of `rlt.yaml`, generated from the parser's own types; `$comment` names the rlt version. |
 | `rlt wiki lint --json` | `{schema_version, ok, wiki, exists, files, concepts, problems: [{file, line, rule, message}], warnings}`. Exit 0 conformant · 1 a violation or a missing path. Schema: [`docs/schemas/wiki_lint.v1.json`](schemas/wiki_lint.v1.json). |
-| The judge verdict JSON | One line on stdout: `{"met", "value", "max", "target", "rationale", "error"}` — see [Building judges](#building-judges). |
+| The verifier verdict JSON | One line on stdout: `{"met", "value", "max", "target", "rationale", "error"}` — see [Building verifiers](#building-verifiers). |
 
 ```bash
 rlt --project ./svc run --report-json --base-branch release > report.json
@@ -859,17 +859,17 @@ rlt --project ./svc answer "$id" sqlite --json | jq .accepted
 
 ## Configuration
 
-You don't normally write this by hand — `/rlt:new` generates `rlt/rlt.yaml` (and the judge files
-under `rlt/judges/`) for your project, and `rlt run` reads `rlt/rlt.yaml` by default. When you want to
+You don't normally write this by hand — `/rlt:new` generates `rlt/rlt.yaml` (and the verifier files
+under `rlt/verifiers/`) for your project, and `rlt run` reads `rlt/rlt.yaml` by default. When you want to
 tune it: the `agent:` (see [Choosing an agent](#choosing-an-agent)), the `steps` / `sequence` model,
 token and dollar ceilings, the rolling summary, cross-session memory, mandatory per-session git
-isolation with a rollback gate, lifecycle hooks, watchdog thresholds, judges-by-name resolution, and
+isolation with a rollback gate, lifecycle hooks, watchdog thresholds, verifiers-by-name resolution, and
 the `done_if` / `abort_if` / `notify_if` grammar are all documented in
 **[`docs/CONFIG.md`](CONFIG.md)**.
 
 ## Examples
 
-- **[`examples/hello/`](../examples/hello/)** — the smallest possible loop, runnable in a
+- **[`examples/hello-loop/`](../examples/hello-loop/)** — the smallest possible loop, runnable in a
   minute, plus a walkthrough that drives a project to "all tests pass".
 - **[`examples/p-vs-np/`](../examples/p-vs-np/)** — the showcase: every feature aimed at one famous
-  problem, with a Lean proof checker as the incorruptible judge.
+  problem, with a Lean proof checker as the incorruptible verifier.

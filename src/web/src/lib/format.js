@@ -1,9 +1,9 @@
-// Small pure formatters + the judge-state → status mapping. Status colors follow the validated
+// Small pure formatters + the verifier-state → status mapping. Status colors follow the validated
 // dataviz status palette and are ALWAYS paired with a glyph + label (never color alone).
 
-/** Map a judge to { color-var, glyph, label }. A *broken* judge (error set) gets its own glyph,
+/** Map a verifier to { color-var, glyph, label }. A *broken* verifier (error set) gets its own glyph,
  *  distinct from a clean "not met": a reader must never confuse "could not grade" with "not met". */
-export function judgeStatus(j) {
+export function verifierStatus(j) {
   if (j?.error) return { css: 'critical', glyph: '⊘', label: 'errored' };
   switch (j?.state) {
     case 'met':         return { css: 'good',     glyph: '✔', label: 'met' };
@@ -14,12 +14,12 @@ export function judgeStatus(j) {
   }
 }
 
-/** The measure a judge shows, as a descriptor the component renders (§7.4):
+/** The measure a verifier shows, as a descriptor the component renders (§7.4):
  *   - errored  → { kind:'error' }                         (never a lying number)
  *   - binary   → { kind:'binary', text:'met'|'unmet' }    (value is null: NOT "0")
  *   - numeric  → { kind:'numeric', text:'v / target', frac } (value/target + a bar)
- *  A binary or broken judge carries NO number (value === null), so it is met/unmet, never 0. */
-export function judgeMeasure(j) {
+ *  A binary or broken verifier carries NO number (value === null), so it is met/unmet, never 0. */
+export function verifierMeasure(j) {
   if (j?.error) return { kind: 'error', text: 'error' };
   if (j?.value == null) return { kind: 'binary', text: j?.met ? 'met' : 'unmet' };
   const target = j.target ?? 0;
@@ -27,23 +27,23 @@ export function judgeMeasure(j) {
   return { kind: 'numeric', value: j.value, target, frac, text: `${Math.round(j.value)} / ${Math.round(target)}` };
 }
 
-/** The §7.4 per-judge scoreboard the UI renders. Prefers the native `judges` (Option value/max,
- *  explicit `met`, broken-judge `error`, run-set judges like `stalled`); falls back to mapping the
+/** The §7.4 per-verifier scoreboard the UI renders. Prefers the native `verifiers` (Option value/max,
+ *  explicit `met`, broken-verifier `error`, run-set verifiers like `stalled`); falls back to mapping the
  *  legacy `goals` so a state.json written by a pre-§7.4 `rlt` still renders — mirrors the Rust
- *  `DashboardState::judge_views()` / `JudgeView::from_goal` bridge. */
-export function judgeViews(state) {
-  const j = state?.judges;
+ *  `DashboardState::verifier_views()` / `VerifierView::from_goal` bridge. */
+export function verifierViews(state) {
+  const j = state?.verifiers;
   if (Array.isArray(j) && j.length) return j;
   return (state?.goals ?? []).map(fromGoal);
 }
 
-/** Bridge a legacy GoalView into a judge view — recovers the lost null-ness from the goal type:
+/** Bridge a legacy GoalView into a verifier view — recovers the lost null-ness from the goal type:
  *  a `binary` goal carried no real number, so its value/max come back as null (not a fake 0). */
 function fromGoal(g) {
   const numeric = g.goal_type !== 'binary';
   return {
     name: g.id,
-    kind: (g.judge_kind ?? 'script').startsWith('llm') ? 'llm' : (g.judge_kind || 'script'),
+    kind: (g.verifier_kind ?? 'script').startsWith('llm') ? 'llm' : (g.verifier_kind || 'script'),
     in_dod: true, // the legacy `goals` set was DoD-only.
     invariant: g.invariant,
     state: g.state,

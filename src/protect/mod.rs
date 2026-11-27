@@ -267,7 +267,7 @@ pub struct ViolationRecord {
     pub reason: String,
     /// `"session"`: during a worker session (the session is rolled back). `"between_sessions"`:
     /// after the check and before the next session — a process the worker left behind, a hook, a
-    /// judge; the paths are restored, but the work it rode in on had already been gated.
+    /// verifier; the paths are restored, but the work it rode in on had already been gated.
     pub window: String,
     /// project-relative, sorted.
     pub paths: Vec<String>,

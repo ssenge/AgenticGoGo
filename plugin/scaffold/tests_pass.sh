@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Starter judge (rlt/judges/tests_pass.sh) — resolved by the NAME `tests_pass` in done_if.
+# Starter verifier (rlt/verifiers/tests_pass.sh) — resolved by the NAME `tests_pass` in done_if.
 # Prints a verdict JSON to stdout. REPLACE the body with your real check.
-# Env rlt sets: RLT_SESSION, RLT_STEP, RLT_JUDGE, RLT_PROJECT_DIR.
+# Env rlt sets: RLT_SESSION, RLT_STEP, RLT_VERIFIER, RLT_PROJECT_DIR.
 N="$(cat .passing 2>/dev/null || echo 0)"
 TARGET=3
 met=$([ "$N" -ge "$TARGET" ] && echo true || echo false)

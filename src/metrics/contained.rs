@@ -1,43 +1,43 @@
-//! swe-metrics on the CONTAINER tier: the measurement behind every metric and score judge runs in
-//! the judges' image, like every other judge of a container run (`isolation::runtime`).
+//! swe-metrics on the CONTAINER tier: the measurement behind every metric and score verifier runs in
+//! the verifiers' image, like every other verifier of a container run (`isolation::runtime`).
 //!
 //! | | |
 //! |---|---|
-//! | image | `judge.image` |
+//! | image | `verifier.image` |
 //! | project | read-only — the incumbent's report under `rlt/private/metrics/` is read from there |
-//! | writes | the session's judge scratch (`rlt/private/container/judge/scratch-<n>/`), a FRESH home, the container's own `/tmp` (`TMPDIR`) |
-//! | network, context dirs, `pass_env` | the run's, exactly as a script judge gets them |
+//! | writes | the session's verifier scratch (`rlt/private/container/verifier/scratch-<n>/`), a FRESH home, the container's own `/tmp` (`TMPDIR`) |
+//! | network, context dirs, `pass_env` | the run's, exactly as a script verifier gets them |
 //! | trivy's database | the host's, READ-ONLY, never updated in there ([`trivy_env`]) |
 //!
 //! # Why nothing persists between measurements
 //! swe-metrics runs the measured project's own tool configs, so a measurement of a worker's tree can
 //! run worker-authored code. Whatever it can write and a later measurement reads is a channel into
-//! the next session's grade — the per-project toolchain cache a script judge keeps, a home, a
+//! the next session's grade — the per-project toolchain cache a script verifier keeps, a home, a
 //! bytecode cache (`PYTHONPYCACHEPREFIX` would hold swe-metrics' own compiled modules). So it gets
 //! none of them: its session scratch, a fresh home, and `PYTHONDONTWRITEBYTECODE`.
 //!
 //! # Why `TMPDIR` is the container's `/tmp`, not the scratch
 //! Tools put unix sockets there (tflint talks to its ruleset plugin over one), and a socket path is
-//! limited to ~108 bytes: under a project's `rlt/private/container/judge/scratch-<n>/` it overflows
+//! limited to ~108 bytes: under a project's `rlt/private/container/verifier/scratch-<n>/` it overflows
 //! and the tool fails as if it were not installed. The container's `/tmp` is as private and is gone
 //! with the container; the report and the details still go to the scratch (`--out`, `--details`).
 //!
 //! # Why trivy's database is the host's, read-only
 //! It is ~1.5 GB and refreshed daily. Per project it would be downloaded per project; in the fresh
-//! home, every measurement; in a cache shared by every project's judges, one project's measurement
+//! home, every measurement; in a cache shared by every project's verifiers, one project's measurement
 //! could rewrite the database another project's vulnerability gate trusts. The host's own cache —
 //! which the `sandbox` tier reads too — is mounted read-only with updates off, so the container needs
-//! no network for it. No database there: trivy fails at once, and every judge reading
+//! no network for it. No database there: trivy fails at once, and every verifier reading
 //! `dependencies.*` (a score's vulnerability gate included) fails closed, saying so.
 
 use super::measure::{Ctx, PROGRAM};
 use std::path::{Path, PathBuf};
 
-/// `swe-metrics <args>` in the judges' image, as the judge in `c`. `readonly` = host paths outside
+/// `swe-metrics <args>` in the verifiers' image, as the verifier in `c`. `readonly` = host paths outside
 /// the project the call reads (a scoring definition's directory).
 pub fn command(c: &Ctx<'_>, args: &[String], readonly: &[PathBuf]) -> Result<std::process::Command, String> {
-    let scratch = crate::isolation::runtime::judge_scratch(c.cwd, c.session);
-    std::fs::create_dir_all(&scratch).map_err(|e| format!("judge scratch {}: {e}", scratch.display()))?;
+    let scratch = crate::isolation::runtime::verifier_scratch(c.cwd, c.session);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("verifier scratch {}: {e}", scratch.display()))?;
     let mut command = super::measure::command(c, args, &scratch);
     command.env("TMPDIR", "/tmp").env("PYTHONDONTWRITEBYTECODE", "1");
     let trivy = trivy_cache();
@@ -45,7 +45,7 @@ pub fn command(c: &Ctx<'_>, args: &[String], readonly: &[PathBuf]) -> Result<std
         command.env(k, v);
     }
     let mounts: Vec<PathBuf> = readonly.iter().cloned().chain(trivy).collect();
-    crate::isolation::runtime::metrics_judge(command, c.cwd, &[scratch], &mounts)
+    crate::isolation::runtime::metrics_verifier(command, c.cwd, &[scratch], &mounts)
         .map_err(|e| format!("could not containerize {PROGRAM}: {e:#}"))
 }
 
@@ -137,24 +137,24 @@ mod tests {
         assert_eq!(outside, std::fs::canonicalize(other.path()).unwrap());
     }
 
-    /// The argv: the judges' image, the project read-only, the session scratch writable, a fresh home
+    /// The argv: the verifiers' image, the project read-only, the session scratch writable, a fresh home
     /// under `rlt/private/container/home/`, and the inner command intact at the end.
     #[test]
-    fn swe_metrics_runs_in_the_judges_image_on_a_read_only_project() {
+    fn swe_metrics_runs_in_the_verifiers_image_on_a_read_only_project() {
         let tmp = tempfile::tempdir().unwrap();
         let d = std::fs::canonicalize(tmp.path()).unwrap();
-        let c = Ctx { cwd: &d, session: Some(4), step: "s", judge: "j", timeout: 5, isolation: crate::isolation::Isolation::Container, base: None };
+        let c = Ctx { cwd: &d, session: Some(4), step: "s", verifier: "j", timeout: 5, isolation: crate::isolation::Isolation::Container, base: None };
         let cmd = command(&c, &["schema".into(), "report".into()], &[]).unwrap();
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.contains(&format!("{p}:{p}:ro", p = d.display())), "project read-only: {args:?}");
-        let scratch = d.join("rlt/private/container/judge/scratch-4");
+        let scratch = d.join("rlt/private/container/verifier/scratch-4");
         assert!(args.contains(&format!("{p}:{p}", p = scratch.display())), "scratch writable: {args:?}");
-        assert!(args.contains(&format!("RLT_JUDGE_SCRATCH={}", scratch.display())), "{args:?}");
+        assert!(args.contains(&format!("RLT_VERIFIER_SCRATCH={}", scratch.display())), "{args:?}");
         assert!(args.contains(&"TMPDIR=/tmp".to_string()) && !args.contains(&format!("TMPDIR={}", scratch.display())), "{args:?}");
         assert!(args.contains(&"PYTHONDONTWRITEBYTECODE=1".to_string()) && args.contains(&"TRIVY_SKIP_DB_UPDATE=true".to_string()), "{args:?}");
         let home = args.iter().find_map(|a| a.strip_prefix("HOME=")).expect("HOME").to_string();
         assert!(home.starts_with(&d.join("rlt/private/container/home/metrics-").display().to_string()), "{home}");
-        assert!(!args.iter().any(|a| a.contains("PYTHONPYCACHEPREFIX") || a.contains("judge/cache")), "no persistent cache: {args:?}");
+        assert!(!args.iter().any(|a| a.contains("PYTHONPYCACHEPREFIX") || a.contains("verifier/cache")), "no persistent cache: {args:?}");
         assert_eq!(args[args.len() - 4..], [crate::isolation::DEFAULT_IMAGE, PROGRAM, "schema", "report"]);
     }
 }

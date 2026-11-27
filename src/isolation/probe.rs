@@ -2,18 +2,18 @@
 //! two questions a container run cannot answer for itself until a session has already failed.
 //!
 //! 1. **Does the image have the CLI?** A worker step runs `claude`/`codex` inside its image, and the
-//!    judges' image runs the ruler's CLI for an LLM judge and `swe-metrics` for a metric or score
-//!    judge. Missing, every session dies at spawn.
+//!    verifiers' image runs the ruler's CLI for an rubric verifier and `swe-metrics` for a metric or score
+//!    verifier. Missing, every session dies at spawn.
 //! 2. **Can the engine see the paths rlt mounts?** A VM-backed engine (colima, lima) shares only
 //!    some host directories with its VM, and a bind of one it cannot see is not an error — the
-//!    container gets an EMPTY directory there. A worker in an empty project, or a judge reading an
+//!    container gets an EMPTY directory there. A worker in an empty project, or a verifier reading an
 //!    empty context, is a session that runs, reports success, and did nothing real.
 //!
 //! Both are refusals, located at the key that chose the image or the path ([`assess`]), so `rlt
 //! check` lists them and `rlt run` will not start. The facts also feed `rlt doctor --json`.
 
 use crate::core::config::RelentlessConfig;
-use crate::core::model::{Judge, JudgeKind};
+use crate::core::model::{Verifier, VerifierKind};
 use crate::problem::Problem;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -37,14 +37,14 @@ pub struct ImageFacts {
 struct Need {
     /// the config key that chose it first — where a failure to start it is reported.
     at: String,
-    /// each CLI it must have, with the key of what runs it there (a step's image, the judges').
+    /// each CLI it must have, with the key of what runs it there (a step's image, the verifiers').
     bins: Vec<(String, String)>,
 }
 
 /// Probe every image `cfg` runs in and report each problem at its key. Runs nothing when the config
 /// has no container tier or no engine answers (that refusal is the tier check's).
-pub fn assess(cfg: &RelentlessConfig, judges: &[Judge], dir: &Path) -> (Vec<ImageFacts>, Vec<Problem>) {
-    let needs = needs(cfg, judges);
+pub fn assess(cfg: &RelentlessConfig, verifiers: &[Verifier], dir: &Path) -> (Vec<ImageFacts>, Vec<Problem>) {
+    let needs = needs(cfg, verifiers);
     if needs.is_empty() || !super::container_available() {
         return (Vec::new(), Vec::new());
     }
@@ -90,10 +90,10 @@ pub fn missing_cli(at: &str, image: &str, bin: &str) -> Problem {
     ))
 }
 
-/// The config key that chose the judges' image — where its problems are reported.
-pub fn judge_image_key(cfg: &RelentlessConfig) -> &'static str {
-    if cfg.judge.image.is_some() {
-        "judge.image"
+/// The config key that chose the verifiers' image — where its problems are reported.
+pub fn verifier_image_key(cfg: &RelentlessConfig) -> &'static str {
+    if cfg.verifier.image.is_some() {
+        "verifier.image"
     } else if cfg.defaults.image.is_some() {
         "defaults.image"
     } else {
@@ -102,7 +102,7 @@ pub fn judge_image_key(cfg: &RelentlessConfig) -> &'static str {
 }
 
 /// Every image the run starts a container from, with the CLIs it must have.
-fn needs(cfg: &RelentlessConfig, judges: &[Judge]) -> BTreeMap<String, Need> {
+fn needs(cfg: &RelentlessConfig, verifiers: &[Verifier]) -> BTreeMap<String, Need> {
     use super::Isolation::Container;
     let mut out: BTreeMap<String, Need> = BTreeMap::new();
     let mut add = |image: String, at: String, bin: Option<&str>| {
@@ -129,12 +129,12 @@ fn needs(cfg: &RelentlessConfig, judges: &[Judge]) -> BTreeMap<String, Need> {
         add(s.image.clone(), at, s.backend().ok().map(|b| b.bin()));
     }
     if cfg.run_isolation() == Container {
-        if let Ok(image) = cfg.judge_image() {
-            let at = judge_image_key(cfg);
-            let llm = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
+        if let Ok(image) = cfg.verifier_image() {
+            let at = verifier_image_key(cfg);
+            let llm = verifiers.iter().any(|j| matches!(j.kind, VerifierKind::Llm { .. }));
             let ruler = cfg.ruler_backend().ok().filter(|_| llm).map(|b| b.bin());
             add(image.clone(), at.into(), ruler);
-            let measured = judges.iter().any(|j| matches!(j.kind, JudgeKind::Metric(_) | JudgeKind::Score(_)));
+            let measured = verifiers.iter().any(|j| matches!(j.kind, VerifierKind::Metric(_) | VerifierKind::Score(_)));
             add(image, at.into(), measured.then_some(crate::metrics::measure::PROGRAM));
         }
     }
@@ -221,19 +221,19 @@ mod tests {
     }
 
     /// Each image once, with the CLIs it needs and the key that chose it: a container step's agent;
-    /// the ruler in the judges' image only when an LLM judge exists.
+    /// the ruler in the verifiers' image only when an rubric verifier exists.
     #[test]
     fn every_container_image_is_needed_with_its_clis_at_its_key() {
-        let c = cfg("project: p\nsteps:\n  a: { isolation: container, image: \"x:1\" }\n  b: { isolation: container, image: \"x:1\", agent: codex }\n  c: { isolation: sandbox }\njudge: { image: \"j:1\" }\n");
+        let c = cfg("project: p\nsteps:\n  a: { isolation: container, image: \"x:1\" }\n  b: { isolation: container, image: \"x:1\", agent: codex }\n  c: { isolation: sandbox }\nverifier: { image: \"j:1\" }\n");
         let n = needs(&c, &[]);
         assert_eq!(n.keys().collect::<Vec<_>>(), ["j:1", "x:1"]);
         let bins = |n: &Need| n.bins.iter().map(|(b, _)| b.clone()).collect::<Vec<_>>();
         assert_eq!(bins(&n["x:1"]), ["claude", "codex"]);
         assert_eq!(n["x:1"].at, "steps.a.image");
-        assert!(n["j:1"].bins.is_empty(), "no LLM judge ⇒ the judges' image needs no CLI");
-        let llm = Judge {
+        assert!(n["j:1"].bins.is_empty(), "no rubric verifier ⇒ the verifiers' image needs no CLI");
+        let llm = Verifier {
             name: "r".into(),
-            kind: JudgeKind::Llm { path: "r.md".into(), inputs: vec![] },
+            kind: VerifierKind::Llm { path: "r.md".into(), inputs: vec![] },
             invariant: false,
             in_dod: true,
             timeout: None,
@@ -244,9 +244,9 @@ mod tests {
         };
         assert_eq!(bins(&needs(&c, &[llm])["j:1"]), ["claude"]);
         assert!(needs(&cfg("project: p\nsteps: { a: { isolation: sandbox } }\n"), &[]).is_empty());
-        let metric = Judge {
+        let metric = Verifier {
             name: "cc".into(),
-            kind: JudgeKind::Metric(Box::new(crate::metrics::MetricJudge::new("complexity.cyclomatic").max(10.0))),
+            kind: VerifierKind::Metric(Box::new(crate::metrics::MetricVerifier::new("complexity.cyclomatic").max(10.0))),
             invariant: false,
             in_dod: true,
             timeout: None,
@@ -255,12 +255,12 @@ mod tests {
             last_verdict: None,
             ever_met: false,
         };
-        assert_eq!(needs(&c, std::slice::from_ref(&metric))["j:1"].bins, [("swe-metrics".to_string(), "judge.image".to_string())], "a metric judge ⇒ swe-metrics in the judges' image");
-        // one image for the worker and the judges: each CLI is reported at the key of what runs it
-        let shared = cfg("project: p\ndefaults: { isolation: container, image: \"x:1\" }\nsteps: { a: {} }\njudge: { image: \"x:1\" }\n");
+        assert_eq!(needs(&c, std::slice::from_ref(&metric))["j:1"].bins, [("swe-metrics".to_string(), "verifier.image".to_string())], "a metric verifier ⇒ swe-metrics in the verifiers' image");
+        // one image for the worker and the verifiers: each CLI is reported at the key of what runs it
+        let shared = cfg("project: p\ndefaults: { isolation: container, image: \"x:1\" }\nsteps: { a: {} }\nverifier: { image: \"x:1\" }\n");
         let n = needs(&shared, &[metric]);
-        assert_eq!(n["x:1"].bins, [("claude".to_string(), "defaults.image".to_string()), ("swe-metrics".to_string(), "judge.image".to_string())]);
-        assert_eq!(judge_image_key(&c), "judge.image");
+        assert_eq!(n["x:1"].bins, [("claude".to_string(), "defaults.image".to_string()), ("swe-metrics".to_string(), "verifier.image".to_string())]);
+        assert_eq!(verifier_image_key(&c), "verifier.image");
     }
 
     #[test]

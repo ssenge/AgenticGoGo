@@ -26,7 +26,7 @@ const RUN_FILL: &str = "#1f6feb";
 const STAGES: [(&str, &str, f64); 4] = [
     ("INJECT", "state + steering → prompt", 0.0),
     ("RUN", "Claude Code — one fresh `claude -p` session", 90.0),
-    ("VERIFY", "judges run against the filesystem", 180.0),
+    ("VERIFY", "verifiers run against the filesystem", 180.0),
     ("GATE", "keep or roll back · repeat until done_if", 270.0),
 ];
 

@@ -24,7 +24,7 @@ use std::time::Duration;
 use crate::core::calls::{CallRecord, NoteLevel};
 use crate::core::config::{RelentlessConfig, CustomBackend, Limits, ResolvedStep};
 use crate::core::engine::GoalRuntime;
-use crate::core::model::{Judge, JudgeKind, JudgeSource, Verdict};
+use crate::core::model::{Verifier, VerifierKind, VerifierSource, Verdict};
 use crate::driver::{Agent, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, OnRegression, Opts, Step, StepOutcome};
 use crate::git::StagedSession;
 use crate::loop_::{
@@ -43,7 +43,7 @@ const BLOCK_CHUNK_SECS: u64 = 5;
 ///
 /// ⛔ **A stray `rlt.yaml` in the project is IGNORED** — not merged, not a fallback.
 /// [`RelentlessConfig::load`] is never called on this path. The two entry points share FILES
-/// (`rlt/judges/`, the instructions file, `rlt/state/`), never configuration.
+/// (`rlt/verifiers/`, the instructions file, `rlt/state/`), never configuration.
 ///
 /// Fields are private, against this crate's no-facade convention, because `Relentless` *is* the facade and
 /// its invariants are not expressible as field types: `started` must be filled exactly once and
@@ -60,13 +60,13 @@ pub struct Relentless {
     ended: Cell<Option<RunOutcome>>,
     /// the ledger cursor (Phase 1).
     ord: Cell<u64>,
-    /// the per-STEP lazy verdict cache — what makes `rlt.judge(&x)` memoized and `&&` a gate.
+    /// the per-STEP lazy verdict cache — what makes `rlt.verifier(&x)` memoized and `&&` a gate.
     verdicts: RefCell<HashMap<String, Verdict>>,
     /// every verdict consulted since the last `gate()`; `gate()` reads and clears it.
     span: RefCell<HashMap<String, Verdict>>,
-    /// the judges the driver asked BY NAME (`judge()`) since the last gate — held one by one there.
+    /// the verifiers the driver asked BY NAME (`verifier()`) since the last gate — held one by one there.
     span_direct: RefCell<HashSet<String>>,
-    /// the groups asked (`group()`) since the last gate: a member asked only through one is judged
+    /// the groups asked (`group()`) since the last gate: a member asked only through one is verified
     /// with its group, net (`core::groups`).
     span_groups: RefCell<BTreeMap<String, Vec<String>>>,
     /// the engine's goal truth as of the moment the open span began — what a rollback restores.
@@ -80,14 +80,14 @@ pub struct Relentless {
     ///
     /// ⚠ It exists because `cfg.run_isolation()` reads `cfg.steps`, which a DRIVER NEVER POPULATES:
     /// its steps are values in its own binary, not config entries. So that call returns `None` here
-    /// unconditionally, and §2.5's "judges take the RUN tier" silently meant "judges take no tier at
-    /// all" — every driver judge ran unconfined, which is the exact escape §2.5 exists to close.
-    /// Proven by a real-kernel test that watched a driver's judge write outside the project.
+    /// unconditionally, and §2.5's "verifiers take the RUN tier" silently meant "verifiers take no tier at
+    /// all" — every driver verifier ran unconfined, which is the exact escape §2.5 exists to close.
+    /// Proven by a real-kernel test that watched a driver's verifier write outside the project.
     iso_seen: Cell<crate::isolation::Isolation>,
     /// the label path — see [`Relentless::pos`].
     pos: RefCell<Vec<PosItem>>,
-    /// the name of an [`Agent::Custom`] handed to [`Relentless::judge_agent`], refused when the run boots:
-    /// the builder chain cannot fail, and the ruler is resolved BY NAME (`judge.agent`).
+    /// the name of an [`Agent::Custom`] handed to [`Relentless::verifier_agent`], refused when the run boots:
+    /// the builder chain cannot fail, and the ruler is resolved BY NAME (`verifier.agent`).
     custom_ruler: Option<String>,
     /// the working-memory default of a step that doesn't set its own — see [`Relentless::memory`].
     memory: bool,
@@ -136,7 +136,7 @@ struct Started {
 impl Relentless {
     /// Open `dir` as a driver project. Validates the directory and nothing else — the config is
     /// filled by the chain that follows, and the run-level setup is deferred to the first
-    /// `step()`/`judge()`/`gate()`/`check_limits()`.
+    /// `step()`/`verifier()`/`gate()`/`check_limits()`.
     pub fn open(dir: impl AsRef<Path>) -> Result<Relentless, Fatal> {
         Relentless::open_with(dir, Opts::default())
     }
@@ -195,28 +195,28 @@ impl Relentless {
         self
     }
 
-    /// Hold `judge`'s `value` to a numeric RATCHET at every [`Relentless::gate`]: it may not get worse than
+    /// Hold `verifier`'s `value` to a numeric RATCHET at every [`Relentless::gate`]: it may not get worse than
     /// at the last kept gate by more than the tolerance, or the gate counts a regression (and, under
     /// [`OnRegression::Rollback`], discards the span).
     ///
     /// The reference before the first keep is the [`Ratchet::baseline`] seed, else the first value
     /// the driver asks for BEFORE its first `step()` — the driver's baseline pass. Like the boolean
-    /// rule, it applies to the judges asked since the last gate; a ratcheted judge that errored or
+    /// rule, it applies to the verifiers asked since the last gate; a ratcheted verifier that errored or
     /// emitted no number never passes.
-    pub fn ratchet(mut self, judge: impl Into<String>, spec: crate::core::ratchet::Ratchet) -> Relentless {
-        self.cfg.sequence.ratchet.insert(judge.into(), spec.into());
+    pub fn ratchet(mut self, verifier: impl Into<String>, spec: crate::core::ratchet::Ratchet) -> Relentless {
+        self.cfg.sequence.ratchet.insert(verifier.into(), spec.into());
         self
     }
 
-    /// The most judge evidence (MiB) this run copies into `rlt/private/evidence/` — the twin of
-    /// YAML's `judge.evidence_max_mb` (default 100). A disk bound, not a run limit: a file that does
+    /// The most verifier evidence (MiB) this run copies into `rlt/private/evidence/` — the twin of
+    /// YAML's `verifier.evidence_max_mb` (default 100). A disk bound, not a run limit: a file that does
     /// not fit is skipped and recorded on its verdict's ledger row, and the run goes on.
     pub fn evidence_max_mb(mut self, mb: u64) -> Relentless {
-        self.cfg.judge.evidence_max_mb = mb;
+        self.cfg.verifier.evidence_max_mb = mb;
         self
     }
 
-    /// Merge a span at [`Relentless::gate`] only if something IMPROVED — a judge asked since the last gate
+    /// Merge a span at [`Relentless::gate`] only if something IMPROVED — a verifier asked since the last gate
     /// went unmet→met (a group asked through [`Relentless::group`]: gained ground net), or a ratcheted value
     /// moved the good way beyond its tolerance. Otherwise the span is discarded as
     /// [`GateOutcome::NoImprovement`]: not a regression, so it never counts for `rollbacks`. The
@@ -245,7 +245,7 @@ impl Relentless {
     }
 
     /// Which keys of the operator's settings `env` block (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`)
-    /// the Claude workers and one-shot calls (judges, summaries) get as environment variables, without loading the
+    /// the Claude workers and one-shot calls (verifiers, summaries) get as environment variables, without loading the
     /// plugins, hooks and MCP servers of the same file: `false` (the default) none, `true` every key, or a list of
     /// names. A variable rlt's own environment already has wins, the keys rlt manages (`RLT_*`) are never taken, and
     /// only string values are. For a host whose model gateway is set only in those settings, while
@@ -304,50 +304,50 @@ impl Relentless {
         self
     }
 
-    /// The RULER — the backend that runs the LLM judges and the summarizer. YAML's `judge.agent`;
+    /// The RULER — the backend that runs the rubric verifiers and the summarizer. YAML's `verifier.agent`;
     /// default [`Agent::Claude`]. Its CLI is preflighted at boot like every step's.
     ///
-    /// ⛔ [`Agent::Custom`] is REFUSED when the run boots (the first `step()`/`judge()`/`gate()`/
+    /// ⛔ [`Agent::Custom`] is REFUSED when the run boots (the first `step()`/`verifier()`/`gate()`/
     /// `check_limits()` returns the error): the ruler is resolved by NAME, exactly as YAML's
-    /// `judge.agent` is, and a custom backend has no name rlt could resolve — a custom backend
+    /// `verifier.agent` is, and a custom backend has no name rlt could resolve — a custom backend
     /// that called itself `claude` would otherwise silently become the real Claude.
-    pub fn judge_agent(mut self, agent: Agent) -> Relentless {
+    pub fn verifier_agent(mut self, agent: Agent) -> Relentless {
         match &agent {
             Agent::Custom(b) => self.custom_ruler = Some(b.name().to_string()),
             a => {
-                self.cfg.judge.agent = a.name().to_string();
+                self.cfg.verifier.agent = a.name().to_string();
                 self.custom_ruler = None;
             }
         }
         self
     }
 
-    /// The model the ruler runs the LLM judges and the summarizer on — YAML's `judge.model`.
+    /// The model the ruler runs the rubric verifiers and the summarizer on — YAML's `verifier.model`.
     /// Unset = the ruler's own cheap default.
-    pub fn judge_model(mut self, model: impl Into<String>) -> Relentless {
-        self.cfg.judge.model = Some(model.into());
+    pub fn verifier_model(mut self, model: impl Into<String>) -> Relentless {
+        self.cfg.verifier.model = Some(model.into());
         self
     }
 
     /// The workflow's variables: `{{ name }}` in every step's prompt file (the role prompt's too) and every
-    /// LLM judge's rubric (its `inputs:` too) is filled in from `vars`; a name it lacks fails the step or
-    /// the judge. Inline prompts are not templates. One map per process: the last call wins.
+    /// rubric verifier's rubric (its `inputs:` too) is filled in from `vars`; a name it lacks fails the step or
+    /// the verifier. Inline prompts are not templates. One map per process: the last call wins.
     pub fn vars(self, vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Relentless {
         crate::core::vars::set(vars.into_iter().map(|(k, v)| (k.into(), v.into())).collect());
         self
     }
 
-    /// EVERY judge's timeout in seconds, script and LLM alike — YAML's `judge.timeout` (default
-    /// 300). A single judge overrides it with [`Judge::timeout`].
-    pub fn judge_timeout(mut self, secs: u64) -> Relentless {
-        self.cfg.judge.timeout = secs;
+    /// EVERY verifier's timeout in seconds, script and LLM alike — YAML's `verifier.timeout` (default
+    /// 300). A single verifier overrides it with [`Verifier::timeout`].
+    pub fn verifier_timeout(mut self, secs: u64) -> Relentless {
+        self.cfg.verifier.timeout = secs;
         self
     }
 
-    /// The image judges run in when a step of the run is containerized — YAML's `judge.image`.
+    /// The image verifiers run in when a step of the run is containerized — YAML's `verifier.image`.
     /// `None` set = [`Relentless::image`], else the base image.
-    pub fn judge_image(mut self, image: impl Into<String>) -> Relentless {
-        self.cfg.judge.image = Some(image.into());
+    pub fn verifier_image(mut self, image: impl Into<String>) -> Relentless {
+        self.cfg.verifier.image = Some(image.into());
         self
     }
 
@@ -383,7 +383,7 @@ impl Relentless {
         self
     }
 
-    /// A READ-ONLY context directory from outside the project, seen by every step and judge of the
+    /// A READ-ONLY context directory from outside the project, seen by every step and verifier of the
     /// run — the driver's spelling of a YAML `context:` entry. `path` is absolute, `~/`-relative or
     /// relative to the project; `name` is the short `as:` (`/context/<name>` in a container,
     /// `RLT_CONTEXT_<NAME>` everywhere). Validated when the run boots; every step must then be
@@ -431,8 +431,8 @@ impl Relentless {
     fn boot(&self) -> Result<Started, Fatal> {
         if let Some(name) = &self.custom_ruler {
             return Err(Fatal::Other(anyhow::anyhow!(
-                "judge_agent(Agent::Custom(`{name}`)): the ruler must be a built-in agent ({}) — it is \
-                 resolved by name, as YAML's `judge.agent` is. Run a custom backend as a step's agent",
+                "verifier_agent(Agent::Custom(`{name}`)): the ruler must be a built-in agent ({}) — it is \
+                 resolved by name, as YAML's `verifier.agent` is. Run a custom backend as a step's agent",
                 crate::backend::KNOWN.join(", ")
             )));
         }
@@ -441,9 +441,9 @@ impl Relentless {
         let config_base = crate::paths::config_base(&dir);
 
         // the driver variant: an empty `sequence.steps` means no entry list to validate, no
-        // `done_if`, and an EMPTY run-set — judges are lazy and the driver asks.
+        // `done_if`, and an EMPTY run-set — verifiers are lazy and the driver asks.
         let asm = crate::assembly::assemble(&cfg, &config_base)?;
-        crate::capability::check(&cfg, &asm.engine.judges, &dir)?;
+        crate::capability::check(&cfg, &asm.engine.verifiers, &dir)?;
         for name in cfg.agent_names() {
             crate::backend::for_name(&name)?.preflight()?;
         }
@@ -485,8 +485,8 @@ impl Relentless {
         };
 
         let ruler = cfg.ruler_backend()?;
-        let judge_model = cfg.judge_model(ruler);
-        let judge_timeout = cfg.judge.timeout;
+        let verifier_model = cfg.verifier_model(ruler);
+        let verifier_timeout = cfg.verifier.timeout;
 
         let mut lifecycle = Lifecycle::default_pipeline(&cfg, &dir);
         let mut boot =
@@ -551,8 +551,8 @@ impl Relentless {
         let mut st = LoopState {
             cfg,
             ruler,
-            judge_model,
-            judge_timeout,
+            verifier_model,
+            verifier_timeout,
             dir: dir.clone(),
             config_base,
             eng: asm.engine,
@@ -787,10 +787,10 @@ impl Relentless {
             role_prompt_file: role.1.clone(),
             prompt_file: step.prompt_file.clone(),
             // ⛔ ALWAYS. `step()` STAGES and `gate()` decides, so the driver path takes today's
-            // `skip_judges` route unconditionally: `StageSpan` keeps the branch and extends the
-            // span, while `StageMerge`/`RunJudges`/`GateKeepRollback` become no-ops. There is no
-            // run-set to run here — judges are lazy and the driver asks.
-            skip_judges: true,
+            // `skip_verifiers` route unconditionally: `StageSpan` keeps the branch and extends the
+            // span, while `StageMerge`/`RunVerifiers`/`GateKeepRollback` become no-ops. There is no
+            // run-set to run here — verifiers are lazy and the driver asks.
+            skip_verifiers: true,
             isolation: step.isolation,
             image: step
                 .image
@@ -823,14 +823,14 @@ impl Relentless {
     ///
     /// # What a regression is
     ///
-    /// Every judge asked since the last gate that is now `!met`, did not error, and whose last
+    /// Every verifier asked since the last gate that is now `!met`, did not error, and whose last
     /// LANDED verdict said met. **That is the whole rule** — no exclusion list, no opt-in marker. It
-    /// is sound only because of the one convention this path depends on: **a judge's `met` means
+    /// is sound only because of the one convention this path depends on: **a verifier's `met` means
     /// GOOD** (BUILD.md §0.2 rule 3), so met→unmet always means worse. An inverted detector
-    /// (met-when-bad) must be inverted before it is used as a driver judge.
+    /// (met-when-bad) must be inverted before it is used as a driver verifier.
     ///
-    /// Because judges are LAZY, the verdicts that count are the ones the driver actually asked for —
-    /// including one asked for the first time long after the steps it judges. A gate inside `step()`
+    /// Because verifiers are LAZY, the verdicts that count are the ones the driver actually asked for —
+    /// including one asked for the first time long after the steps it verifiers. A gate inside `step()`
     /// could not see those, which is the reason `gate()` is a separate call at all.
     pub fn gate(&self) -> Result<GateOutcome, Fatal> {
         // 1. the latch, before anything else.
@@ -893,13 +893,13 @@ impl Relentless {
             return Ok(outcome);
         }
 
-        // 5. the regression set: every judge asked since the last gate (§0.2 rule 3 is what makes
+        // 5. the regression set: every verifier asked since the last gate (§0.2 rule 3 is what makes
         //    an unscoped rule safe here). Sorted so `verdicts.jsonl` does not inherit a HashMap's
         //    iteration order.
         let mut fresh: Vec<(String, Verdict)> =
             self.span.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         fresh.sort_by(|a, b| a.0.cmp(&b.0));
-        //    A judge asked ONLY through `group()` is judged with its group, net (`core::groups`);
+        //    A verifier asked ONLY through `group()` is verified with its group, net (`core::groups`);
         //    everything else one by one — which, for a driver that never asks a group, is all of it.
         let landed = crate::core::verdicts::landed_met(&st.dir);
         let progress = {
@@ -909,7 +909,7 @@ impl Relentless {
             let grouped = |n: &str| members.iter().any(|m| m.iter().any(|x| x == n));
             crate::core::groups::assess(&fresh, &landed, |n| direct.contains(n) || !grouped(n), &members)
         };
-        // …and the numeric half: every ratcheted judge asked since the last gate, held to its
+        // …and the numeric half: every ratcheted verifier asked since the last gate, held to its
         // reference. Same scope as the boolean rule — the driver decides what it asks.
         let ratchet =
             if matches!(staged, StagedSession::Staged) { st.eng.gate.check(&fresh) } else { Vec::new() };
@@ -919,14 +919,14 @@ impl Relentless {
         // body the YAML path's `GateKeepRollback` runs. One decision, two call sites.
         let pre_goals = std::mem::take(&mut *self.span_goals.borrow_mut());
         let improved = progress.improved || !st.eng.gate.improved(&fresh).is_empty();
-        let judged = crate::features::gate::Judged {
+        let verified = crate::features::gate::Verified {
             fresh: &fresh,
             regressed: progress.regressed || !ratchet.is_empty(),
             improved,
             ratchet,
             signature,
         };
-        let gated = crate::features::gate::keep_or_rollback(&mut st, Some(&(tip, staged.clone())), judged, &pre_goals)?;
+        let gated = crate::features::gate::keep_or_rollback(&mut st, Some(&(tip, staged.clone())), verified, &pre_goals)?;
 
         let outcome = match (&staged, gated) {
             (StagedSession::Staged, crate::features::gate::Gated::Merged) => GateOutcome::Kept,
@@ -961,7 +961,7 @@ impl Relentless {
     }
 
     /// The gate's own state: the ratchet references, the rollback counts and the oscillation
-    /// history — the driver's reading of what `ratchet_regressed`, `<judge>.ref`, `rollbacks`,
+    /// history — the driver's reading of what `ratchet_regressed`, `<verifier>.ref`, `rollbacks`,
     /// `consecutive_rollbacks` and `oscillating` mean on the YAML path. Branch on it in Rust:
     /// `if rlt.gate_state().consecutive_rollbacks >= 2 { … }`, `rlt.gate_state().oscillating(4)`.
     ///
@@ -973,7 +973,7 @@ impl Relentless {
         }
     }
 
-    /// The driver's baseline pass: a ratcheted judge asked before the first `step()` sets its
+    /// The driver's baseline pass: a ratcheted verifier asked before the first `step()` sets its
     /// reference (or is checked against its seed). Replayed asks take the same path, so a resume
     /// re-derives the same reference.
     fn observe_pre_step(&self, name: &str, v: &Verdict) {
@@ -989,30 +989,30 @@ impl Relentless {
 }
 
 // ---------------------------------------------------------------------------------------------
-// judge — lazy, memoized per step
+// verifier — lazy, memoized per step
 // ---------------------------------------------------------------------------------------------
 
 impl Relentless {
     /// This step's verdict for `j`, running it if this step has not asked for it yet.
     ///
     /// Memoized per step, which is what makes `&&` a cost gate:
-    /// `rlt.judge(&build).met() && rlt.judge(&load_test).met()` never reaches the 40-minute load
+    /// `rlt.verifier(&build).met() && rlt.verifier(&load_test).met()` never reaches the 40-minute load
     /// test on a cycle where the build is red.
     ///
     /// ⚠ Returns a [`Verdict`], not a `Result` — deliberately. `Result` is `#[must_use]`, so
-    /// `if rlt.judge(&x).met()` would become `if rlt.judge(&x)?.met()` at every site in every
+    /// `if rlt.verifier(&x).met()` would become `if rlt.verifier(&x)?.met()` at every site in every
     /// driver. After the latch this returns a NOT-MET verdict naming the outcome; never a
     /// fabricated `met: true`.
-    pub fn judge(&self, j: &Judge) -> Verdict {
+    pub fn verifier(&self, j: &Verifier) -> Verdict {
         self.consult(j, true)
     }
 
     /// A condition's verdict: whether something applies (a step of a workflow, a branch of a driver), not a
-    /// quality the gate guards. Run, recorded and memoized exactly like [`Relentless::judge`], so a resumed run
+    /// quality the gate guards. Run, recorded and memoized exactly like [`Relentless::verifier`], so a resumed run
     /// replays it; but it never enters the gate's regression set. A condition flips with the world (a tag
     /// that exists now and didn't when the last gate landed), and the gate would take that flip for a
-    /// regression and roll back the work that follows it. A judge the span also asked by name stays held.
-    pub fn condition(&self, j: &Judge) -> Verdict {
+    /// regression and roll back the work that follows it. A verifier the span also asked by name stays held.
+    pub fn condition(&self, j: &Verifier) -> Verdict {
         let held = self.span.borrow().contains_key(&j.name) || self.span_direct.borrow().contains(&j.name);
         let verdict = self.consult(j, false);
         if !held {
@@ -1022,10 +1022,10 @@ impl Relentless {
     }
 
     /// This step's verdict for every member of `g`, each through the same lazy, memoized cache as
-    /// [`Relentless::judge`] — so a member already asked this step is not run again. Count over the result:
+    /// [`Relentless::verifier`] — so a member already asked this step is not run again. Count over the result:
     /// `rlt.group(&quality).at_least(2)` is "two of three".
     ///
-    /// At the next [`Relentless::gate`], a member asked ONLY through a group is judged with the group, net:
+    /// At the next [`Relentless::gate`], a member asked ONLY through a group is verified with the group, net:
     /// one member flipping met→unmet while another goes unmet→met is not a regression. A member the
     /// driver also asked by name is held one by one. After the latch every member reads not-met.
     pub fn group(&self, g: &Group) -> GroupVerdict {
@@ -1036,12 +1036,12 @@ impl Relentless {
         GroupVerdict { name: g.name.clone(), verdicts }
     }
 
-    /// One ask, by name (`judge()`) or as a group member (`group()`): the latch, the span's by-name
+    /// One ask, by name (`verifier()`) or as a group member (`group()`): the latch, the span's by-name
     /// mark, then the lazy, memoized verdict.
-    fn consult(&self, j: &Judge, by_name: bool) -> Verdict {
+    fn consult(&self, j: &Verifier, by_name: bool) -> Verdict {
         if let Some(o) = self.ended.get() {
             return Verdict::binary(false)
-                .with_rationale(format!("run ended ({o:?}) — judge `{}` was not run", j.name));
+                .with_rationale(format!("run ended ({o:?}) — verifier `{}` was not run", j.name));
         }
         if by_name {
             self.span_direct.borrow_mut().insert(j.name.clone());
@@ -1050,37 +1050,37 @@ impl Relentless {
         lazy.verdict_for(j)
     }
 
-    /// Forget which judges and groups the closed span asked for — the gate decided on them.
+    /// Forget which verifiers and groups the closed span asked for — the gate decided on them.
     fn clear_span_asks(&self) {
         self.span.borrow_mut().clear();
         self.span_direct.borrow_mut().clear();
         self.span_groups.borrow_mut().clear();
     }
 
-    /// Run one judge for real: resolve its paths against the project, dispatch it, and charge its
-    /// ruler spend to the run exactly as `RunJudges` does on the YAML path.
+    /// Run one verifier for real: resolve its paths against the project, dispatch it, and charge its
+    /// ruler spend to the run exactly as `RunVerifiers` does on the YAML path.
     ///
-    /// `src` is threaded through so a NATIVE judge's `JudgeCtx` consults the same lazy cache — the
-    /// `LoopState` borrow is deliberately DROPPED before the judge runs, so a nested ask cannot
+    /// `src` is threaded through so a NATIVE verifier's `VerifierCtx` consults the same lazy cache — the
+    /// `LoopState` borrow is deliberately DROPPED before the verifier runs, so a nested ask cannot
     /// panic on a double borrow.
-    fn run_judge(&self, j: &Judge, src: &dyn JudgeSource) -> Verdict {
+    fn run_verifier(&self, j: &Verifier, src: &dyn VerifierSource) -> Verdict {
         let started = match self.ready() {
             Ok(s) => s,
-            Err(e) => return Verdict::failed(format!("judge `{}`: {e}", j.name)),
+            Err(e) => return Verdict::failed(format!("verifier `{}`: {e}", j.name)),
         };
-        // THE FAST-FORWARD. A recorded judge returns its recorded verdict — no ruler call, no script
+        // THE FAST-FORWARD. A recorded verifier returns its recorded verdict — no ruler call, no script
         // fork. Its spend is ADDED (not assigned): a `Step`'s counters are cumulative as of that
-        // step, but a judge's are its own bill, and dropping them would hand `over_budget` fresh
-        // headroom on every resume. The §5.4 flagship example is a three-hour judge.
+        // step, but a verifier's are its own bill, and dropping them would hand `over_budget` fresh
+        // headroom on every resume. The §5.4 flagship example is a three-hour verifier.
         match self.replayed(started, &j.name) {
-            Err(e) => return Verdict::failed(format!("judge `{}`: {e}", j.name)),
-            Ok(Some(CallRecord::Judge { verdict, tokens, cost, .. })) => {
+            Err(e) => return Verdict::failed(format!("verifier `{}`: {e}", j.name)),
+            Ok(Some(CallRecord::Verify { verdict, tokens, cost, .. })) => {
                 let mut st = started.st.borrow_mut();
                 st.tokens_spent += tokens;
                 st.cost_spent += cost;
                 st.publish();
                 drop(st);
-                eprintln!("  [resume] ord {} · judge `{}` — fast-forwarded", self.ord.get(), j.name);
+                eprintln!("  [resume] ord {} · verifier `{}` — fast-forwarded", self.ord.get(), j.name);
                 self.skip();
                 return verdict;
             }
@@ -1089,15 +1089,15 @@ impl Relentless {
         let (run_ruler, timeout, session, step, isolation, iso_base) = {
             let mut st = started.st.borrow_mut();
             let step = st.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| "driver".into());
-            // §2.5: the RUN tier, never `cur_step.isolation`. A driver's judge is an evaluator whose
+            // §2.5: the RUN tier, never `cur_step.isolation`. A driver's verifier is an evaluator whose
             // confinement follows from its ROLE, not from whichever step happened to run last —
-            // otherwise a judge asked after a `Isolation::None` step runs unconfined, and one asked
+            // otherwise a verifier asked after a `Isolation::None` step runs unconfined, and one asked
             // after a hardened step inherits deny paths it exists to read and execute.
             let isolation = st.cfg.run_isolation().strongest(self.iso_seen.get());
             let base = st.ext.get::<RLTState>().git.iso_base.clone();
             (
-                (st.ruler, st.judge_model.clone(), st.cfg.judge.agent.clone()),
-                j.timeout.unwrap_or(st.judge_timeout),
+                (st.ruler, st.verifier_model.clone(), st.cfg.verifier.agent.clone()),
+                j.timeout.unwrap_or(st.verifier_timeout),
                 st.session,
                 step,
                 isolation,
@@ -1106,9 +1106,9 @@ impl Relentless {
         };
         let kind = self.resolve_kind(&j.kind);
         // an unknown own agent is a failed verdict, recorded like any other (resume counts the call).
-        let (verdict, usage, agent) = match judge_ruler(j, run_ruler) {
+        let (verdict, usage, agent) = match verifier_ruler(j, run_ruler) {
             Ok((ruler, model, effort, agent)) => {
-                let once = || crate::core::judge::run(
+                let once = || crate::core::verifier::run(
                     &kind,
                     &j.name,
                     &self.dir,
@@ -1122,73 +1122,73 @@ impl Relentless {
                     src,
                     Some(&iso_base),
                 );
-                // a judge that failed to RUN (a spawn error, a ruler that didn't answer) has graded nothing:
+                // a verifier that failed to RUN (a spawn error, a ruler that didn't answer) has graded nothing:
                 // asked once more before its error stands; the second call's spend counts too
                 let (mut verdict, first) = once();
                 let mut usage: Vec<crate::usage::Usage> = first.into_iter().collect();
                 if let Some(error) = verdict.error() {
-                    eprintln!("  judge `{}` failed to run, asked once more: {error}", j.name);
+                    eprintln!("  verifier `{}` failed to run, asked once more: {error}", j.name);
                     let (again, more) = once();
                     usage.extend(more);
                     verdict = again;
                 }
                 (verdict, usage, agent)
             }
-            Err(e) => (Verdict::failed(format!("judge `{}`: {e}", j.name)), vec![], String::new()),
+            Err(e) => (Verdict::failed(format!("verifier `{}`: {e}", j.name)), vec![], String::new()),
         };
-        // §5.6: judge spend counts against the ceilings — and against the RULER's per-agent tally.
+        // §5.6: verifier spend counts against the ceilings — and against the RULER's per-agent tally.
         {
             let mut st = started.st.borrow_mut();
             st.charge_ruler_as(&agent, &usage);
             // …and the VERDICT reaches the snapshot, not just the spend. Charging alone was the whole
-            // of this block, which is why a driver run published `judges: []` to every reader while
-            // its judges ran. `publish()` leaves `dash.judges` alone when the engine has none, so
+            // of this block, which is why a driver run published `verifiers: []` to every reader while
+            // its verifiers ran. `publish()` leaves `dash.verifiers` alone when the engine has none, so
             // this upsert is what the TUI, the web BFF and Progress actually render.
-            Self::publish_verdict(&mut st.dash.judges, &j.name, &kind, &verdict);
-            // judged in THIS session's scratch, so the evidence is kept now, not at the gate.
+            Self::publish_verdict(&mut st.dash.verifiers, &j.name, &kind, &verdict);
+            // verified in THIS session's scratch, so the evidence is kept now, not at the gate.
             crate::features::evidence::keep(&mut st, Some(session), &[(j.name.clone(), verdict.clone())], isolation);
             st.dash.pos = self.label_path();
             st.publish();
         }
-        // …and the call is recorded, carrying ITS OWN spend. A judge failing to record is not a
-        // reason to fail the judge — the verdict is real and the driver should get it — but the
+        // …and the call is recorded, carrying ITS OWN spend. A verifier failing to record is not a
+        // reason to fail the verifier — the verdict is real and the driver should get it — but the
         // ledger is then short one row, so say so loudly rather than resume against it silently.
-        if let Err(e) = self.record(CallRecord::Judge {
+        if let Err(e) = self.record(CallRecord::Verify {
             ord: self.ord.get(),
             label: self.label_path(),
-            judge: j.name.clone(),
+            verifier: j.name.clone(),
             verdict: verdict.clone(),
             tokens: usage.iter().map(|u| u.tokens.output_or_zero()).sum(),
             cost: usage.iter().filter_map(|u| u.cost_usd).sum(),
             ts: crate::util::now_epoch(),
         }) {
-            eprintln!("  ⚠ could not record judge `{}` in the call ledger — resume will re-run it: {e}", j.name);
+            eprintln!("  ⚠ could not record verifier `{}` in the call ledger — resume will re-run it: {e}", j.name);
         }
         verdict
     }
 
-    /// Upsert one driver verdict into the published judge scoreboard, keeping the run-lifetime LATEST
-    /// per judge — the same shape `judges_from_engine` produces for the YAML path, so every reader
+    /// Upsert one driver verdict into the published verifier scoreboard, keeping the run-lifetime LATEST
+    /// per verifier — the same shape `verifiers_from_engine` produces for the YAML path, so every reader
     /// (TUI, web BFF, `rlt status`) renders both paths through one code path and one wire format.
     ///
-    /// `delta` is computed against the value this judge published last, which is why the row is
-    /// updated in place rather than pushed: a driver asks the same judge many times across a run.
+    /// `delta` is computed against the value this verifier published last, which is why the row is
+    /// updated in place rather than pushed: a driver asks the same verifier many times across a run.
     /// `in_dod`/`invariant` are FALSE by construction — a driver declares no DoD and no invariants;
     /// it decides it is done by returning.
-    fn publish_verdict(views: &mut Vec<crate::state::JudgeView>, name: &str, kind: &JudgeKind, v: &Verdict) {
+    fn publish_verdict(views: &mut Vec<crate::state::VerifierView>, name: &str, kind: &VerifierKind, v: &Verdict) {
         let prev = views.iter().find(|p| p.name == name).and_then(|p| p.value);
         let delta = match (v.value, prev) {
             (Some(now), Some(was)) => now - was,
             _ => 0.0,
         };
-        let row = crate::state::JudgeView {
+        let row = crate::state::VerifierView {
             name: name.to_string(),
-            judged: true,
+            verified: true,
             kind: kind.tag().to_string(),
             in_dod: false,
             invariant: false,
             // a driver has no `Lifecycle` machine (that is the engine's), so the state IS the verdict:
-            // errored judges read `pending` because they measured nothing, not because they passed.
+            // errored verifiers read `pending` because they measured nothing, not because they passed.
             state: match (v.error.is_some(), v.met) {
                 (true, _) => "pending",
                 (false, true) => "met",
@@ -1209,53 +1209,53 @@ impl Relentless {
         }
     }
 
-    /// A driver-constructed [`JudgeKind`] with its paths resolved against the project dir.
+    /// A driver-constructed [`VerifierKind`] with its paths resolved against the project dir.
     ///
-    /// The constructors (`Judge::rubric`/`script`) take the path VERBATIM, because a driver builds
-    /// its judges above `Relentless::open` (the chain is self-consuming, so it must) and cannot yet know
+    /// The constructors (`Verifier::rubric`/`script`) take the path VERBATIM, because a driver builds
+    /// its verifiers above `Relentless::open` (the chain is self-consuming, so it must) and cannot yet know
     /// the project root. A rubric's `inputs:` frontmatter is read here, at the same point.
-    fn resolve_kind(&self, kind: &JudgeKind) -> JudgeKind {
+    fn resolve_kind(&self, kind: &VerifierKind) -> VerifierKind {
         match kind {
-            JudgeKind::Script { path } => JudgeKind::Script { path: self.dir.join(path) },
-            JudgeKind::Llm { path, .. } => crate::core::judges::kind_for(&self.dir.join(path)),
-            JudgeKind::Native { f } => JudgeKind::Native { f: f.clone() },
+            VerifierKind::Script { path } => VerifierKind::Script { path: self.dir.join(path) },
+            VerifierKind::Llm { path, .. } => crate::core::verifiers::kind_for(&self.dir.join(path)),
+            VerifierKind::Native { f } => VerifierKind::Native { f: f.clone() },
             // a driver's scoring definition FILE is relative to the project dir, like its scripts.
-            JudgeKind::Score(s) => match &s.definition {
-                crate::metrics::spec::Definition::File(p) if p.is_relative() => JudgeKind::Score(Box::new(
-                    crate::metrics::ScoreJudge { definition: crate::metrics::spec::Definition::File(self.dir.join(p)), ..(**s).clone() },
+            VerifierKind::Score(s) => match &s.definition {
+                crate::metrics::spec::Definition::File(p) if p.is_relative() => VerifierKind::Score(Box::new(
+                    crate::metrics::ScoreVerifier { definition: crate::metrics::spec::Definition::File(self.dir.join(p)), ..(**s).clone() },
                 )),
                 _ => kind.clone(),
             },
-            JudgeKind::Metric(_) | JudgeKind::Command(_) => kind.clone(),
+            VerifierKind::Metric(_) | VerifierKind::Command(_) => kind.clone(),
         }
     }
 }
 
-/// The lazy per-step verdict store, shared by `Relentless::judge()` and by every `JudgeCtx` a native judge
+/// The lazy per-step verdict store, shared by `Relentless::verifier()` and by every `VerifierCtx` a native verifier
 /// receives — one memoization, one answer.
 ///
 /// It owns the recursion stack rather than `Relentless` because a nested ask goes through the SAME
-/// instance: the ctx holds `&dyn JudgeSource`, so `ctx.met(&other)` re-enters here with the stack
+/// instance: the ctx holds `&dyn VerifierSource`, so `ctx.met(&other)` re-enters here with the stack
 /// intact.
 struct Lazy<'a> {
     rlt: &'a Relentless,
     asking: RefCell<Vec<String>>,
 }
 
-impl JudgeSource for Lazy<'_> {
-    fn verdict_for(&self, j: &Judge) -> Verdict {
+impl VerifierSource for Lazy<'_> {
+    fn verdict_for(&self, j: &Verifier) -> Verdict {
         if let Some(v) = self.rlt.verdicts.borrow().get(&j.name) {
             return v.clone();
         }
-        // ⛔ Recursion is REFUSED, not overflowed: a judge that asks for itself (directly or round
+        // ⛔ Recursion is REFUSED, not overflowed: a verifier that asks for itself (directly or round
         // a cycle) names the cycle in its own verdict.
         if self.asking.borrow().iter().any(|n| n == &j.name) {
             let mut path = self.asking.borrow().clone();
             path.push(j.name.clone());
-            return Verdict::failed(format!("judge recursion: {}", path.join(" → ")));
+            return Verdict::failed(format!("verifier recursion: {}", path.join(" → ")));
         }
         self.asking.borrow_mut().push(j.name.clone());
-        let verdict = self.rlt.run_judge(j, self);
+        let verdict = self.rlt.run_verifier(j, self);
         self.asking.borrow_mut().pop();
         self.rlt.observe_pre_step(&j.name, &verdict);
         // ⚠ THE CACHE IS POPULATED WHETHER THE VERDICT WAS RUN OR REPLAYED. A ledger hit that skipped
@@ -1487,7 +1487,7 @@ impl Relentless {
 
     /// Ask a human for a value. Returns what they typed, verbatim.
     ///
-    /// ⚠ An OPEN answer set: rlt cannot validate free text, so **pair it with a judge** — ask, check,
+    /// ⚠ An OPEN answer set: rlt cannot validate free text, so **pair it with a verifier** — ask, check,
     /// re-ask with the failure in the question. `examples/` shows the loop.
     ///
     /// ⛔ **Never route a secret through this.** The value would land in `asks.jsonl`, in the next
@@ -1732,7 +1732,7 @@ impl Relentless {
     ///
     /// ⚠ It also enforces the CONSISTENCY CHECK, which is the whole reason a record carries a label
     /// path. Fast-forward is sound only if the resumed driver is the same driver in the same place:
-    /// ordinals alone would happily answer `rlt.judge(&security)` with a recorded `rlt.judge(&lint)`
+    /// ordinals alone would happily answer `rlt.verifier(&security)` with a recorded `rlt.verifier(&lint)`
     /// verdict if the flow had changed, and the run would proceed on a fabricated result. A mismatch
     /// is therefore a HARD error naming both sides — never a silent re-execution, because "the
     /// driver changed" and "the ledger is stale" are the operator's call, not rlt's.
@@ -1957,15 +1957,15 @@ impl Drop for Relentless {
         if let Err(e) = started.report.finish(&report) {
             eprintln!("  ⚠ rlt: cannot write {}: {e}", crate::paths::report_json(&st.dir).display());
         }
-        crate::core::judge::sweep_scratch(&st.dir);
+        crate::core::verifier::sweep_scratch(&st.dir);
     }
 }
 
-/// The ruler an LLM judge asks: its own agent, model and effort ([`Judge::agent`] …) where it names
-/// them, else the run's. A judge with its own agent and no model gets that agent's default judge model.
+/// The ruler an rubric verifier asks: its own agent, model and effort ([`Verifier::agent`] …) where it names
+/// them, else the run's. A verifier with its own agent and no model gets that agent's default verifier model.
 /// Returns the backend, model, effort and the agent's name (what its spend is charged to).
-fn judge_ruler(
-    j: &Judge,
+fn verifier_ruler(
+    j: &Verifier,
     (ruler, model, agent): (&'static dyn crate::backend::AgentBackend, String, String),
 ) -> anyhow::Result<(&'static dyn crate::backend::AgentBackend, String, String, String)> {
     let Some(own) = &j.ruler else { return Ok((ruler, model, String::new(), agent)) };
@@ -2052,38 +2052,38 @@ mod tests {
         (tmp, rlt)
     }
 
-    /// A-25: an LLM judge without its own ruler asks the run's; with its own model the run's agent;
-    /// with its own agent that agent (its default judge model unless named), charged to it.
+    /// A-25: an rubric verifier without its own ruler asks the run's; with its own model the run's agent;
+    /// with its own agent that agent (its default verifier model unless named), charged to it.
     #[test]
-    fn an_llm_judge_picks_its_own_ruler() {
+    fn an_llm_verifier_picks_its_own_ruler() {
         let claude = crate::backend::for_name("claude").unwrap();
         let run = || (claude, "run-model".to_string(), "claude".to_string());
-        let rubric = || Judge::rubric("r", "r.md");
-        let (b, m, e, a) = judge_ruler(&rubric(), run()).unwrap();
+        let rubric = || Verifier::rubric("r", "r.md");
+        let (b, m, e, a) = verifier_ruler(&rubric(), run()).unwrap();
         assert_eq!((b.name(), m.as_str(), e.as_str(), a.as_str()), ("claude", "run-model", "", "claude"));
-        let (b, m, e, _) = judge_ruler(&rubric().model("own").effort(crate::driver::Effort::High), run()).unwrap();
+        let (b, m, e, _) = verifier_ruler(&rubric().model("own").effort(crate::driver::Effort::High), run()).unwrap();
         assert_eq!((b.name(), m.as_str(), e.as_str()), ("claude", "own", "high"));
         let codex = crate::backend::for_name("codex").unwrap();
-        let (b, m, _, a) = judge_ruler(&rubric().agent(Agent::Codex), run()).unwrap();
+        let (b, m, _, a) = verifier_ruler(&rubric().agent(Agent::Codex), run()).unwrap();
         assert_eq!((b.name(), m.as_str(), a.as_str()), ("codex", codex.default_summary_model(), "codex"));
         let mut unknown = rubric();
-        unknown.ruler = Some(crate::core::model::JudgeRuler { agent: Some("nope".into()), ..Default::default() });
-        assert!(judge_ruler(&unknown, run()).is_err());
+        unknown.ruler = Some(crate::core::model::VerifierRuler { agent: Some("nope".into()), ..Default::default() });
+        assert!(verifier_ruler(&unknown, run()).is_err());
     }
 
-    /// The ruler builders set exactly the fields YAML's `judge:` block sets, and nothing is set
+    /// The ruler builders set exactly the fields YAML's `verifier:` block sets, and nothing is set
     /// until asked: the defaults stay `RelentlessConfig::default()`'s.
     #[test]
-    fn the_ruler_builders_set_the_judge_block() {
+    fn the_ruler_builders_set_the_verifier_block() {
         let (_tmp, rlt) = open();
-        let untouched = RelentlessConfig::default().judge;
-        assert_eq!((rlt.cfg.judge.agent.as_str(), rlt.cfg.judge.model.as_deref()), (untouched.agent.as_str(), None));
-        assert_eq!(rlt.cfg.judge.timeout, untouched.timeout);
+        let untouched = RelentlessConfig::default().verifier;
+        assert_eq!((rlt.cfg.verifier.agent.as_str(), rlt.cfg.verifier.model.as_deref()), (untouched.agent.as_str(), None));
+        assert_eq!(rlt.cfg.verifier.timeout, untouched.timeout);
 
-        let rlt = rlt.judge_agent(Agent::Codex).judge_model("gpt-cheap").judge_timeout(900);
-        assert_eq!(rlt.cfg.judge.agent, "codex");
-        assert_eq!(rlt.cfg.judge.model.as_deref(), Some("gpt-cheap"));
-        assert_eq!(rlt.cfg.judge.timeout, 900);
+        let rlt = rlt.verifier_agent(Agent::Codex).verifier_model("gpt-cheap").verifier_timeout(900);
+        assert_eq!(rlt.cfg.verifier.agent, "codex");
+        assert_eq!(rlt.cfg.verifier.model.as_deref(), Some("gpt-cheap"));
+        assert_eq!(rlt.cfg.verifier.timeout, 900);
         assert_eq!(rlt.custom_ruler, None);
     }
 
@@ -2093,15 +2093,15 @@ mod tests {
     fn a_custom_ruler_is_refused_at_boot_and_a_built_in_one_clears_it() {
         let (_tmp, rlt) = open();
         let custom = Agent::Custom(Arc::new(crate::backend::claude::Claude));
-        let rlt = rlt.judge_agent(Agent::Codex).judge_agent(custom.clone());
-        assert_eq!(rlt.cfg.judge.agent, "codex", "the refused agent never reaches the config");
+        let rlt = rlt.verifier_agent(Agent::Codex).verifier_agent(custom.clone());
+        assert_eq!(rlt.cfg.verifier.agent, "codex", "the refused agent never reaches the config");
         let err = rlt.check_limits().unwrap_err().to_string();
         assert!(err.contains("Agent::Custom(`claude`)") && err.contains("built-in agent"), "{err}");
         assert!(rlt.started.get().is_none(), "nothing booted");
 
         let (_tmp, rlt) = open();
-        let rlt = rlt.judge_agent(custom).judge_agent(Agent::Copilot);
-        assert_eq!((rlt.custom_ruler.as_deref(), rlt.cfg.judge.agent.as_str()), (None, "copilot"));
+        let rlt = rlt.verifier_agent(custom).verifier_agent(Agent::Copilot);
+        assert_eq!((rlt.custom_ruler.as_deref(), rlt.cfg.verifier.agent.as_str()), (None, "copilot"));
     }
 
     /// The resolved step's role pair: the step's own when it sets either form, else the defaults' —

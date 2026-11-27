@@ -2,7 +2,7 @@
 //! anyone carries it out, each on its own first, then in turn each reads the others' latest and revises its own,
 //! until all agree or the rounds are spent. Agreement, not stillness, ends it: a diligent voice keeps refining
 //! its points after the disagreements are gone, and the refining is the worker's. The worker then carries out the task with their last positions in its
-//! brief. Not a critic: the voices shape the result before it exists, instead of judging it after.
+//! brief. Not a critic: the voices shape the result before it exists, instead of verifying it after.
 
 use std::path::{Path, PathBuf};
 

@@ -1,27 +1,27 @@
 ---
 name: rlt-new
-description: Set up Relentless for the current project — read existing plans, then generate rlt/rlt.yaml (defaults/judge/steps/sequence), the judge files under rlt/judges/, rlt/RLT.md (stable scope) and rlt/state/STATE.md (forward advice) so `rlt run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
+description: Set up Relentless for the current project — read existing plans, then generate rlt/rlt.yaml (defaults/verifier/steps/sequence), the verifier files under rlt/verifiers/, rlt/RLT.md (stable scope) and rlt/state/STATE.md (forward advice) so `rlt run` can drive the work to completion. Use when the user wants to turn a plan/spec/roadmap into an autonomous agent loop.
 disable-model-invocation: false
 ---
 
 # /rlt:new — set up an Relentless loop for this project
 
 You are setting up **Relentless** (`rlt`): a loop that runs fresh headless agent workers until a
-**Definition of Done** — expressed as judges — is met. Your job in this skill is to turn whatever
+**Definition of Done** — expressed as verifiers — is met. Your job in this skill is to turn whatever
 planning material already exists into the files the loop reads, all under the mandatory `rlt/` folder:
 
-- `rlt/rlt.yaml` — the whole config: `defaults` / `judge` / `steps` / `sequence`
-- `rlt/judges/<name>.sh` (a script judge) or `rlt/judges/<name>.md` (an LLM rubric judge) — one per
-  clause of the Definition of Done. **A judge IS a goal.**
+- `rlt/rlt.yaml` — the whole config: `defaults` / `verifier` / `steps` / `sequence`
+- `rlt/verifiers/<name>.sh` (a script verifier) or `rlt/verifiers/<name>.md` (an LLM rubric verifier) — one per
+  clause of the Definition of Done. **A verifier IS a goal.**
 - `rlt/RLT.md` — the stable scope/goals/architecture each worker reads for orientation (committed)
 - `rlt/state/STATE.md` — the forward "what to do next" advice the worker rewrites each session
   (gitignored; rlt composes it + RLT.md + memory into a per-session `rlt/private/INSTRUCTIONS.md` brief)
 
 **Core principle: do NOT replicate spec tooling.** Read what's already there and *translate* it into
-judges. Only ask the user for what's genuinely missing.
+verifiers. Only ask the user for what's genuinely missing.
 
-**The model in one sentence: your judges ARE the gate — your Definition of Done, made executable.**
-Each judge decides one clause; `done_if` composes them into "done"; rlt runs the judges, never the
+**The model in one sentence: your verifiers ARE the gate — your Definition of Done, made executable.**
+Each verifier decides one clause; `done_if` composes them into "done"; rlt runs the verifiers, never the
 worker, so the loop cannot fake its own completion.
 
 `rlt` can drive **Claude Code, OpenAI Codex, or GitHub Copilot** — chosen by the `agent:` keys you
@@ -67,8 +67,8 @@ matrix below.
 
 | | claude | codex | copilot |
 |---|---|---|---|
-| script judges | ✅ | ✅ | ✅ |
-| LLM judges (an `.md` rubric judge) | ✅ | ✅ | ✅ |
+| script verifiers | ✅ | ✅ | ✅ |
+| rubric verifiers (an `.md` rubric verifier) | ✅ | ✅ | ✅ |
 | summaries (`summary.enabled`) | ✅ | ✅ | ✅ |
 | token budget (`sequence.limits.tokens`, `over_budget`) | ✅ | ✅ | ✅ |
 | thinking effort (`effort:`) | ✅ | ✅ (clamps `max`→`high`) | ⚠️ **not with `model: auto`** |
@@ -115,41 +115,41 @@ If **engram** is available, run `mem_search` for the project to recover prior co
 If you find NOTHING actionable (empty/new repo), go to Step 5 and ask the user to describe
 the goal in a few targeted questions — but prefer inference whenever material exists.
 
-## Step 2 — Derive the judges (each is one clause of "done")
+## Step 2 — Derive the verifiers (each is one clause of "done")
 
-From the plans, derive a small set of **concrete, checkable judges** (aim for 3–8). Each judge is a
+From the plans, derive a small set of **concrete, checkable verifiers** (aim for 3–8). Each verifier is a
 single clause of the Definition of Done. For each, decide:
 
 - **name**: short snake_case (e.g. `tests_pass`, `modules_migrated`, `api_documented`). **This name
-  IS the filename** and how `done_if` refers to it — `tests_pass` → `rlt/judges/tests_pass.sh`.
+  IS the filename** and how `done_if` refers to it — `tests_pass` → `rlt/verifiers/tests_pass.sh`.
 - **kind**: `script` (a `.sh` file) when the check is mechanical, or `llm` (a `.md` rubric file) when
   it's qualitative. **The file extension decides** — there is no `kind:` tag any more.
 - **the check**: for a script, the command that decides met/not-met; for a rubric, the criteria.
 - **numeric or binary**: if it should show partial progress (`18/28`, `82%`), have the script emit
-  `value`/`max`/`target` in its verdict. A judge that emits no `value` is treated as binary.
+  `value`/`max`/`target` in its verdict. A verifier that emits no `value` is treated as binary.
 
-Mark any **soundness/invariant** judge (things that must STAY true — "never break the build", "no
-wrong results") for the `invariants:` list you'll write in Step 4 — not with a per-judge flag.
+Mark any **soundness/invariant** verifier (things that must STAY true — "never break the build", "no
+wrong results") for the `invariants:` list you'll write in Step 4 — not with a per-verifier flag.
 
-**There is no `recheck:` any more.** Every judge in the run-set runs after every step. To skip
-judging on a purely-exploratory step, that STEP sets `skip_judges: true` (Step 4.5) — the lever is
-per-step, not per-judge.
+**There is no `recheck:` any more.** Every verifier in the run-set runs after every step. To skip
+verifying on a purely-exploratory step, that STEP sets `skip_verifiers: true` (Step 4.5) — the lever is
+per-step, not per-verifier.
 
-## Step 3 — Write the judge files
+## Step 3 — Write the verifier files
 
-Every judge is a **file whose name is the judge name**, emitting a verdict JSON to stdout:
+Every verifier is a **file whose name is the verifier name**, emitting a verdict JSON to stdout:
 `{"met": <bool>, "value": <num>, "max": <num>, "target": <num>, "rationale": "<one line>"}`
-Only `met` is required. `rlt` reads the **last** JSON object on stdout, so a judge can log freely.
+Only `met` is required. `rlt` reads the **last** JSON object on stdout, so a verifier can log freely.
 
 Two kinds, chosen by extension:
 
-- **script → `rlt/judges/<name>.sh`** (preferred when measurable). Its stdout is the verdict JSON.
+- **script → `rlt/verifiers/<name>.sh`** (preferred when measurable). Its stdout is the verdict JSON.
   It runs **from the project root**, with cwd = project root and these env vars set: `RLT_SESSION`,
-  `RLT_STEP`, `RLT_JUDGE`, `RLT_PROJECT_DIR`. Suggest a real command for THIS project (a test runner,
+  `RLT_STEP`, `RLT_VERIFIER`, `RLT_PROJECT_DIR`. Suggest a real command for THIS project (a test runner,
   a benchmark, a coverage tool, a grep-count) and wrap it:
   ```bash
   #!/usr/bin/env bash
-  # rlt/judges/tests_pass.sh
+  # rlt/verifiers/tests_pass.sh
   out="$(pytest -q 2>&1)"
   passed=$(printf '%s' "$out" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo 0)
   failed=$(printf '%s' "$out" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo 0)
@@ -158,10 +158,10 @@ Two kinds, chosen by extension:
   printf '{"met":%s,"value":%s,"max":%s,"target":%s,"rationale":"%s/%s pass"}\n' \
     "$met" "$passed" "$total" "$total" "$passed" "$total"
   ```
-  `chmod +x` it. A judge that exits non-zero but prints a valid verdict is still accepted.
-- **llm → `rlt/judges/<name>.md`** (for qualitative goals) — **the file IS the rubric.** It declares
+  `chmod +x` it. A verifier that exits non-zero but prints a valid verdict is still accepted.
+- **llm → `rlt/verifiers/<name>.md`** (for qualitative goals) — **the file IS the rubric.** It declares
   the files it reads in its own YAML **frontmatter**, and its body is the grading criteria. It runs
-  tools-off on the RULER (the `judge:` block), so a repo file can't talk the judge into a pass.
+  tools-off on the RULER (the `verifier:` block), so a repo file can't talk the verifier into a pass.
   ```markdown
   ---
   inputs: ["diff", "log:logs/test.out", "src/main.rs"]
@@ -172,21 +172,21 @@ Two kinds, chosen by extension:
   {"met": <bool>, "value": <0..1>, "max": 1, "target": 1, "rationale": "<one line>"}
   ```
   Valid `inputs` tokens: `"diff"`, `"diff:<rev>"`, `"status"`, `"log:<path>"` (tail), or a file path.
-  The LLM judge's model comes from the **`judge:` block** (Step 6), not the rubric — so it is set once
+  The rubric verifier's model comes from the **`verifier:` block** (Step 6), not the rubric — so it is set once
   for the whole run, on the RULER. (Nothing model-specific goes in the `.md`.)
 
-**Reuse the standard library.** A set of parameterless judges ships inside the binary and installs to
-`~/.rlt/judges/`: `cargo_test`, `build_ok`, `lint_clean`, `git_clean`, `no_regression`, `stalled`,
+**Reuse the standard library.** A set of parameterless verifiers ships inside the binary and installs to
+`~/.rlt/verifiers/`: `cargo_test`, `build_ok`, `lint_clean`, `git_clean`, `no_regression`, `stalled`,
 `cmd_exit`, `grep_count`. If one fits, just name it in `done_if` — no file needed. To customise it,
-copy it into `rlt/judges/<name>.sh` (a project file shadows the library by name). Anything needing an
+copy it into `rlt/verifiers/<name>.sh` (a project file shadows the library by name). Anything needing an
 argument is a three-line project script.
 
 ## Step 4 — Compose the Definition of Done (`done_if`, `abort_if`, `notify_if`, `invariants`)
 
-These live under `sequence:` (Step 6). All use the same whitelisted expression grammar over judge
+These live under `sequence:` (Step 6). All use the same whitelisted expression grammar over verifier
 **names** (NOT arbitrary code):
 
-- **`done_if`** — the success condition (exit 0). This IS your Definition of Done. A **bare judge
+- **`done_if`** — the success condition (exit 0). This IS your Definition of Done. A **bare verifier
   name** is its `met` bool; compose with `AND`/`OR`/`NOT` and parentheses. Aggregates: `all_goals`,
   `count_met`, `total`, `met_fraction`. Default: `all_goals`.
   - **Numeric thresholds use the dotted accessor** — `coverage.value >= 80`, NOT `coverage >= 80`.
@@ -196,7 +196,7 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
     `"count_met >= 3"`.
 - **`abort_if`** — the giving-up guard (exit 3). NOT part of the DoD — a ceiling, not a definition of
   done. Terms: `over_budget`, `over_cost` (Claude-only), `over_iterations`, `wall_time`/`work_time`,
-  `any_regressed(invariants)`, `any_judge_error`. They OR together — the loop aborts the moment any
+  `any_regressed(invariants)`, `any_verifier_error`. They OR together — the loop aborts the moment any
   trips.
   ```yaml
   # claude:
@@ -207,7 +207,7 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
 - **`notify_if`** — *optional, and the ONLY clause that does not end the run.* Same grammar; when it
   is true rlt runs `sequence.notify.cmd` and **the loop keeps running**. A human is a side-channel,
   never a gate — a loop that halts to ask is exactly the babysitting rlt exists to remove. Detectors
-  are ordinary judges, so there is nothing new to learn.
+  are ordinary verifiers, so there is nothing new to learn.
   ```yaml
   notify_if: "stalled"                              # `stalled` ships in the binary — nothing to author
   notify:
@@ -216,7 +216,7 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   ```
   Delivery is **foreground and untimed**, so every command must bound itself (`curl --max-time 10`,
   or `timeout 10 …`) — an unbounded one hangs the loop, the exact thing `notify_if` exists to avoid.
-  `{{reason}}` is the rationale of a judge named in the expression (`met` first, then highest
+  `{{reason}}` is the rationale of a verifier named in the expression (`met` first, then highest
   `value`); `{{project}}` / `{{session}}` / `{{step}}` also work. rlt substitutes them
   **shell-quoted**, so **never wrap a placeholder in quotes of your own** — you would get literal
   quote characters. `notify_if` with an empty `notify.cmd` is refused at startup (nothing would
@@ -224,13 +224,13 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
   `abort_if` halts, including an `abort_if` already true at launch. A `done_if` success never pings;
   for that use `hooks.on_stop`.
   - **⚠ THE MOAT — a WORKER-AUTHORED signal goes in `notify_if`, NEVER in `abort_if`.** A detector
-    that reads something the worker wrote (a `blocked` judge over `rlt/state/BLOCKED.md`, say) hands
-    the agent a way to end its own run by declaring itself stuck — the precise failure the judges
+    that reads something the worker wrote (a `blocked` verifier over `rlt/state/BLOCKED.md`, say) hands
+    the agent a way to end its own run by declaring itself stuck — the precise failure the verifiers
     exist to prevent. In `notify_if` the worst case is an annoying ping, rate-limited by the
     cooldown, and the loop keeps going. Keep TERMINATION on the signals the worker genuinely cannot
     reach — the process-internal ones: `over_budget`, `over_cost`, `over_iterations`, `wall_time`/`work_time`,
     `any_regressed(invariants)`, and the gate's own history — `consecutive_rollbacks`, `oscillating`,
-    `consecutive_no_changes` (a worker that believes it is done while a judge is unmet changes
+    `consecutive_no_changes` (a worker that believes it is done while a verifier is unmet changes
     nothing, session after session: `consecutive_no_changes >= 3` ends that run). A `stalled`/`stuck` detector over rlt's own
     `rlt/private/verdicts.jsonl` is a **higher bar, and how much higher depends on the isolation
     tier**: rlt owns that file and a worker touching it is tampering, and under `isolation:
@@ -241,14 +241,14 @@ These live under `sequence:` (Step 6). All use the same whitelisted expression g
     `{ step: worker, until: "NOT stalled", max: 3 }` entry pages the human at the gate of the session
     that just ran, one full cycle before the recovery step is dispatched. Either drop the `until:`
     bound, or give `notify_if` the stricter detector (`stuck.value >= 85`).
-  - **Only propose a detector that resolves.** `stalled` is shipped; `stuck` and `blocked` are judges
-    you must WRITE into `rlt/judges/` in Step 3 first — naming one that resolves to no file is a hard
+  - **Only propose a detector that resolves.** `stalled` is shipped; `stuck` and `blocked` are verifiers
+    you must WRITE into `rlt/verifiers/` in Step 3 first — naming one that resolves to no file is a hard
     startup error, and `rlt doctor` will refuse the config.
-- **`invariants:`** — a list of judge names that must STAY met (the soundness guards). The gate rolls
+- **`invariants:`** — a list of verifier names that must STAY met (the soundness guards). The gate rolls
   back any session that regresses one, and `any_regressed(invariants)` in `abort_if` gives up on it.
 
 **Never leave an autonomous loop with no ceiling at all.** If you drop `over_cost` for codex/copilot,
-you MUST keep `over_budget` (with a real `sequence.limits.tokens`) in its place. **Never put a judge
+you MUST keep `over_budget` (with a real `sequence.limits.tokens`) in its place. **Never put a verifier
 that only bounds an entry's `until:` (like `stalled`) into `done_if`** — the loop would "succeed" by
 getting stuck.
 
@@ -259,11 +259,11 @@ repeating list of entries over those steps. Most projects need just one plain `w
 for more when the run risks going down a rabbit hole.
 
 - **`steps:`** — a palette. Each NAME maps to a body of *overrides* over `defaults:` (legal keys:
-  `agent`, `model`, `effort`, `worker_args`, `state`, `role_prompt`, `prompt`, `skip_judges` —
+  `agent`, `model`, `effort`, `worker_args`, `state`, `role_prompt`, `prompt`, `skip_verifiers` —
   anything else is a hard error). `prompt:` is ADDITIVE to the composed prompt; `role_prompt:` is a
-  generic ROLE framing composed *above* `prompt:` (e.g. a red-team "reconsider" step). `skip_judges:
-  true` means no judges run after that step, so nothing merges — its work **stages**, and the next
-  judged step gates the whole span.
+  generic ROLE framing composed *above* `prompt:` (e.g. a red-team "reconsider" step). `skip_verifiers:
+  true` means no verifiers run after that step, so nothing merges — its work **stages**, and the next
+  verified step gates the whole span.
 - **`sequence.steps:`** — a list of entries, each one of:
   - `NAME` — run that step once (shorthand for `{ step: NAME }`)
   - `{ step: NAME, times: N }` — run it exactly N times, then move on
@@ -289,15 +289,15 @@ steps:
     prompt: >
       Assume the current approach is wrong. Name 2-3 fundamentally different approaches, pick one,
       and write the rejected ones and WHY into your scratch note — rlt will persist them.
-    skip_judges: true              # stages; the next worker step gates it
+    skip_verifiers: true              # stages; the next worker step gates it
 sequence:
   steps:
     - { step: worker, until: "NOT stalled", max: 4 }   # up to 4 tries, stop early if it's moving
     - reconsider                                       # reached only when 4 tries stayed stalled
 ```
 
-`stalled` is the library judge (it reads the verdict history). Naming it in an `until:` puts the
-`stalled` judge in the run-set automatically — you don't list it anywhere else. **Only propose a
+`stalled` is the library verifier (it reads the verdict history). Naming it in an `until:` puts the
+`stalled` verifier in the run-set automatically — you don't list it anywhere else. **Only propose a
 second agent the user actually has installed** (Step 0b) — `rlt doctor` checks every agent named.
 
 ## Step 4.7 — Detect the user's tools and offer to wire them in (NO hardcoded tool list)
@@ -346,11 +346,11 @@ Ask (with a structured picker if your agent has one, else plain questions) ONLY 
 you couldn't infer, e.g.:
 - which agent the loop should drive, if Step 0 didn't settle it
 - the test/benchmark command if you couldn't find it
-- the numeric threshold for a `judge.value >= N` clause
+- the numeric threshold for a `verifier.value >= N` clause
 - the token budget and max wall-time, if the user wants guards
 - the inner-worker model — but see Step 0 rules 2–3: **never guess one for codex**
 
-Show the user the proposed `rlt.yaml` (and the judge files) and let them approve or edit before writing.
+Show the user the proposed `rlt.yaml` (and the verifier files) and let them approve or edit before writing.
 
 ## Step 6 — Write the files (all under `rlt/`)
 
@@ -369,15 +369,15 @@ defaults:
   # effort: <low|medium|high|xhigh|max>  # NOT with copilot's model: auto
   state: "state/STATE.md"                # forward-advice file (under rlt/, gitignored)
 
-judge:                                   # THE RULER — runs LLM judges + the summarizer; immutable
+verifier:                                   # THE RULER — runs rubric verifiers + the summarizer; immutable
   agent: "<claude|codex|copilot>"        # usually the same as defaults.agent
   # model: "<cheap model>"               # claude: a haiku · copilot: auto · codex: OMIT
-  timeout: 300                           # seconds, EVERY judge (script + LLM)
+  timeout: 300                           # seconds, EVERY verifier (script + LLM)
 
 steps:
   worker: {}                             # add more only if Step 4.5 designed them
   # a step may also carry `prompt:` (its specific ask) and `role_prompt:` (generic role framing,
-  # e.g. a "reconsider" red-team step: { skip_judges: true, role_prompt: "...", prompt: "..." })
+  # e.g. a "reconsider" red-team step: { skip_verifiers: true, role_prompt: "...", prompt: "..." })
 
 sequence:
   steps:
@@ -386,12 +386,12 @@ sequence:
     tokens: <int or null>                # output-token ceiling → over_budget. Works on ALL agents.
     # cost: <dollars or null>            # → over_cost. CLAUDE-ONLY, all-Claude sequences only.
     sessions: <int or null>              # worker-session cap → over_iterations (or `rlt run --max-sessions <n>`)
-  invariants: [<judge names that must STAY met>]
-  done_if: "<expression over judge names>"
+  invariants: [<verifier names that must STAY met>]
+  done_if: "<expression over verifier names>"
   abort_if: "<ceiling expression>"       # see Step 4
   # notify_if: "stalled"                 # optional PING that does NOT stop the loop — see Step 4.
   #                                      # `stalled` is shipped; a `stuck`/`blocked` detector must be
-  #                                      # AUTHORED in rlt/judges/ first, or startup hard-errors.
+  #                                      # AUTHORED in rlt/verifiers/ first, or startup hard-errors.
   # notify: { cooldown_sessions: 3, cmd: ["curl -s --max-time 10 -d {{reason}} ntfy.sh/my-topic"] }
 
 # Optional top-level survivors — omit if unused:
@@ -402,13 +402,13 @@ summary: { enabled: true, min_interval_secs: 300 }   # runs on the RULER (no mod
 # hooks + prompt_includes: ONLY if Step 4.7 wired tools the user confirmed
 ```
 
-Agent-specific reminders (Step 0): **codex** — no `model:` in `defaults` OR `judge`, no `cost:`.
+Agent-specific reminders (Step 0): **codex** — no `model:` in `defaults` OR `verifier`, no `cost:`.
 **copilot** — `model: auto`, no `effort:`, no `cost:`, no `ratelimit_backoff_secs`, optional
 `worker_args: ["--max-ai-credits", "50"]`.
 
-### `rlt/judges/<name>.sh` and `rlt/judges/<name>.md`
+### `rlt/verifiers/<name>.sh` and `rlt/verifiers/<name>.md`
 
-Write one file per judge you derived in Step 2 (skip any you're reusing from the library). `chmod +x`
+Write one file per verifier you derived in Step 2 (skip any you're reusing from the library). `chmod +x`
 the `.sh` scripts. Reference each by its bare name in `done_if` / `abort_if` / `invariants`.
 
 ### `rlt/RLT.md` — the stable scope (committed) and `rlt/state/STATE.md` — the forward advice
@@ -418,7 +418,7 @@ pointer at it) by composing RLT.md + STATE + memory. Split the standing content 
 
 **`rlt/RLT.md`** (committed, rare edits, human-owned) — the STABLE scope: what the project is, the
 goal, the architecture (key modules/entry points + the exact build/test commands), and the rules:
-- Do ONE self-contained chunk of real, correct work toward the judges each session (no stubs).
+- Do ONE self-contained chunk of real, correct work toward the verifiers each session (no stubs).
 - Be autonomous — there is NO human in the loop; never pause to ask.
 - Inline any workflow content the worker needs — do not assume it can invoke a skill by name in a
   headless session.
@@ -429,7 +429,7 @@ it current for its successor.
 
 (Institutional memory, `rlt/private/LOG.md`, is written by rlt, not the worker — never tell the worker
 to maintain it. The worker just edits files and NEVER runs git — rlt commits the work automatically,
-runs the session on a throwaway branch, and keeps it only if the judges pass; rlt owns all git.)
+runs the session on a throwaway branch, and keeps it only if the verifiers pass; rlt owns all git.)
 
 ## Step 7 — Validate: `rlt doctor`, then `rlt plan`
 
@@ -441,12 +441,12 @@ rlt doctor
 ```
 Fix anything it marks ✗ — a ✗ here means `rlt run` would refuse to start.
 
-Then the dry-run, to confirm the judges resolve and work, and show the starting scoreboard:
+Then the dry-run, to confirm the verifiers resolve and work, and show the starting scoreboard:
 ```bash
 rlt plan
 ```
-If a judge errors or fails to resolve, fix its file/name before finishing. (`rlt plan` lists every
-available judge name on a resolution failure.)
+If a verifier errors or fails to resolve, fix its file/name before finishing. (`rlt plan` lists every
+available verifier name on a resolution failure.)
 
 ## Step 8 — Tell the user how to launch
 

@@ -243,9 +243,9 @@ impl Ctx<'_> {
     fn checks(&mut self, at: &str, checks: &[Check], in_each: bool) {
         let mut names = BTreeSet::new();
         for c in checks {
-            match (c.judge(), c.command()) {
-                (Some(j), _) if !self.process.judges.contains_key(j) => {
-                    self.out.push(format!("{at}: a check names the judge `{j}`, which `judges:` doesn't declare"))
+            match (c.verifier(), c.command()) {
+                (Some(j), _) if !self.process.verifiers.contains_key(j) => {
+                    self.out.push(format!("{at}: a check names the verifier `{j}`, which `verifiers:` doesn't declare"))
                 }
                 (_, Some(command)) => self.command(at, command, in_each),
                 _ => {}
@@ -303,15 +303,15 @@ impl Ctx<'_> {
         }
         let found = super::declared::problems(p, &self.home);
         self.out.extend(found);
-        for (name, o) in &p.judges {
+        for (name, o) in &p.verifiers {
             if let Some(template) = &o.template {
-                self.file(&format!("judges.{name}"), "template.from", &template.from, &[]);
+                self.file(&format!("verifiers.{name}"), "template.from", &template.from, &[]);
             }
         }
         if let Some(file) = p.run.hooks.as_ref().and_then(|h| h.process.as_ref()) {
-            for name in super::hooks::judge_names(&self.home.join(file)) {
-                if !p.judges.contains_key(&name) {
-                    self.out.push(format!("run.hooks.process: `{file}` names the judge `{name}`, which `judges:` doesn't declare"));
+            for name in super::hooks::verifier_names(&self.home.join(file)) {
+                if !p.verifiers.contains_key(&name) {
+                    self.out.push(format!("run.hooks.process: `{file}` names the verifier `{name}`, which `verifiers:` doesn't declare"));
                 }
             }
         }
@@ -527,7 +527,7 @@ mod tests {
         \x20 - { id: cp-build, name: OK, kind: checkpoint, prepare: scripts/doc.sh, doc: a.md, question: \"{{ cp.cp-build }}: ok?\", owner: build }\n";
 
     fn files() -> Vec<(&'static str, &'static str)> {
-        vec![("prompts/build.md", "Do {{ legacy }} for {{ step.build }}. ${{ github.sha }}"), ("judges/build-review.md", "review"),
+        vec![("prompts/build.md", "Do {{ legacy }} for {{ step.build }}. ${{ github.sha }}"), ("verifiers/build-review.md", "review"),
              ("prompts/tf.md", "tf"), ("scripts/check.sh", "x"), ("scripts/merge.sh", "x"), ("scripts/doc.sh", "x"), ("scripts/fix.sh", "x")]
     }
 
@@ -541,42 +541,42 @@ mod tests {
     /// Each kind of mistake is listed, with where it is.
     #[test]
     fn every_kind_of_mistake_is_listed() {
-        let bad = GOOD.replace("review: true", "review: judges/nope.md").replace("scripts/check.sh", "scripts/gone.sh")
+        let bad = GOOD.replace("review: true", "review: verifiers/nope.md").replace("scripts/check.sh", "scripts/gone.sh")
             .replace("reenter: build", "reenter: nobody").replace("owner: build", "owner: ghost")
             .replace("{{ item.scope }}", "{{ typo }}").replace("id: merge", "id: Merge")
             .replace("deny: [inputs,", "deny: [inputz,").replace("scripts/fix.sh", "scripts/nofix.sh");
         let dir = home(&files(), &bad);
         let problems = check(&dir.path().join("process.yaml")).join("\n");
-        for expect in ["review `judges/nope.md` is not a file", "command `scripts/gone.sh` is not a file",
+        for expect in ["review `verifiers/nope.md` is not a file", "command `scripts/gone.sh` is not a file",
                        "`reenter: nobody` names no step", "`owner: ghost` names no step", "unknown variable `{{ typo }}`",
                        "step id `Merge`", "deny `inputz` is no list", "task_force.checks: command `scripts/nofix.sh` is not a file"] {
             assert!(problems.contains(expect), "missing {expect:?} in:\n{problems}");
         }
     }
 
-    /// Declared judges (A-38): a check names one the file declares, a hooks entry too; one it doesn't declare, a
-    /// badly shaped declaration and a hooks entry for a judge nobody declared are each listed at where they are.
+    /// Declared verifiers (A-38): a check names one the file declares, a hooks entry too; one it doesn't declare, a
+    /// badly shaped declaration and a hooks entry for a verifier nobody declared are each listed at where they are.
     #[test]
-    fn declared_judges_are_held_to_their_declarations() {
-        let declared = GOOD.replace("version: 1\n", "version: 1\njudges: { tests: { command: pytest -q }, parse: { metric: { id: syntax.parse_errors }, max: 0 } }\n")
-            .replace("checks: [scripts/check.sh]", "checks: [scripts/check.sh, { judge: tests }, { judge: parse, when: last }]")
+    fn declared_verifiers_are_held_to_their_declarations() {
+        let declared = GOOD.replace("version: 1\n", "version: 1\nverifiers: { tests: { command: pytest -q }, parse: { metric: { id: syntax.parse_errors }, max: 0 } }\n")
+            .replace("checks: [scripts/check.sh]", "checks: [scripts/check.sh, { verifier: tests }, { verifier: parse, when: last }]")
             .replace("phases:", "run: { hooks: { process: hooks.yaml } }\nphases:");
         let mut f = files();
-        f.push(("hooks.yaml", "step: { after: [{ judge: parse }] }\n"));
+        f.push(("hooks.yaml", "step: { after: [{ verifier: parse }] }\n"));
         let dir = home(&f, &declared);
         let found = check(&dir.path().join("process.yaml")).join("\n");
         assert!(found.contains("`when: last` only means something inside an `each`"), "{found}");
-        assert!(!found.contains("names the judge"), "declared judges are known: {found}");
+        assert!(!found.contains("names the verifier"), "declared verifiers are known: {found}");
 
-        let bad = declared.replace("{ judge: tests }", "{ judge: nobody }").replace("when: last", "when: x")
-            .replace("judges: {", "judges: { empty: {}, both: { command: x, metric: { id: a.b }, max: 1 }, form: { template: { doc: a.md, from: gone.md } },");
-        f.last_mut().unwrap().1 = "step: { after: [{ judge: ghost }], before: [judges/x.py] }\n";
+        let bad = declared.replace("{ verifier: tests }", "{ verifier: nobody }").replace("when: last", "when: x")
+            .replace("verifiers: {", "verifiers: { empty: {}, both: { command: x, metric: { id: a.b }, max: 1 }, form: { template: { doc: a.md, from: gone.md } },");
+        f.last_mut().unwrap().1 = "step: { after: [{ verifier: ghost }], before: [verifiers/x.py] }\n";
         let dir = home(&f, &bad);
         let found = check(&dir.path().join("process.yaml")).join("\n");
-        for expect in ["a check names the judge `nobody`, which `judges:` doesn't declare",
-                       "judges.empty: declares none of `metric`, `score`, `command` or `template`", "judges.both: ",
-                       "judges.form",
-                       "`hooks.yaml` names the judge `ghost`, which `judges:` doesn't declare"] {
+        for expect in ["a check names the verifier `nobody`, which `verifiers:` doesn't declare",
+                       "verifiers.empty: declares none of `metric`, `score`, `command` or `template`", "verifiers.both: ",
+                       "verifiers.form",
+                       "`hooks.yaml` names the verifier `ghost`, which `verifiers:` doesn't declare"] {
             assert!(found.contains(expect), "missing {expect:?} in:\n{found}");
         }
     }

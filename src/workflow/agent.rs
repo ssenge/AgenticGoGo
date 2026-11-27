@@ -8,7 +8,7 @@ use super::flow::{Flow, When};
 use super::git::{changes_since, unchanged_since};
 use super::review::{cannot_fix, focused, self_checked, stuck, with_rubric, with_task, Earlier};
 use super::task::{Outcome, Task};
-use crate::core::model::{Judge, Verdict};
+use crate::core::model::{Verifier, Verdict};
 use crate::driver::{Fatal, GateOutcome, Landing, Step};
 
 /// Repair rounds a critic's points get: what it still sees after that is for the humans at the next approval.
@@ -16,15 +16,15 @@ const CRITIC_ROUNDS: usize = 1;
 /// How much of the changes since its result a refreshing step gets in its brief.
 const DIFF_LIMIT: usize = 12_000;
 
-/// The judges of one step: the after-hooks and checks in order, then the critic.
-struct Judges<'a> {
+/// The verifiers of one step: the after-hooks and checks in order, then the critic.
+struct Verifiers<'a> {
     flow: &'a Flow,
     name: &'a str,
-    checks: &'a [Judge],
-    critic: Option<&'a Judge>,
+    checks: &'a [Verifier],
+    critic: Option<&'a Verifier>,
 }
 
-impl Judges<'_> {
+impl Verifiers<'_> {
     /// The step's verdict, and whether it is the critic's; `earlier` narrows the critic to its last points.
     fn review(&self, earlier: Option<&Earlier>) -> Result<(Verdict, bool), Fatal> {
         if let Err(why) = self.flow.check(self.name, When::After) {
@@ -32,31 +32,31 @@ impl Judges<'_> {
         }
         let mut last = None;
         for check in self.checks {
-            let verdict = self.flow.judge(check);
+            let verdict = self.flow.verifier(check);
             if !verdict.met() {
                 return Ok((verdict, false));
             }
             last = Some(verdict);
         }
         let Some(critic) = self.critic else {
-            let taken = || Verdict::binary(true).with_rationale("no critic: the checks judge it alone");
+            let taken = || Verdict::binary(true).with_rationale("no critic: the checks verifier it alone");
             return Ok((last.unwrap_or_else(taken), false));
         };
         let critic = match earlier.filter(|e| e.by_critic) {
             Some(e) => focused(self.flow, critic, e)?,
             None => critic.clone(),
         };
-        let verdict = self.flow.judge(&critic);
+        let verdict = self.flow.verifier(&critic);
         // a critic that failed to run has no point to keep for the next approval: the result is not graded
         let by_critic = verdict.error().is_none();
         Ok((verdict, by_critic))
     }
 }
 
-/// Why a verdict grades nothing, if it doesn't: its judge failed to run (rlt asked it twice). Never met: a step
+/// Why a verdict grades nothing, if it doesn't: its verifier failed to run (rlt asked it twice). Never met: a step
 /// nobody graded goes to the task force, not on.
 fn not_graded(verdict: &Verdict) -> Option<String> {
-    verdict.error().map(|e| format!("not graded, its judge failed to run: {e}"))
+    verdict.error().map(|e| format!("not graded, its verifier failed to run: {e}"))
 }
 
 /// What a step's `first` script left for its worker.
@@ -97,11 +97,11 @@ impl Flow {
             self.recover(&name, &why, &|| Ok(self.check(&name, When::Before).err()))?;
         }
         let step = self.absolute(&t.step);
-        let critic = t.critic.as_ref().map(|c| with_task(self, &self.absolute_judge(c), &t.critic_context, &step))
+        let critic = t.critic.as_ref().map(|c| with_task(self, &self.absolute_verifier(c), &t.critic_context, &step))
             .transpose()?;
-        let judges = Judges { flow: self, name: &name, checks: &t.checks, critic: critic.as_ref() };
+        let verifiers = Verifiers { flow: self, name: &name, checks: &t.checks, critic: critic.as_ref() };
         let base = self.lead(&name, &step, since.as_deref(), t.inputs.as_deref().unwrap_or_default(), changed)?;
-        let base = match self.first(&name, t, &judges)? {
+        let base = match self.first(&name, t, &verifiers)? {
             First::Done => return Ok(Outcome::Done),
             First::Rest(rest) => with_section(&base, &rest)?,
             First::None => base,
@@ -109,7 +109,7 @@ impl Flow {
         // a refresh adjusts a result the discussion already shaped
         let base = if since.is_none() { self.discussed(&name, &base, t)? } else { base };
         let cannot = self.scratch(&format!("{}-cannot-fix.md", self.key_of(&name)))?;
-        let rubric = t.critic.as_ref().map(|c| self.absolute_judge(c));
+        let rubric = t.critic.as_ref().map(|c| self.absolute_verifier(c));
         let step = self.briefed(&name, &base, t, rubric.as_ref(), &cannot)?;
         let landed = self.step(&step)?.landed;
         if landed == Landing::Nothing && since.is_some() {
@@ -122,9 +122,9 @@ impl Flow {
             && !self.run.decided {
             return self.unmet(&name, t.climbs, "the re-entered step changed nothing, so its note wasn't carried out (a note that only \
                               informs, asking for no change, goes with `--decided`)",
-                              Some(&judges));
+                              Some(&verifiers));
         }
-        self.repaired(&name, &step, (t.repairs, t.climbs), &judges, &cannot)
+        self.repaired(&name, &step, (t.repairs, t.climbs), &verifiers, &cannot)
     }
 
     /// Whether step `name` refreshes an earlier result: the run re-entered before it and keeps the later
@@ -177,11 +177,11 @@ impl Flow {
         }
     }
 
-    /// Runs the step's `first` script: what it wrote is committed; when it leaves nothing and the judges are
+    /// Runs the step's `first` script: what it wrote is committed; when it leaves nothing and the verifiers are
     /// met, the step is done without a session; otherwise the worker gets what is left.
-    fn first(&self, name: &str, t: &Task, judges: &Judges) -> Result<First, Fatal> {
+    fn first(&self, name: &str, t: &Task, verifiers: &Verifiers) -> Result<First, Fatal> {
         let Some(script) = &t.first else { return Ok(First::None) };
-        let verdict = self.judge(script);
+        let verdict = self.verifier(script);
         super::git::commit(self.project(), &["."], &format!("{name}: its script"))?;
         let rest = |said: &str| First::Rest(format!(
             "## What a script did\n\nA script did what it could and wrote it into this step's results: keep it, \
@@ -192,11 +192,11 @@ impl Flow {
         if !verdict.met() {
             return Ok(rest(verdict.rationale()));
         }
-        let (judged, _) = judges.review(None)?;
-        if !judged.met() {
-            return Ok(rest(&format!("{}; but the check says: {}", verdict.rationale(), judged.rationale())));
+        let (verified, _) = verifiers.review(None)?;
+        if !verified.met() {
+            return Ok(rest(&format!("{}; but the check says: {}", verdict.rationale(), verified.rationale())));
         }
-        self.record(name, "done", true, &format!("without a session: {}; {}", verdict.rationale(), judged.rationale()));
+        self.record(name, "done", true, &format!("without a session: {}; {}", verdict.rationale(), verified.rationale()));
         self.flush()?;
         Ok(First::Done)
     }
@@ -204,7 +204,7 @@ impl Flow {
     /// The worker's brief: the task and what leads it, the driver's sections, the critic's rubric (`critic` as
     /// written: the task it would repeat is already above), the checks to run, and the way out when it can't
     /// fix a failure.
-    fn briefed(&self, name: &str, base: &Step, t: &Task, critic: Option<&Judge>, cannot: &std::path::Path)
+    fn briefed(&self, name: &str, base: &Step, t: &Task, critic: Option<&Verifier>, cannot: &std::path::Path)
                -> Result<Step, Fatal> {
         let mut step = base.clone();
         for section in &t.sections {
@@ -214,35 +214,35 @@ impl Flow {
             step = with_rubric(&step, critic)?;
         }
         step = with_section(&step, &stopped_section(self.project(), base.name.as_deref().unwrap_or(name)))?;
-        let checks: Vec<Judge> = self.hook_judges(name, When::After).into_iter().chain(t.checks.iter().cloned()).collect();
+        let checks: Vec<Verifier> = self.hook_verifiers(name, When::After).into_iter().chain(t.checks.iter().cloned()).collect();
         with_section(&self_checked(&step, &checks)?, &cannot_fix(cannot))
     }
 
-    /// Judge, repair, judge again: up to `repairs` rounds, one of them the critic's.
-    fn repaired(&self, name: &str, step: &Step, (repairs, climbs): (usize, bool), judges: &Judges,
+    /// Verifier, repair, verifier again: up to `repairs` rounds, one of them the critic's.
+    fn repaired(&self, name: &str, step: &Step, (repairs, climbs): (usize, bool), verifiers: &Verifiers,
                 cannot: &std::path::Path)
                 -> Result<Outcome, Fatal> {
-        let (mut verdict, mut by_critic) = judges.review(None)?;
+        let (mut verdict, mut by_critic) = verifiers.review(None)?;
         let (mut previous, mut critic_rounds): (Option<String>, usize) = (None, 0);
         for round in 1..=repairs {
             if verdict.met() || (by_critic && critic_rounds == CRITIC_ROUNDS) {
                 break;
             }
-            // a repair round can't fix a judge that doesn't run
+            // a repair round can't fix a verifier that doesn't run
             if let Some(why) = not_graded(&verdict) {
-                return self.unmet(name, climbs, &why, Some(judges));
+                return self.unmet(name, climbs, &why, Some(verifiers));
             }
             // what blocks the check lies in another step's result: no repair round of this worker's can move it
             if let Some(blocker) = &verdict.blocked_by {
                 return self.unmet(name, climbs, &format!("blocked by {blocker}: {}", verdict.rationale()),
-                                  Some(judges));
+                                  Some(verifiers));
             }
             critic_rounds += usize::from(by_critic);
             if let Some(why) = stuck(cannot, verdict.rationale(), by_critic, previous.as_deref()) {
-                return self.unmet(name, climbs, &why, Some(judges));
+                return self.unmet(name, climbs, &why, Some(verifiers));
             }
             previous = Some(verdict.rationale().to_string());
-            (verdict, by_critic) = self.repair(name, step, round, (&verdict, by_critic), judges)?;
+            (verdict, by_critic) = self.repair(name, step, round, (&verdict, by_critic), verifiers)?;
         }
         // a worker given no repair round can't answer the critic: its point lies in an earlier step's result,
         // which the task force finds; after a worker tried, what the critic still sees is for the next approval
@@ -251,7 +251,7 @@ impl Flow {
         }
         if !verdict.met() {
             let why = not_graded(&verdict).unwrap_or_else(|| verdict.rationale().to_string());
-            return self.unmet(name, climbs, &why, Some(judges));
+            return self.unmet(name, climbs, &why, Some(verifiers));
         }
         self.keep(name)?;
         self.record(name, "done", true, verdict.rationale());
@@ -259,7 +259,7 @@ impl Flow {
     }
 
     /// One repair round: a fresh session fixes the points (or disputes one), then the review.
-    fn repair(&self, name: &str, step: &Step, round: usize, (verdict, by_critic): (&Verdict, bool), judges: &Judges)
+    fn repair(&self, name: &str, step: &Step, round: usize, (verdict, by_critic): (&Verdict, bool), verifiers: &Verifiers)
               -> Result<(Verdict, bool), Fatal> {
         self.record(name, "repair", false, verdict.rationale());
         let disputed = self.scratch(&format!("{}-disputes-{round}.md", self.key_of(name)))?;
@@ -270,7 +270,7 @@ impl Flow {
              the reviewer repeats after reading your reason must be fixed: the reviewer has weighed your \
              reason and still sees the issue.\n\n{}", disputed.display(), verdict.rationale()))?)?;
         let disputes = std::fs::read_to_string(&disputed).unwrap_or_default();
-        judges.review(Some(&Earlier { round, points: verdict.rationale().to_string(), disputes, by_critic }))
+        verifiers.review(Some(&Earlier { round, points: verdict.rationale().to_string(), disputes, by_critic }))
     }
 
     /// The critic still sees a point after its round: the work is kept, the point recorded and returned.
@@ -291,24 +291,24 @@ impl Flow {
     }
 
     /// An unmet end: returned to a caller that climbs, the work kept for its next attempt; else a failure,
-    /// which `judges` judge again after a repair in place.
-    fn unmet(&self, name: &str, climbs: bool, why: &str, judges: Option<&Judges>) -> Result<Outcome, Fatal> {
+    /// which `verifiers` verifier again after a repair in place.
+    fn unmet(&self, name: &str, climbs: bool, why: &str, verifiers: Option<&Verifiers>) -> Result<Outcome, Fatal> {
         if !climbs {
-            return self.failed(name, why, judges);
+            return self.failed(name, why, verifiers);
         }
         self.keep(name)?;
         self.record(name, "unmet", false, why);
         Ok(Outcome::Unmet(why.to_string()))
     }
 
-    /// Fails the step (the task force, or the run's end); repaired in place and met when `judges` judge it again, the
+    /// Fails the step (the task force, or the run's end); repaired in place and met when `verifiers` verifier it again, the
     /// step is done.
-    fn failed(&self, name: &str, why: &str, judges: Option<&Judges>) -> Result<Outcome, Fatal> {
-        let Some(judges) = judges else {
+    fn failed(&self, name: &str, why: &str, verifiers: Option<&Verifiers>) -> Result<Outcome, Fatal> {
+        let Some(verifiers) = verifiers else {
             self.fail(name, why)?;
             return Ok(Outcome::NotReached);
         };
-        let again = || judges.review(None)
+        let again = || verifiers.review(None)
             .map(|(v, _)| (!v.met()).then(|| not_graded(&v).unwrap_or_else(|| v.rationale().to_string())));
         self.recover(name, why, &again)?;
         self.keep(name)?;

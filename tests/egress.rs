@@ -193,10 +193,10 @@ t worker_set_proxy "http_proxy=http://1.1.1.1:3128 wget -q -T 3 -O /dev/null htt
 fn check_problems(yaml: &str) -> Vec<(String, String)> {
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
-    std::fs::create_dir_all(d.join("rlt/judges")).unwrap();
+    std::fs::create_dir_all(d.join("rlt/verifiers")).unwrap();
     std::fs::create_dir_all(d.join("rlt/state")).unwrap();
     std::fs::write(d.join("rlt/rlt.yaml"), yaml).unwrap();
-    std::fs::write(d.join("rlt/judges/ok.sh"), "#!/bin/sh\necho '{\"met\":true}'\n").unwrap();
+    std::fs::write(d.join("rlt/verifiers/ok.sh"), "#!/bin/sh\necho '{\"met\":true}'\n").unwrap();
     let out = Command::cargo_bin("rlt").unwrap().args(["check", "--json"]).current_dir(d).env("HOME", d).output_bounded().unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     v["problems"].as_array().unwrap().iter().map(|p| (p["path"].as_str().unwrap().into(), p["message"].as_str().unwrap().into())).collect()

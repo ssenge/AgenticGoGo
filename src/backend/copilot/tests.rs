@@ -82,20 +82,20 @@ fn the_prompt_is_last_and_stdin_is_never_the_channel() {
     assert!(args.contains(&"--effort".to_string()) && args.contains(&"--resume".to_string()));
 }
 
-/// A judge call must NOT carry `--allow-all-tools` — that flag is the WORKER's. Without it,
-/// Copilot denies writes at execution, which is what stops a judge editing what it grades.
-/// If this ever regresses, the judge silently gains write access to the repo it is judging.
+/// A verifier call must NOT carry `--allow-all-tools` — that flag is the WORKER's. Without it,
+/// Copilot denies writes at execution, which is what stops a verifier editing what it grades.
+/// If this ever regresses, the verifier silently gains write access to the repo it is verifying.
 #[test]
-fn the_judge_call_never_gets_write_access() {
+fn the_verifier_call_never_gets_write_access() {
     assert!(Copilot.capabilities().supports_one_shot);
     // We can't spawn copilot in a unit test, so assert the CONTRACT on the flags we'd send.
     // (The live probe confirmed the behaviour: `create` returned "Permission denied".)
     let forbidden = ["--allow-all-tools", "--allow-all"];
     for f in forbidden {
-        assert!(!ONE_SHOT_FLAGS.contains(&f), "a judge must never be given `{f}`");
+        assert!(!ONE_SHOT_FLAGS.contains(&f), "a verifier must never be given `{f}`");
     }
     for required in ["--no-custom-instructions", "--disable-builtin-mcps"] {
-        assert!(ONE_SHOT_FLAGS.contains(&required), "judge isolation needs `{required}`");
+        assert!(ONE_SHOT_FLAGS.contains(&required), "verifier isolation needs `{required}`");
     }
 }
 

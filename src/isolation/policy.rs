@@ -2,7 +2,7 @@
 //! the read-only context directories today, the egress allow-list and the container runtime next.
 //!
 //! # Why a registry keyed by project dir, and not a parameter
-//! The policy reaches five spawn surfaces — the worker, a script judge, an LLM judge's one-shot, a
+//! The policy reaches five spawn surfaces — the worker, a script verifier, an rubric verifier's one-shot, a
 //! hook, `notify.cmd` — and every one of them already confines by calling [`super::wrap`] /
 //! [`super::containerize`] with the project dir. Deriving the policy from that dir is the same
 //! choice `rlt/private/`'s carve-out made ([`super::deny_set`]): a parameter is a thing a future
@@ -62,12 +62,12 @@ pub struct RunPolicy {
     pub pass_env: Vec<String>,
     /// canonical host paths every container of the run mounts read-only (`isolation_policy.credentials`).
     pub credentials: Vec<PathBuf>,
-    /// the image judges run in when the run's tier is `container` (`judge.image`, resolved).
-    pub judge_image: String,
-    /// the run's judge tier from its config (`cfg.run_isolation()`). Under `container` swe-metrics
-    /// runs in `judge_image` even for a judge run outside the loop (`rlt judge`, `rlt plan`): that
+    /// the image verifiers run in when the run's tier is `container` (`verifier.image`, resolved).
+    pub verifier_image: String,
+    /// the run's verifier tier from its config (`cfg.run_isolation()`). Under `container` swe-metrics
+    /// runs in `verifier_image` even for a verifier run outside the loop (`rlt verifier`, `rlt plan`): that
     /// is where startup found it, and the host need not have it at all.
-    pub judge_tier: super::Isolation,
+    pub verifier_tier: super::Isolation,
     /// the network allow-list and its enforcement; `None` = `network: open`.
     pub egress: Option<super::egress::Egress>,
 }
@@ -78,8 +78,8 @@ impl Default for RunPolicy {
             contexts: Vec::new(),
             pass_env: Vec::new(),
             credentials: Vec::new(),
-            judge_image: super::DEFAULT_IMAGE.to_string(),
-            judge_tier: super::Isolation::None,
+            verifier_image: super::DEFAULT_IMAGE.to_string(),
+            verifier_tier: super::Isolation::None,
             egress: None,
         }
     }

@@ -158,8 +158,8 @@ pub struct StepOutcome {
     /// the RUN-SET verdicts (the ceiling detectors), in order.
     ///
     /// ⚠ **Empty on the driver path**, and that is correct rather than a gap: nothing is declared to
-    /// rlt here (no `abort_if`/`notify_if`/`invariants`), so there is no run-set to run. The judges
-    /// a driver asks for are LAZY — they live in `rlt.judge(..)`'s per-step cache, not here.
+    /// rlt here (no `abort_if`/`notify_if`/`invariants`), so there is no run-set to run. The verifiers
+    /// a driver asks for are LAZY — they live in `rlt.verifier(..)`'s per-step cache, not here.
     pub verdicts: Vec<(String, Verdict)>,
     /// cumulative output tokens spent by the run as of this step.
     pub tokens: u64,
@@ -227,9 +227,9 @@ pub enum GateFailure {
 
 /// What a regression across a span MEANS to this project — the policy `gate()` applies.
 ///
-/// A regression is "a judge that was met as of the last gate is now unmet, and did not error"
-/// (BUILD.md §3.5). That rule is only sound because **a judge's `met` means GOOD** on this path; an
-/// inverted detector must be inverted before it is used as a driver judge.
+/// A regression is "a verifier that was met as of the last gate is now unmet, and did not error"
+/// (BUILD.md §3.5). That rule is only sound because **a verifier's `met` means GOOD** on this path; an
+/// inverted detector must be inverted before it is used as a driver verifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnRegression {
     /// land the span anyway and record the regression. Choose this for exploratory work, where

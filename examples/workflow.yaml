@@ -1,10 +1,10 @@
 # SAMPLE — the YAML path.
 #
 # ✅ THIS LOADS. `tests/samples.rs::the_yaml_sample_loads` parses this exact file through
-# `RelentlessConfig::load` — the same call `rlt run` makes — and asserts the steps, judges, limits, walk
+# `RelentlessConfig::load` — the same call `rlt run` makes — and asserts the steps, verifiers, limits, walk
 # and regression policy below. Every struct in `core::config` is `deny_unknown_fields`, so a key
 # that stopped existing fails that test rather than being silently ignored. It is not meant to be
-# RUN as-is (the judge files it names are illustrative); it is meant to be COPIED from.
+# RUN as-is (the verifier files it names are illustrative); it is meant to be COPIED from.
 #
 # REVISION 6 (2026-08-05): loaded for the first time against the shipped schema. Two changes, both
 # annotated where they happen — the regression policy is `sequence.gate_regressions: <bool>`, not a
@@ -13,10 +13,10 @@
 # REVISION 5 (2026-08-04). Same workflow as examples/workflow.rs, and the honest gap between
 # them. Read the two side by side; where they differ, the difference is the point.
 #
-# ⛔ REV 5 = THE OWNER SIMPLIFICATION (2026-08-04, RUST_API §14.14): per-entry `if:` and per-judge
-# `gate:`/`when:` are CUT from YAML. "Only simple loops, all judges run after every step, then
+# ⛔ REV 5 = THE OWNER SIMPLIFICATION (2026-08-04, RUST_API §14.14): per-entry `if:` and per-verifier
+# `gate:`/`when:` are CUT from YAML. "Only simple loops, all verifiers run after every step, then
 # gating — everything more complex is the Rust API." The walk is a plain dispatch loop; `until:` +
-# `max:`/`times:` and per-judge `timeout:` survive; the word "gate" now means ONLY `rlt.gate()`.
+# `max:`/`times:` and per-verifier `timeout:` survive; the word "gate" now means ONLY `rlt.gate()`.
 #
 # ═══ WHAT THIS FILE IS, EXACTLY (HANDOFF §4c, D1) ═════════════════════════════════════════════
 # THIS FILE IS THE YAML PATH'S CONFIGURATION, AND NOTHING ELSE. **A RUST DRIVER NEVER READS IT.**
@@ -28,7 +28,7 @@
 #                          sessions: Some(400), wall_time: Some(12.0 * 3600.0), work_time: None })
 #         .on_regression(OnRegression::Annotate);
 #
-# (Corrected in rev 6, two ways. There is NO `.abort_if()` on the Rust path — a driver has judges
+# (Corrected in rev 6, two ways. There is NO `.abort_if()` on the Rust path — a driver has verifiers
 # and `if`, and writing the same logic twice, once in Rust and once in a mini-language, is what that
 # path exists to delete; the ceilings are `.limits(..)` plus an explicit `rlt.check_limits()?`. And
 # `Limits` has FIVE fields: `wall_time` and `work_time` are both SECONDS, and both are shared with
@@ -46,7 +46,7 @@
 # were overlaid on `limits:`, "what is my token ceiling" would have two answers and a precedence
 # rule to remember, get wrong, and debug at 3am. One path, one source of truth.
 #
-# THE ONLY THINGS THE TWO PATHS SHARE ARE **FILES, NOT CONFIG**: `rlt/judges/*.sh` and `*.md`,
+# THE ONLY THINGS THE TWO PATHS SHARE ARE **FILES, NOT CONFIG**: `rlt/verifiers/*.sh` and `*.md`,
 # `rlt/RLT.md`, `rlt/state/`. Those are artefacts read off disk by both. None of them is config.
 # ══════════════════════════════════════════════════════════════════════════════════════════════
 #
@@ -74,7 +74,7 @@
 #
 # `stop::` (the whitelisted condition evaluator, `src/core/stop/mod.rs`) STAYS — `done_if`,
 # `abort_if` and `notify_if` need it regardless, so `until:` costs nothing extra. Since rev 5 those
-# four are the ONLY expression sites in YAML: `if:` and per-judge `gate:`/`when:` are gone.
+# four are the ONLY expression sites in YAML: `if:` and per-verifier `gate:`/`when:` are gone.
 
 project: rate-limiting
 
@@ -85,7 +85,7 @@ project: rate-limiting
 # ideation step that D6 cut. It is `reading` now, and every agent is a harness.)
 # ─────────────────────────────────────────────────────────────────────────────────────────────
 # ⚠ `isolation: none` IS THE DEFAULT, HERE AND IN rlt. Under `none` NOTHING below binds: not the
-# `readonly:`/`writable:` lists, not the `rlt/judges/` deny, not even the `rlt/private/` carve-out.
+# `readonly:`/`writable:` lists, not the `rlt/verifiers/` deny, not even the `rlt/private/` carve-out.
 # The worker has the whole filesystem. Only the three steps that say `isolation: sandbox` are
 # confined at all. Never read a `readonly:` line in this file as a protection without checking the
 # tier of the step it sits on.
@@ -153,31 +153,31 @@ steps:
   implement:
     isolation: sandbox             # under THIS tier the WORKER gets: `rlt/private/` carved out of
                                    # its writable cwd with no knob (SHIPPED, isolation/mod.rs), plus
-                                   # whatever `readonly:` below denies. `rlt/judges/` is NOT denied
+                                   # whatever `readonly:` below denies. `rlt/verifiers/` is NOT denied
                                    # to a worker by default — that is why the line below names it.
                                    #
-                                   # ⚠ DIFFERENT RULE FOR JUDGES, and do not conflate them: naming a
-                                   # confining tier ANYWHERE in this file also confines every JUDGE
-                                   # in the run, and a judge gets the whole project tree read-only —
-                                   # `rlt/judges/` included, so it cannot rewrite the grader, itself
-                                   # included. Its writes are relocated to `$RLT_JUDGE_SCRATCH`
-                                   # instead, so that costs a well-behaved judge nothing.
-                                   # See docs/CONFIG.md → "A judge may not write the project tree".
-    readonly: [tests/, rlt/judges/]
+                                   # ⚠ DIFFERENT RULE FOR VERIFIERS, and do not conflate them: naming a
+                                   # confining tier ANYWHERE in this file also confines every VERIFIER
+                                   # in the run, and a verifier gets the whole project tree read-only —
+                                   # `rlt/verifiers/` included, so it cannot rewrite the grader, itself
+                                   # included. Its writes are relocated to `$RLT_VERIFIER_SCRATCH`
+                                   # instead, so that costs a well-behaved verifier nothing.
+                                   # See docs/CONFIG.md → "A verifier may not write the project tree".
+    readonly: [tests/, rlt/verifiers/]
     writable: [tests/]             # this step SHOULD add tests, so it re-grants exactly that one
-                                   # deny. `rlt/judges/` stays denied.
+                                   # deny. `rlt/verifiers/` stays denied.
     prompt: "Implement rlt/state/wiki/spec.md. Add tests alongside."
 
   fix:
     model: claude-sonnet-5         # a cheaper model for the grind
     isolation: sandbox
-    readonly: [tests/, rlt/judges/]  # NOT re-granted: the obvious way to make a failing test pass
+    readonly: [tests/, rlt/verifiers/]  # NOT re-granted: the obvious way to make a failing test pass
                                      # is to delete it. Enforced by the kernel, not by the prompt.
     prompt: "Make the failing tests and lints pass. Do not delete tests."
 
   harden:
     isolation: sandbox
-    readonly: [tests/, rlt/judges/]
+    readonly: [tests/, rlt/verifiers/]
     prompt: >
       Review the rate limiter for abuse: clock skew, distributed counters, burst handling.
       Fix what you find.
@@ -186,25 +186,25 @@ steps:
     prompt: "Document the rate limiter in docs/ and write a release note."
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────
-# judges — resolved by NAME from rlt/judges/<name>.{sh,md}; the extension decides the kind
-# (`.sh` = script, `.md` = rubric). Only judges needing NON-DEFAULT config appear here; the other
+# verifiers — resolved by NAME from rlt/verifiers/<name>.{sh,md}; the extension decides the kind
+# (`.sh` = script, `.md` = rubric). Only verifiers needing NON-DEFAULT config appear here; the other
 # five (survey_good, spec_sound, builds, lint_clean, tests_pass) need none and are never listed.
 # ⚠ "Not listed here" does NOT mean "does not run", and it does not mean "runs" either — what makes a
-# judge run is being named in an expression (see the run-set note above `sequence:`).
+# verifier run is being named in an expression (see the run-set note above `sequence:`).
 #
-# ⛔ REV 5: THE JUDGE-LEVEL `gate:` IS CUT (owner, 2026-08-04 — RUST_API §14.14), and with it the
+# ⛔ REV 5: THE VERIFIER-LEVEL `gate:` IS CUT (owner, 2026-08-04 — RUST_API §14.14), and with it the
 # old "two meanings of gate" hazard: **"gate" now means ONLY `rlt.gate()`** (the Rust git control).
-# ALL run-set judges run after every judged step — which is what the shipped engine already does —
-# and the per-step keep/rollback gate follows. The "final exam" pattern (cheap judges stop the
-# expensive one running) is exclusively a Rust-path feature: `rlt.judge(&tests).met() &&
-# rlt.judge(&load).met()` short-circuits, so `&&` IS the gating.
+# ALL run-set verifiers run after every verified step — which is what the shipped engine already does —
+# and the per-step keep/rollback gate follows. The "final exam" pattern (cheap verifiers stop the
+# expensive one running) is exclusively a Rust-path feature: `rlt.verifier(&tests).met() &&
+# rlt.verifier(&load).met()` short-circuits, so `&&` IS the gating.
 #
 # THE ACCEPTED COST, VISIBLE RIGHT HERE: `load_ok` is ~40 min of synthetic load and now runs after
-# EVERY judged step — across ~20 cycles that is ~40 HOURS where the Rust sample spends ~40 minutes.
-# The honest YAML answers: make the load judge cheap (a smoke variant), run the full one rarely by
+# EVERY verified step — across ~20 cycles that is ~40 HOURS where the Rust sample spends ~40 minutes.
+# The honest YAML answers: make the load verifier cheap (a smoke variant), run the full one rarely by
 # hand, or take the Rust path. That boundary is the point of the ruling.
 # ─────────────────────────────────────────────────────────────────────────────────────────────
-judges:
+verifiers:
   load_ok:
     timeout: 2700                    # the run-level 300s default would kill it
 
@@ -224,7 +224,7 @@ judges:
 # is no prefix `>`. ONE GOTCHA: write `NOT x`, never the symbolic `!x`, because a leading `!` is a
 # YAML tag and the parse fails before rlt sees it — so what `rlt doctor` reports for `!x` is a
 # config-LOAD error, not an expression error. What it genuinely validates is every well-formed
-# expression: it calls `assemble()`, so a typo'd judge name IS a hard startup error there.
+# expression: it calls `assemble()`, so a typo'd verifier name IS a hard startup error there.
 #
 # ⛔ REV 5: the NO-DISPATCH-LAP REFUSAL (`sequence.rs:155`) is MOOT, not ported — with `if:` cut,
 # every lap dispatches unless the list is empty, and the empty case is the §12.6/OD-5 rule. The
@@ -241,17 +241,17 @@ judges:
 # ─────────────────────────────────────────────────────────────────────────────────────────────
 # ⚠ TWO THINGS ABOUT `until:` THAT ARE EASY TO READ PAST:
 #
-# (a) `until:` IS ALSO WHAT PUTS A JUDGE IN THE RUN-SET. The run-set is
-#     `done_if ∪ abort_if ∪ invariants ∪ every until:` — nothing else. A judge file can sit in
-#     `rlt/judges/` forever, parse, resolve, and never run, because no expression names it. That is
-#     not a bug (a judge library is allowed to be larger than one workflow) but it IS a trap: until
-#     rev 6 `spec_sound` was described above as one of this workflow's judges and was named in no
+# (a) `until:` IS ALSO WHAT PUTS A VERIFIER IN THE RUN-SET. The run-set is
+#     `done_if ∪ abort_if ∪ invariants ∪ every until:` — nothing else. A verifier file can sit in
+#     `rlt/verifiers/` forever, parse, resolve, and never run, because no expression names it. That is
+#     not a bug (a verifier library is allowed to be larger than one workflow) but it IS a trap: until
+#     rev 6 `spec_sound` was described above as one of this workflow's verifiers and was named in no
 #     expression, so the Rust sample graded the spec and this file silently did not. The `until:` on
 #     `spec` below is what makes the two workflows the same workflow.
 #
 # (b) `max:` IS A CONTRACT, NOT A BUDGET. Spending it without the condition ever holding ABORTS the
 #     run (`core/walk.rs`) — it does not quietly move to the next entry. Exhaustion and convergence
-#     used to take the same branch, which meant a step burning its whole bound against a judge that
+#     used to take the same branch, which meant a step burning its whole bound against a verifier that
 #     was TIMING OUT looked exactly like a step that had succeeded. Choose these numbers as the
 #     point at which a human should be told, because that is what they now mean.
 #
@@ -300,10 +300,10 @@ sequence:
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 # THE HONEST GAP vs examples/workflow.rs — read this before choosing YAML
 #
-# (1) NO NATIVE JUDGES.  `p99_ok` is a Rust closure in the Rust sample — it reads one field out of
+# (1) NO NATIVE VERIFIERS.  `p99_ok` is a Rust closure in the Rust sample — it reads one field out of
 #     rlt/state/bench.json and returns a Verdict with the number attached. Here it must become
-#     rlt/judges/p99_ok.sh parsing the same JSON with jq.
-#     CONSEQUENCE for this workflow: equivalent in effect, but a fork per judge per step, and the
+#     rlt/verifiers/p99_ok.sh parsing the same JSON with jq.
+#     CONSEQUENCE for this workflow: equivalent in effect, but a fork per verifier per step, and the
 #     rationale string ("p99 4.2ms") is now the script's stdout contract instead of a compiler-
 #     checked `format!`. Cheap to accept here. It stops being cheap when the check needs state the
 #     shell cannot hold.
@@ -330,8 +330,8 @@ sequence:
 #     and may not) or an `on_session_end` hook. The deterministic thing became a probabilistic one.
 #
 # (5) EXPRESSIONS, NOT CLOSURES.  Every `until:` / `done_if:` / `abort_if:` above is the whitelisted
-#     `stop::` grammar: judge names, `.value` / `.max`, the aggregates, run-level scalars,
-#     AND/OR/NOT. No arithmetic across judges, no reading the diff, no calling out.
+#     `stop::` grammar: verifier names, `.value` / `.max`, the aggregates, run-level scalars,
+#     AND/OR/NOT. No arithmetic across verifiers, no reading the diff, no calling out.
 #     CONSEQUENCE: nothing in THIS workflow needs more. And the trade runs the other way too —
 #     an expression is startup-VALIDATED by `rlt doctor` and DISPLAYABLE on the dashboard, and a
 #     Rust closure is neither. This gap is not purely a loss.
@@ -352,13 +352,13 @@ sequence:
 #     `notify_if: stalled` fires one templated `{{reason}}` for all of them.
 #
 # (7) NO CONTROL OVER *WHEN* THE KEEP-OR-ROLLBACK DECISION HAPPENS.  This is `rlt.gate()`
-#     (HANDOFF §4c, D2). Since rev 5 there is no naming hazard left: the judge-level `gate:` field
+#     (HANDOFF §4c, D2). Since rev 5 there is no naming hazard left: the verifier-level `gate:` field
 #     was cut (owner, 2026-08-04), so "gate" means exactly this — whether WORK LANDS.
 #       RUST:  `rlt.step()` ALWAYS STAGES — every session is committed on its own branch and the
 #              span accumulates, nothing merges. The driver then calls `rlt.gate()?` at a moment it
 #              chooses, and rlt decides keep-or-rollback over ALL verdicts consulted since the last
 #              gate, applying `on_regression`. The driver says WHEN; the policy says WHAT.
-#       YAML:  the walk gates after EVERY judged step, automatically. There is no field for it and
+#       YAML:  the walk gates after EVERY verified step, automatically. There is no field for it and
 #              no way to widen or narrow the span. (This file's span is therefore always one step.)
 #     WHICH IS BETTER FOR WHICH CASE — the honest answer is that YAML's automatic gate is right most
 #     of the time:
@@ -366,15 +366,15 @@ sequence:
 #         like this one. Gating per step gives the tightest possible blast radius: a bad `fix`
 #         session is discarded immediately and never contaminates the next. It also needs no
 #         discipline: there is no line to forget.
-#       · EXPLICIT (RUST) WINS when a UNIT OF WORK SPANS SEVERAL STEPS AND IS ONLY JUDGEABLE AT THE
+#       · EXPLICIT (RUST) WINS when a UNIT OF WORK SPANS SEVERAL STEPS AND IS ONLY VERIFIERABLE AT THE
 #         END — the migration case. `implement` alone leaves the tree red BY DESIGN and `fix` makes
-#         it green; judged per step, `implement` looks like a regression and a `rollback` policy
+#         it green; verified per step, `implement` looks like a regression and a `rollback` policy
 #         throws away the half that was correct, then the loop redoes it and livelocks. One
-#         `rlt.gate()` after `fix` judges the pair as one thing, which is what it is.
+#         `rlt.gate()` after `fix` verifiers the pair as one thing, which is what it is.
 #         (This is the same asymmetry that made `on_regression: annotate` the default: a regression
 #         is sometimes the necessary local minimum. YAML's answer is to never roll back; Rust's is
 #         to widen what "the change" means.)
-#     CONSEQUENCE for THIS workflow: none — every step here is independently judgeable, which is
+#     CONSEQUENCE for THIS workflow: none — every step here is independently verifierable, which is
 #     part of why it fits YAML. Cost of the Rust version: an ungated span is a NO-OP, so a driver
 #     that forgets `rlt.gate()` advances base never. rlt does not guess — it neither auto-merges
 #     (it must not make a call it was not given) nor auto-rolls-back (discarding an overnight run
@@ -387,7 +387,7 @@ sequence:
 #     a directory IDENTICALLY (trailing slash included), because subtraction compares paths.
 #     CONSEQUENCE, visible above: `defaults:` is spent on the harness family, so `survey` must
 #     re-state `agent` and `effort` to escape it, and `implement`/`fix`/`harden` each REPEAT
-#     `isolation: sandbox` and `readonly: [tests/, rlt/judges/]` — three copies of one protection.
+#     `isolation: sandbox` and `readonly: [tests/, rlt/verifiers/]` — three copies of one protection.
 #     What is lost is not the typing, it is the ACCUMULATION: in Rust a derived step cannot silently
 #     drop a `readonly` its template set, so a fourth sandboxed step is safe by construction. Here,
 #     a fourth sandboxed step that forgets the `readonly:` line can delete tests, and nothing warns.
@@ -402,7 +402,7 @@ sequence:
 #
 # ── WHAT YAML KEEPS, which is most of it ─────────────────────────────────────────────────────
 # Every step option (agent, model, effort, isolation, readonly, writable, prompt) · script AND
-# rubric judges · per-judge `timeout:` · repetition with a bound (`until:`+`max:`/`times:`) ·
+# rubric verifiers · per-verifier `timeout:` · repetition with a bound (`until:`+`max:`/`times:`) ·
 # ceilings · invariants · `done_if` / `abort_if` · `on_regression` · `notify_if` / `notify` · and
 # per-step keep-or-rollback with no line to forget. For a linear build-test-fix loop — which is most projects, and very nearly this one —
 # this file is the better choice: it is shorter, it is validated at startup rather than at runtime,

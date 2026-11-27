@@ -2,9 +2,9 @@
 //!
 //! PATH holds ONLY a private `bin/` with a fake `claude`, so the host is fully controlled: no
 //! `sandbox-exec`/`bwrap` (the sandbox tier is unavailable), no `docker`/`podman` (no container
-//! engine). The fake agent and the judge each leave a marker file when they RUN, which is how
+//! engine). The fake agent and the verifier each leave a marker file when they RUN, which is how
 //! "check runs nothing" is proved rather than assumed. HOME is redirected into the temp dir so the
-//! judge library install never touches the developer's real home.
+//! verifier library install never touches the developer's real home.
 
 #![cfg(unix)]
 
@@ -26,7 +26,7 @@ fn write(dir: &Path, name: &str, content: &str) {
 }
 
 /// A project dir with a fake `claude` (answers `--version`; marks `agent_ran` on any real call) and
-/// a `goal` judge (marks `judge_ran`). Returns (tempdir, PATH = the fake bin ONLY).
+/// a `goal` verifier (marks `verifier_ran`). Returns (tempdir, PATH = the fake bin ONLY).
 fn project(cfg: &str) -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -35,7 +35,7 @@ fn project(cfg: &str) -> (tempfile::TempDir, String) {
         "bin/claude",
         "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo 'fake-claude 9.9.9'; exit 0; }\n: > agent_ran\nexit 0\n",
     );
-    write(dir, "rlt/judges/goal.sh", "#!/bin/sh\n: > judge_ran\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}'\n");
+    write(dir, "rlt/verifiers/goal.sh", "#!/bin/sh\n: > verifier_ran\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}'\n");
     write(dir, "rlt/state/STATE.md", "next\n");
     write(dir, "rlt/rlt.yaml", cfg);
     let path = dir.join("bin").display().to_string();
@@ -69,14 +69,14 @@ const GOOD: &str = "project: \"p\"\nsummary: { enabled: false }\nsteps: { worker
 /// One fault per config, each from a different startup stage.
 const BAD_KEY: &str = "project: \"p\"\ndefaults: { agnet: \"claude\" }\nsummary: { enabled: false }\n\
                        steps: { worker: {} }\nsequence: { steps: [\"worker\"], done_if: \"goal\" }\n";
-const BAD_JUDGE: &str = "project: \"p\"\nsummary: { enabled: false }\nsteps: { worker: {} }\n\
+const BAD_VERIFIER: &str = "project: \"p\"\nsummary: { enabled: false }\nsteps: { worker: {} }\n\
                          sequence: { steps: [\"worker\"], done_if: \"ghost\" }\n";
 const BAD_TIER: &str = "project: \"p\"\nsummary: { enabled: false }\nsteps: { worker: { isolation: \"sandbox\" } }\n\
                         sequence: { steps: [\"worker\"], done_if: \"goal\" }\n";
 const ALL_THREE: &str = "project: \"p\"\ndefaults: { agnet: \"claude\" }\nsummary: { enabled: false }\n\
                          steps: { worker: { isolation: \"sandbox\" } }\nsequence: { steps: [\"worker\"], done_if: \"ghost\" }\n";
 
-/// THE acceptance criterion: an invalid key, an unknown judge and an unavailable sandbox are
+/// THE acceptance criterion: an invalid key, an unknown verifier and an unavailable sandbox are
 /// returned together, each at its path — and nothing ran to find them.
 #[test]
 fn check_json_returns_every_problem_at_once_and_runs_nothing() {
@@ -88,7 +88,7 @@ fn check_json_returns_every_problem_at_once_and_runs_nothing() {
     assert_eq!(v["schema_version"], 1);
     assert_eq!(v["ok"], false);
     assert_eq!(problem_paths(&v), ["defaults.agnet", "sequence.done_if", "steps.worker.isolation"]);
-    assert!(!dir.join("judge_ran").exists(), "check must never run a judge");
+    assert!(!dir.join("verifier_ran").exists(), "check must never run a verifier");
     assert!(!dir.join("agent_ran").exists(), "check must never run an agent");
 }
 
@@ -96,7 +96,7 @@ fn check_json_returns_every_problem_at_once_and_runs_nothing() {
 /// what `rlt run` refuses with.
 #[test]
 fn each_check_message_is_what_startup_says() {
-    for (cfg, at) in [(BAD_KEY, "defaults.agnet"), (BAD_JUDGE, "sequence.done_if"), (BAD_TIER, "steps.worker.isolation")] {
+    for (cfg, at) in [(BAD_KEY, "defaults.agnet"), (BAD_VERIFIER, "sequence.done_if"), (BAD_TIER, "steps.worker.isolation")] {
         let (tmp, path) = project(cfg);
         let v = json(&rlt(tmp.path(), &path, &["check", "--json"]));
         assert_eq!(problem_paths(&v), [at], "exactly one problem for this fixture: {v}");
@@ -121,8 +121,8 @@ fn check_passes_a_good_config_and_runs_nothing() {
 
     let out = rlt(dir, &path, &["check"]);
     assert!(out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("1 judge(s) resolve"));
-    assert!(!dir.join("judge_ran").exists() && !dir.join("agent_ran").exists(), "check must run nothing");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("1 verifier(s) resolve"));
+    assert!(!dir.join("verifier_ran").exists() && !dir.join("agent_ran").exists(), "check must run nothing");
 }
 
 /// Without `--json` the same problems are listed for a human, located, and the exit code agrees.
@@ -168,7 +168,7 @@ fn doctor_json_reports_backends_tiers_and_ok() {
     assert_eq!(v["rlt_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(v["ok"], true);
     assert_eq!(v["config"]["valid"], true);
-    assert_eq!(v["config"]["judges"], 1);
+    assert_eq!(v["config"]["verifiers"], 1);
 
     let claude = &v["backends"][0];
     assert_eq!(claude["name"], "claude");
@@ -187,7 +187,7 @@ fn doctor_json_reports_backends_tiers_and_ok() {
     assert_eq!(v["isolation"]["sandbox"]["available"], false, "no wrapper on this PATH");
     assert_eq!(v["isolation"]["container"]["available"], false);
     assert!(v["container_engine"].is_null());
-    assert!(!dir.join("judge_ran").exists() && !dir.join("agent_ran").exists(), "doctor must run nothing");
+    assert!(!dir.join("verifier_ran").exists() && !dir.join("agent_ran").exists(), "doctor must run nothing");
 }
 
 /// A requested tier the host lacks is a problem AT ITS KEY, and the tier says it was requested.

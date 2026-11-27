@@ -28,7 +28,7 @@ pub fn stopped_section(dir: &std::path::Path, step: &str) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "## Work a stopped session left\n\nAn earlier session of this step was stopped before its work was judged \
+        "## Work a stopped session left\n\nAn earlier session of this step was stopped before its work was verified \
          or merged. What it did is kept on the refs below, and rlt does not merge it: you decide what of it holds. \
          Look with `git diff <base> <ref>` (all of it) or `git show <ref>:<path>` (a file); take a file as it is with \
          `git checkout <ref> -- <path>`. Take only what this task needs and is right, and check it like your own \

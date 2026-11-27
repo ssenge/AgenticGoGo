@@ -1,10 +1,10 @@
 //! The numeric RATCHET and the gate's own history — `rollbacks`, `consecutive_rollbacks`,
 //! `no_improvements`, `consecutive_no_improvements`, `no_changes`, `consecutive_no_changes`,
-//! `oscillating`, `ratchet_regressed`, `<judge>.ref`.
+//! `oscillating`, `ratchet_regressed`, `<verifier>.ref`.
 //!
-//! # Why these are process-internal terms, not judges
+//! # Why these are process-internal terms, not verifiers
 //!
-//! `stalled` is a judge that reads `verdicts.jsonl`, and that file sits in the worker's writable cwd
+//! `stalled` is a verifier that reads `verdicts.jsonl`, and that file sits in the worker's writable cwd
 //! under `isolation: none` — a PROTOCOL boundary, not a permission one. Everything here is computed
 //! from what the GATE decided, in the loop's own memory, and only PERSISTED (to `rlt/private/`) so a
 //! resume can pick it up. So, like `over_iterations`, these terms are unfakeable on every tier and
@@ -12,7 +12,7 @@
 //!
 //! # The ratchet in one sentence
 //!
-//! A ratcheted judge's `value` may not get worse than it was at the last KEPT gate, by more than its
+//! A ratcheted verifier's `value` may not get worse than it was at the last KEPT gate, by more than its
 //! tolerance. Before the first keep, the reference is the configured seed (`baseline:`) or, without
 //! one, the pre-session baseline pass. A regression beyond tolerance is a gate regression: the
 //! session is rolled back under `gate_regressions: true` (the default).
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Which way is BETTER for a ratcheted judge's `value`.
+/// Which way is BETTER for a ratcheted verifier's `value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -33,13 +33,13 @@ pub enum Direction {
     Down,
 }
 
-/// One judge's ratchet: `sequence.ratchet.<judge>` in YAML, [`crate::driver::Relentless::ratchet`] in Rust.
+/// One verifier's ratchet: `sequence.ratchet.<verifier>` in YAML, [`crate::driver::Relentless::ratchet`] in Rust.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Ratchet {
     /// REQUIRED — there is no sensible default for which way is better.
     pub direction: Direction,
-    /// how much worse than the reference is still accepted, in the judge's own units. Default 0.
+    /// how much worse than the reference is still accepted, in the verifier's own units. Default 0.
     #[serde(default)]
     pub tolerance: f64,
     /// the same allowance as a percentage of the reference. With both set, the LARGER one applies.
@@ -71,16 +71,16 @@ impl Ratchet {
     }
 
     /// Refuse a ratchet that cannot mean anything: a negative or non-finite allowance, a NaN seed.
-    pub fn validate(&self, judge: &str) -> Result<()> {
+    pub fn validate(&self, verifier: &str) -> Result<()> {
         let bad = |what: &str, v: f64| v.is_nan() || v.is_infinite() || (what != "baseline" && v < 0.0);
         if bad("tolerance", self.tolerance) {
-            bail!("ratchet `{judge}`: `tolerance` must be a finite number >= 0, got {}", self.tolerance);
+            bail!("ratchet `{verifier}`: `tolerance` must be a finite number >= 0, got {}", self.tolerance);
         }
         if let Some(p) = self.tolerance_pct.filter(|p| bad("tolerance_pct", *p)) {
-            bail!("ratchet `{judge}`: `tolerance_pct` must be a finite number >= 0, got {p}");
+            bail!("ratchet `{verifier}`: `tolerance_pct` must be a finite number >= 0, got {p}");
         }
         if let Some(b) = self.baseline.filter(|b| bad("baseline", *b)) {
-            bail!("ratchet `{judge}`: `baseline` must be a finite number, got {b}");
+            bail!("ratchet `{verifier}`: `baseline` must be a finite number, got {b}");
         }
         Ok(())
     }
@@ -115,17 +115,17 @@ impl Ratchet {
     }
 }
 
-/// `sequence.ratchet.<judge>` AS WRITTEN: a [`Ratchet`] whose `direction` may be left out for a
-/// judge that states its own — a metric judge (its threshold: `max:` ⇒ down, `min:` ⇒ up, checked
-/// against the metric's direction in the report at every run) or a score judge (higher is better).
-/// Assembly resolves it into a [`Ratchet`]; any other judge without a `direction` is refused there.
+/// `sequence.ratchet.<verifier>` AS WRITTEN: a [`Ratchet`] whose `direction` may be left out for a
+/// verifier that states its own — a metric verifier (its threshold: `max:` ⇒ down, `min:` ⇒ up, checked
+/// against the metric's direction in the report at every run) or a score verifier (higher is better).
+/// Assembly resolves it into a [`Ratchet`]; any other verifier without a `direction` is refused there.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RatchetCfg {
-    /// which way is better. Required, except for a metric or score judge, which states its own.
+    /// which way is better. Required, except for a metric or score verifier, which states its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direction: Option<Direction>,
-    /// how much worse than the reference is still accepted, in the judge's own units. Default 0.
+    /// how much worse than the reference is still accepted, in the verifier's own units. Default 0.
     #[serde(default)]
     pub tolerance: f64,
     /// the same allowance as a percentage of the reference. With both set, the LARGER one applies.
@@ -144,12 +144,12 @@ impl From<Ratchet> for RatchetCfg {
 
 impl RatchetCfg {
     /// Refuse numbers that cannot mean anything — [`Ratchet::validate`], whatever the direction.
-    pub fn validate(&self, judge: &str) -> Result<()> {
-        self.resolve(Some(Direction::Up)).expect("a direction was given").validate(judge)
+    pub fn validate(&self, verifier: &str) -> Result<()> {
+        self.resolve(Some(Direction::Up)).expect("a direction was given").validate(verifier)
     }
 
     /// The [`Ratchet`] this entry means, with `implied` standing in for a missing `direction`
-    /// (`None` when the judge states none either — the caller refuses that).
+    /// (`None` when the verifier states none either — the caller refuses that).
     pub fn resolve(&self, implied: Option<Direction>) -> Option<Ratchet> {
         Some(Ratchet {
             direction: self.direction.or(implied)?,
@@ -161,17 +161,17 @@ impl RatchetCfg {
 }
 
 /// The ratchets whose `direction` is written out — every one a driver declares (it constructs a
-/// [`Ratchet`]); a YAML entry that leaves it to its judge is resolved by assembly instead.
+/// [`Ratchet`]); a YAML entry that leaves it to its verifier is resolved by assembly instead.
 pub fn resolve_explicit(cfg: &BTreeMap<String, RatchetCfg>) -> BTreeMap<String, Ratchet> {
     cfg.iter().filter_map(|(n, c)| c.resolve(None).map(|r| (n.clone(), r))).collect()
 }
 
-/// One ratchet regression, as the gate recorded it: the judge, the reference it was held to, and
-/// what it measured. `to: None` = the judge errored or emitted no number — it could not show that it
+/// One ratchet regression, as the gate recorded it: the verifier, the reference it was held to, and
+/// what it measured. `to: None` = the verifier errored or emitted no number — it could not show that it
 /// is no worse, and a ratchet never passes on an unmeasured value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RatchetRegression {
-    pub judge: String,
+    pub verifier: String,
     pub from: Option<f64>,
     pub to: Option<f64>,
 }
@@ -203,7 +203,7 @@ const HISTORY_CAP: usize = 64;
 /// every driver `Gate` call record so a resume restores it as of the last kept gate.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GateState {
-    /// the ratchet references: each ratcheted judge's value at the last kept gate (or its seed).
+    /// the ratchet references: each ratcheted verifier's value at the last kept gate (or its seed).
     #[serde(default)]
     pub refs: BTreeMap<String, f64>,
     /// sessions the regression policy rolled back, this run.
@@ -225,14 +225,14 @@ pub struct GateState {
     /// breaks it.
     #[serde(default)]
     pub consecutive_no_changes: u32,
-    /// one signature per judged gate, oldest first: the sorted names of the judges that were
+    /// one signature per verified gate, oldest first: the sorted names of the verifiers that were
     /// failing (see [`signature`]).
     #[serde(default)]
     pub signatures: Vec<Vec<String>>,
-    /// the ratchet regressions of the MOST RECENT judged gate (backs `ratchet_regressed`).
+    /// the ratchet regressions of the MOST RECENT verified gate (backs `ratchet_regressed`).
     #[serde(default)]
     pub last_ratchet: Vec<RatchetRegression>,
-    /// per ratcheted judge with a BASIS (a score judge's `definition@version`), the basis its
+    /// per ratcheted verifier with a BASIS (a score verifier's `definition@version`), the basis its
     /// reference was taken under. Two scoring definitions' numbers are not comparable, so a
     /// reference whose basis is not the configured one is reset ([`Gate::restore`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -240,19 +240,19 @@ pub struct GateState {
 }
 
 impl GateState {
-    /// The reference a ratcheted judge is currently held to.
-    pub fn reference(&self, judge: &str) -> Option<f64> {
-        self.refs.get(judge).copied()
+    /// The reference a ratcheted verifier is currently held to.
+    pub fn reference(&self, verifier: &str) -> Option<f64> {
+        self.refs.get(verifier).copied()
     }
 
-    /// Did the most recent judged gate record a ratchet regression?
+    /// Did the most recent verified gate record a ratchet regression?
     pub fn ratchet_regressed(&self) -> bool {
         !self.last_ratchet.is_empty()
     }
 
     /// A→B→A: the latest signature is non-empty and equals one of the `window` signatures before it,
     /// with at least one DIFFERENT signature in between. An all-green signature never counts —
-    /// returning to a good state is not oscillation — and fewer than three judged gates never do.
+    /// returning to a good state is not oscillation — and fewer than three verified gates never do.
     pub fn oscillating(&self, window: usize) -> bool {
         let Some((cur, earlier)) = self.signatures.split_last() else { return false };
         if cur.is_empty() {
@@ -273,7 +273,7 @@ pub struct Gate {
     pub specs: BTreeMap<String, Ratchet>,
     pub window: usize,
     pub state: GateState,
-    /// the configured basis of each ratcheted judge that has one (see [`GateState::bases`]).
+    /// the configured basis of each ratcheted verifier that has one (see [`GateState::bases`]).
     pub bases: BTreeMap<String, String>,
 }
 
@@ -290,7 +290,7 @@ impl Gate {
         Gate { specs, window, state: GateState { refs, ..GateState::default() }, bases: BTreeMap::new() }
     }
 
-    /// Give judges a BASIS — what their values are comparable under (a score judge's
+    /// Give verifiers a BASIS — what their values are comparable under (a score verifier's
     /// `definition@version`). Every reference taken from now on is stamped with it.
     pub fn with_bases(mut self, bases: BTreeMap<String, String>) -> Gate {
         self.bases = bases;
@@ -306,9 +306,9 @@ impl Gate {
         }
     }
 
-    fn stamp(&mut self, judge: &str) {
-        if let Some(b) = self.bases.get(judge) {
-            self.state.bases.insert(judge.to_string(), b.clone());
+    fn stamp(&mut self, verifier: &str) {
+        if let Some(b) = self.bases.get(verifier) {
+            self.state.bases.insert(verifier.to_string(), b.clone());
         }
     }
 
@@ -319,17 +319,17 @@ impl Gate {
     pub fn restore(&mut self, persisted: GateState) -> Vec<String> {
         let current = std::mem::replace(&mut self.state, persisted);
         let mut warnings = Vec::new();
-        for (judge, basis) in &self.bases {
-            let was = self.state.bases.get(judge);
-            if !self.state.refs.contains_key(judge) || was == Some(basis) {
+        for (verifier, basis) in &self.bases {
+            let was = self.state.bases.get(verifier);
+            if !self.state.refs.contains_key(verifier) || was == Some(basis) {
                 continue;
             }
-            match current.refs.get(judge) {
-                Some(r) => self.state.refs.insert(judge.clone(), *r),
-                None => self.state.refs.remove(judge),
+            match current.refs.get(verifier) {
+                Some(r) => self.state.refs.insert(verifier.clone(), *r),
+                None => self.state.refs.remove(verifier),
             };
             warnings.push(format!(
-                "ratchet `{judge}`: its reference was taken under {}, not {basis} — scores of two definitions are not comparable, so the reference is reset",
+                "ratchet `{verifier}`: its reference was taken under {}, not {basis} — scores of two definitions are not comparable, so the reference is reset",
                 was.map(String::as_str).unwrap_or("an unrecorded definition")
             ));
         }
@@ -337,8 +337,8 @@ impl Gate {
         warnings
     }
 
-    pub fn is_ratcheted(&self, judge: &str) -> bool {
-        self.specs.contains_key(judge)
+    pub fn is_ratcheted(&self, verifier: &str) -> bool {
+        self.specs.contains_key(verifier)
     }
 
     /// `oscillating` at the configured window.
@@ -349,9 +349,9 @@ impl Gate {
     /// Take the references from the pre-session baseline pass. Returns the warnings to print.
     ///
     /// A seed wins over the measurement; a gap between them beyond tolerance is reported as drift.
-    /// Refused: a ratcheted judge that emits no number (no ratchet can hold it), and one that
+    /// Refused: a ratcheted verifier that emits no number (no ratchet can hold it), and one that
     /// errors with no seed to fall back on (there would be nothing to compare session 1 against).
-    /// A judge missing from `baseline` is skipped — the driver path has no baseline pass.
+    /// A verifier missing from `baseline` is skipped — the driver path has no baseline pass.
     pub fn seed(&mut self, baseline: &[(String, Verdict)]) -> Result<Vec<String>> {
         let mut warnings = Vec::new();
         for (name, spec) in &self.specs {
@@ -366,7 +366,7 @@ impl Gate {
 
     fn seed_one(refs: &mut BTreeMap<String, f64>, name: &str, spec: &Ratchet, v: &Verdict) -> Result<Option<String>> {
         if v.error.is_none() && finite(v).is_none() {
-            bail!("ratcheted judge `{name}` emitted no `value` — a ratchet compares numbers, so this judge cannot be ratcheted");
+            bail!("ratcheted verifier `{name}` emitted no `value` — a ratchet compares numbers, so this verifier cannot be ratcheted");
         }
         match (spec.baseline, finite(v), &v.error) {
             (Some(seed), Some(now), _) if (now - seed).abs() > spec.allowance(seed) => Ok(Some(format!(
@@ -375,7 +375,7 @@ impl Gate {
             (Some(_), _, Some(e)) => Ok(Some(format!("ratchet `{name}`: the baseline pass errored ({e}) — using the seed"))),
             (Some(_), _, _) => Ok(None),
             (None, _, Some(e)) => {
-                bail!("ratcheted judge `{name}` errored on the baseline pass and has no `baseline:` seed to fall back on: {e}")
+                bail!("ratcheted verifier `{name}` errored on the baseline pass and has no `baseline:` seed to fall back on: {e}")
             }
             (None, now, None) => {
                 refs.insert(name.to_string(), now.expect("checked above"));
@@ -384,7 +384,7 @@ impl Gate {
         }
     }
 
-    /// The driver's baseline: a ratcheted judge asked BEFORE the first step sets the reference
+    /// The driver's baseline: a ratcheted verifier asked BEFORE the first step sets the reference
     /// (unless a seed already did). Returns a warning to print, if any.
     pub fn observe_pre_step(&mut self, name: &str, v: &Verdict) -> Option<String> {
         let spec = self.specs.get(name)?;
@@ -399,7 +399,7 @@ impl Gate {
         out
     }
 
-    /// The ratchet regressions among `fresh`. A ratcheted judge that errored or has no number is a
+    /// The ratchet regressions among `fresh`. A ratcheted verifier that errored or has no number is a
     /// regression whatever its reference; one with no reference yet cannot regress.
     pub fn check(&self, fresh: &[(String, Verdict)]) -> Vec<RatchetRegression> {
         fresh
@@ -407,7 +407,7 @@ impl Gate {
             .filter_map(|(name, v)| {
                 let spec = self.specs.get(name)?;
                 let from = self.state.reference(name);
-                let reg = |to| Some(RatchetRegression { judge: name.clone(), from, to });
+                let reg = |to| Some(RatchetRegression { verifier: name.clone(), from, to });
                 match (finite(v).filter(|_| v.error.is_none()), from) {
                     (None, _) => reg(None),
                     (Some(now), Some(r)) if spec.regressed(r, now) => reg(Some(now)),
@@ -417,9 +417,9 @@ impl Gate {
             .collect()
     }
 
-    /// The ratcheted judges among `fresh` that IMPROVED on their reference beyond tolerance. One with
+    /// The ratcheted verifiers among `fresh` that IMPROVED on their reference beyond tolerance. One with
     /// no reference yet, an error or no number cannot show an improvement — and neither can a
-    /// `mixed` verdict, whose own measurements moved in different directions (a metric judge with
+    /// `mixed` verdict, whose own measurements moved in different directions (a metric verifier with
     /// `combine: all` whose tools disagree): the number moved, but it is not agreed to be better.
     pub fn improved(&self, fresh: &[(String, Verdict)]) -> Vec<String> {
         fresh
@@ -434,7 +434,7 @@ impl Gate {
     }
 
     /// Fold one gate into the state: counters, the signature history, and — on a KEEP — the new
-    /// references. `fresh` empty = no judge ran, so there is no signature to record.
+    /// references. `fresh` empty = no verifier ran, so there is no signature to record.
     pub fn record(
         &mut self,
         decision: GateDecision,
@@ -485,8 +485,8 @@ fn finite(v: &Verdict) -> Option<f64> {
     v.value.filter(|n| n.is_finite())
 }
 
-/// A gate's judge-state signature: the sorted names of the in-scope judges that are failing (not
-/// met, or errored) plus every judge that regressed its ratchet.
+/// A gate's verifier-state signature: the sorted names of the in-scope verifiers that are failing (not
+/// met, or errored) plus every verifier that regressed its ratchet.
 pub fn signature(
     fresh: &[(String, Verdict)],
     in_scope: impl Fn(&str) -> bool,
@@ -496,7 +496,7 @@ pub fn signature(
         .iter()
         .filter(|(n, v)| in_scope(n) && (!v.met || v.error.is_some()))
         .map(|(n, _)| n.clone())
-        .chain(ratchet.iter().map(|r| r.judge.clone()))
+        .chain(ratchet.iter().map(|r| r.verifier.clone()))
         .collect();
     out.sort();
     out.dedup();
@@ -506,7 +506,7 @@ pub fn signature(
 /// One line per regression, for the operator's terminal.
 pub fn describe(regs: &[RatchetRegression]) -> Vec<String> {
     let num = |n: Option<f64>| n.map(|v| v.to_string()).unwrap_or_else(|| "no value".into());
-    regs.iter().map(|r| format!("ratchet `{}`: {} → {}", r.judge, num(r.from), num(r.to))).collect()
+    regs.iter().map(|r| format!("ratchet `{}`: {} → {}", r.verifier, num(r.from), num(r.to))).collect()
 }
 
 /// Persist the state to `rlt/private/gate.json`. A hard error, like `verdicts::append`: a resume

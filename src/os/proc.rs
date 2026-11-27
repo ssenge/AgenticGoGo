@@ -1,6 +1,6 @@
 //! Process primitives — the ONE home for the OS-level operations the harness leans on.
 //!
-//! Before this module these were copy-pasted across judge/summary/worker/reap/spawns/detach
+//! Before this module these were copy-pasted across verifier/summary/worker/reap/spawns/detach
 //! (the `kill(2)` FFI block alone lived in six files, and two of the copies had already begun
 //! to diverge). Process killing, liveness, and the timeout-runner are correctness-sensitive;
 //! they belong in exactly one place. Everything cross-platform lives here behind a `#[cfg]`.
@@ -166,7 +166,7 @@ pub struct Captured {
 /// On unix the child runs in its own process group so the timeout kill reaps grandchildren too.
 ///
 /// The caller sets `current_dir`/env on `command` before calling (this keeps the runner
-/// policy-free: the judge runs in the project dir, the summarizer wherever it likes).
+/// policy-free: the verifier runs in the project dir, the summarizer wherever it likes).
 pub fn run_with_timeout(command: Command, timeout_secs: u64) -> Result<Captured, String> {
     run(command, None, timeout_secs)
 }

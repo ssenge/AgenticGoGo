@@ -3,7 +3,7 @@
 //!
 //! The redirect is done at the FILE-DESCRIPTOR level, not by threading a writer through the code:
 //! log lines come from the loop, from the worker's stream-reader thread, and from every child rlt
-//! spawns (judges, hooks, the agent CLI's own stderr). Pointing fd 1 and fd 2 at the log catches all
+//! spawns (verifiers, hooks, the agent CLI's own stderr). Pointing fd 1 and fd 2 at the log catches all
 //! of them, including output rlt does not know it produces. The ORIGINAL descriptors are kept, so the
 //! report still reaches the caller's stdout and a fatal reason still reaches its stderr.
 

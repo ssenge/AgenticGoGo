@@ -18,14 +18,14 @@
 //! call. ⛔ rlt never auto-merges an ungated span and never auto-rolls it back — it names the branch
 //! and the `git merge` that lands it, and leaves the call to the operator.
 //!
-//! `Judge` and `Verdict` are NOT here: they are the shipped [`crate::core::model`] types, extended
-//! in place with the driver's constructors ([`Judge::rubric`](crate::core::model::Judge::rubric),
-//! `script`, `native`) rather than twinned — one definition of a judge, whichever path built it.
+//! `Verifier` and `Verdict` are NOT here: they are the shipped [`crate::core::model`] types, extended
+//! in place with the driver's constructors ([`Verifier::rubric`](crate::core::model::Verifier::rubric),
+//! `script`, `native`) rather than twinned — one definition of a verifier, whichever path built it.
 //!
 //! # The rule that shapes every type in here
 //!
 //! ⛔ **A stray `rlt.yaml` in a driver project is IGNORED** — not merged, not a fallback. The two
-//! paths share FILES (`rlt/judges/`, `rlt/RLT.md`, `rlt/state/`), never configuration. Types that
+//! paths share FILES (`rlt/verifiers/`, `rlt/RLT.md`, `rlt/state/`), never configuration. Types that
 //! look like config ([`Limits`](crate::core::config::Limits), [`Isolation`](crate::isolation::Isolation))
 //! are REUSED from the shipped structs rather than redefined, so there is one definition of each
 //! knob — but on this path they are populated in Rust and only in Rust.

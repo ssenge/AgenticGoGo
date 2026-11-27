@@ -2,7 +2,7 @@
 //! PATH, a real git repo — as in `tests/cli.rs`.
 //!
 //! Every report a test produces is validated against the PUBLISHED schema
-//! (`docs/schemas/report.v3.json`), with a small validator below that covers exactly the keywords
+//! (`docs/schemas/report.v4.json`), with a small validator below that covers exactly the keywords
 //! the schema uses — and refuses a schema that uses any other, so the check cannot quietly go blind.
 
 #![cfg(unix)]
@@ -43,7 +43,7 @@ const WORKS: &str = ": > started\n: > did_work\ngit add did_work >/dev/null 2>&1
 /// …and when it hangs, so a test can signal the loop while a worker is running.
 const HANGS: &str = ": > started\nsleep 30\n";
 
-/// A project: a git repo on `main`, a fake `claude` running `worker_body`, a `worked` judge (met
+/// A project: a git repo on `main`, a fake `claude` running `worker_body`, a `worked` verifier (met
 /// once `did_work` exists) and an `rlt.yaml` with the given `sequence:` lines.
 fn project(worker_body: &str, sequence: &str) -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
@@ -58,13 +58,13 @@ fn project(worker_body: &str, sequence: &str) -> (tempfile::TempDir, String) {
         ),
     );
     chmod_x(&claude);
-    let judge = dir.join("rlt/judges/worked.sh");
+    let verifier = dir.join("rlt/verifiers/worked.sh");
     write(
-        &judge,
+        &verifier,
         "#!/bin/sh\nif [ -f did_work ]; then echo '{\"met\":true,\"value\":1,\"max\":1,\"rationale\":\"worked\"}'; \
          else echo '{\"met\":false,\"value\":0,\"max\":1,\"rationale\":\"not yet\"}'; fi\n",
     );
-    chmod_x(&judge);
+    chmod_x(&verifier);
     write(
         &dir.join("rlt/rlt.yaml"),
         &format!(
@@ -110,7 +110,7 @@ fn wait_for(p: &Path) {
 // ── the schema check ─────────────────────────────────────────────────────────────────────────────
 
 fn schema() -> Value {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/report.v3.json");
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/schemas/report.v4.json");
     serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap()
 }
 
@@ -118,7 +118,7 @@ fn assert_valid(v: &Value) {
     let s = schema();
     let mut errs = Vec::new();
     validate(&s, &s, v, "$", &mut errs);
-    assert!(errs.is_empty(), "report violates docs/schemas/report.v3.json:\n{}\n{v:#}", errs.join("\n"));
+    assert!(errs.is_empty(), "report violates docs/schemas/report.v4.json:\n{}\n{v:#}", errs.join("\n"));
 }
 
 /// The keywords [`validate`] implements. Annotations are listed so they are not mistaken for gaps.
@@ -266,8 +266,8 @@ fn done_prints_only_the_report_on_stdout_and_logs_to_run_log() {
     assert_eq!(r["session"], serde_json::json!({"rlt_version": env!("CARGO_PKG_VERSION"), "setting_sources": "all", "user_env": []}));
     assert_eq!(r["sessions"]["total"], 1);
     assert_eq!(r["sessions"]["merged"], 1);
-    assert_eq!(r["judges"]["worked"]["last"]["met"], true);
-    assert_eq!(r["judges"]["worked"]["baseline"]["met"], false, "the baseline ran before any work");
+    assert_eq!(r["verifiers"]["worked"]["last"]["met"], true);
+    assert_eq!(r["verifiers"]["worked"]["baseline"]["met"], false, "the baseline ran before any work");
     assert_eq!(r["result"]["base_branch"], "main");
     assert_eq!(r["result"]["final_commit"], git(dir, &["rev-parse", "main"]));
 
@@ -282,8 +282,8 @@ fn done_prints_only_the_report_on_stdout_and_logs_to_run_log() {
 fn abort_if_reports_aborted_and_loses_to_done_in_the_same_session() {
     let (tmp, path) = project(WORKS, "  done_if: \"never_met\"\n  abort_if: \"worked\"\n");
     let dir = tmp.path();
-    write(&dir.join("rlt/judges/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
-    chmod_x(&dir.join("rlt/judges/never_met.sh"));
+    write(&dir.join("rlt/verifiers/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
+    chmod_x(&dir.join("rlt/verifiers/never_met.sh"));
     let out = rlt(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     let r = report(dir);
@@ -351,7 +351,7 @@ fn rlt_stop_from_another_process_beats_done_in_the_same_session() {
     assert_eq!(out.status.code(), Some(5), "{}", text(&out));
     let r = report(dir);
     assert_eq!(r["outcome"], "stopped");
-    assert_eq!(r["judges"]["worked"]["last"]["met"], true, "the DoD held, and the stop still won");
+    assert_eq!(r["verifiers"]["worked"]["last"]["met"], true, "the DoD held, and the stop still won");
 }
 
 /// ERROR from inside rlt during VERIFY — both a returned error and a panic — is caught, reported
@@ -402,8 +402,8 @@ fn a_sigkilled_run_leaves_no_report_at_all() {
     write(&dir.join("bin/claude"), &claude);
     let cfg = fs::read_to_string(dir.join("rlt/rlt.yaml")).unwrap().replace("done_if: \"worked\"", "done_if: \"never_met\"");
     write(&dir.join("rlt/rlt.yaml"), &cfg);
-    write(&dir.join("rlt/judges/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
-    chmod_x(&dir.join("rlt/judges/never_met.sh"));
+    write(&dir.join("rlt/verifiers/never_met.sh"), "#!/bin/sh\necho '{\"met\":false}'\n");
+    chmod_x(&dir.join("rlt/verifiers/never_met.sh"));
     let _ = fs::remove_file(dir.join("started"));
     // the edits above touch files the first run's merge committed: commit them, the tree must be clean.
     git(dir, &["add", "-A"]);
@@ -434,7 +434,7 @@ fn base_branch_flag_overrides_the_config() {
 /// No `sequence.limits` at all: nothing implicit ends the run early — it runs until `done_if`.
 #[test]
 fn a_run_without_limits_runs_until_done() {
-    // the third session's work is the first that meets the judge.
+    // the third session's work is the first that meets the verifier.
     let worker = ": > started\necho x >> tally\nif [ \"$(wc -l < tally)\" -ge 3 ]; then : > did_work; git add did_work >/dev/null 2>&1; git commit -qm w >/dev/null 2>&1; fi\n";
     let (tmp, path) = project(worker, "  done_if: \"worked\"\n");
     let out = rlt(tmp.path(), &path).arg("run").output_bounded().unwrap();
@@ -475,22 +475,22 @@ fn report_json_outside_a_project_prints_an_error_report() {
     assert!(!tmp.path().join("rlt").exists(), "rlt must not scaffold state into a non-project");
 }
 
-/// A judge that writes `cc.sarif` in its scratch and cites it as evidence has the file KEPT under
-/// `rlt/private/evidence/<run>/<session>/<judge>/`, named on its ledger row and in the report (for
+/// A verifier that writes `cc.sarif` in its scratch and cites it as evidence has the file KEPT under
+/// `rlt/private/evidence/<run>/<session>/<verifier>/`, named on its ledger row and in the report (for
 /// the baseline verdict and the last one) — while a path outside the scratch and the project, and a
 /// scratch symlink pointing out of them, are refused and recorded rather than copied.
 #[test]
-fn a_judge_evidence_file_is_kept_and_referenced() {
+fn a_verifier_evidence_file_is_kept_and_referenced() {
     let (tmp, path) = project(WORKS, "  done_if: \"worked\"\n");
     let dir = tmp.path();
-    let judge = dir.join("rlt/judges/worked.sh");
+    let verifier = dir.join("rlt/verifiers/worked.sh");
     write(
-        &judge,
-        "#!/bin/sh\necho '<sarif/>' > \"$RLT_JUDGE_SCRATCH/cc.sarif\"\nln -sf /etc/hosts \"$RLT_JUDGE_SCRATCH/link\"\n\
+        &verifier,
+        "#!/bin/sh\necho '<sarif/>' > \"$RLT_VERIFIER_SCRATCH/cc.sarif\"\nln -sf /etc/hosts \"$RLT_VERIFIER_SCRATCH/link\"\n\
          if [ -f did_work ]; then m=true; else m=false; fi\n\
          echo \"{\\\"met\\\":$m,\\\"value\\\":1,\\\"max\\\":1,\\\"rationale\\\":\\\"r\\\",\\\"evidence\\\":[\\\"cc.sarif\\\",\\\"/etc/hosts\\\",\\\"link\\\"]}\"\n",
     );
-    chmod_x(&judge);
+    chmod_x(&verifier);
     let out = rlt(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
 
@@ -498,12 +498,12 @@ fn a_judge_evidence_file_is_kept_and_referenced() {
     let run = r["run_id"].as_str().unwrap();
     let ev_dir = r["paths"]["evidence_dir"].as_str().expect("evidence was kept, so the dir is named");
     assert!(ev_dir.ends_with(&format!("rlt/private/evidence/{run}")), "{ev_dir}");
-    let last = r["judges"]["worked"]["last"]["evidence"].as_array().expect("the last verdict lists its evidence");
+    let last = r["verifiers"]["worked"]["last"]["evidence"].as_array().expect("the last verdict lists its evidence");
     assert_eq!(last.len(), 1, "only the scratch file is kept: {last:?}");
     let kept = last[0].as_str().unwrap();
     assert!(kept.ends_with(&format!("{run}/1/worked/cc.sarif")), "{kept}");
     assert_eq!(fs::read_to_string(kept).unwrap(), "<sarif/>\n");
-    let base = r["judges"]["worked"]["baseline"]["evidence"][0].as_str().unwrap();
+    let base = r["verifiers"]["worked"]["baseline"]["evidence"][0].as_str().unwrap();
     assert!(base.ends_with(&format!("{run}/baseline/worked/cc.sarif")), "{base}");
 
     let ledger = fs::read_to_string(relentless::paths::verdicts_jsonl(dir)).unwrap();
@@ -547,11 +547,11 @@ fn usage_per_session_matches_what_the_agents_reported() {
     let dir = tmp.path();
     write(&dir.join("bin/claude"), USAGE_FAKE);
     chmod_x(&dir.join("bin/claude"));
-    write(&dir.join("rlt/judges/rubric.md"), "Grade the work.\n");
+    write(&dir.join("rlt/verifiers/rubric.md"), "Grade the work.\n");
     let cfg = fs::read_to_string(dir.join("rlt/rlt.yaml")).unwrap();
-    write(&dir.join("rlt/rlt.yaml"), &format!("{cfg}judge: {{ agent: \"claude\", model: \"configured-ruler\" }}\n"));
+    write(&dir.join("rlt/rlt.yaml"), &format!("{cfg}verifier: {{ agent: \"claude\", model: \"configured-ruler\" }}\n"));
     git(dir, &["add", "-A"]);
-    git(dir, &["commit", "-qm", "judges"]);
+    git(dir, &["commit", "-qm", "verifiers"]);
 
     let out = rlt(dir, &path).arg("run").output_bounded().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));

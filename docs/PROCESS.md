@@ -1,12 +1,12 @@
 # Process files — `rlt process`
 
-A **process** is phases of steps. Each step is one of a closed set of kinds: a script, an agent's work judged by checks
+A **process** is phases of steps. Each step is one of a closed set of kinds: a script, an agent's work verified by checks
 and a critic, a human's approval, a loop over a list, an exam. `rlt process <file> <project>` runs it from YAML. It is the
 YAML twin of the Rust driver blocks in [`relentless::workflow`](RUST_API.md#workflow-building-blocks-aggworkflow): every entry
 becomes a call of the block that already exists. **The YAML has no logic of its own** — no expressions, no `if:`, no
 variables beyond the ones listed here. A condition is a script's verdict; real logic is a script or a Rust driver.
 
-Reach for it when the flow is a *process* (steps in order, each judged, humans at checkpoints) rather than one loop of
+Reach for it when the flow is a *process* (steps in order, each verified, humans at checkpoints) rather than one loop of
 sessions on a goal (that is `rlt.yaml`, [CONFIG.md](CONFIG.md)). The two are separate: `rlt.yaml` is unchanged.
 
 ```
@@ -42,15 +42,15 @@ version: 1
 vars: { app: app }                    # {{ name }} everywhere; values may name {{ home }}, {{ env.NAME }}
 vars_file: layout.yaml                # more variables from a YAML map (vars wins)
 roles: { file: tools.yaml }           # in the project: worker and critic (agent, model, effort)
-dirs: { prompts: prompts, reviews: judges }
+dirs: { prompts: prompts, reviews: verifiers }
 settings:
   project: settings.yaml              # the project's overlay file (in the project)
   extra_keys: [other]                 # keys of that file rlt tolerates
   defaults: { repairs: 1 }            # per-step settings, see below
   skip: [extras]                      # ids of phases or steps kept in the order, not run
-  quality: { definition: d, version: "1", min: 90, guide: prompts/quality.md, reports: judges/reports.py, scope: "{{ app }}" }
+  quality: { definition: d, version: "1", min: 90, guide: prompts/quality.md, reports: verifiers/reports.py, scope: "{{ app }}" }
   models: { small: some-model }       # sizes a ladder's tier may name
-rlt: { memory: false, user_settings: false, user_env: false, preflight: true, on_regression: annotate, judge_timeout: 3600 }
+rlt: { memory: false, user_settings: false, user_env: false, preflight: true, on_regression: annotate, verifier_timeout: 3600 }
 run:
   history: reports/steps.jsonl        # the step history (default rlt/private/steps.jsonl)
   own: [task.md]                      # files --reset never takes back
@@ -64,13 +64,13 @@ run:
   critic_scope: prompts/critic-scope.md            # {{ outputs }} is the step's outputs
   open_points: checkpoints/open-points.md
   leftovers: true                     # end processes a step left running
-  judge_cache: { ignore: [notes.md] }
+  verifier_cache: { ignore: [notes.md] }
   hooks: { process: hooks.yaml, project: hooks.yaml }
   auto_note: scripts/waiting.sh       # stdout appended to an auto-approval's record
   commit_inputs: { branch: main, message: "Inputs at run start" }   # commit what the project folder holds, before the run
   declared: true                      # check the inputs and outputs steps declare (below)
   scripts_runnable: [scripts-out]     # scripts a step wrote under these folders can run (below)
-judges:                               # declared judges (below), named by `checks: [{ judge: <name> }]` and hooks entries
+verifiers:                               # declared verifiers (below), named by `checks: [{ verifier: <name> }]` and hooks entries
   tests: { command: "pytest -q", path: [.venv/bin] }
   parse: { metric: { id: syntax.parse_errors, scope: docs }, max: 0 }
 deny: { inputs: [task.md] }           # named write-deny lists
@@ -122,8 +122,8 @@ Every step has `id`, `name`, `kind` and optionally:
 **Commands** are shell commands in the project; a first word with a `/` is a path relative to the process home. Every
 script gets `RLT_STEP` (the key), `RLT_STEP_LABEL`, `RLT_PROCESS_HOME` and, in an `each`, `RLT_ITEM`. A check prints a
 verdict JSON as its last line. A check is a command, or `{ run, name, when: last }` (`last`: only the last item's instance
-of an `each` runs it). Check judges are named after the step and the command unless `name` is given; every script check
-goes through the judge cache.
+of an `each` runs it). Check verifiers are named after the step and the command unless `name` is given; every script check
+goes through the verifier cache.
 
 **Sections** (`sections:`) are `{ text }`, `{ file }` (read and rendered) or `{ run }` (a command's output, run when the
 brief is built). A step's own sections are appended to its task (the critic sees them); the run's `brief.sections`, the
@@ -132,7 +132,7 @@ small input files and the project's note are the worker's only.
 **`agent`** — an agent step in order: a refresh whose `settings.inputs` didn't change is `unchanged` without a session;
 `settings.first` does what it can; the worker's brief gets what is new first, then the task, the sections, the critic's
 rubric and the checks; the checks, then the critic. A critic's point left after its round is kept for the next
-checkpoint (`run.open_points`). `quality: true` adds rlt's score judge on the files changed since the step's base. `on_fail`
+checkpoint (`run.open_points`). `quality: true` adds rlt's score verifier on the files changed since the step's base. `on_fail`
 runs when the step ends the run unmet, before the error goes on (a deployment it left up is taken down).
 
 **`checkpoint`** — `prepare` writes `doc`; `question` asks about it. The humans write decisions into
@@ -183,7 +183,7 @@ run of the same check on exactly the same project content; unmet verdicts are ne
 
 ### A stopped session's work
 
-A session cut short (a rate limit, an interrupt, a crash) is never judged or merged, but its work is kept: on a partial ref
+A session cut short (a rate limit, an interrupt, a crash) is never verified or merged, but its work is kept: on a partial ref
 (`refs/rlt/partial/<run>/<session>`), or on its session branch, which the next run parks as
 `<prefix>/<project>/orphaned-<ts>/session-<N>`. rlt notes which step a session belonged to when it cuts the branch or saves
 the ref (the step's name, the key a `--from` takes) in the repository's config (`branch.<name>.rlt-step`,
@@ -196,12 +196,12 @@ ref made before rlt noted the step is not found.
 
 ### What every run needs (A-38)
 
-- **Declared judges** (`judges:`): a check or a hooks entry names one as `{ judge: <name> }`, next to plain commands
-  (`checks: [scripts/check.sh, { judge: tests }]`, in a hooks file `after: [{ judge: parse }]`). A declaration is one of
+- **Declared verifiers** (`verifiers:`): a check or a hooks entry names one as `{ verifier: <name> }`, next to plain commands
+  (`checks: [scripts/check.sh, { verifier: tests }]`, in a hooks file `after: [{ verifier: parse }]`). A declaration is one of
   `rlt.yaml`'s (`docs/CONFIG.md`): a `metric:` or `score:` over swe-metrics with its `max:`/`min:`, or a **`command:`**, a shell
   command run in the project and met when it exits 0 (the last four non-blank lines of its output, at most 400
   characters, are the rationale; `path:` entries go in front of `PATH`, relative to the project). `--check` refuses a
-  `judge:` naming no declaration and a declaration of no kind.
+  `verifier:` naming no declaration and a declaration of no kind.
 - **Declared inputs and outputs** (`run.declared: true`): before a step, every input it declares (`settings.inputs`) that an
   earlier step of this run (a met `done`, `tool` or `unchanged` entry of the record) declares as an output exists; after it,
   every output it declares exists. Globs and paths with names only a step knows (`{{ item }}`) are left out, an instance of
@@ -226,20 +226,20 @@ ref made before rlt noted the step is not found.
 | `user_env` | `false` | the `env` block of that file, without the rest of it: `false` (nothing), `true` (every key) or a list of key names |
 | `preflight` | `true` | one tiny call with the worker's agent and model before the first step; `false` leaves it out |
 | `on_regression` | `annotate` | `annotate` (record a regression, keep the work) or `rollback` |
-| `judge_timeout` | `3600` | a judge's time limit, seconds |
+| `verifier_timeout` | `3600` | a verifier's time limit, seconds |
 
 **`user_env`.** The user-scope settings file (`$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, else
 `~/.claude/settings.json`) holds an `env` object: a model gateway's base URL and token, telemetry and cache switches. A worker
 without the user's settings never reads it, and on a host where the gateway is set only there every session fails with
 "Invalid API key". `user_env` copies the keys it names (string values only) into the environment of every Claude worker and
-one-shot call (judges, summaries), and nothing else of the file. A variable rlt's own environment already has wins over the
+one-shot call (verifiers, summaries), and nothing else of the file. A variable rlt's own environment already has wins over the
 file (the operator's shell overrides it), the keys rlt manages itself (`RLT_*`) are never taken, and a list naming a key the
 file lacks takes nothing for it. A missing file, or one without an `env` block, is nothing and no error. Only key names are
 ever logged or recorded, never values. Codex and Copilot workers take nothing from it for now.
 
 **The preflight.** Before the first step of a fresh or re-entered run (not for `--resume`, `--check`, `--list`, `--overview`,
 `--brief`, `--report` or a scenario's scripted agents), rlt makes one call, "Reply with the single word ok.", with the
-worker's agent, model, setting sources and environment, exactly as a worker's session starts. (Not a judge's one-shot: a judge
+worker's agent, model, setting sources and environment, exactly as a worker's session starts. (Not a verifier's one-shot: a verifier
 loads the operator's settings, so it would pass where the worker fails.) If it fails, the run stops with the exit code of any
 fatal error before a step starts, naming the agent's error text (its first lines). When that text is an authentication error
 ("Invalid API key", 401, "authentication") and the operator's settings `env` holds `ANTHROPIC_*` keys the run does not pass, it
@@ -266,21 +266,21 @@ Defaults embedded in the binary apply when the process file sets nothing; a text
 | key | default | notes |
 |---|---|---|
 | `run.system_prompt` | the worker's brief is `rlt/private/INSTRUCTIONS.md`: read it first, all of it; the final message is one line | `<file>` replaces, `{ append: <file> }` adds |
-| `task_force.checks` | commands that judge a repair in place (above); none by default | optional |
+| `task_force.checks` | commands that verifier a repair in place (above); none by default | optional |
 | `task_force.prompt` | the goal, how to find the cause (the record, `git log`), what it never changes (checks, process, decisions), the answer's form (`fixed`, `reenter <step id>`, `escalate`), a flaky failure | the task force exists where `task_force:` is set |
 | `run.critic_scope` | review only this step's outputs (`{{ outputs }}`); never an input, a human's approval, or a requirement nobody stated | |
 | `run.notes: <file>` | a brief section: read the notes file first; at the end write your own section `## <step id>` of at most five lines; a check after the step is unmet when it has more (`notes section of <id> has N lines, at most 5`) | no default: off without the key |
 | `run.brief.shared_machine: true` | a section: other runs share this machine: your own temp folder, end only processes you started, by their PID | off by default |
-| `settings.quality.guide` | the guide file's `{table}` is filled with the score definition's hard limits and parts (`swe-metrics score --describe`), as the `score` judge scores | with `{min}`, `{definition}`, `{version}`, `{since}`, `{reports}` |
+| `settings.quality.guide` | the guide file's `{table}` is filled with the score definition's hard limits and parts (`swe-metrics score --describe`), as the `score` verifier scores | with `{min}`, `{definition}`, `{version}`, `{since}`, `{reports}` |
 
 `rlt process <file> <project> --brief <step>` prints the process's parts of what a step's worker and critic get, without
 running anything: the system prompt, the worker's prompt, the standing sections, the step's sections, the quality guide, the
 critic's scope and rubric (a section's command isn't run); `--brief task-force` prints the task force's prompt.
 
-### The template judge (A-38)
+### The template verifier (A-38)
 
 ```yaml
-judges:
+verifiers:
   report-form: { template: { doc: docs/report.md, from: templates/report.md } }   # `placeholder: <regex>` to change `<…>`
 ```
 
@@ -289,7 +289,7 @@ filled in). Met when the document has the template's headings in the template's 
 heading matches any text), no section is empty (a parent holding subsections isn't), and nothing of the template is left: its
 placeholders (`<…>` outside code, or the declaration's `placeholder` pattern; only those the template has), an HTML comment, a
 `> Instruction:` line or a blockquote line the template has. The rationale names the first three problems with their line.
-A process file's `judges:` only (rlt.yaml refuses it).
+A process file's `verifiers:` only (rlt.yaml refuses it).
 
 ### The run report (A-38)
 
@@ -326,7 +326,7 @@ been quiet), the session's activity and the critics' last verdicts, and the map 
 | `POST /api/run {action}` | `start`: `rlt process <file> <project>` in the background (output in `rlt/private/run.log`); `resume`: the same with `--resume`; `stop`: SIGTERM to the run (its session is interrupted, `resume` continues). 409 when a run is alive (start, resume) or none is (stop). |
 | `GET /api/checkpoint` | while a run is alive: each open ask whose question names a checkpoint's decisions file, with `step`, `doc`, `document`, `decisions_file`, `decisions`, `open_points_file`, `open_points` |
 | `POST /api/answer {id, value, decisions?}` | the decisions, one list item per line, are appended to the checkpoint's decisions file, then the ask is answered |
-| `GET /api/reviews` | the critics' last eight verdicts (`<step>-review` in `rlt/private/verdicts.jsonl`), with `step`, `judge`, `met`, `rationale`, `ts` |
+| `GET /api/reviews` | the critics' last eight verdicts (`<step>-review` in `rlt/private/verdicts.jsonl`), with `step`, `verifier`, `met`, `rationale`, `ts` |
 | `GET /api/projects`, `GET /api/ui`, `POST /api/projects {name, <fields>}` | the projects; the form; a new project made by the form's command, then its run started |
 
 The process file's `ui:` section declares what the page shows beyond rlt's own report:
@@ -354,7 +354,7 @@ started at a step with its note.
 `rlt process <file> --scenario <scenario.yaml>… --projects <dir> [--keep]` plays the process with scripted agents, no tokens:
 each scenario names a project of `<dir>` (copied to a scratch folder, git history included), the `args` to run
 (`--from`, `--until`, …), the `agents` (rules: `when` is a regex on the prompt; `write` files, a `run` shell command, an
-`answer` file for a judge or critic) and the `answers` to asks (`ask` regex, `say`, `decisions` appended to the file the
+`answer` file for a verifier or critic) and the `answers` to asks (`ask` regex, `say`, `decisions` appended to the file the
 question names). Agents are the `claude`/`codex` wrappers `rlt scripted-agent` serves; a rule's `run` sees
 `$RLT_SCENARIO_PROMPT` (the prompt's file), and `RLT_SCENARIO` / `RLT_SCENARIO_LOG` name the scenario and its call log.
 An ask no answer matches is answered no. `expect` checks the run: `record` (regexes in order over the history lines,

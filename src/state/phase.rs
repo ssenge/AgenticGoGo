@@ -18,7 +18,7 @@
 /// running a DIFFERENT `rlt` build than they are.
 ///
 /// That is also why [`Phase::Other`] exists rather than a hard parse error. An older rlt wrote
-/// `"phase":"judging"` — a stage this build has no variant for. Rejecting it would crash the
+/// `"phase":"verifying"` — a stage this build has no variant for. Rejecting it would crash the
 /// dashboard against a running loop; mapping it to a catch-all `Unknown` would lie about what the
 /// loop is doing. `Other` keeps the text verbatim, so it round-trips and still renders.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -30,7 +30,7 @@ pub enum Phase {
     Verify,
     Gate,
     Backoff,
-    /// a `skip_judges` step whose work is staged onto the span (§7.4).
+    /// a `skip_verifiers` step whose work is staged onto the span (§7.4).
     Staging,
     Done,
     /// A stage name this build doesn't know — from a state.json written by another rlt version.

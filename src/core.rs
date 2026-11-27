@@ -1,7 +1,7 @@
 //! **core** — what the harness *is*, independent of any agent, OS, or display.
 //!
 //! The pure decision layer: the goal/verdict data model, the condition language the stop/halt
-//! rules are written in, the engine that folds verdicts into a cycle result, the judges that
+//! rules are written in, the engine that folds verdicts into a cycle result, the verifiers that
 //! produce those verdicts, the durable memory, and the config that parameterizes all of it.
 //!
 //! These are the modules worth testing directly (and the integration tests do). Nothing here
@@ -15,8 +15,8 @@ pub mod config;
 pub mod engine;
 pub mod evidence;
 pub mod groups;
-pub mod judge;
-pub mod judges;
+pub mod verifier;
+pub mod verifiers;
 pub mod memory;
 pub mod model;
 pub mod prompts;

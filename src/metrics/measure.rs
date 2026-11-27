@@ -1,28 +1,28 @@
-//! ONE `swe-metrics measure` per session tree, shared by every metric and score judge of it, and
+//! ONE `swe-metrics measure` per session tree, shared by every metric and score verifier of it, and
 //! the INCUMBENT's report kept next to the ratchet state.
 //!
 //! # The cache
-//! Keyed on the judge scratch (project + session), the measured scope, its `--only` families, the
+//! Keyed on the verifier scratch (project + session), the measured scope, its `--only` families, the
 //! base it is measured against and the TREE — HEAD, the diff against it, and every untracked file's
-//! content. The first judge of a session measures; every later one with the same key reads the same
-//! report. A failed measurement is cached too: five judges must not run a broken analyzer five
-//! times. The report and the tools' details land in the session's judge scratch
-//! (`$RLT_JUDGE_SCRATCH/swe-metrics/<scope>/`), which is where a verdict's evidence is taken from.
+//! content. The first verifier of a session measures; every later one with the same key reads the same
+//! report. A failed measurement is cached too: five verifiers must not run a broken analyzer five
+//! times. The report and the tools' details land in the session's verifier scratch
+//! (`$RLT_VERIFIER_SCRATCH/swe-metrics/<scope>/`), which is where a verdict's evidence is taken from.
 //!
 //! # The incumbent
 //! The report of the last KEPT state, per scope, at `rlt/private/metrics/incumbent/<scope>.json`:
-//! the baseline pass measures it, and every kept gate promotes the session's reports. A score judge
+//! the baseline pass measures it, and every kept gate promotes the session's reports. A score verifier
 //! hands it to `swe-metrics score --baseline`; `combine: all` compares its tools against it.
 //!
 //! # Confinement
-//! swe-metrics runs as a judge does (`core::judge`): from the project root, with `stdin` closed,
-//! the `RLT_*` judge env and `TMPDIR` in the scratch, in the run's strongest tier.
-//! - `sandbox`: in the OS jail with the project read-only and only the scratch and the judge cache
-//!   writable. Unlike a script judge, `XDG_CACHE_HOME` is left alone: swe-metrics' tools keep
+//! swe-metrics runs as a verifier does (`core::verifier`): from the project root, with `stdin` closed,
+//! the `RLT_*` verifier env and `TMPDIR` in the scratch, in the run's strongest tier.
+//! - `sandbox`: in the OS jail with the project read-only and only the scratch and the verifier cache
+//!   writable. Unlike a script verifier, `XDG_CACHE_HOME` is left alone: swe-metrics' tools keep
 //!   machine-wide caches there (trivy's vulnerability database), and pointing it at a per-project
 //!   directory would fetch them per project.
-//! - `container`: in the judges' image (`super::contained`), the project read-only, writing only its
-//!   session scratch (under `rlt/private/container/judge/`), a fresh home and the container's own
+//! - `container`: in the verifiers' image (`super::contained`), the project read-only, writing only its
+//!   session scratch (under `rlt/private/container/verifier/`), a fresh home and the container's own
 //!   `/tmp` (its `TMPDIR`); the host's trivy database mounted read-only.
 
 use super::report::Report;
@@ -33,24 +33,24 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-/// The program rlt runs. Optional: rlt works without it, and a metric/score judge refuses at
+/// The program rlt runs. Optional: rlt works without it, and a metric/score verifier refuses at
 /// startup when it is missing (`super::probe`).
 pub const PROGRAM: &str = "swe-metrics";
 
-/// Where in the judge scratch the measurements go.
+/// Where in the verifier scratch the measurements go.
 pub const SCRATCH_SUBDIR: &str = "swe-metrics";
 
 /// How many measurements the process keeps. A run needs one per scope per session; this only bounds
 /// a long-lived driver process.
 const CACHE_CAP: usize = 32;
 
-/// Everything a run of swe-metrics needs to know about the judge that asked for it.
+/// Everything a run of swe-metrics needs to know about the verifier that asked for it.
 #[derive(Debug, Clone, Copy)]
 pub struct Ctx<'a> {
     pub cwd: &'a Path,
     pub session: Option<u32>,
     pub step: &'a str,
-    pub judge: &'a str,
+    pub verifier: &'a str,
     pub timeout: u64,
     pub isolation: Isolation,
     /// the base branch `scope: changed` measures against; `None` = `HEAD`.
@@ -61,7 +61,7 @@ pub struct Ctx<'a> {
 #[derive(Debug)]
 pub struct Measured {
     pub report: Report,
-    /// the measurement directory relative to the judge scratch (`swe-metrics/target`) — how a
+    /// the measurement directory relative to the verifier scratch (`swe-metrics/target`) — how a
     /// verdict names its evidence.
     pub rel: String,
     /// the same directory, absolute.
@@ -90,11 +90,11 @@ fn cache() -> std::sync::MutexGuard<'static, Vec<Entry>> {
     CACHE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// The shared measurement of `scope` for the judge in `c`: from the cache when this session's tree
-/// was measured already, else measured now (holding the cache, so two judges never measure twice).
+/// The shared measurement of `scope` for the verifier in `c`: from the cache when this session's tree
+/// was measured already, else measured now (holding the cache, so two verifiers never measure twice).
 pub fn measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, reports: Option<&Path>) -> Result<Arc<Measured>, String> {
-    // where the judges of this tier keep their scratch — and their evidence (`features::evidence`).
-    let scratch = crate::core::judge::scratch_path(c.cwd, c.session, c.isolation);
+    // where the verifiers of this tier keep their scratch — and their evidence (`features::evidence`).
+    let scratch = crate::core::verifier::scratch_path(c.cwd, c.session, c.isolation);
     let base = c.base.unwrap_or("HEAD");
     let families = only.map(|o| o.join(",")).unwrap_or_else(|| "*".into());
     let key = format!("{}|{}|{families}|{base}|{}", scratch.display(), site(scope, reports), tree_key(c.cwd));
@@ -156,7 +156,7 @@ fn run_measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, reports: Opt
     Ok(Measured { report, rel, dir })
 }
 
-/// Run `swe-metrics <args>` confined as a judge; `Ok` = it exited 0 (its stdout), `Err` = why not.
+/// Run `swe-metrics <args>` confined as a verifier; `Ok` = it exited 0 (its stdout), `Err` = why not.
 /// `readonly` = host paths outside the project the call reads (a scoring definition's directory) —
 /// what a container must mount; the other tiers read them where they are.
 pub fn run_tool(c: &Ctx<'_>, args: &[String], readonly: &[PathBuf]) -> Result<String, String> {
@@ -215,12 +215,12 @@ fn finished(command: Command, timeout: u64) -> Result<String, String> {
 
 /// `program` (swe-metrics, a reports script) on the host: unconfined, or in the OS jail under `sandbox`.
 fn host_command(c: &Ctx<'_>, program: &std::ffi::OsStr, args: &[String]) -> Result<Command, String> {
-    let scratch = crate::core::judge::scratch_dir(c.cwd, c.session).map_err(|e| format!("judge scratch: {e}"))?;
-    let cache = crate::core::judge::cache_dir(c.cwd).map_err(|e| format!("judge cache: {e}"))?;
+    let scratch = crate::core::verifier::scratch_dir(c.cwd, c.session).map_err(|e| format!("verifier scratch: {e}"))?;
+    let cache = crate::core::verifier::cache_dir(c.cwd).map_err(|e| format!("verifier cache: {e}"))?;
     let mut command = command_of(c, program, args, &scratch);
     command.env("PYTHONPYCACHEPREFIX", &cache);
     if c.isolation == Isolation::Sandbox {
-        // the project is read-only to a judge (§2.5) — the deny of `.` wins over the cwd grant.
+        // the project is read-only to a verifier (§2.5) — the deny of `.` wins over the cwd grant.
         command = crate::isolation::wrap(command, c.cwd, &[scratch, cache], &[".".to_string()])
             .map_err(|e| format!("could not sandbox swe-metrics: {e}"))?;
     }
@@ -228,7 +228,7 @@ fn host_command(c: &Ctx<'_>, program: &std::ffi::OsStr, args: &[String]) -> Resu
 }
 
 /// `swe-metrics <args>` as every tier starts it: from the project root, stdin closed, the `RLT_*`
-/// judge env, and `TMPDIR` in `scratch`.
+/// verifier env, and `TMPDIR` in `scratch`.
 pub(super) fn command(c: &Ctx<'_>, args: &[String], scratch: &Path) -> Command {
     command_of(c, PROGRAM.as_ref(), args, scratch)
 }
@@ -241,9 +241,9 @@ fn command_of(c: &Ctx<'_>, program: &std::ffi::OsStr, args: &[String], scratch: 
         .stdin(Stdio::null())
         .env("RLT_SESSION", c.session.map(|s| s.to_string()).unwrap_or_default())
         .env("RLT_STEP", c.step)
-        .env("RLT_JUDGE", c.judge)
+        .env("RLT_VERIFIER", c.verifier)
         .env("RLT_PROJECT_DIR", c.cwd)
-        .env("RLT_JUDGE_SCRATCH", scratch)
+        .env("RLT_VERIFIER_SCRATCH", scratch)
         .env("TMPDIR", scratch);
     command
 }
@@ -252,7 +252,7 @@ fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// A key for the tree the judges see: HEAD, everything that differs from it (a staged merge
+/// A key for the tree the verifiers see: HEAD, everything that differs from it (a staged merge
 /// included), and every untracked, non-ignored file with its content. Equal keys measure equal.
 fn tree_key(cwd: &Path) -> String {
     let git = |args: &[&str]| Command::new("git").args(args).current_dir(cwd).output().map(|o| o.stdout).unwrap_or_default();
@@ -314,7 +314,7 @@ pub fn forget_incumbent(cwd: &Path) {
 mod tests {
     use super::*;
 
-    /// The key moves with every change the judges could see — HEAD, a tracked edit, an untracked
+    /// The key moves with every change the verifiers could see — HEAD, a tracked edit, an untracked
     /// file's content — and stays put when nothing moved.
     #[test]
     fn the_tree_key_follows_the_tree() {

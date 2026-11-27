@@ -4,7 +4,7 @@ inputs: ["PAPER.md"]
 # Rubric — is PAPER.md a credible write-up of the P vs NP attempt?
 
 You are reviewing PAPER.md, a research write-up accompanying a (formal, Lean) attempt at
-P vs NP. Judge COMPLETENESS and HONESTY, not whether P!=NP was solved (it wasn't).
+P vs NP. Verifier COMPLETENESS and HONESTY, not whether P!=NP was solved (it wasn't).
 
 A passing paper has, with real content (no TODO placeholders):
 - Title + abstract stating the problem and what was ACTUALLY achieved (verified lemmas,

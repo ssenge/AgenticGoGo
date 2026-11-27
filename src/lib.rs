@@ -10,7 +10,7 @@
 //! Four groups now make the layering visible, and each one's module doc says what it is for:
 //!
 //! ```text
-//!   core/     what the harness IS          model · stop · engine · judge · memory · config
+//!   core/     what the harness IS          model · stop · engine · verifier · memory · config
 //!   backend/  what agent we DRIVE          backend · stream · worker
 //!   os/       processes, signals, reaping  proc · reap · spawns · signals · detach
 //!   ui/       read-only views on a run     dashboard · status · serve · localtime
@@ -69,11 +69,11 @@ pub mod workflow;
 ///
 /// ⚠ It re-exports the SHIPPED types rather than driver-local twins. There is exactly one
 /// [`Limits`](crate::core::config::Limits), one [`Isolation`](crate::isolation::Isolation), one
-/// [`Judge`](crate::core::model::Judge) and one [`Verdict`](crate::core::model::Verdict) in rlt; a
+/// [`Verifier`](crate::core::model::Verifier) and one [`Verdict`](crate::core::model::Verdict) in rlt; a
 /// second definition on the driver path would be a split-brain waiting to drift.
 pub mod prelude {
     pub use crate::core::config::Limits;
-    pub use crate::core::model::{Judge, JudgeCtx, Verdict};
+    pub use crate::core::model::{Verifier, VerifierCtx, Verdict};
     pub use crate::core::ratchet::{Direction, GateState, Ratchet};
     pub use crate::core::vars::render;
     pub use crate::core::asks::Ask;
@@ -82,6 +82,6 @@ pub mod prelude {
         OnRegression, Opts, PosFrame, Step, StepOutcome,
     };
     pub use crate::isolation::Isolation;
-    pub use crate::metrics::{Combine, MetricJudge, Scope, ScoreJudge, Stat};
+    pub use crate::metrics::{Combine, MetricVerifier, Scope, ScoreVerifier, Stat};
     pub use crate::plugin::RunOutcome;
 }

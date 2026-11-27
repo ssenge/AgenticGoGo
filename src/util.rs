@@ -1,6 +1,6 @@
 //! Small pure helpers shared across modules. Previously copy-pasted: `now_epoch` lived in
 //! four files, `truncate` in three (one copy had already silently diverged), and
-//! `last_json_object` was byte-identical in judge.rs and summary.rs. One home, one definition.
+//! `last_json_object` was byte-identical in verifier.rs and summary.rs. One home, one definition.
 
 /// Seconds since the Unix epoch (UTC). 0 if the clock is somehow before the epoch.
 /// Write `content` to `path` via a sibling tmp file + `rename(2)`, so a reader never sees a

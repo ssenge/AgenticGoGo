@@ -47,14 +47,14 @@ pub struct Capabilities {
     /// instead of burning its session budget on retries. Best-effort everywhere.
     pub detects_rate_limits: bool,
     /// Can make a NON-AGENTIC single prompt→text call with tools/MCP disabled and project config
-    /// ignored. Required by LLM judges and the summarizer.
+    /// ignored. Required by rubric verifiers and the summarizer.
     ///
-    /// An LLM judge that can WRITE is not a judge — it can go and edit the thing it is grading. All
+    /// An rubric verifier that can WRITE is not a verifier — it can go and edit the thing it is grading. All
     /// three agents can be held to a read-only one-shot, but by three different mechanisms: Claude
     /// `--strict-mcp-config` + `--setting-sources user`; Codex `--sandbox read-only`; Copilot by
     /// WITHHOLDING `--allow-all-tools`, so tools are still offered but every write is denied. (An
-    /// earlier survey concluded Codex and Copilot had 'no way found' and that LLM judges were
-    /// Claude-only. That was wrong — verified live on all three.) Script judges are unaffected.
+    /// earlier survey concluded Codex and Copilot had 'no way found' and that rubric verifiers were
+    /// Claude-only. That was wrong — verified live on all three.) Script verifiers are unaffected.
     pub supports_one_shot: bool,
 }
 
@@ -85,9 +85,9 @@ pub struct SessionReport {
 /// A completed one-shot call: the model's TEXT (envelope already stripped), plus the exit status
 /// and stderr the caller needs to tell "the model said no" from "the call itself failed".
 ///
-/// It also carries USAGE (§5.6): an `.md` judge and the summarizer are LLM calls on the ruler that
+/// It also carries USAGE (§5.6): an `.md` verifier and the summarizer are LLM calls on the ruler that
 /// run every step, so their spend must count against `budget`/`cost`. Before this, `one_shot` had
-/// nowhere to report it and judge spend was simply uncounted.
+/// nowhere to report it and verifier spend was simply uncounted.
 pub struct OneShot {
     pub body: String,
     pub stderr: Vec<u8>,

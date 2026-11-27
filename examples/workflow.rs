@@ -2,7 +2,7 @@
 //!
 //! ✅ **THIS COMPILES.** It is a cargo example (`cargo build --example workflow`), which is what
 //! keeps it honest: it was the SPECIFICATION of the surface while the surface was being built, and
-//! now it is the acceptance test for it. It is not meant to be RUN as-is — it names judge files and
+//! now it is the acceptance test for it. It is not meant to be RUN as-is — it names verifier files and
 //! a project that do not exist here — but every call, every type and every signature below is the
 //! real one, checked by the compiler on every build.
 //!
@@ -13,22 +13,22 @@
 //! REVISION 7 (2026-08-04). Rev 6 was the owner line-by-line review (one `Agent` enum — naked LLMs
 //! cut — all config in Rust, `rlt.gate()`); rev 7 applies the two audit rounds and the owner's YAML
 //! simplification: `with_*` Verdict setters (two methods cannot share a name — E0592),
-//! `GateOutcome::Failed`, no judge-level `gate:`/`when:` ANYWHERE, `Opts { resume }` as the
+//! `GateOutcome::Failed`, no verifier-level `gate:`/`when:` ANYWHERE, `Opts { resume }` as the
 //! fast-forward opt-in. Six ideas; everything else follows.
 //!
 //!   1. NO NODE MODEL. Flow is `for` / `if` / `break` / labeled `continue`. No Stage, Sequence,
 //!      Action, Loop, guard or if_else — reinventing Rust's control flow as data was backwards.
-//!   2. `rlt.step(&s)?` RETURNS the step's outcome. `rlt.judge(&j)` returns its verdict.
-//!   3. JUDGES ARE LAZY and memoized per step, so `&&` short-circuits into gating for free — and
+//!   2. `rlt.step(&s)?` RETURNS the step's outcome. `rlt.verifier(&j)` returns its verdict.
+//!   3. VERIFIERS ARE LAZY and memoized per step, so `&&` short-circuits into gating for free — and
 //!      re-testing a condition costs nothing, which is what kills accumulator bools.
 //!   4. `&Relentless`, not `&mut Relentless`. Laziness means reads mutate a cache; interior mutability keeps that
 //!      out of the signature so `mut` never appears in user code.
 //!   5. THREE notification levels, because "tell me" and "I am stuck without you" are different.
 //!   6. `step()` ALWAYS STAGES; `rlt.gate()` closes the span. The driver says WHEN a keep/rollback
 //!      decision happens, the `on_regression` policy says WHAT it decides. A gate inside `step()`
-//!      could not work: lazy judges are consulted AFTER the step, so it had nothing to compare.
+//!      could not work: lazy verifiers are consulted AFTER the step, so it had nothing to compare.
 //!
-//! The API is: `Relentless::open` · `rlt.step()` · `rlt.judge()` · `rlt.gate()` · `rlt.info/ask/block()`
+//! The API is: `Relentless::open` · `rlt.step()` · `rlt.verifier()` · `rlt.gate()` · `rlt.info/ask/block()`
 //! · `rlt.pos()`.
 //!
 //! NARRATIVE: add rate limiting to a public HTTP API. Nobody has decided how yet.
@@ -37,7 +37,7 @@
 use relentless::prelude::*;
 
 /// `main` is the ENTRY POINT ONLY: it reads the two knobs a run needs from outside (where, and how
-/// many cycles), opens the project, and hands off. Everything that IS the sample — steps, judges,
+/// many cycles), opens the project, and hands off. Everything that IS the sample — steps, verifiers,
 /// the flow — lives in [`drive`], so a harness can drive this exact driver against a scratch project
 /// (`scripts/samples_real.sh`) without a fork of it existing to drift from this one.
 ///
@@ -57,7 +57,7 @@ fn real_main() -> Result<(), Fatal> {
 
     // NO CONFIG FILE. A Rust driver configures EVERYTHING in Rust; a stray `rlt.yaml` is ignored.
     // The two paths are independent — half of the policy in YAML and half in code is the split-brain
-    // this design spent months avoiding. What the paths share is FILES, not config: `rlt/judges/*`,
+    // this design spent months avoiding. What the paths share is FILES, not config: `rlt/verifiers/*`,
     // `rlt/RLT.md`, `rlt/state/`.
     // RESUME. An overnight run that dies at hour six must not start again at hour zero: every
     // completed `rlt.*` call is in `rlt/private/calls.jsonl`, and with `resume` they are answered
@@ -102,9 +102,9 @@ fn model(default: &str, var: &str) -> String {
 /// things the caller decides. Read from here down as if it were `main`; it was, until the split.
 fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
     // ⛔ THERE IS NO `.abort_if()` / `.notify_if()` ON THE RUST PATH. They are condition STRINGS
-    // over judges, and this file already has judges and `if` — writing the same logic twice, once in
+    // over verifiers, and this file already has verifiers and `if` — writing the same logic twice, once in
     // Rust and once in a mini-language, is the thing this API exists to delete. Want to stop when a
-    // judge says so? `if rlt.judge(&x).met() { return Ok(()); }`. Want to page a human? `rlt.ask()`.
+    // verifier says so? `if rlt.verifier(&x).met() { return Ok(()); }`. Want to page a human? `rlt.ask()`.
     // Both are below, in Rust, where the compiler checks them. YAML keeps both keys — it has no `if`.
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
@@ -139,12 +139,12 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         .agent(Agent::Claude)
         .effort(Effort::High)
         .isolation(Isolation::Sandbox)
-        .readonly(["src/", "tests/", "rlt/judges/"]);
+        .readonly(["src/", "tests/", "rlt/verifiers/"]);
 
     let sandboxed = Step::template()         // touches real source
         .agent(Agent::Claude)
         .isolation(Isolation::Sandbox)
-        .readonly(["tests/", "rlt/judges/"]);
+        .readonly(["tests/", "rlt/verifiers/"]);
 
     // Ideation, but it still needs a harness: the survey has to read the existing handler code and
     // write a file. What makes it cheap is the deny list, not a weaker agent.
@@ -183,12 +183,12 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // for the same reason a RUN can pin one (`RLT_SAMPLE_HEAVY_MODEL`), see `model()` above.
         .model(model("claude-opus-4-8[1m]", "RLT_SAMPLE_HEAVY_MODEL"))
         .effort(Effort::High)
-        // This step SHOULD add tests, so it re-grants that one deny. `rlt/judges/` stays denied —
+        // This step SHOULD add tests, so it re-grants that one deny. `rlt/verifiers/` stays denied —
         // which is the payoff of `writable` subtracting rather than replacing.
         .writable(["tests/"])
         .prompt("Implement rlt/state/wiki/spec.md. Add tests alongside.");
 
-    // Inherits `readonly(["tests/", "rlt/judges/"])` and does NOT re-grant it. The obvious way to
+    // Inherits `readonly(["tests/", "rlt/verifiers/"])` and does NOT re-grant it. The obvious way to
     // make a failing test pass is to delete it, and `fix` has no legitimate reason to touch
     // `tests/` — enforced by the kernel, not by the prompt below.
     let fix = sandboxed.create("fix")
@@ -203,41 +203,41 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         .prompt("Document the rate limiter in docs/ and write a release note.");
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
-    // JUDGES — three kinds, all lazy. Nothing is registered and nothing runs here.
+    // VERIFIERS — three kinds, all lazy. Nothing is registered and nothing runs here.
     //
-    // A judge returns a VERDICT, not a number: `met: bool` + `value: Option<f64>` + max + target +
-    // rationale + evidence. `value` is optional because a BINARY judge emits no number, and
+    // A verifier returns a VERDICT, not a number: `met: bool` + `value: Option<f64>` + max + target +
+    // rationale + evidence. `value` is optional because a BINARY verifier emits no number, and
     // conflating "no number" with `0` is a bug rlt has already had once.
     // ═════════════════════════════════════════════════════════════════════════════════════════
 
     // RUBRIC — the .md file IS the prompt. Graded by the ruler; costs a model call.
-    let survey_good = Judge::rubric("survey_good", "rlt/judges/survey_good.md");
-    let spec_sound  = Judge::rubric("spec_sound",  "rlt/judges/spec_sound.md");
+    let survey_good = Verifier::rubric("survey_good", "rlt/verifiers/survey_good.md");
+    let spec_sound  = Verifier::rubric("spec_sound",  "rlt/verifiers/spec_sound.md");
 
     // SCRIPT — any executable. Cheap, deterministic, no model call.
-    let builds = Judge::script("builds",     "rlt/judges/build.sh");
-    let lint   = Judge::script("lint_clean", "rlt/judges/lint.sh");
-    let tests  = Judge::script("tests_pass", "rlt/judges/tests.sh");
+    let builds = Verifier::script("builds",     "rlt/verifiers/build.sh");
+    let lint   = Verifier::script("lint_clean", "rlt/verifiers/lint.sh");
+    let tests  = Verifier::script("tests_pass", "rlt/verifiers/tests.sh");
 
     // 40 minutes of synthetic load. No `gate` field: laziness plus `&&` in the flow is what stops
     // it running on the ~55 steps where the build is still red.
-    let load = Judge::script("load_ok", "rlt/judges/loadtest.sh")
+    let load = Verifier::script("load_ok", "rlt/verifiers/loadtest.sh")
         // SECONDS. Earlier revisions of this file wrote `45 * MINUTES`; there is no such constant,
         // and adding one to the prelude to serve two call sites is a worse trade than `45 * 60`.
         .timeout(45 * 60);            // the run-level 300s default would kill it
 
-    // NATIVE — a Rust closure over a `JudgeCtx`. Reach for it when a check is genuinely easier or
-    // faster in Rust than in a script: no subprocess, no fork per judge, and the compiler checks it.
+    // NATIVE — a Rust closure over a `VerifierCtx`. Reach for it when a check is genuinely easier or
+    // faster in Rust than in a script: no subprocess, no fork per verifier, and the compiler checks it.
     //
-    // `JudgeCtx` offers `met/value/verdict/previous/history` over other judges, plus `session()`,
+    // `VerifierCtx` offers `met/value/verdict/previous/history` over other verifiers, plus `session()`,
     // `step()`, `dir()`, `read()` and `diff()`. It offers NO clock, NO randomness, NO network and NO
-    // env — deliberately. A judge that reads the wall clock returns a different verdict on replay,
+    // env — deliberately. A verifier that reads the wall clock returns a different verdict on replay,
     // and `--resume` fast-forward would then silently diverge from the run it claims to reproduce.
-    let p99 = Judge::native("p99_ok", |c| {
-        // `c.scratch()` — the per-session directory judges may write, SHARED between them. That
-        // sharing is the point here: `load_ok` above measures and writes `bench.json`, this judge
+    let p99 = Verifier::native("p99_ok", |c| {
+        // `c.scratch()` — the per-session directory verifiers may write, SHARED between them. That
+        // sharing is the point here: `load_ok` above measures and writes `bench.json`, this verifier
         // applies the threshold. It cannot be `rlt/state/bench.json` any more, because since §2.5 the
-        // project tree is read-only to a judge — a judge able to write the tree it grades can make
+        // project tree is read-only to a verifier — a verifier able to write the tree it grades can make
         // the code pass, which is the same hole as letting one declare its own writable set.
         let ms = std::fs::read_to_string(c.scratch().join("bench.json")).ok()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -280,25 +280,25 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
             // hard pipeline failure (a broken worker) and, once `check_limits()` has latched, the
             // ceiling. Omitting it is a compiler warning, not silence — `Result` is `#[must_use]`.
             rlt.step(&survey)?;
-            // `value()` is `Option<f64>` — a BINARY judge emits no number and flattening that to 0
+            // `value()` is `Option<f64>` — a BINARY verifier emits no number and flattening that to 0
             // is a bug rlt has already shipped once. `value_or(d)` is the ONE helper that turns it
             // into an `f64`, and it makes the default the DRIVER's stated choice rather than a
             // fabrication. Here 0.0 is right: a rubric that produced no score is not a good survey.
-            if rlt.judge(&survey_good).value_or(0.0) >= 85.0 {
+            if rlt.verifier(&survey_good).value_or(0.0) >= 85.0 {
                 break;
             }
             rlt.info("survey still thin — trying a different angle");
         }
         // Re-testing is FREE — the verdict is memoized for this step — so there is no accumulator
         // bool and no `Status::Exhausted` variant. Just ask again.
-        if rlt.judge(&survey_good).value_or(0.0) < 85.0 {
+        if rlt.verifier(&survey_good).value_or(0.0) < 85.0 {
             rlt.ask("3 surveys and still thin. Any prior art you want me to start from?");
             continue 'cycle;
         }
 
         // ── DESIGN ─────────────────────────────────────────────────────────────────────────
         rlt.step(&spec)?;
-        let v = rlt.judge(&spec_sound);
+        let v = rlt.verifier(&spec_sound);
         if !v.met() {
             rlt.info(&format!("spec rejected: {}", v.rationale()));
             continue 'cycle;
@@ -315,17 +315,17 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // dashboard, the ledger and a driver's log all want different words for `Landing::Span`.
         rlt.log(&format!("implement: {} tokens, landed={:?}", r.tokens, r.landed));
 
-        if !rlt.judge(&builds).met() {
+        if !rlt.verifier(&builds).met() {
             rlt.info("implementation does not compile — starting over next cycle");
             continue 'cycle;
         }
         for _ in 0..8 {
             rlt.step(&fix)?;
-            if rlt.judge(&tests).met() && rlt.judge(&lint).met() {
+            if rlt.verifier(&tests).met() && rlt.verifier(&lint).met() {
                 break;
             }
         }
-        if !rlt.judge(&tests).met() {
+        if !rlt.verifier(&tests).met() {
             rlt.ask(&format!("build did not converge in cycle {c} — worth a different approach?"));
             continue 'cycle;
         }
@@ -336,10 +336,10 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // The DRIVER says WHEN, the POLICY says WHAT — which is why there is no `rlt.rollback()`:
         // that would hoist a policy decision to the call site and make rlt's git handling manual.
         //
-        // ⚠ "GATE" USED TO MEAN TWO THINGS. Since 2026-08-04 it means only this one: the judge-level
-        // `gate:` field was cut from YAML as well (owner simplification — all judges run after every
+        // ⚠ "GATE" USED TO MEAN TWO THINGS. Since 2026-08-04 it means only this one: the verifier-level
+        // `gate:` field was cut from YAML as well (owner simplification — all verifiers run after every
         // step there), so `rlt.gate()` is the only gate in the design. Its question is "does the
-        // staged work LAND?", never "does this judge run?" — that one is `&&`, used just below.
+        // staged work LAND?", never "does this verifier run?" — that one is `&&`, used just below.
         //
         // The outcome is worth matching on when the driver has something to say about it. `Failed`
         // is NOT `RolledBack`: a merge conflict is not a policy decision, the branch is still there,
@@ -354,11 +354,11 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
         // ── HARDEN — and here is the gating, for free ──────────────────────────────────────
         // `&&` short-circuits, so `load` (40 minutes) is only reached on a cycle where the build is
         // already green. Over 20 cycles that is ~40 minutes of load testing instead of ~40 hours.
-        // This is what a judge's `gate:` FIELD was for — and since that field is now cut from YAML
-        // too, this short-circuit is the ONLY judge-gating anywhere in the design. It is also the
+        // This is what a verifier's `gate:` FIELD was for — and since that field is now cut from YAML
+        // too, this short-circuit is the ONLY verifier-gating anywhere in the design. It is also the
         // sharpest reason to reach for the Rust path: a YAML project runs `load` after every step.
         rlt.step(&harden)?;
-        if !(rlt.judge(&tests).met() && rlt.judge(&load).met() && rlt.judge(&p99).met()) {
+        if !(rlt.verifier(&tests).met() && rlt.verifier(&load).met() && rlt.verifier(&p99).met()) {
             rlt.ask("performance gate failed — ship anyway, or keep tuning?");
             continue 'cycle;
         }
@@ -388,7 +388,7 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 //   rlt.check_limits()                    -> Err(Fatal::Ended) if a ceiling is breached; opt-in
 //   rlt.step(&step)                       -> StepOutcome    { step, session, landed, verdicts,
 //                                                             tokens, cost, secs, exit }
-//   rlt.judge(&judge)                     -> Verdict        { met(), value(), value_or(d), max(),
+//   rlt.verifier(&verifier)                     -> Verdict        { met(), value(), value_or(d), max(),
 //                                                             rationale() }
 //   rlt.gate()                            -> GateOutcome    { Kept | RolledBack | Nothing |
 //                                                             Failed(GateFailure) }
@@ -397,17 +397,17 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 //   rlt.log(msg) / rlt.summary()
 //   Step::new(name) / Step::template().create(name)
 //        .agent().model().effort().isolation().readonly().writable().prompt()
-//   Judge::rubric/script/native(..).timeout()      // no `.when()` — cut 2026-08-04 with YAML's
-//   Verdict::binary(met).with_value(n).with_rationale(s) — CONSTRUCTION, for a native judge's return
+//   Verifier::rubric/script/native(..).timeout()      // no `.when()` — cut 2026-08-04 with YAML's
+//   Verdict::binary(met).with_value(n).with_rationale(s) — CONSTRUCTION, for a native verifier's return
 //
-// ⚠ READER vs SETTER (corrected 2026-08-04): the reader is `value() -> Option<f64>` (a binary judge
+// ⚠ READER vs SETTER (corrected 2026-08-04): the reader is `value() -> Option<f64>` (a binary verifier
 //   emits no number; a fabricated `0` is a bug rlt has shipped once); the setters carry a `with_`
 //   prefix because two inherent methods CANNOT share a name in Rust (no overloading — E0592).
 //   Comparisons go through `value_or(d)` so the default is the driver's stated choice.
 //
 // PATH SPELLING IN `readonly`/`writable`: write directories with a TRAILING SLASH and spell them
 //   identically in both lists. `writable` SUBTRACTS from what `readonly` accumulated, so
-//   `writable(["rlt/judges"])` against `readonly(["rlt/judges/"])` subtracts nothing and the deny
+//   `writable(["rlt/verifiers"])` against `readonly(["rlt/verifiers/"])` subtracts nothing and the deny
 //   silently survives. rlt normalises before comparing — but a sample that relies on that is a
 //   sample that teaches the reader to.
 //
@@ -421,8 +421,8 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 // THE WRITABLE SET, three levels
 //   ALWAYS DENIED, derived from cwd, NOT configurable: `rlt/private/` — rlt's own ledger, bus and
 //     pidfile. Derived inside `wrap()` so no call site can forget it; there is no knob to disable it.
-//   DENIED BY DEFAULT under `sandbox`, re-grantable: `rlt/judges/`. A step that legitimately authors
-//     judges says `.writable(["rlt/judges/"])`; no other step can reach them.
+//   DENIED BY DEFAULT under `sandbox`, re-grantable: `rlt/verifiers/`. A step that legitimately authors
+//     verifiers says `.writable(["rlt/verifiers/"])`; no other step can reach them.
 //   PER-STEP, opt-in: `.readonly([..])` adds denies (see the `sandboxed` template), `.writable([..])`
 //     re-grants (see `implement`). readonly ACCUMULATES down a template chain; writable subtracts.
 //   Same mechanism as the private carve-out — Seatbelt `(deny file-write* (subpath ..))`, bwrap
@@ -439,8 +439,8 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 //   done_if         YAML-only. On the Rust path the driver decides it is done by returning.
 //   fast-forward    OPT-IN, via `Relentless::open_with(".", Opts { resume: true })` — rlt does not own the
 //                   driver's argv, so a driver forwards its own `--resume` flag there. Completed
-//                   `rlt.step()`/`judge()`/`gate()` calls then replay from the ledger at zero cost.
-//                   This is why a native judge gets no clock and no RNG — see `p99` above.
+//                   `rlt.step()`/`verifier()`/`gate()` calls then replay from the ledger at zero cost.
+//                   This is why a native verifier gets no clock and no RNG — see `p99` above.
 //   on_regression   `.on_regression(..)`, also in Rust. `Annotate` (the default): a regressing
 //                   session still merges, and the next brief carries what regressed plus the commit
 //                   to revert to. Applied by `gate()`, never inside `step()`.
@@ -452,8 +452,8 @@ fn drive(rlt: &Relentless, cycles: usize) -> Result<(), Fatal> {
 //   `git merge` that lands it.
 //
 // TWO CONSEQUENCES OF LAZINESS, worth knowing
-//   * The scoreboard shows only the judges a step actually consulted. Honest (nothing ran, so
-//     nothing to report) but the dashboard's judge list varies between steps on the Rust path.
+//   * The scoreboard shows only the verifiers a step actually consulted. Honest (nothing ran, so
+//     nothing to report) but the dashboard's verifier list varies between steps on the Rust path.
 //   * `&Relentless` works because the verdict cache lives behind interior mutability. The trade is that a
 //     borrow conflict becomes a runtime panic rather than a compile error — fine single-threaded,
 //     and the alternative is `mut` on something that reads immutable.

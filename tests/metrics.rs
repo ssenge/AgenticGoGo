@@ -1,4 +1,4 @@
-//! Judges built on swe-metrics (A-20), end to end through the real `rlt` binary.
+//! Verifiers built on swe-metrics (A-20), end to end through the real `rlt` binary.
 //!
 //! Most tests put a FAKE `swe-metrics` on PATH: a shell stub that logs every invocation, answers the
 //! schema probes, "measures" by copying `fake-report.json` out of the measured directory and
@@ -109,17 +109,17 @@ impl Project {
         Project { _tmp: tmp, dir, bin, log, path }
     }
 
-    fn config(&self, judges: &str, seq: &str) {
+    fn config(&self, verifiers: &str, seq: &str) {
         write(
             &self.dir,
             "rlt/rlt.yaml",
             &format!(
-                "project: metrics\ndefaults: {{ model: fake }}\njudges:\n{judges}steps:\n  worker: {{}}\n\
+                "project: metrics\ndefaults: {{ model: fake }}\nverifiers:\n{verifiers}steps:\n  worker: {{}}\n\
                  sequence:\n  steps: [worker]\n{seq}summary: {{ enabled: false }}\nmemory: {{ enabled: false }}\n"
             ),
         );
         // a never-met DoD goal, so a run goes to its session cap.
-        chmod_x(&write(&self.dir, "rlt/judges/feature.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1}'\n"));
+        chmod_x(&write(&self.dir, "rlt/verifiers/feature.sh", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1}'\n"));
     }
 
     /// A report the next sessions' plan lines can copy over `fake-report.json`.
@@ -128,7 +128,7 @@ impl Project {
     }
 
     fn commit(&self) {
-        write(&self.dir, ".gitignore", "rlt/state/\nagg/private/\n");
+        write(&self.dir, ".gitignore", "rlt/state/\nrlt/private/\n");
         git(&self.dir, &["add", "-A"]);
         git(&self.dir, &["commit", "-qm", "base"]);
     }
@@ -154,9 +154,9 @@ impl Project {
         self.calls().into_iter().filter(|c| c.starts_with(cmd)).collect()
     }
 
-    /// `(session, outcome, value, met, error)` per row of `judge`.
-    fn rows(&self, judge: &str) -> Vec<Row> {
-        rows_for(&self.dir, judge, false).into_iter().map(|r| (r.session, r.outcome, r.value, r.met, r.error)).collect()
+    /// `(session, outcome, value, met, error)` per row of `verifier`.
+    fn rows(&self, verifier: &str) -> Vec<Row> {
+        rows_for(&self.dir, verifier, false).into_iter().map(|r| (r.session, r.outcome, r.value, r.met, r.error)).collect()
     }
 }
 
@@ -211,12 +211,12 @@ const FIVE: &str = "  cc_p95: { metric: { id: \"complexity.cyclomatic\", stat: \
                     secrets: { metric: { id: \"secrets.findings\" }, max: 0 }\n  \
                     vulns: { metric: { id: \"dependencies.vulnerabilities\", labels: { severity: [\"critical\", \"high\"] } }, max: 0 }\n";
 
-/// ACCEPTANCE: one session with FIVE metric judges runs `swe-metrics measure` ONCE — one measurement
-/// per judged tree (the baseline pass, then each session) — and each judge reads its number out of
+/// ACCEPTANCE: one session with FIVE metric verifiers runs `swe-metrics measure` ONCE — one measurement
+/// per verified tree (the baseline pass, then each session) — and each verifier reads its number out of
 /// it: a tool's statistic, the strictest of two tools, a value, a label sum that is a measured 0.
-/// The shared report and the judge's SARIF are kept as evidence.
+/// The shared report and the verifier's SARIF are kept as evidence.
 #[test]
-fn five_metric_judges_share_one_measurement_per_session() {
+fn five_metric_verifiers_share_one_measurement_per_session() {
     let p = Project::new(&["cp '{BIN}/r7.json' fake-report.json"], true);
     write(&p.dir, "fake-report.json", &report(6.0).to_string());
     p.stage_report("r7.json", &report(7.0));
@@ -225,11 +225,11 @@ fn five_metric_judges_share_one_measurement_per_session() {
 
     let (code, out) = p.rlt(&["run", "--max-sessions", "1"]);
     assert_eq!(code, Some(4), "the never-met DoD runs to the cap:\n{out}");
-    assert_eq!(p.calls_of("measure").len(), 2, "baseline + session 1, five judges each: {:?}", p.calls());
+    assert_eq!(p.calls_of("measure").len(), 2, "baseline + session 1, five verifiers each: {:?}", p.calls());
     assert_eq!(p.calls_of("schema report").len(), 1, "probed once, at startup");
     let only = &p.calls_of("measure")[0];
     for f in ["--only complexity", "--only dependencies", "--only duplication", "--only secrets"] {
-        assert!(only.contains(f), "the shared measurement covers every judge's family: {only}");
+        assert!(only.contains(f), "the shared measurement covers every verifier's family: {only}");
     }
 
     let value = |j: &str| p.rows(j).iter().map(|r| r.2).collect::<Vec<_>>();
@@ -249,11 +249,11 @@ fn five_metric_judges_share_one_measurement_per_session() {
     assert!(p.dir.join("rlt/private/metrics/incumbent/target.json").is_file(), "the incumbent's report is kept");
 }
 
-/// ACCEPTANCE: a RATCHETED metric judge rolls back a session that makes the p95 worse — its ratchet
-/// names no direction (the judge's `max:` says lower is better, and the report agrees) — and keeps
+/// ACCEPTANCE: a RATCHETED metric verifier rolls back a session that makes the p95 worse — its ratchet
+/// names no direction (the verifier's `max:` says lower is better, and the report agrees) — and keeps
 /// one that improves it.
 #[test]
-fn a_ratcheted_metric_judge_rolls_back_a_worse_p95() {
+fn a_ratcheted_metric_verifier_rolls_back_a_worse_p95() {
     let p = Project::new(&["cp '{BIN}/r9.json' fake-report.json", "cp '{BIN}/r5.json' fake-report.json"], true);
     write(&p.dir, "fake-report.json", &report(6.0).to_string());
     p.stage_report("r9.json", &report(9.0));
@@ -277,10 +277,10 @@ fn a_ratcheted_metric_judge_rolls_back_a_worse_p95() {
     assert_eq!(relentless::core::ratchet::load(&p.dir).unwrap().reference("cc_p95"), Some(5.0));
 }
 
-/// ACCEPTANCE: a SKIPPED analyzer makes the judge ERROR with the analyzer's reason — never pass. The
+/// ACCEPTANCE: a SKIPPED analyzer makes the verifier ERROR with the analyzer's reason — never pass. The
 /// DoD never holds, and the error is on every row.
 #[test]
-fn a_skipped_analyzer_makes_the_judge_error_not_pass() {
+fn a_skipped_analyzer_makes_the_verifier_error_not_pass() {
     let p = Project::new(&["true"], true);
     let mut r = report(6.0);
     r["analyzers"][5] = analyzer("trivy", "trivy", "skipped", "no applicable files", &["dependencies"]);
@@ -298,25 +298,25 @@ fn a_skipped_analyzer_makes_the_judge_error_not_pass() {
         assert!(err.as_deref().unwrap_or_default().contains("trivy skipped: no applicable files"), "{err:?}");
     }
 
-    // and by hand: `rlt judge` gives the same error.
-    let (_, out) = p.rlt(&["judge", "vulns"]);
+    // and by hand: `rlt verifier` gives the same error.
+    let (_, out) = p.rlt(&["verify", "vulns"]);
     assert!(out.contains("trivy skipped: no applicable files") && out.contains("\"error\""), "{out}");
 }
 
-/// Requirement 7: swe-metrics is OPTIONAL. Without it a plain config is fine; a metric judge refuses
+/// Requirement 7: swe-metrics is OPTIONAL. Without it a plain config is fine; a metric verifier refuses
 /// at startup. An incompatible report schema, or a scoring definition of another version, refuses
 /// too — at the key to edit.
 #[test]
-fn metric_judges_refuse_at_startup_without_a_compatible_swe_metrics() {
+fn metric_verifiers_refuse_at_startup_without_a_compatible_swe_metrics() {
     let p = Project::new(&["true"], false);
     p.config("  slow: { timeout: 900 }\n", "  done_if: \"feature\"\n");
     let (code, out) = p.rlt(&["check"]);
-    assert_eq!(code, Some(0), "no metric judge, no swe-metrics needed:\n{out}");
+    assert_eq!(code, Some(0), "no metric verifier, no swe-metrics needed:\n{out}");
 
     p.config(FIVE, "  done_if: \"feature AND cc_p95\"\n");
     let (code, out) = p.rlt(&["check", "--json"]);
     assert_eq!(code, Some(1), "{out}");
-    assert!(out.contains("\"path\": \"judges.cc_p95\"") && out.contains("not on PATH"), "{out}");
+    assert!(out.contains("\"path\": \"verifiers.cc_p95\"") && out.contains("not on PATH"), "{out}");
 
     let p = Project::new(&["true"], true);
     write(&p.bin, "schema-id-report", "swe-metrics/report/v2");
@@ -330,14 +330,14 @@ fn metric_judges_refuse_at_startup_without_a_compatible_swe_metrics() {
     p.config("  q: { score: { definition: \"swe-default\", version: \"2\" }, min: 80 }\n", "  done_if: \"q\"\n");
     let (code, out) = p.rlt(&["check", "--json"]);
     assert_eq!(code, Some(1), "{out}");
-    assert!(out.contains("judges.q.score") && out.contains("version \\\"1\\\""), "{out}");
+    assert!(out.contains("verifiers.q.score") && out.contains("version \\\"1\\\""), "{out}");
 }
 
-/// The SCORE judge: computed from the shared report — the pass before session 1 without a baseline
+/// The SCORE verifier: computed from the shared report — the pass before session 1 without a baseline
 /// (it measures the incumbent), every session WITH the incumbent's report as `--baseline`. A capped
 /// score names its failed gates; a `null` score is an error carrying the score's notes.
 #[test]
-fn a_score_judge_scores_against_the_incumbent_and_fails_closed() {
+fn a_score_verifier_scores_against_the_incumbent_and_fails_closed() {
     let p = Project::new(&["cp '{BIN}/null-score.json' fake-score.json"], true);
     write(&p.dir, "fake-report.json", &report(6.0).to_string());
     let capped = json!([{"metric": "secrets.findings", "passed": false, "value": 2.0, "max": 0, "cap": 40.0, "status": "ok"}]);
@@ -348,11 +348,11 @@ fn a_score_judge_scores_against_the_incumbent_and_fails_closed() {
 
     let (code, out) = p.rlt(&["run", "--max-sessions", "1"]);
     assert_eq!(code, Some(4), "{out}");
-    let judged: Vec<String> = p.calls_of("score").into_iter().filter(|c| c.contains("--out")).collect();
-    assert_eq!(judged.len(), 2, "the baseline pass and session 1: {:?}", p.calls());
-    assert!(!judged[0].contains("--baseline"), "the pass before session 1 IS the incumbent: {}", judged[0]);
-    assert!(judged[1].contains("--baseline") && judged[1].contains("rlt/private/metrics/incumbent/target.json"), "{}", judged[1]);
-    assert!(!judged[0].contains("--definition"), "swe-metrics takes no `--definition` for its default");
+    let verified: Vec<String> = p.calls_of("score").into_iter().filter(|c| c.contains("--out")).collect();
+    assert_eq!(verified.len(), 2, "the baseline pass and session 1: {:?}", p.calls());
+    assert!(!verified[0].contains("--baseline"), "the pass before session 1 IS the incumbent: {}", verified[0]);
+    assert!(verified[1].contains("--baseline") && verified[1].contains("rlt/private/metrics/incumbent/target.json"), "{}", verified[1]);
+    assert!(!verified[0].contains("--definition"), "swe-metrics takes no `--definition` for its default");
 
     let rows = rows_for(&p.dir, "quality", false);
     assert_eq!((rows[0].value, rows[0].met), (Some(40.0), false));
@@ -460,7 +460,7 @@ fn tools_disagreeing_under_combine_all_are_no_improvement() {
         );
         p.commit();
         let (_, out) = p.rlt(&["run", "--max-sessions", "1"]);
-        let s1 = rows_for(&p.dir, "cc", false).into_iter().find(|r| r.session == Some(1)).expect("session 1 judged");
+        let s1 = rows_for(&p.dir, "cc", false).into_iter().find(|r| r.session == Some(1)).expect("session 1 verified");
         assert_eq!((s1.value, s1.outcome), (Some(8.0), outcome), "combine: {combine}\n{out}");
         assert_eq!(s1.rationale.contains("different directions"), combine == "all", "{}", s1.rationale);
     }
@@ -503,7 +503,7 @@ fn run_real(p: &Project, sessions: &str) -> (Option<i32>, String) {
     (out.status.code(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
-/// Against the REAL swe-metrics, a `scope: changed` code-metric judge: the baseline pass (nothing
+/// Against the REAL swe-metrics, a `scope: changed` code-metric verifier: the baseline pass (nothing
 /// changed) and a session that touches only docs are VACUOUSLY met; a session that changes code is
 /// measured as before (a 5-decision function: cyclomatic 6 > 3).
 #[test]

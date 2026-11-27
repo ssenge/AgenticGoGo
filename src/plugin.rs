@@ -42,7 +42,7 @@ pub enum LifecycleEvent {
     Verify,
     Gate,
     Backoff,
-    /// a `skip_judges` step whose work is being STAGED onto the span (§7.4).
+    /// a `skip_verifiers` step whose work is being STAGED onto the span (§7.4).
     Staging,
     Finished { reason: String, ledger_tag: String },
 }
@@ -101,7 +101,7 @@ impl Extensions {
 
 pub trait Handler {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow>;
-    /// Whether this handler runs on a `skip_judges` step. Default yes; the judged-merge handlers
+    /// Whether this handler runs on a `skip_verifiers` step. Default yes; the verified-merge handlers
     /// override to `false` so a skip step bypasses them (mirrors the old `if !skip`).
     fn runs_on_skip(&self) -> bool {
         true

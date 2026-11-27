@@ -140,9 +140,9 @@ fn config_parses_without_a_backend_and_defaults_resolve_at_use_time() {
     assert_eq!(cfg.defaults.agent, "copilot");
     assert!(cfg.defaults.model.is_none(), "an absent `model:` must stay None, not bake in a default");
     // BOTH readers must see the SAME key. `agent_name` parses its own private partial, and it —
-    // not `load()` — is what picks the backend for `judge`, `plan`, `doctor` and `skills
-    // install`. Let the two drift (a `#[serde(rename)]` on one, say) and `rlt judge` silently
-    // runs the LLM judge on Claude for a copilot project: the exact bug this test is named for,
+    // not `load()` — is what picks the backend for `verifier`, `plan`, `doctor` and `skills
+    // install`. Let the two drift (a `#[serde(rename)]` on one, say) and `rlt verifier` silently
+    // runs the rubric verifier on Claude for a copilot project: the exact bug this test is named for,
     // back again, with the full-parse assertion above still green.
     assert_eq!(RelentlessConfig::agent_name(&p), "copilot", "agent_name must read the real key");
 
@@ -161,7 +161,7 @@ fn config_parses_without_a_backend_and_defaults_resolve_at_use_time() {
     assert_eq!(step.model(claude()), "pinned");
 
     // `agent_name` survives for the paths where rlt.yaml may not exist or may not parse
-    // (doctor / plan / judge / skills install): absent or agent-less → the default.
+    // (doctor / plan / verifier / skills install): absent or agent-less → the default.
     std::fs::write(&p, "project: x\nsequence: { steps: [work] }\n").unwrap();
     assert_eq!(RelentlessConfig::agent_name(&p), "claude");
     assert_eq!(RelentlessConfig::agent_name(&dir.join("nope.yaml")), "claude");
@@ -174,7 +174,7 @@ fn config_parses_without_a_backend_and_defaults_resolve_at_use_time() {
 fn claude_declares_the_capabilities_it_actually_has() {
     let c = claude().capabilities();
     assert!(c.reports_output_tokens && c.reports_cost_usd, "claude reports both");
-    assert!(c.supports_one_shot, "claude can run a tools-off judge call");
+    assert!(c.supports_one_shot, "claude can run a tools-off verifier call");
     assert!(c.supports_resume && c.supports_effort && c.detects_rate_limits);
 }
 
@@ -200,7 +200,7 @@ fn usage_is_an_increment_so_report_once_and_report_per_message_both_work() {
 }
 
 /// The REAL Claude stream: four token kinds off the result, the model off `system`/`init`, the
-/// price off `total_cost_usd` — and the one-shot JSON a judge gets back, which has no init and names
+/// price off `total_cost_usd` — and the one-shot JSON a verifier gets back, which has no init and names
 /// the model in `modelUsage` instead.
 #[test]
 fn the_captured_claude_stream_yields_the_split_tokens_the_model_and_the_price() {

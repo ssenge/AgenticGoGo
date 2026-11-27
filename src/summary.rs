@@ -4,8 +4,8 @@
 //!   - **windowed**: just this session/window, independent.
 //!
 //! One cheap agent call per cycle returns BOTH (as JSON) to minimize cost. It goes through
-//! [`AgentBackend::one_shot`] — the same call the LLM judge makes; this module used to carry a
-//! near-verbatim clone of it, envelope-unwrap included. And like the judge, it runs on the RULER,
+//! [`AgentBackend::one_shot`] — the same call the rubric verifier makes; this module used to carry a
+//! near-verbatim clone of it, envelope-unwrap included. And like the verifier, it runs on the RULER,
 //! which is handed in rather than read off a global (see `core::config::RelentlessConfig::ruler_backend`).
 
 use crate::backend::AgentBackend;
@@ -80,9 +80,9 @@ pub fn summarize(
          {{\"cumulative\": \"<one sentence>\", \"windowed\": \"<one sentence>\"}}"
     );
 
-    // Same one-shot as the judge (this call used to be a near-verbatim clone of it, envelope
+    // Same one-shot as the verifier (this call used to be a near-verbatim clone of it, envelope
     // unwrap included). `cwd: None` — the summarizer only reads text it was handed, so unlike
-    // the judge it has no business looking at the project.
+    // the verifier it has no business looking at the project.
     // Best-effort: any failure (spawn/timeout) → None, never breaks the loop.
     // cwd is None (the summarizer runs in rlt's own dir, not the project) → never confined; it is
     // a tool-less LLM call over worker thoughts, not a worker-rewritable script.

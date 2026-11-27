@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The prize judge: Lean's kernel accepts the FULL proof with no gaps AND no smuggled assumptions.
+# The prize verifier: Lean's kernel accepts the FULL proof with no gaps AND no smuggled assumptions.
 #
 # `lake build` + a no-`sorry` grep is necessary but NOT sufficient: a worker can make both pass
 # while cheating, by adding `axiom pnp : P ≠ NP` (or reaching the goal via `sorryAx` /

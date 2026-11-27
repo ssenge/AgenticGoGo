@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the reference swe-metrics judge image from a swe-metrics git checkout.
+# Build the reference swe-metrics verifier image from a swe-metrics git checkout.
 #
 #   docker/swe-metrics/build.sh <swe-metrics checkout> [tag]      # tag: rlt-swe-metrics
 #   SWE_METRICS_REF=v0.1 docker/swe-metrics/build.sh ~/src/swe-metrics

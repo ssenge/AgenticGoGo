@@ -1,13 +1,13 @@
-//! The step engine: run the run-set judges, fold verdicts into the judges, evaluate done/abort.
+//! The step engine: run the run-set verifiers, fold verdicts into the verifiers, evaluate done/abort.
 //!
-//! This is the judge logic the loop calls once per STEP (after a worker session exits). `rlt plan`
-//! exercises it for a single dry-run step. There is NO recheck caching — every run-set judge runs
-//! every step (§5.5's ponytail note); `skip_judges` is the only lever, and the caching upgrade path
-//! is ROADMAP #8, landing INSIDE [`Engine::run_judges`] and nowhere else.
+//! This is the verifier logic the loop calls once per STEP (after a worker session exits). `rlt plan`
+//! exercises it for a single dry-run step. There is NO recheck caching — every run-set verifier runs
+//! every step (§5.5's ponytail note); `skip_verifiers` is the only lever, and the caching upgrade path
+//! is ROADMAP #8, landing INSIDE [`Engine::run_verifiers`] and nowhere else.
 
 use crate::backend::AgentBackend;
-use crate::core::judge;
-use crate::core::model::{Judge, Lifecycle, Verdict};
+use crate::core::verifier;
+use crate::core::model::{Verifier, Lifecycle, Verdict};
 use crate::core::stop::{self, StopContext};
 use anyhow::Result;
 use std::path::Path;
@@ -72,17 +72,17 @@ pub struct CycleResult {
     /// It never sets `stop`/`halt` — a stuck loop keeps running; a human is a side-channel, not a
     /// gate. `reason` is the one-line `{{reason}}` string (see [`Engine::notify_reason`]).
     pub notify: Option<String>,
-    /// per-judge changes this step (feeds the LLM summarizer).
+    /// per-verifier changes this step (feeds the LLM summarizer).
     pub deltas: Vec<GoalDelta>,
-    /// the verdicts a judge actually PRODUCED this step (name + verdict), in judge order. The GATE
-    /// stamps and appends these to `verdicts.jsonl` (§5.8); a `skip_judges` step produces none.
+    /// the verdicts a verifier actually PRODUCED this step (name + verdict), in verifier order. The GATE
+    /// stamps and appends these to `verdicts.jsonl` (§5.8); a `skip_verifiers` step produces none.
     pub fresh_verdicts: Vec<(String, Verdict)>,
-    /// what each ruler call the LLM judges made this step reported (§5.6) — charged by the loop to
-    /// the run ceilings and the usage record. Script and native judges make no call.
-    pub judge_usage: Vec<crate::usage::Usage>,
+    /// what each ruler call the rubric verifiers made this step reported (§5.6) — charged by the loop to
+    /// the run ceilings and the usage record. Script and native verifiers make no call.
+    pub verifier_usage: Vec<crate::usage::Usage>,
 }
 
-/// What changed for one judge across a step. The summarizer turns these into prose.
+/// What changed for one verifier across a step. The summarizer turns these into prose.
 #[derive(Debug, Clone)]
 pub struct GoalDelta {
     pub id: String,
@@ -127,9 +127,9 @@ pub struct RunState {
 }
 
 pub struct Engine {
-    /// the RUN-SET: every judge that can execute this run (done_if ∪ abort_if ∪ invariants ∪ every
+    /// the RUN-SET: every verifier that can execute this run (done_if ∪ abort_if ∪ invariants ∪ every
     /// if-condition, §5.3). Each carries its `in_dod`/`invariant` membership.
-    pub judges: Vec<Judge>,
+    pub verifiers: Vec<Verifier>,
     /// the Definition of Done (success stop).
     ///
     /// `None` = **there is no DoD** — the Rust driver path, where flow lives in the driver's own
@@ -142,39 +142,39 @@ pub struct Engine {
     /// the non-terminal notify guard (STUCK_NOTIFY §3). Same grammar, no effect on stop/halt.
     pub notify_if: Option<String>,
     /// the gate's ratchet config + history — the in-memory state behind `rollbacks`,
-    /// `consecutive_rollbacks`, `oscillating`, `ratchet_regressed` and `<judge>.ref`.
+    /// `consecutive_rollbacks`, `oscillating`, `ratchet_regressed` and `<verifier>.ref`.
     pub gate: crate::core::ratchet::Gate,
-    /// the judge groups (`sequence.groups`) the conditions' `(<group>)` subsets resolve against, and
-    /// which of them the gate judges as a unit ([`crate::core::groups`]).
+    /// the verifier groups (`sequence.groups`) the conditions' `(<group>)` subsets resolve against, and
+    /// which of them the gate verifiers as a unit ([`crate::core::groups`]).
     pub groups: crate::core::groups::Groups,
-    /// the base branch the judges grade against — what a `scope: changed` metric judge measures
-    /// since, and a native judge's diff is taken against. Set once the run resolved it; `None`
-    /// (`rlt plan`, `rlt judge`) = `HEAD`.
+    /// the base branch the verifiers grade against — what a `scope: changed` metric verifier measures
+    /// since, and a native verifier's diff is taken against. Set once the run resolved it; `None`
+    /// (`rlt plan`, `rlt verifier`) = `HEAD`.
     pub base: Option<String>,
 }
 
-/// The YAML path's verdict store for a native judge's [`crate::core::model::JudgeCtx`]: this step's
+/// The YAML path's verdict store for a native verifier's [`crate::core::model::VerifierCtx`]: this step's
 /// run-set state, read by name.
 ///
-/// ponytail: it does NOT run an unconsulted judge on demand the way the facade's cache does. It
-/// cannot be reached: `judges::resolve` decides a judge's kind by FILE EXTENSION and has no way to
-/// produce a `Native` one, so no YAML run has a native judge to build a ctx for. CEILING: if that
-/// ever changes, a native judge asking about a judge that has not run this step gets a `failed`
+/// ponytail: it does NOT run an unconsulted verifier on demand the way the facade's cache does. It
+/// cannot be reached: `verifiers::resolve` decides a verifier's kind by FILE EXTENSION and has no way to
+/// produce a `Native` one, so no YAML run has a native verifier to build a ctx for. CEILING: if that
+/// ever changes, a native verifier asking about a verifier that has not run this step gets a `failed`
 /// verdict rather than a fresh run. UPGRADE PATH: give `Engine` the same lazy cache the facade has,
-/// once there is a second producer of `JudgeKind::Native`.
-struct LastVerdicts<'a>(&'a [Judge]);
+/// once there is a second producer of `VerifierKind::Native`.
+struct LastVerdicts<'a>(&'a [Verifier]);
 
-impl crate::core::model::JudgeSource for LastVerdicts<'_> {
-    fn verdict_for(&self, j: &Judge) -> Verdict {
+impl crate::core::model::VerifierSource for LastVerdicts<'_> {
+    fn verdict_for(&self, j: &Verifier) -> Verdict {
         self.0
             .iter()
             .find(|g| g.name == j.name)
             .and_then(|g| g.last_verdict.clone())
-            .unwrap_or_else(|| Verdict::failed(format!("judge `{}` was not consulted this step", j.name)))
+            .unwrap_or_else(|| Verdict::failed(format!("verifier `{}` was not consulted this step", j.name)))
     }
 }
 
-/// A snapshot of one judge's per-step runtime state (see [`Engine::snapshot_goal_state`]).
+/// A snapshot of one verifier's per-step runtime state (see [`Engine::snapshot_goal_state`]).
 #[derive(Debug, Clone)]
 pub struct GoalRuntime {
     pub state: Lifecycle,
@@ -186,19 +186,19 @@ impl Engine {
     /// Build from a resolved run-set + the DoD expressions. Validates the expressions up front so a
     /// typo fails at load, not 3 sessions into a run.
     pub fn new(
-        judges: Vec<Judge>,
+        verifiers: Vec<Verifier>,
         done_if: Option<String>,
         abort_if: Option<String>,
         notify_if: Option<String>,
     ) -> Result<Self> {
         let groups = crate::core::groups::Groups::default();
-        Self::with_gate(judges, done_if, abort_if, notify_if, crate::core::ratchet::Gate::default(), groups)
+        Self::with_gate(verifiers, done_if, abort_if, notify_if, crate::core::ratchet::Gate::default(), groups)
     }
 
-    /// [`Engine::new`] with a ratchet and judge groups configured — the expressions are validated
-    /// against both, so a `<judge>.ref` on an unratcheted judge or an unknown group fails at load.
+    /// [`Engine::new`] with a ratchet and verifier groups configured — the expressions are validated
+    /// against both, so a `<verifier>.ref` on an unratcheted verifier or an unknown group fails at load.
     pub fn with_gate(
-        judges: Vec<Judge>,
+        verifiers: Vec<Verifier>,
         done_if: Option<String>,
         abort_if: Option<String>,
         notify_if: Option<String>,
@@ -206,34 +206,34 @@ impl Engine {
         groups: crate::core::groups::Groups,
     ) -> Result<Self> {
         for expr in [&done_if, &abort_if, &notify_if].into_iter().flatten() {
-            stop::validate_with(expr, &judges, Some(&gate), &groups)?;
+            stop::validate_with(expr, &verifiers, Some(&gate), &groups)?;
         }
-        Ok(Engine { judges, done_if, abort_if, notify_if, gate, groups, base: None })
+        Ok(Engine { verifiers, done_if, abort_if, notify_if, gate, groups, base: None })
     }
 
     /// The one-line `{{reason}}` for a `notify_if` that just fired (STUCK_NOTIFY §5 / §12.3): the
-    /// rationale of ONE judge named in the expression — judges reporting `met` are preferred over
+    /// rationale of ONE verifier named in the expression — verifiers reporting `met` are preferred over
     /// the rest, and the highest `value` wins inside that group — so a compound
     /// `stuck.value >= 85 OR blocked` reports the detector that is actually shouting rather than the
-    /// one with the bigger scale. Falls back to the expression text when no named judge has a usable
-    /// rationale: every named judge's rationale is empty, or the expression names only run-scalars
+    /// one with the bigger scale. Falls back to the expression text when no named verifier has a usable
+    /// rationale: every named verifier's rationale is empty, or the expression names only run-scalars
     /// (`over_iterations`, `wall_hours`).
     pub fn notify_reason(&self, expr: &str) -> String {
-        let named = stop::judge_names(expr).unwrap_or_default();
-        // MET FIRST, then value. Ranking on raw `value` alone is meaningless across judges: a
+        let named = stop::verifier_names(expr).unwrap_or_default();
+        // MET FIRST, then value. Ranking on raw `value` alone is meaningless across verifiers: a
         // rubric scores 0–100 and a script scores 0–1, so a quiet `stuck` at 10/100 outranks a
         // FIRING `blocked` at 1/1 and the human is paged with the rationale of the detector that is
-        // not complaining. `met` is the judge's own verdict, not proof it made the expression true
+        // not complaining. `met` is the verifier's own verdict, not proof it made the expression true
         // (`stuck.value >= 50` can fire while the rubric's own `met` threshold of 85 is unmet), so
-        // it is a heuristic — but it is the right one: among the judges an expression names, the
-        // ones reporting trouble are the ones with something to say. The all-judges pass is the
+        // it is a heuristic — but it is the right one: among the verifiers an expression names, the
+        // ones reporting trouble are the ones with something to say. The all-verifiers pass is the
         // fallback for exactly that threshold-mismatch case.
         //
         // `reduce` with a strict `>`, not `max_by`: `Iterator::max_by` returns the LAST of equal
         // maxima, and §12.3 pins ties to the FIRST in run-set order (the order the expression names
         // them). Both are deterministic; matching the spec is free and one less thing to debug.
         let pick = |met_only: bool| {
-            self.judges
+            self.verifiers
                 .iter()
                 .filter(|g| named.iter().any(|n| n == &g.name))
                 .filter(|g| !met_only || g.met())
@@ -248,50 +248,50 @@ impl Engine {
         sanitize_reason(text, expr)
     }
 
-    /// Run every run-set judge (unless `skip_judges`), fold verdicts in, and evaluate done/abort
+    /// Run every run-set verifier (unless `skip_verifiers`), fold verdicts in, and evaluate done/abort
     /// against the current run-state.
     ///
-    /// On a `skip_judges` step NO judge runs (§5.5): judge state is untouched, `fresh_verdicts` and
-    /// `judge_errors` are empty, so `any_judge_error` is honestly false and the DoD terms read their
+    /// On a `skip_verifiers` step NO verifier runs (§5.5): verifier state is untouched, `fresh_verdicts` and
+    /// `verifier_errors` are empty, so `any_verifier_error` is honestly false and the DoD terms read their
     /// prior (non-firing) values — only the run-state ceilings can newly trip. `cwd` is the project
-    /// root; `ruler`/`judge_model`/`timeout` are the run-level `judge:` block; `session`/`step`
-    /// populate the judge env contract.
+    /// root; `ruler`/`verifier_model`/`timeout` are the run-level `verifier:` block; `session`/`step`
+    /// populate the verifier env contract.
     #[allow(clippy::too_many_arguments)]
     pub fn run_step(
         &mut self,
         cwd: &Path,
         run: &RunState,
         ruler: &dyn AgentBackend,
-        judge_model: &str,
+        verifier_model: &str,
         timeout: u64,
         step: &str,
         session: Option<u32>,
-        skip_judges: bool,
+        skip_verifiers: bool,
         isolation: crate::isolation::Isolation,
     ) -> CycleResult {
         let before: Vec<(f64, Lifecycle)> = self
-            .judges
+            .verifiers
             .iter()
             .map(|g| (g.last_verdict.as_ref().and_then(|v| v.value).unwrap_or(0.0), g.state))
             .collect();
 
-        let mut judge_errors: Vec<String> = Vec::new();
+        let mut verifier_errors: Vec<String> = Vec::new();
         let mut fresh: Vec<(String, Verdict)> = Vec::new();
-        let mut judge_usage = Vec::new();
-        if !skip_judges {
-            let verdicts = self.run_judges(cwd, ruler, judge_model, timeout, session, step, isolation);
-            for (judge, (v, usage)) in self.judges.iter_mut().zip(verdicts) {
-                judge_usage.extend(usage);
+        let mut verifier_usage = Vec::new();
+        if !skip_verifiers {
+            let verdicts = self.run_verifiers(cwd, ruler, verifier_model, timeout, session, step, isolation);
+            for (verifier, (v, usage)) in self.verifiers.iter_mut().zip(verdicts) {
+                verifier_usage.extend(usage);
                 if v.error.is_some() {
-                    judge_errors.push(judge.name.clone());
+                    verifier_errors.push(verifier.name.clone());
                 }
-                fresh.push((judge.name.clone(), v.clone()));
-                judge.apply(v);
+                fresh.push((verifier.name.clone(), v.clone()));
+                verifier.apply(v);
             }
         }
 
         let deltas: Vec<GoalDelta> = self
-            .judges
+            .verifiers
             .iter()
             .zip(before)
             .map(|(g, (bv, bs))| GoalDelta {
@@ -304,48 +304,48 @@ impl Engine {
             })
             .collect();
 
-        let mut result = self.conditions_with_deltas(run, deltas, &judge_errors);
+        let mut result = self.conditions_with_deltas(run, deltas, &verifier_errors);
         result.fresh_verdicts = fresh;
-        result.judge_usage = judge_usage;
+        result.verifier_usage = verifier_usage;
         result
     }
 
-    /// Run every run-set judge and return their verdicts POSITIONALLY (`verdicts[i]` belongs to
-    /// `judges[i]`).
+    /// Run every run-set verifier and return their verdicts POSITIONALLY (`verdicts[i]` belongs to
+    /// `verifiers[i]`).
     ///
     /// # seam
-    /// The single choke point through which every judge in a step runs: ROADMAP #8 (judge
+    /// The single choke point through which every verifier in a step runs: ROADMAP #8 (verifier
     /// parallelism + result caching) lands INSIDE this function and nowhere else. `&self` (not
-    /// `&mut`) because judging is a pure read of judge state — the mutation stays in the caller,
+    /// `&mut`) because verifying is a pure read of verifier state — the mutation stays in the caller,
     /// sequential and in order. Today it is a plain sequential map; the seam is the deliverable.
     #[allow(clippy::too_many_arguments)]
-    fn run_judges(
+    fn run_verifiers(
         &self,
         cwd: &Path,
         ruler: &dyn AgentBackend,
-        judge_model: &str,
+        verifier_model: &str,
         timeout: u64,
         session: Option<u32>,
         step: &str,
         isolation: crate::isolation::Isolation,
     ) -> Vec<(Verdict, Option<crate::usage::Usage>)> {
-        let src = LastVerdicts(&self.judges);
-        self.judges
+        let src = LastVerdicts(&self.verifiers);
+        self.verifiers
             .iter()
             .map(|g| {
-                // `g.timeout` is the `judges:` block's per-judge override; `timeout` is the
-                // run-level `judge.timeout`. Without this the override would parse and do nothing.
+                // `g.timeout` is the `verifiers:` block's per-verifier override; `timeout` is the
+                // run-level `verifier.timeout`. Without this the override would parse and do nothing.
                 let secs = g.timeout.unwrap_or(timeout);
-                judge::run(&g.kind, &g.name, cwd, ruler, judge_model, "", secs, session, step, isolation, &src, self.base.as_deref())
+                verifier::run(&g.kind, &g.name, cwd, ruler, verifier_model, "", secs, session, step, isolation, &src, self.base.as_deref())
             })
             .collect()
     }
 
-    /// Snapshot every judge's per-step RUNTIME state (everything `apply` mutates). Paired with
-    /// [`restore_goal_state`] to undo a step's judging when the rollback gate discards a staged merge
+    /// Snapshot every verifier's per-step RUNTIME state (everything `apply` mutates). Paired with
+    /// [`restore_goal_state`] to undo a step's verifying when the rollback gate discards a staged merge
     /// (§5.7 / W5) — so the engine never reports success on discarded work.
     pub fn snapshot_goal_state(&self) -> Vec<GoalRuntime> {
-        self.judges
+        self.verifiers
             .iter()
             .map(|g| GoalRuntime { state: g.state, last_verdict: g.last_verdict.clone(), ever_met: g.ever_met })
             .collect()
@@ -353,25 +353,25 @@ impl Engine {
 
     /// Restore a snapshot taken by [`snapshot_goal_state`]. No-op if the shape doesn't match.
     pub fn restore_goal_state(&mut self, snap: &[GoalRuntime]) {
-        if snap.len() != self.judges.len() {
+        if snap.len() != self.verifiers.len() {
             return;
         }
-        for (g, s) in self.judges.iter_mut().zip(snap) {
+        for (g, s) in self.verifiers.iter_mut().zip(snap) {
             g.state = s.state;
             g.last_verdict = s.last_verdict.clone();
             g.ever_met = s.ever_met;
         }
     }
 
-    /// Re-evaluate done/abort against the CURRENT judge state without running any judges (no LLM
-    /// cost). Used after a rollback restores base truth. No judge ran ⇒ `any_judge_error` is false.
+    /// Re-evaluate done/abort against the CURRENT verifier state without running any verifiers (no LLM
+    /// cost). Used after a rollback restores base truth. No verifier ran ⇒ `any_verifier_error` is false.
     pub fn conditions_only(&self, run: &RunState) -> CycleResult {
         self.conditions_with_deltas(run, Vec::new(), &[])
     }
 
-    /// Re-evaluate done/abort/notify for a cycle whose judges already ran, after the GATE moved its
-    /// own state (`rollbacks`, `oscillating`, the ratchet). The judges that errored are re-derived
-    /// from the cycle's fresh verdicts, so `any_judge_error` reads exactly as it did.
+    /// Re-evaluate done/abort/notify for a cycle whose verifiers already ran, after the GATE moved its
+    /// own state (`rollbacks`, `oscillating`, the ratchet). The verifiers that errored are re-derived
+    /// from the cycle's fresh verdicts, so `any_verifier_error` reads exactly as it did.
     pub fn reevaluate(&self, run: &RunState, res: &mut CycleResult) {
         let errors: Vec<String> =
             res.fresh_verdicts.iter().filter(|(_, v)| v.error.is_some()).map(|(n, _)| n.clone()).collect();
@@ -386,11 +386,11 @@ impl Engine {
         &self,
         run: &RunState,
         deltas: Vec<GoalDelta>,
-        judge_errors: &[String],
+        verifier_errors: &[String],
     ) -> CycleResult {
         let ctx = StopContext {
-            judges: &self.judges,
-            judge_errors,
+            verifiers: &self.verifiers,
+            verifier_errors,
             tokens_spent: run.tokens_spent,
             budget_total: run.budget_total,
             cost_spent: run.cost_spent,
@@ -413,7 +413,7 @@ impl Engine {
             }
             None => (false, None),
         };
-        // Evaluated on the SAME judge snapshot as done/abort so a cycle cannot report an
+        // Evaluated on the SAME verifier snapshot as done/abort so a cycle cannot report an
         // inconsistent trio. NON-TERMINAL by construction: `notify` is a separate field, and no
         // branch below folds it into `stop`/`halt`.
         let notify = match &self.notify_if {
@@ -427,15 +427,15 @@ impl Engine {
             notify,
             deltas,
             fresh_verdicts: Vec::new(),
-            judge_usage: Vec::new(),
+            verifier_usage: Vec::new(),
         }
     }
 
-    /// Counts for the scoreboard header: (met, total) over the DoD-set — a run-set-only judge like
+    /// Counts for the scoreboard header: (met, total) over the DoD-set — a run-set-only verifier like
     /// `stalled` is machinery, not a goal, so it is not counted.
     pub fn tally(&self) -> (usize, usize) {
-        let met = self.judges.iter().filter(|g| g.in_dod && g.met()).count();
-        let total = self.judges.iter().filter(|g| g.in_dod).count();
+        let met = self.verifiers.iter().filter(|g| g.in_dod && g.met()).count();
+        let total = self.verifiers.iter().filter(|g| g.in_dod).count();
         (met, total)
     }
 
@@ -446,7 +446,7 @@ impl Engine {
             Some(d) => format!("Goals: {met}/{total}   done_if: {d}\n"),
             None => format!("Goals: {met}/{total}\n"),
         };
-        for g in &self.judges {
+        for g in &self.verifiers {
             out.push_str("  ");
             out.push_str(&g.scoreboard_line());
             if let Some(v) = &g.last_verdict {
@@ -463,14 +463,14 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::model::{Judge, JudgeKind, Lifecycle, Verdict};
+    use crate::core::model::{Verifier, VerifierKind, Lifecycle, Verdict};
 
-    /// A judge that has never been graded — the state `Engine::new` validates against, and the
+    /// A verifier that has never been graded — the state `Engine::new` validates against, and the
     /// state every detector is in on the baseline pass.
-    fn unjudged(name: &str, in_dod: bool) -> Judge {
-        Judge {
+    fn unverified(name: &str, in_dod: bool) -> Verifier {
+        Verifier {
             name: name.into(),
-            kind: JudgeKind::Script { path: "true".into() },
+            kind: VerifierKind::Script { path: "true".into() },
             invariant: false,
             in_dod,
             timeout: None,
@@ -484,8 +484,8 @@ mod tests {
     /// A graded DoD-set goal. Passing `met: false` is what keeps the non-terminality assertions
     /// honest: a vacuously-satisfied `done_if` would set `stop` for reasons that have nothing to do
     /// with notify, and the test would pass while proving nothing.
-    fn goal(name: &str, met: bool) -> Judge {
-        let mut j = unjudged(name, true);
+    fn goal(name: &str, met: bool) -> Verifier {
+        let mut j = unverified(name, true);
         j.apply(Verdict {
             met,
             value: Some(if met { 1.0 } else { 0.0 }),
@@ -501,8 +501,8 @@ mod tests {
 
     /// A stuck-detector: run-set only (`in_dod: false` — machinery, never a goal, §12.1), carrying
     /// the `value` the expression compares and the `rationale` that becomes `{{reason}}`.
-    fn detector(name: &str, value: f64, rationale: &str) -> Judge {
-        let mut j = unjudged(name, false);
+    fn detector(name: &str, value: f64, rationale: &str) -> Verifier {
+        let mut j = unverified(name, false);
         j.apply(Verdict {
             met: value > 0.0,
             value: Some(value),
@@ -518,13 +518,13 @@ mod tests {
 
     /// The engine under test: an unmet DoD plus a guard that cannot trip on a default `RunState`,
     /// so `stop`/`halt` are false unless the thing under test moves them.
-    fn engine(judges: Vec<Judge>, notify_if: Option<&str>) -> Engine {
-        Engine::new(judges, Some("all_goals".into()), Some("over_iterations".into()), notify_if.map(String::from))
+    fn engine(verifiers: Vec<Verifier>, notify_if: Option<&str>) -> Engine {
+        Engine::new(verifiers, Some("all_goals".into()), Some("over_iterations".into()), notify_if.map(String::from))
             .expect("the test engine's expressions must validate")
     }
 
-    /// One cycle's verdict without running a single judge (no subprocess, no ruler) — the same
-    /// entry point the rollback gate uses to re-derive a cycle from kept judge state.
+    /// One cycle's verdict without running a single verifier (no subprocess, no ruler) — the same
+    /// entry point the rollback gate uses to re-derive a cycle from kept verifier state.
     fn cycle(eng: &Engine) -> CycleResult {
         eng.conditions_only(&RunState::default())
     }
@@ -535,11 +535,11 @@ mod tests {
     #[test]
     fn a_fired_notify_if_is_non_terminal_the_loop_keeps_running() {
         let eng = engine(
-            vec![goal("feature", false), detector("stuck", 92.0, "no judge moved in 5 sessions")],
+            vec![goal("feature", false), detector("stuck", 92.0, "no verifier moved in 5 sessions")],
             Some("stuck.value >= 85"),
         );
         let res = cycle(&eng);
-        assert_eq!(res.notify.as_deref(), Some("no judge moved in 5 sessions"), "the detector's rationale is the reason");
+        assert_eq!(res.notify.as_deref(), Some("no verifier moved in 5 sessions"), "the detector's rationale is the reason");
         assert!(!res.stop, "notify is not success — it must never satisfy the Definition of Done");
         assert!(!res.halt, "notify is not abort — the loop KEEPS RUNNING while a human is pinged");
         assert!(res.halt_reason.is_none(), "nothing halted, so there is no halt reason to report");
@@ -553,10 +553,10 @@ mod tests {
     }
 
     /// §5/§12.3: under a compound guard, `{{reason}}` is the rationale of whichever NAMED detector
-    /// is shouting loudest — highest `value`. Not the first one listed, and not the loudest judge
+    /// is shouting loudest — highest `value`. Not the first one listed, and not the loudest verifier
     /// in the run-set, or a `stuck.value >= 85 OR blocked` ladder would report the wrong stage.
     #[test]
-    fn the_reason_comes_from_the_highest_value_judge_named_in_the_expression() {
+    fn the_reason_comes_from_the_highest_value_verifier_named_in_the_expression() {
         let expr = "stuck.value >= 85 OR blocked";
 
         // `stuck` (92) outranks `blocked` (1) even though `blocked` comes first in the run-set…
@@ -565,7 +565,7 @@ mod tests {
                 goal("feature", false),
                 detector("blocked", 1.0, "waiting on a prod credential"),
                 detector("stuck", 92.0, "values flat for 5 sessions"),
-                // …and a LOUDER judge the expression does not name must not supply the reason.
+                // …and a LOUDER verifier the expression does not name must not supply the reason.
                 detector("coverage", 100.0, "coverage is fine"),
             ],
             Some(expr),
@@ -586,18 +586,18 @@ mod tests {
 
     /// §12.3 step 4 — the reason is never empty, so a detector with nothing to say falls back to
     /// the expression text: "why did I get paged" must always be answerable. Two shapes reach it —
-    /// a judge that ran and said nothing, and a judge that has not run yet (the baseline pass).
+    /// a verifier that ran and said nothing, and a verifier that has not run yet (the baseline pass).
     #[test]
-    fn a_judge_with_no_usable_rationale_falls_back_to_the_expression_text() {
+    fn a_verifier_with_no_usable_rationale_falls_back_to_the_expression_text() {
         let silent = engine(
             vec![goal("feature", false), detector("stuck", 92.0, "   ")],
             Some("stuck.value >= 85"),
         );
         assert_eq!(cycle(&silent).notify.as_deref(), Some("stuck.value >= 85"), "whitespace is not a rationale");
 
-        // never graded: `NOT stuck` still fires (an unjudged judge is not met) and there is no
+        // never graded: `NOT stuck` still fires (an unverified verifier is not met) and there is no
         // verdict to read a rationale from.
-        let fresh = engine(vec![goal("feature", false), unjudged("stuck", false)], Some("NOT stuck"));
+        let fresh = engine(vec![goal("feature", false), unverified("stuck", false)], Some("NOT stuck"));
         assert_eq!(cycle(&fresh).notify.as_deref(), Some("NOT stuck"));
     }
 
@@ -614,12 +614,12 @@ mod tests {
         assert_eq!(reason, "goal values flat since session 3. The diff churns over the same two files.");
     }
 
-    /// §8.1/§12.1: a `notify_if` naming a judge outside the run-set is a STARTUP error, not a
+    /// §8.1/§12.1: a `notify_if` naming a verifier outside the run-set is a STARTUP error, not a
     /// surprise three sessions into an overnight run — the exact treatment `abort_if` already gets.
-    /// (In production `assemble` puts `notify_if`'s judges INTO the run-set; this is the guard for
+    /// (In production `assemble` puts `notify_if`'s verifiers INTO the run-set; this is the guard for
     /// when a name still fails to resolve.)
     #[test]
-    fn engine_new_refuses_a_notify_if_naming_a_judge_outside_the_run_set() {
+    fn engine_new_refuses_a_notify_if_naming_a_verifier_outside_the_run_set() {
         let run_set = || vec![goal("feature", false)];
 
         // `.map(|_| ())` only so the failure path is printable — `Engine` is not `Debug`.
@@ -629,7 +629,7 @@ mod tests {
                 .map(|_| ())
                 .expect_err("an unresolvable notify_if must not build an Engine")
         );
-        assert!(err.contains("unknown judge `stuck`"), "the error must name the judge that is missing: {err}");
+        assert!(err.contains("unknown verifier `stuck`"), "the error must name the verifier that is missing: {err}");
         assert!(err.contains("stuck.value >= 85"), "…and quote the offending expression back: {err}");
 
         // identical treatment for the terminal twin — this is a mirror, not a new policy.
@@ -637,7 +637,7 @@ mod tests {
 
         // …and the very same expression builds clean once the detector IS in the run-set.
         let mut with_detector = run_set();
-        with_detector.push(unjudged("stuck", false));
+        with_detector.push(unverified("stuck", false));
         assert!(Engine::new(with_detector, Some("all_goals".into()), None, Some("stuck.value >= 85".into())).is_ok());
     }
 
@@ -669,7 +669,7 @@ mod tests {
     /// Run-set order is the order the expression names them, so this is the tie-break a reader of
     /// `blocked OR escalated` would predict.
     #[test]
-    fn a_tie_on_value_goes_to_the_first_judge_in_run_set_order() {
+    fn a_tie_on_value_goes_to_the_first_verifier_in_run_set_order() {
         let eng = engine(
             vec![
                 goal("feature", false),
@@ -692,9 +692,9 @@ mod tests {
         assert_eq!(cycle(&flipped).notify.as_deref(), Some("second — should lose the tie"));
     }
 
-    /// §12.10b — the halt ping enriches the bare `abort_if` expression with the winning judge's
+    /// §12.10b — the halt ping enriches the bare `abort_if` expression with the winning verifier's
     /// rationale, so "stop + notify" delivers the blocker rather than a config line. A ceiling-only
-    /// expression names no judge and must come back UNCHANGED (that is §8.5's contract, and the e2e
+    /// expression names no verifier and must come back UNCHANGED (that is §8.5's contract, and the e2e
     /// asserts the exact `over_iterations` line).
     #[test]
     fn the_halt_reason_carries_the_blocker_but_a_ceiling_stays_bare() {
@@ -705,16 +705,16 @@ mod tests {
         assert_eq!(
             eng.notify_reason("blocked OR over_iterations"),
             "BLOCKED: need the prod deploy key",
-            "a named judge with a rationale supplies the detail the handler appends"
+            "a named verifier with a rationale supplies the detail the handler appends"
         );
         assert_eq!(
             eng.notify_reason("over_budget OR wall_hours >= 8"),
             "over_budget OR wall_hours >= 8",
-            "a ceiling-only expression names no judge — echo it back so the handler leaves it bare"
+            "a ceiling-only expression names no verifier — echo it back so the handler leaves it bare"
         );
     }
 
-    /// §12.3 — MET FIRST, and only then by value. Judge `value`s are on scales the judges choose
+    /// §12.3 — MET FIRST, and only then by value. Verifier `value`s are on scales the verifiers choose
     /// (a rubric grades 0–100, a script answers 0–1), so ranking on the raw number alone pages the
     /// human with the rationale of the detector that is NOT complaining. This is the exact shape of
     /// the docs' flagship expression, and the reason the whole feature delivered the opposite of the
@@ -732,13 +732,13 @@ mod tests {
         assert_eq!(
             cycle(&eng).notify.as_deref(),
             Some("MISSING CREDENTIAL: I need the prod deploy key"),
-            "the 1/1 judge that MADE the expression true must win over a 10/100 judge that did not"
+            "the 1/1 verifier that MADE the expression true must win over a 10/100 verifier that did not"
         );
 
-        // The all-judges fallback still has to answer "why was I paged". `met` is the judge's own
+        // The all-verifiers fallback still has to answer "why was I paged". `met` is the verifier's own
         // rubric, not proof it made the expression true — `stuck.value >= 50` fires while a rubric
-        // whose `met` bar is 85 stays unmet — so an expression that names NO met judge must still
-        // produce that judge's rationale rather than falling through to the bare expression text.
+        // whose `met` bar is 85 stays unmet — so an expression that names NO met verifier must still
+        // produce that verifier's rationale rather than falling through to the bare expression text.
         let threshold_mismatch = engine(
             vec![goal("feature", false), detector_unmet("stuck", 60.0, "values drifting, nothing landed")],
             Some("stuck.value >= 50"),
@@ -774,9 +774,9 @@ mod tests {
         assert_eq!(cycle(&blank).notify.as_deref(), Some("stuck.value >= 85"));
     }
 
-    /// The GATE moves its own state after the judges ran, so a cycle's verdict is re-read against
+    /// The GATE moves its own state after the verifiers ran, so a cycle's verdict is re-read against
     /// it: `rollbacks` in `abort_if` fires on the gate that made it true, not one cycle later — and
-    /// `any_judge_error` survives the re-read, because it is re-derived from the fresh verdicts.
+    /// `any_verifier_error` survives the re-read, because it is re-derived from the fresh verdicts.
     #[test]
     fn reevaluate_reads_the_gate_state_the_gate_just_moved() {
         use crate::core::ratchet::GateDecision;
@@ -792,17 +792,17 @@ mod tests {
         assert!(res.halt, "the second rollback trips `rollbacks >= 2`");
         assert_eq!(res.halt_reason.as_deref(), Some("rollbacks >= 2"));
 
-        let errs = Engine::new(vec![goal("feature", false)], Some("all_goals".into()), Some("any_judge_error".into()), None).unwrap();
+        let errs = Engine::new(vec![goal("feature", false)], Some("all_goals".into()), Some("any_verifier_error".into()), None).unwrap();
         errs.reevaluate(&RunState::default(), &mut res);
-        assert!(res.halt, "the errored fresh verdict still reads as `any_judge_error`");
+        assert!(res.halt, "the errored fresh verdict still reads as `any_verifier_error`");
     }
 
     /// A detector that is LOUD but NOT firing — `met: false` with a non-zero `value`. `detector()`
     /// cannot express this (it derives `met` from `value > 0.0`), which is exactly why the raw-value
-    /// ranking bug survived a six-test module: every named judge in those tests is met, so the
+    /// ranking bug survived a six-test module: every named verifier in those tests is met, so the
     /// met-first pass and the value-only pass agree and the difference is invisible.
-    fn detector_unmet(name: &str, value: f64, rationale: &str) -> Judge {
-        let mut j = unjudged(name, false);
+    fn detector_unmet(name: &str, value: f64, rationale: &str) -> Verifier {
+        let mut j = unverified(name, false);
         j.apply(Verdict {
             met: false,
             value: Some(value),

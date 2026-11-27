@@ -55,7 +55,7 @@ fn the_minimal_config_parses_with_all_defaults() {
     let cfg = parse(MINIMAL).expect("minimal config parses");
     assert_eq!(cfg.project, "p");
     assert_eq!(cfg.defaults.agent, "claude");
-    assert_eq!(cfg.judge.timeout, 300);
+    assert_eq!(cfg.verifier.timeout, 300);
     assert_eq!(cfg.sequence.done_if, "all_goals");
     assert!(cfg.sequence.gate_regressions, "gate_regressions defaults ON (the rename default)");
 }
@@ -159,13 +159,13 @@ fn the_embedded_new_scaffold_parses_as_a_current_config() {
         .find(|b| b.contains("sequence:") && b.contains("limits:") && b.contains("done_if"))
         .expect("the /rlt:new scaffold (a ```yaml block with sequence.limits + done_if) must be present");
 
-    // fill the human placeholders with concrete VALID values (an agent / a number / a judge name).
+    // fill the human placeholders with concrete VALID values (an agent / a number / a verifier name).
     let filled = scaffold
         .replace("<name>", "p")
         .replace("<claude|codex|copilot>", "claude")
         .replace("<int or null>", "100")
-        .replace("<judge names that must STAY met>", "all_tests_pass")
-        .replace("<expression over judge names>", "all_tests_pass")
+        .replace("<verifier names that must STAY met>", "all_tests_pass")
+        .replace("<expression over verifier names>", "all_tests_pass")
         .replace("<ceiling expression>", "over_iterations");
 
     // any `<…>` left on a NON-comment line means the scaffold grew a placeholder this test does
@@ -195,14 +195,14 @@ fn the_embedded_new_scaffold_parses_as_a_current_config() {
     );
 }
 
-/// §4.1: the RULER block is immutable; naming any `judge*` key (or any non-[`StepBody`] key) in a
+/// §4.1: the RULER block is immutable; naming any `verifier*` key (or any non-[`StepBody`] key) in a
 /// step body is a HARD ERROR — a grader that moves makes verdicts incomparable across cycles.
 #[test]
-fn a_judge_key_in_a_step_body_is_a_hard_error() {
-    let err = parse("project: p\nsteps: { worker: { judge: mine } }\nsequence: { steps: [worker] }\n")
+fn a_verifier_key_in_a_step_body_is_a_hard_error() {
+    let err = parse("project: p\nsteps: { worker: { verifier: mine } }\nsequence: { steps: [worker] }\n")
         .unwrap_err()
         .to_string();
-    assert!(err.contains("unknown field `judge`"), "a step may not name a judge, got: {err}");
+    assert!(err.contains("unknown field `verifier`"), "a step may not name a verifier, got: {err}");
     // a stray recheck-era key in a step body is likewise refused (deny_unknown catches all of them).
     let err2 = parse("project: p\nsteps: { worker: { recheck: once_met } }\nsequence: { steps: [worker] }\n")
         .unwrap_err()
@@ -220,7 +220,7 @@ fn a_step_takes_normalised_readonly_and_writable_lists() {
          steps:\n  \
            implement:\n    \
              isolation: sandbox\n    \
-             readonly: [tests/, rlt/judges/, ./src]\n    \
+             readonly: [tests/, rlt/verifiers/, ./src]\n    \
              writable: [tests]\n\
          sequence: { steps: [implement] }\n",
     )
@@ -228,10 +228,10 @@ fn a_step_takes_normalised_readonly_and_writable_lists() {
     let step = cfg.resolve_step("implement").expect("resolves");
 
     // one spelling stored, whatever spelling was written
-    assert_eq!(step.readonly, ["tests", "rlt/judges", "src"]);
+    assert_eq!(step.readonly, ["tests", "rlt/verifiers", "src"]);
     assert_eq!(step.writable, ["tests"]);
     // …and the subtraction lands despite `readonly: [tests/]` vs `writable: [tests]`
-    assert_eq!(step.denied(), ["rlt/judges", "src"]);
+    assert_eq!(step.denied(), ["rlt/verifiers", "src"]);
     assert!(step.custom.is_none(), "YAML cannot name a driver-supplied backend");
 }
 
@@ -270,7 +270,7 @@ fn a_step_overrides_what_it_names_and_inherits_the_rest() {
     let cfg = parse(
         "project: p\n\
          defaults: { agent: claude, model: opus, effort: high, worker_args: [\"--sandbox\"], state: S.md }\n\
-         steps:\n  plan: {}\n  build: { agent: codex, model: gpt, skip_judges: true }\n\
+         steps:\n  plan: {}\n  build: { agent: codex, model: gpt, skip_verifiers: true }\n\
          sequence: { steps: [plan, build] }\n",
     )
     .expect("config parses");
@@ -282,15 +282,15 @@ fn a_step_overrides_what_it_names_and_inherits_the_rest() {
     assert_eq!(plan.effort.as_deref(), Some("high"));
     assert_eq!(plan.worker_args, vec!["--sandbox".to_string()]);
     assert_eq!(plan.state, "S.md");
-    assert!(!plan.skip_judges);
+    assert!(!plan.skip_verifiers);
 
-    // `build` overrides agent + model + skip_judges; effort/worker_args/state inherit.
+    // `build` overrides agent + model + skip_verifiers; effort/worker_args/state inherit.
     let build = cfg.resolve_step("build").unwrap();
     assert_eq!(build.agent, "codex", "the per-step agent override resolves");
     assert_eq!(build.model.as_deref(), Some("gpt"));
     assert_eq!(build.effort.as_deref(), Some("high"), "effort inherits from defaults");
     assert_eq!(build.worker_args, vec!["--sandbox".to_string()], "worker_args inherits");
-    assert!(build.skip_judges);
+    assert!(build.skip_verifiers);
 
     // an unknown step name is a hard error that lists the palette (never a runtime surprise).
     let err = cfg.resolve_step("nope").unwrap_err().to_string();
@@ -349,7 +349,7 @@ fn resolve_step_merges_the_container_tier_and_its_image() {
 #[test]
 fn agent_names_collects_every_distinct_agent() {
     let cfg = parse(
-        "project: p\ndefaults: { agent: claude }\njudge: { agent: claude }\n\
+        "project: p\ndefaults: { agent: claude }\nverifier: { agent: claude }\n\
          steps:\n  plan: {}\n  build: { agent: codex }\n  review: { agent: copilot }\n\
          sequence: { steps: [plan, build, review] }\n",
     )
@@ -472,20 +472,20 @@ fn env_overrides_land_on_the_new_shape() {
     assert_eq!(cfg.sequence.limits.tokens, Some(700_000));
 }
 
-/// PER-JUDGE `timeout:` — the plural `judges:` block. Absent ⇒ the run-level `judge.timeout`, which
-/// is what every judge used before this key existed, so an old config parses unchanged.
+/// PER-VERIFIER `timeout:` — the plural `verifiers:` block. Absent ⇒ the run-level `verifier.timeout`, which
+/// is what every verifier used before this key existed, so an old config parses unchanged.
 ///
-/// `deny_unknown_fields` matters more here than almost anywhere else: `judges:` and `judge:` differ
-/// by one letter and mean completely different things (per-judge overrides vs. THE RULER), so a
+/// `deny_unknown_fields` matters more here than almost anywhere else: `verifiers:` and `verifier:` differ
+/// by one letter and mean completely different things (per-verifier overrides vs. THE RULER), so a
 /// mistyped block must name the key rather than be silently ignored.
 #[test]
-fn a_per_judge_timeout_overrides_the_run_level_one() {
-    let cfg = parse(&format!("{MINIMAL}judges:\n  load_ok: {{ timeout: 2700 }}\n")).unwrap();
-    assert_eq!(cfg.judges["load_ok"].timeout, Some(2700));
-    assert_eq!(cfg.judge.timeout, 300, "the run-level default is untouched");
+fn a_per_verifier_timeout_overrides_the_run_level_one() {
+    let cfg = parse(&format!("{MINIMAL}verifiers:\n  load_ok: {{ timeout: 2700 }}\n")).unwrap();
+    assert_eq!(cfg.verifiers["load_ok"].timeout, Some(2700));
+    assert_eq!(cfg.verifier.timeout, 300, "the run-level default is untouched");
 
-    assert!(parse(MINIMAL).unwrap().judges.is_empty(), "absent ⇒ empty, and every judge takes the run default");
+    assert!(parse(MINIMAL).unwrap().verifiers.is_empty(), "absent ⇒ empty, and every verifier takes the run default");
 
-    let e = parse(&format!("{MINIMAL}judges:\n  load_ok: {{ gate: tests_pass }}\n")).unwrap_err().to_string();
-    assert!(e.contains("gate"), "the cut judge-level `gate:` must be NAMED, not ignored: {e}");
+    let e = parse(&format!("{MINIMAL}verifiers:\n  load_ok: {{ gate: tests_pass }}\n")).unwrap_err().to_string();
+    assert!(e.contains("gate"), "the cut verifier-level `gate:` must be NAMED, not ignored: {e}");
 }

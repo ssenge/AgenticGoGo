@@ -2,8 +2,8 @@
 //! `rlt run`, with the right `outcome` per session disposition, and it SURVIVES across separate
 //! invocations. A fake, committing `claude` on PATH drives the loop — no model, no network.
 //!
-//! A judge IS a goal now (§7.1): there is no `goals.yaml`; the judge is a file at
-//! `rlt/judges/<name>.sh` resolved by the NAME in `done_if` / `invariants`.
+//! A verifier IS a goal now (§7.1): there is no `goals.yaml`; the verifier is a file at
+//! `rlt/verifiers/<name>.sh` resolved by the NAME in `done_if` / `invariants`.
 //!
 //! Unix-only (the stub + PATH shimming use sh), like `tests/cli.rs`.
 
@@ -33,10 +33,10 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
-/// Write a script judge to `rlt/judges/<name>.sh` (the project judges dir, §5.1) and make it
+/// Write a script verifier to `rlt/verifiers/<name>.sh` (the project verifiers dir, §5.1) and make it
 /// executable. The NAME is what `done_if` / `invariants` reference.
-fn write_judge(dir: &Path, name: &str, body: &str) {
-    let p = write(dir, &format!("rlt/judges/{name}.sh"), body);
+fn write_verifier(dir: &Path, name: &str, body: &str) {
+    let p = write(dir, &format!("rlt/verifiers/{name}.sh"), body);
     chmod_x(&p);
 }
 
@@ -45,7 +45,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// A clean git repo on `main` with one empty commit — mandatory session isolation needs it. The
-/// empty commit keeps `bin/`, `rlt/`, `judges/` UNTRACKED (which `is_clean` ignores), so sessions
+/// empty commit keeps `bin/`, `rlt/`, `verifiers/` UNTRACKED (which `is_clean` ignores), so sessions
 /// branch from a born `main`.
 fn git_init(dir: &Path) {
     git(dir, &["init", "-q", "-b", "main"]);
@@ -55,7 +55,7 @@ fn git_init(dir: &Path) {
 }
 
 /// `rlt` rooted at `dir` with the fake agent on PATH. HOME is redirected into the project temp so
-/// `ensure_library` writes the `~/.rlt/judges` standard library there (never the real home) — the
+/// `ensure_library` writes the `~/.rlt/verifiers` standard library there (never the real home) — the
 /// tests stay hermetic and never touch the developer's machine.
 fn rlt(dir: &Path, path: &str) -> Command {
     let mut c = Command::cargo_bin("rlt").expect("rlt binary built");
@@ -78,7 +78,7 @@ fn read_rows(dir: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// A single-worker config whose Definition of Done is the judge named `feature`.
+/// A single-worker config whose Definition of Done is the verifier named `feature`.
 fn base_config(project: &str) -> String {
     format!(
         "project: {project}\n\
@@ -92,7 +92,7 @@ fn base_config(project: &str) -> String {
 
 /// A fake `claude` on a private `bin/` that, on a `-p` run, creates `feature_done` and COMMITS it
 /// on the session branch (so the merge stages something real), then emits one stream-json result.
-/// Returns (project_dir, PATH-with-fake-claude-first). The `feature` judge is met once the file
+/// Returns (project_dir, PATH-with-fake-claude-first). The `feature` verifier is met once the file
 /// exists; the DoD is `done_if: feature`.
 fn committing_project(project: &str) -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
@@ -115,7 +115,7 @@ exit 0
     );
     chmod_x(&bin.join("claude"));
 
-    write_judge(dir, "feature", "#!/bin/sh\n[ -f feature_done ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\n[ -f feature_done ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write(dir, "rlt/rlt.yaml", &base_config(project));
     write(dir, "rlt/state/STATE.md", "create feature_done\n");
     git_init(dir);
@@ -126,7 +126,7 @@ exit 0
 
 #[test]
 fn baseline_and_merged_rows_are_written_and_survive_a_restart() {
-    // Run 1: baseline judges `feature` not-met (no file), the worker commits it, the merge is kept
+    // Run 1: baseline verifiers `feature` not-met (no file), the worker commits it, the merge is kept
     // → one `baseline` row (session null, met false) and one `merged` row (session 1, met true).
     // Run 2 on the SAME dir: `feature` is already satisfied at launch, so it stops after the
     // baseline — but the run-1 rows must still be there, with a second `baseline` row appended.
@@ -143,7 +143,7 @@ fn baseline_and_merged_rows_are_written_and_survive_a_restart() {
         rows.iter().any(|r| r["outcome"].as_str() == Some("baseline")
             && r["session"].is_null()
             && r["met"].as_bool() == Some(false)
-            && r["judge"].as_str() == Some("feature")),
+            && r["verifier"].as_str() == Some("feature")),
         "a baseline row (session null, met false) must be written before session 1:\n{rows:#?}"
     );
     // session 1 merged → outcome merged, session 1, met true.
@@ -219,9 +219,9 @@ exit 0
     git(dir, &["config", "user.name", "t"]);
     write(dir, "tracked.txt", "ok\n");
     // build_ok invariant: met at baseline, REGRESSES once `.regressed` exists on the merged tree.
-    write_judge(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"broke the build\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    write_verifier(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"broke the build\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
     // feature: never met, so the loop actually launches a worker (doesn't stop at baseline).
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     // done_if: feature (never met); build_ok is the invariant that must STAY met. gate_regressions
     // defaults ON, so the regression rolls the session back.
     write(
@@ -244,7 +244,7 @@ exit 0
     // baseline seeded build_ok as met — the "was met" the gate regressed against.
     assert!(
         rows.iter().any(|r| r["outcome"].as_str() == Some("baseline")
-            && r["judge"].as_str() == Some("build_ok")
+            && r["verifier"].as_str() == Some("build_ok")
             && r["met"].as_bool() == Some(true)),
         "the baseline must record build_ok as met (the seed the gate compares against):\n{rows:#?}"
     );
@@ -252,7 +252,7 @@ exit 0
     assert!(
         rows.iter().any(|r| r["outcome"].as_str() == Some("rolled_back")
             && r["session"].as_u64() == Some(1)
-            && r["judge"].as_str() == Some("build_ok")
+            && r["verifier"].as_str() == Some("build_ok")
             && r["met"].as_bool() == Some(false)),
         "a rolled-back session must append rolled_back rows:\n{rows:#?}"
     );

@@ -7,7 +7,7 @@
 One line: what this project is and does.
 
 # Goal
-Make all the project's tests pass. (The real gate is your judges / `done_if`.)
+Make all the project's tests pass. (The real gate is your verifiers / `done_if`.)
 
 # Architecture — where things live
 Fill this in so a fresh worker orients fast: key modules/entry points, and the exact build/test

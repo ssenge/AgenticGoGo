@@ -52,7 +52,7 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
         }
     }
 
-    // 2b) a Codex judge reads no config file: a provider only the user's Codex config names is missed (a warning)
+    // 2b) a Codex verifier reads no config file: a provider only the user's Codex config names is missed (a warning)
     if agent_names.iter().any(|n| n == "codex") {
         if let Some(missed) = crate::backend::overrides::codex_provider_missed() {
             eprintln!("  ⚠ {missed}");
@@ -60,18 +60,18 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
     }
 
     // 3) build the run-set engine + parse the sequence exactly as `rlt run` does — this resolves
-    //    every judge name to a file, validates the sequence, and checks the done/abort expressions.
+    //    every verifier name to a file, validates the sequence, and checks the done/abort expressions.
     if let Some(c) = &cfg {
         match crate::loop_::assemble(c, config_base) {
             Ok(asm) => {
-                check(true, &format!("sequence + judges resolve ({} judge(s))", asm.engine.judges.len()), "", &mut fail);
+                check(true, &format!("sequence + verifiers resolve ({} verifier(s))", asm.engine.verifiers.len()), "", &mut fail);
                 // 3b) the chosen agent(s) can do what the config asks.
-                match crate::capability::check(c, &asm.engine.judges, dir) {
+                match crate::capability::check(c, &asm.engine.verifiers, dir) {
                     Ok(()) => check(true, "the agent(s) can do everything this config asks", "", &mut fail),
                     Err(e) => check(false, "the agent(s) support what this config asks", &format!("{e}"), &mut fail),
                 }
             }
-            Err(e) => check(false, "sequence + judges resolve", &format!("{e}"), &mut fail),
+            Err(e) => check(false, "sequence + verifiers resolve", &format!("{e}"), &mut fail),
         }
 
         // 3c) blast-radius isolation: if any step asks for `isolation: sandbox`, an OS wrapper
@@ -119,7 +119,7 @@ pub fn run(dir: &Path, config_base: &Path, config: &Path) -> Result<()> {
 
     // 5) are the /rlt:* skills where the worker agent looks? Reported, never failed. Report on the
     //    WORKER agent (`defaults.agent`) specifically — NOT `agent_names().first()`, which sorts, so
-    //    a codex-worker/claude-judge config would misreport "claude" (the human invokes /rlt:* in
+    //    a codex-worker/claude-verifier config would misreport "claude" (the human invokes /rlt:* in
     //    the agent they drive the project with, i.e. the worker).
     let name = match &cfg {
         Some(c) => c.defaults.agent.clone(),

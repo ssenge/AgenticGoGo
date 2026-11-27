@@ -1,5 +1,5 @@
-# Reference JUDGE image: swe-metrics and its pinned tools, for metric and score judges under
-# `isolation: container` (`judge: { image: "rlt-swe-metrics" }`).
+# Reference VERIFIER image: swe-metrics and its pinned tools, for metric and score verifiers under
+# `isolation: container` (`verifier: { image: "rlt-swe-metrics" }`).
 #
 #   docker/swe-metrics/build.sh ~/src/swe-metrics            # → rlt-swe-metrics
 #
@@ -13,11 +13,11 @@
 #   - /bin/sh, git (`scope: changed`, the git history analyzer);
 #   - no credentials, no ENTRYPOINT, nothing that relies on a passwd entry — HOME is rlt's to set.
 #
-# `judge.image` is the image EVERY judge of the run uses: when the run also has script judges, add
-# their toolchain below (or start your own judge image `FROM rlt-swe-metrics`).
+# `verifier.image` is the image EVERY verifier of the run uses: when the run also has script verifiers, add
+# their toolchain below (or start your own verifier image `FROM rlt-swe-metrics`).
 #
 # trivy's vulnerability database is NOT baked in (it is ~1.5 GB and goes stale within a day): rlt
-# mounts the host's trivy cache read-only into the container (docs/CONFIG.md → metric judges).
+# mounts the host's trivy cache read-only into the container (docs/CONFIG.md → metric verifiers).
 FROM python:3.12-slim-bookworm
 
 # what scripts/install-tools.sh needs (curl, tar, unzip, xz, python3 with venv) and git.

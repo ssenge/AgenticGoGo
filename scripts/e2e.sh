@@ -7,8 +7,8 @@
 # network. Everything else is the shipping code.
 #
 # The model this suite drives (§4/§5/§7 of internal/SEQUENCES.md):
-#   - a judge IS a goal, resolved by NAME from rlt/judges/<name>.{sh,md}. There is no goals.yaml.
-#   - one config file, rlt/rlt.yaml (defaults / judge / steps / sequence). done_if / abort_if.
+#   - a verifier IS a goal, resolved by NAME from rlt/verifiers/<name>.{sh,md}. There is no goals.yaml.
+#   - one config file, rlt/rlt.yaml (defaults / verifier / steps / sequence). done_if / abort_if.
 #   - session isolation is MANDATORY: every `rlt run` needs a git repo, a clean tree, a born HEAD,
 #     and stages + gates every session — so the fixtures git-init and the workers COMMIT their work
 #     (uncommitted work resolves as NoChanges and the gate restores base, so a met verdict on it
@@ -85,14 +85,14 @@ deansi() { LC_ALL=C sed -e $'s/\x1b\[[0-9;?]*[A-Za-z]//g' -e $'s/\x1b[()][AB0]//
 #   WORKER_SLEEP / NO_WORK / WORKER_TOKENS / WORKER_COST toggle-files, and — unless NO_WORK —
 #   COMMITS its `did_work` marker on the session branch (uncommitted work is NoChanges and the
 #   gate would restore base, so its met verdict would never count).
-#   the judge `worked` records the live phase and honours JUDGE_FAIL.
+#   the verifier `worked` records the live phase and honours VERIFIER_FAIL.
 # git_init leaves ONE empty commit, so every fixture file the caller writes stays UNTRACKED —
 # which `is_clean` ignores, so the tree reads clean and sessions branch from a born `main`.
 # ---------------------------------------------------------------------------
 mkproj() { # mkproj <name>
   local name=$1
   local d="$WS/$name"
-  mkdir -p "$d/bin" "$d/rlt/judges" "$d/rlt/state"
+  mkdir -p "$d/bin" "$d/rlt/verifiers" "$d/rlt/state"
 
   cat > "$d/bin/rec" <<'EOF'
 #!/bin/sh
@@ -123,17 +123,17 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"done","u
 exit 0
 EOF
 
-  cat > "$d/rlt/judges/worked.sh" <<'EOF'
+  cat > "$d/rlt/verifiers/worked.sh" <<'EOF'
 #!/bin/sh
 sh bin/rec VERIFY
-if [ -f JUDGE_FAIL ] || [ ! -f did_work ]; then
+if [ -f VERIFIER_FAIL ] || [ ! -f did_work ]; then
   echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
 else
   echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"did_work present"}'
 fi
 EOF
 
-  chmod +x "$d/bin/rec" "$d/bin/claude" "$d/rlt/judges/worked.sh"
+  chmod +x "$d/bin/rec" "$d/bin/claude" "$d/rlt/verifiers/worked.sh"
 
   cat > "$d/rlt/rlt.yaml" <<EOF
 project: $name
@@ -153,13 +153,13 @@ EOF
   # GIT_REDESIGN: rlt now auto-commits the worker's WORK (`git add -A`), so anything left UNTRACKED in
   # the project tree would be swept onto the session branch and pollute base on merge. A real project
   # tracks its config + gitignores build artifacts; these fixtures instead REWRITE bin/, rlt.yaml, and
-  # judges per-test (which would dirty a tracked tree and make `rlt run` refuse), so we gitignore all
+  # verifiers per-test (which would dirty a tracked tree and make `rlt run` refuse), so we gitignore all
   # the per-test SCAFFOLDING + rlt runtime + worker instrumentation + toggle/marker files, AND the
   # `*.log` capture files rlt's own stdout is redirected into (run.log/dirrun.log/uncapped.log/…): those
   # live in the project root, so `git add -A` would COMMIT the actively-written log → the next
   # `checkout base` fails ("local changes to run.log would be overwritten") and isolation breaks. Only the
-  # worker's judged WORK files (tracked.txt, did_work, .n, BREAK, .flip) stay trackable → rlt commits +
-  # merges/rolls-them-back exactly as in production. (rlt reads config/judges from DISK, not from git.)
+  # worker's verified WORK files (tracked.txt, did_work, .n, BREAK, .flip) stay trackable → rlt commits +
+  # merges/rolls-them-back exactly as in production. (rlt reads config/verifiers from DISK, not from git.)
   # BOTH halves of the runtime-state split are ignored. rlt appends `rlt/private/` itself
   # (ensure_rlt_gitignored), but only on its first run — this fixture is committed BEFORE rlt ever
   # sees it, so without the entry here the very first `git add -A` would sweep rlt's own ledger,
@@ -169,7 +169,7 @@ rlt/state/
 rlt/private/
 bin/
 rlt/rlt.yaml
-rlt/judges/
+rlt/verifiers/
 trace.txt
 prompt_latest.txt
 prompts.txt
@@ -177,7 +177,7 @@ NO_WORK
 WORKER_SLEEP
 WORKER_TOKENS
 WORKER_COST
-JUDGE_FAIL
+VERIFIER_FAIL
 .sess
 *.log
 EOF
@@ -231,8 +231,8 @@ sec "0. build"
 # same paths against the same fake-claude shim, in-process and in CI. Kept here only as a
 # map so a future reader does not think the coverage vanished:
 #
-#   init/plan/judge/doctor      → init_then_plan_shows_scoreboard · doctor_passes_a_good_setup
-#                                 doctor_flags_a_broken_setup · judge_runs_one_name_and_prints_raw_verdict
+#   init/plan/verifier/doctor      → init_then_plan_shows_scoreboard · doctor_passes_a_good_setup
+#                                 doctor_flags_a_broken_setup · verifier_runs_one_name_and_prints_raw_verdict
 #                                 config_lives_in_the_rlt_folder
 #   exit codes 0/3/4            → run_drives_a_correction_loop_to_stop · run_without_config_gives_actionable_hint
 #                                 dollar_budget_aborts_the_loop · max_sessions_cap_exits_4_and_says_so
@@ -242,12 +242,12 @@ sec "0. build"
 #   status/history/dashboard    → status_and_history_json_are_machine_readable
 #   interrupt (Ctrl-C)          → interrupt_during_run_skips_verify_and_the_exit_log
 #   the rollback GATE (moat)    → rollback_gate_unlands_a_regressing_merge ·
-#                                 rollback_gate_keeps_merge_when_a_judge_merely_flakes ·
-#                                 a_broken_judge_does_not_abort_the_run_wearing_a_regressions_clothes
+#                                 rollback_gate_keeps_merge_when_a_verifier_merely_flakes ·
+#                                 a_broken_verifier_does_not_abort_the_run_wearing_a_regressions_clothes
 #   the new step/sequence model → an_unknown_step_in_the_sequence_is_a_startup_error ·
-#                                 a_sequence_of_only_skip_judges_is_refused_at_startup ·
-#                                 a_skip_judges_span_is_gated_and_merged_by_the_next_judged_step ·
-#                                 done_if_all_goals_ignores_an_until_condition_judge
+#                                 a_sequence_of_only_skip_verifiers_is_refused_at_startup ·
+#                                 a_skip_verifiers_span_is_gated_and_merged_by_the_next_verified_step ·
+#                                 done_if_all_goals_ignores_an_until_condition_verifier
 #
 # What REMAINS in this file is what cli.rs cannot or does not drive: live loops steered over
 # the bus, detached runs, spawn, the watchdog, git merge/conflict/recovery paths, the HTTP API,
@@ -398,9 +398,9 @@ has "…and a green session is MERGED and KEPT"           "$GI/run.log" "merged 
 is  "…so the worker's commit is on base" \
     "$( cd "$GI" && git show HEAD:tracked.txt 2>/dev/null )" "worker-edit"
 
-# now regress a previously-met judge → the GATE must roll the merge back.
+# now regress a previously-met verifier → the GATE must roll the merge back.
 # `worked` is an INVARIANT (in the DoD-set, which the regression gate scopes to); a second,
-# never-met `endless` judge is the done_if that keeps the loop alive past session 1.
+# never-met `endless` verifier is the done_if that keeps the loop alive past session 1.
 GR="$(mkproj rollback)"
 cat > "$GR/bin/claude" <<'EOF'
 #!/bin/sh
@@ -410,15 +410,15 @@ n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
 echo "sess-$n" > tracked.txt
 git add tracked.txt && git commit -qm "worker: session $n"
 : > did_work
-[ "$n" -ge 2 ] && : > JUDGE_FAIL   # session 2 REGRESSES the goal session 1 had met
+[ "$n" -ge 2 ] && : > VERIFIER_FAIL   # session 2 REGRESSES the goal session 1 had met
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$GR/bin/claude"
-cat > "$GR/rlt/judges/endless.sh" <<'EOF'
+cat > "$GR/rlt/verifiers/endless.sh" <<'EOF'
 #!/bin/sh
 echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
 EOF
-chmod +x "$GR/rlt/judges/endless.sh"
+chmod +x "$GR/rlt/verifiers/endless.sh"
 cat > "$GR/rlt/rlt.yaml" <<'EOF'
 project: rollback
 defaults: { model: fake }
@@ -497,13 +497,13 @@ EOF
 rlt_do "$RL" run --max-sessions 2 > "$RL/run.log" 2>&1
 has "a rate-limited session backs off"        "$RL/run.log" "rate limit detected"
 has "…and is flagged on the exit line"        "$RL/run.log" "[RATE-LIMITED]"
-hasnt "…and is NEVER judged"                  "$RL/run.log" "running judges…"
+hasnt "…and is NEVER verified"                  "$RL/run.log" "running verifiers…"
 absent "…and leaves NO durable memory entry"  "$RL/rlt/private/LOG.md"
 is "…the trace shows no VERIFY/GATE after RUN" \
    "$(tr '\n' ' ' < "$RL/trace.txt")" "VERIFY=verify INJECT=inject RUN=run INJECT=inject RUN=run "
 
 # A worker that cannot even START (bad model, dead auth, unknown worker_arg) exits non-zero having
-# produced ZERO tokens. The loop used to just go round again: spawn, die, judge, spawn, die, judge
+# produced ZERO tokens. The loop used to just go round again: spawn, die, verifier, spawn, die, verifier
 # — looking exactly like a healthy autonomous run, printing a scoreboard every cycle, doing nothing
 # whatsoever, forever (--max-sessions defaults to unlimited). This is how Copilot's `model: auto` +
 # `effort: max` default shipped broken and looked fine. NOTE the stub emits no rate-limit text, so
@@ -601,11 +601,11 @@ has "on_stop hook runs on exit (Drop guard)"        "$PI/run.log" "HOOK_ON_STOP"
 has "background hook is spawned"                    "$PI/run.log" "[hook:background]"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9e. LLM-backed pieces (llm judge · summarizer) against a stubbed model"
-# A judge with a `.md` extension is an LLM judge (§5.1): the rubric IS the file, inputs come from
-# its own frontmatter. It runs on the RULER (`judge:` block), as does the summarizer.
-LJ="$(mkproj llmjudge)"
-# `--output-format json` marks the judge/summary calls, whose prompt comes on stdin; the worker uses
+sec "9e. LLM-backed pieces (llm verifier · summarizer) against a stubbed model"
+# A verifier with a `.md` extension is an rubric verifier (§5.1): the rubric IS the file, inputs come from
+# its own frontmatter. It runs on the RULER (`verifier:` block), as does the summarizer.
+LJ="$(mkproj llmverifier)"
+# `--output-format json` marks the verifier/summary calls, whose prompt comes on stdin; the worker uses
 # stream-json.
 cat > "$LJ/bin/claude" <<'EOF'
 #!/bin/sh
@@ -619,11 +619,11 @@ if [ "$fmt" = "json" ]; then
   prompt=$(cat)
   case "$prompt" in
     *cumulative*) printf '{"result":"{\\"cumulative\\":\\"CUMULATIVE_SUMMARY_X\\",\\"windowed\\":\\"WINDOWED_SUMMARY_Y\\"}"}\n' ;;
-    # the llm judge must be NOT-met at baseline, else the loop stops before running a session
+    # the llm verifier must be NOT-met at baseline, else the loop stops before running a session
     *) if [ -f did_work ]; then
-         printf '{"result":"{\\"met\\":true,\\"value\\":1,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"LLM_JUDGE_SAYS_OK\\"}"}\n'
+         printf '{"result":"{\\"met\\":true,\\"value\\":1,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"LLM_VERIFIER_SAYS_OK\\"}"}\n'
        else
-         printf '{"result":"{\\"met\\":false,\\"value\\":0,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"LLM_JUDGE_SAYS_NOT_YET\\"}"}\n'
+         printf '{"result":"{\\"met\\":false,\\"value\\":0,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"LLM_VERIFIER_SAYS_NOT_YET\\"}"}\n'
        fi ;;
   esac
   exit 0
@@ -635,17 +635,17 @@ git commit -qm "worker: did_work" >/dev/null 2>&1
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$LJ/bin/claude"
-cat > "$LJ/rlt/judges/reviewed.md" <<'EOF'
+cat > "$LJ/rlt/verifiers/reviewed.md" <<'EOF'
 ---
 inputs: []
 ---
 Decide whether the work is done. Output ONLY the verdict JSON on the last line.
 EOF
-rm -f "$LJ/rlt/judges/worked.sh"   # this project's DoD is the LLM judge, not the script judge
+rm -f "$LJ/rlt/verifiers/worked.sh"   # this project's DoD is the rubric verifier, not the script verifier
 cat > "$LJ/rlt/rlt.yaml" <<'EOF'
-project: llmjudge
+project: llmverifier
 defaults: { model: fake }
-judge: { agent: claude, model: fake }
+verifier: { agent: claude, model: fake }
 steps: { worker: {} }
 sequence:
   steps: [worker]
@@ -653,15 +653,15 @@ sequence:
 summary: { enabled: true, min_interval_secs: 0 }
 EOF
 rlt_do "$LJ" run --max-sessions 2 > "$LJ/run.log" 2>&1
-is  "an llm judge drives the loop to its stop condition (exit 0)" "$?" "0"
-has "…it reports not-met at baseline"          "$LJ/run.log" "LLM_JUDGE_SAYS_NOT_YET"
-has "…then met after the worker ran"           "$LJ/run.log" "LLM_JUDGE_SAYS_OK"
+is  "an llm verifier drives the loop to its stop condition (exit 0)" "$?" "0"
+has "…it reports not-met at baseline"          "$LJ/run.log" "LLM_VERIFIER_SAYS_NOT_YET"
+has "…then met after the worker ran"           "$LJ/run.log" "LLM_VERIFIER_SAYS_OK"
 has "the summarizer runs and logs a cumulative summary" "$LJ/run.log" "CUMULATIVE_SUMMARY_X"
 has "…and a windowed summary"                           "$LJ/run.log" "WINDOWED_SUMMARY_Y"
 is  "…and the summary is published to state.json" "$(snap "$LJ" summary_cumulative)" "CUMULATIVE_SUMMARY_X"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9f. worker_args · numeric judges · over_iterations · the clock (work_time)"
+sec "9f. worker_args · numeric verifiers · over_iterations · the clock (work_time)"
 
 # ── worker_args: extra flags rlt must hand the worker, in the right POSITION ──────────────
 # `worker_args` lives under `defaults:` now (§4.1 — inheritable, the sandbox constraint). There is
@@ -710,26 +710,26 @@ PY
 [ $? -eq 0 ] && ok "…and they sit AFTER rlt's flags and BEFORE -p" \
              || bad "worker_args are in the wrong argv position"
 
-# ── numeric judges: the scoreboard renders value/max, and a `.value` accessor gates on it ─────
-# Goal TYPES are gone (§7.1): a judge emitting a `value` renders `value/max`; the number is read in
+# ── numeric verifiers: the scoreboard renders value/max, and a `.value` accessor gates on it ─────
+# Goal TYPES are gone (§7.1): a verifier emitting a `value` renders `value/max`; the number is read in
 # a condition via the dotted `.value` accessor (§5.3 extension 1). `coverage.value >= 100 AND
 # solved.value >= 28` is the DoD — a BARE `coverage >= 100` would be a hard error (a bool has no
 # ordering against a number), which is exactly what the accessor fixes.
 GT="$(mkproj numeric)"
-cat > "$GT/rlt/judges/coverage.sh" <<'EOF'
+cat > "$GT/rlt/verifiers/coverage.sh" <<'EOF'
 #!/bin/sh
 sh bin/rec VERIFY
 n=$(cat .n 2>/dev/null || echo 0)
 if [ "$n" -ge 1 ]; then echo '{"met":true,"value":100,"max":100,"target":100,"rationale":"done"}'
 else echo '{"met":false,"value":50,"max":100,"target":100,"rationale":"halfway"}'; fi
 EOF
-cat > "$GT/rlt/judges/solved.sh" <<'EOF'
+cat > "$GT/rlt/verifiers/solved.sh" <<'EOF'
 #!/bin/sh
 n=$(cat .n 2>/dev/null || echo 0)
 if [ "$n" -ge 1 ]; then echo '{"met":true,"value":28,"max":28,"target":28,"rationale":"all 28"}'
 else echo '{"met":false,"value":18,"max":28,"target":28,"rationale":"18 of 28"}'; fi
 EOF
-chmod +x "$GT/rlt/judges/coverage.sh" "$GT/rlt/judges/solved.sh"
+chmod +x "$GT/rlt/verifiers/coverage.sh" "$GT/rlt/verifiers/solved.sh"
 cat > "$GT/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
@@ -753,7 +753,7 @@ hooks:
   on_session_end: ["sh bin/rec GATE"]
 EOF
 rlt_do "$GT" run --max-sessions 3 > "$GT/run.log" 2>&1
-is  "numeric judges + a .value DoD drive the loop to stop (exit 0)" "$?" "0"
+is  "numeric verifiers + a .value DoD drive the loop to stop (exit 0)" "$?" "0"
 has "…baseline renders the coverage measure as value/max" "$GT/run.log" "50/100"
 has "…and the solved measure"                             "$GT/run.log" "18/28"
 has "…coverage reaches its full value"                    "$GT/run.log" "100/100"
@@ -801,10 +801,10 @@ has   "…and names the expression"                    "$WH/run.log" "work_time"
 hasnt "…it did not simply run out of sessions"       "$WH/run.log" "reached max_sessions"
 
 # ── an IDLE worker is a stall: `no_changes` sessions count for `stalled` (exit 3) ─────────
-# A worker that believes it is finished while a judge is still unmet changes NOTHING git-visible,
+# A worker that believes it is finished while a verifier is still unmet changes NOTHING git-visible,
 # session after session. Those sessions used to be ledgered `rolled_back`, which the shipped
 # `stalled` ignores, so `abort_if: stalled` never fired (a real run reached 325 sessions). Each is now
-# a `no_changes` step: during session 4's judging `stalled` reads three flat ones and the run aborts.
+# a `no_changes` step: during session 4's verifying `stalled` reads three flat ones and the run aborts.
 # HOME is a fresh dir OUTSIDE the project, so `stalled` is this build's library copy (installed there
 # by `rlt run`), and nothing rlt writes to HOME can be swept onto a session branch. `.obsidian/` is
 # the one `.gitignore` entry rlt would otherwise append (and commit) in session 1.
@@ -825,7 +825,7 @@ is    "an idle worker ends the run under abort_if: stalled (exit 3, not the cap)
 hasnt "…the max-sessions cap never fired"                 "$IDL/run.log" "reached max_sessions"
 idl_report() { python3 -c "import json;r=json.load(open('$IDL/rlt/private/report.json'));print($1)"; }
 is    "…the report names stalled as the reason"           "$(idl_report "r['stop_reason']")" "ABORT: stalled"
-is    "…every session is ledgered no_changes"             "$(grep -c '"judge":"worked".*"outcome":"no_changes"' "$IDL/rlt/private/verdicts.jsonl")" "4"
+is    "…every session is ledgered no_changes"             "$(grep -c '"verifier":"worked".*"outcome":"no_changes"' "$IDL/rlt/private/verdicts.jsonl")" "4"
 is    "…and counted as such in the report"                "$(idl_report "r['sessions']['no_changes']")" "4"
 is    "…never as rolled back"                             "$(idl_report "r['sessions']['rolled_back']")" "0"
 
@@ -841,23 +841,23 @@ sec "9m. notify_if — flag a human WITHOUT killing the loop (STUCK_NOTIFY)"
 # already gitignores (the fixture discipline at ~line 150): a marker dropped in the project ROOT gets
 # swept onto the session branch by rlt's auto-commit and can vanish again on a checkout, so the
 # assertion would be measuring git rather than the notification. These are test scaffolding written
-# by fake judges and a fake notifier, i.e. by the WORKER side — they belong in state/, not private/,
+# by fake verifiers and a fake notifier, i.e. by the WORKER side — they belong in state/, not private/,
 # and moving them would make the fixtures unwritable the moment a step sets `isolation: sandbox`.
 
-# The detector. A script judge that is always shouting (value 90, over the 85 threshold, EVERY
+# The detector. A script verifier that is always shouting (value 90, over the 85 threshold, EVERY
 # session) whose rationale is whatever the caller put in rlt/state/RATIONALE.txt. The indirection is
 # the point: STUCK_NOTIFY §6's `blocked` detector echoes a line the WORKER wrote, which is what makes
 # {{reason}} untrusted input and §12.4's shell-quoting load-bearing.
 mkstuck() { # mkstuck <dir> <rationale>
   printf '%s\n' "$2" > "$1/rlt/state/RATIONALE.txt"
-  cat > "$1/rlt/judges/stuck.sh" <<'EOF'
+  cat > "$1/rlt/verifiers/stuck.sh" <<'EOF'
 #!/bin/sh
-# JSON-escape the free text (backslash first, then quote) — what any real script judge must do when
+# JSON-escape the free text (backslash first, then quote) — what any real script verifier must do when
 # it reports a string it does not control.
 r=$(sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' rlt/state/RATIONALE.txt)
 printf '{"met":true,"value":90,"max":100,"target":100,"rationale":"%s"}\n' "$r"
 EOF
-  chmod +x "$1/rlt/judges/stuck.sh"
+  chmod +x "$1/rlt/verifiers/stuck.sh"
 }
 
 # The delivery. `"$1"` is the WHOLE reason if rlt shell-quoted the placeholder, and only its first
@@ -871,26 +871,26 @@ EOF
   chmod +x "$1/bin/notify"
 }
 
-# The blocker. STUCK_NOTIFY §6's copy-ready `blocked` judge (docs/CONFIG.md's snippet, same escaping):
+# The blocker. STUCK_NOTIFY §6's copy-ready `blocked` verifier (docs/CONFIG.md's snippet, same escaping):
 # WORKER-authored evidence read out of rlt/state/BLOCKED.md. Two properties make it the right fixture
 # for the halt cases below: its rationale is a string rlt does not control (so §12.10b's "append the
 # blocker's own words" is a real claim, not a tautology), and rlt/state/ is gitignored runtime state
 # that survives a rollback, a crash and a reboot — which is exactly how an `abort_if` ends up ALREADY
 # TRUE at launch. Its 0–1 scale is also the loser in every scale-blind `value` comparison (case 8).
 mkblocked() { # mkblocked <dir>
-  cat > "$1/rlt/judges/blocked.sh" <<'EOF'
+  cat > "$1/rlt/verifiers/blocked.sh" <<'EOF'
 #!/bin/sh
 [ -s rlt/state/BLOCKED.md ] \
   && printf '{"met":true,"value":1,"max":1,"target":1,"rationale":"%s"}\n' \
        "$(head -1 rlt/state/BLOCKED.md | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')" \
   || printf '{"met":false,"value":0,"max":1,"target":1,"rationale":"no blocker declared"}\n'
 EOF
-  chmod +x "$1/rlt/judges/blocked.sh"
+  chmod +x "$1/rlt/verifiers/blocked.sh"
 }
 
 # ── 1. the headline: it pings, and the loop DOES NOT DIE ─────────────────────────────────────────
 NTF="$(mkproj notify)"; : > "$NTF/NO_WORK"     # `worked` never fires → only the session cap can end it
-mkstuck "$NTF" "no judge moved in 3 sessions"
+mkstuck "$NTF" "no verifier moved in 3 sessions"
 cat > "$NTF/rlt/rlt.yaml" <<'EOF'
 project: notify
 defaults: { model: fake }
@@ -922,7 +922,7 @@ hasnt "…and a notification never aborts the run"      "$NTF/run.log" "ABORT"
 is    "…the flag lands in state.json for the TUI + web to read" \
    "$(snap "$NTF" notify_session)" "2"
 is    "…carrying the reason, so a surface can say WHY"          \
-   "$(snap "$NTF" notify_reason)" "no judge moved in 3 sessions"
+   "$(snap "$NTF" notify_reason)" "no verifier moved in 3 sessions"
 has   "…and `rlt status` shows it, saying the run is still alive" "$NTF/status.txt" "FLAGGED for help since session #2"
 hasnt "…nor ends it as a success"                     "$NTF/run.log" "done_if satisfied"
 
@@ -1001,10 +1001,10 @@ has "…the run really ended on the guard"     "$NAB/run.log" "ABORT"
 # is also the proof it did not additionally fire on session 1, where nothing was wrong.
 #
 # This is ALSO §12.10b's negative half, and the reason case 7 below does not repeat it: `over_iterations`
-# is a run-scalar that names no judge, so `notify_reason` has nothing to append and must echo the
+# is a run-scalar that names no verifier, so `notify_reason` has nothing to append and must echo the
 # expression back BARE. The assertion is exact equality on the whole delivered line, so a stray
-# " — <rationale>" suffix (the shape case 7 asserts is present when a judge IS named) fails it here.
-is  "…and the halt pings exactly once, carrying the abort expression as {{reason}} — BARE, since a ceiling names no judge (§12.10b)" \
+# " — <rationale>" suffix (the shape case 7 asserts is present when a verifier IS named) fails it here.
+is  "…and the halt pings exactly once, carrying the abort expression as {{reason}} — BARE, since a ceiling names no verifier (§12.10b)" \
     "$(cat "$NAB/rlt/state/notified.txt" 2>/dev/null)" "over_iterations"
 
 # ── 5. §12.8: SUCCESS is not a cry for help — even with a detector still shouting ────────────────
@@ -1034,12 +1034,12 @@ has    "…as a success"                                      "$NOK/run.log" "do
 absent "…and success does NOT notify even with notify_if TRUE on that cycle (§12.8 — hooks.on_stop is the ping-me-whatever-happens knob)" \
        "$NOK/rlt/state/notified.txt"
 # The positive control for that `absent`, and the reason it means anything. Same project, same
-# detector, same notify block, same delivery script — the ONLY change is JUDGE_FAIL, which withholds
+# detector, same notify block, same delivery script — the ONLY change is VERIFIER_FAIL, which withholds
 # the success. If the sink now fills, the empty sink above was suppression; if it stays empty, the
 # feature was simply never wired here and the `absent` was worth nothing. (Also proves the suppressed
 # cycle did not BURN the debounce: `cooled_down` is a fresh `None` per process, but a delivery that
 # had fired above would have left this line unreachable at all.)
-: > "$NOK/JUDGE_FAIL"
+: > "$NOK/VERIFIER_FAIL"
 rlt_do "$NOK" run --max-sessions 1 > "$NOK/rerun.log" 2>&1
 is     "…and the control: withhold ONLY the success and the same fixture pages at once" \
        "$(cat "$NOK/rlt/state/notified.txt" 2>/dev/null)" "still shouting"
@@ -1074,9 +1074,9 @@ has "…from the baseline pass, before session 1 ever starts"     "$NBL/run.log"
 is  "…and \"stop + notify\" PAGES on that path too, expression + the blocker's own words (§12.10b)" \
     "$(cat "$NBL/rlt/state/notified.txt" 2>/dev/null)" "blocked — $NBL_BLOCKER"
 
-# ── 7. §12.10b: a halt that NAMES a judge carries that judge's rationale ─────────────────────────
-# Case 4 pins the bare half (a ceiling names no judge → the expression, verbatim). This is the other
-# half, on the GATE path: `blocked OR over_iterations` names one judge, the worker declares the blocker
+# ── 7. §12.10b: a halt that NAMES a verifier carries that verifier's rationale ─────────────────────────
+# Case 4 pins the bare half (a ceiling names no verifier → the expression, verbatim). This is the other
+# half, on the GATE path: `blocked OR over_iterations` names one verifier, the worker declares the blocker
 # mid-run, and the delivered line must be `<expression> — <rationale>`. A push notification reading
 # `blocked OR over_iterations` tells a human nothing, which is why the append exists at all.
 NHR="$(mkproj notifyhaltreason)"; : > "$NHR/NO_WORK"; mknotifier "$NHR"; mkblocked "$NHR"
@@ -1110,7 +1110,7 @@ has "…at the gate, not at baseline"                    "$NHR/run.log" "⚠ ABO
 is  "…and {{reason}} is the expression PLUS the blocker's rationale (§12.10b)" \
     "$(cat "$NHR/rlt/state/notified.txt" 2>/dev/null)" "blocked OR over_iterations — $NHR_BLOCKER"
 
-# ── 8. the reason names the judge that FIRED, not the one with the biggest number ────────────────
+# ── 8. the reason names the verifier that FIRED, not the one with the biggest number ────────────────
 # The documented flagship expression (`stuck.value >= 85 OR blocked`), with the two detectors on the
 # scales they actually use: a 0–100 rubric and a 0–1 script. `stuck` is UNMET at 10 and `blocked` is MET
 # at 1 — so the only term making the expression true is the one that loses every scale-blind `value`
@@ -1121,11 +1121,11 @@ is  "…and {{reason}} is the expression PLUS the blocker's rationale (§12.10b)
 NMF="$(mkproj notifymetfirst)"; : > "$NMF/NO_WORK"; mknotifier "$NMF"; mkblocked "$NMF"
 NMF_BLOCKER='MISSING CREDENTIAL: I need the prod deploy key to continue'
 printf '%s\n' "$NMF_BLOCKER" > "$NMF/rlt/state/BLOCKED.md"
-cat > "$NMF/rlt/judges/stuck.sh" <<'EOF'
+cat > "$NMF/rlt/verifiers/stuck.sh" <<'EOF'
 #!/bin/sh
 echo '{"met":false,"value":10,"max":100,"target":100,"rationale":"loop is progressing normally"}'
 EOF
-chmod +x "$NMF/rlt/judges/stuck.sh"
+chmod +x "$NMF/rlt/verifiers/stuck.sh"
 cat > "$NMF/rlt/rlt.yaml" <<'EOF'
 project: notifymetfirst
 defaults: { model: fake }
@@ -1191,15 +1191,15 @@ n=$(cat .sess 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > .sess
 echo "sess-$n" > tracked.txt
 git add tracked.txt && git commit -qm "worker: session $n"
 : > did_work
-[ "$n" -ge 2 ] && : > JUDGE_FAIL     # session 2 regresses — but gate_regressions:false keeps it
+[ "$n" -ge 2 ] && : > VERIFIER_FAIL     # session 2 regresses — but gate_regressions:false keeps it
 printf '{"type":"result","subtype":"success","is_error":false,"result":"d","usage":{"output_tokens":1},"total_cost_usd":0}\n'
 EOF
 chmod +x "$EM/bin/claude"
-cat > "$EM/rlt/judges/endless.sh" <<'EOF'
+cat > "$EM/rlt/verifiers/endless.sh" <<'EOF'
 #!/bin/sh
 echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
 EOF
-chmod +x "$EM/rlt/judges/endless.sh"
+chmod +x "$EM/rlt/verifiers/endless.sh"
 cat > "$EM/rlt/rlt.yaml" <<'EOF'
 project: eager
 defaults: { model: fake }
@@ -1360,7 +1360,7 @@ printf '  injected memory block = %s bytes (inject_kb = 1 KB)\n' "$PB"
                    || bad "inject_kb not enforced" "${PB}B"
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9i. the rest of the surface (effort · base_branch · invariants · judge.timeout · env · flags)"
+sec "9i. the rest of the surface (effort · base_branch · invariants · verifier.timeout · env · flags)"
 
 # ── effort: passed through to the worker as `--effort <value>` (worker.rs) ────────────────
 # `effort` lives under `defaults:` now (§4.1).
@@ -1416,16 +1416,16 @@ has "…and sessions are cut off it"            "$BB/run.log" "(off trunk)"
 # regression LANDS and the term can see it. The worker commits its break so it stages (an
 # uncommitted break is NoChanges and would be undone).
 IV="$(mkproj invariant)"
-cat > "$IV/rlt/judges/safe.sh" <<'EOF'
+cat > "$IV/rlt/verifiers/safe.sh" <<'EOF'
 #!/bin/sh
 if [ -f BREAK ]; then echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"safety broke"}'
 else echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"safe"}'; fi
 EOF
-cat > "$IV/rlt/judges/endless.sh" <<'EOF'
+cat > "$IV/rlt/verifiers/endless.sh" <<'EOF'
 #!/bin/sh
 echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"keeps the loop alive"}'
 EOF
-chmod +x "$IV/rlt/judges/safe.sh" "$IV/rlt/judges/endless.sh"
+chmod +x "$IV/rlt/verifiers/safe.sh" "$IV/rlt/verifiers/endless.sh"
 cat > "$IV/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
@@ -1453,21 +1453,21 @@ is    "a regressed INVARIANT halts the loop (exit 3)"  "$?" "3"
 has   "…naming the guard"                              "$IV/run.log" "any_regressed"
 hasnt "…and it is not the session cap"                 "$IV/run.log" "reached max_sessions"
 
-# ── judge.timeout: a hanging judge is killed by the run-level timeout; the loop survives ──
-# The per-judge timeout moved to the run-level `judge:` block (§5.2). A judge that hangs past it is
+# ── verifier.timeout: a hanging verifier is killed by the run-level timeout; the loop survives ──
+# The per-verifier timeout moved to the run-level `verifier:` block (§5.2). A verifier that hangs past it is
 # killed → Verdict::failed (an error, NOT a clean not-met), so it never meets and never regresses;
 # the loop simply reaches the cap.
-JT="$(mkproj judgetimeout)"; : > "$JT/NO_WORK"
-cat > "$JT/rlt/judges/worked.sh" <<'EOF'
+JT="$(mkproj verifiertimeout)"; : > "$JT/NO_WORK"
+cat > "$JT/rlt/verifiers/worked.sh" <<'EOF'
 #!/bin/sh
 sleep 30
 echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"never gets here"}'
 EOF
-chmod +x "$JT/rlt/judges/worked.sh"
+chmod +x "$JT/rlt/verifiers/worked.sh"
 cat > "$JT/rlt/rlt.yaml" <<'EOF'
-project: judgetimeout
+project: verifiertimeout
 defaults: { model: fake }
-judge: { timeout: 1 }
+verifier: { timeout: 1 }
 steps: { worker: {} }
 sequence:
   steps: [worker]
@@ -1476,10 +1476,10 @@ summary: { enabled: false }
 EOF
 JTS=$(date +%s)
 rlt_do "$JT" run --max-sessions 1 > "$JT/run.log" 2>&1
-is "a judge that hangs does not hang the loop (exit 4, the cap)" "$?" "4"
-[ $(( $(date +%s) - JTS )) -lt 25 ] && ok "…the judge timeout fired instead of waiting it out" \
-                                    || bad "the judge ran to completion; timeout ignored"
-hasnt "…and the hung judge never reports met" "$JT/run.log" "never gets here"
+is "a verifier that hangs does not hang the loop (exit 4, the cap)" "$?" "4"
+[ $(( $(date +%s) - JTS )) -lt 25 ] && ok "…the verifier timeout fired instead of waiting it out" \
+                                    || bad "the verifier ran to completion; timeout ignored"
+hasnt "…and the hung verifier never reports met" "$JT/run.log" "never gets here"
 
 # ── RLT_MEMORY_MAX_KB env override (config.rs apply_env_overrides) ────────────────────────
 EV="$(mkproj memenv)"; : > "$EV/NO_WORK"
@@ -1515,7 +1515,7 @@ is  "--dir runs the loop in another directory (exit 0)" "$?" "0"
 exists "…and the worker really worked there"           "$GF/did_work"
 
 GC="$(mkproj cfgflags)"
-mv "$GC/rlt/rlt.yaml" "$GC/custom.yaml"        # the config file at a NON-default path; judges still resolve from rlt/judges/
+mv "$GC/rlt/rlt.yaml" "$GC/custom.yaml"        # the config file at a NON-default path; verifiers still resolve from rlt/verifiers/
 rlt_do "$GC" --config "$GC/custom.yaml" run --max-sessions 2 > "$GC/run.log" 2>&1
 is  "--config accepts a non-default filename (exit 0)" "$?" "0"
 has "…and the run really reached its Definition of Done" "$GC/run.log" "done_if satisfied"
@@ -1565,21 +1565,21 @@ RUNS=$(grep -c 'RUN=run' "$RX/trace.txt" 2>/dev/null || echo 0)
 # This is the successor of the retired `if <cond> then <step>` branch: there is no `if:` any more
 # (§14.14), so "recovery only when the worker did not get there" is spelled as an `until:`-bounded
 # repeat whose FALL-THROUGH is the recovery step.
-# `flip` is a run-set-only control judge (named ONLY in the `until:` condition): met once .flip is
+# `flip` is a run-set-only control verifier (named ONLY in the `until:` condition): met once .flip is
 # COMMITTED, which the FIRST worker session does (uncommitted work is NoChanges and the gate would
 # restore flip to not-met, so the repeat would run to `max` instead). `until:` is evaluated only
 # AFTER a dispatch, so session 1 = worker; at session 2 `flip` holds, the entry is done well short
-# of `max: 8`, and the walk advances to `reconsider` (skip_judges), which STAGES. A per-step override
+# of `max: 8`, and the walk advances to `reconsider` (skip_verifiers), which STAGES. A per-step override
 # proves reconsider ran: it names a distinct `prompt:` that lands in that worker's prompt additively
 # (§5.6). We assert against prompts.txt (which accumulates every prompt) so the check is independent
 # of session order.
 BR="$(mkproj branch)"
-cat > "$BR/rlt/judges/flip.sh" <<'EOF'
+cat > "$BR/rlt/verifiers/flip.sh" <<'EOF'
 #!/bin/sh
 [ -f .flip ] && echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"flipped"}' \
              || echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
 EOF
-chmod +x "$BR/rlt/judges/flip.sh"
+chmod +x "$BR/rlt/verifiers/flip.sh"
 cat > "$BR/bin/claude" <<'EOF'
 #!/bin/sh
 for a in "$@"; do [ "$a" = "--version" ] && { echo "fake 0.0.0"; exit 0; }; done
@@ -1594,7 +1594,7 @@ project: branch
 defaults: { model: fake }
 steps:
   worker: {}
-  reconsider: { skip_judges: true, prompt: "RECONSIDER_MARKER_QRS" }
+  reconsider: { skip_verifiers: true, prompt: "RECONSIDER_MARKER_QRS" }
 sequence:
   steps:
     - { step: worker, until: flip, max: 8 }
@@ -1604,7 +1604,7 @@ summary: { enabled: false }
 EOF
 echo base > "$BR/tracked.txt"; gitbase "$BR"
 rlt_do "$BR" run --max-sessions 3 > "$BR/run.log" 2>&1
-has "an \`until:\` repeat ends early and falls through to the next entry" "$BR/run.log" "(skip_judges) — nothing merged yet"
+has "an \`until:\` repeat ends early and falls through to the next entry" "$BR/run.log" "(skip_verifiers) — nothing merged yet"
 has "…and the fall-through step's per-step prompt reaches that worker"    "$BR/prompts.txt" "RECONSIDER_MARKER_QRS"
 
 # ── a per-step AGENT override is honoured (the whole point: perspective diversity, §3) ────
@@ -1629,7 +1629,7 @@ chmod +x "$PA/bin/claude" "$PA/bin/codex"
 cat > "$PA/rlt/rlt.yaml" <<'EOF'
 project: peragent
 defaults: { agent: claude, model: fake }
-judge: { agent: claude, model: fake }
+verifier: { agent: claude, model: fake }
 steps:
   plan: {}
   build: { agent: codex }
@@ -1708,7 +1708,7 @@ EOF
   SB="$(mkproj sandbox)"
   make_wrapper "$SB"
   # A post-session HOOK that execs a repo-relative script — the §13 escape shape (a confined worker
-  # rewrites hook_payload.sh in its writable cwd). It must be wrapped just like the worker + judge.
+  # rewrites hook_payload.sh in its writable cwd). It must be wrapped just like the worker + verifier.
   printf 'echo hook ran\n' > "$SB/hook_payload.sh"
   cat > "$SB/rlt/rlt.yaml" <<'EOF'
 project: sandbox
@@ -1728,11 +1728,11 @@ EOF
   exists "…the OS wrapper fired (marker present)"           "$SB/sandbox_wrap.log"
   has  "…and the inner claude was the wrapped command"      "$SB/sandbox_wrap.log" "claude"
   has  "…the inner claude STILL ran under the wrapper"      "$SB/trace.txt" "RUN=run"
-  has  "…and its work landed (the judge saw did_work)"      "$SB/run.log" "1/1 goals met"
+  has  "…and its work landed (the verifier saw did_work)"      "$SB/run.log" "1/1 goals met"
   # §12/§13: everything a confined worker can rewrite in its writable cwd is wrapped too, or it is a
-  # wide-open escape. The post-session script JUDGE and the on_session_end HOOK both appear in the
+  # wide-open escape. The post-session script VERIFIER and the on_session_end HOOK both appear in the
   # wrap log alongside the worker.
-  has  "…and the post-session JUDGE was wrapped too (§12 escape closed)" "$SB/sandbox_wrap.log" "worked.sh"
+  has  "…and the post-session VERIFIER was wrapped too (§12 escape closed)" "$SB/sandbox_wrap.log" "worked.sh"
   has  "…and the on_session_end HOOK was wrapped too (§13 escape closed)" "$SB/sandbox_wrap.log" "hook_payload.sh"
 
   # --- isolation: none → rlt spawns the worker DIRECTLY, no wrapper -------------------------
@@ -1814,7 +1814,7 @@ is    "rlt status reads the snapshot from its new home (exit 0)" "$?" "0"
 hasnt "…and does not fall back to \"no run snapshot yet\""       "$SPL/status.txt" "no run snapshot yet"
 has   "…it prints the real scoreboard"                           "$SPL/status.txt" "worked"
 rlt_do "$SPL" plan > "$SPL/plan.txt" 2>&1
-is    "rlt plan re-runs the judges against the new layout (exit 0)" "$?" "0"
+is    "rlt plan re-runs the verifiers against the new layout (exit 0)" "$?" "0"
 has   "…and reports the goal"                                       "$SPL/plan.txt" "worked"
 rlt_do "$SPL" history > "$SPL/hist.txt" 2>&1
 has   "rlt history reads rlt/private/project.json"                  "$SPL/hist.txt" "session"
@@ -1825,7 +1825,7 @@ else
   ( cd "$SPL" && python3 "$ROOT/scripts/tui_drive.py" --seq "2.0:q" --timeout 25 -- "$RLT" dashboard > split_tui.raw 2>&1 )
   deansi "$SPL/split_tui.raw" "$SPL/split_tui.txt"
   has "the dashboard tails rlt/private/state.json — it paints the project" "$SPL/split_tui.txt" "split"
-  has "…and the judge it read from the snapshot"                           "$SPL/split_tui.txt" "worked"
+  has "…and the verifier it read from the snapshot"                           "$SPL/split_tui.txt" "worked"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1877,7 +1877,7 @@ fi
 sec "9q. the container tier runs the AGENT (REAL engine, fake-agent image)"
 # A-11. The worker CLI runs INSIDE its image (a test image with a fake `claude` baked in —
 # tests/fixtures/container/fake-agent), as the project owner, with a fresh HOME, its credential by
-# NAME, the context read-only at /context/<as>; the judges run in the image too, on a read-only
+# NAME, the context read-only at /context/<as>; the verifiers run in the image too, on a read-only
 # project. The workspace is under target/: a VM-backed engine (colima) cannot see $TMPDIR.
 ENGINE_BIN="$(command -v docker || command -v podman || true)"
 if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
@@ -1885,24 +1885,24 @@ if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
   printf '# kb\n' > "$CT/kb/index.md"
   "$ENGINE_BIN" build -q -t rlt-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$CT/build.log" 2>&1
   is "container: the fake-agent test image builds" "$?" "0"
-  CP="$CT/proj"; mkdir -p "$CP/rlt/judges" "$CP/rlt/state" "$CP/tests"
+  CP="$CT/proj"; mkdir -p "$CP/rlt/verifiers" "$CP/rlt/state" "$CP/tests"
   printf 'orig\n' > "$CP/tests/oracle.txt"
-  printf 'rlt/state/\nagg/private/\n' > "$CP/.gitignore"
-  cat > "$CP/rlt/judges/done.sh" <<'EOF'
+  printf 'rlt/state/\nrlt/private/\n' > "$CP/.gitignore"
+  cat > "$CP/rlt/verifiers/done.sh" <<'EOF'
 #!/bin/sh
-{ [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; } && echo JUDGE_IN_CONTAINER > "$RLT_JUDGE_SCRATCH/where"
-if echo x > judge_probe 2>/dev/null; then echo JUDGE_WROTE_PROJECT >> "$RLT_JUDGE_SCRATCH/where"; fi
+{ [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; } && echo VERIFIER_IN_CONTAINER > "$RLT_VERIFIER_SCRATCH/where"
+if echo x > verifier_probe 2>/dev/null; then echo VERIFIER_WROTE_PROJECT >> "$RLT_VERIFIER_SCRATCH/where"; fi
 n=$(cat src/sessions.log 2>/dev/null | wc -l | tr -d ' ')
 [ "${n:-0}" -ge 1 ] && echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"worked"}' \
                      || echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
 EOF
-  chmod +x "$CP/rlt/judges/done.sh"
-  printf -- '---\ninputs: []\n---\nDecide.\n' > "$CP/rlt/judges/reviewed.md"
+  chmod +x "$CP/rlt/verifiers/done.sh"
+  printf -- '---\ninputs: []\n---\nDecide.\n' > "$CP/rlt/verifiers/reviewed.md"
   echo "work" > "$CP/rlt/state/STATE.md"
   cat > "$CP/rlt/rlt.yaml" <<EOF
 project: ctr
 defaults: { model: fake, isolation: container, image: "rlt-test-fake-agent:1", write_deny: ["tests/**"] }
-judge: { agent: claude, model: fake }
+verifier: { agent: claude, model: fake }
 steps: { worker: {} }
 sequence: { steps: [worker], done_if: "done AND reviewed" }
 summary: { enabled: false }
@@ -1919,9 +1919,9 @@ EOF
   has  "…which it could not write"                                "$CP/src/worker.log" "CONTEXT_WRITE_DENIED"
   has  "…nor the write_deny oracle"                               "$CP/src/worker.log" "ORACLE_WRITE_DENIED"
   has  "…nor rlt/private/"                                        "$CP/src/worker.log" "PRIVATE_WRITE_DENIED"
-  has  "the script judge ran in the image too"                    "$CP/rlt/private/container/judge/scratch-1/where" "JUDGE_IN_CONTAINER"
-  hasnt "…on a READ-ONLY project"                                 "$CP/rlt/private/container/judge/scratch-1/where" "JUDGE_WROTE_PROJECT"
-  has  "the LLM judge's verdict came from the image's ruler"     "$CT/run.log" "IMAGE_RULER_MET"
+  has  "the script verifier ran in the image too"                    "$CP/rlt/private/container/verifier/scratch-1/where" "VERIFIER_IN_CONTAINER"
+  hasnt "…on a READ-ONLY project"                                 "$CP/rlt/private/container/verifier/scratch-1/where" "VERIFIER_WROTE_PROJECT"
+  has  "the rubric verifier's verdict came from the image's ruler"     "$CT/run.log" "IMAGE_RULER_MET"
   hasnt "the credential value is not in the run log"              "$CT/run.log" "e2e-secret-value-91"
   if grep -rqF e2e-secret-value-91 "$CP/rlt/private" 2>/dev/null; then bad "…nor anywhere under rlt/private/"; else ok "…nor anywhere under rlt/private/"; fi
   [ -n "${KEEP:-}" ] || rm -rf "$CT"
@@ -1930,8 +1930,8 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9q-m. metric and score judges in the judges' image (REAL engine, fake swe-metrics image)"
-# A-11 × A-20. On a container run swe-metrics runs in judge.image (a test image with a FAKE swe-metrics
+sec "9q-m. metric and score verifiers in the verifiers' image (REAL engine, fake swe-metrics image)"
+# A-11 × A-20. On a container run swe-metrics runs in verifier.image (a test image with a FAKE swe-metrics
 # baked in — tests/fixtures/container/fake-metrics), never on the host: a swe-metrics stub first on the
 # host's PATH fails and leaves a mark. The project is read-only to it; the score reads the incumbent.
 ENGINE_BIN="$(command -v docker || command -v podman || true)"
@@ -1942,12 +1942,12 @@ if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
   is "metrics container: the fake swe-metrics test image builds" "$?" "0"
   printf '#!/bin/sh\ntouch "%s/HOST_CALLED"; exit 1\n' "$CM" > "$CM/hostbin/swe-metrics"; chmod +x "$CM/hostbin/swe-metrics"
   CMP="$CM/proj"; mkdir -p "$CMP/rlt/state"; echo work > "$CMP/rlt/state/STATE.md"
-  printf 'rlt/state/\nagg/private/\n' > "$CMP/.gitignore"
+  printf 'rlt/state/\nrlt/private/\n' > "$CMP/.gitignore"
   cat > "$CMP/rlt/rlt.yaml" <<'EOF'
 project: mctr
 defaults: { model: fake, isolation: container, image: "rlt-test-fake-agent:1" }
-judge: { image: "rlt-test-fake-metrics:1" }
-judges:
+verifier: { image: "rlt-test-fake-metrics:1" }
+verifiers:
   sessions: { metric: { id: "work.sessions" }, min: 1 }
   quality:  { score: { definition: "swe-default", version: "2" }, min: 60 }
 steps: { worker: {} }
@@ -1956,29 +1956,29 @@ summary: { enabled: false }
 EOF
   ( cd "$CMP" && git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init )
   ( cd "$CMP" && PATH="$CM/hostbin:$PATH" "$RLT" doctor --json > "$CM/doctor.json" 2>/dev/null )
-  has  "metrics container: doctor --json reports swe-metrics in judge.image" "$CM/doctor.json" '"swe-metrics": "fake-swe-metrics 1.0.0"'
+  has  "metrics container: doctor --json reports swe-metrics in verifier.image" "$CM/doctor.json" '"swe-metrics": "fake-swe-metrics 1.0.0"'
   ( cd "$CMP" && PATH="$CM/hostbin:$PATH" "$RLT" run --max-sessions 2 > "$CM/run.log" 2>&1 )
   is   "metrics container: the run reaches done (exit 0)"            "$?" "0"
   [ -e "$CM/HOST_CALLED" ] && bad "…swe-metrics never ran on the host" || ok "…swe-metrics never ran on the host"
-  has  "…it measured INSIDE the judges' image"                       "$CMP/rlt/private/container/judge/scratch-1/swe-metrics.log" "MEASURE_IN_CONTAINER"
-  has  "…on a READ-ONLY project"                                     "$CMP/rlt/private/container/judge/scratch-1/swe-metrics.log" "MEASURE_PROJECT_WRITE_DENIED"
-  has  "…and scored against the incumbent it could read"             "$CMP/rlt/private/container/judge/scratch-1/swe-metrics.log" "BASELINE_READ"
-  is   "…one measurement for both judges"                            "$(grep -c '^measure ' "$CMP/rlt/private/container/judge/scratch-1/swe-metrics.log")" "1"
-  # the worker's image has no swe-metrics: refused at judge.image
+  has  "…it measured INSIDE the verifiers' image"                       "$CMP/rlt/private/container/verifier/scratch-1/swe-metrics.log" "MEASURE_IN_CONTAINER"
+  has  "…on a READ-ONLY project"                                     "$CMP/rlt/private/container/verifier/scratch-1/swe-metrics.log" "MEASURE_PROJECT_WRITE_DENIED"
+  has  "…and scored against the incumbent it could read"             "$CMP/rlt/private/container/verifier/scratch-1/swe-metrics.log" "BASELINE_READ"
+  is   "…one measurement for both verifiers"                            "$(grep -c '^measure ' "$CMP/rlt/private/container/verifier/scratch-1/swe-metrics.log")" "1"
+  # the worker's image has no swe-metrics: refused at verifier.image
   sed -i.bak 's/image: "rlt-test-fake-metrics:1"/image: "rlt-test-fake-agent:1"/' "$CMP/rlt/rlt.yaml"
   ( cd "$CMP" && PATH="$CM/hostbin:$PATH" "$RLT" check > "$CM/check.log" 2>&1 )
-  is   "metrics container: a judges' image without swe-metrics is refused (rlt check exit 1)" "$?" "1"
-  has  "…at judge.image"                                             "$CM/check.log" "judge.image"
+  is   "metrics container: a verifiers' image without swe-metrics is refused (rlt check exit 1)" "$?" "1"
+  has  "…at verifier.image"                                             "$CM/check.log" "verifier.image"
   has  "…saying the image lacks it"                                  "$CM/check.log" "has no \`swe-metrics\` on PATH"
   [ -n "${KEEP:-}" ] || rm -rf "$CM"
 else
-  skip "metrics container: swe-metrics in the judges' image" "no running container engine"
+  skip "metrics container: swe-metrics in the verifiers' image" "no running container engine"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 sec "9r. network egress allow-list (A-7): only the listed hosts, through rlt's proxy"
 # The acceptance case: under `allow: [api.anthropic.com]`, `curl example.com` from the worker FAILS
-# and the agent still works (its session completes and is judged). Real mechanisms only — Seatbelt
+# and the agent still works (its session completes and is verified). Real mechanisms only — Seatbelt
 # on macOS, an --internal network in a container — and no internet needed: every attempt is refused
 # before a packet leaves.
 if [ "$(uname -s)" = Darwin ] && sandbox-exec -p '(version 1)(deny default)(allow process*)(allow file-read*)(allow sysctl-read)(allow mach*)' /usr/bin/true 2>/dev/null; then
@@ -2015,15 +2015,15 @@ else
 fi
 ENGINE_BIN="$(command -v docker || command -v podman || true)"
 if [ -n "$ENGINE_BIN" ] && "$ENGINE_BIN" version >/dev/null 2>&1; then
-  EC="$ROOT/target/rlt-e2e-egress.$$"; rm -rf "$EC"; mkdir -p "$EC/proj/rlt/judges" "$EC/proj/rlt/state"
+  EC="$ROOT/target/rlt-e2e-egress.$$"; rm -rf "$EC"; mkdir -p "$EC/proj/rlt/verifiers" "$EC/proj/rlt/state"
   "$ENGINE_BIN" build -q -t rlt-test-fake-agent:1 "$ROOT/tests/fixtures/container/fake-agent" > "$EC/build.log" 2>&1
-  cat > "$EC/proj/rlt/judges/done.sh" <<'EOF'
+  cat > "$EC/proj/rlt/verifiers/done.sh" <<'EOF'
 #!/bin/sh
 [ -f src/work.txt ] && echo '{"met":true,"value":1,"max":1,"target":1}' || echo '{"met":false,"value":0,"max":1,"target":1}'
 EOF
-  chmod +x "$EC/proj/rlt/judges/done.sh"
+  chmod +x "$EC/proj/rlt/verifiers/done.sh"
   echo work > "$EC/proj/rlt/state/STATE.md"
-  printf 'rlt/state/\nagg/private/\n' > "$EC/proj/.gitignore"
+  printf 'rlt/state/\nrlt/private/\n' > "$EC/proj/.gitignore"
   cat > "$EC/proj/rlt/rlt.yaml" <<'EOF'
 project: egressctr
 defaults: { model: fake, isolation: container, image: "rlt-test-fake-agent:1" }
@@ -2061,11 +2061,11 @@ HL="$(mkproj hil)"
 # stops on the cap. Forcing a session by deleting the worker's output instead would leave a TRACKED
 # file missing, and rlt refuses to start on a dirty tree ("session isolation is mandatory") — which
 # is exactly how the first draft of this section silently tested nothing.
-cat > "$HL/rlt/judges/never.sh" <<'EOF'
+cat > "$HL/rlt/verifiers/never.sh" <<'EOF'
 #!/bin/sh
 printf '%s\n' '{"met":false,"rationale":"this run is here for the brief, not the goal"}'
 EOF
-chmod +x "$HL/rlt/judges/never.sh"
+chmod +x "$HL/rlt/verifiers/never.sh"
 cat > "$HL/rlt/rlt.yaml" <<'EOF'
 project: hil
 defaults: { model: fake }
@@ -2217,14 +2217,14 @@ is  "a page without frontmatter fails the lint (exit 1)" "$?" "1"
 has "…naming the file and the rule" "$WK/lint2.json" '"rule": "frontmatter.missing"'
 
 # ═══════════════════════════════════════════════════════════════════════════
-sec "9t. judges built on swe-metrics (A-20) — against the REAL swe-metrics"
+sec "9t. verifiers built on swe-metrics (A-20) — against the REAL swe-metrics"
 
 # The real tool, not a fake: a fixture with KNOWN complexity (classify: 4 decisions ⇒ cyclomatic 5)
 # and KNOWN duplication (report_b.py = report_a.py with one word changed ⇒ one clone). A counting
-# shim in front of the real binary proves the judges of a session share ONE measurement.
+# shim in front of the real binary proves the verifiers of a session share ONE measurement.
 REAL_SM="$(command -v swe-metrics 2>/dev/null)"
 if [ -z "$REAL_SM" ] || ! "$REAL_SM" schema report >/dev/null 2>&1; then
-  skip "swe-metrics judges" "swe-metrics is not on PATH (github.com/ssenge/swe-metrics)"
+  skip "swe-metrics verifiers" "swe-metrics is not on PATH (github.com/ssenge/swe-metrics)"
 else
   SM="$(mkproj swemetrics)"
   cat > "$SM/bin/swe-metrics" <<EOF
@@ -2285,7 +2285,7 @@ EOF
   cat > "$SM/rlt/rlt.yaml" <<'EOF'
 project: swemetrics
 defaults: { model: fake }
-judges:
+verifiers:
   cc_max:  { metric: { id: "complexity.cyclomatic", stat: "max", tool: "lizard" }, max: 10 }
   cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 20 }
   clones:  { metric: { id: "duplication.clones" }, max: 5 }
@@ -2302,24 +2302,24 @@ summary: { enabled: false }
 EOF
   gitbase "$SM"
   rlt_do "$SM" check > "$SM/check.log" 2>&1
-  is  "swe-metrics: a config with metric judges passes rlt check" "$?" "0"
+  is  "swe-metrics: a config with metric verifiers passes rlt check" "$?" "0"
   ( cd "$SM" && env PATH="$SM/bin/none:/usr/bin:/bin" HOME="$SM/.home" "$RLT" check ) > "$SM/nopath.log" 2>&1
   is  "…without swe-metrics on PATH, rlt check refuses" "$?" "1"
   has "…and says why"                                  "$SM/nopath.log" "not on PATH"
   : > "$SM/sm-calls.txt"
   rlt_do "$SM" run --max-sessions 1 > "$SM/run.log" 2>&1
   is  "swe-metrics: the run goes to its session cap" "$?" "4"
-  is  "five metric judges, two judged trees ⇒ two measurements" "$(grep -c '^measure' "$SM/sm-calls.txt")" "2"
+  is  "five metric verifiers, two verified trees ⇒ two measurements" "$(grep -c '^measure' "$SM/sm-calls.txt")" "2"
   first_value() { python3 -c "
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
-print([r for r in rows if r['judge'] == sys.argv[2]][0].get('value'))" "$SM/rlt/private/verdicts.jsonl" "$1"; }
+print([r for r in rows if r['verifier'] == sys.argv[2]][0].get('value'))" "$SM/rlt/private/verdicts.jsonl" "$1"; }
   is  "the fixture's known complexity: cyclomatic max 5" "$(first_value cc_max)" "5.0"
   is  "the fixture's known duplication: one clone"        "$(first_value clones)" "1.0"
   has "a worse max complexity is rolled back by the ratchet" "$SM/run.log" "ratchet \`cc_max\`: 5 → 13"
   exists "the incumbent's report is kept under rlt/private/" "$SM/rlt/private/metrics/incumbent/target.json"
   ls "$SM"/rlt/private/evidence/*/1/secrets/swe-metrics/target/details/gitleaks.sarif >/dev/null 2>&1 \
-    && ok "the secrets judge's SARIF is kept as evidence" || bad "the secrets judge's SARIF is kept as evidence"
+    && ok "the secrets verifier's SARIF is kept as evidence" || bad "the secrets verifier's SARIF is kept as evidence"
 fi
 
 sec "9j. the docs describe the tool that actually exists"
@@ -2355,7 +2355,7 @@ PY
 
 exists "the loop diagram is committed"        "$ROOT/assets/loop.png"
 exists "the config reference exists"          "$ROOT/docs/CONFIG.md"
-exists "the hello example exists"         "$ROOT/examples/hello/README.md"
+exists "the hello example exists"         "$ROOT/examples/hello-loop/README.md"
 exists "the p-vs-np example exists"           "$ROOT/examples/p-vs-np/README.md"
 hasnt  "…and the retired flowchart is gone"   "$ROOT/README.md" "how-it-works"
 
@@ -2392,7 +2392,7 @@ import json;d=json.load(open('$SV/state.json'))
 assert d['project']=='serve', d['project']
 assert d['phase'] in ('inject','run','verify','gate'), d['phase']
 assert isinstance(d['goals'],list) and d['goals'][0]['id']=='worked'" \
-  && ok "GET /api/state → live snapshot with a four-stage phase + the judge scoreboard" || bad "/api/state malformed"
+  && ok "GET /api/state → live snapshot with a four-stage phase + the verifier scoreboard" || bad "/api/state malformed"
 
 curl -sf "http://127.0.0.1:$PORT/api/history" -o "$SV/hist.json"
 python3 -c "import json;d=json.load(open('$SV/hist.json'));assert 'runs' in d" \
@@ -2416,7 +2416,7 @@ UNKNOWN=$(grep -vE '^(inject|run|verify|gate|backoff|staging|starting|done)$' "$
 grep -qE '^(inject|run|verify|gate)$' "$SV/phases.uniq" \
   && ok "…and at least one of the four stages is observed live" \
   || bad "no four-stage phase ever observed" "saw: $(tr '\n' ' ' < "$SV/phases.uniq")"
-hasnt "…the retired 'judging' phase never appears" "$SV/phases.uniq" "judging"
+hasnt "…the retired 'verifying' phase never appears" "$SV/phases.uniq" "verifying"
 hasnt "…the retired 'running' phase never appears" "$SV/phases.uniq" "running"
 
 C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/api/send" -d '{"cmd":"inject","text":"WEB_MARKER_ABC"}')
@@ -2516,7 +2516,7 @@ EOF
   drive base "2.0:q" 25
   is "TUI launches on a pty and quits on 'q'" "$?" "0"
   has "…paints the project name"    "$T/base.txt" "tuidemo"
-  has "…paints the judge"           "$T/base.txt" "worked"
+  has "…paints the verifier"           "$T/base.txt" "worked"
   has "…paints the phase field"     "$T/base.txt" "phase"
   has "…paints the worker's activity stream" "$T/base.txt" "thinking step"
   has "…paints the finished banner" "$T/base.txt" "FINISHED"
@@ -2525,13 +2525,13 @@ EOF
   # focus starts on Activity, follow-mode starts on
   has "…Activity starts focused (▸)"        "$T/base.txt" "▸ Activity"
   has "…and auto-follow starts on (⏵live)"  "$T/base.txt" "⏵live"
-  hasnt "…Judges is not focused to begin with" "$T/base.txt" "▸ Judges"
+  hasnt "…Verifiers is not focused to begin with" "$T/base.txt" "▸ Verifiers"
   hasnt "…and follow is not paused"           "$T/base.txt" "paused"
 
   # a user presses Tab to move focus, f to toggle follow, arrows to scroll
   drive tab "1.5:Tab,0.6:RESIZE,0.8:q" 25
   is  "Tab is accepted and the TUI still quits" "$?" "0"
-  has "…Tab moves focus to Judges (▸ Judges)"   "$T/tab.txt" "▸ Judges"
+  has "…Tab moves focus to Verifiers (▸ Verifiers)"   "$T/tab.txt" "▸ Verifiers"
 
   # `f` at the bottom used to be a no-op: draw_activity re-pinned anything at max_scroll,
   # so the pause was undone by the very next repaint.
@@ -2570,7 +2570,7 @@ EOF
   grep -Eq "phase +(inject|run|verify|gate)" "$TL/tui.txt" \
     && ok "…a live loop renders a four-stage phase (inject/run/verify/gate)" \
     || bad "TUI phase is not one of inject/run/verify/gate" "$(grep -o 'phase [a-z]*' "$TL/tui.txt" | head -1)"
-  hasnt "…and never the old 'judging' vocabulary" "$TL/tui.txt" "judging"
+  hasnt "…and never the old 'verifying' vocabulary" "$TL/tui.txt" "verifying"
 
   # THE NEW FEATURE: inject a steering message straight from the TUI (press `i`, type it, Enter) —
   # it must hit the loop's bus and land on the NEXT worker prompt, exactly like `rlt send inject`.
@@ -2767,8 +2767,8 @@ has "…and says so, non-fatally, when they are not" "$DN/doc.log" "are not inst
 capcheck() { # capcheck <desc> <expect: ok|refused|inert> <rlt.yaml body>
   local desc=$1 expect=$2 body=$3
   local d="$WS/cap-$(echo "$desc" | tr -cd '[:alnum:]' | cut -c1-16)"
-  mkdir -p "$d/rlt/judges" "$d/rlt/state"; printf '%s' "$body" > "$d/rlt/rlt.yaml"
-  printf '#!/bin/sh\necho "{\\"met\\":true}"\n' > "$d/rlt/judges/g.sh"; chmod +x "$d/rlt/judges/g.sh"
+  mkdir -p "$d/rlt/verifiers" "$d/rlt/state"; printf '%s' "$body" > "$d/rlt/rlt.yaml"
+  printf '#!/bin/sh\necho "{\\"met\\":true}"\n' > "$d/rlt/verifiers/g.sh"; chmod +x "$d/rlt/verifiers/g.sh"
   printf 'do work\n' > "$d/rlt/state/STATE.md"
   ( cd "$d" && "$RLT" doctor > "$d/doc.log" 2>&1 )
   if grep -q "cannot do" "$d/doc.log"; then
@@ -2786,7 +2786,7 @@ capcheck() { # capcheck <desc> <expect: ok|refused|inert> <rlt.yaml body>
 capcheck "the skill's claude recipe starts"  ok \
   'project: p
 defaults: { agent: claude, model: "claude-opus-4-8[1m]" }
-judge: { agent: claude, model: haiku }
+verifier: { agent: claude, model: haiku }
 steps: { worker: {} }
 sequence:
   steps: [worker]

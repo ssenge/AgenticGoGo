@@ -4,7 +4,7 @@
 //! session branches — with a fake `claude` on PATH standing in for the model, exactly as
 //! `tests/cli.rs` does for the YAML path. Nothing here asserts on a flag the facade set; every
 //! assertion reads something the pipeline actually produced (the session counter, a marker file a
-//! judge script wrote, `state.json`).
+//! verifier script wrote, `state.json`).
 //!
 //! # Why one shared PATH/HOME, set once
 //!
@@ -28,7 +28,7 @@ use relentless::core::config::Limits;
 use relentless::prelude::*;
 
 /// The one environment mutation in this binary: a shared `bin/` holding the fake `claude`, and a
-/// throwaway `HOME` so `ensure_library` never writes the developer's real `~/.rlt/judges`.
+/// throwaway `HOME` so `ensure_library` never writes the developer's real `~/.rlt/verifiers`.
 static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
     let root = std::env::temp_dir().join(format!("rlt-driver-env-{}", std::process::id()));
     let bin = root.join("bin");
@@ -37,7 +37,7 @@ static ENV: LazyLock<PathBuf> = LazyLock::new(|| {
     std::fs::create_dir_all(&home).unwrap();
 
     // The fake `claude`. `--version` answers preflight. A WORKER session is recognised by the
-    // instructions pointer in its prompt — a ruler one-shot (summary / LLM judge) must not be
+    // instructions pointer in its prompt — a ruler one-shot (summary / rubric verifier) must not be
     // mistaken for one, or every summary would commit a phantom session.
     let claude = bin.join("claude");
     std::fs::write(
@@ -68,7 +68,7 @@ exit 0
     .unwrap();
     chmod_x(&claude);
 
-    // The fake `codex`, asked only as a judge's own ruler (A-25): it records its argv in the
+    // The fake `codex`, asked only as a verifier's own ruler (A-25): it records its argv in the
     // project and answers one review verdict in Codex's `--json` stream shape.
     let codex = bin.join("codex");
     std::fs::write(
@@ -112,11 +112,11 @@ fn work() -> Step {
     Step::new("implement").model("fake").prompt("do a chunk")
 }
 
-/// Write an executable script judge at `rlt/judges/<name>.sh` that APPENDS one line to `<name>.runs`
-/// every time it executes, then reports `met`. The marker file is how "did this judge actually run"
+/// Write an executable script verifier at `rlt/verifiers/<name>.sh` that APPENDS one line to `<name>.runs`
+/// every time it executes, then reports `met`. The marker file is how "did this verifier actually run"
 /// is observed — a count, not a flag rlt set.
-fn marker_judge(dir: &Path, name: &str, met: bool) -> Judge {
-    let rel = format!("rlt/judges/{name}.sh");
+fn marker_verifier(dir: &Path, name: &str, met: bool) -> Verifier {
+    let rel = format!("rlt/verifiers/{name}.sh");
     let p = dir.join(&rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(
@@ -127,10 +127,10 @@ fn marker_judge(dir: &Path, name: &str, met: bool) -> Judge {
     )
     .unwrap();
     chmod_x(&p);
-    Judge::script(name, rel)
+    Verifier::script(name, rel)
 }
 
-/// How many times a marker judge has executed.
+/// How many times a marker verifier has executed.
 fn runs(dir: &Path, name: &str) -> usize {
     std::fs::read_to_string(dir.join(format!("{name}.runs"))).map(|t| t.lines().count()).unwrap_or(0)
 }
@@ -166,7 +166,7 @@ fn work_landed_on_main(dir: &Path) -> usize {
 
 /// Seed `verdicts.jsonl` with a LANDED, met row for `name` — the state a previous gate would have
 /// left. `landed_met` is what the regression rule compares against, so without this a first-ever
-/// failing judge is not a regression, it is just news.
+/// failing verifier is not a regression, it is just news.
 fn seed_landed_met(dir: &Path, name: &str) {
     relentless::core::verdicts::append(
         dir,
@@ -197,7 +197,7 @@ fn a_driver_step_runs_the_real_pipeline() {
     assert_eq!(out.step, "implement");
     assert_eq!(out.landed, Landing::Span, "step() STAGES; nothing merges until gate()");
     assert!(out.tokens >= 1, "the worker's reported tokens reached the run counters: {out:?}");
-    assert!(out.verdicts.is_empty(), "the run-set is EMPTY on the driver path — judges are lazy");
+    assert!(out.verdicts.is_empty(), "the run-set is EMPTY on the driver path — verifiers are lazy");
 
     assert!(relentless::paths::state_json(dir).exists(), "the dashboard snapshot is published");
     let status = relentless::ui::status::render(dir);
@@ -247,52 +247,52 @@ fn after_a_ceiling_every_further_step_launches_no_worker() {
     assert_eq!(rlt.sessions(), 1, "the latch must make every later call a no-op that spends nothing");
     assert_eq!(rlt.ended(), Some(RunOutcome::MaxSessions));
 
-    // …and a judge asked after the latch reports NOT MET with no number — never a fabricated pass.
-    let j = marker_judge(tmp.path(), "always", true);
-    let v = rlt.judge(&j);
-    assert!(!v.met() && v.value().is_none(), "a latched judge is not-met and numberless: {v:?}");
+    // …and a verifier asked after the latch reports NOT MET with no number — never a fabricated pass.
+    let j = marker_verifier(tmp.path(), "always", true);
+    let v = rlt.verifier(&j);
+    assert!(!v.met() && v.value().is_none(), "a latched verifier is not-met and numberless: {v:?}");
     assert_eq!(runs(tmp.path(), "always"), 0, "…and it did not RUN");
 }
 
-/// JUDGES ARE LAZY AND MEMOIZED PER STEP. Asking twice inside one step runs the judge once; the next
+/// VERIFIERS ARE LAZY AND MEMOIZED PER STEP. Asking twice inside one step runs the verifier once; the next
 /// step is a fresh world and it runs again.
 #[test]
-fn a_judge_asked_twice_in_one_step_runs_once_and_again_next_step() {
+fn a_verifier_asked_twice_in_one_step_runs_once_and_again_next_step() {
     let tmp = project();
     let dir = tmp.path();
-    let tests = marker_judge(dir, "tests_pass", true);
+    let tests = marker_verifier(dir, "tests_pass", true);
 
     let rlt = Relentless::open(dir).unwrap();
     rlt.step(&work()).unwrap();
 
-    assert!(rlt.judge(&tests).met());
-    assert!(rlt.judge(&tests).met());
+    assert!(rlt.verifier(&tests).met());
+    assert!(rlt.verifier(&tests).met());
     assert_eq!(runs(dir, "tests_pass"), 1, "memoized for the step — two asks, one execution");
 
     rlt.step(&work()).unwrap();
-    assert!(rlt.judge(&tests).met());
-    assert_eq!(runs(dir, "tests_pass"), 2, "a new step clears the cache — the judge runs again");
+    assert!(rlt.verifier(&tests).met());
+    assert_eq!(runs(dir, "tests_pass"), 2, "a new step clears the cache — the verifier runs again");
 }
 
-/// `&&` IS THE GATE. The expensive judge is never reached on a cycle where the cheap one failed —
-/// which is the entire replacement for the deleted per-judge `gate:` field.
+/// `&&` IS THE GATE. The expensive verifier is never reached on a cycle where the cheap one failed —
+/// which is the entire replacement for the deleted per-verifier `gate:` field.
 #[test]
-fn a_failed_first_judge_short_circuits_the_expensive_one() {
+fn a_failed_first_verifier_short_circuits_the_expensive_one() {
     let tmp = project();
     let dir = tmp.path();
-    let build = marker_judge(dir, "builds", false);
-    let load = marker_judge(dir, "load_test", true);
+    let build = marker_verifier(dir, "builds", false);
+    let load = marker_verifier(dir, "load_test", true);
 
     let rlt = Relentless::open(dir).unwrap();
     rlt.step(&work()).unwrap();
 
-    assert!(!(rlt.judge(&build).met() && rlt.judge(&load).met()));
+    assert!(!(rlt.verifier(&build).met() && rlt.verifier(&load).met()));
     assert_eq!(runs(dir, "builds"), 1);
-    assert_eq!(runs(dir, "load_test"), 0, "Rust's `&&` never reached the 40-minute judge");
+    assert_eq!(runs(dir, "load_test"), 0, "Rust's `&&` never reached the 40-minute verifier");
 
-    // …and it is genuinely reachable — the same expression with a passing first judge runs both.
-    let ok = marker_judge(dir, "lint_clean", true);
-    assert!(rlt.judge(&ok).met() && rlt.judge(&load).met());
+    // …and it is genuinely reachable — the same expression with a passing first verifier runs both.
+    let ok = marker_verifier(dir, "lint_clean", true);
+    assert!(rlt.verifier(&ok).met() && rlt.verifier(&load).met());
     assert_eq!(runs(dir, "load_test"), 1);
 }
 
@@ -368,9 +368,9 @@ fn a_stray_and_even_malformed_rlt_yaml_changes_nothing() {
 
 /// `gate()` SEES A VERDICT ASKED FOR THE FIRST TIME AFTER EVERY STEP — under both policies.
 ///
-/// This is the test the pre-D2 design (a gate inside `step()`) passes neither half of: the judge is
+/// This is the test the pre-D2 design (a gate inside `step()`) passes neither half of: the verifier is
 /// never consulted while a step is running, so a gate that closed inside `step()` would have had
-/// nothing to weigh. Both halves run the SAME script judge against the same seeded history and
+/// nothing to weigh. Both halves run the SAME script verifier against the same seeded history and
 /// differ only in `on_regression`, so the policy is the only variable.
 #[test]
 fn gate_weighs_a_lazily_asked_verdict_under_both_policies() {
@@ -380,15 +380,15 @@ fn gate_weighs_a_lazily_asked_verdict_under_both_policies() {
     ] {
         let tmp = project();
         let dir = tmp.path();
-        let build = marker_judge(dir, "builds", false);
+        let build = marker_verifier(dir, "builds", false);
         seed_landed_met(dir, "builds"); // it WAS met as of the last gate — so this is a regression.
 
         let rlt = Relentless::open(dir).unwrap().on_regression(policy);
         rlt.step(&work()).unwrap();
         rlt.step(&work()).unwrap();
-        assert_eq!(runs(dir, "builds"), 0, "{policy:?}: nothing asked yet — judges are LAZY");
+        assert_eq!(runs(dir, "builds"), 0, "{policy:?}: nothing asked yet — verifiers are LAZY");
 
-        assert!(!rlt.judge(&build).met(), "{policy:?}: the judge is red");
+        assert!(!rlt.verifier(&build).met(), "{policy:?}: the verifier is red");
         assert_eq!(rlt.gate().unwrap(), expected, "{policy:?}");
         assert_eq!(work_landed_on_main(dir), landed, "{policy:?}: sessions on `main`");
     }
@@ -419,12 +419,12 @@ fn gate_lands_the_whole_span_and_the_rollback_twin_clears_every_branch() {
     // (b) roll back.
     let tmp = project();
     let dir = tmp.path();
-    let build = marker_judge(dir, "builds", false);
+    let build = marker_verifier(dir, "builds", false);
     seed_landed_met(dir, "builds");
     let rlt = Relentless::open(dir).unwrap().on_regression(OnRegression::Rollback);
     rlt.step(&work()).unwrap();
     rlt.step(&work()).unwrap();
-    assert!(!rlt.judge(&build).met());
+    assert!(!rlt.verifier(&build).met());
 
     assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack);
     assert_eq!(work_landed_on_main(dir), 0, "`main` is untouched");
@@ -437,7 +437,7 @@ fn gate_lands_the_whole_span_and_the_rollback_twin_clears_every_branch() {
 /// A PROTECTED-PATH VIOLATION ROLLS THE WHOLE SPAN BACK. `write_deny` binds on the driver path
 /// exactly as on YAML's, under `Isolation::None`: the tampering session's change is put back the
 /// moment its worker exits, and the NEXT gate discards the span — the honest session in it too,
-/// because it is one span — whatever the judges and the regression policy say.
+/// because it is one span — whatever the verifiers and the regression policy say.
 #[test]
 fn a_protected_path_violation_rolls_the_whole_span_back() {
     let tmp = project();
@@ -446,7 +446,7 @@ fn a_protected_path_violation_rolls_the_whole_span_back() {
     std::fs::write(dir.join("oracles/x.json"), "orig").unwrap();
     // committed, as in a real project: this fake agent `git add -A`s, so an ignore file rlt
     // created would ride the span and vanish with its rollback.
-    std::fs::write(dir.join(".gitignore"), "rlt/state/\nagg/private/\n").unwrap();
+    std::fs::write(dir.join(".gitignore"), "rlt/state/\nrlt/private/\n").unwrap();
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "oracle"]);
 
@@ -640,7 +640,7 @@ fn a_run_that_never_gates_names_the_branch_and_the_merge_that_lands_it() {
 /// work only after it ends — so a resume that refused to start would make the flagship resume scenario
 /// the one scenario that cannot start. Both directions, because the refusal is the moat for everyone
 /// who is NOT resuming: a dirty tree there means the operator's own uncommitted work. And the edit is
-/// not thrown away (A-18.3): it is on a `refs/rlt/partial/…` ref, never judged.
+/// not thrown away (A-18.3): it is on a `refs/rlt/partial/…` ref, never verified.
 #[test]
 fn a_dirty_tree_refuses_a_fresh_start_and_is_set_aside_on_a_resume() {
     let tmp = project();
@@ -677,27 +677,27 @@ fn a_dirty_tree_refuses_a_fresh_start_and_is_set_aside_on_a_resume() {
 
 // ── the sample driver, actually RUN (BUILD.md §5 — "the samples work as expected") ────────────
 
-/// A script judge that reports `met` and writes NOTHING.
+/// A script verifier that reports `met` and writes NOTHING.
 ///
-/// ⚠ Deliberately NOT [`marker_judge`], and the reason is a real edge this suite found the first
+/// ⚠ Deliberately NOT [`marker_verifier`], and the reason is a real edge this suite found the first
 /// time the sample ran for more than one cycle: its `<name>.runs` marker lands in the project dir,
-/// the worker's `git add -A` commits it on the NEXT session, and the judge's next append then leaves
+/// the worker's `git add -A` commits it on the NEXT session, and the verifier's next append then leaves
 /// a DIRTY TRACKED file — which is enough to make `gate()`'s `git checkout <base>` refuse, so the
 /// gate returns `Failed(CheckoutFailed)` and the span stays open. rlt is being loud and correct
 /// there (it will not clobber a local change it did not make), but the consequence is worth knowing:
-/// **a judge that scribbles into a tracked path can wedge a span.** Real projects gitignore judge
+/// **a verifier that scribbles into a tracked path can wedge a span.** Real projects gitignore verifier
 /// scratch output; this one simply produces none.
-fn quiet_judge(dir: &Path, name: &str, met: bool) -> Judge {
-    let rel = format!("rlt/judges/{name}.sh");
+fn quiet_verifier(dir: &Path, name: &str, met: bool) -> Verifier {
+    let rel = format!("rlt/verifiers/{name}.sh");
     let p = dir.join(&rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(&p, format!("#!/bin/sh\nprintf '%s\\n' '{{\"met\":{met}}}'\n")).unwrap();
     chmod_x(&p);
-    Judge::script(name, rel)
+    Verifier::script(name, rel)
 }
 
 /// `examples/workflow.rs`, cut to its skeleton: one cycle is
-/// **survey (bounded retry) → implement → `&&`-gated lazy judges → `gate()`**.
+/// **survey (bounded retry) → implement → `&&`-gated lazy verifiers → `gate()`**.
 ///
 /// This is a REAL driver, not a test body: `&Relentless` in, `Result<_, Fatal>` out, `?` on every spending
 /// call — the shape a compiled driver's `main` has. `check` and `gate` are the two lines whose
@@ -705,17 +705,17 @@ fn quiet_judge(dir: &Path, name: &str, met: bool) -> Judge {
 /// told its work is stranded), so the three tests below differ by those flags and nothing else.
 ///
 /// Three things are cut from the sample, each because the fake agent cannot honour it:
-/// the two RUBRIC judges (they cost a ruler call the fake agent answers with prose, not a verdict),
+/// the two RUBRIC verifiers (they cost a ruler call the fake agent answers with prose, not a verdict),
 /// `block()` (it waits for an operator who is not there), and `Isolation::Sandbox` (a real kernel
 /// jail — the `#[ignore]`d isolation tests own that). Everything else is the sample's own flow.
 ///
 /// Returns how many cycles closed a span.
 fn sample_driver(rlt: &Relentless, dir: &Path, cycles: u64, check: bool, gate: bool) -> Result<usize, Fatal> {
-    // Two scripts and one native cover every judge dispatch arm reachable without a model.
-    let builds = quiet_judge(dir, "builds", true);
-    let tests = quiet_judge(dir, "tests_pass", true);
-    let load = quiet_judge(dir, "load_ok", true);
-    let worked = Judge::native("worked", |c| {
+    // Two scripts and one native cover every verifier dispatch arm reachable without a model.
+    let builds = quiet_verifier(dir, "builds", true);
+    let tests = quiet_verifier(dir, "tests_pass", true);
+    let load = quiet_verifier(dir, "load_ok", true);
+    let worked = Verifier::native("worked", |c| {
         // a pure function of committed repo state — no clock, no env, exactly as the sample's is.
         Verdict::binary(c.read("work.log").map(|t| !t.trim().is_empty()).unwrap_or(false))
     });
@@ -741,7 +741,7 @@ fn sample_driver(rlt: &Relentless, dir: &Path, cycles: u64, check: bool, gate: b
             attempt.update(a);
             rlt.step(&survey)?;
             assert_eq!(rlt.label_path(), format!("cycle {c}/{cycles} › attempt {a}/2"));
-            if rlt.judge(&builds).met() {
+            if rlt.verifier(&builds).met() {
                 break;
             }
             rlt.info("survey still thin — trying a different angle");
@@ -758,8 +758,8 @@ fn sample_driver(rlt: &Relentless, dir: &Path, cycles: u64, check: bool, gate: b
             "`main` is exactly where the last gate left it — this cycle's sessions are only STAGED"
         );
 
-        // ── HARDEN — `&&` short-circuits, and it is the only judge gating in the design ──
-        if !(rlt.judge(&tests).met() && rlt.judge(&load).met() && rlt.judge(&worked).met()) {
+        // ── HARDEN — `&&` short-circuits, and it is the only verifier gating in the design ──
+        if !(rlt.verifier(&tests).met() && rlt.verifier(&load).met() && rlt.verifier(&worked).met()) {
             rlt.ask("performance gate failed — ship anyway, or keep tuning?");
             continue;
         }
@@ -810,23 +810,23 @@ fn the_sample_drivers_cycle_runs_end_to_end_and_lands_every_span() {
     let rows = relentless::core::verdicts::rows_for(dir, "tests_pass", false);
     assert_eq!(rows.len(), 2, "one row per gate, not one per step: {rows:?}");
     assert!(rows.iter().all(|r| r.met && r.outcome == relentless::core::verdicts::Outcome::Merged), "{rows:?}");
-    // the NATIVE judge is in there too: a closure in the driver's own binary reaches the same
-    // durable ledger a script judge does.
+    // the NATIVE verifier is in there too: a closure in the driver's own binary reaches the same
+    // durable ledger a script verifier does.
     assert_eq!(relentless::core::verdicts::rows_for(dir, "worked", true).len(), 2);
-    // …and a judge the driver never asked for appears in NO row. Laziness is visible from the ledger.
+    // …and a verifier the driver never asked for appears in NO row. Laziness is visible from the ledger.
     assert!(relentless::core::verdicts::rows_for(dir, "spec_sound", false).is_empty());
 
     // THE SNAPSHOT CARRIES THEM TOO, not just the ledger. Charging spend was once the whole of
-    // `run_judge`, and `publish()` rebuilt `dash.judges` from an engine that a driver leaves empty —
-    // so the TUI showed `(no judges in snapshot)`, the web BFF served `judges: []` and Progress read
+    // `run_verifier`, and `publish()` rebuilt `dash.verifiers` from an engine that a driver leaves empty —
+    // so the TUI showed `(no verifiers in snapshot)`, the web BFF served `verifiers: []` and Progress read
     // `0/0 · 0%`, all while the rows above were being written. Read from the FILE, not the facade.
     let snap: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(relentless::paths::state_json(dir)).unwrap()).unwrap();
     let names: Vec<&str> =
-        snap["judges"].as_array().expect("state.json carries a judges array").iter().map(|j| j["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"tests_pass"), "a SCRIPT judge reaches the readers: {names:?}");
+        snap["verifiers"].as_array().expect("state.json carries a verifiers array").iter().map(|j| j["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"tests_pass"), "a SCRIPT verifier reaches the readers: {names:?}");
     assert!(names.contains(&"worked"), "…and so does a NATIVE closure in the driver's own binary: {names:?}");
-    assert!(!names.contains(&"spec_sound"), "a judge never asked for is never published either: {names:?}");
+    assert!(!names.contains(&"spec_sound"), "a verifier never asked for is never published either: {names:?}");
     // a driver declares no DoD, so `eng.tally()` is 0/0 — the scoreboard falls back to what the
     // driver actually ASKED rather than reporting a vacuous zero that reads as "nothing to do".
     assert_eq!(snap["goals_total"].as_u64().unwrap() as usize, names.len(), "{snap:#}");
@@ -841,7 +841,7 @@ fn the_sample_drivers_cycle_runs_end_to_end_and_lands_every_span() {
         serde_json::from_str(&std::fs::read_to_string(relentless::paths::project_json(dir)).unwrap()).unwrap();
     let last = proj["runs"].as_array().unwrap().last().unwrap();
     assert_eq!(last["end_reason"].as_str().unwrap(), "driver-returned", "{last:#}");
-    assert!(last["goals_total"].as_u64().unwrap() > 0, "…and the tally is the judges it ASKED: {last:#}");
+    assert!(last["goals_total"].as_u64().unwrap() > 0, "…and the tally is the verifiers it ASKED: {last:#}");
 }
 
 /// THE SAME DRIVER WITH ITS `gate()` REMOVED. Nothing is lost and nothing moves — and the run's last
@@ -932,14 +932,14 @@ fn the_pos_breadcrumb_is_published_where_the_readers_look() {
 // PHASE 1 — durable execution
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-/// A marker judge whose tally lives OUTSIDE the repo.
+/// A marker verifier whose tally lives OUTSIDE the repo.
 ///
-/// ⚠ [`marker_judge`]'s `<name>.runs` sits in the project dir, so the fake worker's `git add -A`
+/// ⚠ [`marker_verifier`]'s `<name>.runs` sits in the project dir, so the fake worker's `git add -A`
 /// commits it onto a session branch — and a resume that checks out base then makes the file vanish.
 /// The count would read 0 for a reason that has nothing to do with fast-forwarding, which is exactly
 /// the kind of false green this test exists to avoid.
-fn resume_marker_judge(dir: &Path, name: &str, tally: &Path) -> Judge {
-    let rel = format!("rlt/judges/{name}.sh");
+fn resume_marker_verifier(dir: &Path, name: &str, tally: &Path) -> Verifier {
+    let rel = format!("rlt/verifiers/{name}.sh");
     let p = dir.join(&rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(
@@ -948,7 +948,7 @@ fn resume_marker_judge(dir: &Path, name: &str, tally: &Path) -> Judge {
     )
     .unwrap();
     chmod_x(&p);
-    Judge::script(name, rel)
+    Verifier::script(name, rel)
 }
 
 fn tally_of(p: &Path) -> usize {
@@ -962,7 +962,7 @@ fn tally_of(p: &Path) -> usize {
 /// the file — so the driver walks itself back to the interruption point by *running*, because
 /// identical inputs produce identical branches.
 ///
-/// Every assertion here reads something the pipeline PRODUCED — a judge's marker file, the session
+/// Every assertion here reads something the pipeline PRODUCED — a verifier's marker file, the session
 /// counter, git — never a flag the facade set.
 #[test]
 fn a_resumed_driver_fast_forwards_recorded_calls_and_re_executes_the_rest() {
@@ -972,39 +972,39 @@ fn a_resumed_driver_fast_forwards_recorded_calls_and_re_executes_the_rest() {
     let tally = std::env::temp_dir().join(format!("rlt-resume-tally-{}", std::process::id()));
     let _ = std::fs::remove_file(&tally);
 
-    // ── RUN 1: step, judge, gate(Kept), step ── the last step lands AFTER the kept gate, so OD-12
+    // ── RUN 1: step, verifier, gate(Kept), step ── the last step lands AFTER the kept gate, so OD-12
     //    must drop it: its work is parked on a per-run span branch the ledger cannot carry.
     let sessions_run1 = {
         let rlt = Relentless::open(dir).unwrap().limits(lim());
-        let j = resume_marker_judge(dir, "checked", &tally);
+        let j = resume_marker_verifier(dir, "checked", &tally);
         rlt.step(&work()).unwrap();
-        assert!(rlt.judge(&j).met());
+        assert!(rlt.verifier(&j).met());
         assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
         rlt.step(&work()).unwrap(); // ← after the boundary
         rlt.sessions()
     };
     assert_eq!(sessions_run1, 2, "two real worker sessions ran");
-    assert_eq!(tally_of(&tally), 1, "the judge ran once, for real");
+    assert_eq!(tally_of(&tally), 1, "the verifier ran once, for real");
     let landed_after_run1 = work_landed_on_main(dir);
     assert_eq!(landed_after_run1, 1, "only the pre-gate session reached main");
 
     // ── RUN 2: the SAME flow, resumed.
     {
         let rlt = Relentless::open_with(dir, Opts { resume: true }).unwrap().limits(lim());
-        let j = resume_marker_judge(dir, "checked", &tally);
+        let j = resume_marker_verifier(dir, "checked", &tally);
 
         // ord 0 — recorded: no worker launches, and the session counter is RESTORED rather than
         // restarted. A resume that reset it would hand `over_iterations` the whole budget again.
         rlt.step(&work()).unwrap();
         assert_eq!(rlt.sessions(), 1, "the recorded step restored its counter, it did not re-run");
 
-        // ord 1 — recorded: the judge is answered from the ledger, so its marker does NOT grow.
-        assert!(rlt.judge(&j).met());
-        assert_eq!(tally_of(&tally), 1, "a fast-forwarded judge must not EXECUTE");
+        // ord 1 — recorded: the verifier is answered from the ledger, so its marker does NOT grow.
+        assert!(rlt.verifier(&j).met());
+        assert_eq!(tally_of(&tally), 1, "a fast-forwarded verifier must not EXECUTE");
 
         // …and asking a SECOND time in the same step still costs nothing and, crucially, consumes no
         // second ordinal — memoization and the ledger have to agree on what counts as one call.
-        assert!(rlt.judge(&j).met());
+        assert!(rlt.verifier(&j).met());
         assert_eq!(tally_of(&tally), 1);
 
         // ord 2 — recorded: the gate returns its recorded outcome WITHOUT performing the merge
@@ -1033,26 +1033,26 @@ fn a_non_resume_run_starts_from_an_empty_ledger() {
 
     {
         let rlt = Relentless::open(dir).unwrap().limits(lim());
-        let j = marker_judge(dir, "fresh", true);
+        let j = marker_verifier(dir, "fresh", true);
         rlt.step(&work()).unwrap();
-        assert!(rlt.judge(&j).met());
+        assert!(rlt.verifier(&j).met());
         assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     }
     assert_eq!(runs(dir, "fresh"), 1);
 
     {
         let rlt = Relentless::open(dir).unwrap().limits(lim()); // NOT a resume
-        let j = marker_judge(dir, "fresh", true);
+        let j = marker_verifier(dir, "fresh", true);
         rlt.step(&work()).unwrap();
-        assert!(rlt.judge(&j).met());
+        assert!(rlt.verifier(&j).met());
         assert_eq!(rlt.sessions(), 1, "a fresh run counts its OWN sessions from zero");
     }
-    assert_eq!(runs(dir, "fresh"), 2, "the judge really ran again — nothing was fast-forwarded");
+    assert_eq!(runs(dir, "fresh"), 2, "the verifier really ran again — nothing was fast-forwarded");
 }
 
 /// A RESUME WHOSE DRIVER HAS CHANGED IS A HARD ERROR, NEVER A WRONG ANSWER.
 ///
-/// Ordinals alone would happily answer `rlt.judge(&security)` with a recorded `rlt.judge(&lint)`
+/// Ordinals alone would happily answer `rlt.verifier(&security)` with a recorded `rlt.verifier(&lint)`
 /// verdict, and the run would proceed on a fabricated result. The label path plus the call's own
 /// name is the consistency check that makes that impossible.
 #[test]
@@ -1063,20 +1063,20 @@ fn a_resume_that_diverges_from_the_ledger_refuses_to_guess() {
 
     {
         let rlt = Relentless::open(dir).unwrap().limits(lim());
-        let a = marker_judge(dir, "alpha", true);
+        let a = marker_verifier(dir, "alpha", true);
         rlt.step(&work()).unwrap();
-        assert!(rlt.judge(&a).met());
+        assert!(rlt.verifier(&a).met());
         assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     }
 
-    // the resumed driver asks for a DIFFERENT judge at the same ordinal.
+    // the resumed driver asks for a DIFFERENT verifier at the same ordinal.
     let rlt = Relentless::open_with(dir, Opts { resume: true }).unwrap().limits(lim());
-    let b = marker_judge(dir, "beta", true);
+    let b = marker_verifier(dir, "beta", true);
     rlt.step(&work()).unwrap();
-    let v = rlt.judge(&b);
+    let v = rlt.verifier(&b);
     assert!(!v.met(), "a divergent resume must not report a fabricated met");
     assert!(v.rationale().contains("DIVERGED"), "…and must say so plainly: {}", v.rationale());
-    assert_eq!(runs(dir, "beta"), 0, "…without running the judge it could not answer");
+    assert_eq!(runs(dir, "beta"), 0, "…without running the verifier it could not answer");
 }
 
 /// `Relentless::open` IS INERT — it must not touch the call ledger.
@@ -1113,28 +1113,28 @@ fn opening_a_driver_does_not_touch_the_call_ledger() {
     assert_eq!(std::fs::read_to_string(&ledger).unwrap(), before, "a resume `open()` truncated a live ledger");
 }
 
-/// A DRIVER'S JUDGES MUST BE CONFINED WHEN THE DRIVER DECLARED A CONFINING TIER.
+/// A DRIVER'S VERIFIERS MUST BE CONFINED WHEN THE DRIVER DECLARED A CONFINING TIER.
 ///
 /// `cfg.run_isolation()` reads `cfg.steps`, which a DRIVER never populates — its steps are values in
-/// its own binary. So the run tier resolved to `None` on this path and every judge ran unconfined,
-/// which is precisely the escape §2.5 exists to close: a confined worker rewrites `rlt/judges/*.sh`
+/// its own binary. So the run tier resolved to `None` on this path and every verifier ran unconfined,
+/// which is precisely the escape §2.5 exists to close: a confined worker rewrites `rlt/verifiers/*.sh`
 /// in its writable cwd and rlt then executes it with no jail at all.
 ///
 /// Real kernel, so `#[ignore]`d like its siblings:
-/// `cargo test --test driver_api -- --ignored a_drivers_judges_are_confined --nocapture`
+/// `cargo test --test driver_api -- --ignored a_drivers_verifiers_are_confined --nocapture`
 #[test]
 #[ignore = "spawns the real OS sandbox; run by hand on a real host"]
-fn a_drivers_judges_are_confined_when_a_step_declared_a_tier() {
+fn a_drivers_verifiers_are_confined_when_a_step_declared_a_tier() {
     let tmp = project();
     let dir = tmp.path();
     assert!(relentless::isolation::available(), "no OS sandbox on this host — cannot prove confinement");
 
-    // the judge tries to write OUTSIDE the project. Confined, that is EPERM; unconfined it succeeds.
+    // the verifier tries to write OUTSIDE the project. Confined, that is EPERM; unconfined it succeeds.
     // ⚠ NOT under $TMPDIR — the jail GRANTS cwd + $TMPDIR + /tmp, so a write there proves nothing.
     // The repo's own target/ is outside all three, which is what the sibling kernel tests use.
-    let escape = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/rlt-driver-judge-escape.txt");
+    let escape = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/rlt-driver-verifier-escape.txt");
     let _ = std::fs::remove_file(&escape);
-    let rel = "rlt/judges/escaper.sh";
+    let rel = "rlt/verifiers/escaper.sh";
     let p = dir.join(rel);
     std::fs::create_dir_all(p.parent().unwrap()).unwrap();
     std::fs::write(
@@ -1147,11 +1147,11 @@ fn a_drivers_judges_are_confined_when_a_step_declared_a_tier() {
     let rlt = Relentless::open(dir).unwrap();
     // a SANDBOXED step — the driver's declaration of the tier this run works at.
     rlt.step(&Step::new("implement").model("fake").isolation(Isolation::Sandbox).prompt("go")).unwrap();
-    assert!(rlt.judge(&Judge::script("escaper", rel)).met(), "the judge still runs and returns its verdict");
+    assert!(rlt.verifier(&Verifier::script("escaper", rel)).met(), "the verifier still runs and returns its verdict");
 
     let escaped = escape.exists();
     let _ = std::fs::remove_file(&escape);
-    assert!(!escaped, "the driver's judge ESCAPED — it wrote {}", escape.display());
+    assert!(!escaped, "the driver's verifier ESCAPED — it wrote {}", escape.display());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -1479,20 +1479,20 @@ fn a_driver_run_leaves_a_report_and_driver_run_corrects_an_err() {
     assert_eq!(r["sessions"]["total"], 1, "the rest of what the run recorded is kept");
 }
 
-/// Evidence on the DRIVER path: a native judge writes `bench.json` into its scratch and cites it;
-/// the copy is kept the moment it is judged — under the session it was judged in — and named on the
+/// Evidence on the DRIVER path: a native verifier writes `bench.json` into its scratch and cites it;
+/// the copy is kept the moment it is verified — under the session it was verified in — and named on the
 /// ledger row the gate writes, however much later that gate is.
 #[test]
-fn a_driver_judge_evidence_is_kept_when_judged_and_named_at_the_gate() {
+fn a_driver_verifier_evidence_is_kept_when_verified_and_named_at_the_gate() {
     let tmp = project();
     let dir = tmp.path();
-    let bench = Judge::native("bench", |c| {
+    let bench = Verifier::native("bench", |c| {
         std::fs::write(c.scratch().join("bench.json"), "{\"p99\":12}").unwrap();
         Verdict::binary(true).with_evidence(["bench.json"])
     });
     let rlt = Relentless::open(dir).unwrap();
     rlt.step(&work()).unwrap();
-    assert!(rlt.judge(&bench).met());
+    assert!(rlt.verifier(&bench).met());
     rlt.step(&work()).unwrap();
     assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     drop(rlt);
@@ -1505,7 +1505,7 @@ fn a_driver_judge_evidence_is_kept_when_judged_and_named_at_the_gate() {
     let row: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
     let saved = row["evidence_saved"][0].as_str().unwrap();
     assert!(saved.starts_with("rlt/private/evidence/run-") && saved.ends_with("/1/bench/bench.json"), "{saved}");
-    assert_eq!(row["session"], 2, "the row is the gate's, the copy the judging session's");
+    assert_eq!(row["session"], 2, "the row is the gate's, the copy the verifying session's");
 }
 
 /// `Step::prompt_file` on the driver path: the file's text reaches the brief and its hash the prompt
@@ -1607,18 +1607,18 @@ fn the_runs_memory_default_yields_to_the_steps_own() {
     assert!(std::fs::read_to_string(relentless::paths::instructions_md(dir)).unwrap().contains("rlt/state/STATE.md"));
 }
 
-/// A-25: an LLM judge with its own agent, model and effort asks that agent — here Codex, while the
+/// A-25: an rubric verifier with its own agent, model and effort asks that agent — here Codex, while the
 /// run's ruler is Claude — and its review comes back as the verdict.
 #[test]
-fn an_llm_judge_asks_its_own_agent_with_its_model_and_effort() {
+fn an_llm_verifier_asks_its_own_agent_with_its_model_and_effort() {
     let tmp = project();
     let dir = tmp.path();
-    std::fs::create_dir_all(dir.join("rlt/judges")).unwrap();
-    std::fs::write(dir.join("rlt/judges/review.md"), "Review the work; list every point to fix.\n").unwrap();
+    std::fs::create_dir_all(dir.join("rlt/verifiers")).unwrap();
+    std::fs::write(dir.join("rlt/verifiers/review.md"), "Review the work; list every point to fix.\n").unwrap();
     let rlt = Relentless::open(dir).unwrap();
     rlt.step(&work()).unwrap();
-    let review = Judge::rubric("review", "rlt/judges/review.md").agent(Agent::Codex).model("m-review").effort(Effort::Low);
-    let verdict = rlt.judge(&review);
+    let review = Verifier::rubric("review", "rlt/verifiers/review.md").agent(Agent::Codex).model("m-review").effort(Effort::Low);
+    let verdict = rlt.verifier(&review);
     assert!(!verdict.met());
     assert_eq!(verdict.rationale(), "fix A; fix B");
     let args: Vec<String> = std::fs::read_to_string(dir.join("codex.args")).unwrap().lines().map(String::from).collect();

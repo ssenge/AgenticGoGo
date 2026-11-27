@@ -4,7 +4,7 @@
   import Header from '$lib/components/Header.svelte';
   import Stats from '$lib/components/Stats.svelte';
   import Step from '$lib/components/Step.svelte';
-  import Judges from '$lib/components/Judges.svelte';
+  import Verifiers from '$lib/components/Verifiers.svelte';
   import PerAgent from '$lib/components/PerAgent.svelte';
   import Activity from '$lib/components/Activity.svelte';
   import Controls from '$lib/components/Controls.svelte';
@@ -45,7 +45,7 @@
   <div class="grid">
     <div class="col-main">
       {#if hasState}
-        <Judges state={s} />
+        <Verifiers state={s} />
         <Activity state={s} />
       {/if}
     </div>

@@ -3,7 +3,7 @@
 use super::draw; // draw::draw(...)
 use super::fmt::*; // grade_color, human, wrap_indent, …
 use super::*;
-use crate::state::{ActivityEvent, AgentUsage, DashboardState, JudgeView};
+use crate::state::{ActivityEvent, AgentUsage, DashboardState, VerifierView};
 use ratatui::backend::TestBackend;
 
 fn demo_state() -> DashboardState {
@@ -41,12 +41,12 @@ fn demo_state() -> DashboardState {
         notify_reason: String::new(),
         goals_met: 1,
         goals_total: 2,
-        goals: Vec::new(), // the successor `judges` below drives every reader now.
+        goals: Vec::new(), // the successor `verifiers` below drives every reader now.
         per_agent,
-        judges: vec![
-            JudgeView {
+        verifiers: vec![
+            VerifierView {
                 name: "tests_pass".into(),
-                judged: true,
+                verified: true,
                 kind: "script".into(),
                 in_dod: true,
                 invariant: false,
@@ -61,9 +61,9 @@ fn demo_state() -> DashboardState {
                     .into(),
                 error: None,
             },
-            JudgeView {
+            VerifierView {
                 name: "no_regressions".into(),
-                judged: true,
+                verified: true,
                 kind: "script".into(),
                 in_dod: true,
                 invariant: true,
@@ -76,9 +76,9 @@ fn demo_state() -> DashboardState {
                 rationale: "build green".into(),
                 error: None,
             },
-            JudgeView {
+            VerifierView {
                 name: "stalled".into(),
-                judged: true,
+                verified: true,
                 kind: "script".into(),
                 in_dod: false,
                 invariant: false,
@@ -135,9 +135,9 @@ fn renders_all_panels() {
     assert!(text.contains("Per-agent"));     // §7.4 per-agent panel
     assert!(text.contains("claude"));        // a per-agent row
     assert!(text.contains("codex"));         // the other agent / the step agent
-    assert!(text.contains("Judges"));        // scoreboard title
+    assert!(text.contains("Verifiers"));        // scoreboard title
     assert!(text.contains("tests_pass"));
-    assert!(text.contains("18/28"));         // numeric judge shows value/target
+    assert!(text.contains("18/28"));         // numeric verifier shows value/target
     assert!(text.contains("Activity"));
     assert!(text.contains("14:07:05"));      // activity tail timestamp
     assert!(text.contains("bound improved")); // activity tail text
@@ -145,15 +145,15 @@ fn renders_all_panels() {
     assert!(text.contains("Building the parser")); // cumulative summary
 }
 
-/// The §7.4 defect this migration fixes, at the TUI: a binary judge renders met/unmet, NOT a
-/// fabricated `0`; a run-set judge is shown under its own divider.
+/// The §7.4 defect this migration fixes, at the TUI: a binary verifier renders met/unmet, NOT a
+/// fabricated `0`; a run-set verifier is shown under its own divider.
 #[test]
-fn binary_judge_reads_met_and_run_set_is_divided() {
+fn binary_verifier_reads_met_and_run_set_is_divided() {
     let s = demo_state();
     let text = render(&s, 100, 44);
     assert!(text.contains("no_regressions"));
     assert!(text.contains("met")); // the binary invariant reads "met", never "0/0"
-    assert!(!text.contains("0/0"), "a binary judge must never render a fabricated 0/0");
+    assert!(!text.contains("0/0"), "a binary verifier must never render a fabricated 0/0");
     assert!(text.contains("run-set")); // the divider before `stalled`
     assert!(text.contains("stalled"));
 }
@@ -251,11 +251,11 @@ fn q_and_esc_quit() {
 }
 
 #[test]
-fn tab_toggles_focus_between_judges_and_activity() {
+fn tab_toggles_focus_between_verifiers_and_activity() {
     let mut ui = DashboardUi::default(); // starts on Activity
     assert_eq!(ui.focus, Focus::Activity);
     handle_key(&mut ui, KeyCode::Tab);
-    assert_eq!(ui.focus, Focus::Judges);
+    assert_eq!(ui.focus, Focus::Verifiers);
     handle_key(&mut ui, KeyCode::Tab);
     assert_eq!(ui.focus, Focus::Activity);
 }
@@ -315,18 +315,18 @@ fn scrolling_activity_up_drops_follow_then_end_restores_it() {
 }
 
 #[test]
-fn judges_pane_scrolls_and_clamps_at_top() {
+fn verifiers_pane_scrolls_and_clamps_at_top() {
     let mut ui = DashboardUi::default();
-    handle_key(&mut ui, KeyCode::Tab); // focus Judges
+    handle_key(&mut ui, KeyCode::Tab); // focus Verifiers
     handle_key(&mut ui, KeyCode::Down);
     handle_key(&mut ui, KeyCode::Down);
-    assert_eq!(ui.judges_scroll, 2);
+    assert_eq!(ui.verifiers_scroll, 2);
     handle_key(&mut ui, KeyCode::PageUp); // -10, clamped at 0
-    assert_eq!(ui.judges_scroll, 0, "scroll must never go negative");
+    assert_eq!(ui.verifiers_scroll, 0, "scroll must never go negative");
     handle_key(&mut ui, KeyCode::Char('G')); // jump to bottom (clamped at draw time)
-    assert_eq!(ui.judges_scroll, u16::MAX);
+    assert_eq!(ui.verifiers_scroll, u16::MAX);
     handle_key(&mut ui, KeyCode::Char('g')); // back to top
-    assert_eq!(ui.judges_scroll, 0);
+    assert_eq!(ui.verifiers_scroll, 0);
 }
 
 #[test]
@@ -334,7 +334,7 @@ fn scroll_targets_only_the_focused_pane() {
     let mut ui = DashboardUi::default(); // Activity focus
     handle_key(&mut ui, KeyCode::Down);
     assert_eq!(ui.activity_scroll, 1);
-    assert_eq!(ui.judges_scroll, 0, "judges pane untouched while Activity is focused");
+    assert_eq!(ui.verifiers_scroll, 0, "verifiers pane untouched while Activity is focused");
 }
 
 // ── inject input mode: `i` opens a buffer; keys edit it (not the controls); Enter emits the text ──
@@ -385,7 +385,7 @@ fn a_flagged_loop_says_so_and_survives_a_narrow_terminal() {
     assert!(!render(&s, 120, 40).contains("FLAGGED"), "an unflagged loop must not cry wolf");
 
     s.notify_session = Some(7);
-    s.notify_reason = "STALLED — no judge moved across the last 3 merged steps".into();
+    s.notify_reason = "STALLED — no verifier moved across the last 3 merged steps".into();
     let wide = render(&s, 120, 40);
     assert!(wide.contains("FLAGGED"), "the flag renders:\n{wide}");
     assert!(wide.contains("s7"), "…naming the session it started:\n{wide}");

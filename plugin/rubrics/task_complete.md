@@ -1,6 +1,6 @@
 # Task Completion Rubric
 
-A worker was asked to complete a task. From the CONTEXT (diff, logs, files), judge
+A worker was asked to complete a task. From the CONTEXT (diff, logs, files), verifier
 whether the task is GENUINELY done — not just attempted.
 
 Score 0–100:

@@ -1,9 +1,9 @@
 #!/bin/sh
-# FAKE swe-metrics, inside the judges' test image. `measure` reports ONE metric, `work.sessions` =
+# FAKE swe-metrics, inside the verifiers' test image. `measure` reports ONE metric, `work.sessions` =
 # the lines of src/sessions.log (the fake worker appends one per session); `score` is 40 + 20 per
-# session. Every judge-time call logs to $RLT_JUDGE_SCRATCH/swe-metrics.log (probes have no scratch).
+# session. Every verifier-time call logs to $RLT_VERIFIER_SCRATCH/swe-metrics.log (probes have no scratch).
 incontainer() { [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; }
-log() { [ -n "${RLT_JUDGE_SCRATCH:-}" ] && echo "$*" >> "$RLT_JUDGE_SCRATCH/swe-metrics.log"; return 0; }
+log() { [ -n "${RLT_VERIFIER_SCRATCH:-}" ] && echo "$*" >> "$RLT_VERIFIER_SCRATCH/swe-metrics.log"; return 0; }
 where() {
   incontainer && log "$1_IN_CONTAINER"
   log "uid=$(id -u) home=$HOME"
@@ -39,7 +39,7 @@ case "$cmd" in
     else
       log "score baseline=none"
     fi
-    [ -n "${RLT_JUDGE_SCRATCH:-}" ] && where SCORE
+    [ -n "${RLT_VERIFIER_SCRATCH:-}" ] && where SCORE
     doc="{\"schema\":\"swe-metrics/score/v1\",\"definition\":{\"name\":\"swe-default\",\"version\":\"2\"},\"score\":$((40 + 20 * n)),\"gates\":[],\"components\":[],\"regressions\":[{\"metric\":\"work.sessions\",\"worse\":$worse}],\"notes\":[]}"
     if [ -n "$out" ]; then printf '%s\n' "$doc" > "$out"; else printf '%s\n' "$doc"; fi
     exit 0 ;;

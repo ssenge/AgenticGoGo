@@ -1,16 +1,16 @@
-//! The startup checks of an OPTIONAL dependency: a metric or score judge refuses the run when
+//! The startup checks of an OPTIONAL dependency: a metric or score verifier refuses the run when
 //! `swe-metrics` is missing where it will run, speaks another schema version, or — for a score
-//! judge — scores by another definition or version than the one configured. A config without such
-//! judges never runs any of this, which is what keeps rlt working without swe-metrics installed.
+//! verifier — scores by another definition or version than the one configured. A config without such
+//! verifiers never runs any of this, which is what keeps rlt working without swe-metrics installed.
 //!
 //! WHERE it is checked is where it will run ([`Site`]): on the host's `PATH`, or — when the run's
-//! judges are containerized — in the judges' image, by short probe containers (no network, the
+//! verifiers are containerized — in the verifiers' image, by short probe containers (no network, the
 //! project read-only, as the project owner). A container run never needs it on the host.
 
 use super::measure::PROGRAM;
 use super::report::REPORT_SCHEMA;
 use super::score::{ScoreDoc, SCORE_SCHEMA};
-use super::spec::{Definition, ScoreJudge};
+use super::spec::{Definition, ScoreVerifier};
 use crate::core::config::RelentlessConfig;
 use crate::problem::Problem;
 use std::path::{Path, PathBuf};
@@ -26,23 +26,23 @@ const IMAGE_PROBE_SECS: u64 = 600;
 pub enum Site {
     /// on the host, from `PATH` (`none` and `sandbox` runs).
     Host,
-    /// in the judges' image (`container` runs): the image, the config key that chose it, and the
+    /// in the verifiers' image (`container` runs): the image, the config key that chose it, and the
     /// project dir (mounted read-only, as a measurement sees it).
     Image { image: String, at: String, project: PathBuf },
 }
 
 impl Site {
-    /// Where `cfg`'s judges run swe-metrics; `None` = nowhere this probe can reach — a container run
-    /// with no engine or no single judges' image, each refused at its own key already.
+    /// Where `cfg`'s verifiers run swe-metrics; `None` = nowhere this probe can reach — a container run
+    /// with no engine or no single verifiers' image, each refused at its own key already.
     pub fn of(cfg: &RelentlessConfig, project: &Path) -> Option<Site> {
         if cfg.run_isolation() != crate::isolation::Isolation::Container {
             return Some(Site::Host);
         }
-        let image = cfg.judge_image().ok()?;
+        let image = cfg.verifier_image().ok()?;
         if !crate::isolation::container_available() {
             return None;
         }
-        let at = crate::isolation::probe::judge_image_key(cfg).to_string();
+        let at = crate::isolation::probe::verifier_image_key(cfg).to_string();
         Some(Site::Image { image, at, project: std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf()) })
     }
 
@@ -59,7 +59,7 @@ impl Site {
     fn fix(&self) -> String {
         match self {
             Site::Host => "install a compatible swe-metrics".into(),
-            Site::Image { image, .. } => format!("build the judges' image `{image}` with a compatible swe-metrics (docker/swe-metrics/)"),
+            Site::Image { image, .. } => format!("build the verifiers' image `{image}` with a compatible swe-metrics (docker/swe-metrics/)"),
         }
     }
 }
@@ -127,7 +127,7 @@ fn problem(site: &Site, at: &str, f: Fail) -> Problem {
     match (f, site) {
         (Fail::Missing, Site::Host) => Problem::new(
             at,
-            format!("`{PROGRAM}` is not on PATH — metric and score judges need swe-metrics installed (it is optional otherwise)"),
+            format!("`{PROGRAM}` is not on PATH — metric and score verifiers need swe-metrics installed (it is optional otherwise)"),
         ),
         (Fail::Missing, Site::Image { image, at, .. }) => crate::isolation::probe::missing_cli(at, image, PROGRAM),
         (Fail::Other(e), _) => Problem::new(at, e),
@@ -149,11 +149,11 @@ fn schema(site: &Site, which: &str, want: &str) -> Result<(), Fail> {
 }
 
 /// A score of an EMPTY report: what definition and version the configured one really is.
-fn definition_of(site: &Site, j: &ScoreJudge) -> Result<ScoreDoc, String> {
+fn definition_of(site: &Site, j: &ScoreVerifier) -> Result<ScoreDoc, String> {
     // in a container the report must be where the engine sees it: under the (mounted) project.
     let dir = match site {
         Site::Host => std::env::temp_dir(),
-        Site::Image { project, .. } => crate::paths::container_dir(project).join("judge"),
+        Site::Image { project, .. } => crate::paths::container_dir(project).join("verifier"),
     }
     .join(format!("rlt-swe-metrics-probe-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("probe dir: {e}"))?;
@@ -177,27 +177,27 @@ fn definition_of(site: &Site, j: &ScoreJudge) -> Result<ScoreDoc, String> {
     }
 }
 
-/// Every startup problem of the metric/score judges named here (`metric` names, `score` names with
+/// Every startup problem of the metric/score verifiers named here (`metric` names, `score` names with
 /// their specs), probed at `site`: a missing or incompatible swe-metrics at the key that chose where
-/// it runs (`judges.<first>` on the host), a definition mismatch at `judges.<name>.score`. Empty when
-/// there are none — swe-metrics is then never called. `trivy`: a judge reads trivy's metrics.
-pub fn problems(metric: &[&str], score: &[(&str, &ScoreJudge)], site: &Site, trivy: bool) -> Vec<Problem> {
+/// it runs (`verifiers.<first>` on the host), a definition mismatch at `verifiers.<name>.score`. Empty when
+/// there are none — swe-metrics is then never called. `trivy`: a verifier reads trivy's metrics.
+pub fn problems(metric: &[&str], score: &[(&str, &ScoreVerifier)], site: &Site, trivy: bool) -> Vec<Problem> {
     let Some(first) = metric.first().or(score.first().map(|(n, _)| n)) else { return vec![] };
     let names: Vec<&str> = metric.iter().copied().chain(score.iter().map(|(n, _)| *n)).collect();
-    let at = site.at(&format!("judges.{first}"));
+    let at = site.at(&format!("verifiers.{first}"));
     if let Err(f) = schema(site, "report", REPORT_SCHEMA) {
         let mut p = problem(site, &at, f);
         if *site == Site::Host {
-            p.message = format!("{} (judges: {})", p.message, names.join(", "));
+            p.message = format!("{} (verifiers: {})", p.message, names.join(", "));
         }
         return vec![p];
     }
     if trivy && matches!(site, Site::Image { .. }) && super::contained::trivy_cache().is_none() {
         // not a refusal: a project with no manifests never runs trivy at all.
         eprintln!(
-            "  ⚠ no trivy vulnerability database at {} — in the judges' image swe-metrics reads the host's, read-only, \
+            "  ⚠ no trivy vulnerability database at {} — in the verifiers' image swe-metrics reads the host's, read-only, \
              and every `dependencies.*` value (a score's vulnerability gate too) fails until it is there: \
-             `trivy image --download-db-only` (docs/CONFIG.md → metric judges)",
+             `trivy image --download-db-only` (docs/CONFIG.md → metric verifiers)",
             super::contained::trivy_expected()
         );
     }
@@ -211,7 +211,7 @@ pub fn problems(metric: &[&str], score: &[(&str, &ScoreJudge)], site: &Site, tri
         .iter()
         .filter_map(|(name, j)| {
             let checked = definition_of(site, j).and_then(|d| d.check_definition(j));
-            checked.err().map(|e| Problem::new(format!("judges.{name}.score"), e))
+            checked.err().map(|e| Problem::new(format!("verifiers.{name}.score"), e))
         })
         .collect()
 }
@@ -224,16 +224,16 @@ mod tests {
         serde_yaml::from_str(yaml).unwrap()
     }
 
-    /// Off the container tier swe-metrics is the host's; on it, the judges' image's, reported at the
+    /// Off the container tier swe-metrics is the host's; on it, the verifiers' image's, reported at the
     /// key that chose that image.
     #[test]
     fn the_probe_goes_where_swe_metrics_will_run() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(Site::of(&cfg("project: p\nsteps: { a: { isolation: sandbox } }\n"), tmp.path()), Some(Site::Host));
-        let c = cfg("project: p\nsteps: { a: { isolation: container, image: \"w:1\" } }\njudge: { image: \"j:1\" }\n");
+        let c = cfg("project: p\nsteps: { a: { isolation: container, image: \"w:1\" } }\nverifier: { image: \"j:1\" }\n");
         match Site::of(&c, tmp.path()) {
             None => assert!(!crate::isolation::container_available(), "only without an engine"),
-            Some(Site::Image { image, at, .. }) => assert_eq!((image.as_str(), at.as_str()), ("j:1", "judge.image")),
+            Some(Site::Image { image, at, .. }) => assert_eq!((image.as_str(), at.as_str()), ("j:1", "verifier.image")),
             Some(s) => panic!("{s:?}"),
         }
     }
@@ -261,11 +261,11 @@ mod tests {
     /// `rlt check` lists it once.
     #[test]
     fn a_missing_swe_metrics_in_the_image_is_the_image_probes_problem() {
-        let site = Site::Image { image: "j:1".into(), at: "judge.image".into(), project: PathBuf::from("/p") };
-        assert_eq!(problem(&site, "judge.image", Fail::Missing), crate::isolation::probe::missing_cli("judge.image", "j:1", PROGRAM));
-        let host = problem(&Site::Host, "judges.cc", Fail::Missing);
-        assert!(host.path == "judges.cc" && host.message.contains("not on PATH"), "{host:?}");
-        assert_eq!(site.at("judges.cc"), "judge.image");
+        let site = Site::Image { image: "j:1".into(), at: "verifier.image".into(), project: PathBuf::from("/p") };
+        assert_eq!(problem(&site, "verifier.image", Fail::Missing), crate::isolation::probe::missing_cli("verifier.image", "j:1", PROGRAM));
+        let host = problem(&Site::Host, "verifiers.cc", Fail::Missing);
+        assert!(host.path == "verifiers.cc" && host.message.contains("not on PATH"), "{host:?}");
+        assert_eq!(site.at("verifiers.cc"), "verifier.image");
         assert!(site.fix().contains("docker/swe-metrics/"));
     }
 }

@@ -29,7 +29,7 @@ pub struct DoctorReport {
     /// `docker` or `podman` when one answers, else null.
     pub container_engine: Option<&'static str>,
     /// every image an `isolation: container` run of this config starts — the steps' and the
-    /// judges' — with the agent CLIs it needs and whether it has them (`clis.<bin>`: the version
+    /// verifiers' — with the agent CLIs it needs and whether it has them (`clis.<bin>`: the version
     /// line, or null when missing), plus any mounted path the engine cannot see. Empty without a
     /// container tier or an engine.
     pub container_images: Vec<crate::isolation::probe::ImageFacts>,
@@ -46,7 +46,7 @@ pub struct ConfigFacts {
     /// parses AND assembles AND the agents can do what it asks.
     pub valid: bool,
     /// the run-set size, when it assembled.
-    pub judges: Option<usize>,
+    pub verifiers: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,7 +111,7 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
     let mut warnings = v.warnings.clone();
     if used.iter().any(|u| u == "codex") {
         if let Some(missed) = crate::backend::overrides::codex_provider_missed() {
-            warnings.push(Problem::new("judge.agent", missed));
+            warnings.push(Problem::new("verifier.agent", missed));
         }
     }
     let backends = KNOWN.iter().filter_map(|n| for_name(n).ok()).map(|b| backend_facts(b, used.iter().any(|u| u == b.name()))).collect();
@@ -124,7 +124,7 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
             path: config.display().to_string(),
             found: config.exists(),
             valid: v.problems.is_empty(),
-            judges: v.assembly.as_ref().map(|a| a.engine.judges.len()),
+            verifiers: v.assembly.as_ref().map(|a| a.engine.verifiers.len()),
         },
         backends,
         isolation: tiers(&v, container_engine),

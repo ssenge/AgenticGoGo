@@ -1,5 +1,5 @@
 //! The partial-work feature (A-18.3, decision 5): a session cut short — by a rate limit or an
-//! interrupt — is incomplete, so it is never judged. Its work is saved under
+//! interrupt — is incomplete, so it is never verified. Its work is saved under
 //! `refs/rlt/partial/<run>/<session>` and the tree goes back to where the session started.
 
 use crate::features::inject::base_ref;
@@ -12,7 +12,7 @@ pub fn note_untracked_before(ctx: &mut LoopState) {
     ctx.ext.get::<RLTState>().git.untracked_before = Some(files);
 }
 
-/// Save the current session's unjudged work to its partial ref, reset the tree, and step off the
+/// Save the current session's unverified work to its partial ref, reset the tree, and step off the
 /// session branch. Returns the ref when anything was saved.
 ///
 /// The session branch is deleted only when nothing on it can be lost: it carried no commits of its
@@ -39,7 +39,7 @@ pub fn save_and_reset(ctx: &mut LoopState) -> Option<String> {
     crate::git::reset_work_tree(&ctx.dir, keep.as_deref());
     if let Some(r) = &saved {
         eprintln!(
-            "  [iso] session #{} did not finish — its work is saved under {r} (NOT judged); tree reset",
+            "  [iso] session #{} did not finish — its work is saved under {r} (NOT verified); tree reset",
             ctx.session
         );
     }

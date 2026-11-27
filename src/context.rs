@@ -24,12 +24,12 @@ use crate::util::now_epoch;
 /// expressible in safe Rust, so the lifetime parameter had to go. Reads still deref through.
 pub struct LoopState {
     pub cfg: RelentlessConfig,
-    /// the RULER — LLM judges + summarizer. Immutable across the run (§4).
+    /// the RULER — rubric verifiers + summarizer. Immutable across the run (§4).
     pub ruler: &'static dyn AgentBackend,
-    /// the ruler model (`judge.model`, resolved).
-    pub judge_model: String,
-    /// EVERY judge's timeout (`judge.timeout`).
-    pub judge_timeout: u64,
+    /// the ruler model (`verifier.model`, resolved).
+    pub verifier_model: String,
+    /// EVERY verifier's timeout (`verifier.timeout`).
+    pub verifier_timeout: u64,
     pub dir: PathBuf,
     pub config_base: PathBuf,
 
@@ -68,7 +68,7 @@ pub struct LoopState {
     pub session: u32,
     pub tokens_spent: u64,
     pub cost_spent: f64,
-    /// per-agent token + cost tally (§7.4), attributed at each spend site (worker / ruler judges /
+    /// per-agent token + cost tally (§7.4), attributed at each spend site (worker / ruler verifiers /
     /// summarizer). Sums to `tokens_spent`/`cost_spent`; makes a mixed run's totals interpretable.
     pub per_agent: std::collections::BTreeMap<String, crate::state::AgentUsage>,
 
@@ -99,13 +99,13 @@ impl LoopState {
     /// about the same run (they did: `state.json` said `2/2` while `rlt history` said `0/0`).
     ///
     /// [`Engine::tally`] counts the DoD-set, which only the YAML path has; a driver decides it is done
-    /// by RETURNING and leaves `eng.judges` empty by construction. Falling back to the judges it
+    /// by RETURNING and leaves `eng.verifiers` empty by construction. Falling back to the verifiers it
     /// actually ASKED keeps the number honest — a vacuous `0/0` reads as "achieved nothing", not as
     /// "declared no DoD".
     fn tally(&self) -> (usize, usize) {
         match self.eng.tally() {
-            (_, 0) if !self.dash.judges.is_empty() => {
-                (self.dash.judges.iter().filter(|j| j.met).count(), self.dash.judges.len())
+            (_, 0) if !self.dash.verifiers.is_empty() => {
+                (self.dash.verifiers.iter().filter(|j| j.met).count(), self.dash.verifiers.len())
             }
             counted => counted,
         }
@@ -137,13 +137,13 @@ impl LoopState {
         self.ext.get::<crate::usage::Ledger>().record(session, &step, role, agent, u);
     }
 
-    /// Account every call the RULER made (LLM judges, the summarizer).
+    /// Account every call the RULER made (rubric verifiers, the summarizer).
     pub fn charge_ruler(&mut self, calls: &[crate::usage::Usage]) {
-        let ruler = self.cfg.judge.agent.clone();
+        let ruler = self.cfg.verifier.agent.clone();
         self.charge_ruler_as(&ruler, calls);
     }
 
-    /// [`Self::charge_ruler`] for a judge that asked an agent of its own (`Judge::agent`).
+    /// [`Self::charge_ruler`] for a verifier that asked an agent of its own (`Verifier::agent`).
     pub fn charge_ruler_as(&mut self, agent: &str, calls: &[crate::usage::Usage]) {
         for u in calls {
             self.charge_usage(crate::usage::Role::Ruler, agent, u);
@@ -171,15 +171,15 @@ impl LoopState {
             self.dash.step_model = cs.backend().map(|b| cs.model(b).to_string()).unwrap_or_default();
         }
         self.dash.goals = DashboardState::goals_from_engine(&self.eng, &self.dash.goals);
-        // ⚠ ONLY when the engine HAS judges. On the DRIVER path `eng.judges` is empty by construction
-        // — the run-set is built solely from YAML expressions (`assembly.rs`), and a driver's judges
-        // are `Judge` VALUES in its own binary that it hands to `rlt.judge(&j)` one at a time.
+        // ⚠ ONLY when the engine HAS verifiers. On the DRIVER path `eng.verifiers` is empty by construction
+        // — the run-set is built solely from YAML expressions (`assembly.rs`), and a driver's verifiers
+        // are `Verifier` VALUES in its own binary that it hands to `rlt.verifier(&j)` one at a time.
         // Rebuilding unconditionally here overwrote what the facade had just written with an empty
-        // vec, so the TUI rendered `(no judges in snapshot)`, the web BFF served `judges: []` and
-        // Progress read `0/0 · 0%` — all while the judges were demonstrably running and their
+        // vec, so the TUI rendered `(no verifiers in snapshot)`, the web BFF served `verifiers: []` and
+        // Progress read `0/0 · 0%` — all while the verifiers were demonstrably running and their
         // verdicts were reaching `verdicts.jsonl`. The publisher, not the ledger, was the broken half.
-        if !self.eng.judges.is_empty() {
-            self.dash.judges = DashboardState::judges_from_engine(&self.eng, &self.dash.judges);
+        if !self.eng.verifiers.is_empty() {
+            self.dash.verifiers = DashboardState::verifiers_from_engine(&self.eng, &self.dash.verifiers);
         }
         let (m, t) = self.tally();
         self.dash.goals_met = m;
@@ -221,7 +221,7 @@ impl LoopState {
             no_changes: tally.no_changes,
             staged_unmerged: staged,
         };
-        self.dash.detectors = crate::report::detectors(&self.eng.gate, &self.dash.judges);
+        self.dash.detectors = crate::report::detectors(&self.eng.gate, &self.dash.verifiers);
         self.dash.ratchet = crate::report::ratchets(&self.eng.gate);
         self.dash.usage = self.ext.get::<crate::usage::Ledger>().summary();
     }

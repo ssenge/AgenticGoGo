@@ -302,7 +302,7 @@ fn ensure_rlt_gitignored_adds_the_missing_entries_to_an_already_migrated_project
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     git_t(&d, &["init", "-q", "-b", "main"]);
-    std::fs::write(d.join(".gitignore"), "target/\nagg/state/\n").unwrap();
+    std::fs::write(d.join(".gitignore"), "target/\nrlt/state/\n").unwrap();
 
     ensure_rlt_gitignored(&d);
     let gi = std::fs::read_to_string(d.join(".gitignore")).unwrap();

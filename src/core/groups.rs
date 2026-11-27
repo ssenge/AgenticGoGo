@@ -1,6 +1,6 @@
-//! Judge GROUPS (`sequence.groups`) and the gate's PROGRESS rule over them.
+//! Verifier GROUPS (`sequence.groups`) and the gate's PROGRESS rule over them.
 //!
-//! A group is a NAME for a list of judges — `quality: [sonar, codescene, lizard]` — so the
+//! A group is a NAME for a list of verifiers — `quality: [sonar, codescene, lizard]` — so the
 //! aggregates can range over it: `count_met(quality) >= 2` is "two of three". The group carries no
 //! threshold; the condition owns it, exactly as it owns every other threshold.
 //!
@@ -12,15 +12,15 @@
 //!
 //! # …except at the gate
 //!
-//! The gate's boolean rule ("a judge that was met is now unmet") is per JUDGE. For a judge that is
-//! in the DoD-set ONLY because a `done_if` group holds it, the gate judges the GROUP instead: the
+//! The gate's boolean rule ("a verifier that was met is now unmet") is per VERIFIER. For a verifier that is
+//! in the DoD-set ONLY because a `done_if` group holds it, the gate verifiers the GROUP instead: the
 //! group regressed when more of its members went met→unmet than unmet→met. That is what makes k-of-n
 //! worth having — tools disagree, so one of three flipping while another catches up is a swap, not a
 //! regression — while a group that lost ground net is still rolled back. A member that is ALSO named
-//! on its own (bare in `done_if`, or in `invariants`) is held to the per-judge rule as well.
+//! on its own (bare in `done_if`, or in `invariants`) is held to the per-verifier rule as well.
 //!
 //! The same counting decides "improved" for `sequence.merge_requires_improvement`: an individually
-//! judged goal went unmet→met, or a group gained ground net. [`assess`] computes both, for both
+//! verified goal went unmet→met, or a group gained ground net. [`assess`] computes both, for both
 //! front ends — the YAML gate and the driver's `gate()` differ only in the scope they hand it.
 
 use crate::core::model::Verdict;
@@ -36,11 +36,11 @@ const RESERVED: &[&str] = &[
 /// The configured groups, plus what the gate needs to know about them.
 #[derive(Debug, Clone, Default)]
 pub struct Groups {
-    /// group name → member judge names, as configured.
+    /// group name → member verifier names, as configured.
     pub map: BTreeMap<String, Vec<String>>,
-    /// the groups `done_if` names — the ones the gate judges as a unit.
+    /// the groups `done_if` names — the ones the gate verifiers as a unit.
     pub gated: BTreeSet<String>,
-    /// the judges `done_if` names bare, plus every invariant — held to the per-judge rule even when a
+    /// the verifiers `done_if` names bare, plus every invariant — held to the per-verifier rule even when a
     /// gated group also holds them.
     pub direct: BTreeSet<String>,
 }
@@ -69,9 +69,9 @@ impl Groups {
         self.map.keys().map(String::as_str).collect()
     }
 
-    /// Is `judge` judged by the gate ONLY through a gated group (never on its own)?
-    pub fn group_only(&self, judge: &str) -> bool {
-        !self.direct.contains(judge) && self.gated.iter().any(|g| self.map.get(g).is_some_and(|m| m.iter().any(|n| n == judge)))
+    /// Is `verifier` verified by the gate ONLY through a gated group (never on its own)?
+    pub fn group_only(&self, verifier: &str) -> bool {
+        !self.direct.contains(verifier) && self.gated.iter().any(|g| self.map.get(g).is_some_and(|m| m.iter().any(|n| n == verifier)))
     }
 
     /// The member lists of the gated groups — the group half of the gate's scope.
@@ -93,7 +93,7 @@ pub fn problems(name: &str, members: &[String]) -> Vec<(String, String)> {
         out.push((at.clone(), format!("group name `{name}` is reserved by the condition grammar — pick another name")));
     }
     if members.is_empty() {
-        out.push((at.clone(), format!("group `{name}` is empty — an aggregate over no judges can never mean anything")));
+        out.push((at.clone(), format!("group `{name}` is empty — an aggregate over no verifiers can never mean anything")));
     }
     for (i, m) in members.iter().enumerate() {
         if members[..i].contains(m) {
@@ -106,16 +106,16 @@ pub fn problems(name: &str, members: &[String]) -> Vec<(String, String)> {
 /// What one gate made of its span: did it lose ground, did it gain any?
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Progress {
-    /// the boolean regression rule fired (per judge, or net over a group).
+    /// the boolean regression rule fired (per verifier, or net over a group).
     pub regressed: bool,
-    /// something got better: a judge went unmet→met, or a group gained ground net.
+    /// something got better: a verifier went unmet→met, or a group gained ground net.
     pub improved: bool,
 }
 
-/// The boolean half of the gate over `fresh`, against `landed` (each judge's last LANDED, graded
-/// `met`). `individual` says which judges are held one by one; `groups` are judged net, over the
+/// The boolean half of the gate over `fresh`, against `landed` (each verifier's last LANDED, graded
+/// `met`). `individual` says which verifiers are held one by one; `groups` are verified net, over the
 /// members that are NOT individual. An errored verdict counts for neither side — "could not grade"
-/// is not "not met", exactly as in the per-judge rule — and neither does a VACUOUS one: met because
+/// is not "not met", exactly as in the per-verifier rule — and neither does a VACUOUS one: met because
 /// there was nothing to measure is not progress (and cannot be a regression).
 pub fn assess(
     fresh: &[(String, Verdict)],
@@ -165,16 +165,16 @@ mod tests {
         ns.iter().map(|s| s.to_string()).collect()
     }
 
-    /// The per-judge rule: met→unmet regresses, unmet→met (or never landed → met) improves.
+    /// The per-verifier rule: met→unmet regresses, unmet→met (or never landed → met) improves.
     #[test]
-    fn an_individual_judge_regresses_and_improves_one_by_one() {
+    fn an_individual_verifier_regresses_and_improves_one_by_one() {
         let l = landed(&[("a", true), ("b", false)]);
         let p = assess(&fresh(&[("a", false), ("b", false)]), &l, |_| true, &[]);
         assert_eq!(p, Progress { regressed: true, improved: false });
         let p = assess(&fresh(&[("a", true), ("b", true)]), &l, |_| true, &[]);
         assert_eq!(p, Progress { regressed: false, improved: true });
         let p = assess(&fresh(&[("new", true)]), &l, |_| true, &[]);
-        assert!(p.improved, "a judge with no landed row was never met, so met now is an improvement");
+        assert!(p.improved, "a verifier with no landed row was never met, so met now is an improvement");
         let p = assess(&fresh(&[("a", true)]), &l, |_| true, &[]);
         assert_eq!(p, Progress::default(), "met → met is neither");
     }
@@ -188,9 +188,9 @@ mod tests {
         assert_eq!(assess(&errs, &l, |n| n == "a", &[&q]), Progress::default());
     }
 
-    /// A group is judged NET: a swap is neither, a net loss regresses, a net gain improves.
+    /// A group is verified NET: a swap is neither, a net loss regresses, a net gain improves.
     #[test]
-    fn a_group_is_judged_net_over_its_members() {
+    fn a_group_is_verified_net_over_its_members() {
         let q = names(&["a", "b", "c"]);
         let l = landed(&[("a", true), ("b", true), ("c", false)]);
         let none = |_: &str| false;
@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(p, vec![("sequence.groups.q[2]".into(), "group `q` lists `a` twice — it would be counted twice".into())]);
     }
 
-    /// `group_only` — the gate's question: is this judge held only through a gated group?
+    /// `group_only` — the gate's question: is this verifier held only through a gated group?
     #[test]
     fn group_only_is_a_gated_member_not_named_directly() {
         let mut g = Groups::from_map(BTreeMap::from([("q".to_string(), names(&["a", "b"])), ("r".to_string(), names(&["c"]))]));

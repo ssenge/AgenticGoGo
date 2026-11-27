@@ -15,7 +15,7 @@
 //! agents surveyed (Claude, Codex, Copilot) **only Claude reports dollars at all**: Codex reports
 //! none, Copilot reports a credit multiplier that is not USD.
 //!
-//! The same trap applies to `over_budget` (needs output tokens), LLM judges and the summarizer
+//! The same trap applies to `over_budget` (needs output tokens), rubric verifiers and the summarizer
 //! (need a read-only one-shot call — which all three agents can do, each by its own mechanism),
 //! and `effort:`. (`resume_sessions` is gone entirely — a per-agent session id can't cross a mixed
 //! sequence, so `deny_unknown_fields` refuses the key at PARSE time now, §7.3.)
@@ -25,7 +25,7 @@
 //! **A capability the agent lacks must never degrade into a quiet no-op.**
 
 use crate::core::config::RelentlessConfig;
-use crate::core::model::{Judge, JudgeKind};
+use crate::core::model::{Verifier, VerifierKind};
 use crate::problem::{self, Problem};
 use anyhow::Result;
 use std::path::Path;
@@ -45,13 +45,13 @@ pub struct Assessment {
 }
 
 /// Check the config + resolved run-set against EVERY agent the sequence names (§7.3). The
-/// one-shot demands (LLM judges + summarizer) fall on the RULER; the token/cost/effort demands fall
+/// one-shot demands (rubric verifiers + summarizer) fall on the RULER; the token/cost/effort demands fall
 /// on each STEP's worker backend. Returns an error listing EVERY problem at once.
 ///
 /// A capability the agent lacks must never degrade into a quiet no-op: a guard that never fires is
 /// worse than no guard.
-pub fn check(cfg: &RelentlessConfig, judges: &[Judge], dir: &Path) -> Result<()> {
-    let a = assess(cfg, judges, dir);
+pub fn check(cfg: &RelentlessConfig, verifiers: &[Verifier], dir: &Path) -> Result<()> {
+    let a = assess(cfg, verifiers, dir);
     if !a.unknown_agents.is_empty() {
         anyhow::bail!(problem::render(&a.unknown_agents));
     }
@@ -78,34 +78,34 @@ pub fn check(cfg: &RelentlessConfig, judges: &[Judge], dir: &Path) -> Result<()>
 /// [`check`]'s findings, collected rather than rendered — what `rlt check` and `rlt doctor --json`
 /// report. Never fails: an agent that does not resolve is itself a finding. `dir` is the PROJECT
 /// dir, which relative `context:` paths resolve against.
-pub fn assess(cfg: &RelentlessConfig, judges: &[Judge], dir: &Path) -> Assessment {
+pub fn assess(cfg: &RelentlessConfig, verifiers: &[Verifier], dir: &Path) -> Assessment {
     let mut a = Assessment::default();
-    // ── the run-level confinement policy: context dirs, credentials, the judges' image ──
+    // ── the run-level confinement policy: context dirs, credentials, the verifiers' image ──
     a.problems.extend(crate::isolation::run::resolve(cfg, dir).1);
     // ── one-shot demands land on the RULER (§7.3) ──
     match cfg.ruler_backend() {
         Ok(ruler) => {
-            let uses_llm_judge = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
-            // an LLM judge's one-shot is confined like the worker — behind the allow-list too
-            if let (true, Some(allow)) = (uses_llm_judge, allow_list(cfg)) {
+            let uses_llm_verifier = verifiers.iter().any(|j| matches!(j.kind, VerifierKind::Llm { .. }));
+            // an rubric verifier's one-shot is confined like the worker — behind the allow-list too
+            if let (true, Some(allow)) = (uses_llm_verifier, allow_list(cfg)) {
                 if let Some(m) = crate::isolation::egress::endpoint_problem(ruler, &allow) {
                     a.problems.push(Problem::new("isolation_policy.network.allow", format!("the ruler: {m}")));
                 }
             }
             let uses_summarizer = cfg.summary.enabled;
-            if (uses_llm_judge || uses_summarizer) && !ruler.capabilities().supports_one_shot {
+            if (uses_llm_verifier || uses_summarizer) && !ruler.capabilities().supports_one_shot {
                 a.problems.push(Problem::new(
-                    "judge.agent",
+                    "verifier.agent",
                     format!(
                         "the ruler `{}` cannot make a tools-off one-shot call, which {} need.\n      \
-                         fix: use script judges + `summary.enabled: false`, or a ruler that supports it",
+                         fix: use script verifiers + `summary.enabled: false`, or a ruler that supports it",
                         ruler.name(),
-                        if uses_llm_judge { "LLM judges / the summarizer" } else { "the summarizer" },
+                        if uses_llm_verifier { "rubric verifiers / the summarizer" } else { "the summarizer" },
                     ),
                 ));
             }
         }
-        Err(e) => a.unknown_agents.push(Problem::new("judge.agent", format!("{e:#}"))),
+        Err(e) => a.unknown_agents.push(Problem::new("verifier.agent", format!("{e:#}"))),
     }
     // ── token / cost / effort / isolation demands land on each WORKER agent the sequence names ──
     for step_name in cfg.steps.keys() {
@@ -116,7 +116,7 @@ pub fn assess(cfg: &RelentlessConfig, judges: &[Judge], dir: &Path) -> Assessmen
         uncovered_by_allow_list(cfg, &mut a.warnings);
     }
     // ── the container images: each has the CLI it must run, and the engine sees what is mounted ──
-    let (images, found) = crate::isolation::probe::assess(cfg, judges, dir);
+    let (images, found) = crate::isolation::probe::assess(cfg, verifiers, dir);
     a.images = images;
     for p in found {
         problem::push_unique(&mut a.problems, p);
@@ -154,11 +154,11 @@ fn uncovered_by_allow_list(cfg: &RelentlessConfig, warnings: &mut Vec<Problem>) 
 
 /// The agents whose CLI must be on the HOST's PATH, each at the first key that names it: every
 /// agent of a step that does not run in a container, and the ruler when anything it runs stays on
-/// the host (the summarizer always does; LLM judges do unless the run's judges are containerized).
+/// the host (the summarizer always does; rubric verifiers do unless the run's verifiers are containerized).
 /// A container step's agent is the image's business instead ([`crate::isolation::probe`]).
-pub fn host_agents(cfg: &RelentlessConfig, judges: &[Judge]) -> Vec<(String, String)> {
+pub fn host_agents(cfg: &RelentlessConfig, verifiers: &[Verifier]) -> Vec<(String, String)> {
     use crate::isolation::Isolation::Container;
-    let llm = judges.iter().any(|j| matches!(j.kind, JudgeKind::Llm { .. }));
+    let llm = verifiers.iter().any(|j| matches!(j.kind, VerifierKind::Llm { .. }));
     let ruler_on_host = cfg.summary.enabled || (llm && cfg.run_isolation() != Container);
     let step_on_host = |name: &str| {
         // a project with no steps (a Rust driver's): the defaults are what it runs.
@@ -167,7 +167,7 @@ pub fn host_agents(cfg: &RelentlessConfig, judges: &[Judge]) -> Vec<(String, Str
     };
     crate::check::agent_sites(cfg)
         .into_iter()
-        .filter(|(_, name)| step_on_host(name) || (ruler_on_host && &cfg.judge.agent == name))
+        .filter(|(_, name)| step_on_host(name) || (ruler_on_host && &cfg.verifier.agent == name))
         .collect()
 }
 
@@ -319,17 +319,17 @@ fn guard_at(cfg: &RelentlessConfig, limit_set: bool, key: &str, term: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::model::{Judge, JudgeKind, Lifecycle};
+    use crate::core::model::{Verifier, VerifierKind, Lifecycle};
 
     fn cfg_yaml(body: &str) -> RelentlessConfig {
         serde_yaml::from_str(body).expect("test config parse")
     }
 
-    /// A resolved script judge in the DoD-set — the common case.
-    fn script_judge(name: &str) -> Judge {
-        Judge {
+    /// A resolved script verifier in the DoD-set — the common case.
+    fn script_verifier(name: &str) -> Verifier {
+        Verifier {
             name: name.into(),
-            kind: JudgeKind::Script { path: format!("{name}.sh").into() },
+            kind: VerifierKind::Script { path: format!("{name}.sh").into() },
             invariant: false,
             in_dod: true,
             timeout: None,
@@ -340,11 +340,11 @@ mod tests {
         }
     }
 
-    /// A resolved LLM (`.md`) judge — the one that demands a tools-off one-shot call on the RULER.
-    fn llm_judge(name: &str) -> Judge {
-        Judge {
+    /// A resolved LLM (`.md`) verifier — the one that demands a tools-off one-shot call on the RULER.
+    fn llm_verifier(name: &str) -> Verifier {
+        Verifier {
             name: name.into(),
-            kind: JudgeKind::Llm { path: format!("{name}.md").into(), inputs: vec![] },
+            kind: VerifierKind::Llm { path: format!("{name}.md").into(), inputs: vec![] },
             invariant: false,
             in_dod: true,
             timeout: None,
@@ -368,11 +368,11 @@ mod tests {
     #[test]
     fn a_cost_guard_on_an_agent_that_cannot_self_cap_is_refused() {
         let cfg = cfg_yaml(
-            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
+            "project: p\ndefaults: { agent: codex }\nverifier: { agent: claude }\n\
              summary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work], limits: { cost: 5.0 } }\n",
         );
-        let err = check(&cfg, &[script_judge("g")], Path::new(".")).unwrap_err().to_string();
+        let err = check(&cfg, &[script_verifier("g")], Path::new(".")).unwrap_err().to_string();
         assert!(err.contains("limits.cost"), "must name the offending key:\n{err}");
         assert!(err.contains("spending real money"), "must say what breaks:\n{err}");
         assert!(err.contains("codex"), "must name the agent:\n{err}");
@@ -384,11 +384,11 @@ mod tests {
     #[test]
     fn a_cost_guard_on_a_self_capping_agent_is_allowed() {
         let cfg = cfg_yaml(
-            "project: p\ndefaults: { agent: copilot }\njudge: { agent: claude }\n\
+            "project: p\ndefaults: { agent: copilot }\nverifier: { agent: claude }\n\
              summary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work], limits: { cost: 5.0 } }\n",
         );
-        check(&cfg, &[script_judge("g")], Path::new("."))
+        check(&cfg, &[script_verifier("g")], Path::new("."))
             .expect("copilot self-caps (--max-ai-credits), so an inert dollar guard only warns");
     }
 
@@ -400,61 +400,61 @@ mod tests {
     fn a_model_effort_pair_the_agent_cannot_combine_is_refused() {
         let bad = cfg_yaml(
             "project: p\ndefaults: { agent: copilot, model: auto, effort: high }\n\
-             judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
+             verifier: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work] }\n",
         );
-        let err = check(&bad, &[script_judge("g")], Path::new(".")).unwrap_err().to_string();
+        let err = check(&bad, &[script_verifier("g")], Path::new(".")).unwrap_err().to_string();
         assert!(err.contains("model: auto"), "must name the offending pair:\n{err}");
         assert!(err.contains("0 tokens"), "must say what actually breaks:\n{err}");
 
         // …and each key ALONE is still fine — this must not become a blanket ban.
         let auto_no_effort = cfg_yaml(
             "project: p\ndefaults: { agent: copilot, model: auto, effort: \"\" }\n\
-             judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
+             verifier: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work] }\n",
         );
-        check(&auto_no_effort, &[script_judge("g")], Path::new(".")).expect("`auto` with no effort is the default, and works");
+        check(&auto_no_effort, &[script_verifier("g")], Path::new(".")).expect("`auto` with no effort is the default, and works");
 
         let named_model_with_effort = cfg_yaml(
             "project: p\ndefaults: { agent: copilot, model: claude-sonnet-4.5, effort: high }\n\
-             judge: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
+             verifier: { agent: claude }\nsummary: { enabled: false }\nsteps: { work: {} }\n\
              sequence: { steps: [work] }\n",
         );
-        check(&named_model_with_effort, &[script_judge("g")], Path::new(".")).expect("a concrete model may carry an effort");
+        check(&named_model_with_effort, &[script_verifier("g")], Path::new(".")).expect("a concrete model may carry an effort");
     }
 
-    /// §7.3: the one-shot demand (an LLM judge / the summarizer) lands on the RULER, not the worker.
+    /// §7.3: the one-shot demand (an rubric verifier / the summarizer) lands on the RULER, not the worker.
     /// The exact config the old code wrongly refused: a Codex worker with a Claude ruler and an
-    /// `.md` judge. The one-shot host is the ruler (claude), so this must be ACCEPTED — the old
+    /// `.md` verifier. The one-shot host is the ruler (claude), so this must be ACCEPTED — the old
     /// check demanded it of the worker and refused a perfectly valid config.
     #[test]
-    fn an_llm_judge_demand_lands_on_the_ruler_not_the_worker() {
+    fn an_llm_verifier_demand_lands_on_the_ruler_not_the_worker() {
         let cfg = cfg_yaml(
-            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
+            "project: p\ndefaults: { agent: codex }\nverifier: { agent: claude }\n\
              summary: { enabled: true }\nsteps: { work: {} }\nsequence: { steps: [work] }\n",
         );
-        check(&cfg, &[llm_judge("rubric")], Path::new(".")).expect("the ruler (claude) hosts the one-shot; the codex worker is irrelevant");
+        check(&cfg, &[llm_verifier("rubric")], Path::new(".")).expect("the ruler (claude) hosts the one-shot; the codex worker is irrelevant");
     }
 
     /// Claude can do everything, so a full-featured config must pass cleanly.
     #[test]
     fn claude_satisfies_a_fully_loaded_config() {
         let cfg = cfg_yaml(
-            "project: p\ndefaults: { agent: claude, effort: max }\njudge: { agent: claude }\n\
+            "project: p\ndefaults: { agent: claude, effort: max }\nverifier: { agent: claude }\n\
              summary: { enabled: true }\nsteps: { work: {} }\n\
              sequence: { steps: [work], limits: { cost: 5.0, tokens: 10 } }\n",
         );
-        check(&cfg, &[llm_judge("rubric"), script_judge("build")], Path::new(".")).expect("claude does it all");
+        check(&cfg, &[llm_verifier("rubric"), script_verifier("build")], Path::new(".")).expect("claude does it all");
     }
 
     /// A config that asks for nothing special runs on ANY agent, however limited.
     #[test]
     fn a_modest_config_runs_on_any_agent() {
         let cfg = cfg_yaml(
-            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\n\
+            "project: p\ndefaults: { agent: codex }\nverifier: { agent: claude }\n\
              summary: { enabled: false }\nsteps: { work: {} }\nsequence: { steps: [work] }\n",
         );
-        check(&cfg, &[script_judge("g")], Path::new(".")).expect("nothing demanded, nothing refused");
+        check(&cfg, &[script_verifier("g")], Path::new(".")).expect("nothing demanded, nothing refused");
     }
 
     /// §7.3: the check is PER STEP. A mixed sequence — a claude step (reports dollars) and a codex
@@ -463,19 +463,19 @@ mod tests {
     #[test]
     fn the_check_is_per_step() {
         let cfg = cfg_yaml(
-            "project: p\ndefaults: { agent: claude }\njudge: { agent: claude }\n\
+            "project: p\ndefaults: { agent: claude }\nverifier: { agent: claude }\n\
              summary: { enabled: false }\n\
              steps: { plan: {}, build: { agent: codex } }\n\
              sequence: { steps: [plan, build], limits: { cost: 5.0 } }\n",
         );
-        let err = check(&cfg, &[script_judge("g")], Path::new(".")).unwrap_err().to_string();
+        let err = check(&cfg, &[script_verifier("g")], Path::new(".")).unwrap_err().to_string();
         assert!(err.contains("build"), "must name the codex STEP:\n{err}");
         assert!(err.contains("codex"), "must name the agent:\n{err}");
         assert!(!err.contains("step `plan`"), "the claude step reports dollars — it must NOT be flagged:\n{err}");
     }
 
     fn problem_paths(cfg: &RelentlessConfig) -> Vec<String> {
-        assess(cfg, &[script_judge("g")], Path::new(".")).problems.into_iter().map(|p| p.path).collect()
+        assess(cfg, &[script_verifier("g")], Path::new(".")).problems.into_iter().map(|p| p.path).collect()
     }
 
     /// Every finding is located at the key an operator would edit: the step body when it sets the
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn each_problem_is_located_where_it_is_configured() {
         let cfg = cfg_yaml(
-            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\nsummary: { enabled: false }\n\
+            "project: p\ndefaults: { agent: codex }\nverifier: { agent: claude }\nsummary: { enabled: false }\n\
              steps: { b: { effort: \"\" }, c: { agent: copilot, model: auto, effort: high } }\n\
              sequence: { steps: [b], limits: { cost: 1.0 } }\n",
         );
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(problem_paths(&cfg), ["sequence.limits.cost", "steps.c.effort"]);
 
         let cfg = cfg_yaml(
-            "project: p\ndefaults: { agent: codex }\njudge: { agent: claude }\nsummary: { enabled: false }\n\
+            "project: p\ndefaults: { agent: codex }\nverifier: { agent: claude }\nsummary: { enabled: false }\n\
              steps: { w: {} }\nsequence: { steps: [w], abort_if: \"over_cost\" }\n",
         );
         assert_eq!(problem_paths(&cfg), ["sequence.abort_if"], "no limit set → the expression naming the guard");
@@ -513,11 +513,11 @@ mod tests {
     /// `check` reports it the way startup always did (the bare `unknown agent` error).
     #[test]
     fn an_unknown_agent_is_located_and_check_bails_with_it_alone() {
-        let cfg = cfg_yaml("project: p\njudge: { agent: robot }\nsteps: { w: { agent: droid } }\n");
+        let cfg = cfg_yaml("project: p\nverifier: { agent: robot }\nsteps: { w: { agent: droid } }\n");
         let a = assess(&cfg, &[], Path::new("."));
         let at: Vec<&str> = a.unknown_agents.iter().map(|p| p.path.as_str()).collect();
-        assert_eq!(at, ["judge.agent", "steps.w.agent"]);
-        let cfg = cfg_yaml("project: p\njudge: { agent: robot }\n");
+        assert_eq!(at, ["verifier.agent", "steps.w.agent"]);
+        let cfg = cfg_yaml("project: p\nverifier: { agent: robot }\n");
         let err = check(&cfg, &[], Path::new(".")).unwrap_err().to_string();
         assert!(err.starts_with("unknown agent `robot`"), "{err}");
     }

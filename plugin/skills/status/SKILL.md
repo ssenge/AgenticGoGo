@@ -1,6 +1,6 @@
 ---
 name: rlt-status
-description: Show the current status of the Relentless loop for this project — the judge scoreboard, what's met/blocked, tokens spent, and the latest progress summary. Use when the user asks how the loop / rlt run is doing.
+description: Show the current status of the Relentless loop for this project — the verifier scoreboard, what's met/blocked, tokens spent, and the latest progress summary. Use when the user asks how the loop / rlt run is doing.
 disable-model-invocation: false
 ---
 
@@ -22,12 +22,12 @@ The worker's own files live next door in `rlt/state/`. Reading either is always 
 If it's missing, the loop hasn't been started — tell the user to run `/rlt:new` (to set up)
 or `rlt run` (if already configured), and stop here.
 
-You can also run the dry-run scoreboard directly (re-evaluates every judge right now):
+You can also run the dry-run scoreboard directly (re-evaluates every verifier right now):
 ```bash
 rlt plan
 ```
 Use `rlt plan` when the user wants a FRESH evaluation; use `rlt/private/state.json` when they
-want the state of the currently-running loop without re-judging.
+want the state of the currently-running loop without re-verifying.
 
 ## Step 2 — Report
 
@@ -44,11 +44,11 @@ Summarize from the state JSON:
   A `worker`-origin ask does NOT block the loop (the worker asked and ended its session); a
   `driver`-origin one does. Say which. If an ask is hours old, lead with that — a forgotten ask is
   the failure mode this design deliberately accepts, and noticing it is your job.
-- **Headline**: `N/M judges met` and the `done_if` condition (are we close?). `done_if` is the
-  project's Definition of Done, composed from judge names.
-- **Per judge**: name, current measure (`18/28`, `82%`, `yes`), lifecycle state
+- **Headline**: `N/M verifiers met` and the `done_if` condition (are we close?). `done_if` is the
+  project's Definition of Done, composed from verifier names.
+- **Per verifier**: name, current measure (`18/28`, `82%`, `yes`), lifecycle state
   (met ✔ / in_progress ◑ / regressed ⚠ / pending ·), and any `▲+N` delta. **Call out
-  regressions loudly** — a judge that was met and broke is the most important signal (the gate
+  regressions loudly** — a verifier that was met and broke is the most important signal (the gate
   rolls that session back).
 - **Current step**: which step is running, and its **agent + model** (a mixed sequence runs
   different agents at different steps — say which one is live).
@@ -64,7 +64,7 @@ view, suggest `rlt dashboard` in a second terminal.
 
 ## Step 3 — If asked "what should I do?"
 
-- A regressed invariant → the loop likely aborted; investigate that judge's rationale.
+- A regressed invariant → the loop likely aborted; investigate that verifier's rationale.
 - Stalled (high idle, no token growth) → the watchdog should auto-recover; if not, the
   worker may be wedged — suggest checking `rlt/private/run.log` / restarting `rlt run`.
 - Close to done (e.g. `met_fraction` high) → let it run.

@@ -11,7 +11,7 @@ use crate::features::state::RLTScratch;
 /// (it is NOT a `RunOutcome` — e.g. `verdicts::append`, or the worker-broken guard). §3.1.
 pub fn run_hook(hooks: &[Box<dyn Handler>], st: &mut LoopState) -> Result<Option<End>> {
     for h in hooks {
-        if st.scratch.get::<RLTScratch>().skip_judges && !h.runs_on_skip() {
+        if st.scratch.get::<RLTScratch>().skip_verifiers && !h.runs_on_skip() {
             continue;
         }
         match h.run(st)? {
@@ -95,7 +95,7 @@ impl Lifecycle {
         // on_start fires pre-worker on the clean committed tree → nothing tampered yet → unconfined.
         l.on_start.push(shell("on_start", &hooks.on_start, Isolation::None));
         l.background.push(Box::new(crate::features::setup::BackgroundSpawn { cmds: hooks.background.clone() }));
-        l.on_run_start.push(Box::new(crate::features::setup::Baseline)); // baseline judge pass, then bootstrap finalize:
+        l.on_run_start.push(Box::new(crate::features::setup::Baseline)); // baseline verifier pass, then bootstrap finalize:
         l.on_run_start.push(Box::new(crate::features::setup::Setup));
         l.on_session_start.push(feature(
             "Inject",
@@ -119,7 +119,7 @@ impl Lifecycle {
                 Box::new(crate::features::verify::SnapshotGoals),
                 Box::new(crate::features::verify::StageSpan),
                 Box::new(crate::features::verify::StageMerge),
-                Box::new(crate::features::verify::RunJudges),
+                Box::new(crate::features::verify::RunVerifiers),
             ],
         ));
         l.on_gate.push(feature(

@@ -74,7 +74,7 @@ mod imp {
 pub(crate) struct Jail<'a> {
     /// the project dir — writable.
     pub cwd: &'a Path,
-    /// extra writable paths (the agent's own state, a judge's scratch).
+    /// extra writable paths (the agent's own state, a verifier's scratch).
     pub writable: &'a [PathBuf],
     /// paths INSIDE the writable set that are write-denied ([`deny_set`]).
     pub denied: &'a [PathBuf],
@@ -123,9 +123,9 @@ impl Isolation {
     /// The stronger of two tiers.
     ///
     /// A RUN's tier is the strongest any of its steps asked for — never the weakest, and never
-    /// whichever step happened to run last. That is what lets a judge's confinement follow from its
-    /// ROLE (§2.5) instead of from its caller: a judge fired after an `isolation: none` step must not
-    /// be the one unconfined process in a run that sandboxes everywhere else, because a judge script
+    /// whichever step happened to run last. That is what lets a verifier's confinement follow from its
+    /// ROLE (§2.5) instead of from its caller: a verifier fired after an `isolation: none` step must not
+    /// be the one unconfined process in a run that sandboxes everywhere else, because a verifier script
     /// is exactly what a confined worker rewrites in order to escape.
     pub fn strongest(self, other: Self) -> Self {
         if other.rank() > self.rank() {
@@ -147,9 +147,9 @@ pub fn available() -> bool {
 /// Wrap a built [`Command`] in the OS sandbox, confining writes to `cwd` + `$TMPDIR` + `writable`
 /// (the agent's own state dirs) while leaving reads and network open.
 ///
-/// Used for the worker AND for a script judge — a confined worker can rewrite `rlt/judges/*.sh`
-/// (they live inside its writable cwd), so the judge must run in the same jail or it is a wide-open
-/// escape (ISOLATION.md §12). A script judge passes `writable: &[]`: it may write cwd/tmp but must
+/// Used for the worker AND for a script verifier — a confined worker can rewrite `rlt/verifiers/*.sh`
+/// (they live inside its writable cwd), so the verifier must run in the same jail or it is a wide-open
+/// escape (ISOLATION.md §12). A script verifier passes `writable: &[]`: it may write cwd/tmp but must
 /// not be able to write anywhere the worker couldn't.
 ///
 /// Rebuilds a fresh `Command::new(<wrapper>)` whose argv is `[wrapper flags…, <orig program>,
@@ -186,9 +186,9 @@ pub fn wrap_protected(
     // Command without the caller knowing about sandboxing.
     let prog = cmd.get_program().to_owned();
     let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_owned()).collect();
-    // Carry env EXPLICITLY. The worker backends set none, but a script judge sets `RLT_*` — and a
+    // Carry env EXPLICITLY. The worker backends set none, but a script verifier sets `RLT_*` — and a
     // rebuilt Command starts from the parent env with no per-command overrides, so those would be
-    // silently dropped (the judge would run without its contract). `get_envs()` yields the
+    // silently dropped (the verifier would run without its contract). `get_envs()` yields the
     // overrides layered on the inherited env: `Some` = set, `None` = a `.env_remove()`.
     let envs: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> =
         cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
@@ -205,7 +205,7 @@ pub fn wrap_protected(
 
     let (denies, rules) = protect_channels(&cwd_resolved, denies, protect)?;
     // The RUN's policy, derived from the project dir like the carve-out is (see [`policy`]): every
-    // surface that confines — worker, judge, one-shot, hook — gets it without having to pass it.
+    // surface that confines — worker, verifier, one-shot, hook — gets it without having to pass it.
     let run = policy::for_dir(&cwd_resolved);
     let readonly: Vec<PathBuf> = run.contexts.iter().map(|c| c.host.clone()).collect();
     let net = match &run.egress {
@@ -273,13 +273,13 @@ fn protect_channels(cwd: &Path, denies: &[String], protect: &[String]) -> Result
 ///
 /// # Why this exists at all
 /// `writable` SUBTRACTS from what `readonly` accumulated, and the subtraction compares STRINGS.
-/// Without this, `writable(["rlt/judges"])` against `readonly(["rlt/judges/"])` subtracts nothing
+/// Without this, `writable(["rlt/verifiers"])` against `readonly(["rlt/verifiers/"])` subtracts nothing
 /// while looking to its author like it worked — a step that believes it may write the graders and
 /// silently cannot, or (with the lists swapped) a deny the author thinks they lifted and did not.
 /// One spelling in, one spelling stored, one comparison that means what it reads like.
 ///
 /// The canonical form drops a trailing `/`, drops `.` and empty components (so `./src`, `src` and
-/// `src//` are one path), and resolves `..` lexically (`rlt/judges/../judges` ⇒ `rlt/judges`).
+/// `src//` are one path), and resolves `..` lexically (`rlt/verifiers/../verifiers` ⇒ `rlt/verifiers`).
 /// A leading `/` survives — an absolute entry stays absolute.
 ///
 /// # `None` = rejected
@@ -357,7 +357,7 @@ pub fn denied_paths(readonly: &[String], writable: &[String]) -> Vec<String> {
 /// for what lives there and why.
 ///
 /// DERIVED FROM `cwd` rather than passed in, deliberately. `wrap` confines three different spawn
-/// surfaces (worker, script judge, `rlt.yaml` hook) and every one of them is reachable by a worker
+/// surfaces (worker, script verifier, `rlt.yaml` hook) and every one of them is reachable by a worker
 /// that edits files in its own cwd. A parameter is a thing a future call site can forget; deriving
 /// it here means adding a fourth surface cannot silently reopen the hole.
 ///
@@ -380,7 +380,7 @@ fn denied(cwd: &Path) -> Vec<PathBuf> {
 /// so a step that lists nothing still cannot write `rlt/private/`.
 ///
 /// Both tiers share this so `readonly:` means one thing across `sandbox` and `container`, and a
-/// relative entry (`rlt/judges`) resolves against the same cwd the wrapper already canonicalized.
+/// relative entry (`rlt/verifiers`) resolves against the same cwd the wrapper already canonicalized.
 pub(crate) fn deny_set(cwd: &Path, denies: &[String]) -> Vec<PathBuf> {
     let mut out = denied(cwd);
     for d in denies {
@@ -397,7 +397,7 @@ pub(crate) fn deny_set(cwd: &Path, denies: &[String]) -> Vec<PathBuf> {
 
 /// Make a deny path exist, because the two MOUNT-based backends cannot deny one that does not.
 ///
-/// Seatbelt denies by path STRING, so `(deny file-write* (subpath "…/rlt/judges"))` binds whether
+/// Seatbelt denies by path STRING, so `(deny file-write* (subpath "…/rlt/verifiers"))` binds whether
 /// or not the directory is there yet — and keeps binding the moment it appears. `bwrap` and a
 /// container engine deny by READ-ONLY BIND, and a bind needs a mount point, so both used to SKIP a
 /// path that did not exist. That is the same driver getting two different security policies with no
@@ -467,11 +467,11 @@ mod tests {
     /// The trailing slash is the whole reason normalisation exists: `writable` subtracts by string.
     #[test]
     fn one_directory_has_exactly_one_spelling() {
-        for spelling in ["rlt/judges", "rlt/judges/", "./rlt/judges", "rlt//judges//", " rlt/judges "] {
-            assert_eq!(normalize_path(spelling).as_deref(), Some("rlt/judges"), "spelled `{spelling}`");
+        for spelling in ["rlt/verifiers", "rlt/verifiers/", "./rlt/verifiers", "rlt//verifiers//", " rlt/verifiers "] {
+            assert_eq!(normalize_path(spelling).as_deref(), Some("rlt/verifiers"), "spelled `{spelling}`");
         }
         // `..` resolves lexically rather than surviving into the comparison
-        assert_eq!(normalize_path("rlt/judges/../judges").as_deref(), Some("rlt/judges"));
+        assert_eq!(normalize_path("rlt/verifiers/../verifiers").as_deref(), Some("rlt/verifiers"));
         // an absolute entry stays absolute
         assert_eq!(normalize_path("/etc/").as_deref(), Some("/etc"));
     }
@@ -489,8 +489,8 @@ mod tests {
     /// `writable` subtracts from what `readonly` accumulated — and only ever exactly.
     #[test]
     fn writable_subtracts_from_readonly() {
-        let ro = normalize_paths(["tests/", "rlt/judges/", "src/"]);
-        let w = normalize_paths(["rlt/judges"]); // spelled WITHOUT the slash on purpose
+        let ro = normalize_paths(["tests/", "rlt/verifiers/", "src/"]);
+        let w = normalize_paths(["rlt/verifiers"]); // spelled WITHOUT the slash on purpose
         assert_eq!(denied_paths(&ro, &w), vec!["tests".to_string(), "src".to_string()]);
         // exact match only: a subtree does not carve a hole
         assert_eq!(denied_paths(&normalize_paths(["src/"]), &normalize_paths(["src/foo"])), vec!["src".to_string()]);
@@ -512,9 +512,9 @@ mod tests {
 
         assert_eq!(deny_set(cwd, &[]), vec![private.clone()], "no list ⇒ still the carve-out");
 
-        let with = deny_set(cwd, &["rlt/judges".to_string(), "src".to_string()]);
+        let with = deny_set(cwd, &["rlt/verifiers".to_string(), "src".to_string()]);
         assert_eq!(with[0], private, "the derived carve-out comes first and is never dropped");
-        assert_eq!(with[1..], [cwd.join("rlt/judges"), cwd.join("src")], "relative ⇒ under cwd");
+        assert_eq!(with[1..], [cwd.join("rlt/verifiers"), cwd.join("src")], "relative ⇒ under cwd");
 
         // an absolute entry stays absolute (`normalize_path` preserves the leading `/`) — and is
         // CANONICALIZED when it resolves, because Seatbelt matches canonical paths only and `/etc`
@@ -532,7 +532,7 @@ mod tests {
     /// needs to read that the step can write the paths it thought it had protected.
     #[test]
     fn a_deny_list_without_a_tier_warns_that_the_step_can_write_the_paths() {
-        let ro = normalize_paths(["tests/", "rlt/judges/"]);
+        let ro = normalize_paths(["tests/", "rlt/verifiers/"]);
         let w = normalize_paths(["tests"]);
 
         let msg = unenforced_denies("implement", Isolation::None, &ro, &w)
@@ -540,7 +540,7 @@ mod tests {
         assert!(msg.contains("implement"), "names the step: {msg}");
         assert!(msg.contains("CAN WRITE"), "states the consequence: {msg}");
         assert!(!msg.contains("ignor"), "never `ignored` — rlt did not choose this: {msg}");
-        assert!(msg.contains("rlt/judges"), "names the path that is not protected: {msg}");
+        assert!(msg.contains("rlt/verifiers"), "names the path that is not protected: {msg}");
         assert!(msg.contains("sandbox"), "names the fix: {msg}");
 
         // …and it is a WARNING, not a refusal: nothing here returns an Err. Under a confining tier
@@ -574,21 +574,21 @@ mod tests {
         assert_eq!(inner, vec!["claude", "-p", "do the thing"], "inner program + args survive in order after --");
     }
 
-    /// The wrapper MUST carry the inner command's env, or a wrapped script judge loses its `RLT_*`
+    /// The wrapper MUST carry the inner command's env, or a wrapped script verifier loses its `RLT_*`
     /// contract (the exact regression this guards). A rebuilt Command otherwise keeps only the
     /// inherited parent env with none of the per-command overrides.
     #[test]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn wrap_carries_the_inner_command_env() {
         let mut inner = Command::new("/bin/sh");
-        inner.arg("-c").arg("true").env("RLT_JUDGE", "answered").env("RLT_SESSION", "3");
+        inner.arg("-c").arg("true").env("RLT_VERIFIER", "answered").env("RLT_SESSION", "3");
         let cwd = std::env::temp_dir();
         let wrapped = wrap(inner, &cwd, &[], &[]).expect("supported OS builds a wrapper");
         let got: std::collections::HashMap<String, String> = wrapped
             .get_envs()
             .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
             .collect();
-        assert_eq!(got.get("RLT_JUDGE").map(String::as_str), Some("answered"), "judge env must survive the wrap");
+        assert_eq!(got.get("RLT_VERIFIER").map(String::as_str), Some("answered"), "verifier env must survive the wrap");
         assert_eq!(got.get("RLT_SESSION").map(String::as_str), Some("3"));
     }
 
@@ -644,7 +644,7 @@ mod tests {
     /// THE CARVE-OUT, proven by the kernel rather than by reading the profile text. This is the
     /// test the `verdicts.jsonl` forgery has to fail against: a confined worker may still write its
     /// own state (`rlt/state/`) and the project source, but NOT `rlt/private/` — and it may still
-    /// READ the private files, because a judge reads the ledger and the worker reads its brief.
+    /// READ the private files, because a verifier reads the ledger and the worker reads its brief.
     ///
     /// `#[ignore]`d like its siblings: it spawns the real OS sandbox, which a nested sandbox (CI,
     /// Claude Code's own jail) refuses. Run on a real host:
@@ -661,7 +661,7 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap();
         // a pre-existing ledger the worker will try to forge a row into, and read back
         let ledger = crate::paths::verdicts_jsonl(&proj);
-        std::fs::write(&ledger, "{\"judge\":\"real\"}\n").unwrap();
+        std::fs::write(&ledger, "{\"verifier\":\"real\"}\n").unwrap();
 
         let script = format!(
             "echo work > '{p}/source.txt' && echo SRC_OK; \
@@ -682,7 +682,7 @@ mod tests {
         // the worker's own world still works — a carve-out that breaks the loop is not a fix
         assert!(stdout.contains("SRC_OK"), "the worker must still write the project:\n{stdout}\n{stderr}");
         assert!(stdout.contains("STATE_OK"), "…and its own rlt/state/:\n{stdout}\n{stderr}");
-        assert!(stdout.contains("READ_OK"), "…and READ the ledger (a judge does):\n{stdout}\n{stderr}");
+        assert!(stdout.contains("READ_OK"), "…and READ the ledger (a verifier does):\n{stdout}\n{stderr}");
         // …and the hole is shut
         assert!(stdout.contains("FORGE_DENIED"), "the ledger forgery must be DENIED:\n{stdout}\n{stderr}");
         assert!(stdout.contains("NEWFILE_DENIED"), "no new files in private/ either:\n{stdout}\n{stderr}");
@@ -694,7 +694,7 @@ mod tests {
     /// Everything upstream of here (`Step::readonly`'s accumulation, `writable`'s subtraction, the
     /// trailing-slash normalisation) is tested against strings. This is the one test that asks the
     /// OS whether any of it actually bound, and it exercises the whole chain in one shot: a driver's
-    /// template denies `tests/` and `rlt/judges/`, a derived step adds `src/` and re-grants exactly
+    /// template denies `tests/` and `rlt/verifiers/`, a derived step adds `src/` and re-grants exactly
     /// `tests/`, and the kernel is asked which of the four the worker can write.
     ///
     /// The fourth assertion is the load-bearing one: `rlt/private/` is still carved out. The
@@ -711,22 +711,22 @@ mod tests {
         use crate::driver::Step;
         assert!(available(), "no OS sandbox on this host — cannot prove confinement");
         let proj = std::env::temp_dir().join(format!("rlt-denylist-{}", std::process::id()));
-        for d in ["tests", "src", "docs", "rlt/judges"] {
+        for d in ["tests", "src", "docs", "rlt/verifiers"] {
             std::fs::create_dir_all(proj.join(d)).unwrap();
         }
         std::fs::create_dir_all(crate::paths::private_dir(&proj)).unwrap();
         let ledger = crate::paths::verdicts_jsonl(&proj);
-        let pristine = "{\"judge\":\"real\"}\n";
+        let pristine = "{\"verifier\":\"real\"}\n";
         std::fs::write(&ledger, pristine).unwrap();
 
         // The driver's own chain, verbatim from the sample: the family protects, the member
         // re-grants the ONE thing it legitimately needs.
         let sandboxed =
-            Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/judges/"]);
+            Step::template().isolation(Isolation::Sandbox).readonly(["tests/", "rlt/verifiers/"]);
         let step = sandboxed.create("implement").readonly(["src/"]).writable(["tests"]);
         assert_eq!(
             step.denied(),
-            ["rlt/judges", "src"],
+            ["rlt/verifiers", "src"],
             "inherited from the template + its own, minus the one re-grant"
         );
 
@@ -734,7 +734,7 @@ mod tests {
             "echo t > '{p}/tests/new.txt' && echo TESTS_OK || echo TESTS_DENIED; \
              echo s > '{p}/src/new.txt' && echo SRC_OK || echo SRC_DENIED; \
              echo d > '{p}/docs/new.txt' && echo DOCS_OK || echo DOCS_DENIED; \
-             echo j > '{p}/rlt/judges/evil.sh' && echo JUDGES_OK || echo JUDGES_DENIED; \
+             echo j > '{p}/rlt/verifiers/evil.sh' && echo VERIFIERS_OK || echo VERIFIERS_DENIED; \
              cat '{l}' >/dev/null && echo READ_OK; \
              echo forged >> '{l}' && echo FORGE_OK || echo FORGE_DENIED",
             p = proj.display(),
@@ -760,9 +760,9 @@ mod tests {
         // …the step's own `readonly` binds…
         assert!(text.contains("SRC_DENIED"), "the step's own `readonly([\"src/\"])`:\n{text}");
         // …and so does the one it INHERITED from the template it was created from.
-        assert!(text.contains("JUDGES_DENIED"), "`rlt/judges/` inherited from the template:\n{text}");
+        assert!(text.contains("VERIFIERS_DENIED"), "`rlt/verifiers/` inherited from the template:\n{text}");
         // ⛔ and the DERIVED carve-out is still there beside the per-step list.
-        assert!(text.contains("READ_OK"), "reads stay open — a judge reads the ledger:\n{text}");
+        assert!(text.contains("READ_OK"), "reads stay open — a verifier reads the ledger:\n{text}");
         assert!(text.contains("FORGE_DENIED"), "`rlt/private/` is still carved out:\n{text}");
         assert_eq!(ledger_after, pristine, "the ledger was MODIFIED — the carve-out leaked");
     }
@@ -838,7 +838,7 @@ mod tests {
         let proj = std::env::temp_dir().join(format!("rlt-nest-{}", std::process::id()));
         std::fs::create_dir_all(crate::paths::private_dir(&proj)).unwrap();
         let ledger = crate::paths::verdicts_jsonl(&proj);
-        let pristine = "{\"judge\":\"real\"}\n";
+        let pristine = "{\"verifier\":\"real\"}\n";
 
         let script = format!(
             "echo INNER_RAN; \

@@ -34,13 +34,13 @@ One unit struct implementing `AgentBackend` (`src/backend/mod.rs`), selected by 
 `rlt.yaml`. It is always a **subprocess**: rlt builds a `Command`, the OS sandbox or container wraps
 it, rlt spawns it in its own process group, reads its stdout line by line, and supervises it with a
 heartbeat and a watchdog (`src/backend/worker.rs`). The backend decides *what* to run and *how to
-read* what comes back; rlt owns process management, git, isolation and judging.
+read* what comes back; rlt owns process management, git, isolation and verifying.
 
 It is used in two roles, possibly by two different backends in one run:
 
 - **the worker** (`defaults.agent`, `steps.<s>.agent`): one fresh agentic session per loop step,
   `session_command` + the per-line parsers;
-- **the ruler** (`judge.agent`): non-agentic, read-only `one_shot` calls for `.md` (LLM) judges and the
+- **the ruler** (`verifier.agent`): non-agentic, read-only `one_shot` calls for `.md` (LLM) verifiers and the
   summarizer.
 
 ## The contract, method by method
@@ -60,7 +60,7 @@ All in `trait AgentBackend` (`src/backend/mod.rs`). "Called by" says where rlt u
 | `parse_model(line)` | the model **this line** says ran; default `None` | worker reader (first wins), `tally_one_shot` |
 | `parse_session_id(line)` | the resume handle on **this line** | worker reader (last wins) |
 | `parse_result(line)` | `Some(SessionReport)` only for a **terminal** event: cost, `rate_limited`, `rate_limit_reset` | worker reader, `tally_one_shot` |
-| `one_shot(prompt, model, effort, timeout, cwd, isolation, schema)` | a non-agentic, read-only prompt → text call; returns `OneShot { body, stderr, success, usage }`. `schema` (the LLM judge passes the verdict's) is a JSON Schema the answer must match: Claude gets `--json-schema` and the body is its `structured_output`, Codex gets `--output-schema` (not in a container: it can't read the file); Copilot ignores it | LLM judges (`src/core/judge.rs`), summarizer (`src/summary.rs`) |
+| `one_shot(prompt, model, effort, timeout, cwd, isolation, schema)` | a non-agentic, read-only prompt → text call; returns `OneShot { body, stderr, success, usage }`. `schema` (the rubric verifier passes the verdict's) is a JSON Schema the answer must match: Claude gets `--json-schema` and the body is its `structured_output`, Codex gets `--output-schema` (not in a container: it can't read the file); Copilot ignores it | rubric verifiers (`src/core/verifier.rs`), summarizer (`src/summary.rs`) |
 | `confine_one_shot` (provided) | wraps a one-shot in the OS sandbox under `isolation: sandbox`; call it on every one-shot `Command` | your `one_shot` |
 | `tally_one_shot` (provided) | sums a one-shot's usage with your own parsers (a single JSON object or a JSON Lines stream) | your `one_shot` |
 | `config_conflict(model, effort)` | explain a pair of individually legal values the CLI rejects together; default `None` | `capability::assess` |
@@ -97,7 +97,7 @@ serialized as-is into `rlt doctor --json`, so their names are a stable interface
 | `reports_output_tokens` | `parse_usage` yields output tokens | `sequence.limits.tokens`, `over_budget` in `done_if`/`abort_if` | refused at startup | ✅ / ✅ / ✅ |
 | `reports_cost_usd` | `parse_result` yields `cost_usd` in **dollars** (a credit multiplier is not dollars) | `sequence.limits.cost`, `over_cost` | **warning** if `spend_ceiling_hint()` names a self-cap (the guard is inert, the run is still bounded), else refused | ✅ / ❌ / ❌ (hint: `--max-ai-credits`) |
 | `supports_effort` | `session_command` passes `spec.effort` | a non-empty `effort:` | refused at startup | ✅ / ✅ (`-c model_reasoning_effort=`, `max` clamps to `high`) / ✅ |
-| `supports_one_shot` | `one_shot` is a read-only call: tools that write are denied, MCP off, **worker-writable repo config ignored** | an LLM judge, or `summary.enabled`, on the **ruler** | refused at startup (your `one_shot` may then be `unreachable!()`) | ✅ / ✅ / ✅ |
+| `supports_one_shot` | `one_shot` is a read-only call: tools that write are denied, MCP off, **worker-writable repo config ignored** | an rubric verifier, or `summary.enabled`, on the **ruler** | refused at startup (your `one_shot` may then be `unreachable!()`) | ✅ / ✅ / ✅ |
 | `detects_rate_limits` | `parse_result` can tell a rate/usage limit from an ordinary failure | nothing refuses on it | reported (`rlt doctor --json`, the agent table in `docs/GUIDE.md`); a limit is then scored as an ordinary failed session | ✅ / ✅ / ❌ |
 | `supports_resume` | `parse_session_id` yields a handle and `session_command` honours `spec.resume_id` | nothing today: every worker session is fresh (`worker::run_session` passes `resume_id: None`) | reported only | ✅ / ✅ / ✅ |
 
@@ -115,7 +115,7 @@ serialized as-is into `rlt doctor --json`, so their names are a stable interface
   --ignore-rules --ephemeral`; Copilot withholds `--allow-all-tools` and adds `--no-custom-instructions
   --disable-builtin-mcps`. The part that is easy to miss is the **trust boundary**: the worker writes
   the repo, so a one-shot that loads repo instructions, hooks or agent profiles lets the worker steer
-  its own judge. If the CLI has no way to ignore those for one call, `supports_one_shot` is `false`.
+  its own verifier. If the CLI has no way to ignore those for one call, `supports_one_shot` is `false`.
 - **Rate limits.** Detect from **terminal events only** (next sections). If the CLI does not put the
   limit anywhere you can see it, say `false`, as Copilot does, rather than guess a field path.
 
@@ -152,7 +152,7 @@ that is how a CLI rejecting its own argv shows up, so make sure a real session r
 ## Parsing a one-shot
 
 `one_shot` returns the model's **text** in `OneShot.body` with the envelope removed, plus `stderr`,
-`success` (the exit status) and `usage`. rlt's judge parser then looks for the verdict JSON in the
+`success` (the exit status) and `usage`. rlt's verifier parser then looks for the verdict JSON in the
 body. Two rules:
 
 - **Fall back to the raw stdout** when the envelope is not the expected shape (`claude.rs`
@@ -167,7 +167,7 @@ Build the command, pass it through `self.confine_one_shot(command, cwd, isolatio
 ## Usage and model reporting
 
 What a backend reports ends up in the run report's `session_log` and totals, `rlt status --json` and
-`rlt history --json` (`src/usage.rs`, `docs/schemas/report.v3.json`):
+`rlt history --json` (`src/usage.rs`, `docs/schemas/report.v4.json`):
 
 - **Four token kinds that do not overlap** (`usage::Tokens`): `input` (uncached prompt), `output`,
   `cache_write`, `cache_read`. Map the CLI's fields onto them exactly. If the CLI's input count
@@ -186,7 +186,7 @@ What a backend reports ends up in the run report's `session_log` and totals, `rl
 
 ## Rate-limit detection
 
-A rate-limited session is not judged. rlt saves its partial work under
+A rate-limited session is not verified. rlt saves its partial work under
 `refs/rlt/partial/<run>/<session>`, waits until the reset (or `ratelimit_backoff_secs`, default 1800,
 when no reset is known), and lets `rlt send wake` end the wait no sooner than `ratelimit_min_gap_secs`
 (default 60) after the limited attempt (`src/features/backoff.rs`). The backend's part:
@@ -253,7 +253,7 @@ against the recorded fixture where one applies:
   an empty model or effort omits the flag; resume has the right shape; the argv under `isolation:
   none` vs `sandbox` (the OS wrapper confines, the flags do not change, unless the CLI self-sandboxes).
 - **one-shot isolation**: the flags that grant writes are absent from the one-shot argv and the flags
-  that cut repo config are present (Copilot's `the_judge_call_never_gets_write_access` is the model).
+  that cut repo config are present (Copilot's `the_verifier_call_never_gets_write_access` is the model).
 - **capabilities**: an assertion per flag, with the reason in the message.
 
 Shared tests in `src/backend/tests.rs` pick a new `KNOWN` entry up automatically:

@@ -109,7 +109,7 @@ with sync_playwright() as pw:
         re.search(r"\b(inject|run|verify|gate|backoff)\b", status) is not None,
         f"header shows a four-stage phase (got {status!r})",
     )
-    check("judging" not in status and status != "running", "header never shows the retired phase names")
+    check("verifying" not in status and status != "running", "header never shows the retired phase names")
 
     proj = page.locator("header .proj").inner_text().strip()
     check(proj == PROJ.name, f"header shows the project name (got {proj!r})")

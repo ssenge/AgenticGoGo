@@ -1,5 +1,5 @@
-//! The judge cache (A-37): a check's met verdict from an earlier run of it on exactly the same project
-//! content. The worker's self-check and the run's judge run the same check on the same state, and a long check (the
+//! The verifier cache (A-37): a check's met verdict from an earlier run of it on exactly the same project
+//! content. The worker's self-check and the run's verifier run the same check on the same state, and a long check (the
 //! gates, a rerun of every measure) needn't run twice. `rlt cached [--ignore <path>]… -- <command>…` runs the check,
 //! or answers with the cached verdict; the process wraps its script checks in it.
 

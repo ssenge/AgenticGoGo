@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! <project>/
-//!   rlt/                  user config — COMMITTED (rlt.yaml, RLT.md, judges/<name>.{sh,md})
+//!   rlt/                  user config — COMMITTED (rlt.yaml, RLT.md, verifiers/<name>.{sh,md})
 //!     RLT.md            standing project instructions the WORKER reads (the CLAUDE.md-analog) — COMMITTED
 //!     state/              WORKER-WRITABLE runtime state — GITIGNORED
 //!       STATE.md            worker-curated forward advice (survives rollback)
@@ -15,7 +15,7 @@
 //!       sessions/           transient per-session worker memory scratch (session-<N>.md)
 //!       spawns.json         long-task registry — `rlt spawn` is invoked BY THE WORKER
 //!       spawns/<name>.log   per-spawn combined stdout+stderr
-//!       BLOCKED.md          the worker's self-report, if the project authors a `blocked` judge
+//!       BLOCKED.md          the worker's self-report, if the project authors a `blocked` verifier
 //!     private/            RLT-OWNED runtime state — GITIGNORED, and the worker CANNOT WRITE IT
 //!       INSTRUCTIONS.md     the worker's whole `-p` target — rlt REGENERATES it every session
 //!       LOG.md              durable institutional memory (#3) — enforced hard-facts audit trail
@@ -30,10 +30,10 @@
 //!       violations.jsonl    append-only record of `protected_path_violation` rollbacks (write_deny)
 //!       waits.jsonl         append-only record of every rate-limit wait: its start and how it ended
 //!       protected/<sha256>  rlt's own copies of every `write_deny` file, to restore a violation from
-//!       evidence/<run>/<session>/<judge>/  the files each verdict cited, kept after its judge ran
+//!       evidence/<run>/<session>/<verifier>/  the files each verdict cited, kept after its verifier ran
 //!       prompts.jsonl       per session, the hash of every prompt file its brief was read from
 //!       metrics/incumbent/<scope>.json  the swe-metrics report of the last KEPT state (a score's baseline)
-//!       container/          `isolation: container` runtime: worker + judge homes, judge scratch
+//!       container/          `isolation: container` runtime: worker + verifier homes, verifier scratch
 //! ```
 //!
 //! # Why the split exists
@@ -49,7 +49,7 @@
 //! - `run.pid` — the double-run guard and `rlt stop` target.
 //!
 //! Splitting them into `private/` lets [`crate::isolation`] carve that ONE subpath out of the
-//! worker's writable set. Reads stay open: the worker still reads its brief, and a judge still
+//! worker's writable set. Reads stay open: the worker still reads its brief, and a verifier still
 //! reads the ledger. See `internal/ISOLATION.md`.
 //!
 //! **This only binds under `isolation: sandbox`/`container`.** Under the default `none` the worker
@@ -57,14 +57,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// The MANDATORY config-dir name. User inputs (rlt.yaml, the state file, the judges under judges/)
+/// The MANDATORY config-dir name. User inputs (rlt.yaml, the state file, the verifiers under verifiers/)
 /// live under `<project>/rlt/`, and all runtime state under `<project>/rlt/state/`.
 /// (Runtime state living inside `rlt/` is what makes the folder mandatory.)
 pub const CONFIG_DIR: &str = "rlt";
 
 /// Where user-provided config lives for `dir`: `<dir>/rlt/`. This is the base that `rlt.yaml`,
-/// the state file, and `.md` judge rubrics resolve against. (Judge *scripts* still run
-/// from the project root, so a judge's `cmd`/`inputs` reference real project files — only
+/// the state file, and `.md` verifier rubrics resolve against. (Verifier *scripts* still run
+/// from the project root, so a verifier's `cmd`/`inputs` reference real project files — only
 /// config-adjacent files live here.)
 pub fn config_base(dir: &Path) -> PathBuf {
     dir.join(CONFIG_DIR)
@@ -134,7 +134,7 @@ pub fn calls_jsonl(dir: &Path) -> PathBuf {
 }
 
 /// The gate's own state: `rlt/private/gate.json` (`core::ratchet`) — the ratchet references and the
-/// rollback / oscillation history behind `ratchet_regressed`, `<judge>.ref`, `rollbacks`,
+/// rollback / oscillation history behind `ratchet_regressed`, `<verifier>.ref`, `rollbacks`,
 /// `consecutive_rollbacks` and `oscillating`.
 ///
 /// Private because those terms may sit in `abort_if`: a worker able to rewrite this file could lower
@@ -221,12 +221,12 @@ pub fn protected_store(dir: &Path) -> PathBuf {
 }
 
 /// The container runtime's own dirs: `rlt/private/container/` — a fresh `HOME` for each worker
-/// session, the judges' homes, and the scratch + toolchain cache of a judge that runs in a
+/// session, the verifiers' homes, and the scratch + toolchain cache of a verifier that runs in a
 /// container ([`crate::isolation::runtime`]).
 ///
-/// Private for two reasons. The worker must not plant anything a JUDGE then runs with (a
+/// Private for two reasons. The worker must not plant anything a VERIFIER then runs with (a
 /// `~/.claude/settings.json` hook in the ruler's home would steer its grader), and must not write a
-/// judge's measurements. And it is under the PROJECT on purpose rather than in `$TMPDIR`: the engine
+/// verifier's measurements. And it is under the PROJECT on purpose rather than in `$TMPDIR`: the engine
 /// can always see the project (it is bind-mounted), while a VM-backed engine (colima, lima) often
 /// cannot see `$TMPDIR` — and a bind of a path the engine cannot see is not an error, it is an EMPTY
 /// directory inside the container.
@@ -234,7 +234,7 @@ pub fn container_dir(dir: &Path) -> PathBuf {
     private_dir(dir).join("container")
 }
 
-/// The kept judge evidence: `rlt/private/evidence/<run>/<session>/<judge>/` (`core::evidence`).
+/// The kept verifier evidence: `rlt/private/evidence/<run>/<session>/<verifier>/` (`core::evidence`).
 ///
 /// Private because it is what a verdict CITES: a worker able to write here could swap the SARIF
 /// file a passing gate points at for one that tells a different story, after the fact.
@@ -254,7 +254,7 @@ pub fn prompts_jsonl(dir: &Path) -> PathBuf {
 /// The incumbent's swe-metrics reports: `rlt/private/metrics/incumbent/<scope>.json`
 /// (`metrics::measure`) — the report of the last kept state, kept next to the ratchet state.
 ///
-/// Private because a score judge scores AGAINST it (`--baseline`): a worker able to swap it could
+/// Private because a score verifier scores AGAINST it (`--baseline`): a worker able to swap it could
 /// hand its own session a flattering baseline, so that a metric that got worse costs no points.
 pub fn metrics_incumbent_dir(dir: &Path) -> PathBuf {
     private_dir(dir).join("metrics").join("incumbent")
@@ -324,9 +324,9 @@ mod tests {
         assert_eq!(protected_store(d), Path::new("/proj/rlt/private/protected"));
         // a worker deleting a row would hide that a stop came while the run was waiting.
         assert_eq!(waits_jsonl(d), Path::new("/proj/rlt/private/waits.jsonl"));
-        // a score judge's baseline — a swapped one would make a worse metric cost nothing.
+        // a score verifier's baseline — a swapped one would make a worse metric cost nothing.
         assert_eq!(metrics_incumbent_dir(d), Path::new("/proj/rlt/private/metrics/incumbent"));
-        // the judges' homes + scratch in a container: a worker writing here steers its grader.
+        // the verifiers' homes + scratch in a container: a worker writing here steers its grader.
         assert_eq!(container_dir(d), Path::new("/proj/rlt/private/container"));
 
         // and the carve-out must actually CONTAIN the private files, or the sandbox deny (which is

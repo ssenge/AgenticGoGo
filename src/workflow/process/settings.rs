@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context as _, Result};
 use serde::Deserialize;
 
 use super::ladder::TierSpec;
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::driver::Step;
 
 /// A role's settings; each one unset falls back to the layer below.
@@ -229,19 +229,19 @@ impl StepSettings {
     }
 
     /// The critic with this step's critic settings applied over the ones it has.
-    pub fn critic_of(&self, judge: Judge) -> Result<Judge> {
-        let Some(Critic::Role(r)) = &self.critic else { return Ok(judge) };
-        let judge = match &r.agent {
-            Some(a) => judge.agent(a.parse().map_err(|e: String| anyhow!("critic agent: {e}"))?),
-            None => judge,
+    pub fn critic_of(&self, verifier: Verifier) -> Result<Verifier> {
+        let Some(Critic::Role(r)) = &self.critic else { return Ok(verifier) };
+        let verifier = match &r.agent {
+            Some(a) => verifier.agent(a.parse().map_err(|e: String| anyhow!("critic agent: {e}"))?),
+            None => verifier,
         };
-        let judge = match &r.effort {
-            Some(e) => judge.effort(e.parse().map_err(|e: String| anyhow!("critic effort: {e}"))?),
-            None => judge,
+        let verifier = match &r.effort {
+            Some(e) => verifier.effort(e.parse().map_err(|e: String| anyhow!("critic effort: {e}"))?),
+            None => verifier,
         };
         Ok(match &r.model {
-            Some(m) => judge.model(m.as_str()),
-            None => judge,
+            Some(m) => verifier.model(m.as_str()),
+            None => verifier,
         })
     }
 }

@@ -4,7 +4,7 @@
 # scripts/e2e.sh stubs the worker so it is fast, free and deterministic. This one does not.
 # It spends real tokens, and it is the only test that exercises the worker integration for
 # real: the live stream-json shapes, the real `total_cost_usd` and `usage.output_tokens`, the
-# real activity events, and a real agent actually satisfying an external judge — with rlt
+# real activity events, and a real agent actually satisfying an external verifier — with rlt
 # auto-committing its work so mandatory session isolation keeps it.
 #
 # The `claude` on PATH is a PASSTHROUGH WRAPPER, not a stub: it records argv, records the
@@ -19,7 +19,7 @@
 # API-equivalent list price of the work. On a Max/Pro subscription you are NOT charged it —
 # it is the same number `sequence.limits.cost` / `over_cost` gate on. See README "usage (API-eq)".
 #
-# Config is the CURRENT judge/step model: a judge IS a goal (rlt/judges/<name>.{sh,md}), the DoD
+# Config is the CURRENT verifier/step model: a verifier IS a goal (rlt/verifiers/<name>.{sh,md}), the DoD
 # is `done_if`, ceilings live in `sequence.limits`, and continuity across sessions is carried by
 # COMMITTED git state + LOG.md — there is no `--resume` (every worker session is fresh). The worker's
 # whole `-p` is a tiny pointer at rlt/private/INSTRUCTIONS.md (rlt regenerates it each session); this
@@ -60,17 +60,17 @@ printf 'model: %s   claude: %s\nworkspace: %s\n' "$MODEL" "$REAL_CLAUDE" "$WS"
 printf '\033[33mthis spends real subscription usage (not dollars).\033[0m\n'
 ( cd "$ROOT" && cargo build --quiet ) || { bad "cargo build"; exit 1; }
 
-# ── fixture: a passthrough-instrumented `claude` + a named external judge + a git repo ────────
-# mkproj <name> <judge_name> <done_if_expr> <state/STATE.md seed> [<step prompt — the persistent ask>]
-# Writes rlt/rlt.yaml (judge/step model), rlt/state/STATE.md, rlt/judges/<judge_name>.sh stub, and
-# inits a git repo (session isolation is mandatory). The section fills in the judge body after.
+# ── fixture: a passthrough-instrumented `claude` + a named external verifier + a git repo ────────
+# mkproj <name> <verifier_name> <done_if_expr> <state/STATE.md seed> [<step prompt — the persistent ask>]
+# Writes rlt/rlt.yaml (verifier/step model), rlt/state/STATE.md, rlt/verifiers/<verifier_name>.sh stub, and
+# inits a git repo (session isolation is mandatory). The section fills in the verifier body after.
 #
 # The 4th arg seeds STATE.md (worker-curated forward advice; the worker REWRITES it each session).
 # A persistent MULTI-session ask must therefore go in the 5th arg → the step `prompt:` (inlined into
 # every session's brief, immutable config the worker cannot overwrite). A one-shot ask can just live
 # in the STATE seed (§3: STATE is pointed-at, so this also proves a real agent follows that pointer).
 mkproj() {
-  local d="$WS/$1"; mkdir -p "$d/bin" "$d/rlt/judges" "$d/rlt/state"
+  local d="$WS/$1"; mkdir -p "$d/bin" "$d/rlt/verifiers" "$d/rlt/state"
   cat > "$d/bin/claude" <<EOF
 #!/bin/sh
 # PASSTHROUGH: record what rlt invoked us with, note the live phase, then run the REAL claude.
@@ -86,7 +86,7 @@ EOF
   chmod +x "$d/bin/claude" "$d/rec"
   { printf 'project: %s\n' "$1"
     printf 'defaults: { agent: claude, model: %s, state: state/STATE.md }\n' "$MODEL"
-    printf 'judge: { agent: claude, model: %s, timeout: 120 }\n' "$MODEL"
+    printf 'verifier: { agent: claude, model: %s, timeout: 120 }\n' "$MODEL"
     if [ -n "${5:-}" ]; then
       # a persistent ask → the step `prompt:` (a YAML block scalar), inlined into every brief.
       printf 'steps:\n  worker:\n    prompt: |\n'
@@ -114,7 +114,7 @@ rlt/private/
 bin/
 rec
 rlt/rlt.yaml
-rlt/judges/
+rlt/verifiers/
 claude_args.txt
 trace.txt
 *.log
@@ -126,10 +126,10 @@ EOF
 run_rlt() { local d=$1; shift; ( cd "$d" && PATH="$d/bin:$PATH" "$RLT" "$@" ); }
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
-sec "1. a real agent, driven by rlt, satisfying a real external judge (rlt auto-commits its work)"
+sec "1. a real agent, driven by rlt, satisfying a real external verifier (rlt auto-commits its work)"
 A="$(mkproj oneshot answered 'answered' 'Create a file named `answer.txt` in the current directory whose entire contents are the number 42 followed by a newline. Nothing else. Then stop. Do NOT run git — rlt version-controls and commits your work for you.
 ')"
-cat > "$A/rlt/judges/answered.sh" <<'EOF'
+cat > "$A/rlt/verifiers/answered.sh" <<'EOF'
 #!/bin/sh
 sh ./rec VERIFY
 if [ -f answer.txt ] && grep -qx '42' answer.txt; then
@@ -138,7 +138,7 @@ else
   echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"answer.txt missing or wrong"}'
 fi
 EOF
-chmod +x "$A/rlt/judges/answered.sh"
+chmod +x "$A/rlt/verifiers/answered.sh"
 
 T0=$(date +%s)
 run_rlt "$A" run --max-sessions 3 > "$A/out.log" 2>&1
@@ -148,13 +148,13 @@ printf '  (%ss)\n' "$E1"
 is "the loop reaches its Definition of Done (exit 0)" "$RC" "0"
 has "…and says so (done_if satisfied)"            "$A/out.log" "done_if satisfied"
 exists "the REAL agent created the file"           "$A/answer.txt"
-is "…with exactly the content the judge demands"   "$(cat "$A/answer.txt" 2>/dev/null)" "42"
+is "…with exactly the content the verifier demands"   "$(cat "$A/answer.txt" 2>/dev/null)" "42"
 has "…and the session merged (rlt auto-committed the worker's edit → kept)" "$A/out.log" "merged → kept"
 
 sec "2. the four outer-loop stages, observed on a real run"
 TRACE=$(tr '\n' ' ' < "$A/trace.txt" 2>/dev/null)
 printf '  trace: %s\n' "$TRACE"
-# baseline judging fires VERIFY once before session 1, then INJECT→RUN→VERIFY→GATE per session.
+# baseline verifying fires VERIFY once before session 1, then INJECT→RUN→VERIFY→GATE per session.
 has "a baseline VERIFY runs before the first session" "$A/trace.txt" "VERIFY="
 has "…then INJECT (on_session_start hook)"            "$A/trace.txt" "INJECT="
 has "…then RUN (the real worker launches)"            "$A/trace.txt" "RUN="
@@ -213,7 +213,7 @@ B="$(mkproj resume counted 'counted' \
 Increment that number by exactly ONE. Write the new number back to `count.txt` as the only
 contents, followed by a newline. Increment exactly once, then stop. Do not skip ahead. Do NOT run
 git — rlt version-controls and commits your work for you.')"
-cat > "$B/rlt/judges/counted.sh" <<'EOF'
+cat > "$B/rlt/verifiers/counted.sh" <<'EOF'
 #!/bin/sh
 sh ./rec VERIFY
 n=$(cat count.txt 2>/dev/null | tr -d '[:space:]')
@@ -223,7 +223,7 @@ else
   printf '{"met":false,"value":0,"max":2,"target":2,"rationale":"count is %s"}\n' "${n:-0}"
 fi
 EOF
-chmod +x "$B/rlt/judges/counted.sh"
+chmod +x "$B/rlt/verifiers/counted.sh"
 
 T0=$(date +%s)
 run_rlt "$B" run --max-sessions 4 > "$B/out.log" 2>&1
@@ -257,15 +257,15 @@ W="$(mkproj wiki wikidone 'wikidone' \
 Implement EXACTLY ONE not-yet-present function this session — real code plus a one-line print
 self-test at the bottom — run it. Only ONE function per session, then stop. Do NOT run git — rlt
 commits your work for you.')"
-cat > "$W/rlt/judges/wikidone.sh" <<'EOF'
+cat > "$W/rlt/verifiers/wikidone.sh" <<'EOF'
 #!/bin/sh
 sh ./rec VERIFY
 n=0; for f in add subtract; do grep -qE "def[[:space:]]+$f" calc.py 2>/dev/null && n=$((n+1)); done
 [ "$n" -ge 2 ] && printf '{"met":true,"value":%s,"max":2,"target":2,"rationale":"%s/2 ops"}\n' "$n" "$n" \
              || printf '{"met":false,"value":%s,"max":2,"target":2,"rationale":"%s/2 ops"}\n' "$n" "$n"
 EOF
-chmod +x "$W/rlt/judges/wikidone.sh"
-# worker → a capable model (wiki curation needs it); judge stays on $MODEL. Give sonnet cost headroom.
+chmod +x "$W/rlt/verifiers/wikidone.sh"
+# worker → a capable model (wiki curation needs it); verifier stays on $MODEL. Give sonnet cost headroom.
 sed -i.bak "s#model: $MODEL, state#model: $WIKI_MODEL, state#; s#cost: 1.0#cost: 5.0#" "$W/rlt/rlt.yaml"
 
 T0=$(date +%s); run_rlt "$W" run --max-sessions 4 > "$W/out.log" 2>&1; E3=$(( $(date +%s) - T0 ))

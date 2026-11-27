@@ -1,4 +1,4 @@
-//! The setup feature group — the run-start bootstrap: finalize the prompt prefix (`Setup`), the pre-session baseline judge pass (`Baseline`), and spawning the user's `background` watchers (`BackgroundSpawn`).
+//! The setup feature group — the run-start bootstrap: finalize the prompt prefix (`Setup`), the pre-session baseline verifier pass (`Baseline`), and spawning the user's `background` watchers (`BackgroundSpawn`).
 
 use anyhow::Result;
 use std::time::{Duration, Instant};
@@ -12,7 +12,7 @@ use crate::util::now_epoch;
 /// reset the summary clock, prepare the on-disk memory scratch, and open the operator bus. On
 /// `on_run_start`, after the baseline pass — which runs AFTER `on_start` (so on_start→prompt_includes
 /// order holds) and BEFORE the loop (so the first `compose` sees the prefix). Behavior-unchanged:
-/// nothing between the `LoopState` build and here reads `prompt_prefix` (baseline judges only).
+/// nothing between the `LoopState` build and here reads `prompt_prefix` (baseline verifiers only).
 pub struct Setup;
 impl Handler for Setup {
     fn run(&self, st: &mut LoopState) -> Result<Flow> {
@@ -32,7 +32,7 @@ impl Handler for Setup {
     }
 }
 
-/// Baseline pass (§5.5.1): judge the untouched repo ONCE before session 1 and write `baseline`
+/// Baseline pass (§5.5.1): verifier the untouched repo ONCE before session 1 and write `baseline`
 /// verdicts, on `on_run_start`. Its two launch-time early exits — `abort_if` already true → Halt,
 /// `done_if` already satisfied → GoalsMet — come back as `Flow::Stop`; it finalizes dash + ledger
 /// itself (exactly as the old inline pass did) before returning, so the core just propagates the
@@ -40,28 +40,28 @@ impl Handler for Setup {
 pub struct Baseline;
 impl Handler for Baseline {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
-        eprintln!("  baseline: running judges once before the first session…");
+        eprintln!("  baseline: running verifiers once before the first session…");
         ctx.dash.phase = Phase::Verify;
         ctx.publish();
         let ruler = ctx.ruler;
-        let judge_model = ctx.judge_model.clone();
-        let judge_timeout = ctx.judge_timeout;
+        let verifier_model = ctx.verifier_model.clone();
+        let verifier_timeout = ctx.verifier_timeout;
         let rs = ctx.run_state();
         // Confined with the RUN-level tier, exactly as the `on_stop` hook is (registry.rs) — the
         // same "no step context yet" problem, so the same answer.
         //
-        // The old rationale here was "baseline runs on the clean committed tree, so the judges
+        // The old rationale here was "baseline runs on the clean committed tree, so the verifiers
         // cannot have been tampered with yet". That is false ACROSS RUNS, and was demonstrated: the
-        // carve-out covers `rlt/private/`, but `rlt/judges/` is committed BY DESIGN (the moat), so a
-        // confined worker in run 1 rewrites a judge, rlt commits it, and run 2's baseline executes
+        // carve-out covers `rlt/private/`, but `rlt/verifiers/` is committed BY DESIGN (the moat), so a
+        // confined worker in run 1 rewrites a verifier, rlt commits it, and run 2's baseline executes
         // it — unconfined, before any jail exists — forging `merged` rows straight into the ledger.
         // `stalled` then reports met and an `abort_if: "stalled"` project has its worker end its own
         // run. Clean-and-committed is not the same as untampered.
-        let mut pre = ctx.eng.run_step(&ctx.dir, &rs, ruler, &judge_model, judge_timeout, "baseline", None, false, ctx.cfg.run_isolation());
-        // The RATCHET's references: a seed wins, else this pass measures them. A ratcheted judge
+        let mut pre = ctx.eng.run_step(&ctx.dir, &rs, ruler, &verifier_model, verifier_timeout, "baseline", None, false, ctx.cfg.run_isolation());
+        // The RATCHET's references: a seed wins, else this pass measures them. A ratcheted verifier
         // with no number — or one that errored with no seed — REFUSES the run here, before session
         // 1: a ratchet with nothing to compare against would silently pass every session. Then the
-        // conditions are re-read, so a `<judge>.ref` term sees the reference it was just given.
+        // conditions are re-read, so a `<verifier>.ref` term sees the reference it was just given.
         for w in ctx.eng.gate.seed(&pre.fresh_verdicts)? {
             eprintln!("  ⚠ {w}");
         }
@@ -72,7 +72,7 @@ impl Handler for Baseline {
         }
         crate::core::ratchet::save(&ctx.dir, &ctx.eng.gate.state)?;
         ctx.eng.reevaluate(&rs, &mut pre);
-        ctx.charge_ruler(&pre.judge_usage);
+        ctx.charge_ruler(&pre.verifier_usage);
         eprint!("{}", indent(&ctx.eng.scoreboard()));
         ctx.publish();
         let tier = ctx.cfg.run_isolation();
@@ -140,10 +140,10 @@ impl Handler for BackgroundSpawn {
 
 #[cfg(test)]
 mod tests {
-    /// The baseline pass must confine its judges with the RUN-level tier, not `Isolation::None`.
+    /// The baseline pass must confine its verifiers with the RUN-level tier, not `Isolation::None`.
     ///
-    /// This pins a real, reproduced bypass: `rlt/judges/` is committed by design (the moat), so a
-    /// sandboxed worker in run 1 can rewrite a judge, rlt commits it, and run 2's baseline — which
+    /// This pins a real, reproduced bypass: `rlt/verifiers/` is committed by design (the moat), so a
+    /// sandboxed worker in run 1 can rewrite a verifier, rlt commits it, and run 2's baseline — which
     /// used to hardcode `Isolation::None` on the premise that a clean committed tree is untampered —
     /// executed it before any jail existed, forging `merged` rows into `rlt/private/verdicts.jsonl`.
     /// `stalled` then reported met and an `abort_if: "stalled"` project ended its own run.
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(
             load("sandbox").run_isolation(),
             Isolation::Sandbox,
-            "a project with a sandboxed step must NOT baseline-judge unconfined — that is the bypass"
+            "a project with a sandboxed step must NOT baseline-verifier unconfined — that is the bypass"
         );
         // …and a project that asked for nothing still pays nothing: no behaviour change for the
         // default tier, which is what makes this fix safe to ship.

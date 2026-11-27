@@ -88,7 +88,7 @@ pub fn resolve_session(
 ) -> SessionResolution {
     let vetoed = file_exists(dir, red_file);
     // Discard the session's uncommitted tracked edits BEFORE leaving the branch — otherwise git
-    // carries them onto base at checkout and they'd be judged/merged as if they were committed work.
+    // carries them onto base at checkout and they'd be verified/merged as if they were committed work.
     if discard_uncommitted_tracked(dir) {
         eprintln!("  [iso] session #{session} left uncommitted edits — discarding (commit your work to keep it)");
     }
@@ -125,11 +125,11 @@ pub enum StagedSession {
     Vetoed,
     /// Merge couldn't apply — already aborted, branch kept for inspection, base unchanged.
     Conflict,
-    /// The worker committed nothing (no commits beyond base) — there is nothing to stage, judge,
+    /// The worker committed nothing (no commits beyond base) — there is nothing to stage, verifier,
     /// or commit. The branch is discarded and base is left exactly as-is. Treated like `Vetoed`:
     /// no merge, no rollback, no `finalize_session` call.
     NoChanges,
-    /// Merge applied and is STAGED (uncommitted). The loop must judge the merged tree, then call
+    /// Merge applied and is STAGED (uncommitted). The loop must verifier the merged tree, then call
     /// `finalize_session` to commit (keep) or roll back. `branch` carried for the keep/discard.
     Staged,
 }
@@ -170,7 +170,7 @@ pub fn stage_session(dir: &Path, base: &str, branch: &str, red_file: &str) -> St
     }
 }
 
-/// Second half of the ROLLBACK GATE: after judging a staged merge, KEEP it (commit + delete the
+/// Second half of the ROLLBACK GATE: after verifying a staged merge, KEEP it (commit + delete the
 /// branch) or ROLL IT BACK (abort the staged merge, leave base untouched, keep the branch for
 /// inspection). Only meaningful after `stage_session` returned `Staged`.
 pub fn finalize_session(dir: &Path, branch: &str, session: u32, keep: bool) -> SessionResolution {

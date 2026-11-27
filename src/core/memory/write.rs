@@ -17,7 +17,7 @@ use super::*;
 ///
 /// `supersede`: when true, a trailing entry whose header is `## session {n} (session-start)` is
 /// REPLACED by this one rather than a second entry appended. This is how the early enforced fold
-/// (the crash-insurance "session-start" floor) is upgraded in place by the post-judge refinement
+/// (the crash-insurance "session-start" floor) is upgraded in place by the post-verifier refinement
 /// — so a normally-completing session leaves exactly ONE entry, not two. When false (or there is
 /// no matching trailing floor entry), this is a plain append.
 pub fn fold_entry(dir: &Path, n: u32, source: &str, body: &str, max_kb: Option<u64>, supersede: bool) -> usize {
@@ -102,7 +102,7 @@ pub fn cap_to_kb(content: &str, max_kb: Option<u64>) -> String {
 
 /// Build the LAST SESSION block carried into the NEXT prompt's READ injection: the changed goal
 /// deltas this cycle + the current scoreboard. Pure formatting over data the loop already holds —
-/// no I/O. Each change line is truncated (a judge rationale can be long) and the whole block is
+/// no I/O. Each change line is truncated (a verifier rationale can be long) and the whole block is
 /// byte-capped.
 pub fn last_session_block(deltas: &[crate::core::engine::GoalDelta], scoreboard: &str) -> String {
     let mut out = String::new();
@@ -124,7 +124,7 @@ pub fn last_session_block(deltas: &[crate::core::engine::GoalDelta], scoreboard:
 
 /// Tier-3c mechanical fallback body from data the loop already has in hand. Cannot fail / needs
 /// no cooperation — guarantees the WRITE tier always has content. Used both for the early
-/// (pre-judge) fold and the post-judge refinement.
+/// (pre-verify) fold and the post-verifier refinement.
 #[allow(clippy::too_many_arguments)] // 8 already-computed session facts; a struct would not simplify
 pub fn mechanical_note(
     exit_code: Option<i32>,
@@ -167,7 +167,7 @@ pub fn mechanical_note(
     cap_bytes_keep_newest_chars(&out, BLOCK_MAX_BYTES)
 }
 
-/// Changed-goal lines, each truncated so a verbose judge rationale (embedded by
+/// Changed-goal lines, each truncated so a verbose verifier rationale (embedded by
 /// `GoalDelta::line()`) can't balloon the block / the prompt.
 fn changed_lines(deltas: &[crate::core::engine::GoalDelta]) -> Vec<String> {
     deltas

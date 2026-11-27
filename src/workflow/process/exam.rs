@@ -1,5 +1,5 @@
 //! An exam step (A-37): the result of earlier steps is its own check: a fresh examinee answers from
-//! what it may read, the step's checks, the answers' check and a grader judge the round, and a repairer fixes what they
+//! what it may read, the step's checks, the answers' check and a grader verifier the round, and a repairer fixes what they
 //! found, round after round, until the exam passes or a round finds what the one before found.
 
 use std::collections::BTreeSet;
@@ -9,7 +9,7 @@ use anyhow::anyhow;
 use super::exec::Ctx;
 use super::format::Worker;
 use super::proc::Proc;
-use crate::core::model::{Judge, JudgeKind, Verdict};
+use crate::core::model::{Verifier, VerifierKind, Verdict};
 use crate::driver::{Fatal, GateOutcome};
 use crate::workflow::{commit, with_lead, with_section, When};
 
@@ -39,7 +39,7 @@ impl Proc {
         let ids = self.exam_ids(ctx);
         let mut last = None;
         for round in 1..=rounds {
-            let verdict = self.exam_judged(ctx)?;
+            let verdict = self.exam_verified(ctx)?;
             if verdict.met() {
                 self.record(label, "done", true, verdict.rationale());
                 return Ok(());
@@ -73,9 +73,9 @@ impl Proc {
     }
 
     /// One round's verdict: the checks, then the examinee on a fresh copy, its hooks, the answers, the grader.
-    fn exam_judged(&self, ctx: &Ctx) -> Result<Verdict, Fatal> {
+    fn exam_verified(&self, ctx: &Ctx) -> Result<Verdict, Fatal> {
         for check in &ctx.step.checks {
-            let verdict = self.judge_now(&self.cached(&self.check_to_judge(ctx, check)?)?);
+            let verdict = self.verifier_now(&self.cached(&self.check_to_verifier(ctx, check)?)?);
             if !verdict.met() {
                 return Ok(verdict);
             }
@@ -91,8 +91,8 @@ impl Proc {
         if let Some(why) = self.examined(ctx)? {
             return Ok(Verdict::binary(false).with_rationale(why));
         }
-        let answers = self.judge(ctx, Some(&format!("{}-answers", ctx.key)), ctx.step.answers.as_deref().unwrap_or_default())?;
-        let (tasks, questions) = (self.judge_now(&self.cached(&answers)?), self.judge_now(&self.grader(ctx)?));
+        let answers = self.verifier(ctx, Some(&format!("{}-answers", ctx.key)), ctx.step.answers.as_deref().unwrap_or_default())?;
+        let (tasks, questions) = (self.verifier_now(&self.cached(&answers)?), self.verifier_now(&self.grader(ctx)?));
         if tasks.met() && questions.met() {
             return Ok(questions);
         }
@@ -100,12 +100,12 @@ impl Proc {
         Ok(Verdict::binary(false).with_rationale(found.join("\n")))
     }
 
-    /// The grader: a rubric judge on the critic role, with the step's critic settings.
-    fn grader(&self, ctx: &Ctx) -> Result<Judge, Fatal> {
+    /// The grader: a rubric verifier on the critic role, with the step's critic settings.
+    fn grader(&self, ctx: &Ctx) -> Result<Verifier, Fatal> {
         let s = self.rendered(ctx, self.settings.for_step(&ctx.key, ctx.id()))?;
         let roles = self.roles.as_ref().ok_or_else(|| anyhow!("{}: an exam needs the process's `roles`", ctx.label))?;
         let rubric = self.home.join(ctx.step.grader.as_deref().unwrap_or_default());
-        Ok(s.critic_of(roles.judge("critic", &format!("{}-grader", ctx.key), rubric))?)
+        Ok(s.critic_of(roles.verifier("critic", &format!("{}-grader", ctx.key), rubric))?)
     }
 
     /// The examinee's round, its result held to the step's hooks: a result that fails them is the examinee's own to fix,
@@ -127,13 +127,13 @@ impl Proc {
     fn exam_repaired(&self, ctx: &Ctx, found: &str) -> Result<Repair, Fatal> {
         let disputes = self.scratch(&format!("{}-disputes.md", ctx.key))?;
         let _ = std::fs::remove_file(&disputes);
-        let mut judges = vec![];
+        let mut verifiers = vec![];
         for check in &ctx.step.checks {
-            judges.push(self.check_to_judge(ctx, check)?);
+            verifiers.push(self.check_to_verifier(ctx, check)?);
         }
-        judges.push(self.judge(ctx, Some(&format!("{}-answers", ctx.key)), ctx.step.answers.as_deref().unwrap_or_default())?);
-        let listed: Vec<String> = judges.iter()
-            .filter_map(|j| match &j.kind { JudgeKind::Script { path } => Some(format!("- `{}`", path.display())), _ => None })
+        verifiers.push(self.verifier(ctx, Some(&format!("{}-answers", ctx.key)), ctx.step.answers.as_deref().unwrap_or_default())?);
+        let listed: Vec<String> = verifiers.iter()
+            .filter_map(|j| match &j.kind { VerifierKind::Script { path } => Some(format!("- `{}`", path.display())), _ => None })
             .collect();
         let repairer = self.worker_of(ctx, "repairer", ctx.step.repairer.as_ref())?;
         let step = with_lead(&repairer, &format!("## What the exam found\n\n{found}\n\n## The checks\n\nEach prints its \

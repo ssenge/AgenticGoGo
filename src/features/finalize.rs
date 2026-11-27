@@ -1,11 +1,11 @@
-//! The finalize feature group — the on-session-end tail: the post-judge memory refinement fold (`RefineFold`) and the run-stop decision (`CheckRunStop`).
+//! The finalize feature group — the on-session-end tail: the post-verifier memory refinement fold (`RefineFold`) and the run-stop decision (`CheckRunStop`).
 
 use anyhow::Result;
 
 use crate::loop_::{RLTScratch, RLTState, Flow, Handler, LifecycleEvent, LoopState, RunOutcome};
 
-/// Institutional memory: the post-judge refinement fold. Gated on the floor fold (`scratch.mem_folded`)
-/// and reads `scratch.rolled_back` + the summary — exactly the old post-judge fold.
+/// Institutional memory: the post-verifier refinement fold. Gated on the floor fold (`scratch.mem_folded`)
+/// and reads `scratch.rolled_back` + the summary — exactly the old post-verifier fold.
 pub struct RefineFold;
 impl Handler for RefineFold {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {

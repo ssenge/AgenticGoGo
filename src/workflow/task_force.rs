@@ -1,5 +1,5 @@
 //! The task force (A-30, A-35): when a step fails, an agent looks for the cause. Where it can, it repairs
-//! the cause in place, and the step is judged again; met, the run goes on. Otherwise it proposes to go back to
+//! the cause in place, and the step is verified again; met, the run goes on. Otherwise it proposes to go back to
 //! the earliest step whose result is wrong, with a note, and after a human's yes the run ends and [`run`]
 //! starts it again from there (A-29); or it leaves the failure to a human.
 
@@ -21,7 +21,7 @@ static LIMIT_SPENT: OnceLock<()> = OnceLock::new();
 /// The exit code of a halt whose step has no repairs left: only a human's change of what the step works on helps.
 pub const SPENT_EXIT: u8 = 6;
 
-/// How a failed step is judged again after a repair in place: `None` when it is met now, else why not.
+/// How a failed step is verified again after a repair in place: `None` when it is met now, else why not.
 pub type Again<'a> = &'a dyn Fn() -> Result<Option<String>, Fatal>;
 
 /// The task force's answer: `outcome` (`fixed`, `reenter` or `escalate`), the step to re-enter, the cause, the note.
@@ -61,7 +61,7 @@ impl Flow {
     }
 }
 
-/// Step `name` failed for `why`: the task force repairs it in place (when `again` can judge the step again), proposes
+/// Step `name` failed for `why`: the task force repairs it in place (when `again` can verifier the step again), proposes
 /// a re-entry a human decides, or leaves it to a human; without the task force, or past its limit, the run ends.
 pub(crate) fn fail(flow: &Flow, name: &str, why: &str, again: Option<Again>) -> Result<(), Fatal> {
     fail_from(flow, name, why, again, None)
@@ -101,12 +101,12 @@ fn fail_from(flow: &Flow, name: &str, why: &str, again: Option<Again>, base: Opt
 /// The task force's brief: the failure, the run's steps, and the answer it writes to `file`.
 fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: bool) -> String {
     let fixed = if in_place {
-        "`fixed`: you repaired the cause in place, and the failed step is judged again"
+        "`fixed`: you repaired the cause in place, and the failed step is verified again"
     } else {
-        "`fixed` is no answer here: this failure can't be judged again in place"
+        "`fixed` is no answer here: this failure can't be verified again in place"
     };
     let keep = flow.constraints.as_ref().and_then(|f| f(flow, name)).map(|c| format!(
-        "## What step {name} must keep to\n\nA repair in place is judged by all of the step's rules, not only the one \
+        "## What step {name} must keep to\n\nA repair in place is verified by all of the step's rules, not only the one \
          that failed: keep within these. Where the cause can't be repaired within them, answer `reenter` or \
          `escalate` instead.\n\n{c}\n\n")).unwrap_or_default();
     format!("## The failure\n\nStep {name} failed:\n\n{why}\n\n{keep}## The steps of this run, in order\n\n{}\n\nThis \
@@ -118,7 +118,7 @@ fn brief(flow: &Flow, name: &str, why: &str, file: &std::path::Path, in_place: b
             flow.seen().join(", "), flow.run.reentries, file.display())
 }
 
-/// The task force repaired the cause in place: the step judged again goes on when met; else what is left is a new
+/// The task force repaired the cause in place: the step verified again goes on when met; else what is left is a new
 /// failure, which the task force gets again while its limit lasts (a repair often uncovers the next point).
 fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head, base): (Again, &str, &str)) -> Result<(), Fatal> {
     flow.fixes.set(flow.fixes.get() + 1);
@@ -140,7 +140,7 @@ fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head, base): (Again, &str,
             }
         },
         Some(still) => {
-            flow.record(name, "task-force", false, &format!("{what}; judged again: {still}"));
+            flow.record(name, "task-force", false, &format!("{what}; verified again: {still}"));
             fail_from(flow, name, &format!("{still} (after the task force's repair in place)"), Some(again), Some(base))
         }
     }
@@ -150,8 +150,8 @@ fn fixed(flow: &Flow, name: &str, a: &Answer, (again, head, base): (Again, &str,
 /// or none set). Each verdict is recorded as a hook's is. They run as conditions: an unmet one rejects the repair
 /// and costs an attempt, but is no regression of the work for the gate to roll back.
 fn rejected(flow: &Flow, name: &str, base: &str) -> Option<String> {
-    let judges = flow.fix_checks.as_ref().map(|f| f(flow, name, base)).unwrap_or_default();
-    let failed: Vec<String> = judges.iter().filter_map(|j| {
+    let verifiers = flow.fix_checks.as_ref().map(|f| f(flow, name, base)).unwrap_or_default();
+    let failed: Vec<String> = verifiers.iter().filter_map(|j| {
         let verdict = flow.condition(j);
         flow.record(name, "hook", verdict.met(), &format!("task force check {}: {}", j.name, verdict.rationale()));
         (!verdict.met()).then(|| format!("{}: {}", j.name, verdict.rationale()))

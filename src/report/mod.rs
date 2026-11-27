@@ -3,7 +3,7 @@
 //! Before this existed, an embedding program had to piece the ending together from the exit code,
 //! `state.json`, `verdicts.jsonl` and `project.json` — all documented as INTERNAL, so any refactor of
 //! rlt could break every wrapper. The report is the stable interface instead: versioned, published
-//! as a JSON Schema (`docs/schemas/report.v3.json`), written atomically, and written on EVERY ending
+//! as a JSON Schema (`docs/schemas/report.v4.json`), written atomically, and written on EVERY ending
 //! rlt can observe — done, aborted, stopped, an error, and a panic inside rlt itself.
 //!
 //! ```text
@@ -57,7 +57,7 @@ pub fn fault_point(point: &str) -> anyhow::Result<()> {
 }
 
 /// The report format's version. Bump it on any change to the serialized shape (see module doc).
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// How the run ended, as a consumer should act on it. Authoritative over the exit code.
 ///
@@ -129,8 +129,8 @@ pub struct Report {
     pub finished_at: u64,
     pub sessions: Sessions,
     pub time: Time,
-    /// every judge the run consulted, by name.
-    pub judges: BTreeMap<String, JudgeEntry>,
+    /// every verifier the run consulted, by name.
+    pub verifiers: BTreeMap<String, VerifierEntry>,
     pub result: RunResult,
     pub open_asks: Vec<OpenAsk>,
     pub paths: Paths,
@@ -154,7 +154,7 @@ pub struct Session {
     pub rlt_version: String,
     /// `project,local` (the operator's own settings left out) or `all`.
     pub setting_sources: String,
-    /// the keys of the operator's settings `env` block the Claude workers and judges got (`user_env`).
+    /// the keys of the operator's settings `env` block the Claude workers and verifiers got (`user_env`).
     pub user_env: Vec<String>,
 }
 
@@ -185,28 +185,28 @@ pub struct Time {
     pub human_wait_time_s: f64,
 }
 
-/// One judge: what it said last, what it said before any work (the baseline pass), and — for a
-/// ratcheted judge — its ratchet.
+/// One verifier: what it said last, what it said before any work (the baseline pass), and — for a
+/// ratcheted verifier — its ratchet.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct JudgeEntry {
+pub struct VerifierEntry {
     pub last: Option<VerdictView>,
-    /// `null` on the driver path, which has no baseline pass (its judges are lazy).
+    /// `null` on the driver path, which has no baseline pass (its verifiers are lazy).
     pub baseline: Option<VerdictView>,
-    /// `null` for a judge that is not ratcheted.
+    /// `null` for a verifier that is not ratcheted.
     pub ratchet: Option<RatchetView>,
 }
 
-/// A verdict as the report states it: the judge contract, with `evidence` naming rlt's KEPT copies
-/// rather than the paths the judge declared (those pointed into a scratch that does not last).
+/// A verdict as the report states it: the verifier contract, with `evidence` naming rlt's KEPT copies
+/// rather than the paths the verifier declared (those pointed into a scratch that does not last).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VerdictView {
     pub met: bool,
-    /// `null` when the judge emitted no number (a binary judge, or a broken one) — never a fake 0.
+    /// `null` when the verifier emitted no number (a binary verifier, or a broken one) — never a fake 0.
     pub value: Option<f64>,
     pub max: Option<f64>,
     pub target: f64,
     pub rationale: String,
-    /// set when the judge could not grade at all, as distinct from "not met".
+    /// set when the verifier could not grade at all, as distinct from "not met".
     pub error: Option<String>,
     /// absolute paths of the evidence files rlt kept for this verdict, under `paths.evidence_dir`.
     /// Omitted when none were kept.
@@ -258,7 +258,7 @@ pub struct Paths {
     /// the per-gate verdict ledger. Its ROW FORMAT is internal; the path is given for auditing.
     pub ledger: String,
     pub log: String,
-    /// this run's kept judge evidence (`rlt/private/evidence/<run_id>`); `null` when none was kept.
+    /// this run's kept verifier evidence (`rlt/private/evidence/<run_id>`); `null` when none was kept.
     pub evidence_dir: Option<String>,
 }
 

@@ -155,7 +155,7 @@ fn profile(cwd: &Path, tmp: &Path, writable: &[PathBuf], denied: &[PathBuf], net
     // everything again, which is why the real-kernel test below asserts the effect, not the text.
     //
     // Write-only: `file-read*` is untouched above, so the worker still reads its own brief and a
-    // judge still reads `verdicts.jsonl`. Confining reads would break the loop for no gain — the
+    // verifier still reads `verdicts.jsonl`. Confining reads would break the loop for no gain — the
     // worker is handed this content in its prompt anyway.
     let denies: String = denied
         .iter()

@@ -17,8 +17,8 @@
 //!
 //! The walk is written as a cursor rather than as literal nested `for`s because the caller is the
 //! handler pipeline: `PickStep` asks for ONE step name per session and everything between two
-//! dispatches (the worker, the judges, the gate) happens in between. `until` is therefore evaluated
-//! at the top of the next lap — after the dispatch it is judging, which is the same order the
+//! dispatches (the worker, the verifiers, the gate) happens in between. `until` is therefore evaluated
+//! at the top of the next lap — after the dispatch it is verifying, which is the same order the
 //! pseudo-code above reads in.
 
 use crate::core::config::SeqStep;
@@ -26,7 +26,7 @@ use anyhow::{bail, Result};
 
 /// A cursor over `sequence.steps` yielding ONE step name per call, wrapping forever (§5.5).
 /// The `until` expression is evaluated by a caller-supplied closure, so the walk stays free of
-/// judge state.
+/// verifier state.
 pub struct Walk {
     entries: Vec<SeqStep>,
     idx: usize,
@@ -76,7 +76,7 @@ impl Walk {
                 //
                 // Advancing here (what this did until 2026-08-05) made exhaustion and convergence
                 // take the SAME branch, so a bound blown was indistinguishable from a bound
-                // respected. A real run spent three `survey` sessions against a judge that was
+                // respected. A real run spent three `survey` sessions against a verifier that was
                 // timing out, moved on as if it had converged, and the only trace was one log line.
                 //
                 // `times:` is NOT a contract — a fixed count that finishes is complete, not failed —

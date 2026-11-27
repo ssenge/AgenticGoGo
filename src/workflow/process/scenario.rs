@@ -23,7 +23,7 @@ use super::number::{number, Numbered};
 pub struct Rule {
     /// a regex over the prompt and the brief file it names
     pub when: String,
-    /// `worker` (the default) or `judge`
+    /// `worker` (the default) or `verifier`
     pub kind: Option<String>,
     /// `claude` or `codex`: only calls of that agent
     pub agent: Option<String>,
@@ -144,7 +144,7 @@ fn played(file: &Path, spec: &Process, list: &[Numbered], path: &Path, projects:
     let record: Vec<String> = lines(&project.join(&history)).iter().skip(before).map(record_line).collect();
     let sessions: Vec<String> = lines(&calls).iter().map(|c| format!("{} {}: {}", c["agent"].as_str().unwrap_or_default(), c["kind"].as_str().unwrap_or_default(), c["title"].as_str().unwrap_or_default())).collect();
     let mut wrong = problems;
-    wrong.extend(judged(&scenario.expect, &record, &sessions, code)?);
+    wrong.extend(verified(&scenario.expect, &record, &sessions, code)?);
     wrong.extend(kept(&scenario.expect, &project)?);
     if !wrong.is_empty() || keep {
         println!("== {}: exit {code}, {:.0} s, in {}", path.file_stem().and_then(|s| s.to_str()).unwrap_or_default(), start.elapsed().as_secs_f64(), work.display());
@@ -304,7 +304,7 @@ fn in_order(patterns: &[String], found: &[String]) -> Result<Option<String>> {
 
 /// What the run shows that the scenario doesn't expect: `record` and `sessions` (regexes, in order), `never` (regexes no
 /// record line matches) and `exit`.
-fn judged(expect: &Expect, record: &[String], sessions: &[String], code: i32) -> Result<Vec<String>> {
+fn verified(expect: &Expect, record: &[String], sessions: &[String], code: i32) -> Result<Vec<String>> {
     let mut wrong = vec![];
     for (key, patterns, found) in [("record", &expect.record, record), ("sessions", &expect.sessions, sessions)] {
         if let Some(missing) = in_order(patterns, found)? {
@@ -414,7 +414,7 @@ mod tests {
     fn what_a_run_shows_is_held_to_what_the_scenario_expects() {
         let expect: Expect = serde_yaml::from_str("record: ['^build done']\nsessions: ['claude worker']\nnever: [' task-force ']\nexit: 3\nfiles: { a.txt: 'x+' }\n").unwrap();
         let (record, sessions) = (strings(&["build done met: fine", "ship task-force unmet: no"]), strings(&["claude worker: Step build"]));
-        let wrong = judged(&expect, &record, &sessions, 0).unwrap();
+        let wrong = verified(&expect, &record, &sessions, 0).unwrap();
         assert_eq!(wrong, ["never: ship task-force unmet: no", "exit: 0, expected 3"]);
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(kept(&expect, tmp.path()).unwrap(), ["files: a.txt doesn't match \"x+\""]);

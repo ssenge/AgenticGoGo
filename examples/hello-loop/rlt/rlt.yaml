@@ -1,5 +1,5 @@
-# rlt.yaml — harness + steps + sequence, all in one file. A judge IS a goal, resolved by NAME
-# from rlt/judges/<name>.{sh,md} (then ~/.rlt/judges/).
+# rlt.yaml — harness + steps + sequence, all in one file. A verifier IS a goal, resolved by NAME
+# from rlt/verifiers/<name>.{sh,md} (then ~/.rlt/verifiers/).
 project: "hello"
 
 # Inherited by EVERY step; a step body may override any of these.
@@ -8,11 +8,11 @@ defaults:
   model: "claude-haiku-4-5-20251001" # haiku — costs next to nothing to try
   state: "state/STATE.md"            # worker-curated forward advice; under gitignored rlt/state/ (created at runtime)
 
-# THE RULER — runs the LLM judges + the summarizer. Immutable across the run.
-judge:
+# THE RULER — runs the rubric verifiers + the summarizer. Immutable across the run.
+verifier:
   agent: "claude"
   model: "claude-haiku-4-5-20251001"
-  timeout: 300                     # seconds, EVERY judge (script + LLM)
+  timeout: 300                     # seconds, EVERY verifier (script + LLM)
 
 # The step palette. The NAME is your own label; the body is overrides only.
 steps:
@@ -22,10 +22,10 @@ steps:
 sequence:
   steps:
     - "worker"                     # run `worker`, forever, until done_if fires
-  done_if: "prints_two"            # your Definition of Done: the `prints_two` judge is met
+  done_if: "prints_two"            # your Definition of Done: the `prints_two` verifier is met
   abort_if: "over_iterations OR work_time >= 3600"   # a ceiling (SECONDS), not part of the DoD
   # ASK FOR HELP WITHOUT STOPPING. `notify_if` is the non-terminal twin of `abort_if`: when it is
-  # true rlt runs `notify.cmd` and the loop KEEPS RUNNING. `stalled` is a judge that ships inside
+  # true rlt runs `notify.cmd` and the loop KEEPS RUNNING. `stalled` is a verifier that ships inside
   # the binary (it reads rlt/private/verdicts.jsonl), so this runs as-is — nothing to author.
   # `stalled` is safe HERE because the sequence above has no `until: "NOT stalled"` repeat: name one
   # detector in both and you get paged a cycle BEFORE the recovery step runs (docs/CONFIG.md, "the
@@ -34,7 +34,7 @@ sequence:
   notify_if: "stalled"
   notify:
     cooldown_sessions: 3           # at most one ping per 3 sessions — don't nag (default 3; 0 = every cycle)
-    # {{reason}} is the firing judge's rationale; rlt shell-quotes every {{…}}, so DON'T quote it
+    # {{reason}} is the firing verifier's rationale; rlt shell-quotes every {{…}}, so DON'T quote it
     # yourself. {{project}} / {{session}} / {{step}} are available too.
     # NOTIFY.log goes in rlt/state/, NOT rlt/private/: under `isolation: sandbox` notify.cmd is
     # confined with the step, and `private/` is carved out of that writable set — a ping that

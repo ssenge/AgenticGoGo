@@ -1,13 +1,13 @@
-//! The LIVE STATUS document — `rlt status --json`, schema `docs/schemas/status.v1.json` (A-17).
+//! The LIVE STATUS document — `rlt status --json`, schema `docs/schemas/status.v2.json` (A-17).
 //!
 //! The report answers "how did it end"; this answers "where is it now", for a program watching a run
 //! from another process. Its field names are the report's wherever the two say the same thing
-//! (`run_id`, `stop_reason`, `sessions`, `time`, `judges.*.last`, `open_asks`, `detectors`, `usage`,
+//! (`run_id`, `stop_reason`, `sessions`, `time`, `verifiers.*.last`, `open_asks`, `detectors`, `usage`,
 //! `waiting`, `paths`), so one parser reads both.
 //!
 //! Cheap by construction: it reads the snapshot the loop publishes (`state.json`), the open asks
 //! (`asks.jsonl`, refreshed by [`DashboardState::read`]) and whether the run's process is alive
-//! (`run.pid`). It never runs a judge and never takes a lock the loop holds.
+//! (`run.pid`). It never runs a verifier and never takes a lock the loop holds.
 //!
 //! ⚠ Like the report, ANY change to the serialized shape bumps [`SCHEMA_VERSION`] and ships a new
 //! `docs/schemas/status.v<N>.json`; the schema is strict so the test catches a field that lands
@@ -22,7 +22,7 @@ use super::{Detectors, OpenAsk, Paths, RatchetView, Sessions, Time, VerdictView,
 use crate::state::DashboardState;
 
 /// The status document's version. Bump it on any change to the serialized shape.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// One run's live status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,8 +49,8 @@ pub struct Status {
     pub lifetime_session: u32,
     pub time: Time,
     pub sessions: Sessions,
-    /// every judge the run consulted, by name.
-    pub judges: BTreeMap<String, LiveJudge>,
+    /// every verifier the run consulted, by name.
+    pub verifiers: BTreeMap<String, LiveVerifier>,
     pub detectors: Detectors,
     pub open_asks: Vec<OpenAsk>,
     /// running totals; the per-session breakdown is in the report.
@@ -69,14 +69,14 @@ pub struct CurrentStep {
     pub model: Option<String>,
 }
 
-/// One judge, as it stands.
+/// One verifier, as it stands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LiveJudge {
+pub struct LiveVerifier {
     /// its latest verdict; `null` until it has run.
     pub last: Option<VerdictView>,
-    /// counted toward `done_if` (the DoD-set), as opposed to a control judge like `stalled`.
+    /// counted toward `done_if` (the DoD-set), as opposed to a control verifier like `stalled`.
     pub in_dod: bool,
-    /// `null` for a judge that is not ratcheted.
+    /// `null` for a verifier that is not ratcheted.
     pub ratchet: Option<RatchetView>,
 }
 
@@ -107,11 +107,11 @@ pub fn build(s: &DashboardState, running: bool, now: u64, paths: Paths) -> Statu
         agent: s.step_agent.clone(),
         model: Some(s.step_model.clone()).filter(|m| !m.is_empty()),
     });
-    let judges = s
-        .judge_views()
+    let verifiers = s
+        .verifier_views()
         .iter()
         .map(|j| {
-            let live = LiveJudge { last: super::build::last_verdict(j), in_dod: j.in_dod, ratchet: s.ratchet.get(&j.name).cloned() };
+            let live = LiveVerifier { last: super::build::last_verdict(j), in_dod: j.in_dod, ratchet: s.ratchet.get(&j.name).cloned() };
             (j.name.clone(), live)
         })
         .collect();
@@ -129,7 +129,7 @@ pub fn build(s: &DashboardState, running: bool, now: u64, paths: Paths) -> Statu
         lifetime_session: s.lifetime_session,
         time: live_time(s, running, now),
         sessions: s.sessions.clone(),
-        judges,
+        verifiers,
         detectors: s.detectors.clone(),
         open_asks: s.asks.iter().map(super::build::open_ask).collect(),
         usage: s.usage.clone(),
@@ -152,7 +152,7 @@ fn live_time(s: &DashboardState, running: bool, now: u64) -> Time {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{AskView, JudgeView};
+    use crate::state::{AskView, VerifierView};
 
     fn snapshot() -> DashboardState {
         let mut s = DashboardState {
@@ -163,9 +163,9 @@ mod tests {
             session: 3,
             clock_started_at: 1_000,
             time: Time { wall_time_s: 50.0, work_time_s: 40.0, human_wait_time_s: 10.0 },
-            judges: vec![
-                JudgeView { name: "cc".into(), state: "met".into(), met: true, judged: true, value: Some(7.0), in_dod: true, ..Default::default() },
-                JudgeView { name: "stalled".into(), state: "pending".into(), ..Default::default() },
+            verifiers: vec![
+                VerifierView { name: "cc".into(), state: "met".into(), met: true, verified: true, value: Some(7.0), in_dod: true, ..Default::default() },
+                VerifierView { name: "stalled".into(), state: "pending".into(), ..Default::default() },
             ],
             asks: vec![AskView { id: "a1".into(), case: "choose".into(), options: Some(vec!["x".into(), "y".into()]), age_secs: 9, ..Default::default() }],
             ..Default::default()
@@ -177,16 +177,16 @@ mod tests {
         s
     }
 
-    /// A live run: the step with an unpinned model, judges keyed by name with their ratchet, asks
+    /// A live run: the step with an unpinned model, verifiers keyed by name with their ratchet, asks
     /// with options, the clock ticking against `now`, and no stop reason yet.
     #[test]
     fn a_running_snapshot_reads_as_a_live_status() {
         let st = build(&snapshot(), true, 1_100, Paths::default());
-        assert_eq!((st.schema_version, st.run_id.as_deref(), st.running, st.stop_reason), (1, Some("run-1"), true, None));
+        assert_eq!((st.schema_version, st.run_id.as_deref(), st.running, st.stop_reason), (2, Some("run-1"), true, None));
         assert_eq!(st.current_step, Some(CurrentStep { name: "work".into(), agent: "claude".into(), model: None }));
-        assert_eq!(st.judges["cc"].ratchet.as_ref().and_then(|r| r.reference), Some(8.0));
-        assert!(st.judges["cc"].last.as_ref().is_some_and(|v| v.met && v.value == Some(7.0)));
-        assert!(st.judges["stalled"].last.is_none(), "a judge that has not run has no verdict");
+        assert_eq!(st.verifiers["cc"].ratchet.as_ref().and_then(|r| r.reference), Some(8.0));
+        assert!(st.verifiers["cc"].last.as_ref().is_some_and(|v| v.met && v.value == Some(7.0)));
+        assert!(st.verifiers["stalled"].last.is_none(), "a verifier that has not run has no verdict");
         assert_eq!(st.open_asks[0].options.as_deref(), Some(&["x".to_string(), "y".to_string()][..]));
         assert_eq!((st.time.wall_time_s, st.time.work_time_s), (100.0, 90.0), "the clock ticks while it runs");
     }
@@ -197,11 +197,11 @@ mod tests {
     fn a_stopped_snapshot_reads_as_published() {
         let mut s = snapshot();
         s.finished = true;
-        s.finish_reason = "3/3 judges met".into();
+        s.finish_reason = "3/3 verifiers met".into();
         s.run_id.clear();
         s.step.clear();
         let st = build(&s, false, 1_100, Paths::default());
-        assert_eq!((st.running, st.finished, st.stop_reason.as_deref()), (false, true, Some("3/3 judges met")));
+        assert_eq!((st.running, st.finished, st.stop_reason.as_deref()), (false, true, Some("3/3 verifiers met")));
         assert_eq!((st.run_id, st.current_step), (None, None));
         assert_eq!(st.time.wall_time_s, 50.0, "not running: the last published clock");
     }

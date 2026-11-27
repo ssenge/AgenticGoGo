@@ -38,5 +38,5 @@ Chose recursive-descent over a table-driven parser. Rejected alternatives are in
 ## 2026-05-22
 * **Creation**: [Parser approach](parser-approach.md).
 ```
-4. Just edit files — you NEVER run git (no `add`/`commit`/`merge`/`push`). rlt version-controls and commits your work automatically, runs each session on its own throwaway branch, and keeps the work only if the judges pass. Everything is handled for you, including `rlt/state/` (your STATE.md and the wiki).
+4. Just edit files — you NEVER run git (no `add`/`commit`/`merge`/`push`). rlt version-controls and commits your work automatically, runs each session on its own throwaway branch, and keeps the work only if the verifiers pass. Everything is handled for you, including `rlt/state/` (your STATE.md and the wiki).
 5. Inside `rlt/`, write only under `rlt/state/` (STATE.md, `wiki/`, scratch). `rlt/private/` is rlt's own bookkeeping — your brief, the verdict ledger, the operator bus: read it if useful, never write it. Under `isolation: sandbox` those writes just fail; don't spend a session fighting it.

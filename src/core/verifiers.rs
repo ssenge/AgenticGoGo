@@ -1,62 +1,62 @@
-//! Judges resolved by NAME, from disk — there is no registry (§5.1).
+//! Verifiers resolved by NAME, from disk — there is no registry (§5.1).
 //!
 //! ```text
 //! all_tests_pass
-//!   1. rlt/judges/all_tests_pass.sh   → script judge      (THIS project's — shadows everything)
-//!   2. rlt/judges/all_tests_pass.md   → LLM judge; the FILE IS THE RUBRIC
-//!   3. ~/.rlt/judges/all_tests_pass.* → the STANDARD LIBRARY (below)
+//!   1. rlt/verifiers/all_tests_pass.sh   → script verifier      (THIS project's — shadows everything)
+//!   2. rlt/verifiers/all_tests_pass.md   → rubric verifier; the FILE IS THE RUBRIC
+//!   3. ~/.rlt/verifiers/all_tests_pass.* → the STANDARD LIBRARY (below)
 //!   4. else → HARD ERROR AT STARTUP, listing what IS available
 //! ```
-//! The **extension decides the kind**: `.sh` = script, `.md` = rubric ⇒ LLM. An `.md` judge
+//! The **extension decides the kind**: `.sh` = script, `.md` = rubric ⇒ LLM. An `.md` verifier
 //! declares its `inputs:` in its OWN yaml frontmatter — one self-contained file, no registry.
 //!
 //! # The standard library ships INSIDE the binary (§6.1)
-//! The judges are `include_str!`'d — exactly as [`crate::skills`] does the `/rlt:*` skills — and
-//! rlt writes them to `~/.rlt/judges/` on `rlt init`, and on `rlt run` when a file is missing or
-//! has DRIFTED from the embedded copy. Install rlt → the judges are installed. No `rlt judges`
+//! The verifiers are `include_str!`'d — exactly as [`crate::skills`] does the `/rlt:*` skills — and
+//! rlt writes them to `~/.rlt/verifiers/` on `rlt init`, and on `rlt run` when a file is missing or
+//! has DRIFTED from the embedded copy. Install rlt → the verifiers are installed. No `rlt verifiers`
 //! subcommand, no HTTP client, no network.
 //!
 //! # Security (§6.1)
-//! `~/.rlt/judges/` is worker-writable and outside git/rollback: one session that writes there
+//! `~/.rlt/verifiers/` is worker-writable and outside git/rollback: one session that writes there
 //! corrupts the grader for every project on the machine. So (a) rlt NEVER hands the worker that
 //! path, and (b) [`ensure_library`] verifies every library file against its embedded copy on
 //! startup and rewrites any drift.
 
-use crate::core::model::JudgeKind;
+use crate::core::model::VerifierKind;
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// The standard judge library, embedded at compile time from the same `plugin/judges/` files the
+/// The standard verifier library, embedded at compile time from the same `plugin/verifiers/` files the
 /// Claude plugin ships. `(filename, body)`. Parameterless by convention (§5.1); anything needing an
-/// argument is a three-line script in the project's own `rlt/judges/`.
+/// argument is a three-line script in the project's own `rlt/verifiers/`.
 pub const LIBRARY: &[(&str, &str)] = &[
-    ("cargo_test.sh", include_str!("../../plugin/judges/cargo_test.sh")),
-    ("build_ok.sh", include_str!("../../plugin/judges/build_ok.sh")),
-    ("lint_clean.sh", include_str!("../../plugin/judges/lint_clean.sh")),
-    ("git_clean.sh", include_str!("../../plugin/judges/git_clean.sh")),
-    ("no_regression.sh", include_str!("../../plugin/judges/no_regression.sh")),
-    ("stalled.sh", include_str!("../../plugin/judges/stalled.sh")),
-    ("cmd_exit.sh", include_str!("../../plugin/judges/cmd_exit.sh")),
-    ("grep_count.sh", include_str!("../../plugin/judges/grep_count.sh")),
+    ("cargo_test.sh", include_str!("../../plugin/verifiers/cargo_test.sh")),
+    ("build_ok.sh", include_str!("../../plugin/verifiers/build_ok.sh")),
+    ("lint_clean.sh", include_str!("../../plugin/verifiers/lint_clean.sh")),
+    ("git_clean.sh", include_str!("../../plugin/verifiers/git_clean.sh")),
+    ("no_regression.sh", include_str!("../../plugin/verifiers/no_regression.sh")),
+    ("stalled.sh", include_str!("../../plugin/verifiers/stalled.sh")),
+    ("cmd_exit.sh", include_str!("../../plugin/verifiers/cmd_exit.sh")),
+    ("grep_count.sh", include_str!("../../plugin/verifiers/grep_count.sh")),
 ];
 
-/// `~/.rlt/judges/` — the user-home library dir. `None` if `$HOME` is unset.
-pub fn home_judges_dir() -> Option<PathBuf> {
-    std::env::home_dir().map(|h| h.join(".rlt").join("judges"))
+/// `~/.rlt/verifiers/` — the user-home library dir. `None` if `$HOME` is unset.
+pub fn home_verifiers_dir() -> Option<PathBuf> {
+    std::env::home_dir().map(|h| h.join(".rlt").join("verifiers"))
 }
 
-/// A project's own judges dir: `<config_base>/judges/` (i.e. `rlt/judges/`, COMMITTED).
-pub fn project_judges_dir(config_base: &Path) -> PathBuf {
-    config_base.join("judges")
+/// A project's own verifiers dir: `<config_base>/verifiers/` (i.e. `rlt/verifiers/`, COMMITTED).
+pub fn project_verifiers_dir(config_base: &Path) -> PathBuf {
+    config_base.join("verifiers")
 }
 
-/// Write the embedded library to `~/.rlt/judges/`, (re)writing any file that is missing or has
+/// Write the embedded library to `~/.rlt/verifiers/`, (re)writing any file that is missing or has
 /// DRIFTED from its embedded copy (§6.1 security). Best-effort: a home dir we cannot write is a
-/// warning, not a hard failure — the loop still runs against project judges.
+/// warning, not a hard failure — the loop still runs against project verifiers.
 pub fn ensure_library() -> Result<()> {
-    let Some(dir) = home_judges_dir() else {
-        eprintln!("  ⚠ no home directory — skipping the ~/.rlt/judges standard library install");
+    let Some(dir) = home_verifiers_dir() else {
+        eprintln!("  ⚠ no home directory — skipping the ~/.rlt/verifiers standard library install");
         return Ok(());
     };
     std::fs::create_dir_all(&dir)?;
@@ -73,12 +73,12 @@ pub fn ensure_library() -> Result<()> {
     Ok(())
 }
 
-/// Resolve a judge NAME to its runnable [`JudgeKind`], searching (in order) the project's
-/// `rlt/judges/`, then `~/.rlt/judges/`. `.sh` before `.md` at each level. HARD ERROR listing what
+/// Resolve a verifier NAME to its runnable [`VerifierKind`], searching (in order) the project's
+/// `rlt/verifiers/`, then `~/.rlt/verifiers/`. `.sh` before `.md` at each level. HARD ERROR listing what
 /// exists if nothing resolves (§5.1 step 4).
-pub fn resolve(name: &str, config_base: &Path) -> Result<JudgeKind> {
-    let proj = project_judges_dir(config_base);
-    let home = home_judges_dir();
+pub fn resolve(name: &str, config_base: &Path) -> Result<VerifierKind> {
+    let proj = project_verifiers_dir(config_base);
+    let home = home_verifiers_dir();
     // search order: project .sh, project .md, home .sh, home .md.
     let mut candidates: Vec<PathBuf> =
         vec![proj.join(format!("{name}.sh")), proj.join(format!("{name}.md"))];
@@ -93,27 +93,27 @@ pub fn resolve(name: &str, config_base: &Path) -> Result<JudgeKind> {
         return Ok(kind_for(&path));
     }
     bail!(
-        "no judge named `{name}` — resolved neither rlt/judges/{name}.{{sh,md}} nor \
-         ~/.rlt/judges/{name}.{{sh,md}}.\n  available judges: {}",
+        "no verifier named `{name}` — resolved neither rlt/verifiers/{name}.{{sh,md}} nor \
+         ~/.rlt/verifiers/{name}.{{sh,md}}.\n  available verifiers: {}",
         available(config_base).join(", ")
     );
 }
 
-/// The [`JudgeKind`] for a resolved file: extension decides. An `.md` reads its `inputs:` from its
+/// The [`VerifierKind`] for a resolved file: extension decides. An `.md` reads its `inputs:` from its
 /// own frontmatter here, at resolution time.
-pub(crate) fn kind_for(path: &Path) -> JudgeKind {
+pub(crate) fn kind_for(path: &Path) -> VerifierKind {
     if path.extension().and_then(|e| e.to_str()) == Some("md") {
         let inputs = std::fs::read_to_string(path)
             .ok()
             .map(|t| parse_inputs(&crate::core::vars::apply(&t).unwrap_or(t)))
             .unwrap_or_default();
-        JudgeKind::Llm { path: path.to_path_buf(), inputs }
+        VerifierKind::Llm { path: path.to_path_buf(), inputs }
     } else {
-        JudgeKind::Script { path: path.to_path_buf() }
+        VerifierKind::Script { path: path.to_path_buf() }
     }
 }
 
-/// Every judge name that resolves for `config_base` — project judges plus the library — for the
+/// Every verifier name that resolves for `config_base` — project verifiers plus the library — for the
 /// "here is what exists" hint on a resolution failure.
 pub fn available(config_base: &Path) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
@@ -134,8 +134,8 @@ pub fn available(config_base: &Path) -> Vec<String> {
             }
         }
     };
-    push_dir(&project_judges_dir(config_base));
-    if let Some(h) = home_judges_dir() {
+    push_dir(&project_verifiers_dir(config_base));
+    if let Some(h) = home_verifiers_dir() {
         push_dir(&h);
     }
     names.sort();
@@ -148,8 +148,8 @@ struct Frontmatter {
     inputs: Vec<String>,
 }
 
-/// Parse the `inputs:` list from an `.md` judge's yaml frontmatter (the leading `---`…`---` block).
-/// No frontmatter, or no `inputs:`, ⇒ an empty list (a rubric judge that reads nothing).
+/// Parse the `inputs:` list from an `.md` verifier's yaml frontmatter (the leading `---`…`---` block).
+/// No frontmatter, or no `inputs:`, ⇒ an empty list (a rubric verifier that reads nothing).
 fn parse_inputs(md: &str) -> Vec<String> {
     let t = md.trim_start_matches('\u{feff}').trim_start();
     let Some(rest) = t.strip_prefix("---") else { return vec![] };

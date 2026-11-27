@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Built-in judge: cargo test → verdict JSON. Counts passed/total from the summary.
+# Built-in verifier: cargo test → verdict JSON. Counts passed/total from the summary.
 # met when all tests pass. Parameterless: name `cargo_test` in a done_if/abort_if condition and it resolves by NAME.
 out="$(cargo test 2>&1)"
 # parse "test result: ok. N passed; M failed"

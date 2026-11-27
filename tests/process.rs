@@ -122,7 +122,7 @@ fn steps(dir: &Path) -> Vec<(String, String)> {
 
 const AUTO: &str = "auto_approve: [cp-survey, cp-build]\n";
 
-/// The process runs in file order, its steps numbered from position: scripts, an agent judged by checks and a critic,
+/// The process runs in file order, its steps numbered from position: scripts, an agent verified by checks and a critic,
 /// checkpoints approved by the project's setting, an `each` over the plan's units with its last-item check, a step whose
 /// condition is unmet and one the settings skip; the phase hooks run around the phase.
 #[test]
@@ -155,7 +155,7 @@ fn a_process_runs_in_file_order_with_numbers_from_position() {
     assert!(!std::fs::read_to_string(d.join(".git/step-hooks.log")).unwrap().is_empty(), "the step hook ran");
     let declared: Vec<String> = history(d).iter().filter(|e| e["kind"] == "hook" && e["step"] == "1.3 Survey")
         .map(|e| e["rationale"].as_str().unwrap_or_default().to_string()).filter(|r| r.contains("worked")).collect();
-    assert_eq!(declared.len(), 1, "a declared judge named in the hooks file ran after the step: {:?}", history(d));
+    assert_eq!(declared.len(), 1, "a declared verifier named in the hooks file ran after the step: {:?}", history(d));
     assert!(declared[0].starts_with("after worked"), "{declared:?}");
 }
 
@@ -239,7 +239,7 @@ fn a_checkpoint_asks_a_human_and_a_decision_in_the_yes_goes_back_to_its_owner() 
                "asked once, then standing: {h:#?}");
 }
 
-/// A failed step goes to the task force, which repairs the cause in place; the step is judged again and met, and the
+/// A failed step goes to the task force, which repairs the cause in place; the step is verified again and met, and the
 /// task force's brief names the step's rubric.
 #[test]
 fn the_task_force_repairs_a_failed_step_in_place() {
@@ -254,7 +254,7 @@ fn the_task_force_repairs_a_failed_step_in_place() {
     assert!(fixed["rationale"].as_str().unwrap().starts_with("fixed in place"), "{fixed}");
     assert_eq!(fixed["id"], "survey");
     let briefs = read(d, ".git/rlt-worker.args");
-    assert!(briefs.contains("## What step 1.3 Survey must keep to") && briefs.contains("judges/survey-review.md"), "the rubric is in the task force's brief");
+    assert!(briefs.contains("## What step 1.3 Survey must keep to") && briefs.contains("verifiers/survey-review.md"), "the rubric is in the task force's brief");
     assert!(briefs.contains("the app lives in `app/`"), "the process's own section is in it");
     assert!(steps(d).contains(&("1.3 Survey".to_string(), "done".to_string())));
 }
@@ -470,7 +470,7 @@ fn check_and_list_read_only_the_file_and_a_bad_process_is_not_run() {
 
 // ---- A-38: what every process run needs -----------------------------------------------------------------------
 
-/// A process home with a script-only process and its scripts (a script step prints a verdict JSON, as a judge does): `write` makes `out/result.txt` (and a script under
+/// A process home with a script-only process and its scripts (a script step prints a verdict JSON, as a verifier does): `write` makes `out/result.txt` (and a script under
 /// `scripts-out/` when the project has `.bad-script`, or no output when it has `.no-output`), `drop` removes the
 /// result when the project has `.drop`, `read` reads it.
 fn mini_home() -> tempfile::TempDir {
@@ -585,9 +585,9 @@ fn play(dir: &Path, files: &[&str]) -> Output {
 }
 
 /// A scenario plays the example's first steps on a copy of a project with scripted agents: the worker writes what its rule
-/// says, the critic's judges are met by default, and the record and the calls are checked against what it expects.
+/// says, the critic's verifiers are met by default, and the record and the calls are checked against what it expects.
 const PASSES: &str = "project: app\nargs: [--until, survey]\nagents:\n  - { when: 'Survey', write: { work.log: \"session\\n\", survey.md: surveyed } }\n\
-    expect:\n  record: ['^survey done met']\n  sessions: ['^claude worker', '^codex judge']\n  never: ['task-force']\n  files: { survey.md: 'surveyed' }\n  exit: 0\n";
+    expect:\n  record: ['^survey done met']\n  sessions: ['^claude worker', '^codex verifier']\n  never: ['task-force']\n  files: { survey.md: 'surveyed' }\n  exit: 0\n";
 /// The same run, expected to show what it doesn't, and a checkpoint's ask nobody foresaw.
 const FAILS: &str = "project: app\nargs: [--until, cp-survey]\nagents:\n  - { when: 'Survey', write: { work.log: \"session\\n\" } }\n\
     expect:\n  record: ['^survey done met', '^never-happens']\n  exit: 0\n";
@@ -824,7 +824,7 @@ impl Hosted {
         let copy = Command::new("cp").arg("-R").arg(process_file().parent().unwrap()).arg(&home).status().unwrap();
         assert!(copy.success());
         let file = std::fs::read_to_string(home.join("process.yaml")).unwrap();
-        std::fs::write(home.join("process.yaml"), file.replace("rlt: { judge_timeout: 60 }", &format!("rlt: {{ judge_timeout: 60{rlt} }}"))).unwrap();
+        std::fs::write(home.join("process.yaml"), file.replace("rlt: { verifier_timeout: 60 }", &format!("rlt: {{ verifier_timeout: 60{rlt} }}"))).unwrap();
         std::fs::create_dir_all(&shims).unwrap();
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("settings.json"),

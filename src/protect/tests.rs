@@ -86,7 +86,7 @@ fn delete_and_recreate_is_caught_and_an_identical_recreate_is_not_a_change() {
         }),
         ["tests/oracles/x.json"]
     );
-    // same bytes, same mode, new inode: nothing a judge could observe changed.
+    // same bytes, same mode, new inode: nothing a verifier could observe changed.
     assert!(caught(|r| {
         fs::remove_file(r.join("tests/oracles/x.json")).unwrap();
         fs::write(r.join("tests/oracles/x.json"), "orig").unwrap();

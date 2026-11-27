@@ -1,6 +1,6 @@
 //! A scripted coding agent for scenario mode (A-38): installed as `claude` and as
 //! `codex` (hidden subcommand `rlt scripted-agent <claude|codex> <the agent's arguments>`), it does what the scenario's
-//! first matching rule says, answers as the real agent's output format does, and logs each call. A judge without a rule
+//! first matching rule says, answers as the real agent's output format does, and logs each call. A verifier without a rule
 //! is met; a worker without one changes nothing.
 
 use std::io::Read;
@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::scenario::{Rule, Scenario};
 
-/// What rlt asks every rubric judge for, last in its prompt.
+/// What rlt asks every rubric verifier for, last in its prompt.
 const VERDICT: &str = "Output ONLY a single JSON object";
 const MET: &str = r#"{"met": true, "value": 1, "max": 1, "target": 1, "rationale": "scripted: met"}"#;
 
@@ -41,11 +41,11 @@ fn answer(agent: &str, args: &[String]) -> Result<(), String> {
     let (scenario, log) = (env("RLT_SCENARIO")?, PathBuf::from(env("RLT_SCENARIO_LOG")?));
     let rules = Scenario::read(Path::new(&scenario))?.agents;
     let prompt = brief(&prompt_of(agent, args), &cwd);
-    let kind = if prompt.contains(VERDICT) { "judge" } else { "worker" };
+    let kind = if prompt.contains(VERDICT) { "verifier" } else { "worker" };
     let index = rule_for(&rules, &prompt, agent, kind, &log)?;
     let rule = index.map(|i| rules[i].clone()).unwrap_or_default();
     act(&rule, &cwd, &prompt)?;
-    let said = rule.say.clone().unwrap_or_else(|| if kind == "judge" { MET.to_string() } else { "done".into() });
+    let said = rule.say.clone().unwrap_or_else(|| if kind == "verifier" { MET.to_string() } else { "done".into() });
     let line = json!({"agent": agent, "kind": kind, "rule": index, "title": title(&prompt)});
     let mut text = std::fs::read_to_string(&log).unwrap_or_default();
     text.push_str(&format!("{line}\n"));
@@ -60,7 +60,7 @@ fn env(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("{name} is not set"))
 }
 
-/// The prompt: `-p <prompt>` for a claude worker, the last argument for a codex one; on stdin for a judge (claude's `-p`
+/// The prompt: `-p <prompt>` for a claude worker, the last argument for a codex one; on stdin for a verifier (claude's `-p`
 /// with no argument, codex's `-`), since one argument is capped.
 fn prompt_of(agent: &str, args: &[String]) -> String {
     let stdin = || {
@@ -104,7 +104,7 @@ fn calls(log: &Path) -> Vec<Value> {
 }
 
 /// The first rule matching the prompt (`when`, a regex), the agent (`agent`, if given) and the kind of call (`kind`:
-/// `worker`, the default, or `judge`) that has calls left (`times`, unbounded if unset).
+/// `worker`, the default, or `verifier`) that has calls left (`times`, unbounded if unset).
 fn rule_for(rules: &[Rule], prompt: &str, agent: &str, kind: &str, log: &Path) -> Result<Option<usize>, String> {
     let used: Vec<Option<u64>> = calls(log).iter().map(|c| c["rule"].as_u64()).collect();
     for (i, rule) in rules.iter().enumerate() {
@@ -182,13 +182,13 @@ mod tests {
     fn the_first_matching_rule_with_calls_left_answers() {
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("calls.jsonl");
-        let rs = rules("- { when: '^# Step build', times: 1 }\n- { when: 'build', agent: codex }\n- { when: 'verdict', kind: judge }\n- { when: '^# Step' }\n");
+        let rs = rules("- { when: '^# Step build', times: 1 }\n- { when: 'build', agent: codex }\n- { when: 'verdict', kind: verifier }\n- { when: '^# Step' }\n");
         let ask = |prompt: &str, agent: &str, kind: &str| rule_for(&rs, prompt, agent, kind, &log).unwrap();
         assert_eq!(ask("# Step build\n", "claude", "worker"), Some(0));
         std::fs::write(&log, "{\"rule\": 0}\n").unwrap();
         assert_eq!(ask("# Step build\n", "claude", "worker"), Some(3), "rule 0 is used up, rule 1 is codex's");
         assert_eq!(ask("# Step build\n", "codex", "worker"), Some(1));
-        assert_eq!(ask("the verdict", "claude", "judge"), Some(2));
+        assert_eq!(ask("the verdict", "claude", "verifier"), Some(2));
         assert_eq!(ask("the verdict", "claude", "worker"), None);
         assert!(rule_for(&rules("- { when: '(' }\n"), "x", "claude", "worker", &log).is_err());
     }

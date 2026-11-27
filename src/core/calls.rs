@@ -14,8 +14,8 @@
 //! ## Relationship to `verdicts.jsonl`
 //!
 //! Different questions, both durable. `verdicts.jsonl` records what a GATE decided about a span —
-//! one row per judge per gate, the record of what landed. This file records what the DRIVER asked
-//! for, at call time, in order. A judge consulted three times in one span appears once per gate
+//! one row per verifier per gate, the record of what landed. This file records what the DRIVER asked
+//! for, at call time, in order. A verifier consulted three times in one span appears once per gate
 //! there and three times here.
 
 use crate::core::model::Verdict;
@@ -58,11 +58,11 @@ impl NoteLevel {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CallRecord {
     Step { ord: u64, label: String, outcome: StepOutcome, ts: u64 },
-    /// ⛔ `tokens`/`cost` are on Judge as well as on Step, and that is NOT redundancy. Judges spend:
+    /// ⛔ `tokens`/`cost` are on Verifier as well as on Step, and that is NOT redundancy. Verifiers spend:
     /// an LLM rubric is a real ruler call charged to the run counters. Restoring counters from the
-    /// last `Step` record alone would drop every judge's bill on the floor, and `over_budget` would
+    /// last `Step` record alone would drop every verifier's bill on the floor, and `over_budget` would
     /// gain that much fresh headroom on every resume — a laundered ceiling is a moat hole.
-    Judge { ord: u64, label: String, judge: String, verdict: Verdict, tokens: u64, cost: f64, ts: u64 },
+    Verify { ord: u64, label: String, verifier: String, verdict: Verdict, tokens: u64, cost: f64, ts: u64 },
     /// ⛔ REQUIRED, and not merely for symmetry: it is the truncate boundary. Without a Gate record
     /// [`truncate_to_base`] has no record kind to search for and the OD-12 rule is unimplementable
     /// against its own schema — a resumed gate would re-execute a real merge.
@@ -94,7 +94,7 @@ impl CallRecord {
     pub fn ord(&self) -> u64 {
         match self {
             CallRecord::Step { ord, .. }
-            | CallRecord::Judge { ord, .. }
+            | CallRecord::Verify { ord, .. }
             | CallRecord::Gate { ord, .. }
             | CallRecord::Note { ord, .. }
             | CallRecord::Hil { ord, .. } => *ord,
@@ -104,15 +104,15 @@ impl CallRecord {
     pub fn label(&self) -> &str {
         match self {
             CallRecord::Step { label, .. }
-            | CallRecord::Judge { label, .. }
+            | CallRecord::Verify { label, .. }
             | CallRecord::Gate { label, .. }
             | CallRecord::Note { label, .. }
             | CallRecord::Hil { label, .. } => label,
         }
     }
 
-    /// WHAT this call was, as the identity a resumed run must match: a step's step-name, a judge's
-    /// judge-name, `gate`, or `note:<level>`.
+    /// WHAT this call was, as the identity a resumed run must match: a step's step-name, a verifier's
+    /// verifier-name, `gate`, or `note:<level>`.
     ///
     /// The level is part of a note's identity on purpose — an `info` that has become an `ask` is a
     /// changed control flow, and answering the second from the first would replay a `block()` as a
@@ -120,7 +120,7 @@ impl CallRecord {
     pub fn what(&self) -> String {
         match self {
             CallRecord::Step { outcome, .. } => outcome.step.clone(),
-            CallRecord::Judge { judge, .. } => judge.clone(),
+            CallRecord::Verify { verifier, .. } => verifier.clone(),
             CallRecord::Gate { .. } => "gate".into(),
             CallRecord::Note { level, .. } => format!("note:{}", level.tag()),
             // ONE tag for all three calls, deliberately: the divergence check compares it, and a
@@ -133,10 +133,10 @@ impl CallRecord {
     /// Spend to restore into the run counters when this record is fast-forwarded.
     ///
     /// A `Step`'s counters are CUMULATIVE as of that step (they are assigned, not added); a
-    /// `Judge`'s are that judge's own bill and accumulate on top. `None` = assign, `Some` = add.
+    /// `Verifier`'s are that verifier's own bill and accumulate on top. `None` = assign, `Some` = add.
     pub fn spend(&self) -> Option<(u64, f64)> {
         match self {
-            CallRecord::Judge { tokens, cost, .. } => Some((*tokens, *cost)),
+            CallRecord::Verify { tokens, cost, .. } => Some((*tokens, *cost)),
             _ => None,
         }
     }
@@ -276,7 +276,7 @@ fn aside(path: &Path) -> std::path::PathBuf {
 fn kind_of(r: &CallRecord) -> &'static str {
     match r {
         CallRecord::Step { .. } => "step",
-        CallRecord::Judge { .. } => "judge",
+        CallRecord::Verify { .. } => "verify",
         CallRecord::Gate { .. } => "gate",
         CallRecord::Note { .. } => "note",
         CallRecord::Hil { .. } => "hil",
@@ -434,15 +434,15 @@ mod tests {
         assert!(load(&d).unwrap().is_empty(), "the file is rewritten empty, not left stale");
     }
 
-    /// A judge's spend rides on its OWN record. Restoring counters from `Step` records alone would
-    /// drop every judge's bill and hand `over_budget` fresh headroom on every resume.
+    /// A verifier's spend rides on its OWN record. Restoring counters from `Step` records alone would
+    /// drop every verifier's bill and hand `over_budget` fresh headroom on every resume.
     #[test]
-    fn a_judge_record_carries_its_own_spend() {
-        let d = tmp("judgespend");
-        let j = CallRecord::Judge {
+    fn a_verifier_record_carries_its_own_spend() {
+        let d = tmp("verifierspend");
+        let j = CallRecord::Verify {
             ord: 0,
             label: "cycle 1/2".into(),
-            judge: "load_ok".into(),
+            verifier: "load_ok".into(),
             verdict: Verdict::binary(true),
             tokens: 137_000,
             cost: 2.81,

@@ -4,11 +4,11 @@
 //! before the worker starts; [`after_worker`] does it again the moment the worker exits and diffs
 //! the two. A difference is a `protected_path_violation`:
 //!
-//! 1. the paths are put back from rlt's own copies — BEFORE judging, so no judge ever grades
+//! 1. the paths are put back from rlt's own copies — BEFORE verifying, so no verifier ever grades
 //!    against a weakened oracle;
 //! 2. a row lands in `rlt/private/violations.jsonl` with the paths;
 //! 3. the open span is marked, and the next gate ([`crate::features::gate::keep_or_rollback`])
-//!    rolls it back whatever the judges said and whatever `gate_regressions` is set to.
+//!    rolls it back whatever the verifiers said and whatever `gate_regressions` is set to.
 //!
 //! Both calls sit inside `LaunchWorker`, around `run_session` and nothing else, so the window they
 //! compare is exactly the worker's. A change made AFTER the check — by a process the worker left
@@ -114,7 +114,7 @@ pub fn after_worker(ctx: &mut LoopState, step: &ResolvedStep) -> Result<()> {
 
 /// Restore `changed` to `want`, record the violation, and PROVE the restore by re-reading. Any
 /// failure is a hard error: a weakened oracle left on disk is what this feature exists to prevent,
-/// so the run stops rather than judge against it.
+/// so the run stops rather than verifier against it.
 fn undo(
     ctx: &LoopState,
     set: &PatternSet,
@@ -140,5 +140,5 @@ fn undo(
         ts: crate::util::now_epoch(),
     };
     crate::protect::append(&ctx.dir, &rec).context("recording the protected_path_violation")?;
-    restored.context("could not restore the protected paths — stopping rather than judging against them")
+    restored.context("could not restore the protected paths — stopping rather than verifying against them")
 }

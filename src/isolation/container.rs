@@ -23,7 +23,7 @@
 //! # The agent runtime
 //! [`containerize`] confines a command against any image. Running the AGENT CLI in there — the
 //! image contract, a fresh `HOME`, credentials by name or read-only mount, the project owner's uid,
-//! judges on a read-only project — is [`containerize_spec`] driven by [`super::runtime`], and the
+//! verifiers on a read-only project — is [`containerize_spec`] driven by [`super::runtime`], and the
 //! startup check that each image has its CLI is [`super::probe`].
 
 use anyhow::{bail, Result};
@@ -66,7 +66,7 @@ pub fn container_engine() -> Option<&'static str> {
 /// the engine client — which is correct, since killing it tears down the attached run.
 ///
 /// Env is forwarded as `-e K=V`, not by setting it on the engine process: a container does NOT
-/// inherit the caller's environment, so anything the caller set (a script judge's `RLT_*` contract)
+/// inherit the caller's environment, so anything the caller set (a script verifier's `RLT_*` contract)
 /// would otherwise be silently dropped. A `.env_remove()` needs no counterpart — the container
 /// starts from the image's environment, so the variable is absent already.
 ///
@@ -91,11 +91,11 @@ pub struct Spec<'a> {
     pub image: &'a str,
     /// extra host paths mounted read-write at the same path.
     pub writable: &'a [PathBuf],
-    /// extra host paths mounted READ-ONLY at the same path (a library judge's directory).
+    /// extra host paths mounted READ-ONLY at the same path (a library verifier's directory).
     pub readonly: &'a [PathBuf],
     /// this step's `readonly` minus `writable` — added to the derived `rlt/private/` carve-out.
     pub denies: &'a [String],
-    /// mount the project READ-ONLY (a judge grades the tree, it never changes it).
+    /// mount the project READ-ONLY (a verifier grades the tree, it never changes it).
     pub project_ro: bool,
     /// the container's `HOME`: a host dir mounted read-write at the same path. The agent's own
     /// state lives here, not in the host's `~` — which is not in the container at all.
@@ -106,7 +106,7 @@ pub struct Spec<'a> {
     /// `~`-relative host files mounted read-only at the same place under `home` when they exist (an
     /// agent's credential file). Added to the run's `isolation_policy.credentials`.
     pub credential_files: &'a [&'a str],
-    /// keep the container's stdin open (`-i`): a judge's prompt comes on it.
+    /// keep the container's stdin open (`-i`): a verifier's prompt comes on it.
     pub stdin: bool,
 }
 
@@ -281,7 +281,7 @@ fn credential_mounts(home: &Path, agent_files: &[&str], run: &[PathBuf]) -> Vec<
 /// The engine binary to use: `docker` if it runs, else `podman`. `None` = neither.
 ///
 /// Probed ONCE per process: the answer cannot meaningfully change mid-run, and the probe is a
-/// subprocess we would otherwise pay for on every session, judge, and doctor check.
+/// subprocess we would otherwise pay for on every session, verifier, and doctor check.
 fn engine() -> Option<&'static str> {
     static ENGINE: OnceLock<Option<&'static str>> = OnceLock::new();
     *ENGINE.get_or_init(|| ENGINES.iter().copied().find(|e| runnable(e)))
@@ -404,12 +404,12 @@ mod tests {
     #[test]
     fn containerize_denies_the_per_step_paths_and_still_carves_out_private() {
         let cwd = std::env::temp_dir().join(format!("rlt-container-deny-{}", std::process::id()));
-        std::fs::create_dir_all(cwd.join("rlt/judges")).unwrap();
-        let cmd = containerize(Command::new("true"), &cwd, &[], &["rlt/judges".to_string()], DEFAULT_IMAGE)
+        std::fs::create_dir_all(cwd.join("rlt/verifiers")).unwrap();
+        let cmd = containerize(Command::new("true"), &cwd, &[], &["rlt/verifiers".to_string()], DEFAULT_IMAGE)
             .expect("build the run");
         let args = argv(&cmd);
         let ro = |p: PathBuf| format!("{p}:{p}:ro", p = canonical(&p).display());
-        assert!(args.contains(&ro(cwd.join("rlt/judges"))), "the step's deny is mounted :ro: {args:?}");
+        assert!(args.contains(&ro(cwd.join("rlt/verifiers"))), "the step's deny is mounted :ro: {args:?}");
         assert!(
             args.contains(&ro(crate::paths::private_dir(&canonical(&cwd)))),
             "the DERIVED carve-out survives the per-step list: {args:?}"
@@ -425,9 +425,9 @@ mod tests {
     fn containerize_denies_a_path_that_does_not_exist_yet() {
         let cwd = std::env::temp_dir().join(format!("rlt-container-absent-{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
-        let absent = cwd.join("rlt/judges");
+        let absent = cwd.join("rlt/verifiers");
         assert!(!absent.exists(), "the point of the test is that it is not there");
-        let cmd = containerize(Command::new("true"), &cwd, &[], &["rlt/judges".to_string()], DEFAULT_IMAGE)
+        let cmd = containerize(Command::new("true"), &cwd, &[], &["rlt/verifiers".to_string()], DEFAULT_IMAGE)
             .expect("build the run");
         let want = format!("{p}:{p}:ro", p = canonical(&absent).display());
         assert!(argv(&cmd).contains(&want), "an absent deny still binds: {:?}", argv(&cmd));
@@ -439,11 +439,11 @@ mod tests {
     #[test]
     fn containerize_forwards_the_inner_command_env() {
         let mut inner = Command::new("true");
-        inner.env("RLT_JUDGE", "answered").env_remove("SHOULD_BE_ABSENT");
+        inner.env("RLT_VERIFIER", "answered").env_remove("SHOULD_BE_ABSENT");
         let cmd =
             containerize(inner, &std::env::temp_dir(), &[], &[], DEFAULT_IMAGE).expect("build the run");
         let args = argv(&cmd);
-        assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "RLT_JUDGE=answered"), "env forwarded: {args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "-e" && w[1] == "RLT_VERIFIER=answered"), "env forwarded: {args:?}");
         // a removal needs no flag: the container starts from the image's env, so it is absent already
         assert!(!args.iter().any(|a| a.contains("SHOULD_BE_ABSENT")), "no flag for a removal: {args:?}");
     }

@@ -81,12 +81,12 @@ fn project(sessions_needed: usize) -> tempfile::TempDir {
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
         git(d, args);
     }
-    std::fs::create_dir_all(d.join("rlt/judges")).unwrap();
-    write_exe(&d.join("rlt/judges/check.sh"), &format!(
+    std::fs::create_dir_all(d.join("rlt/verifiers")).unwrap();
+    write_exe(&d.join("rlt/verifiers/check.sh"), &format!(
         "#!/bin/sh\nn=$(cat work.log 2>/dev/null | wc -l | tr -d ' ')\n\
          if [ \"$n\" -ge {sessions_needed} ]; then m=true; else m=false; fi\n\
          printf '{{\"met\": %s, \"rationale\": \"%s sessions\"}}\\n' $m $n\n"));
-    std::fs::write(d.join("rlt/judges/review.md"), "Is the work right?\n").unwrap();
+    std::fs::write(d.join("rlt/verifiers/review.md"), "Is the work right?\n").unwrap();
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "baseline"]);
     tmp
@@ -105,11 +105,11 @@ fn flow(dir: &Path, run: Run) -> Flow {
 /// An agent step named in the flow `name`, its worker step named after its role, as a driver names them.
 fn task(name: &str) -> Task {
     Task::new(Step::new("builder").model("fake").prompt("Do the work.")).named(name)
-        .check(Judge::script("check", "rlt/judges/check.sh"))
+        .check(Verifier::script("check", "rlt/verifiers/check.sh"))
 }
 
-fn critic() -> Judge {
-    Judge::rubric("review", "rlt/judges/review.md").agent(Agent::Codex)
+fn critic() -> Verifier {
+    Verifier::rubric("review", "rlt/verifiers/review.md").agent(Agent::Codex)
 }
 
 /// The kinds the history recorded for step `name`, in order.
@@ -137,7 +137,7 @@ fn a_failed_check_is_repaired_and_the_critic_runs_only_after_it() {
     assert_eq!(critic_calls(tmp.path()).len(), 1, "the critic ran once, after the check was met");
     assert_eq!(git(tmp.path(), &["show", "main:work.log"]).lines().count(), 2, "both sessions' work landed");
     let briefs = std::fs::read_to_string(tmp.path().join(".git/rlt-worker.args")).unwrap();
-    assert!(briefs.contains("## How your result is reviewed") && briefs.contains("rlt/judges/check.sh"));
+    assert!(briefs.contains("## How your result is reviewed") && briefs.contains("rlt/verifiers/check.sh"));
     assert!(briefs.contains("## Review to address"), "the repair round got the check's rationale");
 }
 
@@ -194,11 +194,11 @@ fn the_next_attempt_after_an_unmet_one_keeps_the_note() {
 fn a_script_step_commits_and_an_unmet_condition_skips_without_a_session() {
     let tmp = project(1);
     let d = tmp.path();
-    write_exe(&d.join("rlt/judges/write.sh"), "#!/bin/sh\necho data > out.txt\necho '{\"met\": true, \"rationale\": \"wrote\"}'\n");
-    write_exe(&d.join("rlt/judges/never.sh"), "#!/bin/sh\necho '{\"met\": false, \"rationale\": \"no database\"}'\n");
+    write_exe(&d.join("rlt/verifiers/write.sh"), "#!/bin/sh\necho data > out.txt\necho '{\"met\": true, \"rationale\": \"wrote\"}'\n");
+    write_exe(&d.join("rlt/verifiers/never.sh"), "#!/bin/sh\necho '{\"met\": false, \"rationale\": \"no database\"}'\n");
     let f = flow(d, Run::default());
-    f.script_step("1 Write", &Judge::script("write", "rlt/judges/write.sh")).unwrap();
-    assert!(!f.applies("2 Migrate", &Judge::script("never", "rlt/judges/never.sh")).unwrap());
+    f.script_step("1 Write", &Verifier::script("write", "rlt/verifiers/write.sh")).unwrap();
+    assert!(!f.applies("2 Migrate", &Verifier::script("never", "rlt/verifiers/never.sh")).unwrap());
     f.flush().unwrap();
     assert_eq!(git(d, &["show", "main:out.txt"]), "data");
     assert_eq!((kinds(&f, "1 Write"), kinds(&f, "2 Migrate")), (vec!["tool".to_string()], vec!["skipped".to_string()]));
@@ -284,7 +284,7 @@ fn a_step_whose_instructions_changed_is_told_how() {
     let tmp = project(1);
     let d = tmp.path();
     let docs = |prompt: &str| Task::new(Step::new("writer").model("fake").prompt(prompt)).named("2 Docs")
-        .check(Judge::script("check", "rlt/judges/check.sh")).inputs(["docs/"]);
+        .check(Verifier::script("check", "rlt/verifiers/check.sh")).inputs(["docs/"]);
     let f = flow(d, Run::default());
     assert_eq!(f.task(&task("1 Build")).unwrap(), Outcome::Done);
     assert_eq!(f.task(&docs("Write the docs.")).unwrap(), Outcome::Done);
@@ -421,12 +421,12 @@ fn answer_yes(dir: &Path) -> std::thread::JoinHandle<()> {
 fn a_condition_that_flips_between_steps_is_no_regression() {
     let tmp = project(1);
     let d = tmp.path();
-    write_exe(&d.join("rlt/judges/cond.sh"), "#!/bin/sh\nif [ -f cond.on ]; then m=true; else m=false; fi\n\
+    write_exe(&d.join("rlt/verifiers/cond.sh"), "#!/bin/sh\nif [ -f cond.on ]; then m=true; else m=false; fi\n\
                                              printf '{\"met\": %s, \"rationale\": \"cond\"}\\n' $m\n");
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "the condition"]);
     std::fs::write(d.join("cond.on"), "").unwrap();
-    let cond = Judge::script("cond", "rlt/judges/cond.sh");
+    let cond = Verifier::script("cond", "rlt/verifiers/cond.sh");
     let f = flow(d, Run::default());
     assert!(f.applies("1 Prepare", &cond).unwrap());
     assert_eq!(f.task(&task("2 Build")).unwrap(), Outcome::Done);
@@ -504,10 +504,10 @@ fn a_decision_outside_a_steps_inputs_needs_no_session() {
     assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), sessions);
 }
 
-/// A-35: the task force repairs a failed step's cause in place; judged again and met, the step is done and the run
+/// A-35: the task force repairs a failed step's cause in place; verified again and met, the step is done and the run
 /// goes on, recorded with what the task force changed.
 #[test]
-fn the_task_force_repairs_in_place_and_the_step_judged_again_goes_on() {
+fn the_task_force_repairs_in_place_and_the_step_verified_again_goes_on() {
     let tmp = project(2);
     let d = tmp.path();
     std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: a tool was missing\nnote: installed it\n").unwrap();
@@ -524,7 +524,7 @@ fn the_task_force_repairs_in_place_and_the_step_judged_again_goes_on() {
     assert!(relentless::core::asks::open(d).is_empty(), "a repair in place asks no one");
 }
 
-/// A-35: a repair in place the step's judges still don't meet is a new failure: the task force gets it again (here
+/// A-35: a repair in place the step's verifiers still don't meet is a new failure: the task force gets it again (here
 /// it has no answer the second time, and the run ends for a human).
 #[test]
 fn a_repair_in_place_still_unmet_goes_to_the_task_force_again() {
@@ -537,7 +537,7 @@ fn a_repair_in_place_still_unmet_goes_to_the_task_force_again() {
     let force: Vec<String> = f.steps().entries().iter().filter(|e| e["kind"] == "task-force")
         .map(|e| e["rationale"].as_str().unwrap_or_default().to_string()).collect();
     assert_eq!(force.len(), 2, "{force:?}");
-    assert!(force[0].contains("judged again: 2 sessions"), "{force:?}");
+    assert!(force[0].contains("verified again: 2 sessions"), "{force:?}");
     assert!(force[1].starts_with("no re-entry: no answer"), "the second round: {force:?}");
 }
 
@@ -553,7 +553,7 @@ fn the_history_written_between_two_task_force_rounds_is_kept() {
     assert!(matches!(f.task(&task("1 Build")).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
     let force: Vec<String> = f.steps().entries().iter().filter(|e| e["kind"] == "task-force")
         .map(|e| e["rationale"].as_str().unwrap_or_default().to_string()).collect();
-    assert!(force.iter().any(|r| r.contains("judged again")), "the first round's entry survives: {force:?}");
+    assert!(force.iter().any(|r| r.contains("verified again")), "the first round's entry survives: {force:?}");
     assert!(relentless::protect::read(d).is_empty(), "no violation: {:?}", relentless::protect::read(d));
 }
 
@@ -574,14 +574,14 @@ fn a_repair_in_place_still_unmet_past_the_limit_ends_the_run() {
     assert!(kept.contains("\"fixes\":1"), "the repair is kept for a restart: {kept}");
 }
 
-/// A step whose judge fails to run is not graded: no repair round (a worker can't fix a judge), and never met.
+/// A step whose verifier fails to run is not graded: no repair round (a worker can't fix a verifier), and never met.
 #[test]
-fn a_step_whose_judge_fails_to_run_is_not_graded() {
+fn a_step_whose_verifier_fails_to_run_is_not_graded() {
     let tmp = project(1);
     let d = tmp.path();
     let f = flow(d, Run::default());
     let t = Task::new(Step::new("builder").model("fake").prompt("Do the work.")).named("1 Rules")
-        .check(Judge::script("broken", "rlt/judges/missing.sh")).repairs(2);
+        .check(Verifier::script("broken", "rlt/verifiers/missing.sh")).repairs(2);
     assert!(matches!(f.task(&t).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
     assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), 1, "no repair session");
     assert!(!kinds(&f, "1 Rules").contains(&"done".to_string()));
@@ -608,7 +608,7 @@ fn a_script_step_repaired_in_place_runs_its_script_again() {
     std::fs::write(d.join("task-force.answer"), "outcome: fixed\ncause: no log\nnote: wrote one\n").unwrap();
     let force = Step::new("task-force").model("fake").prompt("Find the cause.");
     let f = flow(d, Run::default()).on_failure(force, 3);
-    f.script_step("1 Count", &Judge::script("check", "rlt/judges/check.sh")).unwrap();
+    f.script_step("1 Count", &Verifier::script("check", "rlt/verifiers/check.sh")).unwrap();
     f.flush().unwrap();
     assert_eq!(kinds(&f, "1 Count"), ["tool", "task-force", "tool"]);
 }
@@ -618,13 +618,13 @@ fn a_script_step_repaired_in_place_runs_its_script_again() {
 fn a_blocked_check_fails_without_a_repair_round() {
     let tmp = project(1);
     let d = tmp.path();
-    write_exe(&d.join("rlt/judges/blocked.sh"),
+    write_exe(&d.join("rlt/verifiers/blocked.sh"),
               "#!/bin/sh\necho '{\"met\": false, \"blocked_by\": \"bindings.lock.yaml\", \"rationale\": \"no tool\"}'\n");
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "a blocked check"]);
     let f = flow(d, Run::default());
     let t = Task::new(Step::new("builder").model("fake").prompt("Do the work.")).named("1 Rules")
-        .check(Judge::script("blocked", "rlt/judges/blocked.sh")).repairs(2);
+        .check(Verifier::script("blocked", "rlt/verifiers/blocked.sh")).repairs(2);
     assert!(matches!(f.task(&t).unwrap_err(), Fatal::Ended(RunOutcome::Halt)));
     assert_eq!(std::fs::read_to_string(d.join("work.log")).unwrap().lines().count(), 1, "no repair session");
 }

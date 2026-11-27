@@ -1,5 +1,5 @@
 //! Whether a run's worker agent can be reached at all, asked once before the run's first step: one tiny call with the
-//! worker's own flags and environment (not a judge's: a judge loads the operator's settings, so it would pass where
+//! worker's own flags and environment (not a verifier's: a verifier loads the operator's settings, so it would pass where
 //! the worker, started without them, fails), and the cause named when it fails.
 
 use std::path::Path;

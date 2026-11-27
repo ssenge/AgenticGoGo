@@ -1,16 +1,16 @@
-//! Core data model: judges, verdicts, lifecycle states.
+//! Core data model: verifiers, verdicts, lifecycle states.
 //!
-//! A [`Judge`] is a goal made executable (§7.1 — "a judge IS a goal"): resolved by NAME from disk
+//! A [`Verifier`] is a goal made executable (§7.1 — "a verifier IS a goal"): resolved by NAME from disk
 //! (§5.1), it carries its run-set membership and the [`Lifecycle`] derived from its verdict
-//! history, so we can detect `Regressed` — a judge that was met and is now unmet. A [`Verdict`] is
-//! what a judge returns each step.
+//! history, so we can detect `Regressed` — a verifier that was met and is now unmet. A [`Verdict`] is
+//! what a verifier returns each step.
 
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Derived lifecycle state of a judge across steps.
+/// Derived lifecycle state of a verifier across steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lifecycle {
@@ -36,13 +36,13 @@ impl Lifecycle {
     }
 }
 
-/// Uniform judge output — the judge contract. Every judge (script or LLM) prints
+/// Uniform verifier output — the verifier contract. Every verifier (script or LLM) prints
 /// exactly this JSON to stdout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Verdict {
     pub met: bool,
-    /// numeric measure the judge emitted: a count, a percent, or 0/1. `None` = the judge emitted NO
-    /// number (a binary goal says only `met`; a broken judge emits nothing usable). `Some(0.0)` is a
+    /// numeric measure the verifier emitted: a count, a percent, or 0/1. `None` = the verifier emitted NO
+    /// number (a binary goal says only `met`; a broken verifier emits nothing usable). `Some(0.0)` is a
     /// REAL, measured zero and is DISTINCT from absent — `coverage.value == 0` must tell the two
     /// apart (`core::stop`), and `verdicts.jsonl` records the difference faithfully.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,21 +57,21 @@ pub struct Verdict {
     pub rationale: String,
     #[serde(default)]
     pub evidence: Vec<String>,
-    /// set when the judge itself failed to run (vs. a clean "not met")
+    /// set when the verifier itself failed to run (vs. a clean "not met")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// the judge's own measurements moved in DIFFERENT directions (several tools, one says better,
+    /// the verifier's own measurements moved in DIFFERENT directions (several tools, one says better,
     /// one says worse), so a ratchet must not count this verdict as an improvement. Optional in the
     /// contract; absent = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mixed: bool,
-    /// met VACUOUSLY: there was nothing to measure (a `scope: changed` metric judge whose session
+    /// met VACUOUSLY: there was nothing to measure (a `scope: changed` metric verifier whose session
     /// changed no file its analyzer applies to). It moves nothing at the gate — no improvement, no
-    /// regression, and it does not replace the judge's last landed reading. Absent = false.
+    /// regression, and it does not replace the verifier's last landed reading. Absent = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vacuous: bool,
     /// what the goal waits on lies in another step's result (a path or a step's name), so no repair of the
-    /// judged work can meet it. Optional in the contract; absent = nothing blocks it.
+    /// verified work can meet it. Optional in the contract; absent = nothing blocks it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_by: Option<String>,
 }
@@ -81,16 +81,16 @@ fn one() -> f64 {
 }
 
 impl Verdict {
-    /// Construct the verdict for a judge that failed to execute.
+    /// Construct the verdict for a verifier that failed to execute.
     pub fn failed(error: impl Into<String>) -> Self {
         let error = error.into();
         Verdict {
             met: false,
-            // a broken judge emitted no number — not a measured 0.
+            // a broken verifier emitted no number — not a measured 0.
             value: None,
             max: None,
             target: 1.0,
-            rationale: format!("judge failed: {error}"),
+            rationale: format!("verifier failed: {error}"),
             evidence: vec![],
             error: Some(error),
             mixed: false,
@@ -99,7 +99,7 @@ impl Verdict {
         }
     }
 
-    /// A BINARY verdict: `met` and nothing else. `value` stays `None` — a binary judge emits no
+    /// A BINARY verdict: `met` and nothing else. `value` stays `None` — a binary verifier emits no
     /// number, and flattening that to `0` is a bug rlt has already shipped once (`verdicts.rs` is
     /// deliberately careful to keep absent absent).
     pub fn binary(met: bool) -> Self {
@@ -121,7 +121,7 @@ impl Verdict {
     ///
     /// `met` is `value >= max` — a cardinal goal is met when the count reaches its denominator.
     /// (BUILD.md §0.1 gives the signature and not the rule; this is the reading that makes
-    /// `scored(7.0, 10.0)` and `scored(10.0, 10.0)` mean the obvious things.) A judge whose
+    /// `scored(7.0, 10.0)` and `scored(10.0, 10.0)` mean the obvious things.) A verifier whose
     /// threshold is NOT its denominator says so explicitly and keeps the number:
     /// `Verdict::binary(pct >= 85.0).with_value(pct).with_max(100.0)`.
     pub fn scored(value: f64, max: f64) -> Self {
@@ -155,24 +155,24 @@ impl Verdict {
     // ---- readers ----
     //
     // The fields are `pub` and stay `pub` (this crate has no facade); these exist because a driver
-    // reads a verdict inline — `if rlt.judge(&x).met()` — where a field access on a temporary reads
+    // reads a verdict inline — `if rlt.verifier(&x).met()` — where a field access on a temporary reads
     // worse, and because `value_or` has no field twin.
 
-    /// Did the judge say GOOD? On the driver path `met` ALWAYS means good — `gate()`'s regression
+    /// Did the verifier say GOOD? On the driver path `met` ALWAYS means good — `gate()`'s regression
     /// rule is "was met, now unmet", which only means "worse" under that convention. An inverted
     /// detector (the shipped `stalled`, met-when-bad) must be inverted before it is used here.
     pub fn met(&self) -> bool {
         self.met
     }
 
-    /// The measured number, or `None` for a binary judge. ⛔ NEVER a fabricated `0` — `Some(0.0)` is
+    /// The measured number, or `None` for a binary verifier. ⛔ NEVER a fabricated `0` — `Some(0.0)` is
     /// a real, measured zero and the two must stay distinguishable. Compare through [`Self::value_or`].
     pub fn value(&self) -> Option<f64> {
         self.value
     }
 
     /// The ONE flattening helper. `d` is the DRIVER's stated fallback, at the call site, instead of
-    /// a fabrication buried in the library: `if rlt.judge(&survey).value_or(0.0) >= 85.0 { … }`.
+    /// a fabrication buried in the library: `if rlt.verifier(&survey).value_or(0.0) >= 85.0 { … }`.
     pub fn value_or(&self, d: f64) -> f64 {
         self.value.unwrap_or(d)
     }
@@ -187,104 +187,104 @@ impl Verdict {
         &self.evidence
     }
 
-    /// Set when the judge failed to RUN. A judge with an `error` has not said "not met" — it has
+    /// Set when the verifier failed to RUN. A verifier with an `error` has not said "not met" — it has
     /// said "I could not grade this", which is why `gate()` excludes it from the regression set and
-    /// [`Judge::apply`] leaves the lifecycle untouched.
+    /// [`Verifier::apply`] leaves the lifecycle untouched.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 }
 
-/// What a [`Judge::native`] closure is handed.
+/// What a [`Verifier::native`] closure is handed.
 ///
 /// ⛔ **The clock, randomness, the network and the environment are DELIBERATELY EXCLUDED, and this
-/// type definition is where that decision lives.** A native judge that reads the wall clock returns
+/// type definition is where that decision lives.** A native verifier that reads the wall clock returns
 /// a different verdict on replay, and Phase 1's fast-forward would then silently diverge from the
-/// run it claims to reproduce. `JudgeCtx` is a pure function of committed repo state plus rlt's own
-/// ledger. A judge that genuinely needs the clock is a [`Judge::script`], where the impurity lives
+/// run it claims to reproduce. `VerifierCtx` is a pure function of committed repo state plus rlt's own
+/// ledger. A verifier that genuinely needs the clock is a [`Verifier::script`], where the impurity lives
 /// in a separate file a reviewer can see.
 ///
 /// # What it can reach
 ///
 /// Committed repo state (`dir`, `read`, `diff`) and rlt's own ledger (`previous`, `history`), plus
-/// the other judges — through the SAME lazy per-step cache `rlt.judge()` uses, so asking for an
-/// unconsulted judge RUNS it, memoized, with its spend charged exactly as a direct ask would be.
+/// the other verifiers — through the SAME lazy per-step cache `rlt.verifier()` uses, so asking for an
+/// unconsulted verifier RUNS it, memoized, with its spend charged exactly as a direct ask would be.
 /// That is the price of `met`/`verdict` returning non-`Option` values, and it is the right price:
-/// the alternative is fabricating a verdict. Recursion (a judge asking for itself, directly or
+/// the alternative is fabricating a verdict. Recursion (a verifier asking for itself, directly or
 /// through a cycle) is REFUSED with a [`Verdict::failed`] naming the cycle.
-pub struct JudgeCtx<'a> {
-    source: &'a dyn JudgeSource,
+pub struct VerifierCtx<'a> {
+    source: &'a dyn VerifierSource,
     session: u32,
     step: &'a str,
     dir: &'a Path,
-    /// captured EAGERLY at construction — see [`JudgeCtx::diff`].
+    /// captured EAGERLY at construction — see [`VerifierCtx::diff`].
     diff: String,
-    /// the shared per-session judge scratch — see [`JudgeCtx::scratch`].
+    /// the shared per-session verifier scratch — see [`VerifierCtx::scratch`].
     scratch: std::path::PathBuf,
     _borrow: PhantomData<&'a ()>,
 }
 
-/// "Give me the verdict for this judge, running it if needed."
+/// "Give me the verdict for this verifier, running it if needed."
 ///
-/// The ONE seam both [`JudgeCtx`] construction sites go through, so they build the ctx identically
+/// The ONE seam both [`VerifierCtx`] construction sites go through, so they build the ctx identically
 /// while seeing different verdict stores: the facade's per-step `RefCell` cache on the Rust path,
 /// and `Engine` state on the YAML path.
-pub trait JudgeSource {
-    fn verdict_for(&self, j: &Judge) -> Verdict;
+pub trait VerifierSource {
+    fn verdict_for(&self, j: &Verifier) -> Verdict;
 }
 
-impl<'a> JudgeCtx<'a> {
+impl<'a> VerifierCtx<'a> {
     /// `diff` is the session's diff against the isolation base, captured by the CALLER before any
-    /// judge runs — see [`JudgeCtx::diff`] for why it cannot be lazy.
+    /// verifier runs — see [`VerifierCtx::diff`] for why it cannot be lazy.
     pub fn new(
-        source: &'a dyn JudgeSource,
+        source: &'a dyn VerifierSource,
         session: u32,
         step: &'a str,
         dir: &'a Path,
         diff: String,
         scratch: std::path::PathBuf,
-    ) -> JudgeCtx<'a> {
-        JudgeCtx { source, session, step, dir, diff, scratch, _borrow: PhantomData }
+    ) -> VerifierCtx<'a> {
+        VerifierCtx { source, session, step, dir, diff, scratch, _borrow: PhantomData }
     }
 
-    /// The directory judges may WRITE this session — the same `$RLT_JUDGE_SCRATCH` a script judge
+    /// The directory verifiers may WRITE this session — the same `$RLT_VERIFIER_SCRATCH` a script verifier
     /// gets, so a native closure and a script can hand a measurement to each other.
     ///
-    /// A native judge is a Rust closure running IN-PROCESS, so nothing stops it writing wherever it
+    /// A native verifier is a Rust closure running IN-PROCESS, so nothing stops it writing wherever it
     /// likes; this exists so it does not have to want to. The project tree is read-only to every
-    /// SCRIPT judge (§2.5), and a native judge that writes there anyway breaks the same guarantee
+    /// SCRIPT verifier (§2.5), and a native verifier that writes there anyway breaks the same guarantee
     /// silently instead of loudly — it is a bug either way, so point it here.
     ///
-    /// Shared per session, not per judge: `load_ok` writes `bench.json` here, `p99_ok` reads it.
+    /// Shared per session, not per verifier: `load_ok` writes `bench.json` here, `p99_ok` reads it.
     pub fn scratch(&self) -> &Path {
         &self.scratch
     }
 
     /// Did `j` say GOOD? Runs `j` if this step has not asked for it yet.
-    pub fn met(&self, j: &Judge) -> bool {
+    pub fn met(&self, j: &Verifier) -> bool {
         self.verdict(j).met
     }
 
-    /// `j`'s measured number, or `None` for a binary judge. ⛔ NEVER a fabricated `0`.
-    pub fn value(&self, j: &Judge) -> Option<f64> {
+    /// `j`'s measured number, or `None` for a binary verifier. ⛔ NEVER a fabricated `0`.
+    pub fn value(&self, j: &Verifier) -> Option<f64> {
         self.verdict(j).value
     }
 
     /// `j`'s whole verdict this step, from the shared lazy cache (running it on a miss).
-    pub fn verdict(&self, j: &Judge) -> Verdict {
+    pub fn verdict(&self, j: &Verifier) -> Verdict {
         self.source.verdict_for(j)
     }
 
     /// `j`'s last MERGED verdict — `verdicts.jsonl`'s `merged`/`baseline` rows, i.e. the very
-    /// baseline the regression gate measures against, so a native judge and the gate cannot
+    /// baseline the regression gate measures against, so a native verifier and the gate cannot
     /// disagree about what "before" means. `None` = `j` has no landed row yet.
-    pub fn previous(&self, j: &Judge) -> Option<Verdict> {
+    pub fn previous(&self, j: &Verifier) -> Option<Verdict> {
         crate::core::verdicts::rows_for(self.dir, &j.name, true).last().map(|r| r.verdict())
     }
 
     /// `j`'s last `n` recorded verdicts, OLDEST FIRST — every outcome, not just the landed ones,
     /// because "the test count must never shrink" is a statement about the series rlt observed.
-    pub fn history(&self, j: &Judge, n: usize) -> Vec<Verdict> {
+    pub fn history(&self, j: &Verifier, n: usize) -> Vec<Verdict> {
         let rows = crate::core::verdicts::rows_for(self.dir, &j.name, false);
         rows[rows.len().saturating_sub(n)..].iter().map(|r| r.verdict()).collect()
     }
@@ -304,11 +304,11 @@ impl<'a> JudgeCtx<'a> {
 
     /// Read a project file, RELATIVE to the project dir — which is the whole reason this exists
     /// beside [`Self::dir`]: it is the one place that rule is enforced, and it is what makes a
-    /// judge relocatable.
+    /// verifier relocatable.
     ///
     /// ponytail: no path-traversal check. CEILING: `read("../../etc/passwd")` resolves. Harmless
     /// today (the path is a literal in the driver's own compiled source, not worker-authored).
-    /// UPGRADE PATH: reject `..` the first time a judge reads a path the worker can influence.
+    /// UPGRADE PATH: reject `..` the first time a verifier reads a path the worker can influence.
     pub fn read(&self, rel: &str) -> anyhow::Result<String> {
         let p = self.dir.join(rel);
         std::fs::read_to_string(&p).map_err(|e| anyhow::anyhow!("reading {}: {e}", p.display()))
@@ -317,214 +317,214 @@ impl<'a> JudgeCtx<'a> {
     /// This session's diff against the isolation base, captured EAGERLY when the ctx was built.
     ///
     /// The `&str` return says so. It is not lazy on purpose: a lazy read would see the tree AFTER
-    /// some other judge's script had perturbed it, and determinism is this type's whole reason for
+    /// some other verifier's script had perturbed it, and determinism is this type's whole reason for
     /// its shape.
     pub fn diff(&self) -> &str {
         &self.diff
     }
 }
 
-/// A [`JudgeKind::Native`] body.
+/// A [`VerifierKind::Native`] body.
 ///
-/// `Arc` rather than `Box` because [`Judge`] derives `Clone`, and that derive is load-bearing —
-/// `snapshot_goal_state`/`restore_goal_state` clone the whole judge set every gate. `Send + Sync`
-/// pre-pays parallel judge evaluation; it costs a closure author nothing today.
-pub type NativeFn = Arc<dyn Fn(&JudgeCtx<'_>) -> Verdict + Send + Sync>;
+/// `Arc` rather than `Box` because [`Verifier`] derives `Clone`, and that derive is load-bearing —
+/// `snapshot_goal_state`/`restore_goal_state` clone the whole verifier set every gate. `Send + Sync`
+/// pre-pays parallel verifier evaluation; it costs a closure author nothing today.
+pub type NativeFn = Arc<dyn Fn(&VerifierCtx<'_>) -> Verdict + Send + Sync>;
 
-/// How a resolved judge runs. On the YAML path the kind is decided by the FILE EXTENSION at
+/// How a resolved verifier runs. On the YAML path the kind is decided by the FILE EXTENSION at
 /// resolution time (§5.1): `.sh` ⇒ Script, `.md` ⇒ Llm. There is no `kind:` key and no registry —
-/// the old serde-tagged `JudgeSpec` enum is gone. A Rust driver names the kind directly with
-/// [`Judge::script`] / [`Judge::rubric`] / [`Judge::native`].
+/// the old serde-tagged `VerifierSpec` enum is gone. A Rust driver names the kind directly with
+/// [`Verifier::script`] / [`Verifier::rubric`] / [`Verifier::native`].
 ///
-/// ⚠ `Debug` is HAND-WRITTEN because [`JudgeKind::Native`] holds an `Arc<dyn Fn>`, which is not
-/// `Debug` — and requiring it would be a tax on every closure a driver writes. [`Judge`]'s own
+/// ⚠ `Debug` is HAND-WRITTEN because [`VerifierKind::Native`] holds an `Arc<dyn Fn>`, which is not
+/// `Debug` — and requiring it would be a tax on every closure a driver writes. [`Verifier`]'s own
 /// derives then still compile.
 #[derive(Clone)]
-pub enum JudgeKind {
+pub enum VerifierKind {
     /// a script whose stdout is the verdict JSON. `path` is the resolved file.
     Script { path: PathBuf },
     /// an LLM rubric ⇒ a tools-off call on the RULER. `path` is the resolved rubric file; `inputs`
     /// come from ITS OWN yaml frontmatter (§5.1), read at resolution time — no registry.
     Llm { path: PathBuf, inputs: Vec<String> },
-    /// a Rust closure over a [`JudgeCtx`] — DRIVER-ONLY, `judges::resolve` never produces one.
+    /// a Rust closure over a [`VerifierCtx`] — DRIVER-ONLY, `verifiers::resolve` never produces one.
     ///
-    /// Justified on speed (no subprocess, no fork per judge) and on being compiler-checked.
-    /// ⛔ NEVER on security: the isolation carve-out already protects script judges, and a script
-    /// judge can be given context via env, so "compiled in, therefore unrewritable" is not a
+    /// Justified on speed (no subprocess, no fork per verifier) and on being compiler-checked.
+    /// ⛔ NEVER on security: the isolation carve-out already protects script verifiers, and a script
+    /// verifier can be given context via env, so "compiled in, therefore unrewritable" is not a
     /// property `native` uniquely buys at the level that matters.
     Native { f: NativeFn },
     /// one number read from the session's shared `swe-metrics measure` report, held to a threshold
-    /// ([`crate::metrics`]). YAML: a `judges.<name>.metric:` block, not a file.
-    Metric(Box<crate::metrics::MetricJudge>),
+    /// ([`crate::metrics`]). YAML: a `verifiers.<name>.metric:` block, not a file.
+    Metric(Box<crate::metrics::MetricVerifier>),
     /// swe-metrics' quality score of the session's shared report, scored against the incumbent's
-    /// report ([`crate::metrics`]). YAML: a `judges.<name>.score:` block, not a file.
-    Score(Box<crate::metrics::ScoreJudge>),
-    /// a command held to its exit code: met when it exits 0 ([`CommandJudge`]). YAML: a
-    /// `judges.<name>.command:` entry, not a file.
-    Command(Box<CommandJudge>),
+    /// report ([`crate::metrics`]). YAML: a `verifiers.<name>.score:` block, not a file.
+    Score(Box<crate::metrics::ScoreVerifier>),
+    /// a command held to its exit code: met when it exits 0 ([`CommandVerifier`]). YAML: a
+    /// `verifiers.<name>.command:` entry, not a file.
+    Command(Box<CommandVerifier>),
 }
 
-/// A COMMAND judge: a shell command run in the project (the judge's working directory), met when it exits 0. The
+/// A COMMAND verifier: a shell command run in the project (the verifier's working directory), met when it exits 0. The
 /// last lines of its output are the rationale; `path` entries (relative to the project) go in front of `PATH`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CommandJudge {
+pub struct CommandVerifier {
     pub command: String,
     pub path: Vec<String>,
 }
 
-impl CommandJudge {
-    pub fn new(command: impl Into<String>) -> CommandJudge {
-        CommandJudge { command: command.into(), path: vec![] }
+impl CommandVerifier {
+    pub fn new(command: impl Into<String>) -> CommandVerifier {
+        CommandVerifier { command: command.into(), path: vec![] }
     }
 
     /// Directories (relative to the project) put in front of `PATH` for the command.
-    pub fn path(mut self, dirs: impl IntoIterator<Item = impl Into<String>>) -> CommandJudge {
+    pub fn path(mut self, dirs: impl IntoIterator<Item = impl Into<String>>) -> CommandVerifier {
         self.path = dirs.into_iter().map(Into::into).collect();
         self
     }
 }
 
-impl std::fmt::Debug for JudgeKind {
+impl std::fmt::Debug for VerifierKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JudgeKind::Script { path } => f.debug_struct("Script").field("path", path).finish(),
-            JudgeKind::Llm { path, inputs } => {
+            VerifierKind::Script { path } => f.debug_struct("Script").field("path", path).finish(),
+            VerifierKind::Llm { path, inputs } => {
                 f.debug_struct("Llm").field("path", path).field("inputs", inputs).finish()
             }
-            JudgeKind::Native { .. } => f.debug_struct("Native").finish_non_exhaustive(),
-            JudgeKind::Metric(m) => f.debug_tuple("Metric").field(m).finish(),
-            JudgeKind::Score(s) => f.debug_tuple("Score").field(s).finish(),
-            JudgeKind::Command(c) => f.debug_tuple("Command").field(c).finish(),
+            VerifierKind::Native { .. } => f.debug_struct("Native").finish_non_exhaustive(),
+            VerifierKind::Metric(m) => f.debug_tuple("Metric").field(m).finish(),
+            VerifierKind::Score(s) => f.debug_tuple("Score").field(s).finish(),
+            VerifierKind::Command(c) => f.debug_tuple("Command").field(c).finish(),
         }
     }
 }
 
-impl JudgeKind {
+impl VerifierKind {
     /// A short display tag for the scoreboard/dashboard.
     pub fn tag(&self) -> &'static str {
         match self {
-            JudgeKind::Script { .. } => "script",
-            JudgeKind::Llm { .. } => "llm",
-            JudgeKind::Native { .. } => "native",
-            JudgeKind::Metric(_) => "metric",
-            JudgeKind::Score(_) => "score",
-            JudgeKind::Command(_) => "command",
+            VerifierKind::Script { .. } => "script",
+            VerifierKind::Llm { .. } => "llm",
+            VerifierKind::Native { .. } => "native",
+            VerifierKind::Metric(_) => "metric",
+            VerifierKind::Score(_) => "score",
+            VerifierKind::Command(_) => "command",
         }
     }
 }
 
-/// An LLM judge's own ruler ([`Judge::agent`], [`Judge::model`], [`Judge::effort`]); each `None` falls
+/// An rubric verifier's own ruler ([`Verifier::agent`], [`Verifier::model`], [`Verifier::effort`]); each `None` falls
 /// back to the run's.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct JudgeRuler {
+pub struct VerifierRuler {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
 }
 
-/// A judge — a goal, made executable. Resolved by NAME from disk (§5.1); it carries its DoD-set
+/// A verifier — a goal, made executable. Resolved by NAME from disk (§5.1); it carries its DoD-set
 /// membership and its runtime lifecycle.
 #[derive(Debug, Clone)]
-pub struct Judge {
-    /// the judge's NAME — the filename stem it was resolved from, and the id conditions reference.
+pub struct Verifier {
+    /// the verifier's NAME — the filename stem it was resolved from, and the id conditions reference.
     pub name: String,
     /// how it runs — decided by the resolved file's extension (§5.1).
-    pub kind: JudgeKind,
+    pub kind: VerifierKind,
     /// named in `sequence.invariants` — must STAY met.
     pub invariant: bool,
     /// in the DoD-set (`done_if` ∪ `invariants`) — the set the AGGREGATES range over (§5.3). A
-    /// judge named ONLY in an `if` condition (e.g. `stalled`) is in the run-set but NOT the DoD-set,
+    /// verifier named ONLY in an `if` condition (e.g. `stalled`) is in the run-set but NOT the DoD-set,
     /// so `all_goals` can't be blocked on "we got stuck".
     pub in_dod: bool,
-    /// PER-JUDGE timeout override, in seconds. `None` = the run-level `judge.timeout` (300s), which
-    /// is what every YAML-resolved judge uses — there is no per-judge `timeout:` key. It exists for
+    /// PER-VERIFIER timeout override, in seconds. `None` = the run-level `verifier.timeout` (300s), which
+    /// is what every YAML-resolved verifier uses — there is no per-verifier `timeout:` key. It exists for
     /// the driver path, where a 40-minute load test and a 2-second build check are both ordinary and
-    /// one run-level number cannot serve both. Meaningless for [`JudgeKind::Native`] (no subprocess
+    /// one run-level number cannot serve both. Meaningless for [`VerifierKind::Native`] (no subprocess
     /// to kill).
     pub timeout: Option<u64>,
-    /// PER-JUDGE ruler for an LLM judge: its own agent, model and effort. `None` = the run's ruler,
-    /// which is what every YAML-resolved judge uses. Set with [`Judge::agent`] / [`Judge::model`] /
-    /// [`Judge::effort`]; meaningless for every other kind.
-    pub ruler: Option<JudgeRuler>,
+    /// PER-VERIFIER ruler for an rubric verifier: its own agent, model and effort. `None` = the run's ruler,
+    /// which is what every YAML-resolved verifier uses. Set with [`Verifier::agent`] / [`Verifier::model`] /
+    /// [`Verifier::effort`]; meaningless for every other kind.
+    pub ruler: Option<VerifierRuler>,
 
     // ---- runtime state ----
     pub state: Lifecycle,
     pub last_verdict: Option<Verdict>,
-    /// has this judge EVER been met during this run? (drives regression detection)
+    /// has this verifier EVER been met during this run? (drives regression detection)
     pub ever_met: bool,
 }
 
-impl Judge {
-    /// An LLM RUBRIC judge: the `.md` file IS the prompt, graded by the RULER. Costs a model call.
+impl Verifier {
+    /// An LLM RUBRIC verifier: the `.md` file IS the prompt, graded by the RULER. Costs a model call.
     ///
-    /// `path_md` is taken verbatim and resolved against the project dir when the judge RUNS, not
-    /// here — a driver constructs its judges above `Relentless::open(dir)` (the builder chain is
+    /// `path_md` is taken verbatim and resolved against the project dir when the verifier RUNS, not
+    /// here — a driver constructs its verifiers above `Relentless::open(dir)` (the builder chain is
     /// self-consuming, so it must), and a constructor therefore cannot know the project root. The
     /// rubric's own `inputs:` frontmatter is read at that same point, which is why `inputs` starts
     /// empty rather than being filled from a path this call cannot yet resolve.
-    pub fn rubric(name: impl Into<String>, path_md: impl Into<PathBuf>) -> Judge {
-        Judge::declared(name, JudgeKind::Llm { path: path_md.into(), inputs: vec![] })
+    pub fn rubric(name: impl Into<String>, path_md: impl Into<PathBuf>) -> Verifier {
+        Verifier::declared(name, VerifierKind::Llm { path: path_md.into(), inputs: vec![] })
     }
 
-    /// A SCRIPT judge: any executable whose stdout is the verdict JSON. Cheap, deterministic, no
+    /// A SCRIPT verifier: any executable whose stdout is the verdict JSON. Cheap, deterministic, no
     /// model call. `path_sh` is resolved like [`Self::rubric`]'s.
-    pub fn script(name: impl Into<String>, path_sh: impl Into<PathBuf>) -> Judge {
-        Judge::declared(name, JudgeKind::Script { path: path_sh.into() })
+    pub fn script(name: impl Into<String>, path_sh: impl Into<PathBuf>) -> Verifier {
+        Verifier::declared(name, VerifierKind::Script { path: path_sh.into() })
     }
 
-    /// A NATIVE judge: a Rust closure over a [`JudgeCtx`]. See [`JudgeKind::Native`] for what it is
+    /// A NATIVE verifier: a Rust closure over a [`VerifierCtx`]. See [`VerifierKind::Native`] for what it is
     /// and is not justified on.
     pub fn native(
         name: impl Into<String>,
-        f: impl Fn(&JudgeCtx<'_>) -> Verdict + Send + Sync + 'static,
-    ) -> Judge {
-        Judge::declared(name, JudgeKind::Native { f: Arc::new(f) })
+        f: impl Fn(&VerifierCtx<'_>) -> Verdict + Send + Sync + 'static,
+    ) -> Verifier {
+        Verifier::declared(name, VerifierKind::Native { f: Arc::new(f) })
     }
 
-    /// A METRIC judge: one number from the session's shared `swe-metrics measure` report, held to
-    /// the spec's threshold — `Judge::metric("cc_p95", MetricJudge::new("complexity.cyclomatic")
+    /// A METRIC verifier: one number from the session's shared `swe-metrics measure` report, held to
+    /// the spec's threshold — `Verifier::metric("cc_p95", MetricVerifier::new("complexity.cyclomatic")
     /// .stat(Stat::P95).tool("lizard").max(10.0))`. Needs `swe-metrics` on `PATH`.
-    pub fn metric(name: impl Into<String>, spec: crate::metrics::MetricJudge) -> Judge {
-        Judge::declared(name, JudgeKind::Metric(Box::new(spec)))
+    pub fn metric(name: impl Into<String>, spec: crate::metrics::MetricVerifier) -> Verifier {
+        Verifier::declared(name, VerifierKind::Metric(Box::new(spec)))
     }
 
-    /// A SCORE judge: swe-metrics' quality score (0–100) of the session's shared report —
-    /// `Judge::score("quality", ScoreJudge::new("swe-default", "2").min(80.0))`.
-    pub fn score(name: impl Into<String>, spec: crate::metrics::ScoreJudge) -> Judge {
-        Judge::declared(name, JudgeKind::Score(Box::new(spec)))
+    /// A SCORE verifier: swe-metrics' quality score (0–100) of the session's shared report —
+    /// `Verifier::score("quality", ScoreVerifier::new("swe-default", "2").min(80.0))`.
+    pub fn score(name: impl Into<String>, spec: crate::metrics::ScoreVerifier) -> Verifier {
+        Verifier::declared(name, VerifierKind::Score(Box::new(spec)))
     }
 
-    /// A COMMAND judge: met when the shell command exits 0 —
-    /// `Judge::command("tests", CommandJudge::new("pytest -q").path([".venv/bin"]))`. Its output's last lines are the
+    /// A COMMAND verifier: met when the shell command exits 0 —
+    /// `Verifier::command("tests", CommandVerifier::new("pytest -q").path([".venv/bin"]))`. Its output's last lines are the
     /// rationale, so no wrapper script is needed.
-    pub fn command(name: impl Into<String>, spec: CommandJudge) -> Judge {
-        Judge::declared(name, JudgeKind::Command(Box::new(spec)))
+    pub fn command(name: impl Into<String>, spec: CommandVerifier) -> Verifier {
+        Verifier::declared(name, VerifierKind::Command(Box::new(spec)))
     }
 
-    /// Override the run-level `judge.timeout` for this judge alone — `.timeout(45 * 60)` for a load
+    /// Override the run-level `verifier.timeout` for this verifier alone — `.timeout(45 * 60)` for a load
     /// test the 300s default would kill.
-    pub fn timeout(mut self, secs: u64) -> Judge {
+    pub fn timeout(mut self, secs: u64) -> Verifier {
         self.timeout = Some(secs);
         self
     }
 
-    /// The AGENT this LLM judge asks, instead of the run's ruler — a reviewer that is not the worker's
-    /// agent. Its model is then that agent's default judge model unless [`Judge::model`] names one.
-    /// `Agent::Custom` is refused when the judge runs (the ruler is resolved by name).
-    pub fn agent(mut self, agent: crate::driver::Agent) -> Judge {
-        self.ruler.get_or_insert_with(JudgeRuler::default).agent = Some(agent.name().to_string());
+    /// The AGENT this rubric verifier asks, instead of the run's ruler — a reviewer that is not the worker's
+    /// agent. Its model is then that agent's default verifier model unless [`Verifier::model`] names one.
+    /// `Agent::Custom` is refused when the verifier runs (the ruler is resolved by name).
+    pub fn agent(mut self, agent: crate::driver::Agent) -> Verifier {
+        self.ruler.get_or_insert_with(VerifierRuler::default).agent = Some(agent.name().to_string());
         self
     }
 
-    /// The MODEL this LLM judge asks, instead of the run's `judge_model`.
-    pub fn model(mut self, model: impl Into<String>) -> Judge {
-        self.ruler.get_or_insert_with(JudgeRuler::default).model = Some(model.into());
+    /// The MODEL this rubric verifier asks, instead of the run's `verifier_model`.
+    pub fn model(mut self, model: impl Into<String>) -> Verifier {
+        self.ruler.get_or_insert_with(VerifierRuler::default).model = Some(model.into());
         self
     }
 
-    /// The reasoning EFFORT of this LLM judge's call (the run's ruler calls with none).
-    pub fn effort(mut self, effort: crate::driver::Effort) -> Judge {
-        self.ruler.get_or_insert_with(JudgeRuler::default).effort = effort.as_str().map(String::from);
+    /// The reasoning EFFORT of this rubric verifier's call (the run's ruler calls with none).
+    pub fn effort(mut self, effort: crate::driver::Effort) -> Verifier {
+        self.ruler.get_or_insert_with(VerifierRuler::default).effort = effort.as_str().map(String::from);
         self
     }
 
@@ -532,10 +532,10 @@ impl Judge {
     ///
     /// `invariant`/`in_dod` are BOTH false, and that is correct rather than a gap: on the driver
     /// path nothing is declared to rlt (no `abort_if`, no `notify_if`, no `invariants`, no
-    /// `done_if`), so there is no run-set and no DoD-set for a judge to be a member of. Judges are
+    /// `done_if`), so there is no run-set and no DoD-set for a verifier to be a member of. Verifiers are
     /// lazy and the driver asks.
-    fn declared(name: impl Into<String>, kind: JudgeKind) -> Judge {
-        Judge {
+    fn declared(name: impl Into<String>, kind: VerifierKind) -> Verifier {
+        Verifier {
             name: name.into(),
             kind,
             invariant: false,
@@ -548,15 +548,15 @@ impl Judge {
         }
     }
 
-    /// Fold a fresh verdict into the judge's lifecycle state. Returns the new state.
+    /// Fold a fresh verdict into the verifier's lifecycle state. Returns the new state.
     ///
-    /// # A BROKEN JUDGE IS NOT A FAILING JUDGE
+    /// # A BROKEN VERIFIER IS NOT A FAILING VERIFIER
     /// A verdict carrying `error` (spawn failure, timeout, garbage stdout — every
-    /// [`Verdict::failed`] path) is the judge saying *"I could not grade this"*, NOT *"this is not
+    /// [`Verdict::failed`] path) is the verifier saying *"I could not grade this"*, NOT *"this is not
     /// met"*. It therefore **never changes the lifecycle**: never a regression, never satisfies
-    /// `done_if`, never marks a judge met. We record the verdict (its `rationale` carries the error
-    /// text) and leave `state`/`ever_met` exactly as they were. `any_judge_error` (see `core::stop`)
-    /// is the front-door signal, and `abort_if: … OR any_judge_error` the explicit policy.
+    /// `done_if`, never marks a verifier met. We record the verdict (its `rationale` carries the error
+    /// text) and leave `state`/`ever_met` exactly as they were. `any_verifier_error` (see `core::stop`)
+    /// is the front-door signal, and `abort_if: … OR any_verifier_error` the explicit policy.
     pub fn apply(&mut self, verdict: Verdict) -> Lifecycle {
         if verdict.error.is_some() {
             self.last_verdict = Some(verdict);
@@ -572,7 +572,7 @@ impl Judge {
             // was met before, now not -> regression
             Lifecycle::Regressed
         } else if value.is_some_and(|v| v > 0.0) {
-            // a measured value above 0 = partial progress. `None` (a binary/numberless judge) is not
+            // a measured value above 0 = partial progress. `None` (a binary/numberless verifier) is not
             // progress — it stays Pending.
             Lifecycle::InProgress
         } else {
@@ -589,7 +589,7 @@ impl Judge {
         self.state == Lifecycle::Regressed
     }
 
-    /// The presentational goal-type, INFERRED from the verdict (§7.1): a judge that emitted no
+    /// The presentational goal-type, INFERRED from the verdict (§7.1): a verifier that emitted no
     /// number is `binary`; one with a `max` reads as `cardinal`; else `percentage`.
     pub fn type_str(&self) -> &'static str {
         match self.last_verdict.as_ref() {
@@ -635,7 +635,7 @@ mod tests {
         assert!(v.error().is_none());
     }
 
-    /// A binary judge emits NO number, and `value_or` is the one place the fallback becomes a
+    /// A binary verifier emits NO number, and `value_or` is the one place the fallback becomes a
     /// visible decision. `Some(0.0)` is a measured zero and must stay distinct from absent.
     #[test]
     fn a_binary_verdict_has_no_number_and_a_measured_zero_is_not_absent() {
@@ -670,48 +670,48 @@ mod tests {
 
     /// The three driver constructors, and the one thing they must NOT do: join rlt's run-set.
     #[test]
-    fn a_driver_judge_is_in_no_declared_set() {
-        let judges = [
-            Judge::rubric("survey_good", "rlt/judges/survey_good.md"),
-            Judge::script("builds", "rlt/judges/build.sh"),
-            Judge::native("p99_ok", |_| Verdict::binary(true)),
+    fn a_driver_verifier_is_in_no_declared_set() {
+        let verifiers = [
+            Verifier::rubric("survey_good", "rlt/verifiers/survey_good.md"),
+            Verifier::script("builds", "rlt/verifiers/build.sh"),
+            Verifier::native("p99_ok", |_| Verdict::binary(true)),
         ];
-        for j in &judges {
+        for j in &verifiers {
             assert!(!j.in_dod, "`{}` must not join the DoD-set — nothing is declared to rlt here", j.name);
             assert!(!j.invariant, "`{}` must not become an invariant", j.name);
             assert_eq!(j.state, Lifecycle::Pending);
-            assert_eq!(j.timeout, None, "absent = the run-level judge.timeout");
+            assert_eq!(j.timeout, None, "absent = the run-level verifier.timeout");
         }
-        let tags: Vec<_> = judges.iter().map(|j| j.kind.tag()).collect();
+        let tags: Vec<_> = verifiers.iter().map(|j| j.kind.tag()).collect();
         assert_eq!(tags, ["llm", "script", "native"]);
     }
 
-    /// A per-judge timeout overrides the 300s run default — a 40-minute load test needs it.
+    /// A per-verifier timeout overrides the 300s run default — a 40-minute load test needs it.
     #[test]
     fn timeout_is_a_consuming_setter() {
-        let load = Judge::script("load_ok", "rlt/judges/loadtest.sh").timeout(45 * 60);
+        let load = Verifier::script("load_ok", "rlt/verifiers/loadtest.sh").timeout(45 * 60);
         assert_eq!(load.timeout, Some(2700));
     }
 
-    /// `Judge` derives `Clone`, and that derive is load-bearing (snapshot/restore_goal_state clone
-    /// the whole judge set every gate). A native judge's closure must survive it — which is why the
+    /// `Verifier` derives `Clone`, and that derive is load-bearing (snapshot/restore_goal_state clone
+    /// the whole verifier set every gate). A native verifier's closure must survive it — which is why the
     /// body is an `Arc` and not a `Box`.
     #[test]
-    fn a_native_judge_survives_the_clone_the_gate_depends_on() {
-        let j = Judge::native("always", |_| Verdict::binary(true).with_rationale("yes"));
+    fn a_native_verifier_survives_the_clone_the_gate_depends_on() {
+        let j = Verifier::native("always", |_| Verdict::binary(true).with_rationale("yes"));
         let copy = j.clone();
-        let JudgeKind::Native { f } = &copy.kind else { panic!("kind survives the clone") };
+        let VerifierKind::Native { f } = &copy.kind else { panic!("kind survives the clone") };
         // the closure is callable through the clone.
         let src = FixedSource(Verdict::binary(false));
-        let ctx = JudgeCtx::new(&src, 1, "worker", Path::new("."), String::new(), std::env::temp_dir());
+        let ctx = VerifierCtx::new(&src, 1, "worker", Path::new("."), String::new(), std::env::temp_dir());
         let v = f(&ctx);
         assert!(v.met() && v.rationale() == "yes");
     }
 
-    /// A verdict store that answers every judge the same way — enough to build a `JudgeCtx`.
+    /// A verdict store that answers every verifier the same way — enough to build a `VerifierCtx`.
     struct FixedSource(Verdict);
-    impl JudgeSource for FixedSource {
-        fn verdict_for(&self, _j: &Judge) -> Verdict {
+    impl VerifierSource for FixedSource {
+        fn verdict_for(&self, _j: &Verifier) -> Verdict {
             self.0.clone()
         }
     }
@@ -724,8 +724,8 @@ mod tests {
         std::fs::write(tmp.path().join("VERSION"), "1.2.3").unwrap();
         let src = FixedSource(Verdict::binary(true).with_value(7.0));
         let ctx =
-            JudgeCtx::new(&src, 4, "implement", tmp.path(), "diff --git a/x".into(), std::env::temp_dir());
-        let other = Judge::script("builds", "rlt/judges/build.sh");
+            VerifierCtx::new(&src, 4, "implement", tmp.path(), "diff --git a/x".into(), std::env::temp_dir());
+        let other = Verifier::script("builds", "rlt/verifiers/build.sh");
 
         assert!(ctx.met(&other));
         assert_eq!(ctx.value(&other), Some(7.0));
@@ -743,7 +743,7 @@ mod tests {
 
         // …and a binary verdict still reports NO number through the ctx.
         let bare = FixedSource(Verdict::binary(true));
-        let ctx = JudgeCtx::new(&bare, 1, "s", tmp.path(), String::new(), std::env::temp_dir());
+        let ctx = VerifierCtx::new(&bare, 1, "s", tmp.path(), String::new(), std::env::temp_dir());
         assert_eq!(ctx.value(&other), None, "never a fabricated 0");
     }
 
@@ -759,8 +759,8 @@ mod tests {
         append(d, Some(2), "w", &[("cov".into(), Verdict::scored(20.0, 100.0))], Outcome::RolledBack).unwrap();
 
         let src = FixedSource(Verdict::binary(false));
-        let ctx = JudgeCtx::new(&src, 3, "w", d, String::new(), std::env::temp_dir());
-        let cov = Judge::script("cov", "rlt/judges/cov.sh");
+        let ctx = VerifierCtx::new(&src, 3, "w", d, String::new(), std::env::temp_dir());
+        let cov = Verifier::script("cov", "rlt/verifiers/cov.sh");
 
         assert_eq!(ctx.previous(&cov).and_then(|v| v.value()), Some(50.0), "the rolled-back 20 never landed");
         let series: Vec<_> = ctx.history(&cov, 10).iter().filter_map(|v| v.value()).collect();
@@ -768,16 +768,16 @@ mod tests {
         assert_eq!(ctx.history(&cov, 2).len(), 2, "…and `n` takes the most recent");
     }
 
-    /// `JudgeKind`'s `Debug` is hand-written (an `Arc<dyn Fn>` has none). It must still print
+    /// `VerifierKind`'s `Debug` is hand-written (an `Arc<dyn Fn>` has none). It must still print
     /// something useful for the two file-backed kinds — the dashboard and every `{:?}` in a log
     /// went through the derive before.
     #[test]
     fn the_hand_written_debug_still_names_the_paths() {
-        let s = format!("{:?}", Judge::script("builds", "rlt/judges/build.sh").kind);
+        let s = format!("{:?}", Verifier::script("builds", "rlt/verifiers/build.sh").kind);
         assert!(s.contains("Script") && s.contains("build.sh"), "got: {s}");
-        let l = format!("{:?}", Judge::rubric("good", "rlt/judges/good.md").kind);
+        let l = format!("{:?}", Verifier::rubric("good", "rlt/verifiers/good.md").kind);
         assert!(l.contains("Llm") && l.contains("good.md"), "got: {l}");
-        let n = format!("{:?}", Judge::native("n", |_| Verdict::binary(true)).kind);
+        let n = format!("{:?}", Verifier::native("n", |_| Verdict::binary(true)).kind);
         assert!(n.contains("Native"), "got: {n}");
     }
 }

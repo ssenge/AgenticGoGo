@@ -1,8 +1,8 @@
-//! An agent step with its judges (A-26): what the worker does, the checks and the critic that judge it, the
+//! An agent step with its verifiers (A-26): what the worker does, the checks and the critic that verifier it, the
 //! repair rounds, a script that does what it can first, and what the step reads.
 
 use super::roles::Role;
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::driver::Step;
 
 /// An agent step for [`super::Flow::task`]: built with [`Task::new`] and the setters below.
@@ -14,16 +14,16 @@ pub struct Task {
     pub step: Step,
     /// sections the worker's brief gets after the task, which the critic doesn't see (inputs, house rules).
     pub sections: Vec<String>,
-    /// script judges, in order: the first unmet one is the verdict, and the critic runs only when all are met.
-    pub checks: Vec<Judge>,
-    /// the LLM judge that reviews the result after the checks.
-    pub critic: Option<Judge>,
+    /// script verifiers, in order: the first unmet one is the verdict, and the critic runs only when all are met.
+    pub checks: Vec<Verifier>,
+    /// the rubric verifier that reviews the result after the checks.
+    pub critic: Option<Verifier>,
     /// what the critic gets below its rubric besides the worker's task: what it reviews and what it never raises.
     pub critic_context: String,
     /// repair rounds after the first session.
     pub repairs: usize,
     /// a script that does what it can before the worker (verdict: met when nothing is left).
-    pub first: Option<Judge>,
+    pub first: Option<Verifier>,
     /// what the step reads (git pathspecs): a refresh with none of them changed needs no session.
     pub inputs: Option<Vec<String>>,
     /// an unmet end returns [`Outcome::Unmet`] to the caller, the work kept, instead of failing into the task force.
@@ -33,7 +33,7 @@ pub struct Task {
 }
 
 impl Task {
-    /// The worker's step, with no judges, no repairs and nothing else.
+    /// The worker's step, with no verifiers, no repairs and nothing else.
     pub fn new(step: Step) -> Task {
         Task { name: None, step, sections: vec![], checks: vec![], critic: None, critic_context: String::new(), repairs: 0,
                first: None, inputs: None, climbs: false, voices: vec![] }
@@ -53,14 +53,14 @@ impl Task {
     }
 
     /// One more check, after the ones set.
-    pub fn check(mut self, judge: Judge) -> Task {
-        self.checks.push(judge);
+    pub fn check(mut self, verifier: Verifier) -> Task {
+        self.checks.push(verifier);
         self
     }
 
     /// The critic.
-    pub fn critic(mut self, judge: Judge) -> Task {
-        self.critic = Some(judge);
+    pub fn critic(mut self, verifier: Verifier) -> Task {
+        self.critic = Some(verifier);
         self
     }
 
@@ -77,7 +77,7 @@ impl Task {
     }
 
     /// The script that does what it can before the worker.
-    pub fn first(mut self, script: Judge) -> Task {
+    pub fn first(mut self, script: Verifier) -> Task {
         self.first = Some(script);
         self
     }
@@ -112,7 +112,7 @@ impl Task {
 pub enum Outcome {
     /// the run didn't reach the step (`--from` is later).
     NotReached,
-    /// its judges are met and its work kept.
+    /// its verifiers are met and its work kept.
     Done,
     /// a refresh that had nothing to change.
     Unchanged,

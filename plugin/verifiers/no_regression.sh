@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Standard library judge (INVARIANT): the build still passes — "never break a green build".
+# Standard library verifier (INVARIANT): the build still passes — "never break a green build".
 # Binary goal, meant for `sequence.invariants: [no_regression]`. Rust default; shadow for your lang.
 out="$(cargo build 2>&1)"
 code=$?

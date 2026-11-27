@@ -1,4 +1,4 @@
-//! Metric and score judges on the RUST DRIVER path (A-20): `Judge::metric` / `Judge::score` run
+//! Metric and score verifiers on the RUST DRIVER path (A-20): `Verifier::metric` / `Verifier::score` run
 //! through the same engine as the YAML path — one shared `swe-metrics measure` per tree, the
 //! ratchet, the incumbent.
 //!
@@ -88,7 +88,7 @@ fn project() -> (tempfile::TempDir, PathBuf) {
         git(&dir, args);
     }
     write(&dir, "fake-report.json", REPORT);
-    write(&dir, ".gitignore", "rlt/state/\nagg/private/\n");
+    write(&dir, ".gitignore", "rlt/state/\nrlt/private/\n");
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "base"]);
     (tmp, dir)
@@ -98,26 +98,26 @@ fn measures(dir: &Path) -> usize {
     fs::read_to_string(dir.join("../calls.log")).unwrap_or_default().lines().filter(|l| l.starts_with("measure")).count()
 }
 
-/// Two metric judges and a score judge asked in one span share ONE measurement; the ratchet on the
-/// metric judge (down, the driver's own) rolls back a span that makes p95 worse.
+/// Two metric verifiers and a score verifier asked in one span share ONE measurement; the ratchet on the
+/// metric verifier (down, the driver's own) rolls back a span that makes p95 worse.
 #[test]
-fn driver_metric_judges_share_a_measurement_and_ratchet() {
+fn driver_metric_verifiers_share_a_measurement_and_ratchet() {
     let (_tmp, dir) = project();
-    let cc = Judge::metric("cc", MetricJudge::new("complexity.cyclomatic").stat(Stat::P95).tool("lizard").max(10.0));
-    let dup = Judge::metric("dup", MetricJudge::new("duplication.percent").max(3.0));
-    let q = Judge::score("q", ScoreJudge::new("swe-default", "2").min(50.0));
+    let cc = Verifier::metric("cc", MetricVerifier::new("complexity.cyclomatic").stat(Stat::P95).tool("lizard").max(10.0));
+    let dup = Verifier::metric("dup", MetricVerifier::new("duplication.percent").max(3.0));
+    let q = Verifier::score("q", ScoreVerifier::new("swe-default", "2").min(50.0));
     let rlt = Relentless::open(&dir).unwrap().ratchet("cc", Ratchet::down(0.0));
 
-    assert_eq!(rlt.judge(&cc).value(), Some(6.0), "the pre-step ask is the baseline");
-    assert_eq!(rlt.judge(&dup).value(), Some(2.0));
-    let score = rlt.judge(&q);
+    assert_eq!(rlt.verifier(&cc).value(), Some(6.0), "the pre-step ask is the baseline");
+    assert_eq!(rlt.verifier(&dup).value(), Some(2.0));
+    let score = rlt.verifier(&q);
     assert_eq!((score.value(), score.met()), (Some(77.0), true), "{}", score.rationale());
-    assert_eq!(measures(&dir), 1, "three judges, one measurement");
+    assert_eq!(measures(&dir), 1, "three verifiers, one measurement");
 
     rlt.step(&Step::new("implement").model("fake").prompt("work")).unwrap();
-    let worse = rlt.judge(&cc);
+    let worse = rlt.verifier(&cc);
     assert_eq!(worse.value(), Some(9.0), "{}", worse.rationale());
-    rlt.judge(&dup);
+    rlt.verifier(&dup);
     assert_eq!(measures(&dir), 2, "the changed tree is measured once more");
     assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "p95 6 → 9 under a zero-tolerance ratchet");
 }
@@ -129,9 +129,9 @@ fn a_score_of_changed_files_in_a_path_measures_them_alone() {
     let (_tmp, dir) = project();
     write(&dir, "work/fake-report.json", REPORT);
     let changed = Scope::ChangedIn { path: "work".into(), since: "HEAD".into() };
-    let q = Judge::score("q", ScoreJudge::new("swe-default", "2").scope(changed).min(50.0));
+    let q = Verifier::score("q", ScoreVerifier::new("swe-default", "2").scope(changed).min(50.0));
     let rlt = Relentless::open(&dir).unwrap();
-    assert_eq!(rlt.judge(&q).value(), Some(77.0));
+    assert_eq!(rlt.verifier(&q).value(), Some(77.0));
     let calls = fs::read_to_string(dir.join("../calls.log")).unwrap();
     assert!(calls.lines().any(|l| l.starts_with("measure") && l.contains("/work ") && l.contains("--changed-since HEAD")), "{calls}");
     assert!(!calls.contains("--baseline"), "{calls}");
@@ -139,7 +139,7 @@ fn a_score_of_changed_files_in_a_path_measures_them_alone() {
     write(&dir, "work/fake-report.json", &REPORT.replacen("\"analyzers\"", "\"subject\":{\"files\":0,\"changed_since\":\"HEAD\"},\"analyzers\"", 1));
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "nothing changed in work"]);
-    let nothing = Relentless::open(&dir).unwrap().judge(&Judge::score("q2", ScoreJudge::new("swe-default", "2")
+    let nothing = Relentless::open(&dir).unwrap().verifier(&Verifier::score("q2", ScoreVerifier::new("swe-default", "2")
         .scope(Scope::ChangedIn { path: "work".into(), since: "HEAD".into() }).min(50.0)));
     assert!(nothing.met() && nothing.value().is_none(), "{}", nothing.rationale());
 }
@@ -151,8 +151,8 @@ fn a_score_reads_the_build_reports_its_script_writes() {
     let (_tmp, dir) = project();
     let script = write(&dir, "../reports.sh", "#!/bin/sh\necho building >&2\ntouch \"$1/jacoco.xml\"\necho \"{\\\"jacoco\\\": \\\"$1/jacoco.xml\\\"}\"\n");
     chmod_x(&script);
-    let q = Judge::score("q", ScoreJudge::new("swe-default", "2").reports(&script).min(50.0));
-    assert_eq!(Relentless::open(&dir).unwrap().judge(&q).value(), Some(77.0));
+    let q = Verifier::score("q", ScoreVerifier::new("swe-default", "2").reports(&script).min(50.0));
+    assert_eq!(Relentless::open(&dir).unwrap().verifier(&q).value(), Some(77.0));
     let calls = fs::read_to_string(dir.join("../calls.log")).unwrap();
     assert!(calls.lines().any(|l| l.starts_with("measure") && l.contains("--report jacoco=") && l.contains("/build/jacoco.xml")), "{calls}");
 
@@ -160,6 +160,6 @@ fn a_score_reads_the_build_reports_its_script_writes() {
     chmod_x(&broken);
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "after the first score"]);
-    let v = Relentless::open(&dir).unwrap().judge(&Judge::score("q2", ScoreJudge::new("swe-default", "2").reports(&broken).min(50.0)));
+    let v = Relentless::open(&dir).unwrap().verifier(&Verifier::score("q2", ScoreVerifier::new("swe-default", "2").reports(&broken).min(50.0)));
     assert!(!v.met() && v.rationale().contains("tests failed"), "{}", v.rationale());
 }

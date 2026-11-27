@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context as _};
 use serde::Deserialize;
 
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::driver::{Agent, Effort, Step};
 
 /// One role as the file names it.
@@ -74,13 +74,13 @@ impl Roles {
         }
     }
 
-    /// A rubric judge named `name` on role `role`, with its criteria in `rubric`.
-    pub fn judge(&self, role: &str, name: &str, rubric: impl Into<std::path::PathBuf>) -> Judge {
+    /// A rubric verifier named `name` on role `role`, with its criteria in `rubric`.
+    pub fn verifier(&self, role: &str, name: &str, rubric: impl Into<std::path::PathBuf>) -> Verifier {
         let r = self.get(role);
-        let judge = Judge::rubric(name, rubric).agent(r.agent.clone()).effort(r.effort);
+        let verifier = Verifier::rubric(name, rubric).agent(r.agent.clone()).effort(r.effort);
         match &r.model {
-            Some(m) => judge.model(m.as_str()),
-            None => judge,
+            Some(m) => verifier.model(m.as_str()),
+            None => verifier,
         }
     }
 }
@@ -89,9 +89,9 @@ impl Roles {
 mod tests {
     use super::*;
 
-    /// Two roles set a step's and a judge's agent, model and effort; other keys stay unread.
+    /// Two roles set a step's and a verifier's agent, model and effort; other keys stay unread.
     #[test]
-    fn roles_set_the_steps_and_the_judges_agent_model_and_effort() {
+    fn roles_set_the_steps_and_the_verifiers_agent_model_and_effort() {
         let text = "worker: { agent: claude, model: m1, effort: high }\ncritic: { agent: codex }\ntools: [x]\n";
         let roles = Roles::parse(text, &["worker", "critic"]).unwrap();
         let step = roles.step("worker", "1 Do", "/x/do.md");

@@ -59,7 +59,7 @@ pub fn current_branch(dir: &Path) -> Option<String> {
 /// state)? Untracked files are allowed (they carry across a checkout). rlt's `rlt/{state,private}/` runtime
 /// state (state.json/project.json/run.pid) churns every cycle and MUST NOT count as dirty —
 /// it's runtime, not project content (and gitignored). We exclude it via a pathspec. The
-/// pathspec excludes `rlt/state/**` and `rlt/private/**` (NOT `rlt`): the committed config + judge
+/// pathspec excludes `rlt/state/**` and `rlt/private/**` (NOT `rlt`): the committed config + verifier
 /// library under `rlt/` must still be checked, only the two runtime-state halves are churn.
 pub fn is_clean(dir: &Path) -> bool {
     // pathspec `:(exclude)rlt/{state,private}/**` drops rlt's runtime churn (BOTH halves of the
@@ -74,7 +74,7 @@ pub fn is_clean(dir: &Path) -> bool {
 }
 
 /// Is a merge in progress in `dir` (MERGE_HEAD present)? The rollback gate stages a merge with
-/// `merge --no-ff --no-commit` and only finalizes it AFTER the (minutes-long) judging phase — so
+/// `merge --no-ff --no-commit` and only finalizes it AFTER the (minutes-long) verifying phase — so
 /// a crash/Ctrl-C/kill in that window leaves the repo mid-merge. On the next run that makes
 /// `is_clean` false, which would silently disable isolation and let the next worker build on a
 /// half-merged tree.
@@ -141,8 +141,8 @@ pub fn discard_uncommitted_tracked(dir: &Path) -> bool {
     if dirty {
         // restore tracked files to HEAD of the (session) branch; pathspec form leaves untracked
         // files and can't over-reach into base — we are still ON the session branch here. The
-        // the excludes are the two runtime-state halves ONLY: the committed `rlt/` config + judges MUST be restored
-        // (a rolled-back session must not keep the worker's edits to the judges that graded it).
+        // the excludes are the two runtime-state halves ONLY: the committed `rlt/` config + verifiers MUST be restored
+        // (a rolled-back session must not keep the worker's edits to the verifiers that graded it).
         let _ = git(dir, &["checkout", "--", ".", ":(exclude)rlt/state/**", ":(exclude)rlt/private/**"]);
     }
     dirty
@@ -284,7 +284,7 @@ pub fn remove_file(dir: &Path, path: &str) {
 /// `rlt/` folder as an Obsidian vault — to visualize the LLM wiki — never commits Obsidian's config).
 /// Idempotent, order-independent. MIGRATION: runtime state used to live at `<project>/.rlt/`, so a
 /// pre-move project ignores that now-stale path — we DROP it rather than leave two contradictory
-/// lines. Only the two runtime-state dirs are ignored under `rlt/`: the committed config + judges must stay tracked.
+/// lines. Only the two runtime-state dirs are ignored under `rlt/`: the committed config + verifiers must stay tracked.
 /// Best-effort.
 pub fn ensure_rlt_gitignored(dir: &Path) {
     // FIRST, and unconditionally: the `.gitignore` below is a work-tree file a rollback can delete.
@@ -326,7 +326,7 @@ pub fn ensure_rlt_gitignored(dir: &Path) {
     let _ = std::fs::write(&gi, new);
     // also stop tracking runtime state if it was committed under the OLD layout (keeps files on
     // disk). Target `rlt/state` ONLY — `git rm --cached rlt` would untrack the whole committed
-    // config + judge library, inverting the moat. (We do NOT untrack a `.obsidian/` a user chose to
+    // config + verifier library, inverting the moat. (We do NOT untrack a `.obsidian/` a user chose to
     // commit — only ignore it going forward.)
     let _ = git(dir, &["rm", "-r", "--cached", "--quiet", "rlt/state"]);
 }

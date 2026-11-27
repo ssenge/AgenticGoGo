@@ -2,7 +2,7 @@
 # REAL isolation e2e: Claude Code and/or Codex as workers INSIDE their reference images (docker/claude,
 # docker/codex) — editing the bind-mounted project, reading a read-only context directory, blocked
 # from a `write_deny` oracle, behind a network ALLOW-LIST that holds only the agent's own endpoint,
-# judged by a script judge that runs in the image too. On macOS it also runs the HOST's `claude`
+# verified by a script verifier that runs in the image too. On macOS it also runs the HOST's `claude`
 # under `isolation: sandbox` behind the same allow-list (Seatbelt + rlt's proxy, no DNS).
 #
 # scripts/e2e.sh and `cargo test` cover the same mechanisms with a FAKE agent. This one spends real
@@ -87,15 +87,15 @@ run_agent() {
   fi
 
   local word="PERIWINKLE-$$"
-  mkdir -p "$kb" "$d/rlt/judges" "$d/rlt/state" "$d/tests"
+  mkdir -p "$kb" "$d/rlt/verifiers" "$d/rlt/state" "$d/tests"
   printf '# Project knowledge\n\nThe secret word is: %s\n' "$word" > "$kb/index.md"
   printf 'orig\n' > "$d/tests/oracle.txt"
-  printf 'rlt/state/\nagg/private/\n' > "$d/.gitignore"
+  printf 'rlt/state/\nrlt/private/\n' > "$d/.gitignore"
   local model=""; [ "$agent" = claude ] && model='model: "claude-haiku-4-5-20251001", '
   cat > "$d/rlt/rlt.yaml" <<EOF
 project: "ctr-real-$agent"
 defaults: { agent: "$agent", ${model}${tierkeys}, write_deny: ["tests/**"] }
-judge: { agent: "$agent" }
+verifier: { agent: "$agent" }
 steps:
   worker:
     prompt: "Read the index.md of the context directory named kb (listed under Context in your brief). Create the file answer.txt in the project root containing exactly the secret word it names, and nothing else. Then run this exact command once and leave its output where it writes it: curl -sS -m 10 -o /dev/null -w '%{http_code}' https://example.com > egress.txt 2>&1 || echo FAILED >> egress.txt . Do not change anything under tests/."
@@ -107,7 +107,7 @@ isolation_policy:
   network: { allow: [$(endpoints "$target")] }
   pass_env: ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]
 EOF
-  cat > "$d/rlt/judges/answered.sh" <<EOF
+  cat > "$d/rlt/verifiers/answered.sh" <<EOF
 #!/bin/sh
 # runs INSIDE the image too (the run's strongest tier)
 if [ "\$(tr -d '[:space:]' < answer.txt 2>/dev/null)" = "$word" ]; then
@@ -116,7 +116,7 @@ else
   echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"answer.txt does not hold the word yet"}'
 fi
 EOF
-  chmod +x "$d/rlt/judges/answered.sh"
+  chmod +x "$d/rlt/verifiers/answered.sh"
   printf 'answer the question in the brief\n' > "$d/rlt/state/STATE.md"
   ( cd "$d" && git init -q -b main && git config user.email t@t && git config user.name t && git add -A && git commit -qm init )
 

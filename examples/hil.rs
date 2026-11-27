@@ -3,7 +3,7 @@
 //! ✅ **THIS COMPILES.** It is a cargo example, which is what keeps it honest: it was written as the
 //! SPECIFICATION of the HiL surface before any of it existed, and it is now the acceptance test for
 //! it — the same role `examples/workflow.rs` plays for the driver API. It is not meant to be RUN
-//! as-is (it names judge files and a project that do not exist here); every call and signature below
+//! as-is (it names verifier files and a project that do not exist here); every call and signature below
 //! is the real one, checked by the compiler on every build.
 //!
 //! Writing it first paid for itself: it surfaced four gaps in the design. Two were real and shipped
@@ -13,12 +13,12 @@
 //!
 //! WHAT IT DEMONSTRATES — the eight cases of HUMAN_LOOP.md §3, in the three calls of §4.5:
 //!   B decide      `hil_choose`  — which store, when the agent may not pick
-//!   C provide     `hil_input`   — a value only a human has, validated by a judge
+//!   C provide     `hil_input`   — a value only a human has, validated by a verifier
 //!   C′ secret     `hil_bool`    — NEVER `hil_input`; the human places it, rlt confirms
 //!   D act         `hil_bool`    — a real-world change, verified against the WORLD in a retry loop
 //!   E take over   `hil_bool`    — after `gate()`, never before
 //!   A authorize   `hil_bool`    — the prod deploy, which blocks until a human says yes
-//!   F accept      `Judge::human`— a sign-off that BINDS `done_if`, not just a branch
+//!   F accept      `Verifier::human`— a sign-off that BINDS `done_if`, not just a branch
 //!   G intervene   (nothing)     — already shipped: `rlt send inject|budget|pause|stop`
 //!   + worker-initiated asks, which never block the loop
 //!
@@ -66,10 +66,10 @@ fn real_main() -> Result<(), Fatal> {
 }
 
 fn drive(rlt: &Relentless) -> Result<(), Fatal> {
-    // Steps and judges are the ordinary surface — see `examples/workflow.rs` for the full treatment
-    // of templates, isolation and the three judge kinds. Only what HiL needs is spelled out here.
+    // Steps and verifiers are the ordinary surface — see `examples/workflow.rs` for the full treatment
+    // of templates, isolation and the three verifier kinds. Only what HiL needs is spelled out here.
     let build = Step::template().agent(Agent::Claude).isolation(Isolation::Sandbox)
-        .readonly(["tests/", "rlt/judges/"]);
+        .readonly(["tests/", "rlt/verifiers/"]);
 
     let scaffold  = build.create("scaffold").prompt("Scaffold the billing service against rlt/state/wiki/spec.md.");
     let migrate   = build.create("migrate").prompt("Write and run the schema migration. Commit when green.");
@@ -77,17 +77,17 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
     let deploy    = Step::new("deploy").isolation(Isolation::None)
         .prompt("Run ./deploy.sh against the configured environment. Do NOT change infra by hand.");
 
-    let tests     = Judge::script("tests_pass",  "rlt/judges/tests.sh");
-    let lint      = Judge::script("lint_clean",  "rlt/judges/lint.sh");
-    let migrated  = Judge::script("migrated",    "rlt/judges/migrated.sh");
-    let progressing = Judge::script("progressing", "rlt/judges/progressing.sh"); // met = GOOD, see below
-    let dsn_ok    = Judge::script("dsn_ok",      "rlt/judges/dsn_reachable.sh");
-    let key_ok    = Judge::script("key_present", "rlt/judges/stripe_key.sh");
-    let dns_ok    = Judge::script("dns_ok",      "rlt/judges/dns_resolves.sh");
+    let tests     = Verifier::script("tests_pass",  "rlt/verifiers/tests.sh");
+    let lint      = Verifier::script("lint_clean",  "rlt/verifiers/lint.sh");
+    let migrated  = Verifier::script("migrated",    "rlt/verifiers/migrated.sh");
+    let progressing = Verifier::script("progressing", "rlt/verifiers/progressing.sh"); // met = GOOD, see below
+    let dsn_ok    = Verifier::script("dsn_ok",      "rlt/verifiers/dsn_reachable.sh");
+    let key_ok    = Verifier::script("key_present", "rlt/verifiers/stripe_key.sh");
+    let dns_ok    = Verifier::script("dns_ok",      "rlt/verifiers/dns_resolves.sh");
 
     // ⚠ `stalled` ships INVERTED (met = stalled = bad). `gate()`'s regression rule is "was met, now
-    // unmet ⇒ worse", so a met-when-bad judge must be flipped before a driver uses it. Hence
-    // `progressing` — a three-line shadow that negates the library judge. RUST_API.md §"Two rules".
+    // unmet ⇒ worse", so a met-when-bad verifier must be flipped before a driver uses it. Hence
+    // `progressing` — a three-line shadow that negates the library verifier. RUST_API.md §"Two rules".
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // 0 · THE CONTRAST THAT DEFINES THE FEATURE
@@ -117,7 +117,7 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
     // Why `choose` and not `input`: the options are recorded in `rlt/private/asks.jsonl`, so
     // `rlt send answer <id> 3` is REJECTED at the CLI with the list re-printed, and the ask stays
     // open. The driver cannot be handed a value it did not offer — a boundary property, not
-    // ergonomics. `hil_input` is the open-set call and needs a judge instead (§2 below).
+    // ergonomics. `hil_input` is the open-set call and needs a verifier instead (§2 below).
     // ═════════════════════════════════════════════════════════════════════════════════════════
     let stores = ["postgres-rds", "postgres-neon", "sqlite-litefs"];
     let store = stores[rlt.hil_choose("Which store for billing? (it outlives this run)", &stores)?];
@@ -140,9 +140,9 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
         let answer = rlt.hil_input(&format!(
             "{why}Which {store} instance is PROD? (host:port/db, reachable from this machine)"
         ))?;
-        std::env::set_var("BILLING_DSN", &answer);      // the judge reads it from the env
-        if rlt.judge(&dsn_ok).met() { break answer; }
-        why = format!("`{}` did not answer: {}. ", answer, rlt.judge(&dsn_ok).rationale());
+        std::env::set_var("BILLING_DSN", &answer);      // the verifier reads it from the env
+        if rlt.verifier(&dsn_ok).met() { break answer; }
+        why = format!("`{}` did not answer: {}. ", answer, rlt.verifier(&dsn_ok).rationale());
     };
     rlt.log(&format!("prod DSN accepted: {dsn}"));
 
@@ -156,27 +156,27 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
     // So the human puts the secret where secrets go and rlt learns only THAT it is there. The rule,
     // stated once: **an answer may NAME a secret, never CONTAIN one.**
     // ═════════════════════════════════════════════════════════════════════════════════════════
-    while !rlt.judge(&key_ok).met() {
+    while !rlt.verifier(&key_ok).met() {
         rlt.hil_bool("Put STRIPE_KEY (live mode) in this run's environment or ~/.billing.env. Done?")?;
-        // The `while` re-runs the judge, so a "yes" that was not true only costs one more question.
-        // A human's "done" is a CLAIM; the judge is what makes it a FACT. This is the shape that
-        // replaced the plan's earlier `hil_act(what, &judge)` — the judge is a line, not a signature.
+        // The `while` re-runs the verifier, so a "yes" that was not true only costs one more question.
+        // A human's "done" is a CLAIM; the verifier is what makes it a FACT. This is the shape that
+        // replaced the plan's earlier `hil_act(what, &verifier)` — the verifier is a line, not a signature.
     }
 
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // 4 · A REAL-WORLD ACT (case D) — verify against the WORLD, never the claim
     //
-    // Nothing rlt can run creates this DNS record. The human does it in a console, and the judge
+    // Nothing rlt can run creates this DNS record. The human does it in a console, and the verifier
     // resolves the name from outside — not "did the human touch a file", which is the mistake that
     // makes this case dangerous.
     // ═════════════════════════════════════════════════════════════════════════════════════════
     let mut attempt = 0;
-    while !rlt.judge(&dns_ok).met() {
+    while !rlt.verifier(&dns_ok).met() {
         attempt += 1;
         let q = if attempt == 1 {
             "Create the A record billing.prod → the LB, and pierce the firewall for :443. Done?".to_string()
         } else {
-            format!("Still not resolving (attempt {attempt}): {}. Fixed?", rlt.judge(&dns_ok).rationale())
+            format!("Still not resolving (attempt {attempt}): {}. Fixed?", rlt.verifier(&dns_ok).rationale())
         };
         rlt.hil_bool(&q)?;
     }
@@ -197,12 +197,12 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
     for attempt in 1..=3 {
         rlt.check_limits()?;                    // ceilings are OPT-IN — this is where they fire
         rlt.step(&migrate)?;
-        if rlt.judge(&migrated).met() { break; }
-        rlt.info(&format!("migration attempt {attempt}/3 failed: {}", rlt.judge(&migrated).rationale()));
+        if rlt.verifier(&migrated).met() { break; }
+        rlt.info(&format!("migration attempt {attempt}/3 failed: {}", rlt.verifier(&migrated).rationale()));
     }
-    if !rlt.judge(&migrated).met() {
+    if !rlt.verifier(&migrated).met() {
         rlt.gate()?;                            // ← land whatever exists BEFORE a human touches it
-        while !rlt.judge(&migrated).met() {
+        while !rlt.verifier(&migrated).met() {
             rlt.hil_bool("3 attempts, migration still red. Take it over and confirm when done?")?;
         }
         rlt.info("human landed the migration — resuming autonomously");
@@ -214,14 +214,14 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
         rlt.check_limits()?;
         rlt.step(&implement)?;
 
-        if rlt.judge(&tests).met() && rlt.judge(&lint).met() {
+        if rlt.verifier(&tests).met() && rlt.verifier(&lint).met() {
             rlt.gate()?;
             break;
         }
         // NON-BLOCKING, deliberately: the loop has 19 more cycles of useful work, so this is `ask`,
         // not `hil_bool`. Reaching for the blocking call here is how a driver becomes an interactive
         // agent one call site at a time.
-        if !rlt.judge(&progressing).met() {
+        if !rlt.verifier(&progressing).met() {
             rlt.ask("implementation has not moved in 3 cycles — a different approach worth trying?");
         }
         rlt.gate()?;
@@ -278,11 +278,11 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
     // ═════════════════════════════════════════════════════════════════════════════════════════
     // 8 · ACCEPT (case F) — sign-off as a blocking question
     //
-    // ⚠ `Judge::human` — a human's answer becoming a VERDICT ROW that counts in `done_if` and the
+    // ⚠ `Verifier::human` — a human's answer becoming a VERDICT ROW that counts in `done_if` and the
     // `N/M` scoreboard — is Stage 3 and NOT BUILT. It needs two rules the gate does not have yet
-    // (cache the answer on the graded artefact's commit sha; exempt an unanswered human judge from
-    // the regression rule), or it becomes a pager loop: a run-set judge is re-evaluated after every
-    // judged step. See `internal/HUMAN_LOOP.md` §7.3.
+    // (cache the answer on the graded artefact's commit sha; exempt an unanswered human verifier from
+    // the regression rule), or it becomes a pager loop: a run-set verifier is re-evaluated after every
+    // verified step. See `internal/HUMAN_LOOP.md` §7.3.
     //
     // Until then, case F is a `hil_bool` before the final gate. What you lose is only the sign-off
     // appearing in `N/M`; what you keep is the gate.
@@ -294,19 +294,19 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
     // Two rules make it safe, and both live in the implementation, not here (§7.3):
     //   · the answer is CACHED ON THE GRADED ARTEFACT'S COMMIT SHA — so the human is asked once per
     //     CHANGE, not once per step, and a stale yes can never approve code nobody saw;
-    //   · an UNANSWERED human judge is EXEMPT from the regression rule — otherwise "was met, now
+    //   · an UNANSWERED human verifier is EXEMPT from the regression rule — otherwise "was met, now
     //     unmet" rolls back the very work it wants reviewed, and the run deadlocks.
     //
-    // And because a human is the most expensive judge there is, it goes LAST in the `&&` chain:
+    // And because a human is the most expensive verifier there is, it goes LAST in the `&&` chain:
     // `&&` short-circuits, so nobody is paged until the cheap machine checks already pass. This is
     // the same cost gate `examples/workflow.rs` uses for a 40-minute load test.
     // ═════════════════════════════════════════════════════════════════════════════════════════
-    let smoke = Judge::script("smoke_ok", "rlt/judges/smoke_prod.sh");
+    let smoke = Verifier::script("smoke_ok", "rlt/verifiers/smoke_prod.sh");
 
-    // `&&` SHORT-CIRCUITS, and that is the cost gate: the human is the most expensive judge there
+    // `&&` SHORT-CIRCUITS, and that is the cost gate: the human is the most expensive verifier there
     // is, so nobody is paged until the cheap machine checks already pass. Same pattern
     // `examples/workflow.rs` uses to keep a 40-minute load test off the critical path.
-    if rlt.judge(&tests).met() && rlt.judge(&smoke).met() {
+    if rlt.verifier(&tests).met() && rlt.verifier(&smoke).met() {
         if !rlt.hil_bool("Prod smoke is green. Sign off on the release?")? {
             rlt.info("sign-off declined — the release is staged, not live");
             return Ok(());
@@ -324,9 +324,9 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
 //
 //   rlt.hil_bool(q)            -> Result<bool, Fatal>     blocks until answered
 //   rlt.hil_choose(q, &opts)   -> Result<usize, Fatal>    blocks; closed answer set, CLI-validated
-//   rlt.hil_input(q)           -> Result<String, Fatal>   blocks; open set — pair it with a judge
-//   Judge::human(name, q)      -> Judge                   a verdict row; binary
-//   Judge::human(..).scored(t) -> Judge                   value from `hil_input`, met = value >= t
+//   rlt.hil_input(q)           -> Result<String, Fatal>   blocks; open set — pair it with a verifier
+//   Verifier::human(name, q)      -> Verifier                   a verdict row; binary
+//   Verifier::human(..).scored(t) -> Verifier                   value from `hil_input`, met = value >= t
 //
 //   Limits { .., wall_time, work_time }   SECONDS. `work_time` excludes human wait — the thing
 //                                          that makes an indefinite block survivable.
@@ -336,7 +336,7 @@ fn drive(rlt: &Relentless) -> Result<(), Fatal> {
 //   rlt hil bool|choose|input "<q>"       the WORKER's front-end: records, exits, never waits
 //
 // FOUR RULES, AND THEY ARE THE WHOLE DESIGN
-//   1. A human's answer unblocks the STEP; a JUDGE still owns the VERDICT. Every case above that
+//   1. A human's answer unblocks the STEP; a VERIFIER still owns the VERDICT. Every case above that
 //      claims something about the world is checked, not trusted.
 //   2. An answer may NAME a secret, never CONTAIN one.
 //   3. `gate()` before you block for a human who will touch the tree.

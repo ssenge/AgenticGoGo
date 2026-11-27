@@ -1,8 +1,8 @@
 //! A workflow's variables: `{{ name }}` in a step's prompt file (the role prompt's too) and in an LLM
-//! judge's rubric, its `inputs:` frontmatter included, is filled in from the map the driver set
+//! verifier's rubric, its `inputs:` frontmatter included, is filled in from the map the driver set
 //! ([`Relentless::vars`](crate::driver::Relentless::vars)). Only files are templates: inline text a driver builds may
 //! carry a project's content (a doc with a template language of its own), and code has `format!`. A
-//! `{{ name }}` the map lacks is an error: a worker or a judge briefed with a hole does the wrong work.
+//! `{{ name }}` the map lacks is an error: a worker or a verifier briefed with a hole does the wrong work.
 //! Without variables nothing is touched.
 
 use std::collections::BTreeMap;
@@ -108,14 +108,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("w.md"), "change {{ out_dir }}/ only\n").unwrap();
         std::fs::write(dir.path().join("bad.md"), "see {{ nowhere }}\n").unwrap();
-        std::fs::write(dir.path().join("r.md"), "---\ninputs: [\"{{ legacy }}/a.txt\"]\n---\nJudge {{ legacy }}.\n").unwrap();
+        std::fs::write(dir.path().join("r.md"), "---\ninputs: [\"{{ legacy }}/a.txt\"]\n---\nVerifier {{ legacy }}.\n").unwrap();
         set(vars());
         let step = crate::driver::Step::new("w").prompt_file(dir.path().join("w.md").display().to_string());
         assert_eq!(crate::workflow::task(&step).unwrap(), "change new/ only\n");
         let bad = crate::driver::Step::new("b").prompt_file(dir.path().join("bad.md").display().to_string());
         assert!(crate::workflow::task(&bad).unwrap_err().to_string().contains("unknown variable `{{ nowhere }}`"));
-        let crate::core::model::JudgeKind::Llm { inputs, .. } = crate::core::judges::kind_for(&dir.path().join("r.md"))
-        else { panic!("an .md is an LLM judge") };
+        let crate::core::model::VerifierKind::Llm { inputs, .. } = crate::core::verifiers::kind_for(&dir.path().join("r.md"))
+        else { panic!("an .md is an rubric verifier") };
         assert_eq!(inputs, ["old/a.txt"]);
         set(BTreeMap::new());
     }

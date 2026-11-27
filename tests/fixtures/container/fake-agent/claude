@@ -6,7 +6,7 @@ for a in "$@"; do [ "$prev" = "--output-format" ] && fmt="$a"; prev="$a"; done
 incontainer() { [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; }
 
 if [ "$fmt" = "json" ]; then
-  # an LLM judge's one-shot, in the judges' image: the project is read-only to it.
+  # an rubric verifier's one-shot, in the verifiers' image: the project is read-only to it.
   {
     incontainer && echo RULER_IN_CONTAINER
     echo "ruler home=$HOME"
@@ -43,7 +43,7 @@ mkdir -p src
     if wget -q -T 5 -O /dev/null http://example.com/ 2>/dev/null; then echo EGRESS_OPEN; else echo EGRESS_BLOCKED; fi
     [ -n "${HTTPS_PROXY:-}" ] && echo PROXY_SET
   fi
-  [ -n "${RLT_TEST_TAMPER:-}" ] && printf '#!/bin/sh\ntouch %s\necho {\\"met\\":true,\\"value\\":2,\\"max\\":2,\\"target\\":2}\n' "$RLT_TEST_TAMPER" > rlt/judges/done.sh
+  [ -n "${RLT_TEST_TAMPER:-}" ] && printf '#!/bin/sh\ntouch %s\necho {\\"met\\":true,\\"value\\":2,\\"max\\":2,\\"target\\":2}\n' "$RLT_TEST_TAMPER" > rlt/verifiers/done.sh
 } >> src/worker.log 2>&1
 echo "s" >> src/sessions.log
 echo done > src/work.txt

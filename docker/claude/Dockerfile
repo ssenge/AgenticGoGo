@@ -1,11 +1,11 @@
-# Reference image: Claude Code as an rlt worker (and LLM-judge ruler) under `isolation: container`.
+# Reference image: Claude Code as an rlt worker (and rubric verifier ruler) under `isolation: container`.
 #
 #   docker build -t rlt-claude docker/claude
 #   # rlt.yaml:  defaults: { agent: "claude", isolation: "container", image: "rlt-claude" }
 #
 # It follows rlt's IMAGE CONTRACT (docs/CONFIG.md → "The container tier runs the agent"):
 #   - the agent CLI on PATH for ANY uid — rlt runs the container as the project's owner, never root;
-#   - /bin/sh, plus whatever your worker's tasks and your judges run (add your toolchain below);
+#   - /bin/sh, plus whatever your worker's tasks and your verifiers run (add your toolchain below);
 #   - NO credentials: rlt passes them at run time, by name (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN)
 #     or as read-only mounts — never bake a key or a login into an image;
 #   - no ENTRYPOINT (or one that execs its arguments): rlt runs `claude <args…>` as the command;

@@ -1,9 +1,9 @@
-//! The swe-metrics score document (`swe-metrics/score/v1`) and what a score judge concludes from
+//! The swe-metrics score document (`swe-metrics/score/v1`) and what a score verifier concludes from
 //! it — pure, except [`run`], which invokes `swe-metrics score`.
 
 use super::combine::Threshold;
 use super::measure::{self, Ctx};
-use super::spec::ScoreJudge;
+use super::spec::ScoreVerifier;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -90,14 +90,14 @@ impl ScoreDoc {
 
     /// Refuse a score of another definition or version than `j` configures: two definitions'
     /// scores are not comparable, and a silently swapped definition would move the ratchet.
-    pub fn check_definition(&self, j: &ScoreJudge) -> Result<(), String> {
+    pub fn check_definition(&self, j: &ScoreVerifier) -> Result<(), String> {
         let named = matches!(j.definition, super::spec::Definition::Default);
         let name_ok = !named || self.definition.name == super::spec::DEFAULT_DEFINITION;
         if name_ok && self.definition.version == j.version {
             return Ok(());
         }
         Err(format!(
-            "the score was computed by `{}` version \"{}\", but the judge is configured for `{}` version \"{}\" — \
+            "the score was computed by `{}` version \"{}\", but the verifier is configured for `{}` version \"{}\" — \
              scores of different definitions are not comparable, so this one is refused",
             self.definition.name, self.definition.version, j.definition_name, j.version
         ))
@@ -114,8 +114,8 @@ pub fn nothing_to_score(doc: &ScoreDoc) -> bool {
         && doc.gates.iter().all(|g| g.passed && (na(&g.status) || g.status.as_deref() == Some("ok")))
 }
 
-/// The verdict parts a score judge concludes: `(value, met, rationale)` — or the error.
-pub fn conclude(doc: &ScoreDoc, j: &ScoreJudge) -> Result<(f64, bool, String), String> {
+/// The verdict parts a score verifier concludes: `(value, met, rationale)` — or the error.
+pub fn conclude(doc: &ScoreDoc, j: &ScoreVerifier) -> Result<(f64, bool, String), String> {
     doc.check_definition(j)?;
     let Some(score) = doc.score else {
         let notes = if doc.notes.is_empty() { "no notes".to_string() } else { doc.notes.join("; ") };
@@ -182,7 +182,7 @@ fn describe_gate(g: &GateRow) -> String {
 
 /// Score `report` by `j`'s definition, against `baseline` when there is one; the document is
 /// written to `out` (kept as evidence) and returned.
-pub fn run(c: &Ctx<'_>, j: &ScoreJudge, report: &Path, baseline: Option<&Path>, out: &Path) -> Result<ScoreDoc, String> {
+pub fn run(c: &Ctx<'_>, j: &ScoreVerifier, report: &Path, baseline: Option<&Path>, out: &Path) -> Result<ScoreDoc, String> {
     let mut args: Vec<String> = vec!["score".into(), report.display().to_string()];
     if let Some(b) = baseline {
         args.extend(["--baseline".into(), b.display().to_string()]);
@@ -212,13 +212,13 @@ mod tests {
         ScoreDoc::parse(&d.to_string()).unwrap()
     }
 
-    fn judge() -> ScoreJudge {
-        ScoreJudge::new("swe-default", "2").min(80.0)
+    fn verifier() -> ScoreVerifier {
+        ScoreVerifier::new("swe-default", "2").min(80.0)
     }
 
     #[test]
     fn a_complete_score_is_the_value_and_meets_its_threshold() {
-        let (v, met, why) = conclude(&doc(serde_json::json!(85.5), "2", serde_json::json!([]), serde_json::json!({})), &judge()).unwrap();
+        let (v, met, why) = conclude(&doc(serde_json::json!(85.5), "2", serde_json::json!([]), serde_json::json!({})), &verifier()).unwrap();
         assert_eq!((v, met), (85.5, true));
         assert!(why.contains("score 85.5 (swe-default@2) meets ≥ 80"), "{why}");
     }
@@ -232,7 +232,7 @@ mod tests {
             {"metric": "iac.validation_errors", "passed": false, "value": null, "max": 0, "cap": 40.0, "status": "unavailable"},
         ]);
         let regs = serde_json::json!({"regressions": [{"metric": "duplication.percent", "worse": true}, {"metric": "x.y", "worse": false}]});
-        let (v, met, why) = conclude(&doc(serde_json::json!(40.0), "2", gates, regs), &judge()).unwrap();
+        let (v, met, why) = conclude(&doc(serde_json::json!(40.0), "2", gates, regs), &verifier()).unwrap();
         assert_eq!((v, met), (40.0, false));
         assert!(why.contains("capped by failed gates: secrets.findings = 2 (max 0, caps at 40), iac.validation_errors unavailable"), "{why}");
         assert!(why.contains("worse than the incumbent: duplication.percent") && !why.contains("x.y"), "{why}");
@@ -246,11 +246,11 @@ mod tests {
             {"metric": "complexity.cognitive [p95]", "value": 12.0, "good": 5, "bad": 15, "weight": 3, "subscore": 30.0},
             {"metric": "duplication.percent", "value": 0.0, "good": 3, "bad": 10, "weight": 2, "subscore": 100.0},
             {"metric": "coverage.line_percent", "weight": 3}]});
-        let (_, met, why) = conclude(&doc(serde_json::json!(70.0), "2", serde_json::json!([]), parts.clone()), &judge()).unwrap();
+        let (_, met, why) = conclude(&doc(serde_json::json!(70.0), "2", serde_json::json!([]), parts.clone()), &verifier()).unwrap();
         assert!(!met);
         assert!(why.ends_with("most points lost: complexity.cognitive [p95] = 12 (good 5, bad 15), \
                                doc_coverage.percent = 60 (good 80, bad 30)"), "{why}");
-        let (_, met, why) = conclude(&doc(serde_json::json!(90.0), "2", serde_json::json!([]), parts), &judge()).unwrap();
+        let (_, met, why) = conclude(&doc(serde_json::json!(90.0), "2", serde_json::json!([]), parts), &verifier()).unwrap();
         assert!(met && !why.contains("points lost"), "{why}");
     }
 
@@ -258,20 +258,20 @@ mod tests {
     #[test]
     fn a_null_score_is_an_error_with_its_notes() {
         let d = doc(serde_json::json!(null), "2", serde_json::json!([]), serde_json::json!({"notes": ["component coverage: cobertura failed", "score incomplete"]}));
-        let e = conclude(&d, &judge()).unwrap_err();
+        let e = conclude(&d, &verifier()).unwrap_err();
         assert!(e.contains("incomplete") && e.contains("cobertura failed; score incomplete"), "{e}");
     }
 
     /// Another version, or another definition than the shipped one it was told, is refused.
     #[test]
     fn a_definition_or_version_mismatch_is_refused() {
-        let e = conclude(&doc(serde_json::json!(90.0), "1", serde_json::json!([]), serde_json::json!({})), &judge()).unwrap_err();
+        let e = conclude(&doc(serde_json::json!(90.0), "1", serde_json::json!([]), serde_json::json!({})), &verifier()).unwrap_err();
         assert!(e.contains("version \"1\"") && e.contains("not comparable"), "{e}");
         let mut other = doc(serde_json::json!(90.0), "2", serde_json::json!([]), serde_json::json!({}));
         other.definition.name = "team-a".into();
-        assert!(conclude(&other, &judge()).is_err(), "swe-default was configured");
+        assert!(conclude(&other, &verifier()).is_err(), "swe-default was configured");
         // a file/module definition is checked on its version (its name is the file's own).
-        let file = ScoreJudge { definition: super::super::spec::Definition::Module("t.s:D".into()), ..judge() };
+        let file = ScoreVerifier { definition: super::super::spec::Definition::Module("t.s:D".into()), ..verifier() };
         assert!(conclude(&other, &file).is_ok());
         assert!(ScoreDoc::parse(r#"{"schema":"swe-metrics/score/v9"}"#).unwrap_err().contains("v9"));
     }

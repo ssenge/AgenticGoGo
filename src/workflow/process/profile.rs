@@ -127,8 +127,8 @@ fn category(call: &Value, sessions: &mut std::collections::HashMap<String, u32>)
             *n += 1;
             if *n == 1 { ("agent", format!("session {name}")) } else { ("repair", format!("repair session {name}")) }
         }
-        "judge" => {
-            let name = text(call, "judge");
+        "verify" => {
+            let name = text(call, "verifier");
             match name.strip_prefix("hook-") {
                 Some(hook) => ("hooks", hook.into()),
                 None if num(call, "tokens") > 0.0 || call["critic"].as_bool().unwrap_or(false) => ("critic", name),
@@ -440,8 +440,8 @@ mod tests {
     fn a_sessions_span_is_its_own_seconds_and_the_rest_is_the_drivers() {
         let calls = vec![call("note", 100, json!({})),
                          call("step", 200, json!({"outcome": {"step": "a", "secs": 60, "tokens": 10, "cost": 0.5, "session": 1}})),
-                         call("judge", 210, json!({"judge": "hook-x", "verdict": {"met": true}, "tokens": 0, "cost": 0.0})),
-                         call("judge", 220, json!({"judge": "hook-y", "verdict": {"met": false, "rationale": "bad"}, "tokens": 0, "cost": 0.0})),
+                         call("verify", 210, json!({"verifier": "hook-x", "verdict": {"met": true}, "tokens": 0, "cost": 0.0})),
+                         call("verify", 220, json!({"verifier": "hook-y", "verdict": {"met": false, "rationale": "bad"}, "tokens": 0, "cost": 0.0})),
                          call("step", 400, json!({"outcome": {"step": "a", "secs": 100, "tokens": 15, "cost": 0.7, "session": 2}}))];
         let s = spans(&calls);
         let cats: Vec<&str> = s.iter().map(|x| x["cat"].as_str().unwrap()).collect();

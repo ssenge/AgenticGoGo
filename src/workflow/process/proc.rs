@@ -1,5 +1,5 @@
 //! A run of a process (A-37): rlt's flow plus how this process's steps run: its settings, hooks
-//! around steps and phases, the judge cache, the processes steps leave running, and the registries the flow's callbacks
+//! around steps and phases, the verifier cache, the processes steps leave running, and the registries the flow's callbacks
 //! need (a step's key, its phase). What the interpreter ([`super::run`]) and the step kinds work through.
 
 use std::cell::RefCell;
@@ -13,7 +13,7 @@ use super::hooks::{self, Scope, When};
 use super::number::Numbered;
 use super::settings::Settings;
 use super::{bases, leftovers};
-use crate::core::model::{Judge, JudgeKind};
+use crate::core::model::{Verifier, VerifierKind};
 use crate::driver::{Relentless, Fatal, Step};
 use crate::workflow::{Flow, Roles, Run};
 
@@ -93,7 +93,7 @@ impl Proc {
         }
         let s5 = Rc::clone(&shared);
         if spec.task_force.as_ref().is_some_and(|tf| !tf.checks.is_empty()) {
-            flow = flow.fix_checks(move |f, name, base| super::exec::fix_judges(&s5, f, name, base));
+            flow = flow.fix_checks(move |f, name, base| super::exec::fix_verifiers(&s5, f, name, base));
         }
         let order: Vec<String> = init.list.iter().filter(|s| s.number.is_some()).map(|s| s.id.clone()).collect();
         flow = flow.order(order);
@@ -107,16 +107,16 @@ impl Proc {
         Proc { flow, shared, project, home: init.home, list: init.list, settings: init.settings, roles: init.roles }
     }
 
-    /// The check run through the verdict cache (`rlt cached`): the worker's self-check and the run's judge run it on
+    /// The check run through the verdict cache (`rlt cached`): the worker's self-check and the run's verifier run it on
     /// the same content, and the second one is answered from the first.
-    pub fn cached(&self, check: &Judge) -> Result<Judge, Fatal> {
-        let JudgeKind::Script { path } = &check.kind else { return Ok(check.clone()) };
-        let Some(cache) = &self.shared.spec.run.judge_cache else { return Ok(check.clone()) };
+    pub fn cached(&self, check: &Verifier) -> Result<Verifier, Fatal> {
+        let VerifierKind::Script { path } = &check.kind else { return Ok(check.clone()) };
+        let Some(cache) = &self.shared.spec.run.verifier_cache else { return Ok(check.clone()) };
         let rlt = std::env::current_exe().map_err(|e| anyhow::anyhow!("finding rlt: {e}"))?;
         let ignore: String = cache.ignore.iter().map(|i| format!(" --ignore {}", super::exec::quote(i))).collect();
         let wrapper = self.wrapper(&format!("{}-cached.sh", check.name),
             &format!("{} cached{ignore} -- {}", super::exec::quote(&rlt.display().to_string()), path.display()))?;
-        Ok(Judge::script(check.name.clone(), wrapper.as_str()))
+        Ok(Verifier::script(check.name.clone(), wrapper.as_str()))
     }
 
     /// The run's end: what the last step left running ends, and the last phase's after-hooks and commands run.
@@ -144,20 +144,20 @@ fn trusted(shared: &Shared, failed: &str, at: &str) -> bool {
 }
 
 /// The hooks around step `name`.
-fn step_hooks(shared: &Shared, f: &Flow, name: &str, when: crate::workflow::When) -> Vec<Judge> {
+fn step_hooks(shared: &Shared, f: &Flow, name: &str, when: crate::workflow::When) -> Vec<Verifier> {
     let when = if when == crate::workflow::When::Before { When::Before } else { When::After };
     let key = f.key_of(name);
     let id = shared.ids.borrow().get(&key).cloned().unwrap_or_else(|| key.clone());
     let scope = Scope::Step { key: &key, id: &id };
     let commands = hook_commands(shared, &scope, when);
-    let mut judges = hooks::judges(f, &commands, &scope, when, &|n| declared_judge(shared, n));
-    judges.extend(super::builtin::judges(shared, &key, &id, when));
-    judges
+    let mut verifiers = hooks::verifiers(f, &commands, &scope, when, &|n| declared_verifier(shared, n));
+    verifiers.extend(super::builtin::verifiers(shared, &key, &id, when));
+    verifiers
 }
 
-/// The declared judge of the process file a hooks entry names.
-fn declared_judge(shared: &Shared, name: &str) -> Option<Judge> {
-    super::declared::judge(shared, name).ok()
+/// The declared verifier of the process file a hooks entry names.
+fn declared_verifier(shared: &Shared, name: &str) -> Option<Verifier> {
+    super::declared::verifier(shared, name).ok()
 }
 
 /// The hook commands of `scope`: the process's file's, then the project's.
@@ -185,13 +185,13 @@ fn starting(shared: &Shared, flow: &Flow, name: &str) -> Result<(), String> {
         super::exec::run_plain(shared, &c, &now)?;
     }
     let commands = hook_commands(shared, &Scope::Phase(&now), When::Before);
-    hooks::check(flow, name, &commands, &Scope::Phase(&now), When::Before, &|n| declared_judge(shared, n))
+    hooks::check(flow, name, &commands, &Scope::Phase(&now), When::Before, &|n| declared_verifier(shared, n))
 }
 
 /// The phase `id` leaves: its after-hooks and its `post` commands.
 fn leaving(shared: &Shared, flow: &Flow, name: &str, id: &str) -> Result<(), String> {
     let commands = hook_commands(shared, &Scope::Phase(id), When::After);
-    hooks::check(flow, name, &commands, &Scope::Phase(id), When::After, &|n| declared_judge(shared, n))?;
+    hooks::check(flow, name, &commands, &Scope::Phase(id), When::After, &|n| declared_verifier(shared, n))?;
     for c in phase_of(shared, id).map(|p| p.post.clone()).unwrap_or_default() {
         super::exec::run_plain(shared, &c, id)?;
     }

@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn a_clean_document_has_no_unknown_keys() {
-        let doc = "project: p\ndefaults: { agent: claude, isolation: sandbox }\njudges: { t: { timeout: 9 } }\n\
+        let doc = "project: p\ndefaults: { agent: claude, isolation: sandbox }\nverifiers: { t: { timeout: 9 } }\n\
                    steps: { w: { readonly: [a] } }\nsequence:\n  steps: [w, { step: w, times: 2 }]\n  limits: { cost: 1.0 }\n";
         assert!(paths(doc).is_empty(), "{:?}", paths(doc));
     }
@@ -135,14 +135,14 @@ mod tests {
     /// by user names (`steps.<name>`), a list of mixed shapes, and an optional nested struct.
     #[test]
     fn every_unknown_key_is_found_with_its_path() {
-        let doc = "project: p\nbogus: 1\ndefaults: { agnet: claude }\nsteps: { w: { judge_model: x } }\n\
+        let doc = "project: p\nbogus: 1\ndefaults: { agnet: claude }\nsteps: { w: { verifier_model: x } }\n\
                    sequence:\n  steps: [w, { step: w, tims: 2 }]\n  notify: { cmd: [], every: 1 }\n  limits: { wall_hours: 8 }\n";
         assert_eq!(
             paths(doc),
             [
                 "bogus",
                 "defaults.agnet",
-                "steps.w.judge_model",
+                "steps.w.verifier_model",
                 "sequence.steps[1].tims",
                 "sequence.notify.every",
                 "sequence.limits.wall_hours"
@@ -152,8 +152,8 @@ mod tests {
 
     #[test]
     fn the_message_is_serdes_wording() {
-        let p = &unknown_keys(&yaml("project: p\njudges: { t: { timeot: 1 } }\n"))[0];
-        assert_eq!(p.path, "judges.t.timeot");
+        let p = &unknown_keys(&yaml("project: p\nverifiers: { t: { timeot: 1 } }\n"))[0];
+        assert_eq!(p.path, "verifiers.t.timeot");
         assert_eq!(p.message, "unknown field `timeot`, expected one of `timeout`, `metric`, `score`, `max`, `min`, `command`, `path`, `template`");
         let p = &unknown_keys(&yaml("project: p\nwatchdog: { x: 1 }\n"))[0];
         assert!(p.message.starts_with("unknown field `x`, expected one of "), "{}", p.message);

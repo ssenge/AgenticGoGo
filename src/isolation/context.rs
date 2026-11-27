@@ -1,5 +1,5 @@
 //! READ-ONLY CONTEXT DIRECTORIES (`context:`) — knowledge that lives outside the project, which the
-//! worker and its judges read every session and must never change.
+//! worker and its verifiers read every session and must never change.
 //!
 //! rlt does not interpret the contents. It resolves each entry, refuses one it cannot enforce, and
 //! hands the run's confining tiers the list ([`super::policy::RunPolicy::contexts`]):

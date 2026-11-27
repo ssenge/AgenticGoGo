@@ -1,7 +1,7 @@
 //! NETWORK EGRESS — `isolation_policy.network: open | { allow: [host[:port], …] }`.
 //!
 //! `open` (the default) is the network every tier has always had. `allow` confines every process
-//! the run confines — worker, judges, the LLM judge's one-shot, and on `sandbox` the hooks — to the
+//! the run confines — worker, verifiers, the rubric verifier's one-shot, and on `sandbox` the hooks — to the
 //! listed destinations, through ONE enforcement point: rlt's own proxy ([`proxy`]), which checks the
 //! name the client asked for and resolves it itself. Each tier's job is to make the proxy the only
 //! way out:

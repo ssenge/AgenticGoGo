@@ -1,17 +1,17 @@
-//! Evidence persistence: keep the files a verdict names as `evidence`, after the judge that wrote
+//! Evidence persistence: keep the files a verdict names as `evidence`, after the verifier that wrote
 //! them is gone.
 //!
-//! A judge's working files live in its per-session scratch (`$RLT_JUDGE_SCRATCH`, under `$TMPDIR`),
+//! A verifier's working files live in its per-session scratch (`$RLT_VERIFIER_SCRATCH`, under `$TMPDIR`),
 //! which nothing keeps: by the time a human asks why a gate passed, the SARIF file or the diff report
-//! the verdict pointed at may already be swept. So after judging, rlt copies each declared file to
-//! `rlt/private/evidence/<run>/<session>/<judge>/` — rlt-private, because it is part of what rlt
+//! the verdict pointed at may already be swept. So after verifying, rlt copies each declared file to
+//! `rlt/private/evidence/<run>/<session>/<verifier>/` — rlt-private, because it is part of what rlt
 //! believes happened.
 //!
 //! # What may be copied
-//! A declared path is resolved against the judge's scratch first, then the project root (an absolute
+//! A declared path is resolved against the verifier's scratch first, then the project root (an absolute
 //! path is taken as is). The CANONICAL path — every symlink resolved — must lie inside one of those
 //! two roots, and must be a regular file. Anything else is refused and recorded, never followed: a
-//! verdict is judge output, and a judge reads worker-written content, so `"../../.ssh/id_rsa"` or a
+//! verdict is verifier output, and a verifier reads worker-written content, so `"../../.ssh/id_rsa"` or a
 //! scratch symlink to `/etc` must not become a copy rlt makes on its behalf.
 //!
 //! # The size cap
@@ -20,7 +20,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// The default byte budget for one run's evidence copies (`judge.evidence_max_mb`).
+/// The default byte budget for one run's evidence copies (`verifier.evidence_max_mb`).
 pub const DEFAULT_MAX_MB: u64 = 100;
 
 /// What became of one verdict's declared evidence.
@@ -51,7 +51,7 @@ impl Budget {
 /// The two directories a declared evidence path may resolve into.
 #[derive(Debug, Clone)]
 pub struct Roots {
-    /// the judge's per-session scratch.
+    /// the verifier's per-session scratch.
     pub scratch: PathBuf,
     /// the project root.
     pub project: PathBuf,
@@ -105,7 +105,7 @@ fn confine(entry: &str, roots: &Roots) -> Result<(PathBuf, PathBuf), String> {
     let found = candidates
         .iter()
         .find(|c| std::fs::symlink_metadata(c).is_ok())
-        .ok_or_else(|| "no such file in the judge scratch or the project".to_string())?;
+        .ok_or_else(|| "no such file in the verifier scratch or the project".to_string())?;
     // canonical = every symlink resolved, so the containment check sees where the bytes really are.
     let source = std::fs::canonicalize(found).map_err(|e| e.to_string())?;
     for root in [&roots.scratch, &roots.project] {
@@ -116,14 +116,14 @@ fn confine(entry: &str, roots: &Roots) -> Result<(PathBuf, PathBuf), String> {
             }
         }
     }
-    Err("outside the judge scratch and the project — refused".into())
+    Err("outside the verifier scratch and the project — refused".into())
 }
 
-/// A judge name as a single, safe directory name. A native judge is named by a Rust string, so its
+/// A verifier name as a single, safe directory name. A native verifier is named by a Rust string, so its
 /// name may hold a `/` or be `..`; the evidence path must not climb out of `<session>/`.
-pub fn dir_name(judge: &str) -> String {
+pub fn dir_name(verifier: &str) -> String {
     let s: String =
-        judge.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect();
+        verifier.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect();
     if s.is_empty() || s.chars().all(|c| c == '.') {
         format!("_{s}")
     } else {
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(kept.saved, [dest.join("a.txt"), dest.join("b.txt")]);
     }
 
-    /// The scratch wins over the project for a relative path — it is where a judge writes.
+    /// The scratch wins over the project for a relative path — it is where a verifier writes.
     #[test]
     fn a_relative_path_prefers_the_scratch() {
         let (_t, roots, dest) = fixture();
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn a_judge_name_becomes_one_safe_directory() {
+    fn a_verifier_name_becomes_one_safe_directory() {
         assert_eq!(dir_name("lint_clean"), "lint_clean");
         assert_eq!(dir_name("a/../b"), "a_.._b");
         assert_eq!(dir_name(".."), "_..");

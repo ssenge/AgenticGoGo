@@ -8,30 +8,30 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::workflow::Flow;
 
-/// One entry of a hooks list: a script (with its arguments), or a judge the process file declares.
+/// One entry of a hooks list: a script (with its arguments), or a verifier the process file declares.
 #[derive(Deserialize, Clone)]
 #[serde(untagged)]
 enum Entry {
     Command(String),
-    Judge(Declared),
+    Verifier(Declared),
 }
 
-/// `{ judge: <name> }`: a judge declared under the process file's `judges:`.
+/// `{ verifier: <name> }`: a verifier declared under the process file's `verifiers:`.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct Declared {
-    judge: String,
+    verifier: String,
 }
 
 impl Entry {
-    /// The entry as the command lists the hooks pass around: a declared judge is its marker and name.
+    /// The entry as the command lists the hooks pass around: a declared verifier is its marker and name.
     fn text(&self) -> String {
         match self {
             Entry::Command(c) => c.clone(),
-            Entry::Judge(d) => format!("{}{}", super::declared::HOOK, d.judge),
+            Entry::Verifier(d) => format!("{}{}", super::declared::HOOK, d.verifier),
         }
     }
 }
@@ -71,14 +71,14 @@ pub enum Scope<'a> {
     Phase(&'a str),
 }
 
-/// The names of the declared judges a hooks file's entries use (`{ judge: <name> }`), for `--check`.
-pub fn judge_names(path: &Path) -> Vec<String> {
+/// The names of the declared verifiers a hooks file's entries use (`{ verifier: <name> }`), for `--check`.
+pub fn verifier_names(path: &Path) -> Vec<String> {
     let file = read(path);
     let lists = std::iter::once(&file.step).chain(file.steps.values()).chain(file.phases.values());
     lists
         .flat_map(|l| l.before.iter().chain(&l.after))
         .filter_map(|e| match e {
-            Entry::Judge(d) => Some(d.judge.clone()),
+            Entry::Verifier(d) => Some(d.verifier.clone()),
             Entry::Command(_) => None,
         })
         .collect()
@@ -119,9 +119,9 @@ fn label(command: &str) -> String {
     std::iter::once(stem).chain(words).collect::<Vec<_>>().join(" ")
 }
 
-/// The hooks of `scope` (`when`) as script judges, each told the step's key (`RLT_STEP`): what the run judges and
+/// The hooks of `scope` (`when`) as script verifiers, each told the step's key (`RLT_STEP`): what the run verifiers and
 /// what a worker runs to check itself. A wrapper that can't be written is left out.
-pub fn judges(flow: &Flow, commands: &[String], scope: &Scope, when: When, declared: &dyn Fn(&str) -> Option<Judge>) -> Vec<Judge> {
+pub fn verifiers(flow: &Flow, commands: &[String], scope: &Scope, when: When, declared: &dyn Fn(&str) -> Option<Verifier>) -> Vec<Verifier> {
     let id = match scope {
         Scope::Step { key, .. } => (*key).to_string(),
         Scope::Phase(p) => format!("phase-{p}"),
@@ -132,19 +132,19 @@ pub fn judges(flow: &Flow, commands: &[String], scope: &Scope, when: When, decla
             return declared(name);
         }
         let path = flow.wrapper(&format!("hook-{id}-{which}-{i}.sh"), &format!("env RLT_STEP='{id}' {c}")).ok()?;
-        Some(Judge::script(format!("hook-{}", label(c)).replace(' ', "-"), path.as_str()))
+        Some(Verifier::script(format!("hook-{}", label(c)).replace(' ', "-"), path.as_str()))
     }).collect()
 }
 
 /// Runs the hooks of a phase (`when`) and records each verdict under step `name`; the unmet ones' reasons.
-pub fn check(flow: &Flow, name: &str, commands: &[String], scope: &Scope, when: When, declared: &dyn Fn(&str) -> Option<Judge>) -> Result<(), String> {
+pub fn check(flow: &Flow, name: &str, commands: &[String], scope: &Scope, when: When, declared: &dyn Fn(&str) -> Option<Verifier>) -> Result<(), String> {
     let which = if when == When::Before { "before" } else { "after" };
     let which = match scope {
         Scope::Phase(p) => format!("phase {p} {which}"),
         Scope::Step { .. } => which.to_string(),
     };
-    let failed: Vec<String> = judges(flow, commands, scope, when, declared).iter().filter_map(|j| {
-        let verdict = flow.judge(j);
+    let failed: Vec<String> = verifiers(flow, commands, scope, when, declared).iter().filter_map(|j| {
+        let verdict = flow.verifier(j);
         flow.record(name, "hook", verdict.met(), &format!("{which} {}: {}", j.name, verdict.rationale()));
         (!verdict.met()).then(|| format!("{}: {}", j.name, verdict.rationale()))
     }).collect();
@@ -163,31 +163,31 @@ mod tests {
     /// of an `each`'s child takes its child's.
     #[test]
     fn a_steps_hooks_are_the_processs_then_the_projects() {
-        let process = file("step: { after: [judges/parses.py] }\nsteps:\n  build: { after: [judges/own.py x] }\nphases:\n  verify: { before: [judges/secrets.py] }\n");
+        let process = file("step: { after: [verifiers/parses.py] }\nsteps:\n  build: { after: [verifiers/own.py x] }\nphases:\n  verify: { before: [verifiers/secrets.py] }\n");
         let project = file("steps:\n  build: { after: [hooks/own.sh x] }\n");
         let (home, dir) = (Path::new("/home"), Path::new("/proj"));
         let after = commands((&process, home), (&project, dir), &Scope::Step { key: "build-U1", id: "build" }, When::After);
-        assert_eq!(after, ["/home/judges/parses.py", "/home/judges/own.py x", "/proj/hooks/own.sh x"]);
+        assert_eq!(after, ["/home/verifiers/parses.py", "/home/verifiers/own.py x", "/proj/hooks/own.sh x"]);
         assert_eq!(label(&after[2]), "own x");
         let phase = commands((&process, home), (&project, dir), &Scope::Phase("verify"), When::Before);
-        assert_eq!(phase, ["/home/judges/secrets.py"]);
+        assert_eq!(phase, ["/home/verifiers/secrets.py"]);
         assert!(commands((&process, home), (&project, dir), &Scope::Phase("other"), When::After).is_empty());
     }
 
-    /// A hooks entry `{ judge: <name> }` stays as it is (a marker and the name) next to the scripts, which get their
-    /// paths; the names of the judges a file uses are listed for `--check`.
+    /// A hooks entry `{ verifier: <name> }` stays as it is (a marker and the name) next to the scripts, which get their
+    /// paths; the names of the verifiers a file uses are listed for `--check`.
     #[test]
-    fn an_entry_can_name_a_declared_judge() {
-        let process = file("step: { before: [judges/a.py], after: [{ judge: parse }, judges/b.py] }\nphases:\n  verify: { after: [{ judge: tests }] }\n");
+    fn an_entry_can_name_a_declared_verifier() {
+        let process = file("step: { before: [verifiers/a.py], after: [{ verifier: parse }, verifiers/b.py] }\nphases:\n  verify: { after: [{ verifier: tests }] }\n");
         let (home, dir) = (Path::new("/home"), Path::new("/proj"));
         let none = file("");
         let step = Scope::Step { key: "x", id: "x" };
-        assert_eq!(commands((&process, home), (&none, dir), &step, When::After), ["@judge:parse", "/home/judges/b.py"]);
-        assert_eq!(commands((&process, home), (&none, dir), &Scope::Phase("verify"), When::After), ["@judge:tests"]);
-        assert!(serde_yaml::from_str::<File>("step: { after: [{ judge: a, run: b }] }\n").is_err(), "an unknown key");
+        assert_eq!(commands((&process, home), (&none, dir), &step, When::After), ["@verifier:parse", "/home/verifiers/b.py"]);
+        assert_eq!(commands((&process, home), (&none, dir), &Scope::Phase("verify"), When::After), ["@verifier:tests"]);
+        assert!(serde_yaml::from_str::<File>("step: { after: [{ verifier: a, run: b }] }\n").is_err(), "an unknown key");
         let path = std::env::temp_dir().join(format!("rlt-hooks-{}.yaml", std::process::id()));
-        std::fs::write(&path, "step: { after: [{ judge: parse }] }\nsteps:\n  build: { before: [{ judge: tests }, x.sh] }\n").unwrap();
-        let mut names = judge_names(&path);
+        std::fs::write(&path, "step: { after: [{ verifier: parse }] }\nsteps:\n  build: { before: [{ verifier: tests }, x.sh] }\n").unwrap();
+        let mut names = verifier_names(&path);
         names.sort();
         assert_eq!(names, ["parse", "tests"]);
         let _ = std::fs::remove_file(&path);

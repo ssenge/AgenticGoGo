@@ -1,10 +1,10 @@
-//! Judge GROUPS (`sequence.groups`, k-of-n aggregates, the gate's net group rule), the
+//! Verifier GROUPS (`sequence.groups`, k-of-n aggregates, the gate's net group rule), the
 //! `merge_requires_improvement` merge rule and the session that changes nothing (`no_changes`) —
 //! end to end, on both front ends.
 //!
 //! The YAML half drives the real `rlt` binary with a fake `claude` whose sessions follow a PLAN: one
 //! shell line per session, run in the project, then committed. The plan sits OUTSIDE the project so
-//! a rollback cannot restore it. The driver half drives the real facade, with judges whose verdict
+//! a rollback cannot restore it. The driver half drives the real facade, with verifiers whose verdict
 //! is a function of how many sessions' work is in the tree.
 //!
 //! Unix-only (the fake agent is a shell script), like the rest of the suite.
@@ -38,8 +38,8 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
-fn write_judge(dir: &Path, name: &str, body: &str) {
-    chmod_x(&write(dir, &format!("rlt/judges/{name}.sh"), body));
+fn write_verifier(dir: &Path, name: &str, body: &str) {
+    chmod_x(&write(dir, &format!("rlt/verifiers/{name}.sh"), body));
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -82,12 +82,12 @@ exit 0
 }
 
 fn commit_base(dir: &Path) {
-    write(dir, ".gitignore", "rlt/state/\nagg/private/\n.obsidian/\n");
+    write(dir, ".gitignore", "rlt/state/\nrlt/private/\n.obsidian/\n");
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "base"]);
 }
 
-/// `rlt.yaml` with one judged `worker` step and `seq` as the whole body under `sequence:`.
+/// `rlt.yaml` with one verified `worker` step and `seq` as the whole body under `sequence:`.
 fn write_cfg(dir: &Path, seq: &str) {
     write(
         dir,
@@ -99,10 +99,10 @@ fn write_cfg(dir: &Path, seq: &str) {
     );
 }
 
-/// Judges `names`, each met iff its letter is in `state.txt`.
-fn letter_judges(dir: &Path, names: &[&str]) {
+/// Verifiers `names`, each met iff its letter is in `state.txt`.
+fn letter_verifiers(dir: &Path, names: &[&str]) {
     for j in names {
-        write_judge(dir, j, &format!("#!/bin/sh\ngrep -q {j} state.txt && echo '{{\"met\":true}}' || echo '{{\"met\":false}}'\n"));
+        write_verifier(dir, j, &format!("#!/bin/sh\ngrep -q {j} state.txt && echo '{{\"met\":true}}' || echo '{{\"met\":false}}'\n"));
     }
 }
 
@@ -119,18 +119,18 @@ fn run(dir: &Path, path: &str, sessions: &str) -> (Option<i32>, String) {
     (out.status.code(), combined)
 }
 
-/// Per session, the outcome the gate stamped on `judge`'s row.
-fn outcomes(dir: &Path, judge: &str) -> Vec<(Option<u32>, Outcome)> {
-    rows_for(dir, judge, false).into_iter().map(|r| (r.session, r.outcome)).collect()
+/// Per session, the outcome the gate stamped on `verifier`'s row.
+fn outcomes(dir: &Path, verifier: &str) -> Vec<(Option<u32>, Outcome)> {
+    rows_for(dir, verifier, false).into_iter().map(|r| (r.session, r.outcome)).collect()
 }
 
-/// THE A-4 ACCEPTANCE ROW: `done_if: "count_met(qs) >= 2"` over three judges does not pass with one
+/// THE A-4 ACCEPTANCE ROW: `done_if: "count_met(qs) >= 2"` over three verifiers does not pass with one
 /// met (session 1) and passes with two (session 2).
 #[test]
 fn k_of_n_passes_with_two_of_three_and_not_with_one() {
     let (_tmp, dir, path) = planned_project(&["echo a > state.txt", "echo ab > state.txt", "echo abc > state.txt"]);
     write(&dir, "state.txt", "\n");
-    letter_judges(&dir, &["a", "b", "c"]);
+    letter_verifiers(&dir, &["a", "b", "c"]);
     write_cfg(&dir, "  groups:\n    qs: [\"a\", \"b\", \"c\"]\n  done_if: \"count_met(qs) >= 2\"\n");
     commit_base(&dir);
 
@@ -151,7 +151,7 @@ fn a_swap_inside_a_group_is_kept_and_a_net_loss_is_rolled_back() {
     let plan = ["echo b > state.txt", "echo x > state.txt"];
     let (_tmp, dir, path) = planned_project(&plan);
     write(&dir, "state.txt", "a\n");
-    letter_judges(&dir, &["a", "b", "c"]);
+    letter_verifiers(&dir, &["a", "b", "c"]);
     write_cfg(&dir, "  groups:\n    qs: [\"a\", \"b\", \"c\"]\n  done_if: \"count_met(qs) >= 3\"\n");
     commit_base(&dir);
 
@@ -164,10 +164,10 @@ fn a_swap_inside_a_group_is_kept_and_a_net_loss_is_rolled_back() {
     );
     assert_eq!(git(&dir, &["show", "main:state.txt"]), "b", "the swap landed, the loss did not");
 
-    // the contrast: the same members, named one by one, are each held to the per-judge rule.
+    // the contrast: the same members, named one by one, are each held to the per-verifier rule.
     let (_tmp2, dir2, path2) = planned_project(&plan);
     write(&dir2, "state.txt", "a\n");
-    letter_judges(&dir2, &["a", "b", "c"]);
+    letter_verifiers(&dir2, &["a", "b", "c"]);
     write_cfg(&dir2, "  done_if: \"a AND b AND c\"\n");
     commit_base(&dir2);
     let (_, combined) = run(&dir2, &path2, "1");
@@ -179,7 +179,7 @@ fn a_swap_inside_a_group_is_kept_and_a_net_loss_is_rolled_back() {
 fn a_group_in_abort_if_aborts_on_its_count() {
     let (_tmp, dir, path) = planned_project(&["echo c > state.txt", "echo cd > state.txt"]);
     write(&dir, "state.txt", "\n");
-    letter_judges(&dir, &["goal", "c", "d"]);
+    letter_verifiers(&dir, &["goal", "c", "d"]);
     write_cfg(&dir, "  groups:\n    alarms: [\"c\", \"d\"]\n  done_if: \"goal\"\n  abort_if: \"all_goals(alarms)\"\n");
     commit_base(&dir);
 
@@ -192,12 +192,12 @@ fn a_group_in_abort_if_aborts_on_its_count() {
 #[test]
 fn an_unknown_member_or_group_refuses_at_startup_listing_the_valid_names() {
     let (_tmp, dir, path) = planned_project(&["echo nope > touched.txt"]);
-    letter_judges(&dir, &["a", "b"]);
+    letter_verifiers(&dir, &["a", "b"]);
     write_cfg(&dir, "  groups:\n    qs: [\"a\", \"ghost\"]\n  done_if: \"count_met(qs) >= 1\"\n");
     commit_base(&dir);
     let (code, combined) = run(&dir, &path, "1");
     assert_eq!(code, Some(1), "{combined}");
-    assert!(combined.contains("ghost") && combined.contains("available judges") && combined.contains("a, b"), "{combined}");
+    assert!(combined.contains("ghost") && combined.contains("available verifiers") && combined.contains("a, b"), "{combined}");
 
     write_cfg(&dir, "  groups:\n    qs: [\"a\", \"b\"]\n  done_if: \"count_met(quality) >= 1\"\n");
     let (code, combined) = run(&dir, &path, "1");
@@ -218,7 +218,7 @@ fn a_reformat_only_session_is_not_merged_with_the_option_and_merged_without() {
     let plan = ["echo reformatted > fmt.txt", "touch feature.txt"];
     let setup = |on: bool| {
         let (tmp, dir, path) = planned_project(&plan);
-        write_judge(&dir, "feature", "#!/bin/sh\n[ -f feature.txt ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
+        write_verifier(&dir, "feature", "#!/bin/sh\n[ -f feature.txt ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
         let opt = if on { "  merge_requires_improvement: true\n" } else { "" };
         write_cfg(&dir, &format!("  done_if: \"feature\"\n  abort_if: \"rollbacks >= 1\"\n{opt}"));
         commit_base(&dir);
@@ -254,8 +254,8 @@ fn a_reformat_only_session_is_not_merged_with_the_option_and_merged_without() {
 fn a_ratchet_improvement_beyond_tolerance_counts_and_noise_does_not() {
     let (_tmp, dir, path) = planned_project(&["echo 9.8 > metric.txt", "echo 9 > metric.txt"]);
     write(&dir, "metric.txt", "10\n");
-    write_judge(&dir, "cc", "#!/bin/sh\nprintf '{\"met\":true,\"value\":%s}\\n' \"$(cat metric.txt)\"\n");
-    write_judge(&dir, "feature", "#!/bin/sh\necho '{\"met\":false}'\n");
+    write_verifier(&dir, "cc", "#!/bin/sh\nprintf '{\"met\":true,\"value\":%s}\\n' \"$(cat metric.txt)\"\n");
+    write_verifier(&dir, "feature", "#!/bin/sh\necho '{\"met\":false}'\n");
     write_cfg(
         &dir,
         "  done_if: \"feature\"\n  merge_requires_improvement: true\n  ratchet:\n    cc: { direction: \"down\", tolerance: 0.5 }\n",
@@ -276,7 +276,7 @@ fn a_ratchet_improvement_beyond_tolerance_counts_and_noise_does_not() {
 #[test]
 fn a_no_improvement_streak_aborts_on_consecutive_no_improvements() {
     let (_tmp, dir, path) = planned_project(&["echo 1 > fmt.txt", "echo 2 > fmt.txt", "echo 3 > fmt.txt"]);
-    write_judge(&dir, "feature", "#!/bin/sh\necho '{\"met\":false}'\n");
+    write_verifier(&dir, "feature", "#!/bin/sh\necho '{\"met\":false}'\n");
     write_cfg(
         &dir,
         "  done_if: \"feature\"\n  merge_requires_improvement: true\n  abort_if: \"rollbacks >= 1 OR consecutive_no_improvements >= 2\"\n",
@@ -290,14 +290,14 @@ fn a_no_improvement_streak_aborts_on_consecutive_no_improvements() {
     assert_eq!(relentless::core::ratchet::load(&dir).unwrap().rollbacks, 0);
 }
 
-/// `stalled` (the shipped library judge) counts a `no_improvement` session as a step in which
+/// `stalled` (the shipped library verifier) counts a `no_improvement` session as a step in which
 /// nothing moved: three of them in a row read as a stall. Rolled-back rows still count for nothing.
 #[test]
 fn stalled_counts_no_improvement_sessions_as_steps_where_nothing_moved() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/judges/stalled.sh");
-    let judge = |dir: &Path| -> serde_json::Value {
+    let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/verifiers/stalled.sh");
+    let verifier = |dir: &Path| -> serde_json::Value {
         let out = Command::new("bash").arg(&stalled).env("RLT_PROJECT_DIR", dir).output_bounded().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
     };
@@ -307,18 +307,18 @@ fn stalled_counts_no_improvement_sessions_as_steps_where_nothing_moved() {
     row(1, 10.0, Outcome::Merged);
     row(2, 99.0, Outcome::RolledBack);
     row(3, 11.0, Outcome::NoImprovement);
-    assert_eq!(judge(dir)["met"], false, "two qualifying steps are not enough history");
+    assert_eq!(verifier(dir)["met"], false, "two qualifying steps are not enough history");
     row(4, 12.0, Outcome::NoImprovement);
-    assert_eq!(judge(dir)["met"], true, "merged + two no_improvement steps: nothing moved");
+    assert_eq!(verifier(dir)["met"], true, "merged + two no_improvement steps: nothing moved");
 }
 
 /// `stalled` counts a `no_changes` session as a step with its OWN readings — they are base's, since
-/// nothing was merged or discarded. Flat readings are a stall; a judge that moved on one (a step
+/// nothing was merged or discarded. Flat readings are a stall; a verifier that moved on one (a step
 /// whose output is gitignored worker state) is progress.
 #[test]
 fn stalled_counts_no_changes_sessions_with_their_own_readings() {
-    let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/judges/stalled.sh");
-    let judge = |dir: &Path| -> serde_json::Value {
+    let stalled = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/verifiers/stalled.sh");
+    let verifier = |dir: &Path| -> serde_json::Value {
         let out = Command::new("bash").arg(&stalled).env("RLT_PROJECT_DIR", dir).output_bounded().unwrap();
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)))
     };
@@ -329,30 +329,30 @@ fn stalled_counts_no_changes_sessions_with_their_own_readings() {
     let idle = tempfile::tempdir().unwrap();
     row(idle.path(), 1, 10.0, Outcome::NoChanges);
     row(idle.path(), 2, 10.0, Outcome::NoChanges);
-    assert_eq!(judge(idle.path())["met"], false, "two steps are not enough history");
+    assert_eq!(verifier(idle.path())["met"], false, "two steps are not enough history");
     row(idle.path(), 3, 10.0, Outcome::NoChanges);
-    assert_eq!(judge(idle.path())["met"], true, "three idle sessions, nothing moved: a stall");
+    assert_eq!(verifier(idle.path())["met"], true, "three idle sessions, nothing moved: a stall");
 
     let state_only = tempfile::tempdir().unwrap();
     row(state_only.path(), 1, 10.0, Outcome::Merged);
     row(state_only.path(), 2, 50.0, Outcome::NoChanges);
     row(state_only.path(), 3, 50.0, Outcome::NoChanges);
-    assert_eq!(judge(state_only.path())["met"], false, "`spec` moved on a no-change session: progress");
+    assert_eq!(verifier(state_only.path())["met"], false, "`spec` moved on a no-change session: progress");
 }
 
 /// A project whose idle worker changes NOTHING git-visible, `.home/` ignored too so rlt's own
 /// library install cannot be swept onto session 1.
 fn idle_project(plan: &[&str], seq: &str) -> (tempfile::TempDir, PathBuf, String) {
     let (tmp, dir, path) = planned_project(plan);
-    write_judge(&dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0}'\n");
+    write_verifier(&dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0}'\n");
     write_cfg(&dir, seq);
-    write(&dir, ".gitignore", "rlt/state/\nagg/private/\n.obsidian/\n.home/\n");
+    write(&dir, ".gitignore", "rlt/state/\nrlt/private/\n.obsidian/\n.home/\n");
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "base"]);
     (tmp, dir, path)
 }
 
-/// THE BUG: a worker that believes it is finished while a judge stays unmet changes nothing, every
+/// THE BUG: a worker that believes it is finished while a verifier stays unmet changes nothing, every
 /// session. Those sessions used to count for nothing — not for `stalled`, not for any gate term — so
 /// `abort_if: stalled` idled forever. Now each is a `no_changes` step: `stalled` turns met once it
 /// sees three, and the run aborts.
@@ -365,7 +365,7 @@ fn an_idle_worker_is_a_stall_and_abort_if_stalled_ends_the_run() {
     assert_eq!(
         outcomes(&dir, "feature"),
         vec![(None, Outcome::Baseline), no_changes(1), no_changes(2), no_changes(3), no_changes(4)],
-        "`stalled` reads sessions 1-3 during session 4's judging:\n{combined}"
+        "`stalled` reads sessions 1-3 during session 4's verifying:\n{combined}"
     );
     let st = relentless::core::ratchet::load(&dir).unwrap();
     assert_eq!((st.no_changes, st.consecutive_no_changes, st.rollbacks), (4, 4, 0), "never a rollback");
@@ -434,9 +434,9 @@ exit 0
     root
 });
 
-/// A driver project with three judges over `n` = the number of sessions in the tree: `even` (met
+/// A driver project with three verifiers over `n` = the number of sessions in the tree: `even` (met
 /// iff n is even), `odd` (met iff n is odd) and `any` (met iff n >= 1).
-fn driver_project() -> (tempfile::TempDir, Judge, Judge, Judge) {
+fn driver_project() -> (tempfile::TempDir, Verifier, Verifier, Verifier) {
     LazyLock::force(&ENV);
     let tmp = tempfile::tempdir().unwrap();
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
@@ -445,13 +445,13 @@ fn driver_project() -> (tempfile::TempDir, Judge, Judge, Judge) {
     git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "rlt baseline"]);
     let n = "n=$(cat work.log 2>/dev/null | wc -l | tr -d ' ')";
     for (name, test) in [("even", "[ $((n % 2)) -eq 0 ]"), ("odd", "[ $((n % 2)) -eq 1 ]"), ("any", "[ \"$n\" -ge 1 ]")] {
-        write_judge(
+        write_verifier(
             tmp.path(),
             name,
             &format!("#!/bin/sh\n{n}\n{test} && printf '{{\"met\":true,\"value\":%s}}\\n' \"$n\" || printf '{{\"met\":false,\"value\":%s}}\\n' \"$n\"\n"),
         );
     }
-    let j = |n: &str| Judge::script(n, format!("rlt/judges/{n}.sh"));
+    let j = |n: &str| Verifier::script(n, format!("rlt/verifiers/{n}.sh"));
     (tmp, j("even"), j("odd"), j("any"))
 }
 
@@ -459,11 +459,11 @@ fn work() -> Step {
     Step::new("implement").model("fake").prompt("do a chunk")
 }
 
-/// `rlt.group()` counts k-of-n, and at the gate a member asked ONLY through the group is judged with
+/// `rlt.group()` counts k-of-n, and at the gate a member asked ONLY through the group is verified with
 /// it, net: the even/odd swap of the second session is kept. Asked by name, the same swap is a
-/// per-judge regression and is rolled back.
+/// per-verifier regression and is rolled back.
 #[test]
-fn a_driver_group_counts_k_of_n_and_its_gate_judges_the_group_net() {
+fn a_driver_group_counts_k_of_n_and_its_gate_verifiers_the_group_net() {
     let (tmp, even, odd, any) = driver_project();
     let q = Group::new("q", [even.clone(), odd.clone(), any.clone()]);
     let rlt = Relentless::open(tmp.path()).unwrap();
@@ -482,35 +482,35 @@ fn a_driver_group_counts_k_of_n_and_its_gate_judges_the_group_net() {
     let (tmp, even, odd, _) = driver_project();
     let rlt = Relentless::open(tmp.path()).unwrap();
     rlt.step(&work()).unwrap();
-    rlt.judge(&even);
-    rlt.judge(&odd);
+    rlt.verifier(&even);
+    rlt.verifier(&odd);
     assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     rlt.step(&work()).unwrap();
-    rlt.judge(&even);
-    rlt.judge(&odd);
+    rlt.verifier(&even);
+    rlt.verifier(&odd);
     assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "asked by name, `odd` regressed on its own");
 }
 
-/// `merge_requires_improvement` on the driver: a gate whose asked judges improved nothing is
-/// discarded as `NoImprovement` — not a rollback — while an improvement (a judge unmet→met, or a
+/// `merge_requires_improvement` on the driver: a gate whose asked verifiers improved nothing is
+/// discarded as `NoImprovement` — not a rollback — while an improvement (a verifier unmet→met, or a
 /// ratchet beyond tolerance) is kept. Off, the same span is kept.
 #[test]
 fn a_driver_span_that_improves_nothing_is_not_merged() {
     let (tmp, _, _, any) = driver_project();
-    let size = Judge::script("odd", "rlt/judges/odd.sh"); // its `value` is n — higher is better
+    let size = Verifier::script("odd", "rlt/verifiers/odd.sh"); // its `value` is n — higher is better
     let rlt = Relentless::open(tmp.path()).unwrap().merge_requires_improvement(true).ratchet("odd", Ratchet::up(0.0));
-    rlt.judge(&size); // the baseline: 0
+    rlt.verifier(&size); // the baseline: 0
     rlt.step(&work()).unwrap();
-    rlt.judge(&any);
+    rlt.verifier(&any);
     assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "`any` went unmet→met");
     rlt.step(&work()).unwrap();
-    rlt.judge(&any);
+    rlt.verifier(&any);
     assert_eq!(rlt.gate().unwrap(), GateOutcome::NoImprovement, "`any` was met and is met");
     let st = rlt.gate_state();
     assert_eq!((st.rollbacks, st.no_improvements), (0, 1), "not a rollback");
     assert_eq!(git(tmp.path(), &["show", "main:work.log"]).lines().count(), 1, "the span did not land");
     rlt.step(&work()).unwrap();
-    rlt.judge(&size);
+    rlt.verifier(&size);
     assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "the ratchet moved the good way: 0 → 2");
     drop(rlt);
 
@@ -518,7 +518,7 @@ fn a_driver_span_that_improves_nothing_is_not_merged() {
     let rlt = Relentless::open(tmp.path()).unwrap();
     for _ in 0..2 {
         rlt.step(&work()).unwrap();
-        rlt.judge(&any);
+        rlt.verifier(&any);
         assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "off by default");
     }
 }
@@ -536,7 +536,7 @@ fn a_driver_span_that_changes_nothing_counts_as_a_no_change_gate() {
     assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     for _ in 0..2 {
         rlt.step(&idle).unwrap();
-        rlt.judge(&any);
+        rlt.verifier(&any);
         assert_eq!(rlt.gate().unwrap(), GateOutcome::Nothing, "nothing to merge");
     }
     let st = rlt.gate_state();

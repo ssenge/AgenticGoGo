@@ -37,7 +37,7 @@ pub enum AskCase {
     /// `hil_choose` — a CLOSED answer set. The options are recorded, so `rlt answer` can refuse
     /// anything not on the list and the caller cannot be handed a value it did not offer.
     Choose,
-    /// `hil_input` — an OPEN set. Pair it with a judge; rlt cannot validate free text.
+    /// `hil_input` — an OPEN set. Pair it with a verifier; rlt cannot validate free text.
     Input,
 }
 

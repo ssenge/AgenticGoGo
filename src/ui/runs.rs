@@ -301,8 +301,8 @@ pub fn merge(report: &mut Value, facts: &Value) {
 pub fn reviews(project: &Path, count: usize) -> Value {
     let text = std::fs::read_to_string(crate::paths::verdicts_jsonl(project)).unwrap_or_default();
     let rows: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| v["judge"].as_str().is_some_and(|j| j.ends_with("-review")))
-        .map(|v| json!({"step": v["step"], "judge": v["judge"], "met": v["met"], "rationale": v["rationale"], "ts": v["ts"]}))
+        .filter(|v| v["verifier"].as_str().is_some_and(|j| j.ends_with("-review")))
+        .map(|v| json!({"step": v["step"], "verifier": v["verifier"], "met": v["met"], "rationale": v["rationale"], "ts": v["ts"]}))
         .collect();
     json!({"reviews": rows[rows.len().saturating_sub(count)..]})
 }
@@ -317,11 +317,11 @@ mod tests {
         assert_eq!(reviews(tmp.path(), 2), json!({"reviews": []}), "no ledger: none");
         let file = crate::paths::verdicts_jsonl(tmp.path());
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        let row = |judge: &str, met: bool| json!({"step": "s", "judge": judge, "met": met, "rationale": judge, "ts": 1}).to_string();
+        let row = |verifier: &str, met: bool| json!({"step": "s", "verifier": verifier, "met": met, "rationale": verifier, "ts": 1}).to_string();
         let lines = [row("a-review", false), row("hook-x", true), row("b-review", true), row("c-review", false)];
         std::fs::write(&file, lines.join("\n") + "\nnot json\n").unwrap();
         let found = reviews(tmp.path(), 2)["reviews"].clone();
-        assert_eq!(found.as_array().unwrap().iter().map(|r| r["judge"].as_str().unwrap()).collect::<Vec<_>>(), ["b-review", "c-review"]);
+        assert_eq!(found.as_array().unwrap().iter().map(|r| r["verifier"].as_str().unwrap()).collect::<Vec<_>>(), ["b-review", "c-review"]);
         assert_eq!(found[1]["met"], false);
     }
 

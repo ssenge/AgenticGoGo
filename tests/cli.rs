@@ -1,16 +1,16 @@
 //! End-to-end integration tests driving the real `rlt` binary.
 //!
-//! A judge IS a goal now (§7.1): there is no `goals.yaml`. A judge is a file at
-//! `rlt/judges/<name>.sh` (or `.md`), resolved by the NAME referenced in `done_if` / `invariants` /
-//! an `if` condition. The config is one file, `rlt/rlt.yaml` (defaults/judge/steps/sequence).
+//! A verifier IS a goal now (§7.1): there is no `goals.yaml`. A verifier is a file at
+//! `rlt/verifiers/<name>.sh` (or `.md`), resolved by the NAME referenced in `done_if` / `invariants` /
+//! an `if` condition. The config is one file, `rlt/rlt.yaml` (defaults/verifier/steps/sequence).
 //!
 //! The loop spawns `claude -p` workers, so these tests put a FAKE `claude` on PATH: a tiny shell
-//! stub that emits valid stream-json and, as a side effect, advances the project state so a judge
-//! can flip to met. That exercises the genuinely risky path — the actual launch → stream → judge →
+//! stub that emits valid stream-json and, as a side effect, advances the project state so a verifier
+//! can flip to met. That exercises the genuinely risky path — the actual launch → stream → verifier →
 //! gate machinery — without a real model or network.
 //!
 //! Session isolation is MANDATORY (§4.1), so every `rlt run` needs a git repo, a clean tree and a
-//! non-detached HEAD. HOME is redirected into each test's temp dir so the `~/.rlt/judges` standard
+//! non-detached HEAD. HOME is redirected into each test's temp dir so the `~/.rlt/verifiers` standard
 //! library install (`ensure_library`) never touches the developer's real home.
 //!
 //! Unix-only (the stub + PATH shimming use sh). The harness's own platform is unix-first.
@@ -42,10 +42,10 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
-/// Write a script judge to `rlt/judges/<name>.sh` (the project judges dir, §5.1) and make it
+/// Write a script verifier to `rlt/verifiers/<name>.sh` (the project verifiers dir, §5.1) and make it
 /// executable. `name` is what `done_if` / `invariants` / an `if` condition references.
-fn write_judge(dir: &Path, name: &str, body: &str) {
-    let p = write(dir, &format!("rlt/judges/{name}.sh"), body);
+fn write_verifier(dir: &Path, name: &str, body: &str) {
+    let p = write(dir, &format!("rlt/verifiers/{name}.sh"), body);
     chmod_x(&p);
 }
 
@@ -110,7 +110,7 @@ fn project_with_fake_claude() -> (tempfile::TempDir, String) {
     // The fake `claude`: handles `--version` (preflight) and a `-p` run. On a `-p` run it creates
     // `did_work` in its CWD (the project dir) and COMMITS it on the session branch, then prints a
     // minimal stream-json result. The commit matters: session isolation is mandatory (§5.7), and
-    // UNCOMMITTED work resolves as `NoChanges` — the gate then restores base truth and the judge's
+    // UNCOMMITTED work resolves as `NoChanges` — the gate then restores base truth and the verifier's
     // met verdict on it never counts. A worker that means its work commits it. The result carries
     // total_cost_usd so the dollar-budget plumbing has real data to sum.
     let claude = bin.join("claude");
@@ -137,8 +137,8 @@ exit 0
 }
 
 /// `rlt` command rooted at `dir`, with the given PATH (so the fake claude is found). HOME is
-/// redirected into the project temp so `ensure_library` writes the standard judge library there,
-/// never the developer's real `~/.rlt/judges`.
+/// redirected into the project temp so `ensure_library` writes the standard verifier library there,
+/// never the developer's real `~/.rlt/verifiers`.
 fn rlt(dir: &Path, path: &str) -> Command {
     let mut c = Command::cargo_bin("rlt").expect("rlt binary built");
     c.current_dir(dir).env("PATH", path).env("HOME", dir.join(".home"));
@@ -155,11 +155,11 @@ fn init_then_plan_shows_scoreboard() {
     let out = rlt(dir, &path).arg("init").output_bounded().unwrap();
     assert!(out.status.success(), "rlt init failed: {}", String::from_utf8_lossy(&out.stderr));
     // init scaffolds rlt.yaml + the committed RLT.md + the gitignored forward-state STATE.md + a
-    // starter judge. No goals.yaml, no RLT_RESUME.md (§7.1).
+    // starter verifier. No goals.yaml, no RLT_RESUME.md (§7.1).
     assert!(dir.join("rlt/rlt.yaml").exists(), "init should scaffold rlt.yaml");
     assert!(dir.join("rlt/RLT.md").exists(), "init should scaffold the committed RLT.md");
     assert!(relentless::paths::rlt_dir(dir).join("STATE.md").exists(), "init should scaffold the forward state file");
-    assert!(dir.join("rlt/judges/tests_pass.sh").exists(), "init should scaffold a starter judge");
+    assert!(dir.join("rlt/verifiers/tests_pass.sh").exists(), "init should scaffold a starter verifier");
 
     let out = rlt(dir, &path).arg("plan").output_bounded().unwrap();
     assert!(out.status.success(), "rlt plan failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -169,11 +169,11 @@ fn init_then_plan_shows_scoreboard() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(combined.contains("Goals"), "plan output should show a scoreboard, got:\n{combined}");
-    // `plan` RE-RUNS the judges rather than reading a snapshot — proven by its output carrying the
-    // rationale the scaffolded judge SCRIPT prints, which only exists if the script executed.
+    // `plan` RE-RUNS the verifiers rather than reading a snapshot — proven by its output carrying the
+    // rationale the scaffolded verifier SCRIPT prints, which only exists if the script executed.
     assert!(
         combined.contains("replace me"),
-        "plan should re-run the judges and show their live rationale, got:\n{combined}"
+        "plan should re-run the verifiers and show their live rationale, got:\n{combined}"
     );
 }
 
@@ -203,8 +203,8 @@ fn doctor_passes_a_good_setup() {
 fn max_sessions_cap_exits_4_and_says_so() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    // a judge that is NEVER satisfied → the loop can only end by hitting the cap.
-    write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    // a verifier that is NEVER satisfied → the loop can only end by hitting the cap.
+    write_verifier(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "cap", "worked", "", "");
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
@@ -231,7 +231,7 @@ fn max_sessions_cap_exits_4_and_says_so() {
 fn runtime_state_splits_into_state_and_private_and_both_are_gitignored() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    write_judge(dir, "did", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    write_verifier(dir, "did", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "splitproj", "did", "", "");
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
@@ -265,14 +265,14 @@ fn runtime_state_splits_into_state_and_private_and_both_are_gitignored() {
 #[test]
 fn config_lives_in_the_rlt_folder() {
     // ALL user config lives under the mandatory `rlt/` folder and the loop finds + uses it:
-    // rlt.yaml, the state file, and the judge (resolved by NAME from rlt/judges/) all resolve
-    // through config_base, while the judge SCRIPT still runs from the project root (so `did_work`
-    // lands where the next judge looks for it). This is the end-to-end proof of the config folder.
+    // rlt.yaml, the state file, and the verifier (resolved by NAME from rlt/verifiers/) all resolve
+    // through config_base, while the verifier SCRIPT still runs from the project root (so `did_work`
+    // lands where the next verifier looks for it). This is the end-to-end proof of the config folder.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
 
-    // judge `worked` lives under rlt/judges/ and checks a root-level marker the worker creates.
-    write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
+    // verifier `worked` lives under rlt/verifiers/ and checks a root-level marker the worker creates.
+    write_verifier(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
     write_cfg(dir, "folded", "worked", "", "");
     write_state_md(dir, "create the file did_work\n");
 
@@ -295,8 +295,8 @@ fn run_drives_a_correction_loop_to_stop() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
 
-    // A DoD judge met when `did_work` exists. The judge prints the verdict JSON contract.
-    write_judge(
+    // A DoD verifier met when `did_work` exists. The verifier prints the verdict JSON contract.
+    write_verifier(
         dir,
         "worked",
         r#"#!/bin/sh
@@ -311,7 +311,7 @@ fi
     write_state_md(dir, "create the file did_work\n");
 
     // Cap sessions so a logic bug can't hang the test. One fake session should suffice:
-    // baseline judge says not-met → launch worker (creates did_work) → judge met → stop.
+    // baseline verifier says not-met → launch worker (creates did_work) → verifier met → stop.
     let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!(
         "{}{}",
@@ -326,14 +326,14 @@ fi
     );
 
     // `rlt status` and `dashboard --once` must read the snapshot the run just published —
-    // showing the met judge — WITHOUT re-running judges. (Both go through status::render.)
+    // showing the met verifier — WITHOUT re-running verifiers. (Both go through status::render.)
     for args in [vec!["status"], vec!["dashboard", "--once"]] {
         let snap = rlt(dir, &path).args(&args).output_bounded().unwrap();
         let text = String::from_utf8_lossy(&snap.stdout).into_owned();
         assert!(snap.status.success(), "`rlt {args:?}` failed");
         assert!(
             text.contains("itest") && text.contains("worked"),
-            "`rlt {args:?}` should render the published snapshot (project + judge), got:\n{text}"
+            "`rlt {args:?}` should render the published snapshot (project + verifier), got:\n{text}"
         );
     }
 }
@@ -342,9 +342,9 @@ fi
 fn run_stops_immediately_when_goal_already_met() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    // Pre-create the marker so the baseline judge is already satisfied → zero sessions.
+    // Pre-create the marker so the baseline verifier is already satisfied → zero sessions.
     write(dir, "did_work", "");
-    write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
+    write_verifier(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true}' || echo '{\"met\":false}'\n");
     write_cfg(dir, "itest", "worked", "", "");
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
@@ -392,14 +392,14 @@ fn doctor_flags_a_broken_setup() {
 /// both go through `assemble()` (STUCK_NOTIFY §12.1). Proving it on `doctor` is enough — a second
 /// test on `plan` would assert the same call, not a second code path.
 ///
-/// The setup is otherwise perfect (fake agent on PATH, state file present, judge resolves), so
+/// The setup is otherwise perfect (fake agent on PATH, state file present, verifier resolves), so
 /// EXACTLY ONE check may fail: a typo'd detector name must be caught before an overnight run, not
 /// mid-loop, and it must be attributed to the sequence check rather than to some incidental gap.
 #[test]
 fn doctor_inherits_the_notify_if_validation() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}'\n");
+    write_verifier(dir, "worked", "#!/bin/sh\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}'\n");
     write_cfg(
         dir,
         "docnotify",
@@ -410,10 +410,10 @@ fn doctor_inherits_the_notify_if_validation() {
 
     let out = rlt(dir, &path).arg("doctor").output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(!out.status.success(), "a notify_if naming an unresolvable judge must fail doctor:\n{combined}");
+    assert!(!out.status.success(), "a notify_if naming an unresolvable verifier must fail doctor:\n{combined}");
     assert!(
-        combined.contains("✗ sequence + judges resolve"),
-        "the failure must be attributed to the sequence/judge check, got:\n{combined}"
+        combined.contains("✗ sequence + verifiers resolve"),
+        "the failure must be attributed to the sequence/verifier check, got:\n{combined}"
     );
     assert!(combined.contains("ghost_detector"), "doctor must NAME the unresolvable detector:\n{combined}");
     assert!(
@@ -423,28 +423,28 @@ fn doctor_inherits_the_notify_if_validation() {
 }
 
 #[test]
-fn judge_runs_one_name_and_prints_raw_verdict() {
+fn verifier_runs_one_name_and_prints_raw_verdict() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let path = std::env::var("PATH").unwrap_or_default(); // no worker → real PATH is fine
-    // a judge is a FILE resolved by NAME now (§5.1) — no goals.yaml, no inline cmd.
-    write_judge(dir, "ok", "#!/bin/sh\necho '{\"met\":true,\"rationale\":\"fine\"}'\n");
+    // a verifier is a FILE resolved by NAME now (§5.1) — no goals.yaml, no inline cmd.
+    write_verifier(dir, "ok", "#!/bin/sh\necho '{\"met\":true,\"rationale\":\"fine\"}'\n");
     write(dir, "rlt/rlt.yaml", "project: jt\nsteps: { worker: {} }\nsequence: { steps: [worker], done_if: ok }\n");
     write_state_md(dir, "noop\n");
 
-    // a known judge: raw verdict JSON on stdout
-    let out = rlt(dir, &path).args(["judge", "ok"]).output_bounded().unwrap();
-    assert!(out.status.success(), "judge ok failed: {}", String::from_utf8_lossy(&out.stderr));
+    // a known verifier: raw verdict JSON on stdout
+    let out = rlt(dir, &path).args(["verify", "ok"]).output_bounded().unwrap();
+    assert!(out.status.success(), "verifier ok failed: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\"met\":true"), "stdout should be the raw verdict, got: {stdout}");
 
-    // an unknown judge: error that lists what IS available
-    let out = rlt(dir, &path).args(["judge", "nope"]).output_bounded().unwrap();
-    assert!(!out.status.success(), "unknown judge name must fail");
+    // an unknown verifier: error that lists what IS available
+    let out = rlt(dir, &path).args(["verify", "nope"]).output_bounded().unwrap();
+    assert!(!out.status.success(), "unknown verifier name must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("no judge named `nope`") && err.contains("ok"),
-        "should name the miss and list available judges, got: {err}"
+        err.contains("no verifier named `nope`") && err.contains("ok"),
+        "should name the miss and list available verifiers, got: {err}"
     );
 }
 
@@ -457,9 +457,9 @@ fn dollar_budget_aborts_the_loop() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
 
-    // a judge that can never be met, so ONLY the cost guard can end the loop — if cost weren't
+    // a verifier that can never be met, so ONLY the cost guard can end the loop — if cost weren't
     // wired, the loop would run to max_sessions instead.
-    write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    write_verifier(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
     // limits.cost: 0 → any spend (the stub's $0.05) is over budget.
     write_cfg(dir, "itest", "impossible", "  abort_if: \"over_cost\"\n  limits: { cost: 0 }\n", "");
 
@@ -488,7 +488,7 @@ fn status_and_history_json_are_machine_readable() {
     // `--json` on status + history emits parseable JSON of the existing serde types.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    write_judge(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
+    write_verifier(dir, "worked", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
     write_cfg(dir, "jsonproj", "worked", "  limits: { cost: 5.0 }\n", "");
     write_state_md(dir, "create the file did_work\n");
 
@@ -496,12 +496,12 @@ fn status_and_history_json_are_machine_readable() {
     let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
 
-    // status --json: the versioned live document (docs/schemas/status.v1.json; validated in
+    // status --json: the versioned live document (docs/schemas/status.v2.json; validated in
     // tests/status.rs), carrying the project and the usage totals.
     let snap = rlt(dir, &path).args(["status", "--json"]).output_bounded().unwrap();
     assert!(snap.status.success(), "status --json failed: {}", String::from_utf8_lossy(&snap.stderr));
     let v: serde_json::Value = serde_json::from_slice(&snap.stdout).expect("status --json must be valid JSON");
-    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["schema_version"], 2);
     assert_eq!(v["project"], "jsonproj");
     assert_eq!(v["running"], false, "the run has exited");
     assert!(v["usage"]["total"]["cost_usd"].as_f64().unwrap() > 0.0, "the usage totals reflect the stub's spend");
@@ -528,7 +528,7 @@ fn status_and_history_json_are_machine_readable() {
     );
 
     // The HUMAN renderers: `rlt status` and the headless `rlt dashboard --once` both read the same
-    // published snapshot and must name the project and the judge.
+    // published snapshot and must name the project and the verifier.
     for args in [vec!["status"], vec!["dashboard", "--once"]] {
         let out = rlt(dir, &path).args(&args).output_bounded().unwrap();
         let combined = format!(
@@ -538,7 +538,7 @@ fn status_and_history_json_are_machine_readable() {
         );
         assert_exit(&out, 0, &combined);
         assert!(combined.contains("jsonproj"), "`rlt {args:?}` should render the project:\n{combined}");
-        assert!(combined.contains("worked"), "`rlt {args:?}` should render the judge:\n{combined}");
+        assert!(combined.contains("worked"), "`rlt {args:?}` should render the verifier:\n{combined}");
     }
 }
 
@@ -548,8 +548,8 @@ fn institutional_memory_is_written_without_worker_cooperation() {
     // LOG.md from mechanical facts — the worker is never trusted to persist.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    // a judge that never meets, so the loop runs the full max_sessions and folds memory each time.
-    write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    // a verifier that never meets, so the loop runs the full max_sessions and folds memory each time.
+    write_verifier(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "memproj", "impossible", "", "memory: { enabled: true, max_kb: 64, inject_kb: 8 }\n");
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
@@ -597,7 +597,7 @@ exit 0
     chmod_x(&claude);
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    write_judge(dir, "did", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    write_verifier(dir, "did", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "ptrproj", "did", "", "");
     // a recognisable STATE body, to prove rlt POINTS at it (§3 refinement 1) rather than inlining it.
     write_state_md(dir, "STATE-BODY-MARKER: fix the widget\n");
@@ -639,7 +639,7 @@ fn lifetime_session_is_published_to_state_json() {
     // rendered. A run that completes 2 sessions must publish lifetime_session >= 2.
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    write_verifier(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "lifeproj", "impossible", "", "");
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
@@ -678,7 +678,7 @@ exit 0
     chmod_x(&claude);
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    write_verifier(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "memproj2", "impossible", "", "memory: { enabled: true }\n");
     git_init(dir); // mandatory session isolation needs a git base
 
@@ -701,13 +701,13 @@ exit 0
 #[test]
 fn rollback_gate_unlands_a_regressing_merge() {
     // SAFETY-CRITICAL (§5.7): with session isolation + gate_regressions on (the default), a worker
-    // change that makes a previously-met invariant judge REGRESS must be rolled back — base pristine.
+    // change that makes a previously-met invariant verifier REGRESS must be rolled back — base pristine.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     // fake claude: on a -p run, append a line to tracked.txt + COMMIT it on the session branch
-    // (the worker's "work"). It also writes a marker so the judge can flip met→not-met after it runs.
+    // (the worker's "work"). It also writes a marker so the verifier can flip met→not-met after it runs.
     write(
         &bin,
         "claude",
@@ -733,9 +733,9 @@ exit 0
     g(&["config", "user.name", "t"]);
     write(dir, "tracked.txt", "ok\n");
     // build_ok (invariant): met at baseline, REGRESSES once the worker drops `.regressed`.
-    write_judge(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"broke the build\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    write_verifier(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"broke the build\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
     // feature: never met (so the loop actually launches a worker rather than stopping at baseline).
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     // done_if: feature; build_ok is the invariant that must STAY met.
     write_cfg(dir, "rbk", "feature", "  invariants: [build_ok]\n", "memory: { enabled: false }\n");
     g(&["add", "-A"]);
@@ -753,11 +753,11 @@ exit 0
 }
 
 #[test]
-fn rollback_gate_keeps_merge_when_a_judge_merely_flakes() {
-    // SAFETY-CRITICAL companion: a previously-MET invariant whose judge FAILS transiently
+fn rollback_gate_keeps_merge_when_a_verifier_merely_flakes() {
+    // SAFETY-CRITICAL companion: a previously-MET invariant whose verifier FAILS transiently
     // (rate-limit/timeout/error → Verdict::failed, error set) must NOT trigger a rollback. A flake is
-    // "judge couldn't run", not "the work regressed" — discarding a good session's merge because a
-    // judge flaked is the bug. The good work must be KEPT.
+    // "verifier couldn't run", not "the work regressed" — discarding a good session's merge because a
+    // verifier flaked is the bug. The good work must be KEPT.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
@@ -786,11 +786,11 @@ exit 0
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
     write(dir, "tracked.txt", "ok\n");
-    // build_ok (invariant): met at baseline; once the worker drops `.flake`, the judge ERRORS —
+    // build_ok (invariant): met at baseline; once the worker drops `.flake`, the verifier ERRORS —
     // exits non-zero with no verdict JSON → Verdict::failed (error set), NOT a clean not-met.
-    write_judge(dir, "build_ok", "#!/bin/sh\nif [ -f .flake ]; then echo 'transient judge failure' >&2; exit 3; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    write_verifier(dir, "build_ok", "#!/bin/sh\nif [ -f .flake ]; then echo 'transient verifier failure' >&2; exit 3; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
     // feature: never met, so the loop actually runs a session (doesn't stop at baseline).
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "flake", "feature", "  invariants: [build_ok]\n", "memory: { enabled: false }\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
@@ -799,16 +799,16 @@ exit 0
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
     // the flake must NOT have rolled anything back — the good work is KEPT on main.
-    assert!(!combined.contains("ROLLED BACK"), "a transient judge flake must NOT trigger rollback:\n{combined}");
+    assert!(!combined.contains("ROLLED BACK"), "a transient verifier flake must NOT trigger rollback:\n{combined}");
     let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
-    assert!(content.contains("good-work"), "the worker's good work must be KEPT despite the judge flake, got: {content:?}");
+    assert!(content.contains("good-work"), "the worker's good work must be KEPT despite the verifier flake, got: {content:?}");
 }
 
 #[test]
-fn rollback_gate_ignores_a_run_set_only_control_judge_flipping() {
+fn rollback_gate_ignores_a_run_set_only_control_verifier_flipping() {
     // SAFETY-CRITICAL (§5.7 / §5.3): the regression gate ranges over the DoD-set ONLY, exactly as
-    // `any_regressed` does. A run-set-only control judge named solely in an `if` condition (here
+    // `any_regressed` does. A run-set-only control verifier named solely in an `if` condition (here
     // `stalled`) is DESIGNED to flip met→unmet — that flip is the signal that fires `reconsider`. If
     // the gate treated the flip as a regression it would ROLL BACK the very work that escaped the
     // stall, and since rolled-back rows never land, every later step would keep "regressing" on the
@@ -818,7 +818,7 @@ fn rollback_gate_ignores_a_run_set_only_control_judge_flipping() {
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     // worker: does clean, GOOD work (adds a wanted line + commits) AND drops `.escaped`, which flips
-    // the control judge `stalled` from met (at baseline) to not-met on this session's merged tree.
+    // the control verifier `stalled` from met (at baseline) to not-met on this session's merged tree.
     write(
         &bin,
         "claude",
@@ -845,10 +845,10 @@ exit 0
     // stalled (run-set-only, named ONLY in the `until:` condition → NOT in the DoD-set): met at baseline
     // (`.escaped` absent), then FLIPS to not-met once the worker drops `.escaped`. Its landed baseline
     // `met:true` is exactly what a naive gate would read as a regression when it goes false.
-    write_judge(dir, "stalled", "#!/bin/sh\n[ -f .escaped ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"escaped the stall\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"stalled\"}'\n");
-    // feature (the DoD judge, via done_if): never met → the loop runs a real session and reaches the
+    write_verifier(dir, "stalled", "#!/bin/sh\n[ -f .escaped ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"escaped the stall\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"stalled\"}'\n");
+    // feature (the DoD verifier, via done_if): never met → the loop runs a real session and reaches the
     // cap rather than stopping at baseline. false→false is not a regression, so it never rolls back.
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write(
         dir,
         "rlt/rlt.yaml",
@@ -864,27 +864,27 @@ exit 0
     let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // `feature` never met → reaches the session cap.
-    // the control judge's flip must NOT have rolled anything back — the good work is KEPT on main.
-    assert!(!combined.contains("ROLLED BACK"), "a run-set-only control judge flipping must NOT trigger rollback:\n{combined}");
+    // the control verifier's flip must NOT have rolled anything back — the good work is KEPT on main.
+    assert!(!combined.contains("ROLLED BACK"), "a run-set-only control verifier flipping must NOT trigger rollback:\n{combined}");
     let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
     assert!(content.contains("good-work"), "the worker's good work must be KEPT despite `stalled` flipping, got: {content:?}");
 }
 
 #[test]
-fn a_broken_judge_does_not_abort_the_run_wearing_a_regressions_clothes() {
+fn a_broken_verifier_does_not_abort_the_run_wearing_a_regressions_clothes() {
     // The HALF the flake test above does not cover: it proves the gate KEEPS the merge, but says
-    // nothing about `abort_if`. This is the shipped bug end-to-end. A previously-MET invariant judge
+    // nothing about `abort_if`. This is the shipped bug end-to-end. A previously-MET invariant verifier
     // that CRASHES has `met:false` on its `Verdict::failed` — which USED to fold into
     // `Lifecycle::Regressed`, which `any_regressed(invariants)` (the abort term `rlt init` writes)
     // turned into an ABORT (exit 3). The run died blaming a regression that never happened. With the
-    // fix, a broken judge leaves the judge's state intact, nothing regresses, the run does NOT abort,
+    // fix, a broken verifier leaves the verifier's state intact, nothing regresses, the run does NOT abort,
     // and it simply reaches the session cap (exit 4) like any run that hasn't met its DoD.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // worker: makes the invariant judge start CRASHING (drops `.flake`), does otherwise-clean work.
+    // worker: makes the invariant verifier start CRASHING (drops `.flake`), does otherwise-clean work.
     write(
         &bin,
         "claude",
@@ -908,22 +908,22 @@ exit 0
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
     write(dir, "tracked.txt", "ok\n");
-    // build_ok (invariant): met at baseline; once `.flake` exists the judge CRASHES — exits
+    // build_ok (invariant): met at baseline; once `.flake` exists the verifier CRASHES — exits
     // non-zero with no verdict JSON → Verdict::failed (error set), NOT a clean not-met.
-    write_judge(dir, "build_ok", "#!/bin/sh\nif [ -f .flake ]; then echo 'judge crashed' >&2; exit 1; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    write_verifier(dir, "build_ok", "#!/bin/sh\nif [ -f .flake ]; then echo 'verifier crashed' >&2; exit 1; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
     // feature: never met, so the loop runs sessions and does not stop at baseline.
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     // abort_if carries `any_regressed(invariants)` — the exact term `rlt init` ships that the bug
     // fired through. build_ok is the invariant it ranges over.
-    write_cfg(dir, "brokenjudge", "feature", "  invariants: [build_ok]\n  abort_if: \"any_regressed(invariants)\"\n", "memory: { enabled: false }\n");
+    write_cfg(dir, "brokenverifier", "feature", "  invariants: [build_ok]\n  abort_if: \"any_regressed(invariants)\"\n", "memory: { enabled: false }\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    // exit 4 (session cap), NOT 3 (ABORT). A crashed judge must not masquerade as a regression.
+    // exit 4 (session cap), NOT 3 (ABORT). A crashed verifier must not masquerade as a regression.
     assert_exit(&out, 4, &combined);
-    assert!(!combined.contains("ABORT"), "a crashed judge must NOT abort the run as a phantom regression:\n{combined}");
+    assert!(!combined.contains("ABORT"), "a crashed verifier must NOT abort the run as a phantom regression:\n{combined}");
 }
 
 /// The four deterministic outer-loop stages must be OBSERVABLE, in order, in `rlt/private/state.json`
@@ -932,7 +932,7 @@ exit 0
 ///
 /// We don't poll (a race); instead each stage records the phase the loop had published at the
 /// moment that stage invoked it, through rlt's OWN extension points:
-///   `on_session_start` → INJECT · the worker → RUN · the judge → VERIFY · `on_session_end` → GATE
+///   `on_session_start` → INJECT · the worker → RUN · the verifier → VERIFY · `on_session_end` → GATE
 fn record_phase_stub(dir: &Path) -> String {
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -973,7 +973,7 @@ fn phase_names_the_four_outer_loop_stages() {
     let dir = tmp.path();
     let path = record_phase_stub(dir);
 
-    write_judge(
+    write_verifier(
         dir,
         "worked",
         r#"#!/bin/sh
@@ -1006,7 +1006,7 @@ fi
     let trace = fs::read_to_string(dir.join("trace.txt")).expect("stages should have recorded");
     let seq: Vec<&str> = trace.lines().collect();
 
-    // baseline VERIFY (judges run once before the first session) → one full cycle → stop.
+    // baseline VERIFY (verifiers run once before the first session) → one full cycle → stop.
     assert_eq!(
         seq,
         ["VERIFY=verify", "INJECT=inject", "RUN=run", "VERIFY=verify", "GATE=gate"],
@@ -1028,7 +1028,7 @@ fn a_baseline_satisfied_run_enters_no_stage() {
     let path = record_phase_stub(dir);
 
     write(dir, "did_work", ""); // pre-satisfy the DoD
-    write_judge(
+    write_verifier(
         dir,
         "worked",
         "#!/bin/sh\nsh bin/rec VERIFY\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n",
@@ -1051,16 +1051,16 @@ fn a_baseline_satisfied_run_enters_no_stage() {
     );
     assert_exit(&out, 0, &combined);
 
-    let trace = fs::read_to_string(dir.join("trace.txt")).expect("the baseline judge should have run");
+    let trace = fs::read_to_string(dir.join("trace.txt")).expect("the baseline verifier should have run");
     let seq: Vec<&str> = trace.lines().collect();
     assert_eq!(
         seq,
         ["VERIFY=verify"],
-        "a baseline-satisfied run must judge once and stop — no INJECT, no RUN, no GATE:\n{trace}\n{combined}"
+        "a baseline-satisfied run must verifier once and stop — no INJECT, no RUN, no GATE:\n{trace}\n{combined}"
     );
 }
 
-/// An interrupted session is never judged and never logs a session-exit line: the SIGINT check
+/// An interrupted session is never verified and never logs a session-exit line: the SIGINT check
 /// sits between the worker returning and that log, so a killed session leaves no trace of having
 /// "exited" normally. It still exits 0 (an operator stop is a clean end) through the Drop guards.
 #[test]
@@ -1083,7 +1083,7 @@ sleep 30
     );
     chmod_x(&dir.join("bin/claude"));
 
-    write_judge(
+    write_verifier(
         dir,
         "worked",
         r#"#!/bin/sh
@@ -1143,7 +1143,7 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
     assert_eq!(
         seq,
         ["VERIFY=verify", "INJECT=inject", "RUN=run"],
-        "an interrupted session must NOT be staged, judged or gated:\n{trace}\n{err}"
+        "an interrupted session must NOT be staged, verified or gated:\n{trace}\n{err}"
     );
     assert!(err.contains("interrupted (SIGINT/SIGTERM)"), "should report the interrupt:\n{err}");
     assert!(
@@ -1163,7 +1163,7 @@ echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"not yet"}'
 fn an_unknown_step_in_the_sequence_is_a_startup_error() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":true}'\n");
+    write_verifier(dir, "worked", "#!/bin/sh\necho '{\"met\":true}'\n");
     // `ghost` is named in the sequence but is not a key in `steps:`.
     write(
         dir,
@@ -1182,42 +1182,42 @@ fn an_unknown_step_in_the_sequence_is_a_startup_error() {
     );
 }
 
-/// §5.7: a sequence of ONLY `skip_judges` steps never merges, so `done_if` can never fire — this is
+/// §5.7: a sequence of ONLY `skip_verifiers` steps never merges, so `done_if` can never fire — this is
 /// refused at startup rather than spinning forever staging work nothing ever gates.
 #[test]
-fn a_sequence_of_only_skip_judges_is_refused_at_startup() {
+fn a_sequence_of_only_skip_verifiers_is_refused_at_startup() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":true}'\n");
+    write_verifier(dir, "worked", "#!/bin/sh\necho '{\"met\":true}'\n");
     write(
         dir,
         "rlt/rlt.yaml",
-        "project: allskip\ndefaults: { model: fake }\nsteps:\n  stage: { skip_judges: true }\n\
+        "project: allskip\ndefaults: { model: fake }\nsteps:\n  stage: { skip_verifiers: true }\n\
          sequence:\n  steps: [stage]\n  done_if: \"worked\"\nsummary: { enabled: false }\n",
     );
     write_state_md(dir, "do work\n");
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
-    assert!(!out.status.success(), "an all-skip_judges sequence must refuse to start");
+    assert!(!out.status.success(), "an all-skip_verifiers sequence must refuse to start");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("skip_judges") && err.contains("judged step"),
-        "the error must explain that at least one judged step is required, got:\n{err}"
+        err.contains("skip_verifiers") && err.contains("verified step"),
+        "the error must explain that at least one verified step is required, got:\n{err}"
     );
 }
 
-/// §5.7: a `skip_judges` step STAGES its work (nothing merges); the NEXT judged step gates the whole
-/// span — pass ⇒ the entire span merges. Proof: the skip step's commit AND the judged step's commit
+/// §5.7: a `skip_verifiers` step STAGES its work (nothing merges); the NEXT verified step gates the whole
+/// span — pass ⇒ the entire span merges. Proof: the skip step's commit AND the verified step's commit
 /// both land on `main` together, cut from the span tip, not from base.
 #[test]
-fn a_skip_judges_span_is_gated_and_merged_by_the_next_judged_step() {
+fn a_skip_verifiers_span_is_gated_and_merged_by_the_next_verified_step() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     // fake claude: append `work-<n>` to tracked.txt where <n> is a per-session counter, and COMMIT
-    // it on the session branch. Session 1 (stage, skipped) writes work-0; session 2 (worker, judged)
-    // branches off the staged span tip → reads counter=1 → writes work-1, then the judge meets.
+    // it on the session branch. Session 1 (stage, skipped) writes work-0; session 2 (worker, verified)
+    // branches off the staged span tip → reads counter=1 → writes work-1, then the verifier meets.
     write(
         &bin,
         "claude",
@@ -1243,13 +1243,13 @@ exit 0
     g(&["config", "user.name", "t"]);
     write(dir, "tracked.txt", "ok\n");
     // feature: met once `work-1` (the SECOND session's line) is present — so the span must run the
-    // stage step then the judged step before it can pass.
-    write_judge(dir, "feature", "#!/bin/sh\ngrep -q 'work-1' tracked.txt && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"two rounds done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
-    // stage (skip_judges) → worker (judged), in that order.
+    // stage step then the verified step before it can pass.
+    write_verifier(dir, "feature", "#!/bin/sh\ngrep -q 'work-1' tracked.txt && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"two rounds done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    // stage (skip_verifiers) → worker (verified), in that order.
     write(
         dir,
         "rlt/rlt.yaml",
-        "project: span\ndefaults: { model: fake }\nsteps:\n  stage: { skip_judges: true }\n  worker: {}\n\
+        "project: span\ndefaults: { model: fake }\nsteps:\n  stage: { skip_verifiers: true }\n  worker: {}\n\
          sequence:\n  steps: [stage, worker]\n  done_if: \"feature\"\nsummary: { enabled: false }\nmemory: { enabled: false }\n",
     );
     write_state_md(dir, "do work\n");
@@ -1259,31 +1259,31 @@ exit 0
     let out = rlt(dir, &path).args(["run", "--max-sessions", "4"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 0, &combined);
-    assert!(combined.contains("done_if satisfied"), "the judged step gates the span to done:\n{combined}");
+    assert!(combined.contains("done_if satisfied"), "the verified step gates the span to done:\n{combined}");
 
-    // the WHOLE span merged: BOTH the skipped step's commit (work-0) and the judged step's (work-1)
-    // are now on base. If the span logic branched the judged step off `base` instead of the span
+    // the WHOLE span merged: BOTH the skipped step's commit (work-0) and the verified step's (work-1)
+    // are now on base. If the span logic branched the verified step off `base` instead of the span
     // tip, work-0 would be missing.
     let on_main = std::process::Command::new("git").args(["show", "main:tracked.txt"]).current_dir(dir).output_bounded().unwrap();
     let content = String::from_utf8_lossy(&on_main.stdout);
     assert!(
         content.contains("work-0") && content.contains("work-1"),
-        "the skip_judges step's staged work must merge together with the judged step's, got: {content:?}"
+        "the skip_verifiers step's staged work must merge together with the verified step's, got: {content:?}"
     );
 }
 
-/// §5.3 end-to-end: the aggregates range over the DoD-set, NOT the run-set. A judge named only in an
+/// §5.3 end-to-end: the aggregates range over the DoD-set, NOT the run-set. A verifier named only in an
 /// `until:` condition (`stalled`) is in the run-set but not the DoD-set, so `done_if: all_goals` can
 /// fire while `stalled` is unmet. If aggregates ranged over the run-set, the run would never finish
 /// (the success condition would become "we got stuck") and hit the session cap (exit 4) instead.
 #[test]
-fn done_if_all_goals_ignores_an_until_condition_judge() {
+fn done_if_all_goals_ignores_an_until_condition_verifier() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    // feature (the DoD judge, via `invariants` → it is in the DoD-set): met once did_work exists.
-    write_judge(dir, "feature", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
-    // stalled (a run-set-only judge, named ONLY in the `until:` condition): NEVER met.
-    write_judge(dir, "stalled", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"still churning\"}'\n");
+    // feature (the DoD verifier, via `invariants` → it is in the DoD-set): met once did_work exists.
+    write_verifier(dir, "feature", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    // stalled (a run-set-only verifier, named ONLY in the `until:` condition): NEVER met.
+    write_verifier(dir, "stalled", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"still churning\"}'\n");
     write(
         dir,
         "rlt/rlt.yaml",
@@ -1300,7 +1300,7 @@ fn done_if_all_goals_ignores_an_until_condition_judge() {
     assert_exit(&out, 0, &combined);
     assert!(
         combined.contains("done_if satisfied"),
-        "all_goals must fire over the DoD-set even while the until-condition judge `stalled` is unmet:\n{combined}"
+        "all_goals must fire over the DoD-set even while the until-condition verifier `stalled` is unmet:\n{combined}"
     );
 }
 
@@ -1309,19 +1309,19 @@ fn done_if_all_goals_ignores_an_until_condition_judge() {
 // the real loop through the fake-claude shim and would go RED if the behaviour regressed.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// #1 — JUDGE-TOKEN BUDGETING (a money path, previously untested end-to-end). The LLM judge's OWN
+/// #1 — VERIFIER-TOKEN BUDGETING (a money path, previously untested end-to-end). The rubric verifier's OWN
 /// output tokens count against `limits.tokens` (§5.6). The worker reports 5 tok/session — 100 over
 /// the whole 20-session cap, well UNDER the 1000 ceiling — so worker spend ALONE can never trip
-/// `over_budget`. The `.md` judge reports 600 tok per run; once worker+judge crosses 1000, the guard
-/// must ABORT (exit 3). If judge spend were uncounted, only the worker's ~100 tok would accrue and the
+/// `over_budget`. The `.md` verifier reports 600 tok per run; once worker+verifier crosses 1000, the guard
+/// must ABORT (exit 3). If verifier spend were uncounted, only the worker's ~100 tok would accrue and the
 /// run would sail to the session cap (exit 4). That exit-3-vs-4 split is the whole test.
 #[test]
-fn judge_tokens_count_toward_the_token_ceiling() {
+fn verifier_tokens_count_toward_the_token_ceiling() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // ONE binary, BOTH roles: `--output-format json` is the ruler one-shot (the LLM judge), which
+    // ONE binary, BOTH roles: `--output-format json` is the ruler one-shot (the rubric verifier), which
     // reports 600 output_tokens on a `result`-shaped envelope so `tally_one_shot` sums them (§5.6) and
     // whose verdict (in `.result`) is NEVER met; `stream-json` is the worker, reporting 5 tok.
     write(
@@ -1341,12 +1341,12 @@ exit 0
     );
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    // the `.md` judge IS the DoD (an LLM judge), never met — so ONLY over_budget can end the loop.
-    write(dir, "rlt/judges/reviewed.md", "---\ninputs: []\n---\nDecide if the work is done. Output the verdict JSON on the last line.\n");
+    // the `.md` verifier IS the DoD (an rubric verifier), never met — so ONLY over_budget can end the loop.
+    write(dir, "rlt/verifiers/reviewed.md", "---\ninputs: []\n---\nDecide if the work is done. Output the verdict JSON on the last line.\n");
     write(
         dir,
         "rlt/rlt.yaml",
-        "project: judgetok\ndefaults: { model: fake }\njudge: { agent: claude, model: fake }\n\
+        "project: verifiertok\ndefaults: { model: fake }\nverifier: { agent: claude, model: fake }\n\
          steps:\n  worker: {}\n\
          sequence:\n  steps: [worker]\n  done_if: \"reviewed\"\n  abort_if: \"over_budget\"\n  limits: { tokens: 1000 }\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
@@ -1357,34 +1357,34 @@ exit 0
     let out = rlt(dir, &path).args(["run", "--max-sessions", "20"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     // over_budget aborts (exit 3) — NOT the session cap (exit 4). The ONLY way tokens reach 1000 is by
-    // counting the judge's 600/run, so this asserts exactly the money path.
+    // counting the verifier's 600/run, so this asserts exactly the money path.
     assert_exit(&out, 3, &combined);
     assert!(
         combined.contains("ABORT") && combined.contains("over_budget"),
-        "the judge's own tokens must push worker+judge over limits.tokens and trip over_budget:\n{combined}"
+        "the verifier's own tokens must push worker+verifier over limits.tokens and trip over_budget:\n{combined}"
     );
     assert!(
         !combined.contains("reached max_sessions"),
-        "over_budget (judge tokens counted), not the session cap, must end the run:\n{combined}"
+        "over_budget (verifier tokens counted), not the session cap, must end the run:\n{combined}"
     );
 }
 
-/// #2 — CEILINGS ARE CHECKED AFTER A `skip_judges` STEP TOO. A skip step runs NO judges, but the
+/// #2 — CEILINGS ARE CHECKED AFTER A `skip_verifiers` STEP TOO. A skip step runs NO verifiers, but the
 /// run-level ceilings must still be evaluated after it — else a run of skip steps sails past
-/// `limits.sessions`/`limits.tokens`. Sequence `[worker, stage]`: `stage` (skip_judges) is session 2,
+/// `limits.sessions`/`limits.tokens`. Sequence `[worker, stage]`: `stage` (skip_verifiers) is session 2,
 /// which is exactly when `over_iterations` (limits.sessions: 2) first trips, so the abort (exit 3)
 /// lands ON the skip step. If the skip path stopped checking ceilings, the loop would slip to the
 /// loop's own exit-4 session-cap precheck instead.
 #[test]
-fn ceilings_are_checked_after_a_skip_judges_step_too() {
+fn ceilings_are_checked_after_a_skip_verifiers_step_too() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
     write(
         dir,
         "rlt/rlt.yaml",
         "project: skipceil\ndefaults: { model: fake }\n\
-         steps:\n  worker: {}\n  stage: { skip_judges: true }\n\
+         steps:\n  worker: {}\n  stage: { skip_verifiers: true }\n\
          sequence:\n  steps: [worker, stage]\n  done_if: \"feature\"\n  abort_if: \"over_iterations\"\n  limits: { sessions: 2 }\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
@@ -1403,17 +1403,17 @@ fn ceilings_are_checked_after_a_skip_judges_step_too() {
     );
 }
 
-/// #3 — a CRASHING judge with `abort_if: any_judge_error` ABORTS the run (exit 3). Distinct from a
-/// regression: a crashed judge's `Verdict::failed` never changes lifecycle (model.rs), so
-/// `any_regressed` stays false — only `any_judge_error` surfaces it. (The companion below proves the
+/// #3 — a CRASHING verifier with `abort_if: any_verifier_error` ABORTS the run (exit 3). Distinct from a
+/// regression: a crashed verifier's `Verdict::failed` never changes lifecycle (model.rs), so
+/// `any_regressed` stays false — only `any_verifier_error` surfaces it. (The companion below proves the
 /// negative half: a clean not-met does NOT trip it.)
 #[test]
-fn a_crashing_judge_aborts_the_run_via_any_judge_error() {
+fn a_crashing_verifier_aborts_the_run_via_any_verifier_error() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // worker: makes the invariant judge start CRASHING (drops `.flake`), then commits clean work.
+    // worker: makes the invariant verifier start CRASHING (drops `.flake`), then commits clean work.
     write(
         &bin,
         "claude",
@@ -1436,9 +1436,9 @@ exit 0
     write(dir, "tracked.txt", "ok\n");
     // build_ok (invariant): met at baseline; once `.flake` exists it CRASHES (exit non-zero, no JSON →
     // Verdict::failed, error set), NOT a clean not-met.
-    write_judge(dir, "build_ok", "#!/bin/sh\nif [ -f .flake ]; then echo 'judge crashed' >&2; exit 1; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
-    write_cfg(dir, "crashjudge", "feature", "  invariants: [build_ok]\n  abort_if: \"any_judge_error\"\n", "memory: { enabled: false }\n");
+    write_verifier(dir, "build_ok", "#!/bin/sh\nif [ -f .flake ]; then echo 'verifier crashed' >&2; exit 1; fi\necho '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"build ok\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_cfg(dir, "crashverifier", "feature", "  invariants: [build_ok]\n  abort_if: \"any_verifier_error\"\n", "memory: { enabled: false }\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
 
@@ -1446,25 +1446,25 @@ exit 0
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 3, &combined);
     assert!(
-        combined.contains("ABORT") && combined.contains("any_judge_error"),
-        "a crashing judge under `abort_if: any_judge_error` must abort (exit 3):\n{combined}"
+        combined.contains("ABORT") && combined.contains("any_verifier_error"),
+        "a crashing verifier under `abort_if: any_verifier_error` must abort (exit 3):\n{combined}"
     );
 }
 
-/// #3 companion — the DISCRIMINATOR for the test above. A judge that runs cleanly and returns
-/// `met:false` (NO error) must NOT populate `any_judge_error`. With `abort_if: any_judge_error` and a
+/// #3 companion — the DISCRIMINATOR for the test above. A verifier that runs cleanly and returns
+/// `met:false` (NO error) must NOT populate `any_verifier_error`. With `abort_if: any_verifier_error` and a
 /// DoD that is simply never met, the run reaches the session cap (exit 4), never aborting (exit 3).
 #[test]
-fn a_clean_not_met_judge_does_not_trip_any_judge_error() {
+fn a_clean_not_met_verifier_does_not_trip_any_verifier_error() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"cleanly not yet\"}'\n");
-    write_cfg(dir, "cleanjudge", "feature", "  abort_if: \"any_judge_error\"\n", "memory: { enabled: false }\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"cleanly not yet\"}'\n");
+    write_cfg(dir, "cleanverifier", "feature", "  abort_if: \"any_verifier_error\"\n", "memory: { enabled: false }\n");
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "2"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
-    assert!(!combined.contains("ABORT"), "a cleanly not-met judge must NOT trip any_judge_error:\n{combined}");
+    assert!(!combined.contains("ABORT"), "a cleanly not-met verifier must NOT trip any_verifier_error:\n{combined}");
 }
 
 /// Build a two-step project (`plan` then `build`) whose fake worker APPENDS its full argv to
@@ -1490,7 +1490,7 @@ exit 0
     );
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-    write_judge(dir, "nope", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    write_verifier(dir, "nope", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
     write(
         dir,
         "rlt/rlt.yaml",
@@ -1562,17 +1562,17 @@ fn an_emptied_worker_args_list_overrides_the_inherited_defaults() {
     );
 }
 
-/// #7 — a non-empty `inputs:` in an `.md` judge's frontmatter is resolved and its content REACHES the
-/// judge prompt. `evidence.txt` carries a sentinel; the judge declares `inputs: [evidence.txt]`; the
+/// #7 — a non-empty `inputs:` in an `.md` verifier's frontmatter is resolved and its content REACHES the
+/// verifier prompt. `evidence.txt` carries a sentinel; the verifier declares `inputs: [evidence.txt]`; the
 /// ruler one-shot records the prompt it was handed. Both the sentinel and the input's label must be in
-/// it. If frontmatter parsing regressed to empty, the judge would see "(no inputs specified)".
+/// it. If frontmatter parsing regressed to empty, the verifier would see "(no inputs specified)".
 #[test]
-fn an_md_judge_resolves_its_frontmatter_inputs_into_the_prompt() {
+fn an_md_verifier_resolves_its_frontmatter_inputs_into_the_prompt() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // ONE binary: the `--output-format json` one-shot records the judge prompt and reports a verdict
+    // ONE binary: the `--output-format json` one-shot records the verifier prompt and reports a verdict
     // (met once `did_work` exists); the stream-json worker creates + commits `did_work`.
     write(
         &bin,
@@ -1586,9 +1586,9 @@ for a in "$@"; do
   prev="$a"
 done
 if [ "$fmt" = "json" ]; then
-  # a judge's prompt comes on stdin (`-p` with no argument): an argument fails over Linux's 128 KiB cap
+  # a verifier's prompt comes on stdin (`-p` with no argument): an argument fails over Linux's 128 KiB cap
   prompt=$(cat)
-  printf '%s' "$prompt" > judge_prompt.txt
+  printf '%s' "$prompt" > verifier_prompt.txt
   if [ -f did_work ]; then
     printf '{"result":"{\\"met\\":true,\\"value\\":1,\\"max\\":1,\\"target\\":1,\\"rationale\\":\\"ok\\"}"}\n'
   else
@@ -1606,11 +1606,11 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     write(dir, "evidence.txt", "INPUT_SENTINEL_ABC\n");
-    write(dir, "rlt/judges/reviewed.md", "---\ninputs: [evidence.txt]\n---\nApply the rubric. Output the verdict JSON on the last line.\n");
+    write(dir, "rlt/verifiers/reviewed.md", "---\ninputs: [evidence.txt]\n---\nApply the rubric. Output the verdict JSON on the last line.\n");
     write(
         dir,
         "rlt/rlt.yaml",
-        "project: mdinputs\ndefaults: { model: fake }\njudge: { agent: claude, model: fake }\n\
+        "project: mdinputs\ndefaults: { model: fake }\nverifier: { agent: claude, model: fake }\n\
          steps:\n  worker: {}\n\
          sequence:\n  steps: [worker]\n  done_if: \"reviewed\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
@@ -1620,22 +1620,22 @@ exit 0
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "the llm-judged loop should reach done:\n{combined}");
-    let jp = fs::read_to_string(dir.join("judge_prompt.txt")).expect("the ruler one-shot should have recorded its prompt");
-    assert!(jp.contains("INPUT_SENTINEL_ABC"), "the declared input's CONTENT must reach the judge prompt:\n{jp}");
+    assert!(out.status.success(), "the llm-verified loop should reach done:\n{combined}");
+    let jp = fs::read_to_string(dir.join("verifier_prompt.txt")).expect("the ruler one-shot should have recorded its prompt");
+    assert!(jp.contains("INPUT_SENTINEL_ABC"), "the declared input's CONTENT must reach the verifier prompt:\n{jp}");
     assert!(jp.contains("evidence.txt"), "…under its input label:\n{jp}");
 }
 
-/// #8 — a run-set-only `until:`-condition judge is EVALUATED and its verdict ends the repetition
+/// #8 — a run-set-only `until:`-condition verifier is EVALUATED and its verdict ends the repetition
 /// (the execution half; the DoD-EXCLUSION half is already covered by `done_if_all_goals_ignores_…`).
 /// `stalled` is named ONLY in the `until:` of the `worker` entry, so it is in the run-set but not the
-/// DoD-set. It must actually RUN each judged step (a filesystem side-effect proves it) AND, once met,
+/// DoD-set. It must actually RUN each verified step (a filesystem side-effect proves it) AND, once met,
 /// end `worker`'s repetition early so the walk reaches `reconsider` (whose per-step prompt marker then
 /// appears) INSIDE the 3-session cap — `max: 3` alone would spend the whole cap on `worker`. If
-/// `until:` judges were left out of the run-set, `stalled` would never run and the walk would never
+/// `until:` verifiers were left out of the run-set, `stalled` would never run and the walk would never
 /// converge.
 #[test]
-fn a_run_set_only_until_condition_judge_is_evaluated_and_ends_its_repetition() {
+fn a_run_set_only_until_condition_verifier_is_evaluated_and_ends_its_repetition() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
@@ -1657,14 +1657,14 @@ exit 0
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     // `stalled` leaves a side-effect each time it RUNS, and reports met once `.signal` is present.
-    write_judge(dir, "stalled", "#!/bin/sh\necho STALLED_RAN >> stalled_ran.txt\n[ -f .signal ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"stalled\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "stalled", "#!/bin/sh\necho STALLED_RAN >> stalled_ran.txt\n[ -f .signal ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"stalled\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     // `feature` is the DoD and is NEVER met → the loop runs to the cap, giving the branch time to fire.
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write(
         dir,
         "rlt/rlt.yaml",
         "project: ifcond\ndefaults: { model: fake }\n\
-         steps:\n  worker: {}\n  reconsider: { skip_judges: true, prompt: \"RECONSIDER_MARKER_888\" }\n\
+         steps:\n  worker: {}\n  reconsider: { skip_verifiers: true, prompt: \"RECONSIDER_MARKER_888\" }\n\
          sequence:\n  steps:\n    - { step: worker, until: stalled, max: 3 }\n    - reconsider\n  done_if: \"feature\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
@@ -1676,7 +1676,7 @@ exit 0
     assert_exit(&out, 4, &combined); // feature never met → the session cap ends it
     // (a) `stalled` actually EXECUTED — the run-set really contains it.
     let ran = fs::read_to_string(dir.join("stalled_ran.txt")).expect("`stalled` should have run at least once");
-    assert!(ran.contains("STALLED_RAN"), "the if-condition judge `stalled` must be EVALUATED (run):\n{ran}");
+    assert!(ran.contains("STALLED_RAN"), "the if-condition verifier `stalled` must be EVALUATED (run):\n{ran}");
     // (b) its evaluated verdict ended the repetition — the walk moved on and reconsider fired,
     // injecting its per-step prompt.
     let prompts = fs::read_to_string(dir.join("prompts.txt")).unwrap_or_default();
@@ -1686,24 +1686,24 @@ exit 0
     );
 }
 
-/// FLAGSHIP CIRCUIT-BREAKER, end-to-end: the BUILTIN `stalled` judge — the one that ships inside the
+/// FLAGSHIP CIRCUIT-BREAKER, end-to-end: the BUILTIN `stalled` verifier — the one that ships inside the
 /// binary and reads `rlt/private/verdicts.jsonl` (met when, across the last K=3 MERGED steps, no binary
-/// judge changed `met` and no numeric judge changed `value`) — must actually flip to met on a
+/// verifier changed `met` and no numeric verifier changed `value`) — must actually flip to met on a
 /// no-progress run and end `worker`'s repetition so `reconsider` runs. Unlike `…ends_its_repetition`
 /// above (which
-/// FAKES `stalled` with a `.signal` file), this writes NO `rlt/judges/stalled.sh`: it exercises the
-/// real library judge resolved from `~/.rlt/judges/` (installed by `ensure_library`), driven purely
+/// FAKES `stalled` with a `.signal` file), this writes NO `rlt/verifiers/stalled.sh`: it exercises the
+/// real library verifier resolved from `~/.rlt/verifiers/` (installed by `ensure_library`), driven purely
 /// by the verdict history the loop records.
 ///
 /// Setup: `done_if: feature`, and `feature` is NEVER met and constant → flat across every merged
 /// step. The fake worker COMMITS a unique no-op line each session (so worker steps MERGE — stalled
-/// counts only merged rows) while touching nothing any judge reads, and records every `-p` prompt to
+/// counts only merged rows) while touching nothing any verifier reads, and records every `-p` prompt to
 /// an UNTRACKED file (survives all branch churn). After 3 flat merged worker steps the builtin
 /// `stalled` flips to met, so `until: stalled` ends the `worker` entry and the walk dispatches
 /// `reconsider`, whose injected marker prompt reaches the worker — that marker's presence PROVES the
 /// mechanism fired.
 #[test]
-fn the_builtin_stalled_judge_fires_reconsider_on_a_no_progress_run() {
+fn the_builtin_stalled_verifier_fires_reconsider_on_a_no_progress_run() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
@@ -1712,7 +1712,7 @@ fn the_builtin_stalled_judge_fires_reconsider_on_a_no_progress_run() {
     // is now a tiny pointer at it) to prompts.txt — left UNTRACKED so it survives session branch
     // resets and accumulates the reconsider marker; (2) commits a UNIQUE no-op line per session to a
     // TRACKED file so the worker step MERGES (the builtin stalled counts only `merged` verdict rows)
-    // while moving NO judge's met/value. `rlt/private/` is auto-gitignored by rlt, so the
+    // while moving NO verifier's met/value. `rlt/private/` is auto-gitignored by rlt, so the
     // verdicts.jsonl stalled reads is never committed or clobbered.
     write(
         &bin,
@@ -1732,15 +1732,15 @@ exit 0
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
     // `feature` (the DoD) is NEVER met and CONSTANT — flat across every merged step, so the builtin
-    // stalled sees no movement. It is the ONLY non-`stalled` judge in the run-set (stalled ignores
+    // stalled sees no movement. It is the ONLY non-`stalled` verifier in the run-set (stalled ignores
     // its own rows), so nothing masks the stall.
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
-    // NB: deliberately NO rlt/judges/stalled.sh — `stalled` must resolve to the shipped library judge.
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"never\"}'\n");
+    // NB: deliberately NO rlt/verifiers/stalled.sh — `stalled` must resolve to the shipped library verifier.
     write(
         dir,
         "rlt/rlt.yaml",
         "project: stallfire\ndefaults: { model: fake }\n\
-         steps:\n  worker: {}\n  reconsider: { skip_judges: true, prompt: \"RECONSIDER_FIRED_MARKER\" }\n\
+         steps:\n  worker: {}\n  reconsider: { skip_verifiers: true, prompt: \"RECONSIDER_FIRED_MARKER\" }\n\
          sequence:\n  steps:\n    - { step: worker, until: stalled, max: 8 }\n    - reconsider\n  done_if: \"feature\"\n\
          summary: { enabled: false }\nmemory: { enabled: false }\n",
     );
@@ -1754,10 +1754,10 @@ exit 0
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined);
 
-    // guard the SETUP: no project shadow may exist — the BUILTIN is the judge under test.
+    // guard the SETUP: no project shadow may exist — the BUILTIN is the verifier under test.
     assert!(
-        !dir.join("rlt/judges/stalled.sh").exists(),
-        "this test must exercise the builtin stalled judge, not a project shadow"
+        !dir.join("rlt/verifiers/stalled.sh").exists(),
+        "this test must exercise the builtin stalled verifier, not a project shadow"
     );
     // THE proof: the builtin stalled→reconsider circuit-breaker fired. reconsider's injected marker
     // reached the worker, which only happens if `until: stalled` ended the worker entry early.
@@ -1775,11 +1775,11 @@ exit 0
 }
 
 /// R5a (HOOK_STAGE_PLAN): a rate-limited worker session is INCOMPLETE — the loop backs off and goes
-/// round again WITHOUT judging, staging/gating, or folding the post-judge memory refinement. This is
+/// round again WITHOUT verifying, staging/gating, or folding the post-verifier memory refinement. This is
 /// outcome-invisible (the run still reaches the cap and exits 4), so pin it here where a botched
 /// verify/gate conversion would otherwise stay green while dropping the skip.
 #[test]
-fn a_rate_limited_session_skips_the_judged_gate_and_the_refine_fold() {
+fn a_rate_limited_session_skips_the_verified_gate_and_the_refine_fold() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
@@ -1802,9 +1802,9 @@ exit 1
     chmod_x(&bin.join("claude"));
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
 
-    // a judge that never meets (absent the rate-limit the loop would judge every session); backoff 0
+    // a verifier that never meets (absent the rate-limit the loop would verifier every session); backoff 0
     // so the test never sleeps; memory on so a would-be refine fold would show up in the log.
-    write_judge(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
+    write_verifier(dir, "impossible", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"nope\"}'\n");
     write_cfg(dir, "rl", "impossible", "", "ratelimit_backoff_secs: 0\nmemory: { enabled: true, max_kb: 64, inject_kb: 8 }\n");
     git_init(dir);
 
@@ -1813,29 +1813,29 @@ exit 1
     assert_exit(&out, 4, &combined); // one rate-limited session, then the cap → MaxSessions.
 
     assert!(combined.contains("rate limit detected"), "the rate-limit path must be taken:\n{combined}");
-    // the judged path (verify) is skipped: only the BASELINE runs judges ("running judges once before
-    // the first session…"); the rate-limited session must NOT add a second judge run.
+    // the verified path (verify) is skipped: only the BASELINE runs verifiers ("running verifiers once before
+    // the first session…"); the rate-limited session must NOT add a second verifier run.
     assert_eq!(
-        combined.matches("running judges").count(),
+        combined.matches("running verifiers").count(),
         1,
-        "a rate-limited session must NOT judge (only the baseline should):\n{combined}"
+        "a rate-limited session must NOT verifier (only the baseline should):\n{combined}"
     );
-    // the post-judge memory REFINE fold (in the gate) is skipped for the incomplete session.
+    // the post-verifier memory REFINE fold (in the gate) is skipped for the incomplete session.
     assert!(
         !combined.contains("[memory] session #1 folded"),
-        "a rate-limited session must NOT fold the post-judge refinement:\n{combined}"
+        "a rate-limited session must NOT fold the post-verifier refinement:\n{combined}"
     );
 }
 
 /// R2 (HOOK_STAGE_PLAN): the session that MEETS `done_if` is NOT special-cased out of session-end
-/// work — it still fires the on_session_end hook and folds the post-judge memory refinement BEFORE
+/// work — it still fires the on_session_end hook and folds the post-verifier memory refinement BEFORE
 /// the run stops. (The run-stop check is the LAST on_session_end handler, not part of the gate; a
 /// gate-placed stop would skip the winning session's fold + hook.) Outcome-invisible → pinned here.
 #[test]
 fn a_winning_session_still_folds_memory_and_fires_on_session_end() {
     let (tmp, path) = project_with_fake_claude(); // the worker creates + commits `did_work`
     let dir = tmp.path();
-    write_judge(dir, "won", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "won", "#!/bin/sh\n[ -f did_work ] && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"done\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "win", "won", "", "memory: { enabled: true, max_kb: 64, inject_kb: 8 }\nhooks:\n  on_session_end: [\"touch session_end_ran\"]\n");
 
     let out = rlt(dir, &path).args(["run", "--max-sessions", "3"]).output_bounded().unwrap();
@@ -1879,7 +1879,7 @@ exit 0
     g(&["init", "-q", "-b", "main"]);
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
-    write_judge(dir, "answered", "#!/bin/sh\n[ -f answer.txt ] && grep -q made-it answer.txt && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"answered\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "answered", "#!/bin/sh\n[ -f answer.txt ] && grep -q made-it answer.txt && echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"answered\"}' || echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "autocommit", "answered", "", "memory: { enabled: false }\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
@@ -1895,17 +1895,17 @@ exit 0
 }
 
 #[test]
-fn a_worker_tampered_judge_is_rolled_back_and_base_judge_restored() {
+fn a_worker_tampered_verifier_is_rolled_back_and_base_verifier_restored() {
     // GIT_REDESIGN §6 (the single most important moat test): a session whose worker TAMPERS a
-    // committed judge AND regresses a DoD-set invariant must ROLL BACK — and because judges are
-    // committed and rollback restores base via `:(exclude)rlt/{state,private}/**`, base's judge is the
+    // committed verifier AND regresses a DoD-set invariant must ROLL BACK — and because verifiers are
+    // committed and rollback restores base via `:(exclude)rlt/{state,private}/**`, base's verifier is the
     // ORIGINAL, not the worker's tampered copy. rlt (not the worker) makes the commit now, so this
     // proves the moat still holds under GIT_REDESIGN's auto-commit.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    // worker: regress build_ok (drop .regressed) AND tamper its judge script (append a marker), and
+    // worker: regress build_ok (drop .regressed) AND tamper its verifier script (append a marker), and
     // DO NOT commit — rlt auto-commits. The tamper is a harmless trailing comment, so build_ok still
     // runs and still reports the regression (a self-hiding tamper is a deeper concern, out of scope).
     write(
@@ -1916,7 +1916,7 @@ for a in "$@"; do
   if [ "$a" = "--version" ]; then echo "fake-claude 0.0.0"; exit 0; fi
 done
 touch .regressed
-printf '\n# TAMPERED-BY-WORKER\n' >> rlt/judges/build_ok.sh
+printf '\n# TAMPERED-BY-WORKER\n' >> rlt/verifiers/build_ok.sh
 exit 0
 "#,
     );
@@ -1928,9 +1928,9 @@ exit 0
     g(&["config", "user.email", "t@t"]);
     g(&["config", "user.name", "t"]);
     // build_ok (invariant): met at baseline, REGRESSES once .regressed exists.
-    write_judge(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"regressed\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}'\n");
+    write_verifier(dir, "build_ok", "#!/bin/sh\n[ -f .regressed ] && echo '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"regressed\"}' || echo '{\"met\":true,\"value\":1,\"max\":1,\"target\":1,\"rationale\":\"ok\"}'\n");
     // feature: never met (so the loop runs a session rather than stopping at baseline).
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1,\"rationale\":\"not yet\"}'\n");
     write_cfg(dir, "tamper", "feature", "  invariants: [build_ok]\n", "memory: { enabled: false }\n");
     g(&["add", "-A"]);
     g(&["commit", "-qm", "base"]);
@@ -1938,12 +1938,12 @@ exit 0
     let out = rlt(dir, &path).args(["run", "--max-sessions", "1"]).output_bounded().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_exit(&out, 4, &combined); // feature never met → cap; the regressing session rolled back.
-    assert!(combined.contains("ROLLED BACK"), "the judge-tampering, regressing session must roll back:\n{combined}");
-    // THE MOAT: base's committed judge is restored to the ORIGINAL — the worker's tamper is gone.
-    let judge_on_main = std::process::Command::new("git").args(["show", "main:rlt/judges/build_ok.sh"]).current_dir(dir).output_bounded().unwrap();
-    let judge = String::from_utf8_lossy(&judge_on_main.stdout);
-    assert!(!judge.contains("TAMPERED"), "rollback must restore the committed judge — no worker tamper on base, got:\n{judge}");
-    assert!(judge.contains(".regressed"), "base keeps the ORIGINAL judge logic");
+    assert!(combined.contains("ROLLED BACK"), "the verifier-tampering, regressing session must roll back:\n{combined}");
+    // THE MOAT: base's committed verifier is restored to the ORIGINAL — the worker's tamper is gone.
+    let verifier_on_main = std::process::Command::new("git").args(["show", "main:rlt/verifiers/build_ok.sh"]).current_dir(dir).output_bounded().unwrap();
+    let verifier = String::from_utf8_lossy(&verifier_on_main.stdout);
+    assert!(!verifier.contains("TAMPERED"), "rollback must restore the committed verifier — no worker tamper on base, got:\n{verifier}");
+    assert!(verifier.contains(".regressed"), "base keeps the ORIGINAL verifier logic");
     // base is pristine: the worker's .regressed marker is NOT tracked on base.
     let ls = std::process::Command::new("git").args(["ls-files", ".regressed"]).current_dir(dir).output_bounded().unwrap();
     assert!(String::from_utf8_lossy(&ls.stdout).trim().is_empty(), "the regressing session's marker must not be on base");
@@ -1957,7 +1957,7 @@ exit 0
 /// handler pipeline and ends the process, rather than being swallowed on the way. Exit 3 (abort), not
 /// 4 (max-sessions), is the whole assertion — the run stops at the BOUND, with sessions to spare.
 ///
-/// The 2026-08-05 real run is why this exists: `survey` burned its `max: 3` against a judge that was
+/// The 2026-08-05 real run is why this exists: `survey` burned its `max: 3` against a verifier that was
 /// timing out, the walk moved on silently, and the worker went on to shrink the artefact by 61% so
 /// the broken grader could finish inside its timeout.
 #[test]
@@ -1965,7 +1965,7 @@ fn a_sequence_entry_that_exhausts_max_without_converging_aborts_the_run() {
     let (tmp, path) = project_with_fake_claude();
     let dir = tmp.path();
     // never met, however many times it runs — so `until: worked` can never hold.
-    write_judge(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
+    write_verifier(dir, "worked", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
     write(
         dir,
         "rlt/rlt.yaml",
@@ -1990,7 +1990,7 @@ fn a_sequence_entry_that_exhausts_max_without_converging_aborts_the_run() {
 /// `rlt/state/` is gitignored BY DESIGN — the OKF wiki and STATE.md are durable, multi-session and
 /// first-class — so a `survey`/`spec`/`plan` step commits NOTHING every time and resolves as
 /// `NoChanges`. The gate's `_` arm used to `restore_goal_state` on that, throwing away the verdict
-/// the judge had just measured against the real filesystem and putting the pre-step value back.
+/// the verifier had just measured against the real filesystem and putting the pre-step value back.
 ///
 /// The consequence was invisible until `max:` became a contract: a real `examples/workflow.yaml` run
 /// had `spec` score 100/100, get restored to 75, re-dispatch, score 100/100 again, and then abort
@@ -2010,10 +2010,10 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
 
     // A worker that writes ONLY into the gitignored state dir, so its sessions commit nothing.
     //
-    // ⚠ It writes a COUNTER, not a marker, and the judge needs TWO. That is not padding: rlt appends
+    // ⚠ It writes a COUNTER, not a marker, and the verifier needs TWO. That is not padding: rlt appends
     // its own entries to `.gitignore` on the first run, so session #1 always has something to commit
-    // and always resolves as `Staged`. A judge that flips on session #1 therefore converges through
-    // the merge path and never touches the arm under test. The judge must become met on a LATER,
+    // and always resolves as `Staged`. A verifier that flips on session #1 therefore converges through
+    // the merge path and never touches the arm under test. The verifier must become met on a LATER,
     // commit-free session — which is exactly the shape of the real failure, where `spec` scored
     // 100/100 on a `NoChanges` session.
     write(
@@ -2025,7 +2025,7 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
          printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"usage\":{\"output_tokens\":1}}'\n",
     );
     chmod_x(&dir.join("bin/claude"));
-    write_judge(
+    write_verifier(
         dir,
         "spec_ok",
         "#!/bin/sh\nn=$(wc -l < rlt/state/wiki/spec.md 2>/dev/null || echo 0)\n\
@@ -2034,7 +2034,7 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
     );
     // never met, so `done_if` cannot end the run before the walk re-visits the entry — which is the
     // only moment `until:` is evaluated, and therefore the only moment the bug is observable.
-    write_judge(dir, "never", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
+    write_verifier(dir, "never", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
     write(
         dir,
         "rlt/rlt.yaml",
@@ -2051,7 +2051,7 @@ fn a_step_that_commits_nothing_can_still_satisfy_its_until() {
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(
         !combined.contains("exhausted `max: 3`"),
-        "the judge measured the real filesystem and said MET — the bound must not be spent:\n{combined}"
+        "the verifier measured the real filesystem and said MET — the bound must not be spent:\n{combined}"
     );
     assert!(
         combined.contains("step `second`"),

@@ -1,4 +1,4 @@
-//! What the operator's environment changes in every agent call, whichever step or judge makes it: a model the
+//! What the operator's environment changes in every agent call, whichever step or verifier makes it: a model the
 //! provider lacks and its stand-in (`RLT_MODELS`), Codex's config overrides (`RLT_CODEX_CONFIG`), and the MCP
 //! servers and settings of a Claude worker (`RLT_CLAUDE_MCP_CONFIG`, `RLT_CLAUDE_SETTINGS`). Switching
 //! between environments (a subscription, a cloud provider, another account) then changes no config file.
@@ -16,8 +16,8 @@ pub fn codex_config() -> Vec<String> {
     lines(std::env::var("RLT_CODEX_CONFIG").ok().as_deref())
 }
 
-/// The provider a Codex judge would silently miss: `model_provider` set in the operator's own Codex config
-/// (`$CODEX_HOME/config.toml`, else `~/.codex/config.toml`) while `RLT_CODEX_CONFIG` names none. A judge reads no
+/// The provider a Codex verifier would silently miss: `model_provider` set in the operator's own Codex config
+/// (`$CODEX_HOME/config.toml`, else `~/.codex/config.toml`) while `RLT_CODEX_CONFIG` names none. A verifier reads no
 /// config file, so it calls the default OpenAI endpoint instead, and hangs or fails where only the gateway is
 /// reachable. A warning for `rlt doctor`, with the fix.
 pub fn codex_provider_missed() -> Option<String> {
@@ -36,7 +36,7 @@ fn provider_missed(config: &str, overrides: Option<&str>) -> Option<String> {
         return None;
     }
     Some(format!(
-        "your Codex config sets model_provider = \"{provider}\", but a Codex judge reads no config file \
+        "your Codex config sets model_provider = \"{provider}\", but a Codex verifier reads no config file \
          (--ignore-user-config) and would call the default OpenAI endpoint: set RLT_CODEX_CONFIG, one key=value \
          per line, e.g. model_provider=\"{provider}\" and that provider's model_providers.{provider}.* keys"))
 }

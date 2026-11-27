@@ -1,11 +1,11 @@
 //! `rlt status` — a cheap, read-only snapshot of a run.
 //!
-//! Unlike `rlt plan` (which RE-RUNS every judge — possibly an expensive LLM call — to compute a
+//! Unlike `rlt plan` (which RE-RUNS every verifier — possibly an expensive LLM call — to compute a
 //! fresh scoreboard), `status` just reads the `rlt/private/state.json` snapshot the running loop
 //! already publishes and renders it. That matches the `/rlt:status` skill's "read the digest,
-//! don't re-judge" discipline, so the same word means the same (cheap) thing in both places.
+//! don't re-verify" discipline, so the same word means the same (cheap) thing in both places.
 
-use crate::state::{DashboardState, JudgeView};
+use crate::state::{DashboardState, VerifierView};
 use std::path::Path;
 
 /// Render the current run snapshot to a human string, or an actionable hint if there's no
@@ -15,7 +15,7 @@ pub fn render(dir: &Path) -> String {
         Some(s) => render_state(&s) + &process_line(dir),
         None => "no run snapshot yet (rlt/private/state.json not found).\n  \
                  • `rlt run` to start the loop (it publishes state as it goes), or\n  \
-                 • `rlt plan` to evaluate the judges once now (a dry run — this re-judges)."
+                 • `rlt plan` to evaluate the verifiers once now (a dry run — this re-verifys)."
             .to_string(),
     }
 }
@@ -31,7 +31,7 @@ fn process_line(dir: &Path) -> String {
     found.unwrap_or_default()
 }
 
-/// The live status document (`docs/schemas/status.v1.json`) as pretty JSON — the STABLE interface
+/// The live status document (`docs/schemas/status.v2.json`) as pretty JSON — the STABLE interface
 /// for a program watching a run, built by [`crate::report::status`]. Errors with an actionable hint
 /// if no snapshot exists yet, so `rlt status --json` in a fresh project fails loud rather than
 /// emitting misleading empty JSON.
@@ -46,7 +46,7 @@ fn render_state(s: &DashboardState) -> String {
     let status = if s.finished { format!("done — {}", s.finish_reason) } else { format!("{} (live)", s.phase) };
     // header — the DoD-set aggregate (goals_met/total ranges over the DoD-set, not the run-set, §5.3)
     out.push_str(&format!(
-        "{}  ·  judges {}/{}  ·  session #{} (#{} lifetime)  ·  up {up}  ·  {status}\n",
+        "{}  ·  verifiers {}/{}  ·  session #{} (#{} lifetime)  ·  up {up}  ·  {status}\n",
         s.project, s.goals_met, s.goals_total, s.session, s.lifetime_session
     ));
     // the current STEP and who ran it (§7.4) — a mixed run is uninterpretable without the agent+model.
@@ -134,19 +134,19 @@ fn render_state(s: &DashboardState) -> String {
         out.push_str(&format!("  {:<10} {:>8} tok   {}\n", "total", human(s.tokens_spent), money(total_cost)));
     }
     out.push('\n');
-    // per-judge scoreboard (§7.4) — DoD-set first, then any run-set control judges (e.g. `stalled`).
-    let judges = s.judge_views();
-    if judges.is_empty() {
-        out.push_str("(no judges in snapshot)\n");
+    // per-verifier scoreboard (§7.4) — DoD-set first, then any run-set control verifiers (e.g. `stalled`).
+    let verifiers = s.verifier_views();
+    if verifiers.is_empty() {
+        out.push_str("(no verifiers in snapshot)\n");
     } else {
-        let (dod, run): (Vec<&JudgeView>, Vec<&JudgeView>) = judges.iter().partition(|j| j.in_dod);
+        let (dod, run): (Vec<&VerifierView>, Vec<&VerifierView>) = verifiers.iter().partition(|j| j.in_dod);
         for j in &dod {
-            out.push_str(&judge_block(j));
+            out.push_str(&verifier_block(j));
         }
         if !run.is_empty() {
             out.push_str("\nrun-set (not counted toward done)\n");
             for j in &run {
-                out.push_str(&judge_block(j));
+                out.push_str(&verifier_block(j));
             }
         }
     }
@@ -160,12 +160,12 @@ fn render_state(s: &DashboardState) -> String {
     out
 }
 
-/// One judge's scoreboard entry (§7.4): a compact line + its rationale, e.g.
+/// One verifier's scoreboard entry (§7.4): a compact line + its rationale, e.g.
 /// ```text
-/// ◑ coverage           64/80 [████████░░]  ▲+12  judge:llm
+/// ◑ coverage           64/80 [████████░░]  ▲+12  verifier:llm
 ///     ↳ 64% of modules covered (was 52% last step)
 /// ```
-fn judge_block(j: &JudgeView) -> String {
+fn verifier_block(j: &VerifierView) -> String {
     let delta = if j.value.is_some() && j.delta.abs() > f64::EPSILON {
         format!("  ▲{:+.0}", j.delta)
     } else {
@@ -173,10 +173,10 @@ fn judge_block(j: &JudgeView) -> String {
     };
     let guard = if j.invariant { " (guard)" } else { "" };
     let mut b = format!(
-        "{} {:<18} {}{delta}  judge:{}{guard}\n",
-        judge_glyph(j),
+        "{} {:<18} {}{delta}  verifier:{}{guard}\n",
+        verifier_glyph(j),
         j.name,
-        judge_measure(j),
+        verifier_measure(j),
         j.kind
     );
     if !j.rationale.is_empty() {
@@ -185,8 +185,8 @@ fn judge_block(j: &JudgeView) -> String {
     b
 }
 
-/// State glyph for a judge — a broken judge (`error`) gets its own ⊘, distinct from a clean "not met".
-fn judge_glyph(j: &JudgeView) -> &'static str {
+/// State glyph for a verifier — a broken verifier (`error`) gets its own ⊘, distinct from a clean "not met".
+fn verifier_glyph(j: &VerifierView) -> &'static str {
     if j.error.is_some() {
         return "⊘";
     }
@@ -198,9 +198,9 @@ fn judge_glyph(j: &JudgeView) -> &'static str {
     }
 }
 
-/// The measure column. A binary judge shows met/unmet (NOT a lying `0`, §7.4); a numeric one shows
+/// The measure column. A binary verifier shows met/unmet (NOT a lying `0`, §7.4); a numeric one shows
 /// value/target with a proportional bar; a broken one shows `error`.
-fn judge_measure(j: &JudgeView) -> String {
+fn verifier_measure(j: &VerifierView) -> String {
     if j.error.is_some() {
         return "error".to_string();
     }
@@ -219,7 +219,7 @@ fn judge_measure(j: &JudgeView) -> String {
     }
 }
 
-/// A tiny text meter, `[████░░░░]`, for a numeric judge's progress toward its target.
+/// A tiny text meter, `[████░░░░]`, for a numeric verifier's progress toward its target.
 fn bar_str(frac: f64, w: usize) -> String {
     let filled = ((frac * w as f64).round() as usize).min(w);
     format!("[{}{}]", "█".repeat(filled), "░".repeat(w - filled))
@@ -256,11 +256,11 @@ fn pctf(n: f64, d: f64) -> f64 {
 mod tests {
     use super::*;
 
-    use crate::state::{AgentUsage, JudgeView};
+    use crate::state::{AgentUsage, VerifierView};
     use std::collections::BTreeMap;
 
-    /// A mixed claude/codex run, mid-sequence: a binary invariant that's met, a numeric judge
-    /// climbing, a broken (errored) judge, and a run-set `stalled` control judge. `copilot` is a
+    /// A mixed claude/codex run, mid-sequence: a binary invariant that's met, a numeric verifier
+    /// climbing, a broken (errored) verifier, and a run-set `stalled` control verifier. `copilot` is a
     /// third agent that cannot report a price — its cost must render "—".
     fn sample() -> DashboardState {
         let mut per_agent = BTreeMap::new();
@@ -284,10 +284,10 @@ mod tests {
             goals_met: 1,
             goals_total: 3,
             per_agent,
-            judges: vec![
-                JudgeView {
+            verifiers: vec![
+                VerifierView {
                     name: "build_passes".into(),
-                    judged: true,
+                    verified: true,
                     kind: "script".into(),
                     in_dod: true,
                     invariant: true,
@@ -300,9 +300,9 @@ mod tests {
                     rationale: "cargo build: 0 warnings".into(),
                     error: None,
                 },
-                JudgeView {
+                VerifierView {
                     name: "coverage".into(),
-                    judged: true,
+                    verified: true,
                     kind: "llm".into(),
                     in_dod: true,
                     invariant: false,
@@ -315,9 +315,9 @@ mod tests {
                     rationale: "64% of modules covered (was 52%)".into(),
                     error: None,
                 },
-                JudgeView {
+                VerifierView {
                     name: "no_todos".into(),
-                    judged: true,
+                    verified: true,
                     kind: "script".into(),
                     in_dod: true,
                     invariant: false,
@@ -327,12 +327,12 @@ mod tests {
                     max: None,
                     target: 1.0,
                     delta: 0.0,
-                    rationale: "judge failed: rg: command not found".into(),
+                    rationale: "verifier failed: rg: command not found".into(),
                     error: Some("rg: command not found".into()),
                 },
-                JudgeView {
+                VerifierView {
                     name: "stalled".into(),
-                    judged: true,
+                    verified: true,
                     kind: "script".into(),
                     in_dod: false,
                     invariant: false,
@@ -353,45 +353,45 @@ mod tests {
     }
 
     #[test]
-    fn renders_header_step_judges_and_summaries() {
+    fn renders_header_step_verifiers_and_summaries() {
         let out = render_state(&sample());
         assert!(out.contains("demo"));
-        assert!(out.contains("judges 1/3")); // DoD-set aggregate (excludes run-set `stalled`)
+        assert!(out.contains("verifiers 1/3")); // DoD-set aggregate (excludes run-set `stalled`)
         assert!(out.contains("session #7 (#11 lifetime)"));
         assert!(out.contains("up 3h12m"));
         assert!(out.contains("step   reconsider  ·  claude / claude-opus-4-8"));
         assert!(out.contains("tokens 2100000 / 5000000 (42%)"));
         assert!(out.contains("usage  $1.25 / $5.00 (25%, API-equiv)"));
         assert!(out.contains("memory 2.0 KB"));
-        // per-judge scoreboard
+        // per-verifier scoreboard
         assert!(out.contains("✔ build_passes"));
         assert!(out.contains("(guard)")); // the invariant is flagged
         assert!(out.contains("◑ coverage"));
-        assert!(out.contains("64/80")); // numeric judge shows value/target, not value/max
+        assert!(out.contains("64/80")); // numeric verifier shows value/target, not value/max
         assert!(out.contains("▲+12"));
         assert!(out.contains("story:  Building the parser"));
         assert!(out.contains("recent: Fixed the nested-group case."));
     }
 
-    /// The §7.4 defect the whole migration exists to fix: a binary/errored judge must read met/unmet
+    /// The §7.4 defect the whole migration exists to fix: a binary/errored verifier must read met/unmet
     /// (or `error`), NEVER a lying `0`.
     #[test]
-    fn binary_and_errored_judges_never_render_zero() {
+    fn binary_and_errored_verifiers_never_render_zero() {
         let out = render_state(&sample());
-        // met binary judge: "met", not "1/1" or "0"
+        // met binary verifier: "met", not "1/1" or "0"
         let build_line = out.lines().find(|l| l.contains("build_passes")).unwrap();
-        assert!(build_line.contains("met"), "binary judge shows met: {build_line}");
+        assert!(build_line.contains("met"), "binary verifier shows met: {build_line}");
         assert!(!build_line.contains("0/1") && !build_line.contains("0/0"), "no fabricated number: {build_line}");
-        // broken judge: ⊘ + "error", surfaced with its reason
+        // broken verifier: ⊘ + "error", surfaced with its reason
         let todo_line = out.lines().find(|l| l.contains("no_todos")).unwrap();
-        assert!(todo_line.contains('⊘') && todo_line.contains("error"), "broken judge flagged: {todo_line}");
+        assert!(todo_line.contains('⊘') && todo_line.contains("error"), "broken verifier flagged: {todo_line}");
         assert!(out.contains("rg: command not found"), "the error reason is surfaced");
     }
 
-    /// The run-set control judge (`stalled`) is shown apart, so "why we stalled" is visible without
+    /// The run-set control verifier (`stalled`) is shown apart, so "why we stalled" is visible without
     /// polluting the DoD-set count.
     #[test]
-    fn run_set_judges_are_shown_separately() {
+    fn run_set_verifiers_are_shown_separately() {
         let out = render_state(&sample());
         assert!(out.contains("run-set (not counted toward done)"));
         assert!(out.contains("✔ stalled"));
@@ -428,7 +428,7 @@ mod tests {
         assert!(out.contains("total"));
     }
 
-    /// A pre-§7.4 state.json (only `goals`, no `judges`) still renders via the compatibility bridge.
+    /// A pre-§7.4 state.json (only `goals`, no `verifiers`) still renders via the compatibility bridge.
     #[test]
     fn legacy_goals_still_render() {
         use crate::state::GoalView;
@@ -442,11 +442,11 @@ mod tests {
             target: 42.0,
             delta: 5.0,
             rationale: "all green".into(),
-            judge_kind: "script".into(),
+            verifier_kind: "script".into(),
             ..Default::default()
         }];
         let out = render_state(&s);
-        assert!(out.contains("✔ tests_pass"), "legacy goal mapped onto the judge scoreboard: {out}");
+        assert!(out.contains("✔ tests_pass"), "legacy goal mapped onto the verifier scoreboard: {out}");
         assert!(out.contains("42/42"));
     }
 
@@ -481,9 +481,9 @@ mod tests {
     fn finished_run_shows_reason() {
         let mut s = sample();
         s.finished = true;
-        s.finish_reason = "3/3 judges met after 9 session(s)".into();
+        s.finish_reason = "3/3 verifiers met after 9 session(s)".into();
         let out = render_state(&s);
-        assert!(out.contains("done — 3/3 judges met"));
+        assert!(out.contains("done — 3/3 verifiers met"));
     }
 
     /// A flagged loop must SAY it is flagged — and must say, in the same breath, that it is still

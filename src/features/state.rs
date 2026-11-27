@@ -39,7 +39,7 @@ pub struct GitIso {
     pub session_branch: Option<String>,
     /// the branch the NEXT session cuts off — the TIP of the staged span, or `None` = base (§5.7).
     pub span_tip: Option<String>,
-    /// staged span branches accumulated by `skip_judges` steps (for reporting on abort).
+    /// staged span branches accumulated by `skip_verifiers` steps (for reporting on abort).
     pub span_branches: Vec<String>,
     /// the untracked files present right before this session's worker started — what a partial
     /// save's reset must leave in place (`features::partial`). `None` outside a session.
@@ -88,21 +88,21 @@ pub struct Inject {
 pub struct RLTScratch {
     /// `WriteInstructions` (on_session_start) → the RUN launch.
     pub prompt: Option<String>,
-    /// `PickStep` sets it from `cur_step.skip_judges`; `run_hook`'s predicate bypasses a handler that
+    /// `PickStep` sets it from `cur_step.skip_verifiers`; `run_hook`'s predicate bypasses a handler that
     /// opts out of skip steps (`runs_on_skip()==false`).
-    pub skip_judges: bool,
+    pub skip_verifiers: bool,
     /// `LaunchWorker` (on_run) → VERIFY/GATE.
     pub outcome: Option<SessionOutcome>,
-    /// `FloorFold` (on_verify) → the post-judge refine fold in GATE.
+    /// `FloorFold` (on_verify) → the post-verifier refine fold in GATE.
     pub mem_folded: bool,
     /// `SnapshotGoals` (on_verify) → a rollback in GATE restores it.
     pub pre_cycle_goals: Vec<GoalRuntime>,
-    /// `StageSpan` (skip) XOR `RunJudges` (judged) → GATE; REWRITTEN by GATE on a rollback.
+    /// `StageSpan` (skip) XOR `RunVerifiers` (verified) → GATE; REWRITTEN by GATE on a rollback.
     pub res: Option<CycleResult>,
     /// `StageSpan` (skip) → the step's `Landing`: this session committed nothing. It is still staged,
     /// so the gate counts the span as a no-change one; the step reports `Landing::Nothing`.
     pub span_empty: bool,
-    /// `StageMerge` (judged) → GATE's keep/rollback. `None` on a skip step.
+    /// `StageMerge` (verified) → GATE's keep/rollback. `None` on a skip step.
     pub staged: Option<(String, crate::git::StagedSession)>,
     /// `GateKeepRollback` (on_gate) → `RefineFold`'s "session ROLLED BACK" prefix. Staged-!keep only.
     pub rolled_back: bool,

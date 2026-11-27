@@ -10,13 +10,13 @@ project: "isolated"
 
 defaults:
   agent: "claude"
-  isolation: "container"            # the worker AND its judges run in containers
+  isolation: "container"            # the worker AND its verifiers run in containers
   image: "rlt-claude"
   write_deny: ["tests/oracles/**"]  # readable, never changed
 
-judge:
+verifier:
   agent: "claude"
-  image: "rlt-claude"               # the judges' image: it needs whatever your judges run
+  image: "rlt-claude"               # the verifiers' image: it needs whatever your verifiers run
 
 context:
   - { path: "~/kb/architecture", as: "arch", mode: "ro" }   # /context/arch inside the container

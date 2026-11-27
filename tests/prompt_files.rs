@@ -40,7 +40,7 @@ cp rlt/private/INSTRUCTIONS.md "$BRIEFS/brief-$((n + 1))"
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"output_tokens":1},"total_cost_usd":0.01}'
 "#;
 
-/// A git project whose `rlt.yaml` has `steps_yaml` as its `steps:` body, a judge that is never met
+/// A git project whose `rlt.yaml` has `steps_yaml` as its `steps:` body, a verifier that is never met
 /// and a two-session cap; plus an outside dir (`briefs/`, prompt files) the fake may write.
 fn project(steps_yaml: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
@@ -49,8 +49,8 @@ fn project(steps_yaml: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, temp
     fs::create_dir_all(out.path().join("briefs")).unwrap();
     write(&dir.join("bin/claude"), FAKE);
     chmod_x(&dir.join("bin/claude"));
-    write(&dir.join("rlt/judges/never.sh"), "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1}'\n");
-    chmod_x(&dir.join("rlt/judges/never.sh"));
+    write(&dir.join("rlt/verifiers/never.sh"), "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1}'\n");
+    chmod_x(&dir.join("rlt/verifiers/never.sh"));
     for (rel, text) in files {
         write(&dir.join("rlt").join(rel), text);
     }

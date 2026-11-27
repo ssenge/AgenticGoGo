@@ -5,10 +5,10 @@
 //! - the WORKER runs inside its image as the project owner, with a fresh `HOME` every session, its
 //!   agent's credential by NAME (`ANTHROPIC_API_KEY`), the run's `pass_env` and read-only
 //!   `credentials`, the context read-only at `/context/<as>`, `write_deny` and `rlt/private/`
-//!   read-only — and the judges' homes out of its reach;
-//! - SCRIPT judges and the LLM judge's one-shot run in the judges' image (the run's strongest tier —
+//!   read-only — and the verifiers' homes out of its reach;
+//! - SCRIPT verifiers and the rubric verifier's one-shot run in the verifiers' image (the run's strongest tier —
 //!   no opt-out), with the project READ-ONLY, the context visible, writing only their scratch;
-//! - a worker that rewrites a judge script cannot reach the host through it;
+//! - a worker that rewrites a verifier script cannot reach the host through it;
 //! - no credential VALUE ever lands in rlt's ledgers, logs, report or output.
 //!
 //! Skipped LOUDLY without a running engine. Projects live under `target/`, which every engine rlt
@@ -78,17 +78,17 @@ fn root(name: &str) -> Root {
     Root(fs::canonicalize(&r).unwrap())
 }
 
-/// The script judge: runs in the judges' image; logs what it can and cannot do into its scratch.
-const DONE_JUDGE: &str = r#"#!/bin/sh
+/// The script verifier: runs in the verifiers' image; logs what it can and cannot do into its scratch.
+const DONE_VERIFIER: &str = r#"#!/bin/sh
 {
-  { [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; } && echo JUDGE_IN_CONTAINER
-  if echo x > judge_probe 2>/dev/null; then echo JUDGE_PROJECT_WRITE_OK; else echo JUDGE_PROJECT_WRITE_DENIED; fi
-  [ -f /context/kb/index.md ] && echo JUDGE_CONTEXT_SEEN
-  echo m > "$RLT_JUDGE_SCRATCH/m" && echo JUDGE_SCRATCH_OK
-} >> "$RLT_JUDGE_SCRATCH/judge.log" 2>&1
+  { [ -f /.dockerenv ] || grep -qs -e docker -e containerd /proc/1/cgroup; } && echo VERIFIER_IN_CONTAINER
+  if echo x > verifier_probe 2>/dev/null; then echo VERIFIER_PROJECT_WRITE_OK; else echo VERIFIER_PROJECT_WRITE_DENIED; fi
+  [ -f /context/kb/index.md ] && echo VERIFIER_CONTEXT_SEEN
+  echo m > "$RLT_VERIFIER_SCRATCH/m" && echo VERIFIER_SCRATCH_OK
+} >> "$RLT_VERIFIER_SCRATCH/verifier.log" 2>&1
 n=$(cat src/sessions.log 2>/dev/null | wc -l | tr -d ' ')
 if [ "${n:-0}" -ge 2 ]; then
-  echo "{\"met\":true,\"value\":$n,\"max\":2,\"target\":2,\"rationale\":\"two sessions\",\"evidence\":[\"judge.log\"]}"
+  echo "{\"met\":true,\"value\":$n,\"max\":2,\"target\":2,\"rationale\":\"two sessions\",\"evidence\":[\"verifier.log\"]}"
 else
   echo "{\"met\":false,\"value\":${n:-0},\"max\":2,\"target\":2,\"rationale\":\"not yet\"}"
 fi
@@ -96,7 +96,7 @@ fi
 
 const REVIEWED: &str = "---\ninputs: []\n---\nDecide whether the work is done.\n";
 
-/// A container-tier project: the worker and both judges in `img`, a read-only context, a
+/// A container-tier project: the worker and both verifiers in `img`, a read-only context, a
 /// `write_deny` oracle, one `pass_env` name and one `credentials` dir. Returns (project, kb, home).
 fn project(r: &Root, img: &str, extra_pass: &str) -> (PathBuf, PathBuf, PathBuf) {
     project_with(r, img, extra_pass, "")
@@ -112,7 +112,7 @@ fn project_with(r: &Root, img: &str, extra_pass: &str, extra_policy: &str) -> (P
     git(&r.0, &["init", "-q", "-b", "main", d.to_str().unwrap()]);
     git(&d, &["config", "user.email", "t@t"]);
     git(&d, &["config", "user.name", "t"]);
-    write(&d, ".gitignore", "rlt/state/\nagg/private/\n");
+    write(&d, ".gitignore", "rlt/state/\nrlt/private/\n");
     write(&d, "tests/oracle.txt", "orig\n");
     write(
         &d,
@@ -120,7 +120,7 @@ fn project_with(r: &Root, img: &str, extra_pass: &str, extra_policy: &str) -> (P
         &format!(
             "project: \"ctr\"\n\
              defaults: {{ model: \"fake\", isolation: \"container\", image: \"{img}\", write_deny: [\"tests/**\"] }}\n\
-             judge: {{ agent: \"claude\", model: \"fake\" }}\n\
+             verifier: {{ agent: \"claude\", model: \"fake\" }}\n\
              steps: {{ worker: {{}} }}\n\
              sequence: {{ steps: [\"worker\"], done_if: \"done AND reviewed\" }}\n\
              summary: {{ enabled: false }}\n\
@@ -129,9 +129,9 @@ fn project_with(r: &Root, img: &str, extra_pass: &str, extra_policy: &str) -> (P
             kb = kb.display()
         ),
     );
-    write(&d, "rlt/judges/done.sh", DONE_JUDGE);
-    chmod_x(&d.join("rlt/judges/done.sh"));
-    write(&d, "rlt/judges/reviewed.md", REVIEWED);
+    write(&d, "rlt/verifiers/done.sh", DONE_VERIFIER);
+    chmod_x(&d.join("rlt/verifiers/done.sh"));
+    write(&d, "rlt/verifiers/reviewed.md", REVIEWED);
     write(&d, "rlt/state/STATE.md", "work\n");
     git(&d, &["add", "-A"]);
     git(&d, &["commit", "-qm", "init"]);
@@ -176,7 +176,7 @@ fn files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn the_worker_and_its_judges_run_in_the_image_with_exactly_what_the_run_grants() {
+fn the_worker_and_its_verifiers_run_in_the_image_with_exactly_what_the_run_grants() {
     let Some(img) = image() else {
         eprintln!("SKIPPED: no container engine");
         return;
@@ -211,19 +211,19 @@ fn the_worker_and_its_judges_run_in_the_image_with_exactly_what_the_run_grants()
     assert!(!w.contains("HOME_SURVIVED"), "nothing survives a session in the worker's home:\n{w}");
 
     // the scratch is gone with the run; its log survives as the verdict's evidence of session 2
-    assert!(!d.join("rlt/private/container/judge/scratch-2").exists(), "the judge scratch outlived the run");
+    assert!(!d.join("rlt/private/container/verifier/scratch-2").exists(), "the verifier scratch outlived the run");
     let mut kept = vec![];
     files(&d.join("rlt/private/evidence"), &mut kept);
-    let log_of_2 = kept.iter().find(|p| p.ends_with("judge.log") && p.components().any(|c| c.as_os_str() == "2"));
-    let j = read(log_of_2.unwrap_or_else(|| panic!("no judge.log kept for session 2: {kept:?}")));
-    for want in ["JUDGE_IN_CONTAINER", "JUDGE_PROJECT_WRITE_DENIED", "JUDGE_CONTEXT_SEEN", "JUDGE_SCRATCH_OK"] {
-        assert!(j.contains(want), "script judge: `{want}` missing\n{j}");
+    let log_of_2 = kept.iter().find(|p| p.ends_with("verifier.log") && p.components().any(|c| c.as_os_str() == "2"));
+    let j = read(log_of_2.unwrap_or_else(|| panic!("no verifier.log kept for session 2: {kept:?}")));
+    for want in ["VERIFIER_IN_CONTAINER", "VERIFIER_PROJECT_WRITE_DENIED", "VERIFIER_CONTEXT_SEEN", "VERIFIER_SCRATCH_OK"] {
+        assert!(j.contains(want), "script verifier: `{want}` missing\n{j}");
     }
     let o = read(&d.join("rlt/private/container/home/ruler/oneshot.log"));
     for want in ["RULER_IN_CONTAINER", "RULER_PROJECT_WRITE_DENIED", "RULER_KEY_SEEN"] {
-        assert!(o.contains(want), "LLM judge: `{want}` missing\n{o}");
+        assert!(o.contains(want), "rubric verifier: `{want}` missing\n{o}");
     }
-    assert!(log.contains("IMAGE_RULER_MET"), "the LLM judge's verdict came from the image:\n{log}");
+    assert!(log.contains("IMAGE_RULER_MET"), "the rubric verifier's verdict came from the image:\n{log}");
 
     assert_eq!(read(&d.join("tests/oracle.txt")), "orig\n");
     assert_eq!(read(&kb.join("index.md")), "# kb\n");
@@ -239,11 +239,11 @@ fn the_worker_and_its_judges_run_in_the_image_with_exactly_what_the_run_grants()
     }
 }
 
-/// The residual the container tier used to document: a worker rewrites a judge script, and the
-/// judge then runs on the HOST. Judges run in the container now — the rewritten script finds no
+/// The residual the container tier used to document: a worker rewrites a verifier script, and the
+/// verifier then runs on the HOST. Verifiers run in the container now — the rewritten script finds no
 /// host path to write.
 #[test]
-fn a_rewritten_judge_cannot_reach_the_host() {
+fn a_rewritten_verifier_cannot_reach_the_host() {
     let Some(img) = image() else {
         eprintln!("SKIPPED: no container engine");
         return;
@@ -253,11 +253,11 @@ fn a_rewritten_judge_cannot_reach_the_host() {
     let escape = r.0.join("escaped-to-host");
     let (_, log) = run(&d, &home, &[("RLT_TEST_TAMPER", escape.to_str().unwrap())]);
     assert!(read(&d.join("src/worker.log")).contains("WORKER_IN_CONTAINER"), "{log}");
-    assert!(!escape.exists(), "the rewritten judge ran on the host and wrote {}:\n{log}", escape.display());
+    assert!(!escape.exists(), "the rewritten verifier ran on the host and wrote {}:\n{log}", escape.display());
 }
 
 /// A-7's acceptance on the reference tier: under `allow: [api.anthropic.com]` the worker cannot
-/// reach anything else — and the agent still works (its session, both judges and the LLM judge's
+/// reach anything else — and the agent still works (its session, both verifiers and the rubric verifier's
 /// one-shot all run behind the list), and nothing of the egress network is left behind.
 #[test]
 fn behind_an_allow_list_the_worker_cannot_reach_out_and_the_run_still_completes() {

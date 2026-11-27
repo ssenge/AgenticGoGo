@@ -1,7 +1,7 @@
 //! `rlt run --resume` — the YAML path continues an interrupted run (A-18.3, decision 5).
 //!
 //! It REUSES the driver's call ledger (`rlt/private/calls.jsonl`) instead of adding a mechanism: the
-//! YAML loop writes one `step` record per session and one `gate` record per judged session, and a
+//! YAML loop writes one `step` record per session and one `gate` record per verified session, and a
 //! resume truncates to the last KEPT gate — the same OD-12 rule, for the same reason: only work that
 //! landed on base is sound to skip. What it restores:
 //!
@@ -12,7 +12,7 @@
 //! | session counter, tokens, cost | `state.json` as the run left it — never laundered: work after the last kept gate re-executes, but its spend stays spent and its session numbers stay used |
 //! | the run id, the clock | `clock.json` |
 //!
-//! An interrupted session's work is never judged: it was saved under `refs/rlt/partial/<run>/<n>`
+//! An interrupted session's work is never verified: it was saved under `refs/rlt/partial/<run>/<n>`
 //! when it stopped (or by `GitSetup` on the resume, after a crash), and the resume starts session
 //! n+1 from the gated tree.
 
@@ -124,18 +124,18 @@ pub fn restore_position(st: &mut LoopState, r: &Resume) -> Result<()> {
     Ok(())
 }
 
-/// Record one finished YAML session in the call ledger: its `step`, and — for a judged session —
-/// the `gate` that decided it. A `skip_judges` session is staged, not gated: its gate is the next
-/// judged session's.
+/// Record one finished YAML session in the call ledger: its `step`, and — for a verified session —
+/// the `gate` that decided it. A `skip_verifiers` session is staged, not gated: its gate is the next
+/// verified session's.
 pub fn record(st: &mut LoopState, outcome: &StepOutcome) -> Result<()> {
-    let judged = !st.scratch.get::<RLTScratch>().skip_judges;
+    let verified = !st.scratch.get::<RLTScratch>().skip_verifiers;
     let (idx, reps) = st.cursor.position();
     let ts = crate::util::now_epoch();
     let mut ord = st.ext.get::<Ledger>().ord;
     let step = CallRecord::Step { ord, label: label(idx, reps), outcome: outcome.clone(), ts };
     crate::core::calls::append(&st.dir, &step)?;
     ord += 1;
-    if judged {
+    if verified {
         let decided = match outcome.landed {
             Landing::Base => GateOutcome::Kept,
             Landing::RolledBack => GateOutcome::RolledBack,

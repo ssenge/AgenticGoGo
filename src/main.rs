@@ -6,7 +6,7 @@
 
 // The harness lives in the library crate (`rlt`); `main.rs` is the thin CLI over it. Only the
 // modules the CLI actually touches are imported here.
-use relentless::core::{config, engine, judge};
+use relentless::core::{config, engine, verifier};
 use relentless::os::{detach, spawns};
 use relentless::ui::{dashboard, status};
 use relentless::{bus, doctor, init, loop_, project, skills, state};
@@ -33,7 +33,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scaffold a starter rlt.yaml + RLT.md + state/STATE.md + a judge in this dir.
+    /// Scaffold a starter rlt.yaml + RLT.md + state/STATE.md + a verifier in this dir.
     Init {
         /// which agent the scaffold should target (default: the agent whose shell you are in,
         /// else claude). The template differs: codex omits `model:`, and only claude may set `cost:`.
@@ -51,7 +51,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Evaluate every judge once and print the starting scoreboard (a dry run — RE-RUNS judges).
+    /// Evaluate every verifier once and print the starting scoreboard (a dry run — RE-RUNS verifiers).
     Plan,
     /// Print the JSON Schema of rlt.yaml, generated from the config types rlt parses into; `rlt schema process` prints the
     /// schema of a process file.
@@ -59,17 +59,17 @@ enum Cmd {
         /// `process`: the schema of a process file (`rlt process`), instead of rlt.yaml's
         which: Option<String>,
     },
-    /// Validate rlt.yaml and its judges exactly as `rlt run` does at startup, listing EVERY
-    /// problem at once. Runs no judge and no agent. Exits 1 if there is any problem.
+    /// Validate rlt.yaml and its verifiers exactly as `rlt run` does at startup, listing EVERY
+    /// problem at once. Runs no verifier and no agent. Exits 1 if there is any problem.
     Check {
         /// emit `{schema_version, ok, config, problems: [{path, message}], warnings}` as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Print the running loop's latest scoreboard from its published snapshot (cheap — does NOT
-    /// re-run judges; reads rlt/private/state.json, same as the /rlt:status skill).
+    /// re-run verifiers; reads rlt/private/state.json, same as the /rlt:status skill).
     Status {
-        /// emit the live status document (docs/schemas/status.v1.json) — the stable interface for a
+        /// emit the live status document (docs/schemas/status.v2.json) — the stable interface for a
         /// program watching a run.
         #[arg(long)]
         json: bool,
@@ -92,24 +92,24 @@ enum Cmd {
         base_branch: Option<String>,
         /// continue the project's last interrupted run: same run id, session counter, ratchet state
         /// and call ledger (sound back to its last kept gate). The interrupted session's work is on
-        /// `refs/rlt/partial/<run>/<session>`, not judged.
+        /// `refs/rlt/partial/<run>/<session>`, not verified.
         #[arg(long)]
         resume: bool,
     },
-    /// Run ONE judge once (resolved by NAME from disk) and print its raw verdict JSON + a human
-    /// line — for authoring or debugging a single judge without running the whole `plan`.
-    Judge {
-        /// the judge name to resolve (rlt/judges/<name>.{sh,md} → ~/.rlt/judges/<name>.*)
+    /// Run ONE verifier once (resolved by NAME from disk) and print its raw verdict JSON + a human
+    /// line — for authoring or debugging a single verifier without running the whole `plan`.
+    Verify {
+        /// the verifier name to resolve (rlt/verifiers/<name>.{sh,md} → ~/.rlt/verifiers/<name>.*)
         name: String,
     },
-    /// Run a process file: phases of standard steps (scripts, agents judged by checks and a critic, approvals,
+    /// Run a process file: phases of standard steps (scripts, agents verified by checks and a critic, approvals,
     /// loops over a list, exams) from YAML. `rlt process <file> <project> [--from <step> …]`, `--check`, `--list`.
     Process {
         /// the file, the project and the run's flags (`--from`, `--note`, `--until`, `--resume`, …)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
-    /// A check through the judge cache: `rlt cached [--ignore <path>]... -- <command>...` (what `rlt process` wraps its
+    /// A check through the verifier cache: `rlt cached [--ignore <path>]... -- <command>...` (what `rlt process` wraps its
     /// script checks in).
     #[command(hide = true)]
     Cached {
@@ -305,9 +305,9 @@ enum HilCmd {
 }
 
 struct Paths {
-    /// project root (cwd for judges + worker; runtime state lives in `<dir>/rlt/{state,private}/`).
+    /// project root (cwd for verifiers + worker; runtime state lives in `<dir>/rlt/{state,private}/`).
     dir: PathBuf,
-    /// where user inputs live: `<dir>/rlt/`. The state file, project judges, and LLM-judge rubric
+    /// where user inputs live: `<dir>/rlt/`. The state file, project verifiers, and rubric verifier rubric
     /// files resolve against this base.
     config_base: PathBuf,
     config: PathBuf,
@@ -374,25 +374,25 @@ fn run_cli() -> Result<ExitCode> {
         Cmd::Plan => {
             no_config_hint(&p.config)?;
             let cfg = config::RelentlessConfig::load(&p.config)?;
-            // build the run-set engine exactly as the loop does (resolves judges by name).
+            // build the run-set engine exactly as the loop does (resolves verifiers by name).
             let asm = loop_::assemble(&cfg, &p.config_base)?;
-            // `plan` RE-RUNS the judges, so an LLM judge would make a real model call — refuse a
+            // `plan` RE-RUNS the verifiers, so an rubric verifier would make a real model call — refuse a
             // config the chosen agent(s) cannot honour first.
-            relentless::capability::check(&cfg, &asm.engine.judges, &p.dir)?;
-            // the judges find the run's context dirs (`RLT_CONTEXT_*`) exactly as in a run.
+            relentless::capability::check(&cfg, &asm.engine.verifiers, &p.dir)?;
+            // the verifiers find the run's context dirs (`RLT_CONTEXT_*`) exactly as in a run.
             let _policy = relentless::isolation::run::register(&cfg, &p.dir)?;
             let ruler = cfg.ruler_backend()?;
-            let jm = cfg.judge_model(ruler);
+            let jm = cfg.verifier_model(ruler);
             let mut eng = asm.engine;
-            eprintln!("rlt: evaluating {} judge(s) once (dry run)…", eng.judges.len());
+            eprintln!("rlt: evaluating {} verifier(s) once (dry run)…", eng.verifiers.len());
             // ponytail: UNCONFINED, unlike the baseline pass (features/setup.rs) which now uses the
             // run-level tier. Two things make that safe here and not there: `plan` never writes
-            // `verdicts.jsonl`, so a tampered judge has no ledger to forge; and it is
+            // `verdicts.jsonl`, so a tampered verifier has no ledger to forge; and it is
             // OPERATOR-invoked, so running it is the same act of trust as running any script in a
-            // repo you are working on. The residual is that a judge tampered with by an earlier
+            // repo you are working on. The residual is that a verifier tampered with by an earlier
             // sandboxed run is arbitrary code on the operator's host. Upgrade path if that matters:
-            // pass `cfg.run_isolation()` here and in `rlt judge` below, exactly as Baseline does.
-            let res = eng.run_step(&p.dir, &engine::RunState::default(), ruler, &jm, cfg.judge.timeout, "plan", None, false, relentless::isolation::Isolation::None);
+            // pass `cfg.run_isolation()` here and in `rlt verifier` below, exactly as Baseline does.
+            let res = eng.run_step(&p.dir, &engine::RunState::default(), ruler, &jm, cfg.verifier.timeout, "plan", None, false, relentless::isolation::Isolation::None);
             print!("{}", eng.scoreboard());
             // Non-terminal, so it is reported ALONGSIDE the verdict, not instead of it: knowing a
             // detector already fires is worth having before committing to an overnight run.
@@ -409,7 +409,7 @@ fn run_cli() -> Result<ExitCode> {
             }
             Ok(())
         }
-        // Cheap read of the published snapshot — never re-runs judges (that's `plan`).
+        // Cheap read of the published snapshot — never re-runs verifiers (that's `plan`).
         Cmd::Status { json } => {
             if *json {
                 println!("{}", status::render_json(&p.dir)?);
@@ -427,12 +427,12 @@ fn run_cli() -> Result<ExitCode> {
             }
             Ok(())
         }
-        Cmd::Judge { name } => {
-            // resolve the judge by NAME from disk (§5.1) — no goals.yaml. Ensure the standard
-            // library exists so a library judge name resolves.
-            let _ = relentless::core::judges::ensure_library();
+        Cmd::Verify { name } => {
+            // resolve the verifier by NAME from disk (§5.1) — no goals.yaml. Ensure the standard
+            // library exists so a library verifier name resolves.
+            let _ = relentless::core::verifiers::ensure_library();
             let cfg = config::RelentlessConfig::load(&p.config).ok();
-            // a judge DECLARED in `judges:` (a `metric:`/`score:` block) first, else a file.
+            // a verifier DECLARED in `verifiers:` (a `metric:`/`score:` block) first, else a file.
             let kind = match cfg.as_ref().map(|c| relentless::metrics::declare::declare(c, std::slice::from_ref(name), &p.config_base, true)) {
                 Some(d) if d.kinds.contains_key(name) => {
                     if !d.problems.is_empty() {
@@ -440,24 +440,24 @@ fn run_cli() -> Result<ExitCode> {
                     }
                     d.kinds[name].clone()
                 }
-                _ => relentless::core::judges::resolve(name, &p.config_base)?,
+                _ => relentless::core::verifiers::resolve(name, &p.config_base)?,
             };
             // run it exactly as the loop would (scripts from the project root, rubric on the RULER).
             let ruler = ruler_for(&p.config)?;
             let (jm, timeout) = match &cfg {
-                Some(c) => (c.judge_model(ruler), c.judges.get(name).and_then(|j| j.timeout).unwrap_or(c.judge.timeout)),
+                Some(c) => (c.verifier_model(ruler), c.verifiers.get(name).and_then(|j| j.timeout).unwrap_or(c.verifier.timeout)),
                 None => (ruler.default_summary_model().to_string(), 300),
             };
-            // the judge finds the run's context dirs (`RLT_CONTEXT_*`) exactly as in a run.
+            // the verifier finds the run's context dirs (`RLT_CONTEXT_*`) exactly as in a run.
             let _policy = match &cfg {
                 Some(c) => Some(relentless::isolation::run::register(c, &p.dir)?),
                 None => None,
             };
-            // Manual `rlt judge` — no worker ran this session, so no confinement is needed.
-            // No run-set here (this is one judge, by hand), so a native judge's ctx would have
-            // nothing to consult — and `rlt judge` resolves by file extension, which cannot
+            // Manual `rlt verifier` — no worker ran this session, so no confinement is needed.
+            // No run-set here (this is one verifier, by hand), so a native verifier's ctx would have
+            // nothing to consult — and `rlt verifier` resolves by file extension, which cannot
             // produce one. `None` iso_base ⇒ `diff()` is the working tree against HEAD.
-            let (verdict, _spend) = judge::run(
+            let (verdict, _spend) = verifier::run(
                 &kind,
                 name,
                 &p.dir,
@@ -466,12 +466,12 @@ fn run_cli() -> Result<ExitCode> {
                 "",
                 timeout,
                 None,
-                "judge",
+                "verifier",
                 relentless::isolation::Isolation::None,
-                &relentless::core::judge::NoJudges,
+                &relentless::core::verifier::NoVerifiers,
                 None,
             );
-            // raw verdict JSON (the judge contract), then a one-line human summary.
+            // raw verdict JSON (the verifier contract), then a one-line human summary.
             println!("{}", serde_json::to_string(&verdict).unwrap_or_else(|_| "{}".into()));
             let mark = if verdict.met { "✔ met" } else { "✖ not met" };
             eprintln!(
@@ -599,14 +599,14 @@ fn prepare_run(p: &Paths, base_branch: Option<&str>) -> Result<(config::Relentle
         }
         rlt_cfg.session_isolation.base_branch = b.to_string();
     }
-    // build the run-set engine + parse the sequence (validates step names / judge files / the
+    // build the run-set engine + parse the sequence (validates step names / verifier files / the
     // not-all-skip rule).
     let asm = loop_::assemble(&rlt_cfg, &p.config_base)?;
     // …then REFUSE anything the config asks for that the chosen agent(s) cannot do.
-    relentless::capability::check(&rlt_cfg, &asm.engine.judges, &p.dir)?;
+    relentless::capability::check(&rlt_cfg, &asm.engine.verifiers, &p.dir)?;
     // EVERY agent that runs on the host must be on PATH (§7.3), before launching the loop — a
     // container step's agent was checked in its image by `capability::check`.
-    for (_, name) in relentless::capability::host_agents(&rlt_cfg, &asm.engine.judges) {
+    for (_, name) in relentless::capability::host_agents(&rlt_cfg, &asm.engine.verifiers) {
         relentless::backend::for_name(&name)?.preflight()?;
     }
     Ok((rlt_cfg, asm))
@@ -650,8 +650,8 @@ fn run_reported(p: &Paths, opts: loop_::RunOpts, report_json: bool, base_branch:
     conclude(&p.dir, &project, res, may_write, headless.as_ref().or(printer.as_ref()))
 }
 
-/// The RULER — the backend that runs LLM judges — for a command that may have a missing/broken
-/// rlt.yaml (`judge` resolves the ruler even without a full parse). Reads `judge.agent`.
+/// The RULER — the backend that runs rubric verifiers — for a command that may have a missing/broken
+/// rlt.yaml (`verifier` resolves the ruler even without a full parse). Reads `verifier.agent`.
 fn ruler_for(config: &std::path::Path) -> Result<&'static dyn relentless::backend::AgentBackend> {
     relentless::backend::for_name(&config::RelentlessConfig::ruler_name(config))
 }

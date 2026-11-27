@@ -16,7 +16,7 @@
 //! - **The model is the one the agent reported**, never the configured one. They differ — an alias
 //!   resolves, an `auto` mode picks — and the record is about what ran.
 //! - **Worker and ruler are kept apart.** The worker is the session's agent; the ruler runs the LLM
-//!   judges and the summarizer. A run whose judges cost more than its work is a finding, and it is
+//!   verifiers and the summarizer. A run whose verifiers cost more than its work is a finding, and it is
 //!   invisible in a single total.
 //!
 //! Recording usage never caps anything: the ceilings (`limits.tokens`, `limits.cost`) read the
@@ -82,7 +82,7 @@ pub struct Usage {
 pub enum Role {
     /// the session's agent, doing the work.
     Worker,
-    /// the agent behind the LLM judges and the summarizer.
+    /// the agent behind the rubric verifiers and the summarizer.
     Ruler,
 }
 

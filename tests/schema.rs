@@ -47,7 +47,7 @@ fn the_shipped_examples_validate() {
     for rel in [
         "examples/workflow.yaml",
         "examples/isolated.yaml",
-        "examples/hello/rlt/rlt.yaml",
+        "examples/hello-loop/rlt/rlt.yaml",
         "examples/p-vs-np/rlt/rlt.yaml",
         "examples/quality-gates/rlt/rlt.yaml",
     ] {
@@ -86,11 +86,11 @@ fn a_misspelled_key_fails_both_the_schema_and_the_parser() {
     for bad in [
         "project: \"p\"\nprojet: \"p\"\n",
         "project: \"p\"\ndefaults: { agnet: \"claude\" }\n",
-        "project: \"p\"\nsteps: { w: { judge_model: \"x\" } }\n",
+        "project: \"p\"\nsteps: { w: { verifier_model: \"x\" } }\n",
         "project: \"p\"\nsequence: { steps: [{ step: \"w\", tims: 2 }] }\n",
         "project: \"p\"\nsequence: { limits: { token: 5 } }\n",
-        "project: \"p\"\njudges: { cc: { metric: { idd: \"a.b\" }, max: 1 } }\n",
-        "project: \"p\"\njudges: { q: { score: { definition: \"swe-default\", version: \"2\", name: \"x\" } } }\n",
+        "project: \"p\"\nverifiers: { cc: { metric: { idd: \"a.b\" }, max: 1 } }\n",
+        "project: \"p\"\nverifiers: { q: { score: { definition: \"swe-default\", version: \"2\", name: \"x\" } } }\n",
         "project: \"p\"\ncontext: [{ path: \"/kb\", as: \"kb\", mod: \"ro\" }]\n",
         "project: \"p\"\nisolation_policy: { pass_envs: [\"X\"] }\n",
         "project: \"p\"\nisolation_policy: { network: { alow: [\"x.com\"] } }\n",
@@ -115,7 +115,7 @@ fn a_minimal_config_validates() {
 fn the_confinement_keys_validate() {
     let v = validator();
     let doc = "project: \"p\"\ncontext:\n  - { path: \"~/kb\", as: \"brain\", mode: \"ro\" }\n  - { path: \"../docs\", as: \"docs\" }\n\
-               judge: { image: \"rlt-claude\" }\n\
+               verifier: { image: \"rlt-claude\" }\n\
                isolation_policy: { network: { allow: [\"api.anthropic.com\", \"*.npmjs.org:443\"] }, pass_env: [\"NPM_TOKEN\"], credentials: [\"~/.config/gh\"] }\n";
     let errs = errors(&v, doc);
     assert!(errs.is_empty(), "{}", errs.join("\n"));

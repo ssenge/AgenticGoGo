@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use super::{JudgeEntry, OpenAsk, Outcome, Paths, Report, RunHandle, RunResult, Session, Sessions, Time, VerdictView};
+use super::{VerifierEntry, OpenAsk, Outcome, Paths, Report, RunHandle, RunResult, Session, Sessions, Time, VerdictView};
 use crate::context::LoopState;
 use crate::core::verdicts::Outcome as Gated;
 use crate::core::model::Verdict;
@@ -21,7 +21,7 @@ pub struct Tally {
     pub rolled_back: u32,
     pub no_improvement: u32,
     pub no_changes: u32,
-    /// each judge's verdict from the baseline pass, before any session ran.
+    /// each verifier's verdict from the baseline pass, before any session ran.
     pub baseline: BTreeMap<String, VerdictView>,
 }
 
@@ -31,7 +31,7 @@ pub struct Tally {
 pub fn record_gate(ctx: &mut LoopState, fate: Gated, branch: Option<&str>) {
     let git = &ctx.ext.get::<RLTState>().git;
     // the span's other branches, plus the one gated — which IS in the list on the driver path (the
-    // tip) and is not on the YAML path (a judged session cut off the tip).
+    // tip) and is not on the YAML path (a verified session cut off the tip).
     let n = git.span_branches.iter().filter(|b| Some(b.as_str()) != branch).count() as u32 + 1;
     let t = ctx.ext.get::<Tally>();
     match fate {
@@ -58,7 +58,7 @@ pub fn record_session(ctx: &mut LoopState, run: &RunHandle, user_settings: bool,
     ctx.ext.get::<SessionSlot>().0 = Some(session);
 }
 
-/// Record the baseline pass's verdicts — the "before" column of the report's judge table.
+/// Record the baseline pass's verdicts — the "before" column of the report's verifier table.
 pub fn record_baseline(ctx: &mut LoopState, fresh: &[(String, Verdict)]) {
     for (name, v) in fresh {
         let mut view = VerdictView::from(v);
@@ -79,7 +79,7 @@ fn abs(p: std::path::PathBuf) -> String {
 
 /// Build the report for a run that ended with `res`, from the live loop state.
 pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunOutcome>) -> Report {
-    // refreshes `dash.judges` from the engine on the YAML path; the driver path's are already there.
+    // refreshes `dash.verifiers` from the engine on the YAML path; the driver path's are already there.
     st.publish();
     let now = crate::util::now_epoch();
     let (iso_base, span_tip, staged) = {
@@ -99,7 +99,7 @@ pub fn from_state(st: &mut LoopState, run: &RunHandle, res: &anyhow::Result<RunO
             work_time_s: st.clock.work_secs(now),
             human_wait_time_s: st.clock.human_wait_secs,
         },
-        judges: judges(&st.dash.judges, tally.baseline, &st.dash.ratchet, &kept),
+        verifiers: verifiers(&st.dash.verifiers, tally.baseline, &st.dash.ratchet, &kept),
         result: RunResult { base_branch, final_commit, staged_branch: span_tip },
         open_asks: open_asks(&st.dir, now),
         paths: Paths { evidence_dir, ..paths(&st.dir) },
@@ -145,7 +145,7 @@ fn skeleton(
         finished_at: crate::util::now_epoch(),
         sessions: Sessions::default(),
         time: Time::default(),
-        judges: BTreeMap::new(),
+        verifiers: BTreeMap::new(),
         result: RunResult::default(),
         open_asks: Vec::new(),
         paths: paths(dir),
@@ -157,18 +157,18 @@ fn skeleton(
     }
 }
 
-/// Every judge the run consulted: its last verdict (the published scoreboard, which both entry
-/// points fill) joined with its baseline and its ratchet. A judge that never produced a verdict has
+/// Every verifier the run consulted: its last verdict (the published scoreboard, which both entry
+/// points fill) joined with its baseline and its ratchet. A verifier that never produced a verdict has
 /// `last: null`.
 ///
-/// `kept` is each judge's last kept verdict and its evidence copies: they are listed on `last` only
+/// `kept` is each verifier's last kept verdict and its evidence copies: they are listed on `last` only
 /// when `last` IS that verdict — after a rollback restored an older one, they describe another.
-pub(super) fn judges(
-    board: &[crate::state::JudgeView],
+pub(super) fn verifiers(
+    board: &[crate::state::VerifierView],
     mut baseline: BTreeMap<String, VerdictView>,
     ratchet: &BTreeMap<String, super::RatchetView>,
     kept: &HashMap<String, (Verdict, Vec<std::path::PathBuf>)>,
-) -> BTreeMap<String, JudgeEntry> {
+) -> BTreeMap<String, VerifierEntry> {
     let mut out = BTreeMap::new();
     for j in board {
         let last = last_verdict(j).map(|mut view| {
@@ -177,19 +177,19 @@ pub(super) fn judges(
             }
             view
         });
-        let entry = JudgeEntry { last, baseline: baseline.remove(&j.name), ratchet: ratchet.get(&j.name).cloned() };
+        let entry = VerifierEntry { last, baseline: baseline.remove(&j.name), ratchet: ratchet.get(&j.name).cloned() };
         out.insert(j.name.clone(), entry);
     }
     for (name, b) in baseline {
-        let entry = JudgeEntry { last: None, baseline: Some(b), ratchet: ratchet.get(&name).cloned() };
+        let entry = VerifierEntry { last: None, baseline: Some(b), ratchet: ratchet.get(&name).cloned() };
         out.insert(name, entry);
     }
     out
 }
 
-/// A scoreboard row as a verdict — `None` while the judge has not run.
-pub(super) fn last_verdict(j: &crate::state::JudgeView) -> Option<VerdictView> {
-    j.judged.then(|| VerdictView {
+/// A scoreboard row as a verdict — `None` while the verifier has not run.
+pub(super) fn last_verdict(j: &crate::state::VerifierView) -> Option<VerdictView> {
+    j.verified.then(|| VerdictView {
         met: j.met,
         value: j.value,
         max: j.max,
@@ -248,30 +248,30 @@ mod tests {
         assert_eq!(r.stop_reason, "stopped", "an empty finish reason falls back to the outcome name");
     }
 
-    /// A judge only the baseline saw still appears, with `last: null`.
+    /// A verifier only the baseline saw still appears, with `last: null`.
     #[test]
-    fn judges_join_the_scoreboard_with_the_baseline() {
-        use crate::state::JudgeView;
+    fn verifiers_join_the_scoreboard_with_the_baseline() {
+        use crate::state::VerifierView;
         let mut b = BTreeMap::new();
         b.insert("a".to_string(), VerdictView { met: false, ..Default::default() });
         b.insert("gone".to_string(), VerdictView::default());
         let dash = vec![
-            JudgeView { name: "a".into(), state: "met".into(), met: true, judged: true, ..Default::default() },
-            JudgeView { name: "p".into(), state: "pending".into(), ..Default::default() },
-            JudgeView { name: "z".into(), state: "pending".into(), judged: true, value: Some(0.0), ..Default::default() },
+            VerifierView { name: "a".into(), state: "met".into(), met: true, verified: true, ..Default::default() },
+            VerifierView { name: "p".into(), state: "pending".into(), ..Default::default() },
+            VerifierView { name: "z".into(), state: "pending".into(), verified: true, value: Some(0.0), ..Default::default() },
         ];
         let mut ratchet = BTreeMap::new();
         ratchet.insert(
             "a".to_string(),
             super::super::RatchetView { reference: Some(3.0), direction: crate::core::ratchet::Direction::Up, tolerance: 0.0, tolerance_pct: None },
         );
-        let out = judges(&dash, b, &ratchet, &HashMap::new());
-        assert_eq!(out["a"].ratchet.as_ref().and_then(|r| r.reference), Some(3.0), "a ratcheted judge carries its reference");
+        let out = verifiers(&dash, b, &ratchet, &HashMap::new());
+        assert_eq!(out["a"].ratchet.as_ref().and_then(|r| r.reference), Some(3.0), "a ratcheted verifier carries its reference");
         assert!(out["p"].ratchet.is_none(), "an unratcheted one carries none");
         assert!(out["a"].last.as_ref().is_some_and(|v| v.met));
         assert!(out["a"].baseline.as_ref().is_some_and(|v| !v.met));
-        assert!(out["p"].last.is_none(), "a judge that has not run has no verdict yet");
-        assert!(out["z"].last.as_ref().is_some_and(|v| !v.met), "an unmet judge at 0 HAS run — its verdict is reported");
+        assert!(out["p"].last.is_none(), "a verifier that has not run has no verdict yet");
+        assert!(out["z"].last.as_ref().is_some_and(|v| !v.met), "an unmet verifier at 0 HAS run — its verdict is reported");
         assert!(out["gone"].last.is_none() && out["gone"].baseline.is_some());
     }
 
@@ -279,14 +279,14 @@ mod tests {
     /// rollback restored an older verdict, the copies describe one the report does not show.
     #[test]
     fn evidence_is_listed_only_on_the_verdict_it_was_kept_for() {
-        use crate::state::JudgeView;
+        use crate::state::VerifierView;
         let kept_v = Verdict { met: true, value: Some(1.0), max: Some(1.0), target: 1.0, rationale: "r".into(), evidence: vec!["cc.sarif".into()], error: None, mixed: false, vacuous: false, blocked_by: None };
         let mut kept = HashMap::new();
         kept.insert("a".to_string(), (kept_v.clone(), vec![std::path::PathBuf::from("/p/rlt/private/evidence/r/1/a/cc.sarif")]));
         kept.insert("b".to_string(), (kept_v, vec![std::path::PathBuf::from("/p/x")]));
-        let view = |name: &str, met: bool| JudgeView {
+        let view = |name: &str, met: bool| VerifierView {
             name: name.into(),
-            judged: true,
+            verified: true,
             state: "met".into(),
             met,
             value: Some(1.0),
@@ -295,7 +295,7 @@ mod tests {
             rationale: "r".into(),
             ..Default::default()
         };
-        let out = judges(&[view("a", true), view("b", false)], BTreeMap::new(), &BTreeMap::new(), &kept);
+        let out = verifiers(&[view("a", true), view("b", false)], BTreeMap::new(), &BTreeMap::new(), &kept);
         assert_eq!(out["a"].last.as_ref().unwrap().evidence, ["/p/rlt/private/evidence/r/1/a/cc.sarif"]);
         assert!(out["b"].last.as_ref().unwrap().evidence.is_empty(), "b shows a restored verdict, not the kept one");
     }

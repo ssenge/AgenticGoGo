@@ -1,16 +1,16 @@
-//! `rlt check` — validate `rlt.yaml` and the judges it names exactly as `rlt run` does at startup,
-//! and report EVERY problem at once, each at its dotted config path. Runs no judge and no agent
+//! `rlt check` — validate `rlt.yaml` and the verifiers it names exactly as `rlt run` does at startup,
+//! and report EVERY problem at once, each at its dotted config path. Runs no verifier and no agent
 //! (the only subprocess is each agent CLI's `--version`, the same probe startup makes).
 //!
 //! Startup refuses at the first error of each stage; that is right for a run and wrong for a
 //! config somebody (or something) GENERATED, which wants the whole list in one pass. So every
 //! stage here collects: the parse (all unknown keys via the schema, then the rest), the assembly
-//! (steps, judges, expressions), the capability check, and the agent preflight. A stage still
+//! (steps, verifiers, expressions), the capability check, and the agent preflight. A stage still
 //! runs when an earlier one found problems, as long as there is a config to run it on.
 
 use crate::assembly::{self, Assembly};
 use crate::core::config::RelentlessConfig;
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::problem::{self, Problem};
 use serde::Serialize;
 use serde_yaml::Value as Yaml;
@@ -57,27 +57,27 @@ impl Validation {
     }
 }
 
-/// Run every startup check on `config` (judges resolved against `config_base`), collecting all
+/// Run every startup check on `config` (verifiers resolved against `config_base`), collecting all
 /// problems.
 pub fn validate(config_base: &Path, config: &Path) -> Validation {
     let mut v = Validation::default();
     let Some(mut cfg) = parse(config, &mut v.problems) else { return v };
     cfg.finish_load();
 
-    let judges: Vec<Judge> = match assembly::build(&cfg, config_base) {
+    let verifiers: Vec<Verifier> = match assembly::build(&cfg, config_base) {
         Ok(asm) => {
-            let j = asm.engine.judges.clone();
+            let j = asm.engine.verifiers.clone();
             v.assembly = Some(asm);
             j
         }
         Err(r) => {
             v.problems.extend(r.problems);
-            r.judges
+            r.verifiers
         }
     };
 
     let project = config_base.parent().unwrap_or(config_base);
-    let a = crate::capability::assess(&cfg, &judges, project);
+    let a = crate::capability::assess(&cfg, &verifiers, project);
     v.problems.extend(a.unknown_agents);
     // the swe-metrics probe (assembly) and the image probe (here) both report an image without it.
     for p in a.problems {
@@ -88,7 +88,7 @@ pub fn validate(config_base: &Path, config: &Path) -> Validation {
 
     // `rlt run`'s last startup check: every agent that runs on the HOST is on PATH (a container
     // step's agent is checked in its image, by the probe above).
-    for (path, name) in crate::capability::host_agents(&cfg, &judges) {
+    for (path, name) in crate::capability::host_agents(&cfg, &verifiers) {
         if let Ok(b) = crate::backend::for_name(&name) {
             if let Err(e) = b.preflight() {
                 problem::push_unique(&mut v.problems, Problem::new(path, format!("{e:#}")));
@@ -99,12 +99,12 @@ pub fn validate(config_base: &Path, config: &Path) -> Validation {
     v
 }
 
-/// Each distinct agent name with the FIRST key that names it (`defaults.agent`, `judge.agent`,
+/// Each distinct agent name with the FIRST key that names it (`defaults.agent`, `verifier.agent`,
 /// `steps.<name>.agent`), so a missing CLI is reported once, where it is chosen.
 pub fn agent_sites(cfg: &RelentlessConfig) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = vec![
         ("defaults.agent".into(), cfg.defaults.agent.clone()),
-        ("judge.agent".into(), cfg.judge.agent.clone()),
+        ("verifier.agent".into(), cfg.verifier.agent.clone()),
     ];
     for (step, body) in &cfg.steps {
         if let Some(a) = &body.agent {
@@ -240,7 +240,7 @@ pub fn run(config_base: &Path, config: &Path, json: bool) -> anyhow::Result<bool
         eprintln!("  ✗ {p}");
     }
     match (&v.assembly, r.ok) {
-        (Some(a), true) => eprintln!("✔ valid — {} judge(s) resolve; nothing was run.", a.engine.judges.len()),
+        (Some(a), true) => eprintln!("✔ valid — {} verifier(s) resolve; nothing was run.", a.engine.verifiers.len()),
         _ => eprintln!("✗ {} problem(s) — `rlt run` would refuse to start.", r.problems.len()),
     }
     Ok(r.ok)

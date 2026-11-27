@@ -3,7 +3,7 @@
 //!
 //! Two halves. What startup REFUSES (every config rlt cannot enforce, located at its key). And what
 //! a run DOES on this host's kernel sandbox: the brief lists each directory with a pointer to its
-//! `index.md`, the worker and its judge read it, and every way of changing it — a write, a new file,
+//! `index.md`, the worker and its verifier read it, and every way of changing it — a write, a new file,
 //! renaming its parent away to put a forged one in its place — is refused by the kernel.
 
 #![cfg(unix)]
@@ -53,9 +53,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"d
 exit 0
 "#;
 
-/// The judge reads the context (it must see the same material) and tries to write it.
-const JUDGE: &str = r#"#!/bin/sh
-if echo judge > "$RLT_CONTEXT_KB/judge.md" 2>/dev/null; then echo JUDGE_WROTE > "$RLT_JUDGE_SCRATCH/j.log"; fi
+/// The verifier reads the context (it must see the same material) and tries to write it.
+const VERIFIER: &str = r#"#!/bin/sh
+if echo verifier > "$RLT_CONTEXT_KB/verifier.md" 2>/dev/null; then echo VERIFIER_WROTE > "$RLT_VERIFIER_SCRATCH/j.log"; fi
 if grep -q knowledge "$RLT_CONTEXT_KB/index.md" && [ -f src.txt ]; then
   echo '{"met":true,"value":1,"max":1,"target":1,"rationale":"read the context"}'
 else
@@ -74,7 +74,7 @@ fn project(tier: &str, context: &str) -> (tempfile::TempDir, tempfile::TempDir, 
     git(d, &["init", "-q", "-b", "main"]);
     git(d, &["config", "user.email", "t@t"]);
     git(d, &["config", "user.name", "t"]);
-    write(d, ".gitignore", "rlt/state/\nagg/private/\nbin/\n.home/\nbrief.txt\nread.txt\nattacks.log\n");
+    write(d, ".gitignore", "rlt/state/\nrlt/private/\nbin/\n.home/\nbrief.txt\nread.txt\nattacks.log\n");
     let context = context.replace("{KB}", &kb.display().to_string());
     write(
         d,
@@ -87,8 +87,8 @@ fn project(tier: &str, context: &str) -> (tempfile::TempDir, tempfile::TempDir, 
              summary: {{ enabled: false }}\n{context}"
         ),
     );
-    write(d, "rlt/judges/read_kb.sh", JUDGE);
-    chmod_x(&d.join("rlt/judges/read_kb.sh"));
+    write(d, "rlt/verifiers/read_kb.sh", VERIFIER);
+    chmod_x(&d.join("rlt/verifiers/read_kb.sh"));
     write(d, "rlt/state/STATE.md", "do work\n");
     git(d, &["add", "-A"]);
     git(d, &["commit", "-qm", "init"]);
@@ -158,7 +158,7 @@ fn kernel_sandbox_usable() -> bool {
 }
 
 /// THE ACCEPTANCE CASE on the sandbox tier: the brief lists the context with its index, the worker
-/// and the judge READ it, and nothing changes it — not a write, a new file, a delete, nor renaming
+/// and the verifier READ it, and nothing changes it — not a write, a new file, a delete, nor renaming
 /// it or its parent away (the parent sits in `$TMPDIR`, which the jail can otherwise write).
 #[test]
 fn under_the_sandbox_a_context_is_listed_readable_and_never_writable() {
@@ -171,7 +171,7 @@ fn under_the_sandbox_a_context_is_listed_readable_and_never_writable() {
     let kb = fs::canonicalize(kb_parent.path().join("kb")).unwrap();
     let out = rlt(d, &path, &["run", "--max-sessions", "1"]);
     let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert_eq!(out.status.code(), Some(0), "the judge read the context, so the run is done:\n{log}");
+    assert_eq!(out.status.code(), Some(0), "the verifier read the context, so the run is done:\n{log}");
 
     let brief = fs::read_to_string(d.join("brief.txt")).unwrap();
     assert!(brief.contains("## Context (read-only)"), "{brief}");
@@ -183,6 +183,6 @@ fn under_the_sandbox_a_context_is_listed_readable_and_never_writable() {
         assert!(attacks.contains(&format!("{a} DENIED")), "`{a}` must be refused by the kernel:\n{attacks}");
     }
     assert_eq!(fs::read_to_string(kb.join("index.md")).unwrap(), "# knowledge\n");
-    assert!(!kb.join("new.md").exists() && !kb.join("judge.md").exists(), "nothing new in the context");
+    assert!(!kb.join("new.md").exists() && !kb.join("verifier.md").exists(), "nothing new in the context");
     assert!(kb_parent.path().exists(), "the parent was not renamed away");
 }

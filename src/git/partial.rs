@@ -1,6 +1,6 @@
 //! An interrupted session's work, saved under `refs/rlt/partial/<run>/<session>` (A-18.3).
 //!
-//! A session that a rate limit or an operator cut short is INCOMPLETE: it is never judged, so it is
+//! A session that a rate limit or an operator cut short is INCOMPLETE: it is never verified, so it is
 //! never merged — but the work is the operator's, and leaving it in the tree strands it (the next
 //! session would sweep it into its own commit, and a new `rlt run` refuses a dirty tree). So it is
 //! committed to a ref outside every branch, and the tree goes back to the gated state.
@@ -82,7 +82,7 @@ fn snapshot_commit(dir: &Path, head: &str, run: &str, session: u32) -> Option<St
         git_with_index(dir, &index, &["write-tree"])
     });
     let _ = std::fs::remove_file(&index);
-    let msg = format!("rlt: partial work of session {session} (run {run}) — interrupted, NOT judged");
+    let msg = format!("rlt: partial work of session {session} (run {run}) — interrupted, NOT verified");
     let mut cmd = Command::new("git");
     cmd.current_dir(dir).args(["commit-tree", &tree?, "-p", head, "-m", &msg]);
     // A repository without an identity must not cost the operator their work: name rlt instead.

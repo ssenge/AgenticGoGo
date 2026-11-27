@@ -1,5 +1,5 @@
 //! The `{table}` of a quality guide (A-38 3.8): the score definition's parts (tool, metric, good and bad values, weight,
-//! hard limits) from `swe-metrics score --describe`, the definition the `score` judge scores by, as Markdown.
+//! hard limits) from `swe-metrics score --describe`, the definition the `score` verifier scores by, as Markdown.
 
 use std::process::Command;
 

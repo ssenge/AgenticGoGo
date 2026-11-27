@@ -3,7 +3,7 @@
 
 use super::exec::Ctx;
 use super::proc::Proc;
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::driver::Fatal;
 
 impl Proc {
@@ -64,8 +64,8 @@ impl Proc {
             return Ok(false);
         }
         for (i, command) in when.all().into_iter().enumerate() {
-            let judge = self.judge(ctx, Some(&format!("{}-when-{i}", ctx.key)), command)?;
-            let verdict = self.condition(&judge);
+            let verifier = self.verifier(ctx, Some(&format!("{}-when-{i}", ctx.key)), command)?;
+            let verdict = self.condition(&verifier);
             if let Some(error) = verdict.error() {
                 self.fail(&ctx.label, &format!("whether it applies can't be told: {error}"))?;
                 return Ok(false);
@@ -92,8 +92,8 @@ impl Proc {
     /// A script step: its command does the work and gives the verdict. Met, what it wrote is committed and the step
     /// recorded (kind `tool`); unmet, the step fails, and after the task force's repair in place it runs again.
     pub fn script(&self, ctx: &Ctx, command: &str) -> Result<(), Fatal> {
-        let judge: Judge = self.judge(ctx, Some(&ctx.key), command)?;
-        self.script_step(&ctx.label, &judge)
+        let verifier: Verifier = self.verifier(ctx, Some(&ctx.key), command)?;
+        self.script_step(&ctx.label, &verifier)
     }
 }
 

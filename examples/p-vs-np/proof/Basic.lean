@@ -1,7 +1,7 @@
 /- Starter Lean file for the P vs NP showcase.
 
    The worker builds up VERIFIED supporting lemmas here (and in new files under proof/).
-   Rules the judges enforce (see judges/ and the example README):
+   Rules the verifiers enforce (see verifiers/ and the example README):
      • `lake build` must succeed (the project + Mathlib must compile).
      • NO gap-placeholder tactics anywhere — a gap is not a proof; the loop halts on it.
      • count_lemmas counts `theorem`/`lemma` declarations in gap-free, building files.

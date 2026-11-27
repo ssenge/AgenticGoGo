@@ -21,12 +21,12 @@ cost. So:
 - ✅ Tail the LAST ~20 lines of the loop log (`rlt/private/run.log`) for recent activity if asked.
 - ✅ Read the LLM summaries (`summary_cumulative` / `summary_windowed`) already in the state.
 - ❌ Do NOT `cat` full session logs or worker transcripts into your context.
-- ❌ Do NOT re-run expensive judges yourself; the loop does that.
+- ❌ Do NOT re-run expensive verifiers yourself; the loop does that.
 
 ## What you do
 
 1. **Report on demand.** When the operator asks "how's it going?", read `rlt/private/state.json`
-   and give a tight scoreboard (judges N/M met against `done_if`, what's met/blocked/regressed,
+   and give a tight scoreboard (verifiers N/M met against `done_if`, what's met/blocked/regressed,
    the current step + its agent, tokens, latest summary). Same content as `/rlt:status` — reuse
    that judgment.
 
@@ -62,7 +62,7 @@ cost. So:
    rlt send resume                # continue a paused loop
    rlt send wake                  # end a rate-limit wait now (status shows `waiting`); still limited ⇒ it waits again
    rlt send stop "operator done"  # graceful stop at the next boundary
-   rlt send note "fyi: ignore the flaky perf judge today"
+   rlt send note "fyi: ignore the flaky perf verifier today"
    # (answering is `rlt answer`, NOT `rlt send` — see 2. It is not a steering message.)
    ```
    Each is applied at the next boundary (inject prepends to the next worker's prompt as a

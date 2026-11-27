@@ -59,7 +59,7 @@ const FILE_HEADER: &str =
 /// or push out all real memory in one shot.
 const WORKER_NOTE_MAX_BYTES: usize = 8 * 1024;
 /// Cap on any single change-line / mechanical/last-session block (defends against a verbose
-/// judge rationale, which `GoalDelta::line()` embeds verbatim).
+/// verifier rationale, which `GoalDelta::line()` embeds verbatim).
 const LINE_MAX_CHARS: usize = 200;
 const BLOCK_MAX_BYTES: usize = 4 * 1024;
 /// Hard ceiling on the durable slice injected into each prompt when `inject_kb` is `None`

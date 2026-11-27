@@ -4,9 +4,9 @@
 //! | process | image | project | `HOME` (under `rlt/private/container/home/`) | credentials |
 //! |---|---|---|---|---|
 //! | worker | the step's `image:` | read-write (minus the carve-outs) | `worker`, FRESH every session | its agent's |
-//! | LLM judge (one-shot) | the judges' image | read-only | `ruler` | the ruler's |
-//! | script judge | the judges' image | read-only | `judge` | none (only `pass_env`) |
-//! | swe-metrics (a metric/score judge's measurement) | the judges' image | read-only | `metrics`, FRESH every call | none (only `pass_env`) |
+//! | rubric verifier (one-shot) | the verifiers' image | read-only | `ruler` | the ruler's |
+//! | script verifier | the verifiers' image | read-only | `verifier` | none (only `pass_env`) |
+//! | swe-metrics (a metric/score verifier's measurement) | the verifiers' image | read-only | `metrics`, FRESH every call | none (only `pass_env`) |
 //!
 //! Every one gets the run's `isolation_policy.pass_env` and `credentials`, its context dirs, and
 //! runs as the project owner (see [`super::container::containerize_spec`]).
@@ -14,7 +14,7 @@
 //! # Why the worker's home is fresh every session
 //! Loop Engineering: a fresh session each cycle. An agent's home holds its settings, hooks, memory
 //! and transcripts; a home that survives the session is a channel from one worker session into the
-//! next that rlt neither sees nor controls. The judges' homes are separate and read-only to the
+//! next that rlt neither sees nor controls. The verifiers' homes are separate and read-only to the
 //! worker (they sit in `rlt/private/`), so a worker can never plant a setting its grader then runs
 //! with.
 //!
@@ -36,47 +36,47 @@ pub fn worker(cmd: Command, dir: &Path, denies: &[String], image: &str, env_name
     containerize_spec(cmd, dir, &Spec { image, denies, home: Some(&home), env_names, credential_files, ..Spec::default() })
 }
 
-/// Re-host an LLM judge's one-shot in the judges' image: the project READ-ONLY (a grader never
+/// Re-host an rubric verifier's one-shot in the verifiers' image: the project READ-ONLY (a grader never
 /// changes what it grades), the ruler's credentials.
 pub fn one_shot(cmd: Command, dir: &Path, env_names: &[&str], credential_files: &[&str]) -> Result<Command> {
-    let image = super::policy::for_dir(dir).judge_image.clone();
+    let image = super::policy::for_dir(dir).verifier_image.clone();
     let home = home(dir, "ruler")?;
     let spec = Spec { image: &image, project_ro: true, home: Some(&home), env_names, credential_files, stdin: true,
                       ..Spec::default() };
     containerize_spec(cmd, dir, &spec)
 }
 
-/// Re-host a SCRIPT judge in the judges' image: the project read-only, `writable` (its scratch and
-/// toolchain cache, both under [`crate::paths::container_dir`]) read-write, and the judge file's own
-/// directory read-only when it lives outside the project (the standard library in `~/.rlt/judges`).
-pub fn script_judge(cmd: Command, dir: &Path, script: &Path, writable: &[PathBuf]) -> Result<Command> {
-    let image = super::policy::for_dir(dir).judge_image.clone();
-    let home = home(dir, "judge")?;
+/// Re-host a SCRIPT verifier in the verifiers' image: the project read-only, `writable` (its scratch and
+/// toolchain cache, both under [`crate::paths::container_dir`]) read-write, and the verifier file's own
+/// directory read-only when it lives outside the project (the standard library in `~/.rlt/verifiers`).
+pub fn script_verifier(cmd: Command, dir: &Path, script: &Path, writable: &[PathBuf]) -> Result<Command> {
+    let image = super::policy::for_dir(dir).verifier_image.clone();
+    let home = home(dir, "verifier")?;
     let project = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let lib: Vec<PathBuf> = script.parent().filter(|p| !p.starts_with(&project)).map(Path::to_path_buf).into_iter().collect();
     let spec = Spec { image: &image, writable, readonly: &lib, project_ro: true, home: Some(&home), ..Spec::default() };
     containerize_spec(cmd, dir, &spec)
 }
 
-/// Re-host `swe-metrics` — the measurement behind every metric and score judge — in the judges'
+/// Re-host `swe-metrics` — the measurement behind every metric and score verifier — in the verifiers'
 /// image: the project read-only, `writable` (its session scratch) read-write, `readonly` (the
 /// host's trivy cache, a scoring definition kept outside the project) read-only, and a FRESH home.
-pub fn metrics_judge(cmd: Command, dir: &Path, writable: &[PathBuf], readonly: &[PathBuf]) -> Result<Command> {
-    let image = super::policy::for_dir(dir).judge_image.clone();
+pub fn metrics_verifier(cmd: Command, dir: &Path, writable: &[PathBuf], readonly: &[PathBuf]) -> Result<Command> {
+    let image = super::policy::for_dir(dir).verifier_image.clone();
     let home = fresh_home(dir, "metrics")?;
     let spec = Spec { image: &image, writable, readonly, project_ro: true, home: Some(&home), ..Spec::default() };
     containerize_spec(cmd, dir, &spec)
 }
 
-/// A judge's per-session scratch when it runs in a container — what `$RLT_JUDGE_SCRATCH` and
-/// `$TMPDIR` point at, and what evidence resolves against ([`crate::core::judge::scratch_path`]).
-pub fn judge_scratch(dir: &Path, session: Option<u32>) -> PathBuf {
-    crate::paths::container_dir(dir).join("judge").join(format!("scratch-{}", session.unwrap_or(0)))
+/// A verifier's per-session scratch when it runs in a container — what `$RLT_VERIFIER_SCRATCH` and
+/// `$TMPDIR` point at, and what evidence resolves against ([`crate::core::verifier::scratch_path`]).
+pub fn verifier_scratch(dir: &Path, session: Option<u32>) -> PathBuf {
+    crate::paths::container_dir(dir).join("verifier").join(format!("scratch-{}", session.unwrap_or(0)))
 }
 
-/// A containerized judge's per-project toolchain cache (`CARGO_TARGET_DIR`, `GOCACHE`, …).
-pub fn judge_cache(dir: &Path) -> PathBuf {
-    crate::paths::container_dir(dir).join("judge").join("cache")
+/// A containerized verifier's per-project toolchain cache (`CARGO_TARGET_DIR`, `GOCACHE`, …).
+pub fn verifier_cache(dir: &Path) -> PathBuf {
+    crate::paths::container_dir(dir).join("verifier").join("cache")
 }
 
 /// The home `label` gets: `rlt/private/container/home/<label>`, created when missing. Canonical,
@@ -113,10 +113,10 @@ mod tests {
         cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
-    /// Each worker session gets a NEW empty home, and the earlier ones are gone; a judge's home
+    /// Each worker session gets a NEW empty home, and the earlier ones are gone; a verifier's home
     /// persists.
     #[test]
-    fn the_worker_home_is_fresh_every_session_and_the_judges_is_not() {
+    fn the_worker_home_is_fresh_every_session_and_the_verifiers_is_not() {
         let tmp = tempfile::tempdir().unwrap();
         let w1 = fresh_home(tmp.path(), "worker").unwrap();
         std::fs::write(w1.join("planted"), "x").unwrap();
@@ -124,9 +124,9 @@ mod tests {
         assert_ne!(w1, w2, "a new path, not the old one emptied");
         assert!(!w1.exists(), "the earlier home is removed");
         assert_eq!(std::fs::read_dir(&w2).unwrap().count(), 0, "a fresh home starts empty");
-        let j = home(tmp.path(), "judge").unwrap();
+        let j = home(tmp.path(), "verifier").unwrap();
         std::fs::write(j.join("cache"), "x").unwrap();
-        assert!(home(tmp.path(), "judge").unwrap().join("cache").exists());
+        assert!(home(tmp.path(), "verifier").unwrap().join("cache").exists());
         assert!(w2.starts_with(std::fs::canonicalize(crate::paths::container_dir(tmp.path())).unwrap()));
     }
 
@@ -151,22 +151,22 @@ mod tests {
         std::env::remove_var(key);
     }
 
-    /// A judge never writes the tree it grades: the project is read-only, its scratch writable.
+    /// A verifier never writes the tree it grades: the project is read-only, its scratch writable.
     #[test]
-    fn a_script_judge_reads_the_project_and_writes_only_its_scratch() {
+    fn a_script_verifier_reads_the_project_and_writes_only_its_scratch() {
         let tmp = tempfile::tempdir().unwrap();
         let lib = tempfile::tempdir().unwrap();
-        let scratch = judge_scratch(tmp.path(), Some(3));
+        let scratch = verifier_scratch(tmp.path(), Some(3));
         std::fs::create_dir_all(&scratch).unwrap();
         let script = lib.path().join("cargo_test");
-        let cmd = script_judge(Command::new(&script), tmp.path(), &script, std::slice::from_ref(&scratch)).unwrap();
+        let cmd = script_verifier(Command::new(&script), tmp.path(), &script, std::slice::from_ref(&scratch)).unwrap();
         let args = argv(&cmd);
         let canon = std::fs::canonicalize(tmp.path()).unwrap();
         assert!(args.contains(&format!("{p}:{p}:ro", p = canon.display())), "project read-only: {args:?}");
         let s = std::fs::canonicalize(&scratch).unwrap();
         assert!(args.contains(&format!("{p}:{p}", p = s.display())), "scratch writable: {args:?}");
         let l = std::fs::canonicalize(lib.path()).unwrap();
-        assert!(args.contains(&format!("{p}:{p}:ro", p = l.display())), "a library judge's dir, read-only: {args:?}");
-        assert!(scratch.ends_with("rlt/private/container/judge/scratch-3"));
+        assert!(args.contains(&format!("{p}:{p}:ro", p = l.display())), "a library verifier's dir, read-only: {args:?}");
+        assert!(scratch.ends_with("rlt/private/container/verifier/scratch-3"));
     }
 }

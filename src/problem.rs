@@ -76,8 +76,8 @@ mod tests {
 
     #[test]
     fn one_problem_renders_as_its_bare_message() {
-        let p = Problem::new("sequence.done_if", "no judge named `x`");
-        assert_eq!(render(&[p]), "no judge named `x`", "a lone problem must keep the old startup text exactly");
+        let p = Problem::new("sequence.done_if", "no verifier named `x`");
+        assert_eq!(render(&[p]), "no verifier named `x`", "a lone problem must keep the old startup text exactly");
     }
 
     #[test]

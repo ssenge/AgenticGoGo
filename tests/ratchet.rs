@@ -1,11 +1,11 @@
 //! The numeric RATCHET and the gate's own terms (`rollbacks`, `consecutive_rollbacks`,
-//! `oscillating`, `ratchet_regressed`, `<judge>.ref`) — end to end, on both front ends.
+//! `oscillating`, `ratchet_regressed`, `<verifier>.ref`) — end to end, on both front ends.
 //!
 //! The YAML half drives the real `rlt` binary with a fake `claude` whose sessions follow a PLAN: one
 //! shell line per session, run in the project, then committed. The plan sits OUTSIDE the project so
 //! a rollback cannot restore it (a rolled-back session must not replay its own line).
 //!
-//! The driver half drives the real facade, with a judge whose `value` is the number of sessions
+//! The driver half drives the real facade, with a verifier whose `value` is the number of sessions
 //! whose work is in the tree — so "worse" and "better" are a direction, not a fixture file.
 //!
 //! Unix-only (the fake agent is a shell script), like the rest of the suite.
@@ -38,8 +38,8 @@ fn chmod_x(p: &Path) {
     fs::set_permissions(p, perms).unwrap();
 }
 
-fn write_judge(dir: &Path, name: &str, body: &str) {
-    chmod_x(&write(dir, &format!("rlt/judges/{name}.sh"), body));
+fn write_verifier(dir: &Path, name: &str, body: &str) {
+    chmod_x(&write(dir, &format!("rlt/verifiers/{name}.sh"), body));
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -50,7 +50,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 // ── the YAML path ──────────────────────────────────────────────────────────────────────────────
 
 /// A project whose fake worker runs one line of `plan` per session. Returns (tempdir, project, PATH).
-/// The caller writes judges + config, then calls [`commit_base`].
+/// The caller writes verifiers + config, then calls [`commit_base`].
 fn planned_project(plan: &[&str]) -> (tempfile::TempDir, PathBuf, String) {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
@@ -87,12 +87,12 @@ exit 0
 /// the work tree and the next worker's `git add -A` commits `rlt/private/` (a pre-existing trap that
 /// these tests, which roll back on session 1 by design, would otherwise walk into).
 fn commit_base(dir: &Path) {
-    write(dir, ".gitignore", "rlt/state/\nagg/private/\n.obsidian/\n");
+    write(dir, ".gitignore", "rlt/state/\nrlt/private/\n.obsidian/\n");
     git(dir, &["add", "-A"]);
     git(dir, &["commit", "-qm", "base"]);
 }
 
-/// `rlt.yaml` with one judged `worker` step, a never-met `feature` DoD, and `seq_extra` under
+/// `rlt.yaml` with one verified `worker` step, a never-met `feature` DoD, and `seq_extra` under
 /// `sequence:`.
 fn write_cfg(dir: &Path, seq_extra: &str) {
     write(
@@ -104,12 +104,12 @@ fn write_cfg(dir: &Path, seq_extra: &str) {
              summary: {{ enabled: false }}\nmemory: {{ enabled: false }}\n"
         ),
     );
-    write_judge(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
+    write_verifier(dir, "feature", "#!/bin/sh\necho '{\"met\":false,\"value\":0,\"max\":1,\"target\":1}'\n");
 }
 
-/// The metric judge: its `value` is whatever `metric.txt` says.
-fn metric_judge(dir: &Path) {
-    write_judge(dir, "cc", "#!/bin/sh\nprintf '{\"met\":true,\"value\":%s}\\n' \"$(cat metric.txt)\"\n");
+/// The metric verifier: its `value` is whatever `metric.txt` says.
+fn metric_verifier(dir: &Path) {
+    write_verifier(dir, "cc", "#!/bin/sh\nprintf '{\"met\":true,\"value\":%s}\\n' \"$(cat metric.txt)\"\n");
 }
 
 fn run(dir: &Path, path: &str, sessions: &str) -> (std::process::Output, String) {
@@ -140,7 +140,7 @@ fn the_ratchet_rolls_back_beyond_tolerance_keeps_within_it_and_moves_on_improvem
     let (_tmp, dir, path) =
         planned_project(&["echo 10.4 > metric.txt", "echo 11.5 > metric.txt", "echo 9 > metric.txt"]);
     write(&dir, "metric.txt", "10\n");
-    metric_judge(&dir);
+    metric_verifier(&dir);
     write_cfg(&dir, "  ratchet:\n    cc: { direction: \"down\", tolerance: 0.5 }\n");
     commit_base(&dir);
 
@@ -158,7 +158,7 @@ fn the_ratchet_rolls_back_beyond_tolerance_keeps_within_it_and_moves_on_improvem
         ],
         "{combined}"
     );
-    assert!(combined.contains("ratchet `cc`: 10.4 → 11.5"), "the operator is told which judge, old and new:\n{combined}");
+    assert!(combined.contains("ratchet `cc`: 10.4 → 11.5"), "the operator is told which verifier, old and new:\n{combined}");
     assert_eq!(git(&dir, &["show", "main:metric.txt"]), "9", "the improvement landed, the regression did not");
 
     let state = relentless::core::ratchet::load(&dir).expect("the gate state is persisted under rlt/private/");
@@ -173,7 +173,7 @@ fn the_ratchet_rolls_back_beyond_tolerance_keeps_within_it_and_moves_on_improvem
 fn the_seeded_baseline_holds_session_one_and_consecutive_rollbacks_abort() {
     let (_tmp, dir, path) = planned_project(&["echo 65 > metric.txt", "echo 66 > metric.txt", "echo 99 > metric.txt"]);
     write(&dir, "metric.txt", "60\n");
-    metric_judge(&dir);
+    metric_verifier(&dir);
     write_cfg(
         &dir,
         "  ratchet:\n    cc: { direction: \"up\", tolerance: 1.0, baseline: 71.0 }\n  abort_if: \"consecutive_rollbacks >= 2\"\n",
@@ -190,12 +190,12 @@ fn the_seeded_baseline_holds_session_one_and_consecutive_rollbacks_abort() {
     assert_eq!(git(&dir, &["show", "main:metric.txt"]), "60", "nothing landed");
 }
 
-/// A ratcheted judge that emits no `value` REFUSES the run before session 1 — a ratchet with nothing
+/// A ratcheted verifier that emits no `value` REFUSES the run before session 1 — a ratchet with nothing
 /// to compare would silently pass everything.
 #[test]
-fn a_ratcheted_judge_without_a_value_refuses_at_startup() {
+fn a_ratcheted_verifier_without_a_value_refuses_at_startup() {
     let (_tmp, dir, path) = planned_project(&["echo nope > touched.txt"]);
-    write_judge(&dir, "cc", "#!/bin/sh\necho '{\"met\":true}'\n");
+    write_verifier(&dir, "cc", "#!/bin/sh\necho '{\"met\":true}'\n");
     write_cfg(&dir, "  ratchet:\n    cc: { direction: \"down\" }\n");
     commit_base(&dir);
 
@@ -205,13 +205,13 @@ fn a_ratcheted_judge_without_a_value_refuses_at_startup() {
     assert!(!dir.join("touched.txt").exists(), "no worker session ran");
 }
 
-/// A ratcheted judge that ERRORS on a session never passes: the session is rolled back and the row
-/// says the judge measured nothing — unlike the boolean rule, where a flake keeps the merge.
+/// A ratcheted verifier that ERRORS on a session never passes: the session is rolled back and the row
+/// says the verifier measured nothing — unlike the boolean rule, where a flake keeps the merge.
 #[test]
-fn a_ratcheted_judge_that_errors_never_passes() {
+fn a_ratcheted_verifier_that_errors_never_passes() {
     let (_tmp, dir, path) = planned_project(&["echo broken > metric.txt"]);
     write(&dir, "metric.txt", "10\n");
-    write_judge(
+    write_verifier(
         &dir,
         "cc",
         "#!/bin/sh\nv=$(cat metric.txt)\n[ \"$v\" = broken ] && { echo crashed >&2; exit 2; }\nprintf '{\"met\":true,\"value\":%s}\\n' \"$v\"\n",
@@ -231,7 +231,7 @@ fn oscillating_stops_an_a_b_a_run() {
         planned_project(&["echo a > state.txt", "echo b > state.txt", "echo a > state.txt", "echo ab > state.txt"]);
     write(&dir, "state.txt", "\n");
     for j in ["a", "b"] {
-        write_judge(
+        write_verifier(
             &dir,
             j,
             &format!("#!/bin/sh\ngrep -q {j} state.txt && echo '{{\"met\":true}}' || echo '{{\"met\":false}}'\n"),
@@ -244,7 +244,7 @@ fn oscillating_stops_an_a_b_a_run() {
     assert_eq!(out.status.code(), Some(3), "{combined}");
     assert!(combined.contains("ABORT") && combined.contains("oscillating"), "{combined}");
     let state = relentless::core::ratchet::load(&dir).unwrap();
-    assert_eq!(state.signatures.len(), 3, "it fired on the third judged session, not later");
+    assert_eq!(state.signatures.len(), 3, "it fired on the third verified session, not later");
     assert!(state.oscillating(4));
 }
 
@@ -255,7 +255,7 @@ fn a_monotonically_improving_run_trips_neither_detector() {
         planned_project(&["echo a > state.txt", "echo ab > state.txt", "echo abc > state.txt"]);
     write(&dir, "state.txt", "\n");
     for j in ["a", "b", "c"] {
-        write_judge(
+        write_verifier(
             &dir,
             j,
             &format!("#!/bin/sh\ngrep -q {j} state.txt && echo '{{\"met\":true}}' || echo '{{\"met\":false}}'\n"),
@@ -312,19 +312,19 @@ exit 0
     root
 });
 
-fn driver_project() -> (tempfile::TempDir, Judge) {
+fn driver_project() -> (tempfile::TempDir, Verifier) {
     LazyLock::force(&ENV);
     let tmp = tempfile::tempdir().unwrap();
     for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"]] {
         git(tmp.path(), args);
     }
     git(tmp.path(), &["commit", "-q", "--allow-empty", "-m", "rlt baseline"]);
-    write_judge(
+    write_verifier(
         tmp.path(),
         "size",
         "#!/bin/sh\nn=$(cat work.log 2>/dev/null | wc -l | tr -d ' ')\nprintf '{\"met\":true,\"value\":%s}\\n' \"$n\"\n",
     );
-    let j = Judge::script("size", "rlt/judges/size.sh");
+    let j = Verifier::script("size", "rlt/verifiers/size.sh");
     (tmp, j)
 }
 
@@ -334,16 +334,16 @@ fn work() -> Step {
 
 /// The driver's ratchet: the value asked BEFORE the first step is the baseline, a kept improvement
 /// moves the reference, and a regression beyond tolerance rolls the span back — recorded with the
-/// judge, its old and its new value.
+/// verifier, its old and its new value.
 #[test]
 fn a_driver_ratchet_keeps_improvements_and_rolls_back_regressions() {
     // higher is better: every session's work is an improvement.
     let (tmp, size) = driver_project();
     let rlt = Relentless::open(tmp.path()).unwrap().ratchet("size", Ratchet::up(0.0));
-    assert_eq!(rlt.judge(&size).value(), Some(0.0), "the pre-step ask IS the baseline");
+    assert_eq!(rlt.verifier(&size).value(), Some(0.0), "the pre-step ask IS the baseline");
     assert_eq!(rlt.gate_state().reference("size"), Some(0.0));
     rlt.step(&work()).unwrap();
-    rlt.judge(&size);
+    rlt.verifier(&size);
     assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
     assert_eq!(rlt.gate_state().reference("size"), Some(1.0), "the improvement is the new reference");
     drop(rlt);
@@ -351,9 +351,9 @@ fn a_driver_ratchet_keeps_improvements_and_rolls_back_regressions() {
     // lower is better: the same work is a regression beyond tolerance 0 …
     let (tmp, size) = driver_project();
     let rlt = Relentless::open(tmp.path()).unwrap().ratchet("size", Ratchet::down(0.0));
-    rlt.judge(&size);
+    rlt.verifier(&size);
     rlt.step(&work()).unwrap();
-    rlt.judge(&size);
+    rlt.verifier(&size);
     assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack);
     let st = rlt.gate_state();
     assert_eq!((st.rollbacks, st.consecutive_rollbacks, st.reference("size")), (1, 1, Some(0.0)));
@@ -365,9 +365,9 @@ fn a_driver_ratchet_keeps_improvements_and_rolls_back_regressions() {
     // … and within tolerance 1 it is kept.
     let (tmp, size) = driver_project();
     let rlt = Relentless::open(tmp.path()).unwrap().ratchet("size", Ratchet::down(1.0));
-    rlt.judge(&size);
+    rlt.verifier(&size);
     rlt.step(&work()).unwrap();
-    rlt.judge(&size);
+    rlt.verifier(&size);
     assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept);
 }
 
@@ -378,7 +378,7 @@ fn a_driver_seed_holds_the_first_gate() {
     let rlt = Relentless::open(tmp.path()).unwrap().ratchet("size", Ratchet::up(0.0).baseline(5.0));
     assert_eq!(rlt.gate_state().reference("size"), Some(5.0), "seeded before the run even started");
     rlt.step(&work()).unwrap();
-    assert_eq!(rlt.judge(&size).value(), Some(1.0));
+    assert_eq!(rlt.verifier(&size).value(), Some(1.0));
     assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "1 is below the seeded 5");
 }
 
@@ -391,15 +391,15 @@ fn a_resumed_driver_restores_the_reference_as_of_the_last_kept_gate() {
     let dir = tmp.path();
     let open = |resume: bool| Relentless::open_with(dir, Opts { resume }).unwrap().ratchet("size", Ratchet::down(1.0));
     let flow_to_kept = |rlt: &Relentless| {
-        rlt.judge(&size);
+        rlt.verifier(&size);
         rlt.step(&work()).unwrap();
-        rlt.judge(&size);
+        rlt.verifier(&size);
         assert_eq!(rlt.gate().unwrap(), GateOutcome::Kept, "1 is within tolerance 1 of 0");
     };
     let regress = |rlt: &Relentless| {
         rlt.step(&work()).unwrap();
         rlt.step(&work()).unwrap();
-        rlt.judge(&size);
+        rlt.verifier(&size);
         assert_eq!(rlt.gate().unwrap(), GateOutcome::RolledBack, "3 is 2 worse than 1");
     };
 

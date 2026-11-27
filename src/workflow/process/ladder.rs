@@ -1,5 +1,5 @@
 //! A step's ladder (A-37): its tiers, first to last, each working on what the one
-//! before left and judged by the step's own checks and critic. The first tier that meets them ends it; an unmet
+//! before left and verified by the step's own checks and critic. The first tier that meets them ends it; an unmet
 //! one hands over to the next; the last one goes to the task force as a step always did. A re-entry with a note
 //! starts one tier above the one the step reached.
 
@@ -30,7 +30,7 @@ pub struct AgentTier {
     pub max: Option<usize>,
 }
 
-/// How an agent tier is judged and repaired; a step's checks run in every mode.
+/// How an agent tier is verified and repaired; a step's checks run in every mode.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Default, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {

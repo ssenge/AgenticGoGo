@@ -20,14 +20,14 @@ _ap = argparse.ArgumentParser()
 _ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent))
 ROOT = Path(_ap.parse_args().root)
 RLT  = ROOT / "target/debug/rlt"
-P    = Path(os.environ.get("TMPDIR", "/tmp")) / f"rlt-webask.{os.getpid()}"; subprocess.run(["rm","-rf",str(P)]); (P/"rlt/judges").mkdir(parents=True)
+P    = Path(os.environ.get("TMPDIR", "/tmp")) / f"rlt-webask.{os.getpid()}"; subprocess.run(["rm","-rf",str(P)]); (P/"rlt/verifiers").mkdir(parents=True)
 (P/"bin").mkdir()
 
 def port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
 # a project whose goal never closes, so a session always runs
-(P/"rlt/judges/never.sh").write_text('#!/bin/sh\nprintf %s \'{"met":false}\'\n'); os.chmod(P/"rlt/judges/never.sh", 0o755)
+(P/"rlt/verifiers/never.sh").write_text('#!/bin/sh\nprintf %s \'{"met":false}\'\n'); os.chmod(P/"rlt/verifiers/never.sh", 0o755)
 (P/"rlt/rlt.yaml").write_text(
     "project: webask\ndefaults: { model: fake }\nsteps: { worker: {} }\n"
     "sequence: { steps: [worker], done_if: \"never\" }\nsummary: { enabled: false }\n")

@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # REAL harness for the Rust-API samples: provision a scratch project with a genuine, small,
-# objectively-checkable task, write the REAL judges the samples name, and (optionally) drive
+# objectively-checkable task, write the REAL verifiers the samples name, and (optionally) drive
 # `examples/workflow.rs` / `examples/selfimprove.rs` against it with a REAL model.
 #
 # scripts/e2e_real.sh proves the YAML loop against a real agent. This proves the RUST DRIVER path:
-# `Relentless::open` → `step()` → `judge()` → `gate()` → `block()`, with the driver being the shipped
+# `Relentless::open` → `step()` → `verifier()` → `gate()` → `block()`, with the driver being the shipped
 # sample itself (`target/debug/examples/*`), not a copy of it — that is why `main` was split into a
 # thin `main()` + `drive(&rlt, cycles)`: the cycle count and the project dir come from argv/env, so
 # a harness can bound a run without editing the sample it is supposed to be exercising.
 #
 # NOTHING HERE IS FAKED. The `claude`/`codex` on PATH are PASSTHROUGH WRAPPERS (record argv + the
 # phase rlt had published, then `exec` the real binary) — the same trick e2e_real.sh uses to observe
-# a run without stubbing it. The judges run real python and real measurements. The task is real:
+# a run without stubbing it. The verifiers run real python and real measurements. The task is real:
 # the seeded limiter has a genuine bug and a genuinely missing function, and two real tests fail
 # until an agent actually fixes them.
 #
 #   ./scripts/samples_real.sh                       # scaffold only (default) — no tokens spent
-#   ./scripts/samples_real.sh --check               # scaffold + run every judge on the SEED (free)
+#   ./scripts/samples_real.sh --check               # scaffold + run every verifier on the SEED (free)
 #   ./scripts/samples_real.sh --run workflow --cycles 2
 #   ./scripts/samples_real.sh --run selfimprove --cycles 2 --dir /tmp/mine
 #   ./scripts/samples_real.sh --run workflow --heavy claude-sonnet-5 --grind claude-haiku-4-5-20251001
@@ -74,7 +74,7 @@ REAL_CODEX="$(command -v codex || true)"
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 sec "scaffold: a real project with a real, failing task"
 [ "$FRESH" = 1 ] && rm -rf "$DIR"
-mkdir -p "$DIR"/{bin,src/ratelimit,tests,internal,rlt/judges,rlt/state/wiki}
+mkdir -p "$DIR"/{bin,src/ratelimit,tests,internal,rlt/verifiers,rlt/state/wiki}
 
 # ── the library under test: a token bucket with two REAL defects ────────────────────────────
 cat > "$DIR/src/ratelimit/__init__.py" <<'PY'
@@ -148,7 +148,7 @@ MD
 cat > "$DIR/internal/ROADMAP.md" <<'MD'
 # ROADMAP
 
-Each item is completable in one session and verifiable by `rlt/judges/tests.sh`.
+Each item is completable in one session and verifiable by `rlt/verifiers/tests.sh`.
 
 - [ ] **continuous-refill** — `_refill` truncates elapsed time with `int()`, so anything under a
       second refills nothing. Make refill continuous (see internal/SPEC.md §2).
@@ -279,10 +279,10 @@ chmod +x "$DIR/rec"
 ok "src/ratelimit + tests + internal/{SPEC,ROADMAP}.md + passthrough wrappers"
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════
-sec "the judges the samples name — real commands, real exit codes"
-J="$DIR/rlt/judges"
+sec "the verifiers the samples name — real commands, real exit codes"
+J="$DIR/rlt/verifiers"
 
-# A script judge is read from its STDOUT as verdict JSON (core/judge.rs:3). Each script below runs a
+# A script verifier is read from its STDOUT as verdict JSON (core/verifier.rs:3). Each script below runs a
 # REAL command, keeps its REAL exit code in `$rc`, and reports that — the JSON is the wire format,
 # never a substitute for actually running the thing.
 
@@ -296,7 +296,7 @@ else
   printf '{"met":false,"value":0,"max":1,"target":1,"rationale":"compile failed: %s"}\n' \
     "$(printf '%s' "$out" | tr -d '"\\' | tr '\n' ' ' | cut -c1-200)"
 fi
-exit "$rc"    # compileall's real status, carried out of the judge
+exit "$rc"    # compileall's real status, carried out of the verifier
 EOF
 
 cat > "$J/lint.sh" <<'EOF'
@@ -323,7 +323,7 @@ EOF
 cat > "$J/tests.sh" <<'EOF'
 #!/bin/sh
 # TESTS — the real suite. `met` is the REAL exit code of unittest; `value` is the number of tests it
-# collected, which is what an anti-shrink judge (examples/selfimprove.rs `no_shrink`) compares.
+# collected, which is what an anti-shrink verifier (examples/selfimprove.rs `no_shrink`) compares.
 out=$(python3 -m unittest discover -s tests -p 'test_*.py' 2>&1); rc=$?
 n=$(printf '%s' "$out" | sed -n 's/^Ran \([0-9]*\) test.*/\1/p' | tail -1); n=${n:-0}
 tail=$(printf '%s' "$out" | tr -d '"\\' | tr '\n' ' ' | tail -c 200)
@@ -332,23 +332,23 @@ if [ "$rc" = 0 ]; then
 else
   printf '{"met":false,"value":%s,"max":%s,"target":%s,"rationale":"suite RED: %s"}\n' "$n" "$n" "$n" "$tail"
 fi
-exit "$rc"    # the judge's own exit status IS unittest's — the JSON is the wire format, not a mask
+exit "$rc"    # the verifier's own exit status IS unittest's — the JSON is the wire format, not a mask
 EOF
 
 cat > "$J/loadtest.sh" <<'EOF'
 #!/bin/sh
 # LOAD — a fast STAND-IN for a 40-minute soak, but it genuinely measures: 200k real allow() calls
 # against a synthetic clock, per-op latency sampled with perf_counter_ns, p50/p99 in ms and
-# throughput written to $RLT_JUDGE_SCRATCH/bench.json — which the `p99_ok` judge (YAML) and
+# throughput written to $RLT_VERIFIER_SCRATCH/bench.json — which the `p99_ok` verifier (YAML) and
 # examples/workflow.rs's native p99 closure (Rust) both read.
 #
-# ⚠ NOT rlt/state/bench.json. Since §2.5 the project tree is READ-ONLY to a judge — a judge that can
+# ⚠ NOT rlt/state/bench.json. Since §2.5 the project tree is READ-ONLY to a verifier — a verifier that can
 # write the tree it grades can make the code pass — so the measure/threshold handoff goes through the
-# per-session judge scratch, which is the one place judges may write and is shared between them.
+# per-session verifier scratch, which is the one place verifiers may write and is shared between them.
 python3 - <<'PY'
 import json, os, pathlib, sys, time
 sys.path.insert(0, "src")
-SCRATCH = pathlib.Path(os.environ.get("RLT_JUDGE_SCRATCH", "rlt/state"))
+SCRATCH = pathlib.Path(os.environ.get("RLT_VERIFIER_SCRATCH", "rlt/state"))
 
 OPS, SAMPLE, FLOOR = 200_000, 20_000, 50_000.0   # ops, latency samples, min ops/sec to pass
 try:
@@ -375,7 +375,7 @@ try:
     print(json.dumps({"met": met, "value": res["ops_per_sec"], "max": None, "target": FLOOR,
                       "rationale": f"{res['ops_per_sec']} ops/s, p99 {res['p99_ms']}ms over {OPS} real calls"}))
     sys.exit(0 if met else 1)
-except Exception as e:                    # a broken limiter is a FAILED load test, not a crashed judge
+except Exception as e:                    # a broken limiter is a FAILED load test, not a crashed verifier
     print(json.dumps({"met": False, "value": 0, "max": None, "target": FLOOR,
                       "rationale": f"load run raised {type(e).__name__}: {e}"}))
     sys.exit(1)
@@ -386,7 +386,7 @@ cat > "$J/e2e.sh" <<'EOF'
 #!/bin/sh
 # E2E — the whole thing through the PUBLIC surface: import the installed-shape package, drive a real
 # scenario (burst → partial refill → all-or-nothing take → cap), and fail loudly on the first lie.
-# Slower and broader than tests.sh on purpose: this is the judge the samples put behind `&&`.
+# Slower and broader than tests.sh on purpose: this is the verifier the samples put behind `&&`.
 python3 -m compileall -q src tests >/dev/null 2>&1 || {
   echo '{"met":false,"value":0,"max":1,"target":1,"rationale":"does not compile"}'; exit 1; }
 python3 - <<'PY'
@@ -414,28 +414,28 @@ except Exception as e:
 PY
 EOF
 
-# ALIASES. The two sample paths NAME judges differently, and only one of them can choose:
+# ALIASES. The two sample paths NAME verifiers differently, and only one of them can choose:
 #
-#   Rust  — `Judge::script("tests_pass", "rlt/judges/tests.sh")` maps a NAME to any PATH it likes.
-#   YAML  — resolves by NAME ONLY: `tests_pass` is `rlt/judges/tests_pass.{sh,md}` or it is a
-#           STARTUP ERROR. That is `rlt doctor`'s "no judge named `tests_pass`".
+#   Rust  — `Verifier::script("tests_pass", "rlt/verifiers/tests.sh")` maps a NAME to any PATH it likes.
+#   YAML  — resolves by NAME ONLY: `tests_pass` is `rlt/verifiers/tests_pass.{sh,md}` or it is a
+#           STARTUP ERROR. That is `rlt doctor`'s "no verifier named `tests_pass`".
 #
 # So the YAML sample cannot run against a project that only has `tests.sh`, however good that script
 # is. One implementation per check, as many names as the samples ask for — never a second copy,
 # because two implementations of one check drift and then the two samples grade differently.
 # p99_ok is NOT an alias: it is workflow.yaml's gap (1) made real — the Rust sample's native closure
-# reads one field out of the benchmark, and the YAML path has no native judges, so the same threshold
+# reads one field out of the benchmark, and the YAML path has no native verifiers, so the same threshold
 # has to be a script. It reads what load_ok measured; it never measures again.
 cat > "$J/p99_ok.sh" <<'EOF'
 #!/bin/sh
 # P99 — a THRESHOLD over load_ok's measurement, not a second measurement. Reads bench.json out of
-# the shared per-session judge scratch (the one place a judge may write since §2.5).
+# the shared per-session verifier scratch (the one place a verifier may write since §2.5).
 python3 - <<'PY'
 import json, os, pathlib, sys
 CEIL = 0.5   # ms
-b = pathlib.Path(os.environ.get("RLT_JUDGE_SCRATCH", "rlt/state")) / "bench.json"
+b = pathlib.Path(os.environ.get("RLT_VERIFIER_SCRATCH", "rlt/state")) / "bench.json"
 if not b.exists():
-    # NOT met, and NOT a lie about latency: say which judge has to run first.
+    # NOT met, and NOT a lie about latency: say which verifier has to run first.
     print(json.dumps({"met": False, "value": None, "max": None, "target": CEIL,
                       "rationale": "no bench.json — load_ok has not run this session"}))
     sys.exit(1)
@@ -450,13 +450,13 @@ for a in "build_ok.sh:build.sh" "lint_clean.sh:lint.sh" "cargo_test.sh:tests.sh"
          "builds.sh:build.sh" "tests_pass.sh:tests.sh" "load_ok.sh:loadtest.sh"; do
   cat > "$J/${a%%:*}" <<EOF
 #!/bin/sh
-# ALIAS — a sample names this judge; against THIS project the same check is ${a#*:}.
+# ALIAS — a sample names this verifier; against THIS project the same check is ${a#*:}.
 exec "\$(dirname "\$0")/${a#*:}"
 EOF
 done
 chmod +x "$J"/*.sh
 
-# ── the rubric judges: graded by the REAL ruler, `inputs:` is the evidence it sees ──────────
+# ── the rubric verifiers: graded by the REAL ruler, `inputs:` is the evidence it sees ──────────
 cat > "$J/survey_good.md" <<'MD'
 ---
 inputs: ["rlt/state/wiki/survey.md", "internal/SPEC.md"]
@@ -536,16 +536,16 @@ printf '  project: \033[1m%s\033[0m\n' "$DIR"
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 if [ -n "$CHECK" ]; then
-  sec "judge check — every judge, against the SEED (no model, no tokens)"
-  # The seed MUST be green on build/lint/load and RED on tests/e2e. If that is not what the judges
-  # say, the task is not the task and a real run would be judging the wrong thing.
+  sec "verifier check — every verifier, against the SEED (no model, no tokens)"
+  # The seed MUST be green on build/lint/load and RED on tests/e2e. If that is not what the verifiers
+  # say, the task is not the task and a real run would be verifying the wrong thing.
   for j in build lint tests loadtest e2e; do
-    out=$( cd "$DIR" && "./rlt/judges/$j.sh" 2>&1 ); rc=$?
+    out=$( cd "$DIR" && "./rlt/verifiers/$j.sh" 2>&1 ); rc=$?
     met=$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.loads(sys.stdin.read().strip().splitlines()[-1])["met"])' 2>/dev/null)
     printf '  %-9s exit=%s met=%-5s %s\n' "$j" "$rc" "${met:-?}" \
       "$(printf '%s' "$out" | tail -1 | cut -c1-120)"
   done
-  case "$( cd "$DIR" && ./rlt/judges/tests.sh | tail -1 )" in
+  case "$( cd "$DIR" && ./rlt/verifiers/tests.sh | tail -1 )" in
     *'"met":false'*) ok "the seed is genuinely RED (an agent has real work to do)" ;;
     *) bad "the seed already passes — the task is not a task" ;;
   esac
@@ -614,7 +614,7 @@ print(f"  sessions={d.get('session')}  phase={d.get('phase')}  "
       f"out-tok={d.get('tokens_spent')}  usage(API-eq)=${d.get('cost_spent')}")
 PY
 grep -c '^## session' "$DIR/rlt/private/LOG.md" 2>/dev/null | sed 's/^/  memory entries: /'
-( cd "$DIR" && ./rlt/judges/tests.sh | tail -1 | sed 's/^/  tests judge: /' )
+( cd "$DIR" && ./rlt/verifiers/tests.sh | tail -1 | sed 's/^/  tests verifier: /' )
 ( cd "$DIR" && git log --oneline -n 8 | sed 's/^/  git: /' )
 printf '\n  full log: %s\n' "$LOG"
 exit $RC

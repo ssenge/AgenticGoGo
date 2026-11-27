@@ -27,14 +27,14 @@ use std::process::{Command, Stdio};
 /// Copilot's default model on the free tier is chosen by `auto`; naming it explicitly keeps the
 /// invocation reproducible.
 pub const DEFAULT_MODEL: &str = "auto";
-/// The summarizer/judge model — `default_summary_model()`'s value, i.e. the serde default for
+/// The summarizer/verifier model — `default_summary_model()`'s value, i.e. the serde default for
 /// `summary.model` when rlt.yaml omits it.
 pub const DEFAULT_SUMMARY_MODEL: &str = "auto";
 
-/// The isolation a JUDGE/summarizer call runs under. **`--allow-all-tools` is deliberately absent**
+/// The isolation a VERIFIER/summarizer call runs under. **`--allow-all-tools` is deliberately absent**
 /// — that flag belongs to the worker. Without it Copilot denies writes at execution, which is what
-/// stops a judge from editing the artifact it is grading. A test asserts this list, so adding an
-/// allow-all flag here fails loudly rather than silently handing the judge write access.
+/// stops a verifier from editing the artifact it is grading. A test asserts this list, so adding an
+/// allow-all flag here fails loudly rather than silently handing the verifier write access.
 const ONE_SHOT_FLAGS: &[&str] = &[
     "--output-format",
     "json",
@@ -88,7 +88,7 @@ impl AgentBackend for Copilot {
             detects_rate_limits: false,
             // YES — by NOT passing `--allow-all-tools`, so any write is permission-denied.
             //
-            // The requirement was never "tools must be absent" — it is "the judge must not be able
+            // The requirement was never "tools must be absent" — it is "the verifier must not be able
             // to MODIFY the artifact it is grading". Probing this, the model DID call the `create`
             // tool and the write was DENIED at execution (`success: false, "Permission denied"`),
             // leaving the file untouched. That is the same mechanism Claude relies on: its one-shot
@@ -310,7 +310,7 @@ impl AgentBackend for Copilot {
     ///
     /// So the out-of-the-box Copilot config — no `model:`, no `effort:` in rlt.yaml, both falling
     /// back to these defaults — made **every worker session die in 4s with exit 1 and 0 tokens.**
-    /// The loop dutifully ran its sessions, judged, and halted on `over_iterations` having done
+    /// The loop dutifully ran its sessions, verified, and halted on `over_iterations` having done
     /// nothing at all. Caught by actually driving `rlt run` against Copilot end-to-end; no unit
     /// test would have, because the incompatibility lives in Copilot's argv validation.
     ///
@@ -320,7 +320,7 @@ impl AgentBackend for Copilot {
         ""
     }
 
-    /// A judging / summarizing call: the model may READ, but it cannot WRITE.
+    /// A verifying / summarizing call: the model may READ, but it cannot WRITE.
     ///
     /// # trust boundary
     /// - **No `--allow-all-tools`.** That flag is what the WORKER gets. Without it Copilot's
@@ -328,7 +328,7 @@ impl AgentBackend for Copilot {
     ///   and got `success: false, "Permission denied"`, and the file was never created.
     /// - **`--no-custom-instructions`** — do NOT load `.github/copilot-instructions.md` / `AGENTS.md`
     ///   from the repo. The worker writes those, so loading them would let it reconfigure its own
-    ///   judge. Copilot's equivalent of Claude's `--setting-sources user`.
+    ///   verifier. Copilot's equivalent of Claude's `--setting-sources user`.
     /// - **`--disable-builtin-mcps`** — no MCP servers, like Claude's `--strict-mcp-config`.
     fn one_shot(
         &self,
@@ -348,14 +348,14 @@ impl AgentBackend for Copilot {
         if let Some(dir) = cwd {
             command.current_dir(dir);
         }
-        // Confine the judge under `Sandbox` (ISOLATION.md §12): withholding `--allow-all-tools`
+        // Confine the verifier under `Sandbox` (ISOLATION.md §12): withholding `--allow-all-tools`
         // denies writes at the permission layer, but the OS wrapper is the kernel jail on top.
         let command = self.confine_one_shot(command, cwd, isolation)?;
         let out = crate::os::proc::run_with_timeout(command, timeout_secs)?;
         // ponytail: Copilot's one-shot stream reports neither tokens nor cost (§5.6) — tally yields
         // (0, None), a LOUD hole the ceilings must treat as "unknown", not "free". The visible
         // capability warning belongs in `capability::check` for a Copilot ruler; not re-emitted per
-        // call here to avoid spamming the log every judge. REPORTED as a judgement call.
+        // call here to avoid spamming the log every verifier. REPORTED as a judgement call.
         let usage = self.tally_one_shot(&out.stdout);
         Ok(OneShot { body: last_assistant_message(&out.stdout), stderr: out.stderr, success: out.success, usage })
     }
@@ -424,7 +424,7 @@ fn clean(s: &str) -> String {
 /// The model's ANSWER from a `--output-format json` stream: the LAST non-empty
 /// `assistant.message.data.content`. (Copilot also emits empty message envelopes that carry only
 /// usage — those are not the answer.) Falls back to the raw bytes so a schema change degrades to
-/// "pass the text through" rather than to an empty verdict, which a judge would read as "not met".
+/// "pass the text through" rather than to an empty verdict, which a verifier would read as "not met".
 fn last_assistant_message(stdout: &[u8]) -> String {
     let text = String::from_utf8_lossy(stdout);
     let last = text

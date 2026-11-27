@@ -12,16 +12,16 @@ use super::proc::Proc;
 use super::settings::StepSettings;
 use super::tiers::Ladder;
 use super::{bases, inputs, rerun, standing};
-use crate::core::model::Judge;
+use crate::core::model::Verifier;
 use crate::driver::{Fatal, Step};
-use crate::metrics::{Scope, ScoreJudge};
+use crate::metrics::{Scope, ScoreVerifier};
 use crate::workflow::{Outcome, Task};
 
 /// Repair rounds of a step that sets none.
 const REPAIRS: usize = 2;
 
 impl Proc {
-    /// Runs the agent step of `ctx`: the worker's task through its ladder, judged by the checks and the critic.
+    /// Runs the agent step of `ctx`: the worker's task through its ladder, verified by the checks and the critic.
     pub fn agent(&self, ctx: &Ctx) -> Result<(), Fatal> {
         let s = self.rendered(ctx, self.settings.for_step(&ctx.key, ctx.id()))?;
         s.second_opinion(&ctx.key)?;
@@ -41,13 +41,13 @@ impl Proc {
             step = step.prompt(format!("{text}\n\n{}", extras.join("\n\n")));
         }
         for check in &ctx.step.checks {
-            if let Some(j) = self.check_judge(ctx, check)? {
+            if let Some(j) = self.check_verifier(ctx, check)? {
                 checks.push(j);
             }
         }
         let rubric = self.rubric(ctx);
         let critic = match (&rubric, s.no_critic()) {
-            (Some(path), false) => Some(s.critic_of(roles.judge("critic", &format!("{}-review", ctx.key), path.clone()))?),
+            (Some(path), false) => Some(s.critic_of(roles.verifier("critic", &format!("{}-review", ctx.key), path.clone()))?),
             _ => None,
         };
         let mut base = self.build_task(ctx, &s.worker_of(step)?, &s)?.critic_context(self.critic_brief(ctx, &s)?);
@@ -103,21 +103,21 @@ impl Proc {
         Ok(out)
     }
 
-    /// A check as a judge, through the step's names; none for one that only the last item of an `each` has.
-    fn check_judge(&self, ctx: &Ctx, check: &Check) -> Result<Option<Judge>, Fatal> {
+    /// A check as a verifier, through the step's names; none for one that only the last item of an `each` has.
+    fn check_verifier(&self, ctx: &Ctx, check: &Check) -> Result<Option<Verifier>, Fatal> {
         if check.last_only() && !ctx.item.as_ref().is_some_and(|i| i.last) {
             return Ok(None);
         }
-        self.check_to_judge(ctx, check).map(Some)
+        self.check_to_verifier(ctx, check).map(Some)
     }
 
-    /// A check as a judge: a declared judge of the process file, or a command through the step's names.
-    pub fn check_to_judge(&self, ctx: &Ctx, check: &Check) -> Result<Judge, Fatal> {
-        match (check.judge(), check.command()) {
-            (Some(name), _) => super::declared::judge(&self.shared, name)
+    /// A check as a verifier: a declared verifier of the process file, or a command through the step's names.
+    pub fn check_to_verifier(&self, ctx: &Ctx, check: &Check) -> Result<Verifier, Fatal> {
+        match (check.verifier(), check.command()) {
+            (Some(name), _) => super::declared::verifier(&self.shared, name)
                 .map_err(|e| anyhow!("{}: {e}", ctx.label).into()),
-            (_, Some(command)) => self.judge(ctx, check.name(), command),
-            _ => Err(anyhow!("{}: a check runs a command or names a judge", ctx.label).into()),
+            (_, Some(command)) => self.verifier(ctx, check.name(), command),
+            _ => Err(anyhow!("{}: a check runs a command or names a verifier", ctx.label).into()),
         }
     }
 
@@ -159,8 +159,8 @@ impl Proc {
             }
         }
         if let Some(command) = &s.first {
-            let judge = self.judge(ctx, Some(&format!("{}-first", ctx.key)), command)?;
-            task = task.first(self.cached(&judge)?);
+            let verifier = self.verifier(ctx, Some(&format!("{}-first", ctx.key)), command)?;
+            task = task.first(self.cached(&verifier)?);
         }
         if let Some(inputs) = &s.inputs {
             task = task.inputs(inputs.clone());
@@ -190,9 +190,9 @@ impl Proc {
     }
 
     /// The code-quality floor of what step `ctx` changes (`quality: true`, with the floor set in the settings): the
-    /// score of the files changed since the step's base, with the build's reports, through rlt's score judge, and the
+    /// score of the files changed since the step's base, with the build's reports, through rlt's score verifier, and the
     /// worker's guideline to it; none when no floor is set.
-    fn quality(&self, ctx: &Ctx) -> Result<Option<(Judge, String)>, Fatal> {
+    fn quality(&self, ctx: &Ctx) -> Result<Option<(Verifier, String)>, Fatal> {
         let q = self.settings.quality();
         let spec = &self.shared.spec.settings.quality;
         let (true, Some(definition), Some(version), Some(min)) = (ctx.step.quality, q.definition, q.version, q.min) else {
@@ -208,11 +208,11 @@ impl Proc {
         };
         let guide = super::guide::fill(&guide, &definition, &version);
         let scope = self.render(ctx, spec.scope.as_deref().unwrap_or("."))?;
-        let mut score = ScoreJudge::new(&definition, &version).min(min).scope(Scope::ChangedIn { path: scope, since });
+        let mut score = ScoreVerifier::new(&definition, &version).min(min).scope(Scope::ChangedIn { path: scope, since });
         if !reports.is_empty() {
             score = score.reports(reports);
         }
-        Ok(Some((Judge::score(format!("quality-{}", ctx.key), score), guide)))
+        Ok(Some((Verifier::score(format!("quality-{}", ctx.key), score), guide)))
     }
 }
 

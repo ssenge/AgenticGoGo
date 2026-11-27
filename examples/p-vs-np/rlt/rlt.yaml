@@ -1,5 +1,5 @@
 # p-vs-np — full-feature showcase. Every rlt mechanism on one famous problem.
-# A judge IS a goal, resolved by NAME from rlt/judges/<name>.{sh,md}.
+# A verifier IS a goal, resolved by NAME from rlt/verifiers/<name>.{sh,md}.
 project: "p-vs-np"
 
 # Inherited by EVERY step; a step body may override any of these.
@@ -11,19 +11,19 @@ defaults:
                                          # clamps `max`→`high` (its own ceiling). See docs/CONFIG.md.
   state: "state/STATE.md"                # worker-curated forward advice; under gitignored rlt/state/, survives a rollback
 
-# THE RULER — runs the LLM judge (paper_written) + the summarizer. Immutable across the run:
+# THE RULER — runs the rubric verifier (paper_written) + the summarizer. Immutable across the run:
 # a grader that moves makes verdicts incomparable across cycles.
-judge:
+verifier:
   agent: "claude"
   model: "claude-haiku-4-5-20251001"     # a cheap model grades the paper; the worker stays on Opus
-  timeout: 1800                          # Lean builds are slow — every judge gets 30 min
+  timeout: 1800                          # Lean builds are slow — every verifier gets 30 min
 
 # The step palette. Two steps: the grunt worker, and a vendor-diverse `reconsider` (the headline).
 steps:
   worker: {}                             # pure defaults — Opus does the proof work
 
   # THE PERSPECTIVE-DIVERSITY STEP. When the run stalls, step back on a DIFFERENT VENDOR — a Claude
-  # rabbit hole is not necessarily a Codex rabbit hole. skip_judges ⇒ nothing merges; the work stages
+  # rabbit hole is not necessarily a Codex rabbit hole. skip_verifiers ⇒ nothing merges; the work stages
   # and the next worker step gates it. (Swap `codex` for any installed agent; run `rlt doctor` first.)
   reconsider:
     agent: "codex"
@@ -31,7 +31,7 @@ steps:
       Assume the current proof strategy is a dead end. Name 2-3 fundamentally different lemma
       routes, pick the most promising, and write the rejected routes and WHY they fail into your
       scratch note — rlt will persist them so no future session repeats them.
-    skip_judges: true
+    skip_verifiers: true
 
 # The repeating sequence + the run-level ceilings and Definition of Done.
 sequence:

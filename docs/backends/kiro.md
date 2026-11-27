@@ -27,7 +27,7 @@ Kiro CLI version at the time of writing: 2.29.0 (2026-10-09). Headless mode ship
 | Effort (`supports_effort`) | `--effort low|medium|high|xhigh|max`, for models that support it. [1][2] | ✅ |
 | Resume (`supports_resume`) | `--resume`, `--resume-id <ID>`, `--list-sessions`; session ids are UUIDs, saved per directory. Where the id appears in `stream-json` is not documented. [2] | ⚠ |
 | Rate-limit detection (`detects_rate_limits`) | No exit code for it. [3] The ACP protocol has a `_kiro/error/rate_limit` notification (formerly `_kiro.dev/error/rate_limit`), payload undocumented, and whether it reaches `stream-json` is not stated. [4] | ❌ |
-| Read-only one-shot (`supports_one_shot`) | Half there. `--trust-tools=read_file,grep_search` in non-interactive V3 approves only those tools, and there is no user to approve the rest. [1] But the repo can carry agent inputs: custom agents (`.kiro/agents/`), Steering files (`.kiro/steering/`), workspace MCP configuration, Skills, Workflows, and (V3 headless, 2.27.1+) Hooks. [1][7][8] Kiro withholds most of them from an **untrusted** workspace, but trust is a per-workspace decision, not a per-call flag, and the worker runs in the same workspace as its judge. No flag to ignore workspace inputs for one call (like Claude's `--setting-sources user` or Codex's `--ignore-rules`) is documented, so the worker could steer its own judge through files it writes. | ❌ trust boundary open |
+| Read-only one-shot (`supports_one_shot`) | Half there. `--trust-tools=read_file,grep_search` in non-interactive V3 approves only those tools, and there is no user to approve the rest. [1] But the repo can carry agent inputs: custom agents (`.kiro/agents/`), Steering files (`.kiro/steering/`), workspace MCP configuration, Skills, Workflows, and (V3 headless, 2.27.1+) Hooks. [1][7][8] Kiro withholds most of them from an **untrusted** workspace, but trust is a per-workspace decision, not a per-call flag, and the worker runs in the same workspace as its verifier. No flag to ignore workspace inputs for one call (like Claude's `--setting-sources user` or Codex's `--ignore-rules`) is documented, so the worker could steer its own verifier through files it writes. | ❌ trust boundary open |
 | Headless authentication | `KIRO_API_KEY` only, and API keys exist only on Pro, Pro+, Pro Max and Power plans (an admin must enable them for managed subscriptions). [1] | ⚠ paid plans only |
 
 Two things are in Kiro's favour and worth keeping for later: permission rules and the workspace
@@ -61,9 +61,9 @@ with the official docs, and it does not replace a recording.
    `spend_ceiling_hint` is undocumented.
 3. **A captured rate limit or credit exhaustion**, to see whether it reaches the stream, stderr or
    only the exit code. Until then `detects_rate_limits: false`, as for Copilot.
-4. **A judge isolation recipe** that keeps workspace Hooks, agents, Steering, Skills and MCP
+4. **A verifier isolation recipe** that keeps workspace Hooks, agents, Steering, Skills and MCP
    configuration out of a one-shot call even when the worker's workspace is trusted, verified on
-   the wire: a probe in which the model tries to write and is denied. Until then `supports_one_shot: false`, so a Kiro *ruler* is refused for LLM judges and the
+   the wire: a probe in which the model tries to write and is denied. Until then `supports_one_shot: false`, so a Kiro *ruler* is refused for rubric verifiers and the
    summarizer (a Kiro *worker* with a Claude/Codex/Copilot ruler is fine).
 5. The confined-worker carve-out (`writable_state_paths`, presumably `~/.kiro`), measured under
    `isolation: sandbox` as the other backends' were.

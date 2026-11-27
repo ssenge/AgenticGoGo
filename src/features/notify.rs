@@ -57,7 +57,7 @@ fn template(cmd: &str, vars: &[(&str, String)]) -> String {
 /// Fire `notify.cmd` when `notify_if` is true (cooldown-debounced) or when `abort_if` is stopping the
 /// run (§8.5 — once, cooldown ignored, `{{reason}}` = the halt expression).
 ///
-/// Registered LAST on `on_gate`, after `GateKeepRollback`: a rolled-back session's judging is undone
+/// Registered LAST on `on_gate`, after `GateKeepRollback`: a rolled-back session's verifying is undone
 /// there, so running earlier would notify about work that no longer exists.
 pub struct NotifyOnStuck;
 
@@ -122,9 +122,9 @@ pub(crate) fn halt_ping(ctx: &mut LoopState, halt_reason: Option<&str>) {
     }
     // §8.5 says `{{reason}} = halt_reason`, which is the raw expression. Kept — but a bare
     // `blocked OR over_iterations` tells a human nothing, and "stop + notify" (§4) exists precisely
-    // to tell them WHY. So append the winning judge's rationale when the expression names one:
+    // to tell them WHY. So append the winning verifier's rationale when the expression names one:
     // `blocked OR over_iterations — BLOCKED: need the prod key`. A ceiling-only expression names no
-    // judge, so `notify_reason` echoes the expression back and the message stays exactly as §8.5
+    // verifier, so `notify_reason` echoes the expression back and the message stays exactly as §8.5
     // specifies. Compare SANITIZED forms, using the very function `notify_reason` ends with: it
     // normalises whitespace, strips control chars AND caps the length, so a raw
     // `blocked  OR  over_iterations` — or an `abort_if` past the 400-char cap, where a
@@ -260,7 +260,7 @@ mod tests {
 
     use crate::core::config::RelentlessConfig;
     use crate::core::engine::{CycleResult, Engine};
-    use crate::core::model::{Judge, JudgeKind, Lifecycle, Verdict};
+    use crate::core::model::{Verifier, VerifierKind, Lifecycle, Verdict};
     use crate::isolation::Isolation;
     use std::path::Path;
 
@@ -286,7 +286,7 @@ mod tests {
         std::fs::read_to_string(dir.join("pings.txt")).unwrap_or_default().lines().map(str::to_string).collect()
     }
 
-    /// An engine that names no judge: `notify_if` is `None`, so the `CycleResult` these tests plant
+    /// An engine that names no verifier: `notify_if` is `None`, so the `CycleResult` these tests plant
     /// in scratch is the only source of a reason — the handler's POLICY is isolated from the core's
     /// reason-picking, which `core::engine`'s own tests already cover.
     fn quiet_engine() -> Engine {
@@ -302,8 +302,8 @@ mod tests {
             clock: Default::default(),
             cfg: cfg.clone(),
             ruler: crate::backend::for_name("claude").unwrap(),
-            judge_model: "m".into(),
-            judge_timeout: 1,
+            verifier_model: "m".into(),
+            verifier_timeout: 1,
             dir: dir.to_path_buf(),
             config_base: dir.to_path_buf(),
             eng,
@@ -325,7 +325,7 @@ mod tests {
                 prompt: None,
                 role_prompt_file: None,
                 prompt_file: None,
-                skip_judges: false,
+                skip_verifiers: false,
                 isolation: tier,
                 image: crate::isolation::DEFAULT_IMAGE.into(),
                 readonly: vec![],
@@ -494,9 +494,9 @@ mod tests {
     fn the_gate_pings_about_kept_truth_never_about_work_it_just_discarded() {
         let (tmp, cfg) = project(0, r#"printf "%s\n" {{reason}} >> pings.txt"#);
         // an engine whose `notify_if` is true against RESTORED base truth …
-        let mut stuck = Judge {
+        let mut stuck = Verifier {
             name: "stuck".into(),
-            kind: JudgeKind::Script { path: "true".into() },
+            kind: VerifierKind::Script { path: "true".into() },
             invariant: false,
             in_dod: false,
             timeout: None,

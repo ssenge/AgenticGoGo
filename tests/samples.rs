@@ -55,17 +55,17 @@ fn the_yaml_sample_loads() {
         );
         // the BODY keeps the author's spelling; `resolve_step` is where it is normalised, so the
         // two lists cannot miss each other by a trailing slash.
-        assert_eq!(cfg.steps[s].readonly, ["tests/", "rlt/judges/"]);
+        assert_eq!(cfg.steps[s].readonly, ["tests/", "rlt/verifiers/"]);
         let r = cfg.resolve_step(s).unwrap();
-        assert_eq!(r.readonly, ["tests", "rlt/judges"], "normalised by resolve_step, as the driver's builder does it");
+        assert_eq!(r.readonly, ["tests", "rlt/verifiers"], "normalised by resolve_step, as the driver's builder does it");
     }
     assert_eq!(cfg.resolve_step("implement").unwrap().writable, ["tests"], "the step that SHOULD add tests re-grants that one deny");
     assert!(cfg.steps["fix"].writable.is_empty(), "`fix` re-grants nothing — deleting a failing test is the shortcut it would take");
 
-    // ---- judges: per-judge config, and `timeout:` is the only key ----
-    assert_eq!(cfg.judges["load_ok"].timeout, Some(2700), "a 45-minute load test dies under the 300s run default");
-    assert_eq!(cfg.judges["p99_ok"].timeout, Some(60));
-    assert_eq!(cfg.judge.timeout, 300, "the RUN-level default is untouched by a per-judge override");
+    // ---- verifiers: per-verifier config, and `timeout:` is the only key ----
+    assert_eq!(cfg.verifiers["load_ok"].timeout, Some(2700), "a 45-minute load test dies under the 300s run default");
+    assert_eq!(cfg.verifiers["p99_ok"].timeout, Some(60));
+    assert_eq!(cfg.verifier.timeout, 300, "the RUN-level default is untouched by a per-verifier override");
 
     // ---- sequence: the walk, the DoD, the ceilings ----
     let seq = &cfg.sequence;
@@ -90,13 +90,13 @@ fn the_yaml_sample_loads() {
     // `done_if ∪ abort_if ∪ invariants ∪ every until:`, so this is the ONLY thing that puts
     // `spec_sound` in it. Without it the rubric file shipped, resolved, and never ran — the Rust
     // sample graded the spec and this one did not.
-    // `stop::judge_names` is the exact function `assembly.rs` folds over every `until:` to build the
+    // `stop::verifier_names` is the exact function `assembly.rs` folds over every `until:` to build the
     // run-set, so this asks the real question rather than restating the line above.
     let from_until: Vec<String> = seq
         .steps
         .iter()
         .filter_map(|e| e.until.as_deref())
-        .flat_map(|c| relentless::core::stop::judge_names(c).expect("every sample `until:` must parse"))
+        .flat_map(|c| relentless::core::stop::verifier_names(c).expect("every sample `until:` must parse"))
         .collect();
     assert!(
         from_until.iter().any(|n| n == "spec_sound"),
@@ -123,23 +123,23 @@ fn the_yaml_sample_loads() {
 }
 
 /// The sample is not just parseable, it is RUNNABLE-shaped: `assemble()` is what `rlt run` calls
-/// before the first session, and it is where an unknown step name, an unbounded `until:` or a judge
+/// before the first session, and it is where an unknown step name, an unbounded `until:` or a verifier
 /// that resolves to no file becomes a startup refusal.
 ///
-/// ⚠ Judge resolution reads `<config_base>/judges/`, so this points at the sample's own judge
-/// directory. It is the one part of the sample that is prose — the sample ships no judge scripts —
+/// ⚠ Verifier resolution reads `<config_base>/verifiers/`, so this points at the sample's own verifier
+/// directory. It is the one part of the sample that is prose — the sample ships no verifier scripts —
 /// so this test asserts the refusal is about a MISSING FILE and nothing else. That is still worth
-/// asserting: it proves every judge name in the file reached resolution, i.e. the expressions
-/// parsed and named the judges the sample says they do.
+/// asserting: it proves every verifier name in the file reached resolution, i.e. the expressions
+/// parsed and named the verifiers the sample says they do.
 #[test]
-fn the_yaml_samples_expressions_name_real_judges() {
+fn the_yaml_samples_expressions_name_real_verifiers() {
     let cfg = RelentlessConfig::load(&sample("workflow.yaml")).unwrap();
-    let names = relentless::core::stop::judge_names(&cfg.sequence.done_if).expect("done_if parses");
+    let names = relentless::core::stop::verifier_names(&cfg.sequence.done_if).expect("done_if parses");
     assert_eq!(names, ["tests_pass", "lint_clean", "load_ok", "p99_ok"]);
 
-    let names = relentless::core::stop::judge_names(cfg.sequence.abort_if.as_deref().unwrap()).expect("abort_if parses");
-    assert!(names.is_empty(), "over_budget/wall_hours are run-level scalars and any_regressed(invariants) is an aggregate, not a judge name: {names:?}");
+    let names = relentless::core::stop::verifier_names(cfg.sequence.abort_if.as_deref().unwrap()).expect("abort_if parses");
+    assert!(names.is_empty(), "over_budget/wall_hours are run-level scalars and any_regressed(invariants) is an aggregate, not a verifier name: {names:?}");
 
-    let names = relentless::core::stop::judge_names(cfg.sequence.steps[0].until.as_deref().unwrap()).unwrap();
-    assert_eq!(names, ["survey_good"], "`until:` judges join the run-set — they must execute every step");
+    let names = relentless::core::stop::verifier_names(cfg.sequence.steps[0].until.as_deref().unwrap()).unwrap();
+    assert_eq!(names, ["survey_good"], "`until:` verifiers join the run-set — they must execute every step");
 }

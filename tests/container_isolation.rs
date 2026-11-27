@@ -1,6 +1,6 @@
 //! ACCEPTANCE TEST for the `isolation: container` tier — this file IS the Definition of Done.
 //!
-//! It is written by the operator (rlt), NOT the worker. The loop's judges require these tests to
+//! It is written by the operator (rlt), NOT the worker. The loop's verifiers require these tests to
 //! PASS and to still EXIST. DO NOT weaken, skip, or delete an assertion — that is the one way to
 //! "pass" that does not count. Implement the tier until these are green.
 //!
@@ -69,14 +69,14 @@ fn container_available_returns_a_bool() {
 }
 
 /// REAL container confinement — needs a running Docker/Podman engine. `#[ignore]`d so the plain
-/// `cargo test` suite stays hermetic; the loop's `container_confines` judge runs it with
+/// `cargo test` suite stays hermetic; the loop's `container_confines` verifier runs it with
 /// `--ignored`. Proves the tier ACTUALLY confines: a write inside the bind-mounted cwd reaches the
 /// host, and a write OUTSIDE the mount does not.
 ///
 /// macOS + colima note: only host dirs colima mounts into its VM (default: `$HOME`) can bind-mount
 /// rw, so the jail lives under `$HOME`; the escape target is a sibling path that is NOT bind-mounted.
 #[test]
-#[ignore = "needs a real container engine; the loop's container_confines judge runs it with --ignored"]
+#[ignore = "needs a real container engine; the loop's container_confines verifier runs it with --ignored"]
 fn container_confines_writes() {
     assert!(relentless::isolation::container_available(), "no container engine on this host — cannot prove confinement");
     let home = std::env::var("HOME").expect("HOME");

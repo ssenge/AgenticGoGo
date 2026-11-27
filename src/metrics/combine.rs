@@ -1,4 +1,4 @@
-//! Several tools, one metric: which value the judge reports and whether it is met — pure.
+//! Several tools, one metric: which value the verifier reports and whether it is met — pure.
 //!
 //! The values are ordered from the one that passes the threshold most easily to the one that passes
 //! it least (by the metric's direction; for a `neutral` metric, by the threshold itself), and:
@@ -10,7 +10,7 @@
 use super::report::{Better, ToolValue};
 use super::spec::Combine;
 
-/// What a metric judge concludes from the selected values.
+/// What a metric verifier concludes from the selected values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
     pub value: f64,

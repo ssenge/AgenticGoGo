@@ -1,5 +1,5 @@
 //! Process files (A-37): `rlt process <file> <project>` runs a process of standard steps from YAML. A process is
-//! phases of steps, each step one of a closed set of kinds (a script, an agent's work judged by checks and a
+//! phases of steps, each step one of a closed set of kinds (a script, an agent's work verified by checks and a
 //! critic, a human's approval, a loop over a list, an exam), with its prompt, checks, critic and limits as data.
 //! The interpreter builds each entry into the block rlt already has ([`super::Flow`]); the YAML has no logic of its
 //! own. A step's identity is its id; its number and a checkpoint's name are computed from position.

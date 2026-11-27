@@ -63,12 +63,12 @@ pub fn resolve(cfg: &RelentlessConfig, dir: &Path) -> (RunPolicy, Vec<Problem>) 
             )),
         }
     }
-    let judge_image = match cfg.judge_image() {
+    let verifier_image = match cfg.verifier_image() {
         Ok(i) => i,
         Err(why) => {
-            // only a problem when judges actually run in a container
+            // only a problem when verifiers actually run in a container
             if cfg.run_isolation() == super::Isolation::Container {
-                problems.push(Problem::new("judge.image", why));
+                problems.push(Problem::new("verifier.image", why));
             }
             super::DEFAULT_IMAGE.to_string()
         }
@@ -85,7 +85,7 @@ pub fn resolve(cfg: &RelentlessConfig, dir: &Path) -> (RunPolicy, Vec<Problem>) 
             }
         },
     };
-    (RunPolicy { contexts, pass_env, credentials, judge_image, judge_tier: cfg.run_isolation(), egress }, problems)
+    (RunPolicy { contexts, pass_env, credentials, verifier_image, verifier_tier: cfg.run_isolation(), egress }, problems)
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*` — what `-e NAME` can carry without being read as `NAME=value`.
@@ -107,7 +107,7 @@ mod tests {
         let _g = register(&cfg("project: p\n"), tmp.path()).unwrap();
         let p = policy::for_dir(tmp.path());
         assert!(p.contexts.is_empty() && p.pass_env.is_empty() && p.credentials.is_empty() && p.egress.is_none());
-        assert_eq!(p.judge_image, super::super::DEFAULT_IMAGE);
+        assert_eq!(p.verifier_image, super::super::DEFAULT_IMAGE);
     }
 
     #[test]
@@ -151,20 +151,20 @@ mod tests {
         assert!(problems.is_empty() && p.egress.is_some_and(|e| e.allow.allows_host("api.x.com")));
     }
 
-    /// Judges in a container need ONE image; two container steps on different images with no
-    /// `judge.image` is refused — but only when the run's judges actually run in a container.
+    /// Verifiers in a container need ONE image; two container steps on different images with no
+    /// `verifier.image` is refused — but only when the run's verifiers actually run in a container.
     #[test]
-    fn an_ambiguous_judge_image_is_refused_only_for_a_container_run() {
+    fn an_ambiguous_verifier_image_is_refused_only_for_a_container_run() {
         let tmp = tempfile::tempdir().unwrap();
         let two = "project: p\nsteps:\n  a: { isolation: container, image: \"x:1\" }\n  b: { isolation: container, image: \"y:1\" }\n";
         let (_, problems) = resolve(&cfg(two), tmp.path());
-        assert_eq!(problems.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["judge.image"]);
+        assert_eq!(problems.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["verifier.image"]);
         assert!(problems[0].message.contains("x:1, y:1"), "{}", problems[0].message);
-        let named = format!("{two}judge: {{ image: \"j:1\" }}\n");
+        let named = format!("{two}verifier: {{ image: \"j:1\" }}\n");
         let (p, problems) = resolve(&cfg(&named), tmp.path());
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(p.judge_image, "j:1");
+        assert_eq!(p.verifier_image, "j:1");
         let one = "project: p\nsteps:\n  a: { isolation: container, image: \"x:1\" }\n  b: { isolation: sandbox }\n";
-        assert_eq!(resolve(&cfg(one), tmp.path()).0.judge_image, "x:1", "the one container image");
+        assert_eq!(resolve(&cfg(one), tmp.path()).0.verifier_image, "x:1", "the one container image");
     }
 }

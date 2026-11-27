@@ -182,7 +182,7 @@ pub fn diff(before: &Snapshot, after: &Snapshot) -> Vec<String> {
 /// the worker's link too, and a later write through that link would change the oracle again.
 ///
 /// Errors are HARD. A violation that cannot be undone leaves a weakened oracle on disk for the next
-/// session's judges, which is the outcome this whole feature exists to prevent.
+/// session's verifiers, which is the outcome this whole feature exists to prevent.
 pub fn restore(root: &Path, before: &Snapshot, changed: &[String], store: &Path) -> Result<()> {
     // deepest first: clear what is in the way (an appeared tree, a file now standing where a
     // directory was), so the recreation pass below finds the ground empty.

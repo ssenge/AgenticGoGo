@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Built-in judge: run $RLT_CMD; met = exit 0. Binary goal.
-# Usage: a template — copy into your rlt/judges/<name>.sh with RLT_CMD set (e.g. RLT_CMD='make build'),
-# then name <name> in a condition. Library judges resolve by NAME and take no config parameters.
+# Built-in verifier: run $RLT_CMD; met = exit 0. Binary goal.
+# Usage: a template — copy into your rlt/verifiers/<name>.sh with RLT_CMD set (e.g. RLT_CMD='make build'),
+# then name <name> in a condition. Library verifiers resolve by NAME and take no config parameters.
 eval "${RLT_CMD:?set RLT_CMD}" >/tmp/rlt_cmd.out 2>&1
 code=$?
 met=$([ "$code" -eq 0 ] && echo true || echo false)

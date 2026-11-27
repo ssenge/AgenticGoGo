@@ -2,7 +2,7 @@
 
 use super::fmt::*;
 use super::{DashboardUi, Focus};
-use crate::state::{ActivityEvent, DashboardState, JudgeView};
+use crate::state::{ActivityEvent, DashboardState, VerifierView};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::path::Path;
@@ -21,20 +21,20 @@ pub(super) fn draw(f: &mut Frame, dir: &Path, state: Option<&DashboardState>, ui
     };
 
     // Vertical split. A thin title row (name only) tops the screen; Info + the Progress/Per-agent
-    // band are fixed-height; Judges and Activity flex; Summary is compact.
+    // band are fixed-height; Verifiers and Activity flex; Summary is compact.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // title row: "Relentless" only
             Constraint::Length(4), // Info  (border + 2 lines: run/step + spend/conditions)
             Constraint::Length(6), // band: Progress | Per-agent (border + 4 lines)
-            Constraint::Min(8),    // Judges (scrollable scoreboard)
+            Constraint::Min(8),    // Verifiers (scrollable scoreboard)
             Constraint::Min(6),    // Activity (real-time tail)
             Constraint::Length(5), // Summary (border + ~3 lines)
         ])
         .split(area);
 
-    // the band splits horizontally: judge progress on the left, per-agent spend on the right (§7.4).
+    // the band splits horizontally: verifier progress on the left, per-agent spend on the right (§7.4).
     let band = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
@@ -44,7 +44,7 @@ pub(super) fn draw(f: &mut Frame, dir: &Path, state: Option<&DashboardState>, ui
     draw_info(f, chunks[1], s);
     draw_progress(f, band[0], s);
     draw_per_agent(f, band[1], s);
-    draw_judges(f, chunks[3], s, ui);
+    draw_verifiers(f, chunks[3], s, ui);
     draw_activity(f, chunks[4], s, ui);
     draw_summary(f, chunks[5], s, ui);
 }
@@ -217,7 +217,7 @@ pub(super) fn draw_info(f: &mut Frame, area: Rect, s: &DashboardState) {
 }
 
 /// Progress: the DoD-set aggregate (§5.3 — the count ranges over the DoD-set, NOT the run-set) as a
-/// segmented bar, plus a one-line tally of judge lifecycle states so "1/3" says WHICH three.
+/// segmented bar, plus a one-line tally of verifier lifecycle states so "1/3" says WHICH three.
 pub(super) fn draw_progress(f: &mut Frame, area: Rect, s: &DashboardState) {
     let frac = if s.goals_total == 0 { 0.0 } else { s.goals_met as f64 / s.goals_total as f64 };
     let color = grade_color(frac);
@@ -233,8 +233,8 @@ pub(super) fn draw_progress(f: &mut Frame, area: Rect, s: &DashboardState) {
     ]);
 
     // lifecycle tally across the DoD-set — met / in-progress / pending / regressed / errored.
-    let dod: Vec<JudgeView> = s.judge_views().into_iter().filter(|j| j.in_dod).collect();
-    let n = |pred: fn(&JudgeView) -> bool| dod.iter().filter(|&j| pred(j)).count();
+    let dod: Vec<VerifierView> = s.verifier_views().into_iter().filter(|j| j.in_dod).collect();
+    let n = |pred: fn(&VerifierView) -> bool| dod.iter().filter(|&j| pred(j)).count();
     let errored = n(|j| j.error.is_some());
     let tally = Line::from(vec![
         Span::styled(format!("✔{} ", n(|j| j.met)), Style::default().fg(Color::Green)),
@@ -281,19 +281,19 @@ pub(super) fn draw_per_agent(f: &mut Frame, area: Rect, s: &DashboardState) {
     f.render_widget(p, area);
 }
 
-/// Judges: the §7.4 per-judge scoreboard (successor to the goal list). Each judge renders a detail
+/// Verifiers: the §7.4 per-verifier scoreboard (successor to the goal list). Each verifier renders a detail
 /// line — glyph, name, measure (met/unmet for binary, value/target + bar for numeric, `error` for a
-/// broken judge), ▲delta, guard/run-set flags, kind — plus its wrapped rationale. DoD-set first,
-/// then a divider and any run-set control judges (e.g. `stalled`), so "why we stalled" is visible.
-pub(super) fn draw_judges(f: &mut Frame, area: Rect, s: &DashboardState, ui: &mut DashboardUi) {
-    let focused = ui.focus == Focus::Judges;
+/// broken verifier), ▲delta, guard/run-set flags, kind — plus its wrapped rationale. DoD-set first,
+/// then a divider and any run-set control verifiers (e.g. `stalled`), so "why we stalled" is visible.
+pub(super) fn draw_verifiers(f: &mut Frame, area: Rect, s: &DashboardState, ui: &mut DashboardUi) {
+    let focused = ui.focus == Focus::Verifiers;
     let inner_w = area.width.saturating_sub(2) as usize;
-    let judges = s.judge_views();
-    let (dod, run): (Vec<JudgeView>, Vec<JudgeView>) = judges.into_iter().partition(|j| j.in_dod);
+    let verifiers = s.verifier_views();
+    let (dod, run): (Vec<VerifierView>, Vec<VerifierView>) = verifiers.into_iter().partition(|j| j.in_dod);
 
     let mut lines: Vec<Line> = Vec::new();
-    let push_judge = |lines: &mut Vec<Line>, j: &JudgeView| {
-        lines.push(judge_detail_line(j));
+    let push_verifier = |lines: &mut Vec<Line>, j: &VerifierView| {
+        lines.push(verifier_detail_line(j));
         if !j.rationale.is_empty() {
             for wrapped in wrap_indent(&j.rationale, "    ↳ ", "      ", inner_w) {
                 let c = if j.error.is_some() { Color::Red } else { Color::DarkGray };
@@ -302,7 +302,7 @@ pub(super) fn draw_judges(f: &mut Frame, area: Rect, s: &DashboardState, ui: &mu
         }
     };
     for j in &dod {
-        push_judge(&mut lines, j);
+        push_verifier(&mut lines, j);
     }
     if !run.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -310,32 +310,32 @@ pub(super) fn draw_judges(f: &mut Frame, area: Rect, s: &DashboardState, ui: &mu
             Style::default().fg(Color::DarkGray),
         )));
         for j in &run {
-            push_judge(&mut lines, j);
+            push_verifier(&mut lines, j);
         }
     }
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled("  (no judges in snapshot)", Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled("  (no verifiers in snapshot)", Style::default().fg(Color::DarkGray))));
     }
 
     let total = lines.len() as u16;
     let view_h = area.height.saturating_sub(2); // minus borders
     let max_scroll = total.saturating_sub(view_h);
-    ui.judges_scroll = ui.judges_scroll.min(max_scroll);
+    ui.verifiers_scroll = ui.verifiers_scroll.min(max_scroll);
 
     let title = if max_scroll > 0 {
-        format!(" Judges  [{}/{}]  ↑↓ ", (ui.judges_scroll + view_h).min(total), total)
+        format!(" Verifiers  [{}/{}]  ↑↓ ", (ui.verifiers_scroll + view_h).min(total), total)
     } else {
-        " Judges ".to_string()
+        " Verifiers ".to_string()
     };
     let p = Paragraph::new(lines)
         .block(focusable_block(&title, focused))
-        .scroll((ui.judges_scroll, 0));
+        .scroll((ui.verifiers_scroll, 0));
     f.render_widget(p, area);
 }
 
-/// One judge's detail line: glyph · name · measure · ▲delta · flags · kind.
-pub(super) fn judge_detail_line(j: &JudgeView) -> Line<'static> {
-    let (glyph, color) = judge_glyph(j);
+/// One verifier's detail line: glyph · name · measure · ▲delta · flags · kind.
+pub(super) fn verifier_detail_line(j: &VerifierView) -> Line<'static> {
+    let (glyph, color) = verifier_glyph(j);
     let delta = if j.value.is_some() && j.delta.abs() > f64::EPSILON {
         format!("  ▲{:+.0}", j.delta)
     } else {
@@ -346,13 +346,13 @@ pub(super) fn judge_detail_line(j: &JudgeView) -> Line<'static> {
         Span::styled(format!("{glyph} "), Style::default().fg(color)),
         Span::styled(format!("{:<18}", fit(&j.name, 18)), Style::default().fg(color).bold()),
     ];
-    spans.extend(judge_measure_spans(j, color));
-    // `judge:kind` starts at a CONSTANT column for every row: measure is a fixed 22 cols (below),
+    spans.extend(verifier_measure_spans(j, color));
+    // `verifier:kind` starts at a CONSTANT column for every row: measure is a fixed 22 cols (below),
     // delta a fixed 7, and the variable-width `[guard]` flag trails the kind rather than shoving it
     // right — so the kind column no longer ratchets across guarded/numeric/binary rows.
     spans.extend([
         Span::styled(format!("{:<7}", delta), Style::default().fg(Color::Green)),
-        Span::styled(format!("  judge:{}", j.kind), Style::default().fg(Color::Blue)),
+        Span::styled(format!("  verifier:{}", j.kind), Style::default().fg(Color::Blue)),
         Span::styled(flag.to_string(), Style::default().fg(Color::Yellow)),
     ]);
     Line::from(spans)
@@ -360,7 +360,7 @@ pub(super) fn judge_detail_line(j: &JudgeView) -> Line<'static> {
 
 /// The measure column as colored spans: binary ⇒ met/unmet (never `0`, §7.4); numeric ⇒
 /// `value/target` + a proportional bar; broken ⇒ `error`.
-pub(super) fn judge_measure_spans(j: &JudgeView, color: Color) -> Vec<Span<'static>> {
+pub(super) fn verifier_measure_spans(j: &VerifierView, color: Color) -> Vec<Span<'static>> {
     if j.error.is_some() {
         return vec![Span::styled(format!("{:<22}", "error"), Style::default().fg(Color::Red).bold())];
     }
@@ -381,7 +381,7 @@ pub(super) fn judge_measure_spans(j: &JudgeView, color: Color) -> Vec<Span<'stat
             let filled = ((frac * bar_w as f64).round() as usize).min(bar_w);
             let num = format!("{:.0}/{:.0} ", v, j.target);
             // 12 (num) + 8 (bar) + 2 (trailing) = 22, matching the binary/error branches' `{:<22}`
-            // so the column after the measure lands identically on every judge row.
+            // so the column after the measure lands identically on every verifier row.
             vec![
                 Span::styled(format!("{num:<12}"), Style::default().fg(color)),
                 Span::styled("█".repeat(filled), Style::default().fg(color)),
@@ -391,9 +391,9 @@ pub(super) fn judge_measure_spans(j: &JudgeView, color: Color) -> Vec<Span<'stat
     }
 }
 
-/// State glyph + color for a judge. A broken judge (`error`) gets its own ⊘, distinct from a clean
+/// State glyph + color for a verifier. A broken verifier (`error`) gets its own ⊘, distinct from a clean
 /// "not met" — a reader must never confuse "I could not grade this" with "this is not met" (§5.2).
-pub(super) fn judge_glyph(j: &JudgeView) -> (&'static str, Color) {
+pub(super) fn verifier_glyph(j: &VerifierView) -> (&'static str, Color) {
     if j.error.is_some() {
         return ("⊘", Color::Red);
     }

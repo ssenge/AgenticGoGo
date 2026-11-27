@@ -47,7 +47,7 @@ pub enum WaitRow {
         session: u32,
         #[serde(flatten)]
         waiting: Waiting,
-        /// where the rate-limited session's unjudged work was saved, if it left any.
+        /// where the rate-limited session's unverified work was saved, if it left any.
         partial: Option<String>,
         ts: u64,
     },
@@ -90,7 +90,7 @@ fn sort_commands(cmds: Vec<Command>, deferred: &mut Vec<Command>) -> Option<Sign
 }
 
 /// The wait itself, as an `on_verify` step right after the worker. Plain rate limit →
-/// `SkipSession` (no judging, no gate); a stop, an interrupt or a tripped ceiling → `Stop`.
+/// `SkipSession` (no verifying, no gate); a stop, an interrupt or a tripped ceiling → `Stop`.
 pub struct RateLimitBackoff;
 impl Handler for RateLimitBackoff {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {

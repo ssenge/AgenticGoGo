@@ -9,13 +9,13 @@ use anyhow::{bail, Result};
 #[derive(Clone, Copy)]
 pub(super) enum Val {
     Bool(bool),
-    /// A JUDGE's `met` bool. Distinct from `Bool` for exactly one reason: it is a TYPE ERROR to
+    /// A VERIFIER's `met` bool. Distinct from `Bool` for exactly one reason: it is a TYPE ERROR to
     /// compare it against a number (`coverage >= 80`), because the bool→num coercion below makes
     /// that `1.0 >= 80.0` — silently always false. The coercion itself stays: run-level bools
     /// (`over_budget == 1`) rely on it.
     GoalBool(bool),
     Num(f64),
-    /// A judge with no usable number: `.value`/`.max` on a judge that hasn't run yet, errored, or
+    /// A verifier with no usable number: `.value`/`.max` on a verifier that hasn't run yet, errored, or
     /// emitted no number (`value: None`).
     /// Any comparison against it is **false** — see `parse_cmp`. Deliberately NOT NaN: a NaN
     /// operand hard-bails, and that `Err` is swallowed into `false` by `engine::eval_or_log`, so
@@ -47,7 +47,7 @@ impl Val {
         matches!(self, Val::GoalBool(_))
     }
     /// A boolean result that KEEPS the `GoalBool` tag if an operand carried it. NOT/AND/OR over a
-    /// judge's `met` bool is still a judge bool, so the type check in `parse_cmp` must still fire:
+    /// verifier's `met` bool is still a verifier bool, so the type check in `parse_cmp` must still fire:
     /// otherwise `NOT coverage >= 80` — the most natural way to write "coverage is below 80" —
     /// slips past `validate` and is silently always false, while `(coverage) >= 80` is caught.
     /// Same rule, every shape.
@@ -126,17 +126,17 @@ impl<'a> Parser<'a> {
                 (None, Some((what, n))) if left_literal => unreachable_count(&what, n, &op, left.as_num(), true)?,
                 _ => {}
             }
-            // THE TYPE CHECK. A bare judge name is a `met` BOOL, and a bool has no ordering against
+            // THE TYPE CHECK. A bare verifier name is a `met` BOOL, and a bool has no ordering against
             // a number: `coverage >= 80` coerces met→1.0 and is silently ALWAYS FALSE. `validate`
             // runs this at config load, so it is a startup error, not a run that never finishes.
             if matches!(left, Val::GoalBool(_)) || matches!(right, Val::GoalBool(_)) {
                 bail!(
-                    "a judge's name is its `met` BOOL — comparing it to a number is always false. \
-                     Use the accessor: `judge.value >= 80`, not `judge >= 80`"
+                    "a verifier's name is its `met` BOOL — comparing it to a number is always false. \
+                     Use the accessor: `verifier.value >= 80`, not `verifier >= 80`"
                 );
             }
-            // A judge with no usable number (never ran, or errored) makes the comparison FALSE.
-            // `any_judge_error` is what surfaces the error case — this must not error, because an
+            // A verifier with no usable number (never ran, or errored) makes the comparison FALSE.
+            // `any_verifier_error` is what surfaces the error case — this must not error, because an
             // Err is swallowed into `false` upstream and would look identical while hiding why.
             if matches!(left, Val::Missing) || matches!(right, Val::Missing) {
                 return Ok(Val::Bool(false));
@@ -144,9 +144,9 @@ impl<'a> Parser<'a> {
             let (l, r) = (left.as_num(), right.as_num());
             // A NaN operand makes EVERY comparison meaningless (and `!=` would return
             // true, silently inverting a guard). Fail loud rather than mislead — a
-            // judge that emits a NaN value should surface as an error, not flip the loop.
+            // verifier that emits a NaN value should surface as an error, not flip the loop.
             if l.is_nan() || r.is_nan() {
-                bail!("comparison with NaN in stop condition (a judge likely emitted a non-finite value)");
+                bail!("comparison with NaN in stop condition (a verifier likely emitted a non-finite value)");
             }
             let res = match op.as_str() {
                 "==" => l == r,
@@ -165,7 +165,7 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_atom(&mut self) -> Result<Val> {
         match self.next().cloned() {
             Some(Tok::Num(n)) => Ok(Val::Num(n)),
-            // NOT preserves the GoalBool tag: `NOT coverage` is still a judge's bool, so
+            // NOT preserves the GoalBool tag: `NOT coverage` is still a verifier's bool, so
             // `NOT coverage >= 80` is still the always-false compare parse_cmp rejects.
             Some(Tok::Not) => {
                 let v = self.parse_atom()?;
@@ -227,7 +227,7 @@ impl<'a> Parser<'a> {
         }
         let scope = subset.map_or(Subset::Dod, |(_, s)| s);
 
-        // Dotted accessor: the ONLY way to read the number a judge emitted. (The bare name is its
+        // Dotted accessor: the ONLY way to read the number a verifier emitted. (The bare name is its
         // `met` bool — see `Val::GoalBool`.)
         if let Some((base, field)) = name.split_once('.') {
             return self.resolve_accessor(base, field);
@@ -280,9 +280,9 @@ impl<'a> Parser<'a> {
                 Some(t) => t > 0 && c.sessions_done >= t,
                 None => false, // no cap (0/unset) => never over
             }),
-            // "any judge that RAN this step returned error". No judge ran => false: a skipped
+            // "any verifier that RAN this step returned error". No verifier ran => false: a skipped
             // step reports no errors because there were none to have, not because it forgot.
-            "any_judge_error" => Val::Bool(!c.judge_errors.is_empty()),
+            "any_verifier_error" => Val::Bool(!c.verifier_errors.is_empty()),
             // ── the gate's own history (`core::ratchet`) ─────────────────────────────────────
             // Process-internal, like `over_iterations`: computed from what the GATE decided, in the
             // loop's memory — never read back from a file the worker can reach. So they are
@@ -296,33 +296,33 @@ impl<'a> Parser<'a> {
             "consecutive_no_changes" => Val::Num(c.gate.map_or(0, |g| g.state.consecutive_no_changes) as f64),
             "oscillating" => Val::Bool(c.gate.is_some_and(|g| g.oscillating())),
             "ratchet_regressed" => Val::Bool(c.gate.is_some_and(|g| g.state.ratchet_regressed())),
-            // otherwise: a judge name -> its met bool. GoalBool, not Bool: comparing it to a number
+            // otherwise: a verifier name -> its met bool. GoalBool, not Bool: comparing it to a number
             // is a type error (`coverage >= 80`), while `over_budget == 1` stays legal.
-            other => match c.judge_met(other) {
+            other => match c.verifier_met(other) {
                 Some(b) => Val::GoalBool(b),
-                None => bail!("unknown judge or aggregate `{other}` in condition"),
+                None => bail!("unknown verifier or aggregate `{other}` in condition"),
             },
         };
         Ok(v)
     }
 
-    /// `judge.value` / `judge.max` — the NUMBER the judge emitted, not its `met` bool.
+    /// `verifier.value` / `verifier.max` — the NUMBER the verifier emitted, not its `met` bool.
     pub(super) fn resolve_accessor(&self, base: &str, field: &str) -> Result<Val> {
-        // The gate's numbers are TERMS, not judges, so they have no accessor. Refused with the
+        // The gate's numbers are TERMS, not verifiers, so they have no accessor. Refused with the
         // spelling that works rather than aliased: one way to write each thing.
         if matches!(
             base,
             "rollbacks" | "consecutive_rollbacks" | "no_improvements" | "consecutive_no_improvements" | "no_changes"
                 | "consecutive_no_changes"
         ) {
-            bail!("`{base}` is a built-in number, not a judge — compare it directly: `{base} >= 2`, not `{base}.{field}`");
+            bail!("`{base}` is a built-in number, not a verifier — compare it directly: `{base} >= 2`, not `{base}.{field}`");
         }
-        let goal = match self.ctx.judge(base) {
+        let goal = match self.ctx.verifier(base) {
             Some(g) => g,
-            None => bail!("unknown judge `{base}` in condition (in `{base}.{field}`)"),
+            None => bail!("unknown verifier `{base}` in condition (in `{base}.{field}`)"),
         };
-        // `.ref` is the RATCHET's reference, not something the judge emitted — so it is answered by
-        // the gate, and only for a judge that has a ratchet.
+        // `.ref` is the RATCHET's reference, not something the verifier emitted — so it is answered by
+        // the gate, and only for a verifier that has a ratchet.
         if field == "ref" {
             return match self.ctx.gate.filter(|g| g.is_ratcheted(base)) {
                 Some(g) => Ok(g.state.reference(base).map_or(Val::Missing, Val::Num)),
@@ -330,22 +330,22 @@ impl<'a> Parser<'a> {
             };
         }
         // The FIELD NAME is checked before the verdict is read, and that order is load-bearing: at
-        // `validate` time no judge has run, so a bad accessor would otherwise short-circuit to
+        // `validate` time no verifier has run, so a bad accessor would otherwise short-circuit to
         // `Missing` and sail through startup.
         match field {
             "value" | "max" => {}
-            // `.target` is NOT an accessor, deliberately: a judge's target is presentational (it
+            // `.target` is NOT an accessor, deliberately: a verifier's target is presentational (it
             // draws the progress bar). A threshold has ONE owner — the condition. Two would
             // silently disagree, and the loop would obey the one you weren't reading.
             "target" => bail!(
-                "`{base}.target` is not readable — a judge's `target` is presentational only. \
+                "`{base}.target` is not readable — a verifier's `target` is presentational only. \
                  Put the threshold in the condition itself: `{base}.value >= <n>`"
             ),
-            other => bail!("unknown accessor `{base}.{other}` — a judge exposes `.value` and `.max` (and `.ref` when ratcheted)"),
+            other => bail!("unknown accessor `{base}.{other}` — a verifier exposes `.value` and `.max` (and `.ref` when ratcheted)"),
         }
 
-        // No verdict yet, the judge ERRORED, or it emitted no number => no usable number. `Missing`
-        // makes the comparison false; `any_judge_error` is what tells you the judge blew up. A real
+        // No verdict yet, the verifier ERRORED, or it emitted no number => no usable number. `Missing`
+        // makes the comparison false; `any_verifier_error` is what tells you the verifier blew up. A real
         // `Some(0.0)` is a MEASURED zero and stays a `Num`, so `coverage.value == 0` reads true and
         // is finally distinct from an absent number — the ceiling the old ponytail note flagged is
         // lifted now that `Verdict.value`/`max` are `Option<f64>` (§5.2).

@@ -8,7 +8,7 @@
 //! ```text
 //!   INJECT  next step from the sequence → state + steering → the worker's prompt
 //!   RUN     the fresh worker for THIS step's (agent, model, effort) — the ONE stochastic step
-//!   VERIFY  rlt runs the run-set judges itself, externally, against the (staged) filesystem
+//!   VERIFY  rlt runs the run-set verifiers itself, externally, against the (staged) filesystem
 //!   GATE    keep / roll back / stage the span · check done_if / abort_if · repeat
 //! ```
 //!
@@ -75,7 +75,7 @@ pub fn keeps_memory(ctx: &LoopState) -> bool {
 
 // ── the lifecycle registry (HOOK_REDESIGN §3.1/§5) ────────────────────────────────────────────
 // Handlers are `.add()`ed to hook points in code and dispatched in order by the loop — the seed of
-// "every task is a hook". rlt's own tasks (pick/compose/judges/gate/memory) are handlers too; only
+// "every task is a hook". rlt's own tasks (pick/compose/verifiers/gate/memory) are handlers too; only
 // the true scheduler control flow (over_max_sessions, worker_is_broken, the phase emits) stays core.
 //
 // The context a handler receives is the whole `LoopState` (§8: the context IS the run/session
@@ -180,11 +180,11 @@ impl Drop for StopHooks {
     }
 }
 
-/// Removes the project's judge scratch when the run ends, on every exit ([`crate::core::judge::sweep_scratch`]).
+/// Removes the project's verifier scratch when the run ends, on every exit ([`crate::core::verifier::sweep_scratch`]).
 pub(crate) struct SweepScratch(pub(crate) PathBuf);
 impl Drop for SweepScratch {
     fn drop(&mut self) {
-        crate::core::judge::sweep_scratch(&self.0);
+        crate::core::verifier::sweep_scratch(&self.0);
     }
 }
 
@@ -303,8 +303,8 @@ fn run_reported(
     let _policy = crate::isolation::run::register(&cfg, dir)?;
     let max_sessions_flag = opts.max_sessions;
     let ruler = cfg.ruler_backend()?;
-    let judge_model = cfg.judge_model(ruler);
-    let judge_timeout = cfg.judge.timeout;
+    let verifier_model = cfg.verifier_model(ruler);
+    let verifier_timeout = cfg.verifier.timeout;
 
     // rlt's built-in hook registration (HOOK_REDESIGN §5) — EVERY lifecycle point, no exceptions,
     // including the `pre_start` git preconditions below and on_start (now) / on_stop (Drop guard).
@@ -318,7 +318,7 @@ fn run_reported(
     let mut boot = Bootstrap { dir, cfg: &cfg, resume: opts.resume, iso_base: None };
     run_pre_start(&lifecycle.pre_start, &mut boot)?;
     let iso_base = boot.iso_base.expect("ResolveIsoBase set iso_base");
-    // what the judges grade against: a `scope: changed` metric judge measures the changes since it.
+    // what the verifiers grade against: a `scope: changed` metric verifier measures the changes since it.
     eng.base = Some(iso_base.clone());
 
     #[cfg(not(unix))]
@@ -328,7 +328,7 @@ fn run_reported(
     }
     // on_stop moves into the Drop guard so it fires on any exit incl. panic (its dispatcher).
     let _stop_hooks = StopHooks { handlers: std::mem::take(&mut lifecycle.on_stop) };
-    // declared after the stop hooks, so it drops first: the judges' scratch goes before `on_stop` fires.
+    // declared after the stop hooks, so it drops first: the verifiers' scratch goes before `on_stop` fires.
     let _sweep = SweepScratch(dir.to_path_buf());
 
     // A queue does not outlive the workflow it was meant for. Anything left in `in/` was sent to a
@@ -400,8 +400,8 @@ fn run_reported(
     let mut st = LoopState {
         cfg,
         ruler,
-        judge_model,
-        judge_timeout,
+        verifier_model,
+        verifier_timeout,
         dir: dir.to_path_buf(),
         config_base: config_base.to_path_buf(),
         eng,
@@ -473,7 +473,7 @@ fn drive(st: &mut LoopState, lifecycle: &Lifecycle, resume: Option<&crate::featu
 
     // ── the deterministic outer loop, one step at a time ──
     loop {
-        // A SIGTERM that landed while no worker was running (the baseline pass, a judge, a hook)
+        // A SIGTERM that landed while no worker was running (the baseline pass, a verifier, a hook)
         // killed nothing, so nothing returned early: without this check the next session would
         // launch and run to completion before the signal was noticed.
         if crate::os::signals::interrupted() {
@@ -615,7 +615,7 @@ impl StepStaging {
         use crate::driver::Landing;
         let rolled_back = st.scratch.get::<RLTScratch>().rolled_back;
         let landed = match &self.staged {
-            // a judged step whose merge was staged: the gate either kept it (it is on base now) or
+            // a verified step whose merge was staged: the gate either kept it (it is on base now) or
             // discarded it.
             Some((_, crate::git::StagedSession::Staged)) if !rolled_back => Landing::Base,
             Some((_, crate::git::StagedSession::Staged)) => Landing::RolledBack,
@@ -623,7 +623,7 @@ impl StepStaging {
             // NoChanges, whose verdicts already describe base, `GateKeepRollback` restored base
             // truth). No work landed anywhere.
             Some(_) => Landing::Nothing,
-            // no merge was staged: the driver/`skip_judges` path. The span tip says whether this
+            // no merge was staged: the driver/`skip_verifiers` path. The span tip says whether this
             // session's branch joined the open span or was discarded (a red_file veto); a session
             // that committed nothing joined it but brought nothing.
             None if self.on_span && !self.span_empty => Landing::Span,

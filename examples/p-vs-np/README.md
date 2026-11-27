@@ -2,7 +2,7 @@
 
 ⚠️ **This loop will NOT solve P ≠ NP. That's the point.** It showcases the whole rlt feature
 set on a famous problem: measurable partial progress, a check that can't be faked, a soundness
-guard that aborts on cheating, an LLM-judged paper, a **vendor-diverse `reconsider` step**, hooks,
+guard that aborts on cheating, an rubric-verified paper, a **vendor-diverse `reconsider` step**, hooks,
 and a token budget.
 
 The proof is written in **[Lean 4](https://lean-lang.org/)** — the formal proof assistant
@@ -13,20 +13,20 @@ lemmas* (real progress) and a paper.
 
 ## Layout
 
-**A judge IS a goal, resolved by NAME** from `rlt/judges/<name>.{sh,md}`.
-The name a judge is referenced by in `done_if` / `invariants` **is its filename**.
+**A verifier IS a goal, resolved by NAME** from `rlt/verifiers/<name>.{sh,md}`.
+The name a verifier is referenced by in `done_if` / `invariants` **is its filename**.
 
 ```
 p-vs-np/
-  proof/Basic.lean              # the Lean work the worker grows — at the project root (judges read it)
+  proof/Basic.lean              # the Lean work the worker grows — at the project root (verifiers read it)
   rlt/
-    rlt.yaml                    # defaults / judge / steps / sequence           — COMMITTED
+    rlt.yaml                    # defaults / verifier / steps / sequence           — COMMITTED
     RLT.md                    # stable scope / goal / rules the worker reads   — COMMITTED
-    judges/                     # the moat — a judge IS a goal, resolved by name — COMMITTED
+    verifiers/                     # the moat — a verifier IS a goal, resolved by name — COMMITTED
       proof_verified.sh         #   → the `proof_verified` name (was verify_proof.sh)
       lemmas_verified.sh        #   → the `lemmas_verified` name (was count_lemmas.sh)
       no_sorry.sh               #   → the `no_sorry` invariant
-      paper_written.md          #   an .md judge = an LLM rubric; inputs in its own frontmatter
+      paper_written.md          #   an .md verifier = an LLM rubric; inputs in its own frontmatter
     state/                      # runtime the WORKER writes — GITIGNORED (survives a session rollback)
       STATE.md                  #   worker-curated forward "what to do next" advice
       sessions/                 #   transient per-session worker scratch notes
@@ -39,7 +39,7 @@ p-vs-np/
 ```
 
 Both runtime dirs are gitignored and regenerated as the loop runs — you ship only `RLT.md` and the
-judges. They are split by **who may write them**: if the worker writing a file could change when the
+verifiers. They are split by **who may write them**: if the worker writing a file could change when the
 loop ends, what it may spend, or what rlt believes happened, it is `private/`. On a run this long
 that matters — `stalled` gates the `reconsider` step off `verdicts.jsonl`, and under `isolation:
 sandbox` the ledger is carved out of the worker's writable set so it cannot forge its way past the
@@ -53,19 +53,19 @@ writes are denied. On a long run like this one, `rlt/state/wiki/` gives the work
 compile what it learns (rejected proof routes, key lemma shapes) that outlives every session rollback
 — and it stays worker-writable, because that knowledge base is the worker's to author.
 
-The `.md` judge is the LLM-as-judge: **the file IS the rubric**, and it declares what it reads in a
+The `.md` verifier is the rubric verifier: **the file IS the rubric**, and it declares what it reads in a
 YAML frontmatter (`inputs: ["PAPER.md"]`) — one self-contained file, no registry, no `kind:` tag.
 The `.sh`/`.md` extension is what decides script-vs-LLM.
 
 ## Features demonstrated
-- **numeric judge** `lemmas_verified` — emits `value`/`max`, so the dashboard shows `N/20` climbing
+- **numeric verifier** `lemmas_verified` — emits `value`/`max`, so the dashboard shows `N/20` climbing
   (and `done_if` could read the number directly with the accessor `lemmas_verified.value >= 20`)
-- **binary judge** `proof_verified` — the (unreachable) prize
-- **LLM judge** `paper_written` — an `.md` rubric graded on the cheap RULER model
+- **binary verifier** `proof_verified` — the (unreachable) prize
+- **rubric verifier** `paper_written` — an `.md` rubric graded on the cheap RULER model
 - **invariant** `no_sorry` + **`abort_if: any_regressed(invariants)`** — aborts the run if it cheats
 - **per-step agents** — an Opus grunt loop bounded by `until: "NOT stalled", max: 4`, falling through
   to `reconsider` on a **different vendor (Codex)**: a Claude rabbit hole is not necessarily a Codex one
-- **`skip_judges`** on the reconsider step — nothing merges; its work stages and the next worker gates it
+- **`skip_verifiers`** on the reconsider step — nothing merges; its work stages and the next worker gates it
 - **hooks** (`on_start: lake build`) — wires the Lean toolchain (rlt stays tool-agnostic)
 - **budget** ceiling — a hopeless run can't run forever
 
@@ -74,11 +74,11 @@ The `.sh`/`.md` extension is what decides script-vs-LLM.
 # 1. install Lean 4 + lake (elan): https://lean-lang.org/  then `lake init` / add Mathlib
 # 2. authenticate Codex too (the reconsider step drives it), or change that step to `claude`
 rlt doctor      # checks BOTH agents the sequence names, and that budget (not cost) is the guard
-rlt plan        # dry run: evaluate every judge once, print the scoreboard
+rlt plan        # dry run: evaluate every verifier once, print the scoreboard
 rlt run         # watch lemmas_verified climb; it will not reach proof_verified
 ```
 
-`rlt plan` prints a scoreboard even before Lean is installed (the Lean judges just report "does not
+`rlt plan` prints a scoreboard even before Lean is installed (the Lean verifiers just report "does not
 build yet"):
 
 ```
@@ -90,20 +90,20 @@ Goals: 1/3   done_if: proof_verified AND paper_written
 ```
 
 Note the scoreboard is **1/3** (the Definition-of-Done set: `proof_verified`, `paper_written`,
-`no_sorry`) while **4 judges** ran — `stalled` is evaluated because it bounds the worker repeat
+`no_sorry`) while **4 verifiers** ran — `stalled` is evaluated because it bounds the worker repeat
 (`until: "NOT stalled"`), but it is not part of the DoD, so it never counts toward "done".
 
 ## The two moats on show
 
-**1. The judge is unfakeable.** `proof_verified.sh` requires `lake build` to succeed AND the
+**1. The verifier is unfakeable.** `proof_verified.sh` requires `lake build` to succeed AND the
 soundness check to pass. `no_sorry.sh` forbids gap placeholders (`sorry`/`admit`), hand-declared
 `axiom`s, and unsound escape hatches (`native_decide`/`ofReduceBool`) — the loopholes a
-"just make the judge green" worker will reach for. Because rlt runs the judge and the worker never
+"just make the verifier green" worker will reach for. Because rlt runs the verifier and the worker never
 does, none of it can be gamed from inside a session.
 
 ```bash
 #!/usr/bin/env bash
-# rlt/judges/proof_verified.sh (abridged) — lake builds AND the soundness check passes.
+# rlt/verifiers/proof_verified.sh (abridged) — lake builds AND the soundness check passes.
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$(lake build 2>&1)"; rc=$?
 sound_met="$("$here/no_sorry.sh" | grep -o '"met":[a-z]*' | head -1 | cut -d: -f2)"
@@ -118,7 +118,7 @@ fi
 Opus). The repeat ends the moment `stalled` clears, so the next entry is reached only when the run
 made no verdict progress across the last few merged steps for four sessions running — then the
 sequence steps back on **Codex**, told to assume the current route is a dead end and name a different
-one. Its `skip_judges: true` means nothing merges from that step: the work stages,
+one. Its `skip_verifiers: true` means nothing merges from that step: the work stages,
 and the next worker step gates the whole span. The rejected routes reach institutional memory
 (`rlt/private/LOG.md`, rlt-owned) through the worker's scratch note in `rlt/state/sessions/`, so no
 future session repeats them. That indirection is the point of the split: the note is the worker's to
@@ -130,7 +130,7 @@ steps:
   reconsider:
     agent: "codex"               # a DIFFERENT VENDOR — perspective diversity breaks a local optimum
     prompt: "Assume the current strategy is a dead end. Name 2-3 different routes…"
-    skip_judges: true            # stages; the next worker step gates it
+    skip_verifiers: true            # stages; the next worker step gates it
 sequence:
   steps:
     - { step: worker, until: "NOT stalled", max: 4 }
@@ -150,10 +150,10 @@ The config names two agents already (`claude` worker, `codex` reconsider). To ch
 `rlt doctor` checks **every** agent the sequence names, not just one.
 
 ## Files
-- `rlt/rlt.yaml` — defaults/judge/steps/sequence: two agents, a stall-triggered reconsider, budget
+- `rlt/rlt.yaml` — defaults/verifier/steps/sequence: two agents, a stall-triggered reconsider, budget
 - `rlt/RLT.md` — the stable scope / goal / rules the worker reads for orientation (committed)
-- `rlt/judges/proof_verified.sh` — Lean compiles + no smuggled assumptions → the real check
-- `rlt/judges/lemmas_verified.sh` — counts Lean-verified, sorry-free lemmas (partial progress)
-- `rlt/judges/no_sorry.sh` — the soundness invariant (aborts on sorry/admit/axiom)
-- `rlt/judges/paper_written.md` — the LLM rubric (honesty is the pass criterion)
+- `rlt/verifiers/proof_verified.sh` — Lean compiles + no smuggled assumptions → the real check
+- `rlt/verifiers/lemmas_verified.sh` — counts Lean-verified, sorry-free lemmas (partial progress)
+- `rlt/verifiers/no_sorry.sh` — the soundness invariant (aborts on sorry/admit/axiom)
+- `rlt/verifiers/paper_written.md` — the LLM rubric (honesty is the pass criterion)
 - `proof/Basic.lean` — starter Lean file (the worker grows it)

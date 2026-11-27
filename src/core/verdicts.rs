@@ -2,14 +2,14 @@
 //! RESOLVES (§5.8). Safety-critical GATE state, not an audit log: the gate's "was met" (§5.7)
 //! reads it, so a failed write is a **hard error**, not a swallowed line.
 //!
-//! Nothing else records *when a judge last ran that stuck*: `state.json` is overwritten every
+//! Nothing else records *when a verifier last ran that stuck*: `state.json` is overwritten every
 //! publish, `project.json` holds per-run rows with no verdicts, and `Goal.last_verdict` is
 //! `#[serde(skip)]` — RAM only, reset to `Pending` every restart. This file is the from-zero
 //! build that makes "was met" durable and cross-run.
 //!
 //! Each line is a NEW ENVELOPE wrapping a [`Verdict`] (which carries no `ts`/`session`/`step`),
 //! stamped by the GATE with the session's final disposition. Only the **loop process** writes it
-//! — `run.pid` already forbids a second loop, so there is no lock. `rlt plan` and `rlt judge`
+//! — `run.pid` already forbids a second loop, so there is no lock. `rlt plan` and `rlt verifier`
 //! write nothing: they are not the loop.
 
 use crate::core::model::Verdict;
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// What the GATE decided about the session that produced a verdict. Rows are stamped once the
-/// session's fate is known (§5.8) — never at judge time. Only `Merged`/`Baseline` rows count as
+/// session's fate is known (§5.8) — never at verifier time. Only `Merged`/`Baseline` rows count as
 /// "was met"; `RolledBack` describes code that did not land, `Staged` is unmerged span work,
 /// `NoChanges` a session that left base exactly as it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,9 +30,9 @@ pub enum Outcome {
     Baseline,
     /// the session's staged merge was kept.
     Merged,
-    /// a previously-met judge regressed → the whole session's merge was discarded.
+    /// a previously-met verifier regressed → the whole session's merge was discarded.
     RolledBack,
-    /// a `skip_judges` span's verdicts while it is unmerged (§5.7/§5.8). Re-appended as `merged`
+    /// a `skip_verifiers` span's verdicts while it is unmerged (§5.7/§5.8). Re-appended as `merged`
     /// when the span later merges; readers of "was met" and `stalled` ignore `staged` rows.
     Staged,
     /// `sequence.merge_requires_improvement` refused the merge: nothing regressed and nothing
@@ -51,19 +51,19 @@ pub enum Outcome {
 pub struct VerdictRecord {
     /// the session that produced it; `None` for the baseline pass (§5.5.1).
     pub session: Option<u32>,
-    /// which step's session ran the judge (§5.4 step name).
+    /// which step's session ran the verifier (§5.4 step name).
     pub step: String,
-    /// the judge / goal id.
-    pub judge: String,
+    /// the verifier / goal id.
+    pub verifier: String,
     pub met: bool,
-    /// absent (skipped) preserves "the judge emitted no number" vs a real measured `0` — the
+    /// absent (skipped) preserves "the verifier emitted no number" vs a real measured `0` — the
     /// distinction `model::Verdict` is careful about and `verdicts.jsonl` must keep faithfully.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
     pub target: f64,
-    /// set when the judge could not grade (§5.2). An errored row is recorded (the error text is
+    /// set when the verifier could not grade (§5.2). An errored row is recorded (the error text is
     /// the whole point of keeping the breakage loud) but is NEVER authoritative for "was met".
     #[serde(default)]
     pub error: Option<String>,
@@ -72,15 +72,15 @@ pub struct VerdictRecord {
     #[serde(default)]
     pub evidence: Vec<String>,
     /// the copies rlt kept of `evidence`, project-relative
-    /// (`rlt/private/evidence/<run>/<session>/<judge>/…`). Absent when nothing was kept.
+    /// (`rlt/private/evidence/<run>/<session>/<verifier>/…`). Absent when nothing was kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_saved: Vec<String>,
     /// `<declared>: <reason>` for each `evidence` entry rlt did not keep — refused (outside the
-    /// judge scratch and the project), missing, or over the size cap. Absent when none.
+    /// verifier scratch and the project), missing, or over the size cap. Absent when none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_skipped: Vec<String>,
     pub outcome: Outcome,
-    /// set when the GATE held this judge to its ratchet and it regressed: the reference it was held
+    /// set when the GATE held this verifier to its ratchet and it regressed: the reference it was held
     /// to (`from`) and what it measured (`to`, absent when it errored or emitted no number). Absent
     /// on every other row, so a ledger written before the ratchet existed reads unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,8 +101,8 @@ pub struct RatchetMark {
     pub to: Option<f64>,
 }
 
-/// The gate's durable "was met" (§5.7): for each judge, whether its most recent LANDED, GRADED
-/// verdict was met. A judge absent from the map has no such row — it was never met, so it cannot
+/// The gate's durable "was met" (§5.7): for each verifier, whether its most recent LANDED, GRADED
+/// verdict was met. A verifier absent from the map has no such row — it was never met, so it cannot
 /// regress. Reads ONLY `merged`/`baseline` rows and ignores errored ones: a rolled-back verdict
 /// describes code that did not land, and "could not grade" (§5.2) is not "not met".
 ///
@@ -115,9 +115,9 @@ pub fn landed_met(dir: &Path) -> HashMap<String, bool> {
     };
     for line in text.lines() {
         let Ok(r) = serde_json::from_str::<VerdictRecord>(line) else { continue };
-        // forward scan → the last matching row for a judge wins (the most recent).
+        // forward scan → the last matching row for a verifier wins (the most recent).
         if r.error.is_none() && !r.vacuous && matches!(r.outcome, Outcome::Merged | Outcome::Baseline) {
-            out.insert(r.judge, r.met);
+            out.insert(r.verifier, r.met);
         }
     }
     out
@@ -141,21 +141,21 @@ impl VerdictRecord {
     }
 }
 
-/// Every recorded row for ONE judge, oldest first — what a native judge reads through
-/// [`crate::core::model::JudgeCtx::history`] / `previous`.
+/// Every recorded row for ONE verifier, oldest first — what a native verifier reads through
+/// [`crate::core::model::VerifierCtx::history`] / `previous`.
 ///
 /// `landed_only` keeps just the rows that describe work that actually LANDED and was gradeable
 /// (`merged`/`baseline`, no `error`) — the identical filter [`landed_met`] applies, so a native
-/// judge and the regression gate agree on what "before" means by construction.
+/// verifier and the regression gate agree on what "before" means by construction.
 ///
 /// A missing or rubbish file is honestly "no history", never a crash.
-pub fn rows_for(dir: &Path, judge: &str, landed_only: bool) -> Vec<VerdictRecord> {
+pub fn rows_for(dir: &Path, verifier: &str, landed_only: bool) -> Vec<VerdictRecord> {
     let Ok(text) = std::fs::read_to_string(crate::paths::verdicts_jsonl(dir)) else {
         return Vec::new();
     };
     text.lines()
         .filter_map(|l| serde_json::from_str::<VerdictRecord>(l).ok())
-        .filter(|r| r.judge == judge)
+        .filter(|r| r.verifier == verifier)
         .filter(|r| !landed_only || (r.error.is_none() && !r.vacuous && matches!(r.outcome, Outcome::Merged | Outcome::Baseline)))
         .collect()
 }
@@ -179,8 +179,8 @@ pub fn append(
     append_marked(dir, session, step, verdicts, outcome, &[])
 }
 
-/// [`append`], stamping each row whose judge is in `ratchet` with its [`RatchetMark`] — the gate's
-/// record that the judge regressed its ratchet, naming the old and the new value.
+/// [`append`], stamping each row whose verifier is in `ratchet` with its [`RatchetMark`] — the gate's
+/// record that the verifier regressed its ratchet, naming the old and the new value.
 pub fn append_marked(
     dir: &Path,
     session: Option<u32>,
@@ -193,7 +193,7 @@ pub fn append_marked(
 }
 
 /// [`append_marked`], also stamping each row with the evidence rlt kept for that verdict — `kept`
-/// maps a judge to its `(saved, skipped)` lists, as [`VerdictRecord::evidence_saved`] states them.
+/// maps a verifier to its `(saved, skipped)` lists, as [`VerdictRecord::evidence_saved`] states them.
 pub fn append_full(
     dir: &Path,
     session: Option<u32>,
@@ -217,11 +217,11 @@ pub fn append_full(
         .append(true)
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
-    for (judge, v) in verdicts {
+    for (verifier, v) in verdicts {
         let rec = VerdictRecord {
             session,
             step: step.to_string(),
-            judge: judge.clone(),
+            verifier: verifier.clone(),
             met: v.met,
             value: v.value,
             max: v.max,
@@ -229,12 +229,12 @@ pub fn append_full(
             error: v.error.clone(),
             rationale: v.rationale.clone(),
             evidence: v.evidence.clone(),
-            evidence_saved: kept.get(judge).map(|k| k.0.clone()).unwrap_or_default(),
-            evidence_skipped: kept.get(judge).map(|k| k.1.clone()).unwrap_or_default(),
+            evidence_saved: kept.get(verifier).map(|k| k.0.clone()).unwrap_or_default(),
+            evidence_skipped: kept.get(verifier).map(|k| k.1.clone()).unwrap_or_default(),
             outcome,
             ratchet: ratchet
                 .iter()
-                .find(|r| &r.judge == judge)
+                .find(|r| &r.verifier == verifier)
                 .map(|r| RatchetMark { from: r.from, to: r.to }),
             vacuous: v.vacuous,
             ts,
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn an_errored_landed_row_is_not_authoritative() {
-        // §5.2: a judge that could not grade said "I don't know", not "not met". Its row is kept
+        // §5.2: a verifier that could not grade said "I don't know", not "not met". Its row is kept
         // for the audit trail but must not flip 'was met' off.
         let d = tmpdir("errored");
         append(&d, None, "baseline", &[("build".into(), v(true))], Outcome::Baseline).unwrap();
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn a_judge_with_no_landed_row_was_never_met() {
+    fn a_verifier_with_no_landed_row_was_never_met() {
         // The freshness floor: never-met → cannot regress. No file, then only a rolled_back row.
         let d = tmpdir("never");
         assert!(!landed_met(&d).contains_key("ghost"), "no file → no history");
@@ -372,14 +372,14 @@ mod tests {
         assert!(!crate::paths::verdicts_jsonl(&d).exists(), "no verdicts → no file created");
     }
 
-    /// A ratchet regression is RECORDED on the row of the judge that regressed — judge, old value
+    /// A ratchet regression is RECORDED on the row of the verifier that regressed — verifier, old value
     /// and new value — and on no other row; an unmarked row reads back exactly as before.
     #[test]
     fn a_ratchet_regression_is_recorded_with_its_old_and_new_value() {
         let d = tmpdir("ratchet");
         let regs = [
-            RatchetRegression { judge: "cc".into(), from: Some(10.0), to: Some(12.5) },
-            RatchetRegression { judge: "mut".into(), from: Some(71.0), to: None },
+            RatchetRegression { verifier: "cc".into(), from: Some(10.0), to: Some(12.5) },
+            RatchetRegression { verifier: "mut".into(), from: Some(71.0), to: None },
         ];
         let rows = [("cc".to_string(), v(true)), ("mut".to_string(), Verdict::failed("boom")), ("ok".to_string(), v(true))];
         append_marked(&d, Some(3), "worker", &rows, Outcome::RolledBack, &regs).unwrap();
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(text.matches("\"ratchet\"").count(), 2, "only the regressed rows carry a mark: {text}");
     }
 
-    /// The kept evidence is stamped on the row of the judge it was kept for, and on no other row —
+    /// The kept evidence is stamped on the row of the verifier it was kept for, and on no other row —
     /// a row with nothing kept carries neither key, so an old ledger reads unchanged.
     #[test]
     fn kept_evidence_is_stamped_on_its_own_row_only() {
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn absent_value_stays_absent_on_the_wire() {
-        // A numberless judge ({"met":true}) must NOT invent a 0 on disk — the same faithfulness
+        // A numberless verifier ({"met":true}) must NOT invent a 0 on disk — the same faithfulness
         // model::Verdict guarantees.
         let d = tmpdir("absent");
         let numberless = Verdict {

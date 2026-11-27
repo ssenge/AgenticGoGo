@@ -22,8 +22,8 @@ impl Proc {
             let prepared = format!("{} document", ctx.label);
             let key = format!("{}-document", ctx.key);
             self.register(&prepared, &key, &key, &ctx.num.phase_id);
-            let judge = self.judge(ctx, Some(&key), prepare)?;
-            self.script_step(&prepared, &judge)?;
+            let verifier = self.verifier(ctx, Some(&key), prepare)?;
+            self.script_step(&prepared, &verifier)?;
         }
         // one the run skips weighs nothing: its open points wait for the next checkpoint that asks
         if !self.reaches(ctx) {

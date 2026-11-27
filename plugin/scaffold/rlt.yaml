@@ -1,5 +1,5 @@
-# rlt.yaml — harness + steps + sequence. One file: a judge IS a goal, resolved by NAME from
-# rlt/judges/<name>.{sh,md} (then ~/.rlt/judges/).
+# rlt.yaml — harness + steps + sequence. One file: a verifier IS a goal, resolved by NAME from
+# rlt/verifiers/<name>.{sh,md} (then ~/.rlt/verifiers/).
 project: "my-project"
 
 # Inherited by EVERY step; a step body may override any of these.
@@ -7,16 +7,16 @@ defaults:
   agent: "{{AGENT}}"
 {{MODEL_LINE}}{{EFFORT_LINE}}  state: "state/STATE.md"          # forward "what to do next" file the AGENT maintains (under rlt/, gitignored)
 
-# THE RULER — runs the LLM judges + the summarizer. Immutable; naming any of these in a step is a
+# THE RULER — runs the rubric verifiers + the summarizer. Immutable; naming any of these in a step is a
 # HARD ERROR (a grader that moves makes verdicts incomparable across cycles).
-judge:
+verifier:
   agent: "{{AGENT}}"
-{{JUDGE_MODEL}}  timeout: 300                     # seconds, EVERY judge (script + LLM)
+{{VERIFIER_MODEL}}  timeout: 300                     # seconds, EVERY verifier (script + LLM)
 
 # The step palette. The NAME is your own label; the body is overrides only. A step may also carry
 # `role_prompt:` (generic role framing, e.g. a red-team "reconsider" step) and `prompt:` (its
 # specific ask) — both are composed into the per-session brief above the context. Example:
-#   reconsider: { skip_judges: true, role_prompt: "Step back — assume the current approach is wrong.",
+#   reconsider: { skip_verifiers: true, role_prompt: "Step back — assume the current approach is wrong.",
 #                 prompt: "Name 2-3 different approaches, pick one, record the rejected ones + why." }
 steps:
   worker: {}                       # pure defaults
@@ -27,17 +27,17 @@ sequence:
     - "worker"                     # run `worker`, forever, until done_if fires
   # Run-level ceilings, unified under one block — each null = unlimited.
   limits:
-    tokens: null                   # output-token ceiling — worker AND judge spend → over_budget
+    tokens: null                   # output-token ceiling — worker AND verifier spend → over_budget
 {{COST_LINE}}    sessions: null                 # session cap → over_iterations (or pass `rlt run --max-sessions <n>`)
-  gate_regressions: true           # roll a session back if a previously-met judge regresses
-  invariants: []                   # judge names that must STAY met
-  done_if: "tests_pass"            # your Definition of Done — judge names, all_goals, count_met, …
+  gate_regressions: true           # roll a session back if a previously-met verifier regresses
+  invariants: []                   # verifier names that must STAY met
+  done_if: "tests_pass"            # your Definition of Done — verifier names, all_goals, count_met, …
   abort_if: "over_budget{{OVER_COST}} OR over_iterations OR work_time >= 14400"
   # OPTIONAL — the NON-TERMINAL twin of abort_if: when it fires rlt runs `notify.cmd` and the loop
-  # KEEPS RUNNING (a human is a side-channel, never a gate). STAYS COMMENTED: `stuck` is a judge YOU
-  # author, and naming a judge that resolves to no file is a HARD startup error — this file must run
-  # with zero edits. `notify_if: "stalled"` needs no authoring (shipped judge) if you want it today.
-  # {{reason}} is the firing judge's rationale, shell-quoted BY rlt — never add quotes of your own.
+  # KEEPS RUNNING (a human is a side-channel, never a gate). STAYS COMMENTED: `stuck` is a verifier YOU
+  # author, and naming a verifier that resolves to no file is a HARD startup error — this file must run
+  # with zero edits. `notify_if: "stalled"` needs no authoring (shipped verifier) if you want it today.
+  # {{reason}} is the firing verifier's rationale, shell-quoted BY rlt — never add quotes of your own.
   # Delivery is FOREGROUND and untimed, so bound every command (`curl --max-time 10`, `timeout 10 …`):
   # an unbounded curl against a wedged host stalls the loop, the exact thing this clause avoids.
   # notify_if: "stuck.value >= 85"
@@ -45,9 +45,9 @@ sequence:
 
 # ── IF THIS FILE EVER STOPS BEING ENOUGH ─────────────────────────────────────────────────────
 # The `sequence:` above is a list that laps forever. It cannot branch on a verdict, and every
-# run-set judge runs after every judged step — so a 40-minute check runs on the cycles where the
+# run-set verifier runs after every verified step — so a 40-minute check runs on the cycles where the
 # build is already red. When that starts costing you, the same engine has a Rust driver API:
-# `rlt.step()` / `rlt.judge()` / `rlt.gate()` from ordinary Rust, where `&&` short-circuits and an
+# `rlt.step()` / `rlt.verifier()` / `rlt.gate()` from ordinary Rust, where `&&` short-circuits and an
 # `if` skips a step. It is heavier and Rust-only — stay here unless you need it.
 #   → docs/RUST_API.md, examples/workflow.rs
 # (COMMENTED ON PURPOSE: this file must run with zero edits.)

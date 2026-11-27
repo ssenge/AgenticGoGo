@@ -36,10 +36,10 @@ pub struct Process {
     /// named write-deny lists, referenced by name in `deny:` lists
     #[serde(default)]
     pub deny: BTreeMap<String, Vec<String>>,
-    /// declared judges (A-38): a `metric:` or `score:` over swe-metrics, or a `command:` met by its exit code, by
-    /// name; a step's `checks` and the hooks files name them as `{ judge: <name> }`
+    /// declared verifiers (A-38): a `metric:` or `score:` over swe-metrics, or a `command:` met by its exit code, by
+    /// name; a step's `checks` and the hooks files name them as `{ verifier: <name> }`
     #[serde(default)]
-    pub judges: BTreeMap<String, crate::core::config::JudgeOverride>,
+    pub verifiers: BTreeMap<String, crate::core::config::VerifierOverride>,
     #[serde(default)]
     pub task_force: Option<TaskForceSpec>,
     #[serde(default)]
@@ -124,7 +124,7 @@ impl Dirs {
         "prompts".into()
     }
     fn reviews() -> String {
-        "judges".into()
+        "verifiers".into()
     }
 }
 
@@ -181,7 +181,7 @@ pub struct RltSpec {
     /// the operator's own plugins, hooks and connectors in the workers' sessions: off by default
     #[serde(default)]
     pub user_settings: bool,
-    /// the keys of the operator's settings `env` block the Claude workers and judges get without loading the rest of
+    /// the keys of the operator's settings `env` block the Claude workers and verifiers get without loading the rest of
     /// those settings: `false` (none, the default), `true` (every key) or a list of key names; the environment of rlt
     /// itself wins over the file
     #[serde(default)]
@@ -193,9 +193,9 @@ pub struct RltSpec {
     /// `annotate` (record a regression, keep the work) or `rollback`
     #[serde(default = "RltSpec::annotate")]
     pub on_regression: String,
-    /// a judge's time limit, seconds
+    /// a verifier's time limit, seconds
     #[serde(default = "RltSpec::timeout")]
-    pub judge_timeout: u64,
+    pub verifier_timeout: u64,
 }
 
 impl RltSpec {
@@ -213,7 +213,7 @@ impl RltSpec {
 impl Default for RltSpec {
     fn default() -> RltSpec {
         RltSpec { memory: false, user_settings: false, user_env: Default::default(), preflight: true,
-                  on_regression: RltSpec::annotate(), judge_timeout: RltSpec::timeout() }
+                  on_regression: RltSpec::annotate(), verifier_timeout: RltSpec::timeout() }
     }
 }
 
@@ -247,7 +247,7 @@ pub struct RunSpec {
     #[serde(default)]
     pub leftovers: bool,
     #[serde(default)]
-    pub judge_cache: Option<JudgeCache>,
+    pub verifier_cache: Option<VerifierCache>,
     #[serde(default)]
     pub hooks: Option<HooksSpec>,
     /// a command whose stdout is appended to an auto-approval's record entry
@@ -323,7 +323,7 @@ impl InputsSpec {
 /// A script check's verdict cache: a met verdict is reused on the same content within a run.
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct JudgeCache {
+pub struct VerifierCache {
     /// files whose changes don't change what a check reads (a worker's notes)
     #[serde(default)]
     pub ignore: Vec<String>,
@@ -522,16 +522,16 @@ impl OneOrMany {
 #[serde(untagged)]
 pub enum Check {
     Command(String),
-    /// a judge the process file declares under `judges:`
+    /// a verifier the process file declares under `verifiers:`
     Declared(DeclaredCheck),
     Full(CheckSpec),
 }
 
-/// A check that names a declared judge: `{ judge: <name> }`, optionally `when: last` inside an `each`.
+/// A check that names a declared verifier: `{ verifier: <name> }`, optionally `when: last` inside an `each`.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeclaredCheck {
-    pub judge: String,
+    pub verifier: String,
     pub when: Option<String>,
 }
 
@@ -546,7 +546,7 @@ pub struct CheckSpec {
 }
 
 impl Check {
-    /// The command of a check that runs one; none for a declared judge.
+    /// The command of a check that runs one; none for a declared verifier.
     pub fn command(&self) -> Option<&str> {
         match self {
             Check::Command(c) => Some(c),
@@ -554,10 +554,10 @@ impl Check {
             Check::Full(f) => Some(&f.run),
         }
     }
-    /// The declared judge a check names, if it does.
-    pub fn judge(&self) -> Option<&str> {
+    /// The declared verifier a check names, if it does.
+    pub fn verifier(&self) -> Option<&str> {
         match self {
-            Check::Declared(d) => Some(&d.judge),
+            Check::Declared(d) => Some(&d.verifier),
             _ => None,
         }
     }
@@ -651,7 +651,7 @@ mod tests {
     fn a_process_parses_and_a_typo_is_refused() {
         let text = "version: 1\nphases:\n- id: a\n  name: A\n  steps:\n  - { id: s, name: S, kind: script, run: x.sh }\n";
         let p = Process::parse(text).unwrap();
-        assert_eq!((p.phases[0].steps[0].kind, p.dirs.prompts.as_str(), p.rlt.judge_timeout), (Kind::Script, "prompts", 3600));
+        assert_eq!((p.phases[0].steps[0].kind, p.dirs.prompts.as_str(), p.rlt.verifier_timeout), (Kind::Script, "prompts", 3600));
         let err = Process::parse(&text.replace("run:", "runn:")).unwrap_err().to_string();
         assert!(err.contains("runn"), "{err}");
         assert!(Process::parse(&text.replace("version: 1", "version: 2")).is_err());
@@ -665,16 +665,16 @@ mod tests {
         assert_eq!(step.when.unwrap().all(), ["a", "b"]);
         assert!(matches!(step.review, Some(Review::On(true))));
         assert!(!step.checks[0].last_only() && step.checks[1].last_only() && step.checks[1].command() == Some("y.sh"));
-        let one: Step = serde_yaml::from_str("{ id: s, name: S, kind: script, when: x, review: judges/r.md }").unwrap();
+        let one: Step = serde_yaml::from_str("{ id: s, name: S, kind: script, when: x, review: verifiers/r.md }").unwrap();
         assert_eq!(one.when.unwrap().all(), ["x"]);
     }
 
-    /// A check names a declared judge, alone or with `when: last`; an unknown key of it is refused.
+    /// A check names a declared verifier, alone or with `when: last`; an unknown key of it is refused.
     #[test]
-    fn a_check_can_name_a_declared_judge() {
-        let step: Step = serde_yaml::from_str("{ id: s, name: S, kind: agent, checks: [{ judge: tests }, { judge: p, when: last }] }").unwrap();
-        assert_eq!((step.checks[0].judge(), step.checks[0].command()), (Some("tests"), None));
+    fn a_check_can_name_a_declared_verifier() {
+        let step: Step = serde_yaml::from_str("{ id: s, name: S, kind: agent, checks: [{ verifier: tests }, { verifier: p, when: last }] }").unwrap();
+        assert_eq!((step.checks[0].verifier(), step.checks[0].command()), (Some("tests"), None));
         assert!(step.checks[1].last_only() && !step.checks[0].last_only());
-        assert!(serde_yaml::from_str::<Step>("{ id: s, name: S, kind: agent, checks: [{ judge: t, run: x }] }").is_err());
+        assert!(serde_yaml::from_str::<Step>("{ id: s, name: S, kind: agent, checks: [{ verifier: t, run: x }] }").is_err());
     }
 }

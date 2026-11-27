@@ -1,5 +1,5 @@
 //! Running a step's ladder (A-37): its tiers, first to last, each working on what the one
-//! before left and judged by the step's own checks and critic. The first tier that meets them ends it; an unmet one
+//! before left and verified by the step's own checks and critic. The first tier that meets them ends it; an unmet one
 //! hands over to the next; the last one goes to the task force as a step always did. A re-entry with a note starts one
 //! tier above the one the step reached.
 
@@ -9,7 +9,7 @@ use super::exec::Ctx;
 use super::ladder::{AgentTier, Mode, TierSpec};
 use super::proc::Proc;
 use super::settings::StepSettings;
-use crate::core::model::{Judge, Verdict};
+use crate::core::model::{Verifier, Verdict};
 use crate::driver::Fatal;
 use crate::workflow::{commit, Outcome, Task, When};
 
@@ -25,7 +25,7 @@ pub const DECIDE_MAX: usize = 3;
 pub struct Ladder<'a> {
     pub ctx: &'a Ctx<'a>,
     pub base: Task,
-    pub critic: Option<Judge>,
+    pub critic: Option<Verifier>,
     pub settings: &'a StepSettings,
     pub repairs: usize,
 }
@@ -107,7 +107,7 @@ impl Proc {
     /// met then, it is done.
     fn ladder_failed(&self, l: &Ladder, why: &str) -> Result<Outcome, Fatal> {
         self.recover(&l.ctx.label, why, &|| {
-            let verdict = self.judged(l);
+            let verdict = self.verified(l);
             Ok((!verdict.met()).then(|| verdict.rationale().to_string()))
         })?;
         self.record(&l.ctx.label, "done", true, "met after the task force's repair in place");
@@ -116,7 +116,7 @@ impl Proc {
     }
 
     /// A tool tier: the tool changes the step's work (`ladder.tool_run`), the change is committed, and the step's
-    /// after-hooks and checks judge it; met, the step is done without an agent session.
+    /// after-hooks and checks verifier it; met, the step is done without an agent session.
     fn tool_tier(&self, l: &Ladder, tool: &str) -> Result<Outcome, Fatal> {
         let (ctx, label) = (l.ctx, l.ctx.label.as_str());
         let (Some(item), Some(spec)) = (&ctx.item, &self.shared.spec.ladder) else {
@@ -130,9 +130,9 @@ impl Proc {
         }
         let slug: String = tool.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
         let command = self.render(ctx, &spec.tool_run)?.replace("{tool}", tool);
-        // the item in the name: rlt memoizes a verdict by its judge's name, and one item's run isn't another's
-        let judge = self.judge(ctx, Some(&format!("tool-tier-{}-{slug}", item.key)), &command)?;
-        let ran = self.judge_now(&judge);
+        // the item in the name: rlt memoizes a verdict by its verifier's name, and one item's run isn't another's
+        let verifier = self.verifier(ctx, Some(&format!("tool-tier-{}-{slug}", item.key)), &command)?;
+        let ran = self.verifier_now(&verifier);
         let commits = spec.tool_commits.iter().map(|p| self.render(ctx, p)).collect::<Result<Vec<_>, _>>()?;
         commit_existing(&self.project, &commits, &format!("{label}: {tool}"))?;
         if ran.met() && ran.value == Some(0.0) {
@@ -141,7 +141,7 @@ impl Proc {
         if !ran.met() {
             return Ok(Outcome::Unmet(format!("{tool}: {}", ran.rationale())));
         }
-        let verdict = self.judged(l);
+        let verdict = self.verified(l);
         if !verdict.met() {
             return Ok(Outcome::Unmet(format!("after {tool} ({}): {}", ran.rationale(), verdict.rationale())));
         }
@@ -153,30 +153,30 @@ impl Proc {
         Ok(Outcome::Done)
     }
 
-    /// rlt's judge call on a judge (the flow derefs to it; named apart from a step's own `judge` here).
-    pub(super) fn judge_now(&self, j: &Judge) -> Verdict {
-        crate::driver::Relentless::judge(self, j)
+    /// rlt's verifier call on a verifier (the flow derefs to it; named apart from a step's own `verifier` here).
+    pub(super) fn verifier_now(&self, j: &Verifier) -> Verdict {
+        crate::driver::Relentless::verifier(self, j)
     }
 
     /// The tools' result, its checks met, before the step's critic too: a task with a script first that leaves nothing
-    /// to do, so the judges decide without a session when the critic agrees; a point it raises gets the worker's repair
+    /// to do, so the verifiers decide without a session when the critic agrees; a point it raises gets the worker's repair
     /// round, and an unmet end climbs on.
-    fn reviewed(&self, l: &Ladder, critic: &Judge, unit: &str) -> Result<Outcome, Fatal> {
+    fn reviewed(&self, l: &Ladder, critic: &Verifier, unit: &str) -> Result<Outcome, Fatal> {
         let done = self.wrapper(&format!("tool-tier-{unit}-done.sh"),
                                 r#"echo '{"met": true, "rationale": "the tools did it, and its checks hold"}'"#)?;
-        let task = l.base.clone().first(Judge::script(format!("tool-tier-{unit}-done"), done.as_str()))
+        let task = l.base.clone().first(Verifier::script(format!("tool-tier-{unit}-done"), done.as_str()))
             .critic(critic.clone()).repairs(0).climbs();
         self.task(&task)
     }
 
     /// The step's after-hooks, then its checks in order: the first unmet one, or the last met.
-    fn judged(&self, l: &Ladder) -> Verdict {
+    fn verified(&self, l: &Ladder) -> Verdict {
         if let Err(why) = self.check(&l.ctx.label, When::After) {
             return Verdict::binary(false).with_rationale(why);
         }
         let mut last = Verdict::binary(true).with_rationale("no check");
         for check in &l.base.checks {
-            last = self.judge_now(check);
+            last = self.verifier_now(check);
             if !last.met() {
                 break;
             }

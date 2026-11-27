@@ -1,7 +1,7 @@
 # hello — the smallest possible loop
 
-The whole idea in four files: a worker does a task, a **judge** (any script that prints one line
-of JSON `{"met": …}`) checks it, and the loop repeats until the judge says met. **The judge IS your
+The whole idea in four files: a worker does a task, a **verifier** (any script that prints one line
+of JSON `{"met": …}`) checks it, and the loop repeats until the verifier says met. **The verifier IS your
 Definition of Done, made executable.**
 
 `add.py` starts WRONG on purpose (prints 3) so you can watch the correction loop happen.
@@ -9,17 +9,17 @@ Definition of Done, made executable.**
 ## Layout
 
 Everything rlt reads as config lives under `rlt/` (committed). Runtime state lands in two gitignored
-dirs beside it, split by **who may write them**. One config file, `rlt/rlt.yaml` — a judge is
-resolved by NAME from `rlt/judges/`.
+dirs beside it, split by **who may write them**. One config file, `rlt/rlt.yaml` — a verifier is
+resolved by NAME from `rlt/verifiers/`.
 
 ```
-hello/
+hello-loop/
   add.py                    # the (broken) target the worker fixes  — at the project root
   rlt/
-    rlt.yaml                # defaults / judge / steps / sequence — the whole config
+    rlt.yaml                # defaults / verifier / steps / sequence — the whole config
     RLT.md                # the stable goal + rules the worker reads for orientation
-    judges/
-      prints_two.sh         # the judge — resolved by the NAME `prints_two` in `done_if`
+    verifiers/
+      prints_two.sh         # the verifier — resolved by the NAME `prints_two` in `done_if`
     state/                  # runtime, gitignored — THE WORKER writes this half:
                             #   STATE.md (forward advice), wiki/, sessions/,
                             #   NOTIFY.log (written by this config's notify.cmd)
@@ -38,14 +38,14 @@ split always work; only writes are denied. See
 
 ## Run it
 ```bash
-rlt plan        # dry run: evaluate the judge once, print the scoreboard. No agent launched.
+rlt plan        # dry run: evaluate the verifier once, print the scoreboard. No agent launched.
 rlt run         # drive the loop until done_if (`prints_two`) is met
 ```
 
 `rlt plan` prints:
 
 ```
-rlt: evaluating 2 judge(s) once (dry run)…
+rlt: evaluating 2 verifier(s) once (dry run)…
 Goals: 0/1   done_if: prints_two
   · prints_two         script     no   — add.py did not print 2
   · stalled            script     no   — no verdicts.jsonl yet — nothing to stall on
@@ -53,19 +53,19 @@ Goals: 0/1   done_if: prints_two
 → 0/1 met; loop would continue. Run `rlt run` to start.
 ```
 
-Two judges run, but the scoreboard says **0/1** — `stalled` is only there to drive the `notify_if`
+Two verifiers run, but the scoreboard says **0/1** — `stalled` is only there to drive the `notify_if`
 below. A detector is machinery, not a goal, so it never counts toward your Definition of Done and
 can never block it.
 
-The judge rejects `3` → the worker edits `add.py` to `print(1 + 1)` → the judge sees `2` →
+The verifier rejects `3` → the worker edits `add.py` to `print(1 + 1)` → the verifier sees `2` →
 `met:true` → `done_if` fires → the loop stops. That's the entire model.
 
 ## How `done_if` works
 
-`done_if` is your Definition of Done, written as a boolean over judge names. Here it is a single
-judge, `prints_two`. A real project composes several — `done_if: "outputs_two AND tests_pass"` — so
-the loop only stops when every clause holds. The judge NAME in `done_if` resolves to
-`rlt/judges/<name>.sh` (a script judge) or `rlt/judges/<name>.md` (an LLM rubric judge); the file
+`done_if` is your Definition of Done, written as a boolean over verifier names. Here it is a single
+verifier, `prints_two`. A real project composes several — `done_if: "outputs_two AND tests_pass"` — so
+the loop only stops when every clause holds. The verifier NAME in `done_if` resolves to
+`rlt/verifiers/<name>.sh` (a script verifier) or `rlt/verifiers/<name>.md` (an LLM rubric verifier); the file
 extension decides.
 
 ## Getting told when it's stuck — without stopping it
@@ -83,8 +83,8 @@ sequence:
     cmd: ["echo session {{session}}: {{reason}} >> rlt/state/NOTIFY.log"]
 ```
 
-Detectors are just judges, so there's no new machinery to learn: `stalled` is a library judge that
-reads `rlt/private/verdicts.jsonl` and reports `met` when no judge has moved across the last 3 merged
+Detectors are just verifiers, so there's no new machinery to learn: `stalled` is a library verifier that
+reads `rlt/private/verdicts.jsonl` and reports `met` when no verifier has moved across the last 3 merged
 steps. Swap in a `curl` to a push service and you get the ping on your phone instead of in a file —
 bound it (`curl --max-time 10`), because delivery is foreground and rlt imposes no timeout.
 
@@ -92,7 +92,7 @@ bound it (`curl --max-time 10`), because delivery is foreground and rlt imposes 
 Put the same detector in both and the ping lands a cycle *before* the recovery runs; see
 [the escalation ladder](../../docs/CONFIG.md#the-escalation-ladder-is-composition-not-a-config-object).
 
-`{{reason}}` becomes the firing judge's rationale — *"STALLED — no judge moved across the last 3
+`{{reason}}` becomes the firing verifier's rationale — *"STALLED — no verifier moved across the last 3
 merged steps"* — and rlt substitutes it **shell-quoted**, so a reason full of spaces, quotes or `;`
 can never break out of the command. Don't add quotes of your own around a placeholder; you'd get
 literal quote characters. `{{project}}`, `{{session}}` and `{{step}}` work the same way.
@@ -105,8 +105,8 @@ policies, authoring a `stuck` detector, the sandbox caveat) → [`docs/CONFIG.md
 
 ## Run it on another agent
 
-The judge is a shell script, so nothing here is Claude-specific — only the `agent:` and `model:`
-keys in `rlt/rlt.yaml` are. Edit `defaults:` (and `judge:`) and re-run, or let
+The verifier is a shell script, so nothing here is Claude-specific — only the `agent:` and `model:`
+keys in `rlt/rlt.yaml` are. Edit `defaults:` (and `verifier:`) and re-run, or let
 `rlt init --agent <a>` write a correct config for you:
 
 ```yaml
@@ -128,13 +128,13 @@ defaults:
 ```
 
 Then `rlt doctor` (checks the agent is installed and can do what this config asks) and `rlt run`.
-The loop, the judge and the gate behave identically on all three.
+The loop, the verifier and the gate behave identically on all three.
 
 ## Files
 - `add.py` — the (broken) target the worker fixes
 - `rlt/rlt.yaml` — the config: one `worker` step, `done_if: prints_two`, and a `notify_if` that pings without stopping
 - `rlt/RLT.md` — the stable goal + rules the worker reads for orientation (rlt folds it into `private/INSTRUCTIONS.md` every session)
-- `rlt/judges/prints_two.sh` — the judge; prints `{"met":…}` — a plain script, so it works on any agent
+- `rlt/verifiers/prints_two.sh` — the verifier; prints `{"met":…}` — a plain script, so it works on any agent
 
 ---
 
@@ -152,7 +152,7 @@ def factorial(n):    raise NotImplementedError
 def is_prime(n):     raise NotImplementedError
 ```
 
-**2. A judge** (`VERIFY`) — `rlt/judges/tests_pass.sh` runs the suite and prints a verdict:
+**2. A verifier** (`VERIFY`) — `rlt/verifiers/tests_pass.sh` runs the suite and prints a verdict:
 
 ```bash
 #!/usr/bin/env bash
@@ -165,8 +165,8 @@ printf '{"met":%s,"value":%s,"max":%s,"target":%s,"rationale":"%s/%s tests pass"
   "$met" "${passed:-0}" "$total" "$total" "${passed:-0}" "$total"
 ```
 
-The judge emits `value`/`max` so the dashboard shows partial progress (`18/28`), but `met` is what
-decides. There is no `type:` field any more — a judge that emits a `value` is displayed as a count;
+The verifier emits `value`/`max` so the dashboard shows partial progress (`18/28`), but `met` is what
+decides. There is no `type:` field any more — a verifier that emits a `value` is displayed as a count;
 one that emits only `{"met":…}` is binary.
 
 **3. `rlt/rlt.yaml`** — the config, with a Definition of Done and a wall-clock ceiling:
@@ -177,9 +177,9 @@ defaults:
   agent: "claude"                  # ⚠️ CLAUDE-SHAPED — see "Run it on another agent" above
   model: "claude-opus-4-8[1m]"
   state: "state/STATE.md"
-judge:
+verifier:
   agent: "claude"
-  model: "claude-haiku-4-5-20251001" # the cheap RULER model for any LLM judges
+  model: "claude-haiku-4-5-20251001" # the cheap RULER model for any rubric verifiers
   timeout: 300
 steps:
   worker: {}
@@ -222,7 +222,7 @@ rlt dashboard   # (optional, second terminal) live colored TUI
 ```
 
 What happens: a fresh agent reads its `rlt/private/INSTRUCTIONS.md`, runs pytest, implements the functions,
-re-runs pytest → green, exits. `VERIFY` flips the judge `0/3 → 3/3`; `GATE` sees `done_if` met →
+re-runs pytest → green, exits. `VERIFY` flips the verifier `0/3 → 3/3`; `GATE` sees `done_if` met →
 the loop exits after one session. A one-line summary records what it did.
 
 ### Or let `/rlt:new` write it for you
@@ -244,6 +244,6 @@ $rlt-new                                  # OpenAI Codex — it uses $, not /
 
 Or just **ask** on any of them: "set up Relentless for this project".
 
-It **translates** whatever plan exists into a `done_if` plus a judge per clause (it doesn't replicate
+It **translates** whatever plan exists into a `done_if` plus a verifier per clause (it doesn't replicate
 your spec tooling), asks only about genuine gaps, and writes an `rlt.yaml` shaped for **your** agent —
 no cost guard on Codex or Copilot, which cannot report one. Then exit the agent and `rlt run`.

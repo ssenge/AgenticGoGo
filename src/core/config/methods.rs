@@ -8,9 +8,9 @@ use anyhow::anyhow;
 use std::path::Path;
 
 impl RelentlessConfig {
-    /// The **RULER**: the backend that runs the LLM judges and the summarizer. Reads `judge.agent`.
+    /// The **RULER**: the backend that runs the rubric verifiers and the summarizer. Reads `verifier.agent`.
     pub fn ruler_backend(&self) -> Result<&'static dyn AgentBackend> {
-        for_name(&self.judge.agent)
+        for_name(&self.verifier.agent)
     }
 
     /// The default WORKER backend (`defaults.agent`) — for the banner/dashboard and for the paths
@@ -19,9 +19,9 @@ impl RelentlessConfig {
         for_name(&self.defaults.agent)
     }
 
-    /// The judge model (`judge.model`), resolved against the ruler. Absent = the ruler's cheap default.
-    pub fn judge_model(&self, ruler: &dyn AgentBackend) -> String {
-        self.judge.model.clone().unwrap_or_else(|| ruler.default_summary_model().to_string())
+    /// The verifier model (`verifier.model`), resolved against the ruler. Absent = the ruler's cheap default.
+    pub fn verifier_model(&self, ruler: &dyn AgentBackend) -> String {
+        self.verifier.model.clone().unwrap_or_else(|| ruler.default_summary_model().to_string())
     }
 
     /// Merge a named step's body over [`Defaults`] into a [`ResolvedStep`]. Errors (listing the
@@ -53,7 +53,7 @@ impl RelentlessConfig {
             role_prompt_file: role.1.clone(),
             prompt: body.prompt.clone(),
             prompt_file: body.prompt_file.clone(),
-            skip_judges: body.skip_judges,
+            skip_verifiers: body.skip_verifiers,
             // Copy type → no clone. step overrides defaults; both absent ⇒ Isolation::None.
             isolation: body.isolation.or(self.defaults.isolation).unwrap_or_default(),
             image: body
@@ -62,7 +62,7 @@ impl RelentlessConfig {
                 .or_else(|| self.defaults.image.clone())
                 .unwrap_or_else(|| crate::isolation::DEFAULT_IMAGE.to_string()),
             // Normalised HERE, on the way in, exactly as the driver's builder does it — `writable`
-            // subtracts by string, so `writable: [rlt/judges]` against `readonly: [rlt/judges/]`
+            // subtracts by string, so `writable: [rlt/verifiers]` against `readonly: [rlt/verifiers/]`
             // would otherwise subtract nothing while reading like it worked. There is no
             // `defaults.readonly`: the YAML path has one defaults block and repeating the list per
             // step is the shape `sample_workflow.yaml` documents (the Rust path's templates are the
@@ -77,28 +77,28 @@ impl RelentlessConfig {
     }
 
     /// The RUN-LEVEL blast-radius tier — the STRONGEST tier the defaults or any step names. The
-    /// tier judges run in (§2.5, "judges take the run tier") and the run-level teardown hook
+    /// tier verifiers run in (§2.5, "verifiers take the run tier") and the run-level teardown hook
     /// (`on_stop`) fires in. Over-approximates deliberately: a step that overrides the defaults'
-    /// tier downward does not lower it — confining a judge that maybe didn't need it is harmless;
+    /// tier downward does not lower it — confining a verifier that maybe didn't need it is harmless;
     /// leaving it unconfined when a confined worker ran is the escape.
     ///
-    /// `container` counts. It used not to — judges and hooks were host tooling while the container
-    /// tier could not run an agent, and the residual (a container worker rewrites a judge script
+    /// `container` counts. It used not to — verifiers and hooks were host tooling while the container
+    /// tier could not run an agent, and the residual (a container worker rewrites a verifier script
     /// that then runs on the host) was documented rather than closed. With an agent image in the
-    /// container (the image contract), the image that runs the agent runs the judges too
-    /// ([`Self::judge_image`]), and the residual is closed. Hooks stay host tooling
+    /// container (the image contract), the image that runs the agent runs the verifiers too
+    /// ([`Self::verifier_image`]), and the residual is closed. Hooks stay host tooling
     /// ([`crate::hooks::run`]).
     pub fn run_isolation(&self) -> crate::isolation::Isolation {
         let base = self.defaults.isolation.unwrap_or_default();
         self.steps.values().filter_map(|b| b.isolation).fold(base, |t, s| t.strongest(s))
     }
 
-    /// The image judges run in when [`Self::run_isolation`] is `container`: `judge.image`, else
+    /// The image verifiers run in when [`Self::run_isolation`] is `container`: `verifier.image`, else
     /// `defaults.image`, else the ONE image every container step resolves to, else the default
-    /// base image. `Err` (the problem, for `judge.image`) when container steps name several
-    /// different images and neither key says which one the judges' toolchain is in.
-    pub fn judge_image(&self) -> Result<String, String> {
-        if let Some(i) = self.judge.image.as_ref().or(self.defaults.image.as_ref()) {
+    /// base image. `Err` (the problem, for `verifier.image`) when container steps name several
+    /// different images and neither key says which one the verifiers' toolchain is in.
+    pub fn verifier_image(&self) -> Result<String, String> {
+        if let Some(i) = self.verifier.image.as_ref().or(self.defaults.image.as_ref()) {
             return Ok(i.clone());
         }
         let mut images: Vec<String> = self
@@ -114,19 +114,19 @@ impl RelentlessConfig {
             [] => Ok(crate::isolation::DEFAULT_IMAGE.to_string()),
             [one] => Ok(one.clone()),
             many => Err(format!(
-                "the container steps run in {} different images ({}) and neither `judge.image` nor \
-                 `defaults.image` says which one the judges run in — set `judge.image` to the image \
-                 with your judges' toolchain",
+                "the container steps run in {} different images ({}) and neither `verifier.image` nor \
+                 `defaults.image` says which one the verifiers run in — set `verifier.image` to the image \
+                 with your verifiers' toolchain",
                 many.len(),
                 many.join(", ")
             )),
         }
     }
 
-    /// Every distinct agent named anywhere (defaults + judge + each step) — so `rlt doctor` and the
+    /// Every distinct agent named anywhere (defaults + verifier + each step) — so `rlt doctor` and the
     /// capability check can cover EVERY agent the sequence names (§7.3), not just one.
     pub fn agent_names(&self) -> Vec<String> {
-        let mut names = vec![self.defaults.agent.clone(), self.judge.agent.clone()];
+        let mut names = vec![self.defaults.agent.clone(), self.verifier.agent.clone()];
         for body in self.steps.values() {
             if let Some(a) = &body.agent {
                 names.push(a.clone());
@@ -144,8 +144,8 @@ impl RelentlessConfig {
         read_agent(path, false)
     }
 
-    /// Read ONLY the ruler agent (`judge.agent`, else `defaults.agent`) — for `plan` / `judge`,
-    /// which run judges on the RULER off rlt.yaml alone.
+    /// Read ONLY the ruler agent (`verifier.agent`, else `defaults.agent`) — for `plan` / `verifier`,
+    /// which run verifiers on the RULER off rlt.yaml alone.
     pub fn ruler_name(path: &Path) -> String {
         read_agent(path, true)
     }
@@ -293,7 +293,7 @@ impl RelentlessConfig {
 }
 
 /// Partial-parse the agent name(s) from rlt.yaml without the deny_unknown_fields full parse, so it
-/// survives a config that is missing / broken / half-written. `ruler` picks `judge.agent`.
+/// survives a config that is missing / broken / half-written. `ruler` picks `verifier.agent`.
 fn read_agent(path: &Path, ruler: bool) -> String {
     #[derive(Deserialize, Default)]
     struct AgentOnly {
@@ -304,13 +304,13 @@ fn read_agent(path: &Path, ruler: bool) -> String {
         #[serde(default)]
         defaults: AgentOnly,
         #[serde(default)]
-        judge: AgentOnly,
+        verifier: AgentOnly,
     }
     let parsed: Option<Partial> =
         std::fs::read_to_string(path).ok().and_then(|t| serde_yaml::from_str(&t).ok());
     let p = parsed.unwrap_or_default();
     if ruler {
-        p.judge.agent.or(p.defaults.agent)
+        p.verifier.agent.or(p.defaults.agent)
     } else {
         p.defaults.agent
     }

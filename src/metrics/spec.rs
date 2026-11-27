@@ -1,5 +1,5 @@
-//! The `metric:` / `score:` blocks of a `judges.<name>` entry as written in `rlt.yaml`, the runtime
-//! judges they become, and the startup checks of their SHAPE (the probe of swe-metrics itself is
+//! The `metric:` / `score:` blocks of a `verifiers.<name>` entry as written in `rlt.yaml`, the runtime
+//! verifiers they become, and the startup checks of their SHAPE (the probe of swe-metrics itself is
 //! [`super::probe`]).
 
 use crate::core::ratchet::Direction;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// `judges.<name>.metric` — which number of the swe-metrics report the judge reads.
+/// `verifiers.<name>.metric` — which number of the swe-metrics report the verifier reads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MetricSel {
@@ -89,7 +89,7 @@ impl Stat {
     }
 }
 
-/// `judges.<name>.score` — which scoring definition, at which version.
+/// `verifiers.<name>.score` — which scoring definition, at which version.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScoreSel {
@@ -157,7 +157,7 @@ impl Scope {
         }
     }
 
-    /// Whether only changed files are measured: with none, a judge is vacuously met.
+    /// Whether only changed files are measured: with none, a verifier is vacuously met.
     pub fn is_changes(&self) -> bool {
         matches!(self, Scope::Changed | Scope::ChangedIn { .. })
     }
@@ -205,26 +205,26 @@ impl Definition {
     }
 }
 
-/// A METRIC judge, ready to run: what to read, the threshold, and what the measurement covers.
+/// A METRIC verifier, ready to run: what to read, the threshold, and what the measurement covers.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MetricJudge {
+pub struct MetricVerifier {
     pub sel: MetricSel,
     pub scope: Scope,
     pub max: Option<f64>,
     pub min: Option<f64>,
-    /// the direction the judge is ratcheted in, if it is — checked against the metric's own
+    /// the direction the verifier is ratcheted in, if it is — checked against the metric's own
     /// direction in the report, so a ratchet never holds a number the wrong way.
     pub ratchet: Option<Direction>,
     /// the metric families this scope's ONE shared measurement covers (`--only`); `None` = all.
-    /// Every judge of a scope carries the same set, which is what makes them share it.
+    /// Every verifier of a scope carries the same set, which is what makes them share it.
     pub only: Option<Vec<String>>,
 }
 
-impl MetricJudge {
-    /// A metric judge on `id`, over the whole project, with no threshold yet (the driver builder).
-    pub fn new(id: impl Into<String>) -> MetricJudge {
+impl MetricVerifier {
+    /// A metric verifier on `id`, over the whole project, with no threshold yet (the driver builder).
+    pub fn new(id: impl Into<String>) -> MetricVerifier {
         let sel = MetricSel { id: id.into(), tool: None, combine: None, stat: None, labels: BTreeMap::new(), scope: None };
-        MetricJudge { sel, scope: Scope::Target, max: None, min: None, ratchet: None, only: None }
+        MetricVerifier { sel, scope: Scope::Target, max: None, min: None, ratchet: None, only: None }
     }
     pub fn tool(mut self, t: impl Into<String>) -> Self {
         self.sel.tool = Some(t.into());
@@ -266,26 +266,26 @@ pub fn family(id: &str) -> &str {
     id.split('.').next().unwrap_or(id)
 }
 
-/// A SCORE judge, ready to run.
+/// A SCORE verifier, ready to run.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ScoreJudge {
+pub struct ScoreVerifier {
     pub definition: Definition,
     /// the definition as configured — part of the score's comparability basis.
     pub definition_name: String,
     pub version: String,
     /// what is scored: never [`Scope::Changed`]; a [`Scope::ChangedIn`] score has no incumbent to compare with.
     pub scope: Scope,
-    /// the script that writes the build's reports before the measurement (see [`ScoreJudge::reports`]).
+    /// the script that writes the build's reports before the measurement (see [`ScoreVerifier::reports`]).
     pub reports: Option<PathBuf>,
     pub max: Option<f64>,
     pub min: Option<f64>,
 }
 
-impl ScoreJudge {
-    /// A score judge by `definition` (`swe-default`, a `.py` path or `package.module:NAME`) at
+impl ScoreVerifier {
+    /// A score verifier by `definition` (`swe-default`, a `.py` path or `package.module:NAME`) at
     /// `version` — a relative file is taken relative to the process' working directory here.
-    pub fn new(definition: &str, version: &str) -> ScoreJudge {
-        ScoreJudge {
+    pub fn new(definition: &str, version: &str) -> ScoreVerifier {
+        ScoreVerifier {
             definition: Definition::parse(definition, Path::new(".")),
             definition_name: definition.to_string(),
             version: version.to_string(),
@@ -329,7 +329,7 @@ fn valid_id(id: &str) -> bool {
     ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
 }
 
-/// The declared parts of one `judges.<name>` entry.
+/// The declared parts of one `verifiers.<name>` entry.
 pub struct Declared<'a> {
     pub name: &'a str,
     pub metric: Option<&'a MetricSel>,
@@ -340,23 +340,23 @@ pub struct Declared<'a> {
     pub path: &'a [String],
 }
 
-/// Every problem with the SHAPE of one `judges.<name>` entry, each at its own key.
+/// Every problem with the SHAPE of one `verifiers.<name>` entry, each at its own key.
 pub fn problems(d: &Declared<'_>, config_base: &Path) -> Vec<Problem> {
-    let at = |k: &str| format!("judges.{}{k}", d.name);
+    let at = |k: &str| format!("verifiers.{}{k}", d.name);
     let mut out = Vec::new();
     if d.metric.is_some() && d.score.is_some() {
-        out.push(Problem::new(at(""), "a judge is a `metric:` OR a `score:` judge, not both"));
+        out.push(Problem::new(at(""), "a verifier is a `metric:` OR a `score:` verifier, not both"));
     }
     if d.command.is_some() {
         out.extend(command_problems(d, &at));
         return out;
     }
     if !d.path.is_empty() {
-        out.push(Problem::new(at(".path"), "`path:` belongs to a `command:` judge — this entry declares none"));
+        out.push(Problem::new(at(".path"), "`path:` belongs to a `command:` verifier — this entry declares none"));
     }
     if d.metric.is_none() && d.score.is_none() {
         if d.max.is_some() || d.min.is_some() {
-            out.push(Problem::new(at(""), "`max:`/`min:` are the threshold of a `metric:` or `score:` judge — this entry declares neither"));
+            out.push(Problem::new(at(""), "`max:`/`min:` are the threshold of a `metric:` or `score:` verifier — this entry declares neither"));
         }
         return out;
     }
@@ -370,14 +370,14 @@ pub fn problems(d: &Declared<'_>, config_base: &Path) -> Vec<Problem> {
     out
 }
 
-/// A `command:` judge is that and nothing else: not a metric or score judge, no threshold.
+/// A `command:` verifier is that and nothing else: not a metric or score verifier, no threshold.
 fn command_problems(d: &Declared<'_>, at: &dyn Fn(&str) -> String) -> Vec<Problem> {
     let mut out = Vec::new();
     if d.metric.is_some() || d.score.is_some() {
-        out.push(Problem::new(at(""), "a judge is a `metric:`, a `score:` OR a `command:` judge, not several"));
+        out.push(Problem::new(at(""), "a verifier is a `metric:`, a `score:` OR a `command:` verifier, not several"));
     }
     if d.max.is_some() || d.min.is_some() {
-        out.push(Problem::new(at(""), "`max:`/`min:` are the threshold of a `metric:` or `score:` judge — a `command:` is met by its exit code"));
+        out.push(Problem::new(at(""), "`max:`/`min:` are the threshold of a `metric:` or `score:` verifier — a `command:` is met by its exit code"));
     }
     if d.command.is_some_and(|c| c.trim().is_empty()) {
         out.push(Problem::new(at(".command"), "`command` is empty"));
@@ -393,7 +393,7 @@ fn threshold_problems(d: &Declared<'_>, at: &dyn Fn(&str) -> String) -> Vec<Prob
     match (d.max, d.min) {
         (None, None) => out.push(Problem::new(
             at(""),
-            "a metric/score judge needs a threshold — `max:` (met when the value is at most it) and/or `min:` (at least it)",
+            "a metric/score verifier needs a threshold — `max:` (met when the value is at most it) and/or `min:` (at least it)",
         )),
         (Some(hi), Some(lo)) if hi < lo => {
             out.push(Problem::new(at(".max"), format!("`max: {hi}` is below `min: {lo}` — nothing could ever be met")))
@@ -461,15 +461,15 @@ fn score_problems(s: &ScoreSel, config_base: &Path, at: &dyn Fn(&str) -> String)
     out
 }
 
-/// The runtime judge a VALID metric declaration becomes (shape problems were refused already).
-pub fn metric_judge(m: &MetricSel, max: Option<f64>, min: Option<f64>) -> MetricJudge {
+/// The runtime verifier a VALID metric declaration becomes (shape problems were refused already).
+pub fn metric_verifier(m: &MetricSel, max: Option<f64>, min: Option<f64>) -> MetricVerifier {
     let scope = Scope::parse(m.scope.as_deref()).unwrap_or(Scope::Target);
-    MetricJudge { sel: m.clone(), scope, max, min, ratchet: None, only: None }
+    MetricVerifier { sel: m.clone(), scope, max, min, ratchet: None, only: None }
 }
 
-/// The runtime judge a VALID score declaration becomes.
-pub fn score_judge(s: &ScoreSel, max: Option<f64>, min: Option<f64>, config_base: &Path) -> ScoreJudge {
-    ScoreJudge {
+/// The runtime verifier a VALID score declaration becomes.
+pub fn score_verifier(s: &ScoreSel, max: Option<f64>, min: Option<f64>, config_base: &Path) -> ScoreVerifier {
+    ScoreVerifier {
         definition: Definition::parse(&s.definition, config_base),
         definition_name: s.definition.clone(),
         version: s.version.clone(),
@@ -510,16 +510,16 @@ mod tests {
         Declared { name: "j", metric, score: None, max, min: None, command: c, path }
     }
 
-    /// A `command:` judge is its own kind: it takes no metric, score or threshold, and its fields are checked.
+    /// A `command:` verifier is its own kind: it takes no metric, score or threshold, and its fields are checked.
     #[test]
-    fn a_command_judges_shape_is_checked() {
+    fn a_command_verifiers_shape_is_checked() {
         let ab = sel("{ id: a.b }");
         assert!(paths(&command(Some("pytest -q"), None, None, &[".venv/bin".into()])).is_empty());
-        assert_eq!(paths(&command(Some("pytest"), Some(&ab), None, &[])), ["judges.j"], "not a metric judge too");
-        assert_eq!(paths(&command(Some("pytest"), None, Some(1.0), &[])), ["judges.j"], "no threshold");
-        assert_eq!(paths(&command(Some("  "), None, None, &[])), ["judges.j.command"]);
-        assert_eq!(paths(&command(Some("x"), None, None, &["".into()])), ["judges.j.path"]);
-        assert_eq!(paths(&command(None, Some(&ab), Some(1.0), &["tools".into()])), ["judges.j.path"], "path needs a command");
+        assert_eq!(paths(&command(Some("pytest"), Some(&ab), None, &[])), ["verifiers.j"], "not a metric verifier too");
+        assert_eq!(paths(&command(Some("pytest"), None, Some(1.0), &[])), ["verifiers.j"], "no threshold");
+        assert_eq!(paths(&command(Some("  "), None, None, &[])), ["verifiers.j.command"]);
+        assert_eq!(paths(&command(Some("x"), None, None, &["".into()])), ["verifiers.j.path"]);
+        assert_eq!(paths(&command(None, Some(&ab), Some(1.0), &["tools".into()])), ["verifiers.j.path"], "path needs a command");
     }
 
     /// Each shape problem is refused at the key to edit.
@@ -528,30 +528,30 @@ mod tests {
         let both = sel("{ id: a.b, tool: x, combine: all }");
         let score = ScoreSel { definition: DEFAULT_DEFINITION.into(), version: "2".into(), scope: None, reports: None };
         let d = |metric, score, max, min| Declared { name: "j", metric, score, max, min, command: None, path: &[] };
-        assert_eq!(paths(&d(Some(&both), Some(&score), Some(1.0), None)), ["judges.j", "judges.j.metric.combine"]);
+        assert_eq!(paths(&d(Some(&both), Some(&score), Some(1.0), None)), ["verifiers.j", "verifiers.j.metric.combine"]);
         let ab = sel("{ id: a.b }");
-        assert_eq!(paths(&d(Some(&ab), None, None, None)), ["judges.j"], "no threshold");
-        assert_eq!(paths(&d(Some(&ab), None, Some(1.0), Some(2.0))), ["judges.j.max"]);
+        assert_eq!(paths(&d(Some(&ab), None, None, None)), ["verifiers.j"], "no threshold");
+        assert_eq!(paths(&d(Some(&ab), None, Some(1.0), Some(2.0))), ["verifiers.j.max"]);
         let upper = sel("{ id: A.b }");
-        assert_eq!(paths(&d(Some(&upper), None, Some(1.0), None)), ["judges.j.metric.id"]);
+        assert_eq!(paths(&d(Some(&upper), None, Some(1.0), None)), ["verifiers.j.metric.id"]);
         let glob = sel("{ id: a.b, scope: 'src/*' }");
-        assert_eq!(paths(&d(Some(&glob), None, Some(1.0), None)), ["judges.j.metric.scope"]);
+        assert_eq!(paths(&d(Some(&glob), None, Some(1.0), None)), ["verifiers.j.metric.scope"]);
         let nolabel = sel("{ id: a.b, labels: { k: [] } }");
-        assert_eq!(paths(&d(Some(&nolabel), None, Some(1.0), None)), ["judges.j.metric.labels.k"]);
-        assert_eq!(paths(&d(None, None, Some(1.0), None)), ["judges.j"], "a threshold without a judge");
+        assert_eq!(paths(&d(Some(&nolabel), None, Some(1.0), None)), ["verifiers.j.metric.labels.k"]);
+        assert_eq!(paths(&d(None, None, Some(1.0), None)), ["verifiers.j"], "a threshold without a verifier");
         assert!(paths(&d(None, None, None, None)).is_empty(), "a plain timeout entry is fine");
         let empty = ScoreSel { definition: "nope".into(), version: " ".into(), scope: None, reports: None };
-        assert_eq!(paths(&d(None, Some(&empty), None, Some(80.0))), ["judges.j.score.version", "judges.j.score.definition"]);
+        assert_eq!(paths(&d(None, Some(&empty), None, Some(80.0))), ["verifiers.j.score.version", "verifiers.j.score.definition"]);
         let file = ScoreSel { definition: "scoring.py".into(), version: "1".into(), scope: None, reports: None };
-        assert_eq!(paths(&d(None, Some(&file), None, Some(80.0))), ["judges.j.score.definition"], "a missing file");
+        assert_eq!(paths(&d(None, Some(&file), None, Some(80.0))), ["verifiers.j.score.definition"], "a missing file");
         let changed = ScoreSel { scope: Some("changed".into()), ..score.clone() };
-        assert_eq!(paths(&d(None, Some(&changed), None, Some(80.0))), ["judges.j.score.scope"], "no incumbent of the same files");
+        assert_eq!(paths(&d(None, Some(&changed), None, Some(80.0))), ["verifiers.j.score.scope"], "no incumbent of the same files");
         let work = ScoreSel { scope: Some("work".into()), ..score.clone() };
         assert!(paths(&d(None, Some(&work), None, Some(80.0))).is_empty());
-        assert_eq!(score_judge(&work, None, Some(80.0), Path::new("/x")).scope, Scope::Path("work".into()));
+        assert_eq!(score_verifier(&work, None, Some(80.0), Path::new("/x")).scope, Scope::Path("work".into()));
         let reports = ScoreSel { reports: Some("reports.sh".into()), ..score.clone() };
-        assert_eq!(paths(&d(None, Some(&reports), None, Some(80.0))), ["judges.j.score.reports"], "a missing script");
-        assert_eq!(score_judge(&reports, None, None, Path::new("/x/rlt")).reports, Some(PathBuf::from("/x/rlt/reports.sh")));
+        assert_eq!(paths(&d(None, Some(&reports), None, Some(80.0))), ["verifiers.j.score.reports"], "a missing script");
+        assert_eq!(score_verifier(&reports, None, None, Path::new("/x/rlt")).reports, Some(PathBuf::from("/x/rlt/reports.sh")));
     }
 
     /// A scope is the project, its changes, or a sub-path — never a glob, never outside.
@@ -580,16 +580,16 @@ mod tests {
         assert_eq!(Definition::parse("/abs/s.py", base), Definition::File("/abs/s.py".into()));
         assert_eq!(Definition::parse("team.scoring:DEF", base), Definition::Module("team.scoring:DEF".into()));
         assert!(Definition::Default.args().is_empty(), "swe-metrics refuses `--definition swe-default`");
-        assert_eq!(ScoreJudge::new("swe-default", "2").basis(), "swe-default@2");
+        assert_eq!(ScoreVerifier::new("swe-default", "2").basis(), "swe-default@2");
     }
 
     #[test]
     fn the_driver_builder_sets_what_it_says() {
-        let m = MetricJudge::new("dependencies.vulnerabilities").label("severity", &["high"]).combine(Combine::All).max(0.0);
+        let m = MetricVerifier::new("dependencies.vulnerabilities").label("severity", &["high"]).combine(Combine::All).max(0.0);
         assert_eq!((m.family(), m.max, m.sel.combine), ("dependencies", Some(0.0), Some(Combine::All)));
-        let m = MetricJudge::new("x.y").tool("t").stat(Stat::Max).scope(Scope::Changed).min(1.0);
+        let m = MetricVerifier::new("x.y").tool("t").stat(Stat::Max).scope(Scope::Changed).min(1.0);
         assert_eq!((m.sel.tool.as_deref(), m.sel.stat.map(Stat::key), m.scope, m.min), (Some("t"), Some("max"), Scope::Changed, Some(1.0)));
-        let s = ScoreJudge::new("swe-default", "2").max(100.0).min(80.0);
+        let s = ScoreVerifier::new("swe-default", "2").max(100.0).min(80.0);
         assert_eq!((s.max, s.min), (Some(100.0), Some(80.0)));
     }
 }

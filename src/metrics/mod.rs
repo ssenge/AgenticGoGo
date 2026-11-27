@@ -1,26 +1,26 @@
-//! Judges built on **swe-metrics** — a separate, stateless measuring tool that turns a project into a
-//! JSON report of metrics (and the tools' SARIF details) and never judges them. rlt does the
-//! judging: a metric judge holds one number of the report to a threshold, a score judge holds
-//! swe-metrics' quality score to one, and both feed the ratchet like any judge with a `value`.
+//! Verifiers built on **swe-metrics** — a separate, stateless measuring tool that turns a project into a
+//! JSON report of metrics (and the tools' SARIF details) and never verifies them. rlt does the
+//! verifying: a metric verifier holds one number of the report to a threshold, a score verifier holds
+//! swe-metrics' quality score to one, and both feed the ratchet like any verifier with a `value`.
 //!
 //! ```yaml
-//! judges:
+//! verifiers:
 //!   cc_p95:  { metric: { id: "complexity.cyclomatic", stat: "p95", tool: "lizard" }, max: 10 }
 //!   vulns:   { metric: { id: "dependencies.vulnerabilities", labels: { severity: ["critical", "high"] } }, max: 0 }
 //!   quality: { score: { definition: "swe-default", version: "2" }, min: 80 }
 //! ```
 //!
-//! - [`spec`]    the YAML blocks, the runtime judges, their startup shape checks
+//! - [`spec`]    the YAML blocks, the runtime verifiers, their startup shape checks
 //! - [`report`]  the report and the selection of a metric's value per tool — fail closed
 //! - [`combine`] several tools for one metric: `strictest` · `all` · `majority`
 //! - [`measure`] ONE `swe-metrics measure` per session tree, shared; the incumbent's report
 //! - [`score`]   `swe-metrics score` against the incumbent, and its verdict
 //! - [`probe`]   the startup refusal when swe-metrics is missing or incompatible — on the host, or
-//!   in the judges' image when the run's judges are containerized
-//! - [`contained`] swe-metrics in the judges' image under `isolation: container`
-//! - [`declare`] startup: `judges.*` entries → kinds, ratchet directions, shared `--only` sets
+//!   in the verifiers' image when the run's verifiers are containerized
+//! - [`contained`] swe-metrics in the verifiers' image under `isolation: container`
+//! - [`declare`] startup: `verifiers.*` entries → kinds, ratchet directions, shared `--only` sets
 //!
-//! swe-metrics is OPTIONAL: nothing here runs unless a judge is declared with `metric:`/`score:`.
+//! swe-metrics is OPTIONAL: nothing here runs unless a verifier is declared with `metric:`/`score:`.
 
 pub mod combine;
 pub mod contained;
@@ -31,7 +31,7 @@ pub mod report;
 pub mod score;
 pub mod spec;
 
-pub use spec::{Combine, MetricJudge, MetricSel, OneOrMany, Scope, ScoreJudge, ScoreSel, Stat};
+pub use spec::{Combine, MetricVerifier, MetricSel, OneOrMany, Scope, ScoreVerifier, ScoreSel, Stat};
 
 use crate::core::model::Verdict;
 use crate::core::ratchet::Direction;
@@ -39,15 +39,15 @@ use combine::Threshold;
 use measure::Ctx;
 use report::{Better, Selector};
 
-/// Run a metric judge: the session's shared measurement, the selected value, the threshold.
-pub fn run_metric(j: &MetricJudge, c: &Ctx<'_>) -> Verdict {
+/// Run a metric verifier: the session's shared measurement, the selected value, the threshold.
+pub fn run_metric(j: &MetricVerifier, c: &Ctx<'_>) -> Verdict {
     match metric_verdict(j, c) {
         Ok(v) => v,
         Err((e, evidence)) => Verdict::failed(e).with_evidence(evidence),
     }
 }
 
-fn metric_verdict(j: &MetricJudge, c: &Ctx<'_>) -> Result<Verdict, (String, Vec<String>)> {
+fn metric_verdict(j: &MetricVerifier, c: &Ctx<'_>) -> Result<Verdict, (String, Vec<String>)> {
     let m = measure::measure(c, &j.scope, j.only.as_deref(), None).map_err(|e| (e, vec![]))?;
     let evidence = evidence(&m, Some(j.family()), None);
     let sel = selector(j);
@@ -83,12 +83,12 @@ fn vacuous(sel: &Selector, analyzers: &[String], evidence: Vec<String>) -> Verdi
 
 /// The report's direction must agree with the ratchet's: `max:` (down) on a higher-is-better
 /// metric would hold the number the wrong way, and a ratchet must never do that silently.
-fn check_ratchet(j: &MetricJudge, better: Better) -> Result<(), String> {
+fn check_ratchet(j: &MetricVerifier, better: Better) -> Result<(), String> {
     let contradicts = matches!((j.ratchet, better), (Some(Direction::Down), Better::Higher) | (Some(Direction::Up), Better::Lower));
     if contradicts {
         let dir = if j.ratchet == Some(Direction::Down) { "down" } else { "up" };
         return Err(format!(
-            "the judge is ratcheted `{dir}`, but the report says `{}` is {} — set the ratchet's `direction` (or the \
+            "the verifier is ratcheted `{dir}`, but the report says `{}` is {} — set the ratchet's `direction` (or the \
              threshold) to match the metric",
             j.sel.id,
             better.as_str()
@@ -99,7 +99,7 @@ fn check_ratchet(j: &MetricJudge, better: Better) -> Result<(), String> {
 
 /// The same selection on the incumbent's report — only for `combine: all`, and only after the
 /// baseline (a pass before the first session has no incumbent of its own run).
-fn incumbent_values(j: &MetricJudge, c: &Ctx<'_>, sel: &Selector) -> Option<Vec<report::ToolValue>> {
+fn incumbent_values(j: &MetricVerifier, c: &Ctx<'_>, sel: &Selector) -> Option<Vec<report::ToolValue>> {
     if j.sel.combine != Some(Combine::All) || c.session.unwrap_or(0) == 0 {
         return None;
     }
@@ -107,7 +107,7 @@ fn incumbent_values(j: &MetricJudge, c: &Ctx<'_>, sel: &Selector) -> Option<Vec<
     report::select(&report::Report::parse(&text).ok()?, sel).ok()
 }
 
-fn selector(j: &MetricJudge) -> Selector {
+fn selector(j: &MetricVerifier) -> Selector {
     Selector {
         id: j.sel.id.clone(),
         tool: j.sel.tool.clone(),
@@ -116,7 +116,7 @@ fn selector(j: &MetricJudge) -> Selector {
     }
 }
 
-/// The evidence a verdict cites, relative to the judge scratch: the report, the details of the
+/// The evidence a verdict cites, relative to the verifier scratch: the report, the details of the
 /// metric's family (all of them for a score), and `extra`.
 fn evidence(m: &measure::Measured, family: Option<&str>, extra: Option<&str>) -> Vec<String> {
     let mut out = vec![format!("{}/report.json", m.rel)];
@@ -125,8 +125,8 @@ fn evidence(m: &measure::Measured, family: Option<&str>, extra: Option<&str>) ->
     out
 }
 
-/// Run a score judge: its scope's shared report, scored against the incumbent's.
-pub fn run_score(name: &str, j: &ScoreJudge, c: &Ctx<'_>) -> Verdict {
+/// Run a score verifier: its scope's shared report, scored against the incumbent's.
+pub fn run_score(name: &str, j: &ScoreVerifier, c: &Ctx<'_>) -> Verdict {
     if j.scope == Scope::Changed {
         return Verdict::failed("a score is compared against the incumbent of the same files — `changed` measures other files every session");
     }

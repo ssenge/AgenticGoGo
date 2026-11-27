@@ -3,7 +3,7 @@
 ## Goal
 
 A step of the run failed (below, under "The failure"). Find its cause and, where you can, **repair it in
-place**: change what is wrong, wherever it is, so that the failed step passes when its checks judge it again,
+place**: change what is wrong, wherever it is, so that the failed step passes when its checks verifier it again,
 and the run goes on. Going back to an earlier step is the last resort, for when that step's result is wrong as
 a whole: it reruns every step after it. Write your answer to the file named under "Your answer".
 
@@ -24,7 +24,7 @@ a whole: it reruns every step after it. Write your answer to the file named unde
   with the bug and its file in `cause`. A step's check is deterministic and wins over a reviewer: never make a
   change its check would reject.
 - Change only what the cause needs, and keep it whole: a script you repair has run once.
-- What you change is judged again by the failed step's checks and critic, and the next checkpoint shows it.
+- What you change is verified again by the failed step's checks and critic, and the next checkpoint shows it.
 
 ## Output
 
@@ -47,7 +47,7 @@ Keep `cause` and `note` as the block scalars (`|`) shown, so any text in them is
   decision in `cause`.
 - **A flaky failure**, one that passes and fails on the same code (a test whose result depends on timing, a
   background call that lands in one run and not the next): `fixed` without a change, once, with `cause` naming
-  the flaky part; the step is judged again. When it fails again the same way, `escalate` with the test and why
+  the flaky part; the step is verified again. When it fails again the same way, `escalate` with the test and why
   it is flaky: its step must make it deterministic.
 - **`escalate`** when no change of yours or of an earlier step can fix it: a decision only a human can make,
   access, a quota, a broken environment, or the process itself. When the check and the reviewer contradict

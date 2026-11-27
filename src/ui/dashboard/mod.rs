@@ -16,7 +16,7 @@
 //! Keys: ↑/↓ scroll focused pane · PgUp/PgDn · g/G top/bottom · Tab switch focus
 //!       (Goals↔Activity) · f toggle activity auto-follow · q/Esc quit.
 
-use crate::state::{ActivityEvent, AgentUsage, DashboardState, JudgeView, Phase};
+use crate::state::{ActivityEvent, AgentUsage, DashboardState, VerifierView, Phase};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::{execute, terminal};
@@ -31,14 +31,14 @@ mod fmt;
 /// Which scrollable pane currently has the keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Focus {
-    Judges,
+    Verifiers,
     Activity,
 }
 
 /// Persistent UI state across repaints (scroll positions, focus, follow mode).
 pub(super) struct DashboardUi {
     pub(super) focus: Focus,
-    pub(super) judges_scroll: u16,
+    pub(super) verifiers_scroll: u16,
     pub(super) activity_scroll: u16,
     /// when true, the Activity pane sticks to the newest event (the default);
     /// scrolling up in Activity turns it off, `f` or scrolling to the bottom restores it.
@@ -55,7 +55,7 @@ impl Default for DashboardUi {
     fn default() -> Self {
         DashboardUi {
             focus: Focus::Activity,
-            judges_scroll: 0,
+            verifiers_scroll: 0,
             activity_scroll: 0,
             activity_follow: true,
             input: None,
@@ -170,8 +170,8 @@ fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
         KeyCode::Char('q') | KeyCode::Esc => return KeyAction::Quit,
         KeyCode::Tab => {
             ui.focus = match ui.focus {
-                Focus::Judges => Focus::Activity,
-                Focus::Activity => Focus::Judges,
+                Focus::Verifiers => Focus::Activity,
+                Focus::Activity => Focus::Verifiers,
             };
         }
         KeyCode::Char('f') => {
@@ -189,14 +189,14 @@ fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
         KeyCode::PageUp => scroll(ui, -10),
         KeyCode::PageDown => scroll(ui, 10),
         KeyCode::Char('g') | KeyCode::Home => match ui.focus {
-            Focus::Judges => ui.judges_scroll = 0,
+            Focus::Verifiers => ui.verifiers_scroll = 0,
             Focus::Activity => {
                 ui.activity_scroll = 0;
                 ui.activity_follow = false;
             }
         },
         KeyCode::Char('G') | KeyCode::End => match ui.focus {
-            Focus::Judges => ui.judges_scroll = u16::MAX, // clamped at draw time
+            Focus::Verifiers => ui.verifiers_scroll = u16::MAX, // clamped at draw time
             Focus::Activity => ui.activity_follow = true,
         },
         _ => {}
@@ -208,8 +208,8 @@ fn handle_key(ui: &mut DashboardUi, code: KeyCode) -> KeyAction {
 /// drops out of follow-mode; scrolling back to the top of follow re-enables it.
 fn scroll(ui: &mut DashboardUi, delta: i32) {
     match ui.focus {
-        Focus::Judges => {
-            ui.judges_scroll = (ui.judges_scroll as i32 + delta).max(0) as u16;
+        Focus::Verifiers => {
+            ui.verifiers_scroll = (ui.verifiers_scroll as i32 + delta).max(0) as u16;
         }
         Focus::Activity => {
             // in follow mode "scroll up" means "look back" → leave follow.
@@ -235,8 +235,8 @@ pub fn render_buffer(state: &DashboardState, w: u16, h: u16) -> ratatui::buffer:
 }
 
 /// A representative snapshot for documentation/screenshots — a mixed claude+codex run mid-sequence,
-/// in a `reconsider` (staging) step: a binary invariant holding, a numeric judge climbing, a broken
-/// judge surfaced, and the run-set `stalled` control judge that triggered the reconsider.
+/// in a `reconsider` (staging) step: a binary invariant holding, a numeric verifier climbing, a broken
+/// verifier surfaced, and the run-set `stalled` control verifier that triggered the reconsider.
 #[doc(hidden)]
 pub fn sample_state() -> DashboardState {
     let mut per_agent = std::collections::BTreeMap::new();
@@ -264,12 +264,12 @@ pub fn sample_state() -> DashboardState {
         cost_limit: Some(25.0),
         goals_met: 1,
         goals_total: 3,
-        goals: Vec::new(), // the successor `judges` below drives every reader now.
+        goals: Vec::new(), // the successor `verifiers` below drives every reader now.
         per_agent,
-        judges: vec![
-            JudgeView {
+        verifiers: vec![
+            VerifierView {
                 name: "build_passes".into(),
-                judged: true,
+                verified: true,
                 kind: "script".into(),
                 in_dod: true,
                 invariant: true,
@@ -282,9 +282,9 @@ pub fn sample_state() -> DashboardState {
                 rationale: "cargo build: 0 warnings, 0 errors".into(),
                 error: None,
             },
-            JudgeView {
+            VerifierView {
                 name: "coverage".into(),
-                judged: true,
+                verified: true,
                 kind: "llm".into(),
                 in_dod: true,
                 invariant: false,
@@ -297,9 +297,9 @@ pub fn sample_state() -> DashboardState {
                 rationale: "64% of modules covered (was 52% last step)".into(),
                 error: None,
             },
-            JudgeView {
+            VerifierView {
                 name: "no_todos".into(),
-                judged: true,
+                verified: true,
                 kind: "script".into(),
                 in_dod: true,
                 invariant: false,
@@ -309,12 +309,12 @@ pub fn sample_state() -> DashboardState {
                 max: None,
                 target: 1.0,
                 delta: 0.0,
-                rationale: "judge failed: judges/no_todos.sh: exit 127 (rg: command not found)".into(),
-                error: Some("judges/no_todos.sh: exit 127 (rg: command not found)".into()),
+                rationale: "verifier failed: verifiers/no_todos.sh: exit 127 (rg: command not found)".into(),
+                error: Some("verifiers/no_todos.sh: exit 127 (rg: command not found)".into()),
             },
-            JudgeView {
+            VerifierView {
                 name: "stalled".into(),
-                judged: true,
+                verified: true,
                 kind: "script".into(),
                 in_dod: false,
                 invariant: false,
@@ -328,22 +328,22 @@ pub fn sample_state() -> DashboardState {
                 error: None,
             },
         ],
-        now: "🔧 reading judges/no_todos.sh to fix the broken judge".into(),
-        think: "build is green but no_todos has errored for two sessions and coverage stalled at 64% — fix the judge before pushing more code".into(),
+        now: "🔧 reading verifiers/no_todos.sh to fix the broken verifier".into(),
+        think: "build is green but no_todos has errored for two sessions and coverage stalled at 64% — fix the verifier before pushing more code".into(),
         recent: vec![
             ActivityEvent { ts: "14:31:02".into(), kind: "init".into(), text: "session #3 · step `reconsider` [claude] · Reconsider role".into() },
-            ActivityEvent { ts: "14:31:04".into(), kind: "think".into(), text: "coverage stalled at 64%, no_todos judge erroring — diagnose before continuing".into() },
-            ActivityEvent { ts: "14:31:09".into(), kind: "tool".into(), text: "$ cat judges/no_todos.sh".into() },
-            ActivityEvent { ts: "14:31:16".into(), kind: "tool_result".into(), text: "rg not found — judge depends on a tool the runner lacks".into() },
-            ActivityEvent { ts: "14:31:22".into(), kind: "think".into(), text: "rewrite the judge to use grep -rn instead of rg".into() },
+            ActivityEvent { ts: "14:31:04".into(), kind: "think".into(), text: "coverage stalled at 64%, no_todos verifier erroring — diagnose before continuing".into() },
+            ActivityEvent { ts: "14:31:09".into(), kind: "tool".into(), text: "$ cat verifiers/no_todos.sh".into() },
+            ActivityEvent { ts: "14:31:16".into(), kind: "tool_result".into(), text: "rg not found — verifier depends on a tool the runner lacks".into() },
+            ActivityEvent { ts: "14:31:22".into(), kind: "think".into(), text: "rewrite the verifier to use grep -rn instead of rg".into() },
         ],
-        summary_cumulative: "17 lifetime sessions. Endpoints wired, build green since session 2. Coverage climbing (52%→64%). no_todos judge broken since session 2. Codex handled the implement steps; Claude handles reconsider + rules the judges.".into(),
-        summary_windowed: "This run: brought build to 0 warnings, raised coverage to 64%, hit a stall — now in a reconsider step to repair the judge.".into(),
+        summary_cumulative: "17 lifetime sessions. Endpoints wired, build green since session 2. Coverage climbing (52%→64%). no_todos verifier broken since session 2. Codex handled the implement steps; Claude handles reconsider + rules the verifiers.".into(),
+        summary_windowed: "This run: brought build to 0 warnings, raised coverage to 64%, hit a stall — now in a reconsider step to repair the verifier.".into(),
         memory_bytes: 14_208,
         // the sample drives `rlt dashboard --demo` and the SVG doc shots — flagged, because the
         // whole point of the flag is that it must be impossible to miss.
         notify_session: Some(17),
-        notify_reason: "STALLED — no judge moved across the last 3 merged steps".into(),
+        notify_reason: "STALLED — no verifier moved across the last 3 merged steps".into(),
         seq: 342,
         finished: false,
         finish_reason: String::new(),

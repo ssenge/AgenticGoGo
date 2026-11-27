@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 /// Under `isolation: Sandbox` each hook command runs in the OS jail (ISOLATION.md §13) — an
 /// `rlt.yaml` hook like `sh ./notify.sh` invokes a file inside the worker-writable cwd, so a
 /// confined worker could rewrite that file and escape through the hook exactly as it once could
-/// through a judge. A hook that CANNOT be confined is SKIPPED (loud), never run unconfined: hooks
+/// through a verifier. A hook that CANNOT be confined is SKIPPED (loud), never run unconfined: hooks
 /// are best-effort, so refusing to run one is safe, but reopening the escape is not.
 pub fn run(label: &str, cmds: &[String], dir: &Path, isolation: crate::isolation::Isolation) {
     for cmd in cmds {
@@ -33,7 +33,7 @@ pub fn run(label: &str, cmds: &[String], dir: &Path, isolation: crate::isolation
                 }
             }
         }
-        // Restore inherited stdio: `wrap()` pipes stdout/stderr (right for the worker/judge, whose
+        // Restore inherited stdio: `wrap()` pipes stdout/stderr (right for the worker/verifier, whose
         // pipes are drained by a reader), but a hook is run via `.status()` with nothing draining —
         // piped-and-unread would hide its output and could deadlock on a chatty hook. Inheriting
         // sends it to the loop log, exactly as an unconfined hook does.
@@ -130,7 +130,7 @@ mod tests {
 
     /// The wiring for ISOLATION.md §13: a SANDBOXED hook — the escape a confined worker plants by
     /// rewriting a script an `rlt.yaml` hook execs — can write its own cwd but NOT outside it.
-    /// `#[ignore]`d like its isolation/judge twins: nested Seatbelt is refused in CI. Run on a real
+    /// `#[ignore]`d like its isolation/verifier twins: nested Seatbelt is refused in CI. Run on a real
     /// host: `cargo test -- --ignored sandboxed_hook`.
     #[test]
     #[ignore = "spawns the real OS sandbox; run by hand on a real host"]

@@ -1,9 +1,9 @@
 //! Configuration loading: `rlt.yaml` (harness + steps + sequence). One file now — `goals.yaml`
-//! is DELETED (§7.1): a judge IS a goal, resolved by name from disk.
+//! is DELETED (§7.1): a verifier IS a goal, resolved by name from disk.
 //!
 //! `#[serde(deny_unknown_fields)]` is on EVERY struct here (§4.1): without it a stale top-level
 //! `budget:` after the config move is silently ignored — an autonomous loop whose spend ceiling is
-//! a decorative key. That guard is also what makes "any other key in a step body (esp `judge_*`) is
+//! a decorative key. That guard is also what makes "any other key in a step body (esp `verifier_*`) is
 //! a HARD ERROR" true.
 //!
 //! This module is the SERDE SHAPE: every `rlt.yaml` struct, its `Default`, and the `default_*`
@@ -34,16 +34,16 @@ pub struct RelentlessConfig {
     /// ERROR (a grader that moves makes verdicts incomparable across cycles). This is what
     /// [`Self::ruler_backend`] reads.
     #[serde(default)]
-    pub judge: JudgeCfg,
+    pub verifier: VerifierCfg,
 
-    /// PER-JUDGE config, keyed by judge NAME: a `timeout:` override, or a judge DECLARED here rather
-    /// than as a file — a `metric:` or `score:` judge over swe-metrics. Singular `judge:` above is
-    /// the ruler; plural `judges:` is this. See [`JudgeOverride`].
+    /// PER-VERIFIER config, keyed by verifier NAME: a `timeout:` override, or a verifier DECLARED here rather
+    /// than as a file — a `metric:` or `score:` verifier over swe-metrics. Singular `verifier:` above is
+    /// the ruler; plural `verifiers:` is this. See [`VerifierOverride`].
     #[serde(default)]
-    pub judges: BTreeMap<String, JudgeOverride>,
+    pub verifiers: BTreeMap<String, VerifierOverride>,
 
     /// The step palette. NAME → a body of overrides. The name is a user string literal; any key in
-    /// the body other than the [`StepBody`] fields (esp `judge_*`) is a HARD ERROR (deny_unknown).
+    /// the body other than the [`StepBody`] fields (esp `verifier_*`) is a HARD ERROR (deny_unknown).
     #[serde(default)]
     pub steps: BTreeMap<String, StepBody>,
 
@@ -87,14 +87,14 @@ pub struct RelentlessConfig {
     pub instructions: String,
     /// READ-ONLY context directories from outside the project — a knowledge base, reference
     /// material, another repository's docs. Each is readable and never writable by the worker and
-    /// its judges; the brief lists them. rlt does not interpret their contents.
+    /// its verifiers; the brief lists them. rlt does not interpret their contents.
     ///
     /// Needs a confining tier on EVERY step: under `none` nothing stops a write, so a run that
     /// names a context and has an unconfined step is refused at startup ([`crate::isolation::context`]).
     #[serde(default)]
     pub context: Vec<ContextDir>,
     /// what crosses into a confined run beyond its tier: the credentials a container receives
-    /// (`pass_env`, `credentials`). Run-level — every container of the run, judges included.
+    /// (`pass_env`, `credentials`). Run-level — every container of the run, verifiers included.
     #[serde(default)]
     pub isolation_policy: IsolationPolicy,
 }
@@ -110,7 +110,7 @@ pub struct IsolationPolicy {
     #[serde(default)]
     pub network: crate::isolation::egress::Network,
     /// environment variables passed INTO every container by NAME, when set in rlt's environment
-    /// (a token a judge's tooling needs, a proxy setting). The value never appears on a command
+    /// (a token a verifier's tooling needs, a proxy setting). The value never appears on a command
     /// line, in a log, a ledger or the report. Each agent's own credential variables
     /// (`ANTHROPIC_API_KEY`, `CODEX_API_KEY`, …) are passed without being listed here.
     #[serde(default)]
@@ -217,85 +217,85 @@ impl Default for Defaults {
     }
 }
 
-/// THE RULER (§4): the backend that runs LLM judges and the summarizer. Run-level and immutable.
+/// THE RULER (§4): the backend that runs rubric verifiers and the summarizer. Run-level and immutable.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct JudgeCfg {
+pub struct VerifierCfg {
     #[serde(default = "default_agent")]
     pub agent: String,
     /// `None` = the ruler's own cheap-model default, resolved at USE time.
     #[serde(default)]
     pub model: Option<String>,
-    /// EVERY judge's timeout, script and LLM alike (seconds).
-    #[serde(default = "default_judge_timeout")]
+    /// EVERY verifier's timeout, script and LLM alike (seconds).
+    #[serde(default = "default_verifier_timeout")]
     pub timeout: u64,
     /// the most evidence (MiB) rlt copies into `rlt/private/evidence/` in ONE run. A disk bound,
     /// not a run limit: a file that does not fit is skipped and recorded, and the run goes on.
     #[serde(default = "default_evidence_max_mb")]
     pub evidence_max_mb: u64,
-    /// the image every judge runs in when the run's strongest tier is `container` — script judges
-    /// and the ruler's LLM judges alike. `None` = `defaults.image`, else the one image the container
+    /// the image every verifier runs in when the run's strongest tier is `container` — script verifiers
+    /// and the ruler's rubric verifiers alike. `None` = `defaults.image`, else the one image the container
     /// steps share; several different ones with neither key set is refused (rlt will not guess
-    /// which toolchain your judges need).
+    /// which toolchain your verifiers need).
     #[serde(default)]
     pub image: Option<String>,
 }
 
-impl Default for JudgeCfg {
+impl Default for VerifierCfg {
     fn default() -> Self {
-        JudgeCfg {
+        VerifierCfg {
             agent: default_agent(),
             model: None,
-            timeout: default_judge_timeout(),
+            timeout: default_verifier_timeout(),
             evidence_max_mb: default_evidence_max_mb(),
             image: None,
         }
     }
 }
 
-/// PER-JUDGE config: NAME → `timeout:` (the YAML twin of
-/// [`Judge::timeout`](crate::core::model::Judge::timeout)), and — for a judge that is not a file —
+/// PER-VERIFIER config: NAME → `timeout:` (the YAML twin of
+/// [`Verifier::timeout`](crate::core::model::Verifier::timeout)), and — for a verifier that is not a file —
 /// its DECLARATION: a `metric:` or a `score:` block with its `max:`/`min:` threshold
 /// ([`crate::metrics`]), or a `command:` met by its exit code.
 ///
-/// `timeout` survived the 2026-08-04 owner simplification that cut the judge-level `gate:`/`when:`
-/// because it is neither flow nor gating: a judge that takes longer than the run-level 300s (a load
-/// test, an e2e suite) simply DIES without it. A metric/score judge is declared here because it has
-/// no script to put in `rlt/judges/` — the measuring is rlt's (one shared `swe-metrics measure` per
-/// session), and only the selector and the threshold are the project's. Only judges needing
+/// `timeout` survived the 2026-08-04 owner simplification that cut the verifier-level `gate:`/`when:`
+/// because it is neither flow nor gating: a verifier that takes longer than the run-level 300s (a load
+/// test, an e2e suite) simply DIES without it. A metric/score verifier is declared here because it has
+/// no script to put in `rlt/verifiers/` — the measuring is rlt's (one shared `swe-metrics measure` per
+/// session), and only the selector and the threshold are the project's. Only verifiers needing
 /// non-default config appear here, which is why the map is `#[serde(default)]` and usually absent.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct JudgeOverride {
-    /// seconds. `None` = the run-level [`JudgeCfg::timeout`]. For a metric/score judge it bounds
-    /// the shared measurement (and the scoring) the judge runs.
+pub struct VerifierOverride {
+    /// seconds. `None` = the run-level [`VerifierCfg::timeout`]. For a metric/score verifier it bounds
+    /// the shared measurement (and the scoring) the verifier runs.
     #[serde(default)]
     pub timeout: Option<u64>,
-    /// a METRIC judge: which number of the swe-metrics report it reads.
+    /// a METRIC verifier: which number of the swe-metrics report it reads.
     #[serde(default)]
     pub metric: Option<crate::metrics::MetricSel>,
-    /// a SCORE judge: swe-metrics' quality score by this scoring definition.
+    /// a SCORE verifier: swe-metrics' quality score by this scoring definition.
     #[serde(default)]
     pub score: Option<crate::metrics::ScoreSel>,
-    /// met when the value is at most this (a metric or score judge only).
+    /// met when the value is at most this (a metric or score verifier only).
     #[serde(default)]
     pub max: Option<f64>,
-    /// met when the value is at least this (a metric or score judge only).
+    /// met when the value is at least this (a metric or score verifier only).
     #[serde(default)]
     pub min: Option<f64>,
-    /// a COMMAND judge: a shell command run in the project, met when it exits 0; the last lines of its output are the
+    /// a COMMAND verifier: a shell command run in the project, met when it exits 0; the last lines of its output are the
     /// rationale.
     #[serde(default)]
     pub command: Option<String>,
-    /// a command judge's `PATH` entries, in front of the rest (relative ones to the project).
+    /// a command verifier's `PATH` entries, in front of the rest (relative ones to the project).
     #[serde(default)]
     pub path: Vec<String>,
-    /// a TEMPLATE judge (a process file's `judges:` only): a document filled in from a template.
+    /// a TEMPLATE verifier (a process file's `verifiers:` only): a document filled in from a template.
     #[serde(default)]
     pub template: Option<TemplateSel>,
 }
 
-/// A template judge's document and template.
+/// A template verifier's document and template.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TemplateSel {
@@ -308,15 +308,15 @@ pub struct TemplateSel {
     pub placeholder: Option<String>,
 }
 
-/// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_judges` and the
+/// One step's body — a bag of OVERRIDES over [`Defaults`], plus `prompt`/`skip_verifiers` and the
 /// per-step isolation lists. The COMPLETE legal key list is:
 ///
 /// ```text
 /// agent · model · effort · worker_args · state · role_prompt · role_prompt_file · prompt
-/// prompt_file · skip_judges · isolation · image · readonly · writable · write_deny
+/// prompt_file · skip_verifiers · isolation · image · readonly · writable · write_deny
 /// ```
 ///
-/// Any other key is a HARD ERROR (deny_unknown), which is what makes naming a `judge_*` key in a
+/// Any other key is a HARD ERROR (deny_unknown), which is what makes naming a `verifier_*` key in a
 /// step fail loudly instead of being silently ignored.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -346,9 +346,9 @@ pub struct StepBody {
     /// alternative to `prompt`: setting both is a startup error.
     #[serde(default)]
     pub prompt_file: Option<String>,
-    /// no DoD judges run after this step ⇒ nothing merges; the work STAGES (§5.7).
+    /// no DoD verifiers run after this step ⇒ nothing merges; the work STAGES (§5.7).
     #[serde(default)]
-    pub skip_judges: bool,
+    pub skip_verifiers: bool,
     /// blast-radius isolation for this step (`none` | `sandbox` | `container`); overrides
     /// `defaults.isolation`. `None` inherits it. See [`crate::isolation::Isolation`].
     #[serde(default)]
@@ -367,7 +367,7 @@ pub struct StepBody {
     pub readonly: Vec<String>,
     /// paths SUBTRACTED from [`Self::readonly`] — how a step re-grants exactly one of the denies it
     /// would otherwise carry. Matching is exact on the normalised spelling
-    /// ([`crate::isolation::normalize_path`]), so `rlt/judges` and `rlt/judges/` are one path.
+    /// ([`crate::isolation::normalize_path`]), so `rlt/verifiers` and `rlt/verifiers/` are one path.
     #[serde(default)]
     pub writable: Vec<String>,
     /// MORE protected paths for this step, ADDED to `defaults.write_deny` (union). `writable:` never
@@ -381,7 +381,7 @@ pub struct StepBody {
 /// **These are SERDE FIELDS, NOT A GRAMMAR** (RUST_API §11.1), which is the whole point: the terse
 /// line syntax (`worker x4`, `if stalled then reconsider`) needed a hand-written lexer + parser to
 /// read, and this needs a derive. There is deliberately no `if:` — per-entry conditionals were CUT
-/// by the owner on 2026-08-04 (§14.14): *"only simple loops, all judges run after every step, then
+/// by the owner on 2026-08-04 (§14.14): *"only simple loops, all verifiers run after every step, then
 /// gating — everything more complex is the Rust API."* A lap dispatches EVERY entry, in order.
 ///
 /// `times:` and `until:`+`max:` are alternatives, and a bound is mandatory on both: an unbounded
@@ -466,7 +466,7 @@ pub struct Sequence {
     /// marks a Rust-driver project (BUILD.md §3.6), where the flow is the driver's own `for`/`if`.
     #[serde(default)]
     pub steps: Vec<SeqStep>,
-    /// the run-level ceilings — tokens (worker AND judge spend), dollars, sessions. Each null/absent
+    /// the run-level ceilings — tokens (worker AND verifier spend), dollars, sessions. Each null/absent
     /// = unlimited. The loop reads these into the `budget_total`/`cost_limit`/`max_sessions` fields
     /// that back the stable `over_budget`/`over_cost`/`over_iterations` grammar.
     #[serde(default)]
@@ -474,7 +474,7 @@ pub struct Sequence {
     /// RENAME of the shipped `session_isolation.rollback_on_regression` (§5.7).
     #[serde(default = "default_true")]
     pub gate_regressions: bool,
-    /// judges that must STAY met.
+    /// verifiers that must STAY met.
     #[serde(default)]
     pub invariants: Vec<String>,
     /// the Definition of Done — success stop (exit 0). RENAME of `stop_when`.
@@ -491,20 +491,20 @@ pub struct Sequence {
     /// policy (ping only when `abort_if` halts, §8.5). Required WITH it (else nothing would fire).
     #[serde(default)]
     pub notify: Option<NotifyCfg>,
-    /// the numeric RATCHET, keyed by judge NAME: that judge's `value` may not get worse than at the
-    /// last kept gate by more than its tolerance ([`crate::core::ratchet`]). A ratcheted judge joins
+    /// the numeric RATCHET, keyed by verifier NAME: that verifier's `value` may not get worse than at the
+    /// last kept gate by more than its tolerance ([`crate::core::ratchet`]). A ratcheted verifier joins
     /// the run-set (never the DoD-set); a regression is a gate regression.
     #[serde(default)]
     pub ratchet: BTreeMap<String, crate::core::ratchet::RatchetCfg>,
-    /// how many earlier judged sessions `oscillating` looks back over for an A→B→A repeat.
+    /// how many earlier verified sessions `oscillating` looks back over for an A→B→A repeat.
     #[serde(default = "default_oscillation_window")]
     pub oscillation_window: usize,
-    /// named judge GROUPS, keyed by group name: the aggregates take one as a subset —
+    /// named verifier GROUPS, keyed by group name: the aggregates take one as a subset —
     /// `count_met(quality) >= 2` is "two of three" ([`crate::core::groups`]). Every member joins the
     /// run-set; a group named in `done_if` puts its members in the DoD-set too.
     #[serde(default)]
     pub groups: BTreeMap<String, Vec<String>>,
-    /// merge a judged session only if something IMPROVED: a DoD-set judge went unmet→met (a `done_if`
+    /// merge a verified session only if something IMPROVED: a DoD-set verifier went unmet→met (a `done_if`
     /// group: gained ground net), or a ratcheted value moved the good way by more than its
     /// tolerance. A session that improved nothing is not merged and is recorded `no_improvement` —
     /// not a regression (it never counts for `rollbacks`), but it does count for `stalled`.
@@ -543,8 +543,8 @@ impl Default for RelentlessConfig {
         RelentlessConfig {
             project: String::new(),
             defaults: Defaults::default(),
-            judge: JudgeCfg::default(),
-            judges: BTreeMap::new(),
+            verifier: VerifierCfg::default(),
+            verifiers: BTreeMap::new(),
             steps: BTreeMap::new(),
             sequence: Sequence::default(),
             heartbeat_secs: default_heartbeat(),
@@ -659,7 +659,7 @@ impl Default for Watchdog {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
-    /// output-token ceiling — WORKER *and* JUDGE spend (§5.6). null = unlimited. Backs `over_budget`.
+    /// output-token ceiling — WORKER *and* VERIFIER spend (§5.6). null = unlimited. Backs `over_budget`.
     #[serde(default)]
     pub tokens: Option<u64>,
     /// dollar ceiling. null = unlimited. CLAUDE-only in practice (only it reports dollars). Backs `over_cost`.
@@ -755,7 +755,7 @@ fn default_cooldown() -> u32 {
 fn default_true() -> bool {
     true
 }
-fn default_judge_timeout() -> u64 {
+fn default_verifier_timeout() -> u64 {
     300
 }
 fn default_evidence_max_mb() -> u64 {
@@ -819,7 +819,7 @@ pub struct ResolvedStep {
     pub role_prompt_file: Option<String>,
     /// the file `prompt` is read from at session start, as written.
     pub prompt_file: Option<String>,
-    pub skip_judges: bool,
+    pub skip_verifiers: bool,
     /// resolved blast-radius isolation (step over defaults, default none) — [`crate::isolation`].
     pub isolation: crate::isolation::Isolation,
     /// the base image for `isolation: container` (step over defaults, else

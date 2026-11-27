@@ -6,5 +6,5 @@ Refactor `pricing.py` so that no function has a cyclomatic complexity above 5, w
 
 # Rules
 - You are autonomous — do the work and exit. You NEVER run git; rlt commits your work, runs each session
-  on its own branch, and keeps it only if the judges pass.
-- rlt measures the code with swe-metrics after every session; you cannot run or change the judges.
+  on its own branch, and keeps it only if the verifiers pass.
+- rlt measures the code with swe-metrics after every session; you cannot run or change the verifiers.
