@@ -75,3 +75,21 @@ fn an_install_elsewhere_warns_that_the_older_copy_still_wins() {
     assert!(text.contains("WARNING") && text.contains(&format!("cp \"{}\" \"{}\"", target.join("rlt").display(), old.display())), "{text}");
     assert!(text.contains(&format!("rlt resolves to: {}", old.display())), "{text}");
 }
+
+/// An `agg` left on PATH from before the rename is named, with the advice to remove it once no project needs it.
+#[test]
+fn an_old_agg_on_path_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    let release = fake(&r.join("release"), "0.1.0");
+    let target = r.join("target");
+    let old_dir = r.join("old");
+    std::fs::create_dir_all(&old_dir).unwrap();
+    let old = old_dir.join("agg");
+    std::fs::write(&old, "#!/bin/sh\necho 'agg 0.0.51'\n").unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (out, text) = install(r, &release, &[&target, &old_dir], Some(&target));
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains(&format!("the old agg is still at {}: remove it once no project needs it", old.display())), "{text}");
+}

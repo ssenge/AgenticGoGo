@@ -216,6 +216,18 @@ else
   info "rlt resolves to: ${BOLD}${now}${RST} ($("$now" --version 2>/dev/null || echo 'no version'))"
 fi
 
+# ---- the tool's old name ----
+# Before 0.1.0 the binary was called `agg`. It reads nothing of what rlt writes, and nothing converts its projects.
+old_path=""
+old_ifs="$IFS"; IFS=:
+for d in $PATH; do
+  [ -n "$d" ] && [ -f "$d/agg" ] && [ -x "$d/agg" ] && old_path="$old_path $d/agg"
+done
+IFS="$old_ifs"
+for old in $old_path; do
+  warn "the old agg is still at $old: remove it once no project needs it"
+done
+
 # ---- nudge about the two other pieces of the setup ----
 say ""
 say "${BOLD}Next steps${RST}"
