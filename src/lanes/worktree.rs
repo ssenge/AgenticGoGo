@@ -76,6 +76,23 @@ pub fn add(project: &Path, lane: &Lane, base: &str) -> Result<(), String> {
     }
 }
 
+/// Checks the lane's existing branch out into a worktree again, as it is (a settled fork's, to replay it on a resume); an
+/// existing worktree is kept.
+pub fn reopen(project: &Path, lane: &Lane) -> Result<(), String> {
+    if lane.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = lane.worktree.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let (ok, _, err) = git(project, &["worktree", "add", "-q", &lane.worktree.display().to_string(), &lane.branch]);
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("lane `{}`: git worktree add of its branch failed: {err}", lane.key))
+    }
+}
+
 /// A standalone clone of the project's repository for a lane that runs somewhere else, on its branch from `base`: it holds
 /// everything the lane needs and nothing that points back at this machine (no remote, no link to this repository's folder).
 pub fn add_clone(project: &Path, lane: &Lane, base: &str) -> Result<(), String> {
@@ -126,6 +143,13 @@ pub fn remove(project: &Path, lane: &Lane) {
     let _ = std::fs::remove_dir_all(&lane.worktree);
     let _ = git(project, &["worktree", "prune"]);
     let _ = git(project, &["branch", "-D", &lane.branch]);
+}
+
+/// Removes the lane's worktree and keeps its branch (the work stays reachable: a fork's, merged or not).
+pub fn remove_worktree(project: &Path, lane: &Lane) {
+    let _ = git(project, &["worktree", "remove", "--force", &lane.worktree.display().to_string()]);
+    let _ = std::fs::remove_dir_all(&lane.worktree);
+    let _ = git(project, &["worktree", "prune"]);
 }
 
 /// The lane's tip: its branch's commit.

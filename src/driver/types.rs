@@ -39,6 +39,9 @@ pub enum Fatal {
     Io(std::io::Error),
     /// Everything the pipeline raises — `step_once` and friends return `anyhow::Result`.
     Other(anyhow::Error),
+    /// [`Relentless::merge`](crate::driver::Relentless::merge) met a conflict: the merge was aborted, the merging instance
+    /// is as it was, and the fork's `branch` is kept for the operator to merge by hand. `files` are the conflicted paths.
+    Conflict { branch: String, files: Vec<String> },
 }
 
 impl Fatal {
@@ -58,7 +61,7 @@ impl Fatal {
         match self {
             Fatal::Ended(o) => o.exit_code(),
             // A real fault, not a run outcome: 1 is correct here and only here.
-            Fatal::Io(_) | Fatal::Other(_) => 1,
+            Fatal::Io(_) | Fatal::Other(_) | Fatal::Conflict { .. } => 1,
         }
     }
 }
@@ -111,6 +114,7 @@ impl std::fmt::Display for Fatal {
             Fatal::Io(e) => write!(f, "{e}"),
             // `{:#}` is anyhow's single-line context chain — the whole "why", not just the tip.
             Fatal::Other(e) => write!(f, "{e:#}"),
+            Fatal::Conflict { branch, files } => write!(f, "merging `{branch}` conflicts in {}: merge it by hand (`git merge {branch}`)", files.join(", ")),
         }
     }
 }
@@ -121,6 +125,7 @@ impl std::error::Error for Fatal {
             Fatal::Ended(_) => None,
             Fatal::Io(e) => Some(e),
             Fatal::Other(e) => Some(&**e),
+            Fatal::Conflict { .. } => None,
         }
     }
 }

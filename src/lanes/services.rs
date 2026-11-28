@@ -21,6 +21,8 @@ pub enum LaneState {
     Failed,
     /// ended on a stop, resumable
     Stopped,
+    /// a fork the driver dropped without merging it: its work stays on its branch
+    Discarded,
 }
 
 /// What a view shows of one lane.

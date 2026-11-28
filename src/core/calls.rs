@@ -88,6 +88,15 @@ pub enum CallRecord {
     /// makes replay silent: re-asking a human the same question is the one resume cost that is paid
     /// by a person rather than by tokens.
     Hil { ord: u64, label: String, case: crate::core::asks::AskCase, msg: String, answer: String, ts: u64 },
+    /// [`Relentless::fork`](crate::driver::Relentless::fork): the fork's name. Replayed, the fork finds its worktree or its
+    /// saved ledger again by that name.
+    Fork { ord: u64, label: String, name: String, ts: u64 },
+    /// [`Relentless::merge`](crate::driver::Relentless::merge): the fork's work landed on `tip`. A boundary of a resume like a
+    /// kept gate: what was merged is on base, and is not merged again.
+    Merge { ord: u64, label: String, name: String, tip: String, ts: u64 },
+    /// The last record of a fork's own ledger, written when the fork ends merged or discarded. A boundary of a resume like a
+    /// kept gate: a settled fork replays everything it did, a discarded try's rolled-back steps included, with no agent call.
+    Settled { ord: u64, label: String, how: String, ts: u64 },
 }
 
 impl CallRecord {
@@ -97,6 +106,9 @@ impl CallRecord {
             | CallRecord::Verify { ord, .. }
             | CallRecord::Gate { ord, .. }
             | CallRecord::Note { ord, .. }
+            | CallRecord::Fork { ord, .. }
+            | CallRecord::Merge { ord, .. }
+            | CallRecord::Settled { ord, .. }
             | CallRecord::Hil { ord, .. } => *ord,
         }
     }
@@ -107,6 +119,9 @@ impl CallRecord {
             | CallRecord::Verify { label, .. }
             | CallRecord::Gate { label, .. }
             | CallRecord::Note { label, .. }
+            | CallRecord::Fork { label, .. }
+            | CallRecord::Merge { label, .. }
+            | CallRecord::Settled { label, .. }
             | CallRecord::Hil { label, .. } => label,
         }
     }
@@ -127,6 +142,9 @@ impl CallRecord {
             // driver edited from `hil_bool` to `hil_choose` at the same call site is asking the same
             // human the same thing in a different shape — not a control-flow divergence.
             CallRecord::Hil { .. } => "hil".into(),
+            CallRecord::Fork { .. } => "fork".into(),
+            CallRecord::Merge { .. } => "merge".into(),
+            CallRecord::Settled { .. } => "settled".into(),
         }
     }
 
@@ -221,7 +239,7 @@ pub fn truncate_to_base(dir: &Path) -> Result<Vec<CallRecord>> {
     let all = load(dir)?;
     let keep = all
         .iter()
-        .rposition(|r| matches!(r, CallRecord::Gate { outcome: GateOutcome::Kept, .. }))
+        .rposition(|r| matches!(r, CallRecord::Gate { outcome: GateOutcome::Kept, .. } | CallRecord::Merge { .. } | CallRecord::Settled { .. }))
         .map(|i| i + 1)
         .unwrap_or(0);
     if keep == all.len() {
@@ -280,6 +298,9 @@ fn kind_of(r: &CallRecord) -> &'static str {
         CallRecord::Gate { .. } => "gate",
         CallRecord::Note { .. } => "note",
         CallRecord::Hil { .. } => "hil",
+        CallRecord::Fork { .. } => "fork",
+        CallRecord::Merge { .. } => "merge",
+        CallRecord::Settled { .. } => "settled",
     }
 }
 
@@ -333,6 +354,26 @@ mod tests {
     }
     fn gate(ord: u64, outcome: GateOutcome) -> CallRecord {
         CallRecord::Gate { ord, label: "g".into(), outcome, gate: None, ts: 1 }
+    }
+
+    /// A merge and a settled fork are boundaries like a kept gate: what they landed or settled replays, what followed is dropped,
+    /// and the new records round-trip.
+    #[test]
+    fn a_merge_and_a_settled_record_are_boundaries_too() {
+        let d = tmp("forkbounds");
+        let fork = CallRecord::Fork { ord: 1, label: "l".into(), name: "1".into(), ts: 1 };
+        let merge = CallRecord::Merge { ord: 2, label: "l".into(), name: "1".into(), tip: "abc".into(), ts: 1 };
+        for r in [step(0, "a"), fork, merge, step(3, "b"), gate(4, GateOutcome::RolledBack)] {
+            append(&d, &r).unwrap();
+        }
+        let kept = truncate_to_base(&d).unwrap();
+        assert_eq!(kept.iter().map(|r| r.what()).collect::<Vec<_>>(), ["a", "fork", "merge"]);
+        let d = tmp("settled");
+        let settled = CallRecord::Settled { ord: 2, label: "end".into(), how: "discarded".into(), ts: 1 };
+        for r in [step(0, "t"), gate(1, GateOutcome::RolledBack), settled] {
+            append(&d, &r).unwrap();
+        }
+        assert_eq!(truncate_to_base(&d).unwrap().len(), 3, "a discarded try's rolled-back work replays: no agent call");
     }
 
     /// The gate's state rides on its Gate record and survives the round trip; a record written

@@ -14,6 +14,8 @@
 //! the borrow checker into the driver's control flow for no gain: one thread works on an instance at a time, so
 //! the interior mutability below (`Slot`/`Locked`/`OnceLock`, locks that are never contended) is free and invisible.
 
+mod fork;
+
 use crate::core::asks::AskCase;
 use super::locked::{Locked, Slot};
 use std::sync::OnceLock;
@@ -105,34 +107,14 @@ pub struct Relentless {
     vars: BTreeMap<String, String>,
     /// the thread working on this instance, and how deep its calls are nested — see [`Relentless::enter`].
     busy: std::sync::Mutex<Option<(std::thread::ThreadId, u32)>>,
-}
-
-/// The settings a lane's instance has of the run that started it; `Send` and `Sync`, where a `Relentless` is neither.
-#[derive(Clone)]
-pub(crate) struct LaneTemplate {
-    cfg: RelentlessConfig,
-    custom_ruler: Option<String>,
-    memory: bool,
-    user_settings: bool,
-    user_env: crate::backend::user_env::UserEnv,
-    system_prompt: Option<String>,
-}
-
-impl LaneTemplate {
-    /// The lane's instance of the engine, for the worktree `dir`, named `project`, sharing the run's `services`.
-    pub(crate) fn instance(&self, dir: &Path, project: &str, key: &str, services: std::sync::Arc<dyn crate::lanes::LaneServices>,
-                           resume: bool) -> Result<Relentless, Fatal> {
-        let mut lane = Relentless::open_with(dir, Opts { resume })?;
-        lane.cfg = self.cfg.clone();
-        lane.cfg.project = project.to_string();
-        lane.custom_ruler = self.custom_ruler.clone();
-        lane.memory = self.memory;
-        lane.user_settings = self.user_settings;
-        lane.user_env = self.user_env.clone();
-        lane.system_prompt = self.system_prompt.clone();
-        lane.lane = Some((services, key.to_string()));
-        Ok(lane)
-    }
+    /// where this instance came from when it is a fork — see [`Relentless::fork`]
+    fork_of: Option<fork::ForkOf>,
+    /// the services every fork of this run shares, made at the first fork — see [`Relentless::fork`]
+    forks: OnceLock<std::sync::Arc<crate::lanes::Shared>>,
+    /// paths the worktrees of this instance's forks are given — see [`Relentless::fork_seed`]
+    fork_seed: Vec<String>,
+    /// the end of the run was written (a merge writes a fork's before its work is merged; the drop writes the rest once)
+    wound: std::sync::atomic::AtomicBool,
 }
 
 /// Everything that only exists once the run-level setup has run.
@@ -223,10 +205,15 @@ impl Relentless {
             project: dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "driver".into()),
             ..RelentlessConfig::default()
         };
-        Ok(Relentless {
+        Ok(Relentless::bare(cfg, dir, opts.resume))
+    }
+
+    /// An instance with nothing set but its config, its folder and whether it resumes.
+    pub(super) fn bare(cfg: RelentlessConfig, dir: PathBuf, resume: bool) -> Relentless {
+        Relentless {
             cfg,
             dir,
-            resume: opts.resume,
+            resume,
             started: OnceLock::new(),
             ended: Slot::new(None),
             ord: Slot::new(0),
@@ -245,7 +232,11 @@ impl Relentless {
             system_prompt: None,
             vars: BTreeMap::new(),
             busy: std::sync::Mutex::new(None),
-        })
+            fork_of: None,
+            forks: OnceLock::new(),
+            fork_seed: Vec::new(),
+            wound: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// The run-level ceilings. **Opt-in**: they are enforced where the driver calls
@@ -404,10 +395,21 @@ impl Relentless {
     }
 
     /// Makes this instance one lane of a run: its spend counts toward the run's ceilings, its sessions wait at the gate
-    /// a rate limit closes, and a ceiling the run broke ends it. `key` names the lane. Not for a driver's own use: the
-    /// scheduler of `fan_out` and of a parallel `each` set it.
-    pub fn lanes(mut self, services: std::sync::Arc<dyn crate::lanes::LaneServices>, key: &str) -> Relentless {
+    /// a rate limit closes, and a ceiling the run broke ends it. `key` names the lane. The scheduler of a parallel `each`
+    /// sets it; a fork has it from [`Relentless::fork`].
+    pub(crate) fn lanes(mut self, services: std::sync::Arc<dyn crate::lanes::LaneServices>, key: &str) -> Relentless {
         self.lane = Some((services, key.to_string()));
+        self
+    }
+
+    /// Ignored or untracked paths of the project (dependencies, build caches) copied into the worktree of every fork this
+    /// instance makes, as a fork starts from what git holds and nothing else.
+    pub fn fork_seed<I, S>(mut self, paths: I) -> Relentless
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.fork_seed = paths.into_iter().map(Into::into).collect();
         self
     }
 
@@ -532,6 +534,10 @@ impl Relentless {
             return Err(Fatal::Ended(o));
         }
         if self.started.get().is_none() {
+            if let Some(fork) = &self.fork_of {
+                // a fork's worktree is made at its first call, not at `fork()`: forking fifty items runs four at a time
+                fork.begin(self.lane.as_ref().map(|(svc, _)| svc)).map_err(Fatal::from_message)?;
+            }
             let started = self.boot()?;
             let _ = self.started.set(started);
         }
@@ -1431,7 +1437,8 @@ impl Relentless {
             (st.session, st.tokens_spent, st.cost_spent, st.clock.wall_secs(now), st.clock.work_secs(now))
         };
         // the whole run's spend, when this is one of its lanes: a ceiling any lane's spend broke ends every lane
-        if let Some(why) = self.lane.as_ref().and_then(|(l, _)| l.ceiling_hit()) {
+        let forks = self.forks.get().and_then(|f| crate::lanes::LaneServices::ceiling_hit(&**f));
+        if let Some(why) = self.lane.as_ref().and_then(|(l, _)| l.ceiling_hit()).or(forks) {
             return Err(self.end_now(started, RunOutcome::Halt, why, "abort:over_budget"));
         }
         // The order is the table's. A `None` limit is not checked.
@@ -1945,23 +1952,6 @@ impl Relentless {
         self.ended.get()
     }
 
-    /// What a lane's instance takes from this one: its settings, copied, so a lane's thread needs nothing of `self`.
-    pub(crate) fn lane_template(&self) -> LaneTemplate {
-        LaneTemplate {
-            cfg: self.cfg.clone(),
-            custom_ruler: self.custom_ruler.clone(),
-            memory: self.memory,
-            user_settings: self.user_settings,
-            user_env: self.user_env.clone(),
-            system_prompt: self.system_prompt.clone(),
-        }
-    }
-
-    /// This run's project name: its folder's, or the name a lane was given.
-    pub(crate) fn project_name_of(&self) -> String {
-        self.cfg.project.clone()
-    }
-
     /// The ceilings set on this run.
     pub(crate) fn cfg_limits(&self) -> Limits {
         self.cfg.sequence.limits.clone()
@@ -1974,6 +1964,10 @@ impl Relentless {
 
     /// The project root, canonicalized.
     pub fn dir(&self) -> &Path {
+        if let Some(fork) = &self.fork_of {
+            // the folder of a fork is its worktree: it exists from the first look at it (an error is told by the first call)
+            let _ = fork.make();
+        }
         &self.dir
     }
 
@@ -2111,6 +2105,22 @@ impl Drop for Relentless {
             eprintln!("  ⚠ rlt: the driver PANICKED — any staged span is left on its branch, un-merged.");
             return;
         }
+        self.wind_down("discarded");
+        // the run's guards and ledger write their last lines as they drop: before a fork's worktree goes, not after
+        drop(self.started.take());
+        if let Some(fork) = &self.fork_of {
+            fork.settle(self);
+        }
+    }
+}
+
+impl Relentless {
+    /// Writes the end of the run: the stranded span named, the ledger's end, the report. Once: a merge writes a fork's before
+    /// it merges its work, and the fork's drop then has nothing left to write. `how` is what a fork's last ledger record says.
+    pub(super) fn wind_down(&self, how: &str) {
+        if self.wound.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let Some(started) = self.started.get() else {
             return; // nothing ever spent: there is no run to finalize.
         };
@@ -2140,6 +2150,12 @@ impl Drop for Relentless {
             eprintln!("  ⚠ rlt: cannot write {}: {e}", crate::paths::report_json(&st.dir).display());
         }
         crate::core::verifier::sweep_scratch(&st.dir);
+        if self.fork_of.is_some() {
+            // the last record of a fork's own ledger: a settled fork replays whole on a resume (see `CallRecord::Settled`)
+            let _ = crate::core::calls::append(&self.dir, &CallRecord::Settled {
+                ord: self.ord.get(), label: self.label_path(), how: how.to_string(), ts: crate::util::now_epoch(),
+            });
+        }
     }
 }
 

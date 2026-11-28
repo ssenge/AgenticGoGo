@@ -31,11 +31,16 @@ pub fn is_in(project: &Path, branch: &str) -> bool {
 
 /// Merges `lane`'s branch into the branch `project` has checked out.
 pub fn join(project: &Path, lane: &Lane) -> Joined {
+    join_as(project, lane, &subject(lane))
+}
+
+/// [`join`] with the merge commit's `subject` named by the caller (a fork's merge says `rlt: merge fork <name>`).
+pub fn join_as(project: &Path, lane: &Lane, subject: &str) -> Joined {
     let head = |p: &Path| git(p, &["rev-parse", "HEAD"]).1;
     if is_in(project, &lane.branch) {
         return Joined::Already(head(project));
     }
-    let (ok, _, err) = git(project, &["merge", "--no-ff", "-m", &subject(lane), &lane.branch]);
+    let (ok, _, err) = git(project, &["merge", "--no-ff", "-m", subject, &lane.branch]);
     if ok {
         return Joined::Merged(head(project));
     }

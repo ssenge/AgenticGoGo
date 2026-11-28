@@ -31,14 +31,12 @@
 //! knob — but on this path they are populated in Rust and only in Rust.
 
 mod facade;
-mod fanout;
 pub(crate) mod locked;
 mod group;
 mod step;
 mod types;
 
 pub use facade::{Relentless, PosFrame};
-pub use fanout::{FanOut, LaneEnd, LaneReport};
 pub use group::{Group, GroupVerdict};
 pub use step::Step;
 pub use types::{
