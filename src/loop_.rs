@@ -143,9 +143,11 @@ use crate::registry::run_pre_start;
 
 
 
-pub fn wait_for_resume(bus: &Bus) -> Option<String> {
+pub fn wait_for_resume(bus: &Bus, pump: &dyn Fn()) -> Option<String> {
     loop {
         std::thread::sleep(Duration::from_secs(2));
+        // a fork of a driver's run: the `resume` or `stop` is on the run's bus, which no one else may be reading
+        pump();
         // a paused run is still a running one: SIGTERM ends it like a `stop`, not after a `resume`.
         if crate::os::signals::interrupted() {
             return Some("interrupted (SIGINT/SIGTERM) while paused".into());

@@ -90,7 +90,7 @@ pub struct Relentless {
     /// the label path — see [`Relentless::pos`].
     pos: Locked<Vec<PosItem>>,
     /// the run's lane services and this instance's lane key, when it is one of several lanes of a run (`None`: an ordinary run)
-    lane: Option<(std::sync::Arc<dyn crate::lanes::LaneServices>, String)>,
+    lane: Option<(std::sync::Arc<crate::lanes::Shared>, String)>,
     /// the name of an [`Agent::Custom`] handed to [`Relentless::verifier_agent`], refused when the run boots:
     /// the builder chain cannot fail, and the ruler is resolved BY NAME (`verifier.agent`).
     custom_ruler: Option<String>,
@@ -397,7 +397,7 @@ impl Relentless {
     /// Makes this instance one lane of a run: its spend counts toward the run's ceilings, its sessions wait at the gate
     /// a rate limit closes, and a ceiling the run broke ends it. `key` names the lane. The scheduler of a parallel `each`
     /// sets it; a fork has it from [`Relentless::fork`].
-    pub(crate) fn lanes(mut self, services: std::sync::Arc<dyn crate::lanes::LaneServices>, key: &str) -> Relentless {
+    pub(crate) fn lanes(mut self, services: std::sync::Arc<crate::lanes::Shared>, key: &str) -> Relentless {
         self.lane = Some((services, key.to_string()));
         self
     }
@@ -540,6 +540,14 @@ impl Relentless {
             }
             let started = self.boot()?;
             let _ = self.started.set(started);
+            if let (Some(fork), Some((services, _))) = (&self.fork_of, &self.lane) {
+                // from now on the operator's commands are sent to this fork's folder
+                services.register(&fork.name, &self.dir);
+                if services.stop_requested() {
+                    self.ended.set(Some(RunOutcome::Stopped));
+                    return Err(Fatal::Ended(RunOutcome::Stopped));
+                }
+            }
         }
         if let Some(o) = self.ended.get() {
             return Err(Fatal::Ended(o));
@@ -1436,8 +1444,11 @@ impl Relentless {
             let st = started.st.borrow();
             (st.session, st.tokens_spent, st.cost_spent, st.clock.wall_secs(now), st.clock.work_secs(now))
         };
+        // what this run's forks spent counts toward its ceilings
+        let (fork_tokens, fork_cost) = self.forks.get().map_or((0, 0.0), |f| f.spent());
+        let (tokens, cost) = (tokens + fork_tokens, cost + fork_cost);
         // the whole run's spend, when this is one of its lanes: a ceiling any lane's spend broke ends every lane
-        let forks = self.forks.get().and_then(|f| crate::lanes::LaneServices::ceiling_hit(&**f));
+        let forks = self.forks.get().and_then(|f| f.ceiling_hit());
         if let Some(why) = self.lane.as_ref().and_then(|(l, _)| l.ceiling_hit()).or(forks) {
             return Err(self.end_now(started, RunOutcome::Halt, why, "abort:over_budget"));
         }
@@ -1503,6 +1514,13 @@ impl Relentless {
             let outcome = started.st.borrow_mut().finish_interrupted();
             self.ended.set(Some(outcome));
             return Err(Fatal::Ended(outcome));
+        }
+        // a run with forks: its bus is drained for them too, and what they drained is put back for the run itself
+        if let Some(forks) = self.forks.get() {
+            forks.pump();
+            for cmd in forks.take_root_inbox() {
+                let _ = crate::bus::Bus::open(&self.dir).and_then(|b| b.send(&cmd, &format!("{:013}", crate::util::now_epoch() * 1000)));
+            }
         }
         let flow = {
             let mut st = started.st.borrow_mut();
@@ -1660,7 +1678,7 @@ impl Relentless {
     /// what keeps the asymmetry above honest: the worker asked, the AUTHOR decided to wait.
     pub fn open_asks(&self) -> Vec<crate::core::asks::Ask> {
         let _call = self.enter();
-        crate::core::asks::open(&self.dir)
+        crate::core::asks::open(self.asks_dir())
     }
 
     /// The shared body: record the ask, page the human, wait for the ledger to carry an answer.
@@ -1678,17 +1696,23 @@ impl Relentless {
         }
         self.operator_check(started)?;
 
+        // two forks asking at once get two ids: the list is the run's, and an id is minted from what it holds
+        let asking = self.lane.as_ref().map(|(lane, _)| lane.asks_lock());
         let id = self.mint_ask_id();
         let (session, step) = {
             let st = started.st.borrow();
             (st.session, st.cur_step.as_ref().map(|s| s.name.clone()))
         };
+        let shown = match &self.fork_of {
+            Some(fork) => format!("[fork {}] {question}", fork.name),
+            None => question.to_string(),
+        };
         crate::core::asks::append(
-            &self.dir,
+            self.asks_dir(),
             &crate::core::asks::Row::Open {
                 id: id.clone(),
                 case,
-                question: question.to_string(),
+                question: shown,
                 options: options.clone(),
                 origin: crate::core::asks::Origin::Driver,
                 session,
@@ -1697,10 +1721,12 @@ impl Relentless {
             },
         )?;
 
+        drop(asking);
+
         // The question goes on the OPERATOR'S QUEUE. This is the primary channel — `notify.cmd`
         // below is an optional push adapter on top of it, not the mechanism.
-        if let Some(a) = crate::core::asks::get(&self.dir, &id) {
-            crate::core::asks::emit_to_operator(&self.dir, &a);
+        if let Some(a) = crate::core::asks::get(self.asks_dir(), &id) {
+            crate::core::asks::emit_to_operator(self.asks_dir(), &a);
         }
 
         // ⚠ THE ONE PLACEMENT RULE. `step()` only STAGES — work sits on a session branch until a
@@ -1737,7 +1763,7 @@ impl Relentless {
         let answer = loop {
             // Ceilings + Ctrl-C + the bus drain that records the answer, every `BLOCK_CHUNK_SECS`.
             self.check_limits()?;
-            if let Some(a) = crate::core::asks::get(&self.dir, &id).and_then(|a| a.answer) {
+            if let Some(a) = crate::core::asks::get(self.asks_dir(), &id).and_then(|a| a.answer) {
                 break a;
             }
             std::thread::sleep(Duration::from_secs(BLOCK_CHUNK_SECS));
@@ -1761,10 +1787,15 @@ impl Relentless {
         Ok(answer)
     }
 
+    /// Where this run's asks are: its own folder, or the folder of the run it is a fork of (one list for the operator).
+    fn asks_dir(&self) -> &Path {
+        self.fork_of.as_ref().map_or(&self.dir, |f| &f.root)
+    }
+
     /// A short id an operator can retype off a phone, unique against what the ledger already holds.
     fn mint_ask_id(&self) -> String {
         let now = crate::util::now_epoch();
-        let taken = crate::core::asks::all(&self.dir);
+        let taken = crate::core::asks::all(self.asks_dir());
         (0..u64::MAX)
             .map(|seq| crate::core::asks::mint_id(seq, now))
             .find(|id| !taken.iter().any(|a| &a.id == id))
@@ -2142,6 +2173,11 @@ impl Relentless {
         let outcome = self.ended.get().unwrap_or(RunOutcome::GoalsMet);
         if !st.dash.finished {
             record_end(&mut st, outcome, None);
+        }
+        if let Some(forks) = self.forks.get() {
+            let (tokens, cost) = forks.spent();
+            st.tokens_spent += tokens;
+            st.cost_spent += cost;
         }
         // the report, from the state the run ended in — before `on_stop` fires, as on the YAML path.
         // A driver that returns `Err` reads as `done` here; `driver::run` amends it to `error`.

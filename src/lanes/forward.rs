@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use super::services::{LaneServices, LaneView, Shared};
+use super::services::{LaneView, Shared};
 use super::worktree::Lane;
 
 /// Forwards what the operator sends the run to its lanes, mirrors the lanes' asks into the run's, and keeps the views.

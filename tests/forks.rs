@@ -5,6 +5,10 @@
 
 #![cfg(unix)]
 
+mod common;
+
+use relentless::bus::{queue_command, Command as Bus};
+use relentless::core::config::Limits;
 use relentless::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -302,4 +306,138 @@ fn a_resume_replays_the_discarded_tries_without_an_agent_call() {
     let after: Vec<usize> = (0..3).map(|i| sessions_in(d.path(), &i.to_string())).collect();
     assert_eq!(after, before, "no agent call on the resume");
     assert_eq!(merges(d.path()), ["rlt: merge fork 1"]);
+}
+
+/// A fork calls `check_limits` until it ends, and says how it ended.
+fn spin(fork: &Relentless) -> Fatal {
+    loop {
+        if let Err(e) = fork.check_limits() {
+            return e;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn bus_log(fork: &Relentless) -> String {
+    std::fs::read_to_string(relentless::paths::bus_dir(fork.dir()).join("log.jsonl")).unwrap_or_default()
+}
+
+/// `rlt stop` in the run's folder reaches every fork, and the run itself ends the way a stop ends it.
+#[test]
+fn a_stop_in_the_runs_folder_ends_every_fork_and_then_the_run() {
+    let d = project();
+    let mut rlt = Relentless::open(d.path()).unwrap();
+    let (a, b) = (rlt.fork().unwrap(), rlt.fork().unwrap());
+    std::thread::scope(|s| {
+        let (ta, tb) = (s.spawn(|| spin(&a)), s.spawn(|| spin(&b)));
+        std::thread::sleep(Duration::from_millis(800));
+        queue_command(d.path(), &Bus::Stop { reason: "enough".into() }).unwrap();
+        for t in [ta, tb] {
+            assert!(matches!(t.join().unwrap(), Fatal::Ended(RunOutcome::Stopped)));
+        }
+    });
+    assert!(matches!(rlt.check_limits(), Err(Fatal::Ended(RunOutcome::Stopped))), "the run ends as a stop ends it");
+}
+
+/// A fork's question is in the run's list of asks, marked with the fork, and answering it there lets the fork go on.
+#[test]
+fn a_forks_ask_is_the_runs_and_its_answer_reaches_the_fork() {
+    let d = project();
+    let mut rlt = Relentless::open(d.path()).unwrap();
+    let a = rlt.fork().unwrap();
+    std::thread::scope(|s| {
+        let asked = s.spawn(|| a.hil_bool("go on?"));
+        let ask = common::wait_open_ask(d.path());
+        assert_eq!(ask.question, "[fork 0] go on?");
+        assert_eq!(rlt.open_asks().len(), 1, "the run lists it");
+        relentless::core::asks::answer(d.path(), &ask.id, "yes", "human", 1).unwrap();
+        assert!(asked.join().unwrap().unwrap());
+    });
+}
+
+/// While two forks work, the run's lane views (what `rlt status` shows) list both running, and the forks' end is shown.
+#[test]
+fn the_views_of_the_run_list_the_forks_that_work() {
+    let d = project();
+    let mut rlt = Relentless::open(d.path()).unwrap();
+    let (a, b) = (rlt.fork().unwrap(), rlt.fork().unwrap());
+    let seen = Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for f in [&a, &b] {
+            s.spawn(move || {
+                f.check_limits().unwrap();
+                std::thread::sleep(Duration::from_millis(1500));
+            });
+        }
+        let until = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < until {
+            let running = relentless::lanes::read(d.path()).iter().filter(|v| v.state == relentless::lanes::LaneState::Running).count();
+            if running == 2 {
+                *seen.lock().unwrap() = relentless::lanes::read(d.path());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    assert_eq!(seen.lock().unwrap().len(), 2, "both forks were running at once");
+    drop(a);
+    rlt.merge(b).unwrap();
+    let ends: Vec<_> = relentless::lanes::read(d.path()).iter().map(|v| (v.key.clone(), v.state)).collect();
+    assert_eq!(ends, [("0".into(), relentless::lanes::LaneState::Discarded), ("1".into(), relentless::lanes::LaneState::Done)]);
+}
+
+/// `pause` holds the forks at their next boundary until `resume`; an `inject` reaches every fork.
+#[test]
+fn pause_holds_every_fork_and_an_inject_reaches_each() {
+    let d = project();
+    let mut rlt = Relentless::open(d.path()).unwrap();
+    let (a, b) = (rlt.fork().unwrap(), rlt.fork().unwrap());
+    a.check_limits().unwrap();
+    b.check_limits().unwrap();
+    queue_command(d.path(), &Bus::InjectInstruction { text: "mind the tests".into() }).unwrap();
+    queue_command(d.path(), &Bus::Pause).unwrap();
+    let released = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for f in [&a, &b] {
+            let released = &released;
+            s.spawn(move || {
+                f.check_limits().unwrap();
+                released.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        std::thread::sleep(Duration::from_millis(3500));
+        assert_eq!(released.load(std::sync::atomic::Ordering::SeqCst), 0, "both forks are held while the run is paused");
+        queue_command(d.path(), &Bus::Resume).unwrap();
+    });
+    assert_eq!(released.load(std::sync::atomic::Ordering::SeqCst), 2, "resume lets them go");
+    assert!(bus_log(&a).contains("mind the tests") && bus_log(&b).contains("mind the tests"), "the inject reached both");
+}
+
+/// What one fork spends counts toward the run's ceilings: past a cost ceiling the other fork's next call ends the run's
+/// work, and so does the run's own.
+#[test]
+fn one_forks_spend_counts_for_the_whole_run() {
+    let d = project();
+    let mut rlt = Relentless::open(d.path()).unwrap().limits(Limits { cost: Some(0.015), ..Limits::default() });
+    let (a, b) = (rlt.fork().unwrap(), rlt.fork().unwrap());
+    a.step(&work()).unwrap();
+    let _ = b.step(&work());
+    assert!(matches!(a.check_limits(), Err(Fatal::Ended(RunOutcome::Halt))), "the other fork's next call ends");
+    assert!(matches!(rlt.check_limits(), Err(Fatal::Ended(RunOutcome::Halt))), "so does the run's own");
+}
+
+/// A resumed run counts what its forks spent before it stopped: the ceiling is not handed out again.
+#[test]
+fn a_resumed_run_counts_what_its_forks_spent_before() {
+    let d = project();
+    {
+        let mut rlt = Relentless::open(d.path()).unwrap();
+        let a = rlt.fork().unwrap();
+        a.step(&work()).unwrap();
+        std::mem::forget(a);
+        std::mem::forget(rlt);
+    }
+    let mut rlt = Relentless::open_with(d.path(), Opts { resume: true }).unwrap().limits(Limits { cost: Some(0.005), ..Limits::default() });
+    let _fork = rlt.fork().unwrap();
+    assert!(matches!(rlt.check_limits(), Err(Fatal::Ended(RunOutcome::Halt))), "the fork's 0.01 from before is spent");
 }

@@ -2,7 +2,7 @@
 //! about every second the caller's `control` runs (it forwards the operator's commands to the lanes and mirrors their
 //! asks). A lane that panics is a failed lane, not a dead run.
 
-use super::services::{LaneServices, Shared};
+use super::services::Shared;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc;
 use std::sync::Arc;

@@ -12,6 +12,10 @@ use crate::loop_::{keeps_memory, RLTScratch, RLTState, Flow, Handler, LoopState,
 pub struct BusDrain;
 impl Handler for BusDrain {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
+        // a fork of a driver's run: the commands the operator sent the run are sent on to every fork first
+        if let Some((lane, _)) = &ctx.lane {
+            lane.pump();
+        }
         let cmds = match &ctx.bus {
             Some(bus) => bus.drain(),
             None => Vec::new(),
@@ -41,8 +45,9 @@ impl Handler for BusDrain {
                 }
                 Command::Pause => {
                     eprintln!("  [bus] pause → waiting for resume/stop…");
+                    let lane = ctx.lane.as_ref().map(|(lane, _)| lane.clone());
                     let stopped = match &ctx.bus {
-                        Some(bus) => wait_for_resume(bus),
+                        Some(bus) => wait_for_resume(bus, &|| lane.iter().for_each(|l| l.pump())),
                         None => None,
                     };
                     if let Some(reason) = stopped {

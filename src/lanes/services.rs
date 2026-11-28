@@ -2,12 +2,14 @@
 //! the run's, not the lane's: the stop flag, the gate a rate limit closes, the run's spend and the ceilings on it, and
 //! what the views show of each lane.
 //!
-//! [`LaneServices`] is what an engine instance calls; [`Shared`] is its thread-safe implementation. An instance holds an
-//! `Option<Arc<dyn LaneServices>>`: `None` is an ordinary run, and every call site keeps its own code then.
+//! An engine instance holds an `Option<Arc<Shared>>`: `None` is an ordinary run, and every call site keeps its own code then.
+//! The forks of a driver and the lanes of a process file share one: the operator's commands reach them through it, their
+//! asks are the run's, and their views are published from it.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Condvar, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 /// Where a lane is.
@@ -46,22 +48,6 @@ impl LaneView {
     }
 }
 
-/// What an engine instance in a lane calls.
-pub trait LaneServices: Send + Sync {
-    /// The run is ending (a stop, a ceiling, a failed lane under `fail_fast`): a lane starts nothing new.
-    fn stop_requested(&self) -> bool;
-    /// Blocks while the gate of `agent` is closed (a lane met its rate limit); returns when it opens or a stop is asked.
-    fn wait_rate(&self, agent: &str);
-    /// A lane met `agent`'s rate limit, reset at `until` (epoch seconds): no lane launches a session of it before.
-    fn rate_hit(&self, agent: &str, until: u64);
-    /// A lane's session spent this much (output tokens, millionths of a dollar).
-    fn charge(&self, tokens: u64, cost_micros: u64);
-    /// The ceiling the run's total spend broke, if one.
-    fn ceiling_hit(&self) -> Option<String>;
-    /// A lane's view, as it is now.
-    fn view(&self, view: LaneView);
-}
-
 /// The ceilings on the whole run's spend.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Limits {
@@ -78,6 +64,16 @@ pub struct Shared {
     limits: Limits,
     views: Mutex<BTreeMap<String, LaneView>>,
     paused: std::sync::atomic::AtomicBool,
+    /// the run's project folder, when its views, asks and spend are published and kept there (a driver's forks)
+    root: OnceLock<PathBuf>,
+    /// the forks that are up: their folders, where the operator's commands are sent
+    live: Mutex<BTreeMap<String, PathBuf>>,
+    /// one fork drains the run's bus at a time
+    drain: Mutex<()>,
+    /// commands the forks drained from the run's bus that the run itself has not seen yet
+    root_inbox: Mutex<Vec<crate::bus::Command>>,
+    /// the run's list of asks is written by one fork at a time (an id is minted from what it holds)
+    asks: Mutex<()>,
 }
 
 impl Shared {
@@ -91,7 +87,28 @@ impl Shared {
             limits,
             views: Mutex::new(BTreeMap::new()),
             paused: std::sync::atomic::AtomicBool::new(false),
+            root: OnceLock::new(),
+            live: Mutex::new(BTreeMap::new()),
+            drain: Mutex::new(()),
+            root_inbox: Mutex::new(Vec::new()),
+            asks: Mutex::new(()),
         })
+    }
+
+    /// Services for the forks of the run in `root`: their views are published there, their spend is kept there (so that a
+    /// resumed run's ceilings count what the forks spent before it stopped), and the operator's commands are drained from
+    /// its bus.
+    pub fn for_run(root: &Path, limits: Limits, resume: bool) -> Arc<Shared> {
+        let shared = Shared::new(limits);
+        let _ = shared.root.set(root.to_path_buf());
+        let file = spend_file(root);
+        if resume {
+            let held = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<(u64, u64)>(&t).ok());
+            *shared.spent.lock().unwrap_or_else(|e| e.into_inner()) = held.unwrap_or((0, 0));
+        } else {
+            let _ = std::fs::remove_file(&file);
+        }
+        shared
     }
 
     /// The operator paused the run: no lane starts until it resumes (running lanes get the command on their own bus).
@@ -132,12 +149,14 @@ impl Shared {
     }
 }
 
-impl LaneServices for Shared {
-    fn stop_requested(&self) -> bool {
+impl Shared {
+    /// A stop was asked: by the operator, a ceiling, or a failed lane under `fail_fast`; a lane starts nothing new.
+    pub fn stop_requested(&self) -> bool {
         self.stop_reason().is_some()
     }
 
-    fn wait_rate(&self, agent: &str) {
+    /// Blocks while the gate of `agent` is closed (a lane met its rate limit); returns when it opens or a stop is asked.
+    pub fn wait_rate(&self, agent: &str) {
         let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             let until = gate.get(agent).copied().unwrap_or(0);
@@ -151,20 +170,28 @@ impl LaneServices for Shared {
         }
     }
 
-    fn rate_hit(&self, agent: &str, until: u64) {
+    /// A lane met `agent`'s rate limit, reset at `until` (epoch seconds): no lane launches a session of it before.
+    pub fn rate_hit(&self, agent: &str, until: u64) {
         let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         let held = gate.entry(agent.to_string()).or_insert(0);
         *held = (*held).max(until);
         self.opened.notify_all();
     }
 
-    fn charge(&self, tokens: u64, cost_micros: u64) {
+    /// A session of lane `key` spent this much (output tokens, millionths of a dollar): the run's total, the lane's view, and
+    /// the stop when a ceiling is broken.
+    pub fn charge(&self, key: &str, tokens: u64, cost_micros: u64) {
         let (t, c) = {
             let mut s = self.spent.lock().unwrap_or_else(|e| e.into_inner());
             s.0 += tokens;
             s.1 += cost_micros;
+            self.keep_spend(*s);
             (s.0, s.1)
         };
+        self.update_view(key, |v| {
+            v.tokens += tokens;
+            v.cost += cost_micros as f64 / 1_000_000.0;
+        });
         if let Some(max) = self.limits.tokens.filter(|m| t >= *m) {
             self.request_stop(&format!("limits.tokens: {t}/{max}"));
         }
@@ -173,13 +200,99 @@ impl LaneServices for Shared {
         }
     }
 
-    fn ceiling_hit(&self) -> Option<String> {
+    /// The ceiling the run's total spend broke, if one.
+    pub fn ceiling_hit(&self) -> Option<String> {
         self.stop_reason().filter(|r| r.starts_with("limits."))
     }
 
-    fn view(&self, view: LaneView) {
+    /// A lane's view, as it is now; published with the others when the run keeps them.
+    pub fn view(&self, view: LaneView) {
         self.views.lock().unwrap_or_else(|e| e.into_inner()).insert(view.key.clone(), view);
+        self.publish();
     }
+
+    /// Changes lane `key`'s view where it is, when it has one.
+    fn update_view(&self, key: &str, change: impl FnOnce(&mut LaneView)) {
+        let changed = self.views.lock().unwrap_or_else(|e| e.into_inner()).get_mut(key).map(change).is_some();
+        if changed {
+            self.publish();
+        }
+    }
+
+    /// Lane `key` is at step `step`.
+    pub fn note_step(&self, key: &str, step: &str) {
+        self.update_view(key, |v| v.step = step.to_string());
+    }
+
+    /// Lane `key` is waiting out a rate limit, or is not.
+    pub fn note_waiting(&self, key: &str, waiting: bool) {
+        self.update_view(key, |v| v.waiting = waiting);
+    }
+
+    fn publish(&self) {
+        if let Some(root) = self.root.get() {
+            crate::lanes::publish(root, &self.views());
+        }
+    }
+
+    fn keep_spend(&self, spent: (u64, u64)) {
+        let Some(root) = self.root.get() else { return };
+        let file = spend_file(root);
+        let temp = file.with_extension("json.tmp");
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if serde_json::to_string(&spent).ok().is_some_and(|t| std::fs::write(&temp, t).is_ok()) {
+            let _ = std::fs::rename(&temp, &file);
+        }
+    }
+
+    /// A fork is up: the operator's commands are sent to its folder from now on.
+    pub fn register(&self, key: &str, dir: &Path) {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), dir.to_path_buf());
+    }
+
+    /// A fork ended: nothing is sent to it.
+    pub fn forget(&self, key: &str) {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+
+    /// Drains the run's bus and sends every command to every fork that is up (and keeps it for the run itself): the
+    /// operator's `rlt send` reaches all of them, and each applies it at its next boundary as a run does. A stop is also
+    /// the run's, for the forks and for what starts later.
+    pub fn pump(&self) {
+        let Some(root) = self.root.get() else { return };
+        let _one = self.drain.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(bus) = crate::bus::Bus::open(root) else { return };
+        for cmd in bus.drain() {
+            match &cmd {
+                crate::bus::Command::Stop { reason } => self.request_stop(reason),
+                crate::bus::Command::Pause => self.set_paused(true),
+                crate::bus::Command::Resume => self.set_paused(false),
+                _ => {}
+            }
+            let stamp = format!("{:013}", crate::util::now_epoch() * 1000);
+            for dir in self.live.lock().unwrap_or_else(|e| e.into_inner()).values() {
+                let _ = crate::bus::Bus::open(dir).and_then(|b| b.send(&cmd, &stamp));
+            }
+            self.root_inbox.lock().unwrap_or_else(|e| e.into_inner()).push(cmd);
+        }
+    }
+
+    /// The commands the forks drained that the run has yet to see.
+    pub fn take_root_inbox(&self) -> Vec<crate::bus::Command> {
+        std::mem::take(&mut *self.root_inbox.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Held while an ask is minted and written into the run's list: two forks asking at once get two ids.
+    pub fn asks_lock(&self) -> MutexGuard<'_, ()> {
+        self.asks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Where a run keeps what its forks spent.
+fn spend_file(root: &Path) -> PathBuf {
+    crate::paths::private_dir(root).join("forks").join("spend.json")
 }
 
 #[cfg(test)]
@@ -197,12 +310,12 @@ mod tests {
         assert_eq!(s.stop_reason().as_deref(), Some("the operator"));
         assert!(s.ceiling_hit().is_none(), "a stop of the operator's is no ceiling");
         let c = Shared::new(Limits { tokens: Some(100), cost: Some(1.0) });
-        c.charge(60, 0);
+        c.charge("k", 60, 0);
         assert!(!c.stop_requested());
-        c.charge(60, 0);
+        c.charge("k", 60, 0);
         assert_eq!(c.ceiling_hit().as_deref(), Some("limits.tokens: 120/100"));
         let d = Shared::new(Limits { tokens: None, cost: Some(0.5) });
-        d.charge(1, 600_000);
+        d.charge("k", 1, 600_000);
         assert!(d.ceiling_hit().unwrap().starts_with("limits.cost"));
     }
 
@@ -212,7 +325,7 @@ mod tests {
         let s = Shared::new(Limits::default());
         std::thread::scope(|sc| {
             for _ in 0..8 {
-                sc.spawn(|| (0..500).for_each(|_| s.charge(2, 1000)));
+                sc.spawn(|| (0..500).for_each(|_| s.charge("k", 2, 1000)));
             }
         });
         let (tokens, cost) = s.spent();

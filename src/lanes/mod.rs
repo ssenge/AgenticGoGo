@@ -14,7 +14,7 @@ pub mod services;
 pub mod target;
 pub mod worktree;
 
-pub use services::{LaneServices, LaneState, LaneView, Shared};
+pub use services::{LaneState, LaneView, Shared};
 
 /// Where a run publishes its lanes' views, for `rlt status` and the web view: `rlt/private/lanes.json`.
 pub fn views_file(project: &std::path::Path) -> std::path::PathBuf {

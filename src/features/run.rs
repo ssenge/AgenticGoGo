@@ -89,7 +89,8 @@ impl Handler for LaunchWorker {
             return Ok(Flow::Stop(ctx.disk_halt(&why)));
         }
         // another lane's rate limit closes the gate for this agent: no session starts before it reopens
-        if let Some((lane, _)) = &ctx.lane {
+        if let Some((lane, key)) = &ctx.lane {
+            lane.note_step(key, &step.name);
             lane.wait_rate(&step.agent);
         }
         crate::features::protect::before_worker(ctx, &step)?;

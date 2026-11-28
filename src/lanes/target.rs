@@ -7,7 +7,7 @@
 //! joins as for a lane of its own. The built-in `ssh` and `container` targets are these four commands written for you; the
 //! `command` target is the plug-in point for anything else (a cloud VM, a cluster job).
 
-use super::services::{LaneServices, Shared};
+use super::services::Shared;
 use super::worktree::Lane;
 use std::path::Path;
 use std::process::Command;

@@ -51,7 +51,7 @@ pub struct LoopState {
     pub ledger: crate::project::RunLedger,
     pub bus: Option<Bus>,
     /// the lane services and this instance's key, when it is one of several lanes of a run
-    pub lane: Option<(std::sync::Arc<dyn crate::lanes::LaneServices>, String)>,
+    pub lane: Option<(std::sync::Arc<crate::lanes::Shared>, String)>,
 
     pub budget_total: Option<u64>,
     pub cost_limit: Option<f64>,
@@ -133,8 +133,8 @@ impl LoopState {
         if let Some(c) = u.cost_usd {
             self.cost_spent += c;
         }
-        if let Some((lane, _)) = &self.lane {
-            lane.charge(output, (u.cost_usd.unwrap_or(0.0).max(0.0) * 1_000_000.0).round() as u64);
+        if let Some((lane, key)) = &self.lane {
+            lane.charge(key, output, (u.cost_usd.unwrap_or(0.0).max(0.0) * 1_000_000.0).round() as u64);
         }
         self.charge(agent, output, u.cost_usd);
         let step = self.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();

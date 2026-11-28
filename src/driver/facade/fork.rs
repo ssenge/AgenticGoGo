@@ -24,7 +24,7 @@ use super::{Fatal, Relentless};
 use crate::core::calls::CallRecord;
 use crate::git::git;
 use crate::lanes::join::{self, Joined};
-use crate::lanes::services::{LaneServices, LaneState, LaneView, Limits, Shared};
+use crate::lanes::services::{LaneState, LaneView, Limits, Shared};
 use crate::lanes::worktree::{self, Lane};
 
 /// Where a fork came from and what becomes of it.
@@ -87,7 +87,7 @@ impl ForkOf {
     }
 
     /// The fork's first call: its worktree is made, and its view says it runs.
-    pub(super) fn begin(&self, services: Option<&Arc<dyn LaneServices>>) -> Result<(), String> {
+    pub(super) fn begin(&self, services: Option<&Arc<Shared>>) -> Result<(), String> {
         self.make().clone()?;
         if let Some(svc) = services {
             svc.view(LaneView { state: LaneState::Running, started: Some(crate::util::now_epoch()), ..LaneView::queued(&self.name) });
@@ -110,6 +110,7 @@ impl ForkOf {
             worktree::remove_worktree(&self.parent_dir, &self.lane);
         }
         if let Some((services, _)) = &owner.lane {
+            services.forget(&self.name);
             let state = if self.merged.load(Ordering::SeqCst) { LaneState::Done } else { LaneState::Discarded };
             services.view(LaneView { state, ended: Some(crate::util::now_epoch()), ..LaneView::queued(&self.name) });
         }
@@ -146,6 +147,7 @@ impl Relentless {
     pub fn fork(&mut self) -> Result<Relentless, Fatal> {
         let _call = self.enter();
         let started = self.ready()?;
+        self.operator_check(started)?;
         if self.ungated_span().is_some() {
             return Err(Fatal::from_message("fork: this instance has ungated work: call gate() first, a fork starts from what the run has kept".into()));
         }
@@ -181,8 +183,14 @@ impl Relentless {
             if !self.resume {
                 clear_stale(root, project);
             }
+            // the forks may spend what this run has left of its ceilings
+            let (used_tokens, used_cost) = self.started.get().map_or((0, 0.0), |s| {
+                let st = s.st.borrow();
+                (st.tokens_spent, st.cost_spent)
+            });
             let limits = self.cfg_limits();
-            let _ = self.forks.set(Shared::new(Limits { tokens: limits.tokens, cost: limits.cost }));
+            let left = Limits { tokens: limits.tokens.map(|m| m.saturating_sub(used_tokens)), cost: limits.cost.map(|m| (m - used_cost).max(0.0)) };
+            let _ = self.forks.set(Shared::for_run(root, left, self.resume));
         }
         Ok(())
     }
@@ -192,7 +200,7 @@ impl Relentless {
         let lane = Lane::of(&root, &project, "fork", &name);
         let base = git(&parent, &["rev-parse", "HEAD"]).1;
         let resume = self.resume && (lane.exists() || forks_dir(&root).join(crate::lanes::safe(&name)).join("private").is_dir());
-        let services: Arc<dyn LaneServices> = match &self.lane {
+        let services: Arc<Shared> = match &self.lane {
             Some((services, _)) => services.clone(),
             None => self.forks.get().expect("set by prepare_forking").clone(),
         };
@@ -222,6 +230,7 @@ impl Relentless {
     pub fn merge(&mut self, fork: Relentless) -> Result<String, Fatal> {
         let _call = self.enter();
         let started = self.ready()?;
+        self.operator_check(started)?;
         let Some(of) = fork.fork_of.as_ref().filter(|f| f.parent_dir == self.dir) else {
             return Err(Fatal::from_message("merge takes a fork this instance made (`Relentless::fork`)".into()));
         };

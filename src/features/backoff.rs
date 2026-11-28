@@ -116,7 +116,13 @@ impl Handler for RateLimitBackoff {
         ctx.dash.waiting = Some(waiting);
         ctx.emit(LifecycleEvent::Backoff);
 
+        if let Some((lane, key)) = &ctx.lane {
+            lane.note_waiting(key, true);
+        }
         let (how, stop) = wait_out(ctx, since, until);
+        if let Some((lane, key)) = &ctx.lane {
+            lane.note_waiting(key, false);
+        }
         let now = crate::util::now_epoch();
         ctx.clock.add_rate_limit_wait(&ctx.dir, now.saturating_sub(since) as f64);
         append(ctx, &WaitRow::WaitEnd { session: ctx.session, how, waited_s: now.saturating_sub(since), ts: now });
@@ -161,6 +167,9 @@ fn wait_out(ctx: &mut LoopState, since: u64, until: u64) -> (WaitEnd, Option<Fin
             eprintln!("  ⚠ ceiling tripped during the rate-limit wait — aborting");
             break (WaitEnd::Ceiling, Some(Box::new(move |c: &mut LoopState| c.abort_now(&reason))));
         }
+        if let Some((lane, _)) = &ctx.lane {
+            lane.pump();
+        }
         let cmds = ctx.bus.as_ref().map(|b| b.drain()).unwrap_or_default();
         match sort_commands(cmds, &mut deferred) {
             Some(Signal::Stop(reason)) => {
@@ -191,6 +200,9 @@ pub(crate) fn wait_between_tries(ctx: &mut LoopState, secs: u64) -> Option<RunOu
     let end = loop {
         if crate::os::signals::interrupted() {
             break Some(ctx.finish_interrupted());
+        }
+        if let Some((lane, _)) = &ctx.lane {
+            lane.pump();
         }
         let cmds = ctx.bus.as_ref().map(|b| b.drain()).unwrap_or_default();
         match sort_commands(cmds, &mut deferred) {
