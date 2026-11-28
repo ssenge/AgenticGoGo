@@ -78,7 +78,7 @@ html+=f'<div class="b" style="left:1470px;top:{yc-48:.0f}px;width:170px;height:9
 # center
 html+=f'<img src="mark.png" style="position:absolute;left:{cx-105}px;top:{cy-150}px;width:210px;height:210px">'
 html+=f'<div class="cap" style="left:{cx-150}px;top:{cy+66}px;width:300px;font-size:30px;letter-spacing:.04em;color:var(--engine)">Relentless</div>'
-html+=f'<div class="cap" style="left:{cx-150}px;top:{cy+108}px;width:300px;font-size:17px;font-weight:600;color:var(--mute);line-height:1.3">drives the loop and records<br>every call: resume from anywhere</div>'
+html+=f'<div class="cap" style="left:{cx-150}px;top:{cy+108}px;width:300px;font-size:17px;font-weight:600;color:var(--mute);line-height:1.3">the engine drives the loop and records<br>every call: resume from anywhere</div>'
 # legend
 html+='<div class="lbl" style="left:960px;top:70px">A workflow can</div>'
 chips=[("loop until the job is verified","#2a9d8f"),("branch with ifs and conditions","#264653"),("run steps and items in parallel lanes","#2a9d8f"),("run lanes remotely: ssh, container, cloud VM","#2a9d8f"),("wait for a human, then carry on","#f28c45"),("try a stronger agent, repair, or escalate","#d63a46")]

@@ -25,7 +25,7 @@ Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; t
 
 - **A step's `checks:` is now `verifiers:`** (the vocabulary the rest of the engine uses); the old key is still read, so existing
   workflow files run unchanged. `task_force.checks` (commands) keeps its name.
-- **The slogan** is "Agents that don't stop until the job is truly done" (README, `rlt --help`, the social card); the README is
+- **The slogan** is "The agentic workflow engine that doesn't stop until the job is truly done" (README, `rlt --help`, the social card); the README is
   rewritten around a simple picture, the whole workflow as a diagram, and a first workflow in YAML and in Rust
   (`examples/hello`, `examples/fix_add.rs`).
 

@@ -2,7 +2,7 @@
 name = "relentless"
 version = "0.6.0"
 edition = "2021"
-description = "Relentless: agents that don't stop until the job is truly done"
+description = "Relentless: the agentic workflow engine that doesn't stop until the job is truly done"
 authors = ["Sebastian Senge"]
 license = "MIT"
 repository = "https://github.com/ssenge/relentless"

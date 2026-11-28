@@ -3,7 +3,8 @@
   Relentless
 </h1>
 
-<p align="center"><strong>Agents that don't stop until the job is truly done.</strong></p>
+<h3 align="center">The Agentic Workflow Engine</h3>
+<p align="center"><strong>that doesn't stop until the job is truly done.</strong></p>
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2a9d8f?style=flat-square"></a>
@@ -14,8 +15,8 @@
   <img alt="Platforms: macOS, Linux, Windows" src="https://img.shields.io/badge/platforms-macOS_%7C_Linux_%7C_Windows-457b9d?style=flat-square">
 </p>
 
-**Relentless** runs agentic **workflows**: a bug fix, a migration, a whole business process, written in YAML or in Rust.
-Coding agents (Claude Code, Codex CLI, GitHub Copilot CLI, …) do the work, **verifiers** they can't fool decide when it is
+**Relentless** is a workflow **engine** for agents. It runs agentic **workflows**, a bug fix, a migration, a whole business
+process, written in YAML or in Rust. Coding agents (Claude Code, Codex CLI, GitHub Copilot CLI, …) do the work, **verifiers** they can't fool decide when it is
 done, and humans decide only where they must. A long-running agentic job, written as a loop or, more generally, as a
 workflow, therefore ends only when the job is *truly* done.
 
