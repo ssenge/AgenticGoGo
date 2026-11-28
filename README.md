@@ -32,10 +32,11 @@ workflow, therefore ends only when the job is *truly* done.
 
 ## Features
 
-A workflow is steps in order. Inside a step, an agent works, Relentless runs the verifiers, and the work is kept only when they are all met:
+Relentless drives a loop: agents work, verifiers decide, and a failed attempt goes around again. The workflow around that loop
+can branch, run in parallel and remotely, and wait for humans:
 
 <p align="center">
-  <img src="assets/workflow.png" width="900" alt="A workflow is steps in order; inside a step an agent works in a fresh session, Relentless runs the verifiers, and the work is kept only when they are all met, otherwise the reason goes back and a new session starts">
+  <img src="assets/features.png" width="1000" alt="Relentless in the middle of a ring: a task goes to agents (in parallel lanes, local, over ssh or in containers), then to verifiers; when not all are met the reason goes back, with a stronger agent or the task force; when met a human approves where it matters, an if condition picks the next steps, and the workflow ends done">
 </p>
 
 - **Verifiers decide.** Scripts, rubrics for an agent to grade, metrics such as complexity and coverage, and conditions like
@@ -72,6 +73,10 @@ an answer. Steps chain into a workflow, and the workflow ends only when it is tr
 
 A project has a bug: `add.py` should print the sum of 1 and 2, and it prints 2. The job: have an agent fix it, **prove** that it
 is fixed, and let a human approve.
+
+<p align="center">
+  <img src="assets/example.png" width="1000" alt="The example workflow: Claude Code fixes add.py, a verifier checks that it prints 3, Codex reviews the change, a human approves; whenever one of them says no, the reason goes back and a new session starts">
+</p>
 
 ```
 my-project/
