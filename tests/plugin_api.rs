@@ -50,6 +50,7 @@ fn probe_state(cfg: &relentless::core::config::RelentlessConfig, dir: &Path) -> 
     let loop_start = Instant::now();
     let dash = relentless::state::DashboardState::default();
     LoopState {
+        lane: None,
         clock: Default::default(),
         cfg: cfg.clone(),
         ruler: relentless::backend::for_name("claude").unwrap(),

@@ -1,0 +1,3 @@
+worker: { agent: shell-worker }   # a command agent, described under `rlt: agents:` in process.yaml
+critic: { agent: claude }         # the reviewer is another agent than the worker; swap the worker for `gemini`,
+                                  # `opencode`, `qwen` or `pi` (experimental presets) when that CLI is installed

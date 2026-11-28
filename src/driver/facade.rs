@@ -86,6 +86,8 @@ pub struct Relentless {
     iso_seen: Cell<crate::isolation::Isolation>,
     /// the label path — see [`Relentless::pos`].
     pos: RefCell<Vec<PosItem>>,
+    /// the run's lane services and this instance's lane key, when it is one of several lanes of a run (`None`: an ordinary run)
+    lane: Option<(std::sync::Arc<dyn crate::lanes::LaneServices>, String)>,
     /// the name of an [`Agent::Custom`] handed to [`Relentless::verifier_agent`], refused when the run boots:
     /// the builder chain cannot fail, and the ruler is resolved BY NAME (`verifier.agent`).
     custom_ruler: Option<String>,
@@ -97,6 +99,34 @@ pub struct Relentless {
     user_env: crate::backend::user_env::UserEnv,
     /// text every worker's agent adds to its system prompt — see [`Relentless::system_prompt`].
     system_prompt: Option<String>,
+}
+
+/// The settings a lane's instance has of the run that started it; `Send` and `Sync`, where a `Relentless` is neither.
+#[derive(Clone)]
+pub(crate) struct LaneTemplate {
+    cfg: RelentlessConfig,
+    custom_ruler: Option<String>,
+    memory: bool,
+    user_settings: bool,
+    user_env: crate::backend::user_env::UserEnv,
+    system_prompt: Option<String>,
+}
+
+impl LaneTemplate {
+    /// The lane's instance of the engine, for the worktree `dir`, named `project`, sharing the run's `services`.
+    pub(crate) fn instance(&self, dir: &Path, project: &str, key: &str, services: std::sync::Arc<dyn crate::lanes::LaneServices>,
+                           resume: bool) -> Result<Relentless, Fatal> {
+        let mut lane = Relentless::open_with(dir, Opts { resume })?;
+        lane.cfg = self.cfg.clone();
+        lane.cfg.project = project.to_string();
+        lane.custom_ruler = self.custom_ruler.clone();
+        lane.memory = self.memory;
+        lane.user_settings = self.user_settings;
+        lane.user_env = self.user_env.clone();
+        lane.system_prompt = self.system_prompt.clone();
+        lane.lane = Some((services, key.to_string()));
+        Ok(lane)
+    }
 }
 
 /// Everything that only exists once the run-level setup has run.
@@ -175,6 +205,7 @@ impl Relentless {
             iso_seen: Cell::new(crate::isolation::Isolation::None),
             pos: RefCell::new(Vec::new()),
             custom_ruler: None,
+            lane: None,
             memory: true,
             user_settings: true,
             user_env: Default::default(),
@@ -326,6 +357,21 @@ impl Relentless {
     /// Unset = the ruler's own cheap default.
     pub fn verifier_model(mut self, model: impl Into<String>) -> Relentless {
         self.cfg.verifier.model = Some(model.into());
+        self
+    }
+
+    /// Names the project `name` instead of its folder's name: the branches (`rlt/<name>/session-N`), the run ledger and
+    /// the dashboard are keyed on it. A lane takes `<project>.<each>-<key>`, so its refs are a subtree of its own.
+    pub fn project_name(mut self, name: &str) -> Relentless {
+        self.cfg.project = name.to_string();
+        self
+    }
+
+    /// Makes this instance one lane of a run: its spend counts toward the run's ceilings, its sessions wait at the gate
+    /// a rate limit closes, and a ceiling the run broke ends it. `key` names the lane. Not for a driver's own use: the
+    /// scheduler of `fan_out` and of a parallel `each` set it.
+    pub fn lanes(mut self, services: std::sync::Arc<dyn crate::lanes::LaneServices>, key: &str) -> Relentless {
+        self.lane = Some((services, key.to_string()));
         self
     }
 
@@ -572,6 +618,7 @@ impl Relentless {
             live,
             ledger,
             bus: None,
+            lane: self.lane.clone(),
             budget_total: limits.tokens,
             cost_limit: limits.cost,
             // ⛔ `max_sessions` stays 0 (= the loop's "unlimited" sentinel) even when
@@ -1310,6 +1357,10 @@ impl Relentless {
             let st = started.st.borrow();
             (st.session, st.tokens_spent, st.cost_spent, st.clock.wall_secs(now), st.clock.work_secs(now))
         };
+        // the whole run's spend, when this is one of its lanes: a ceiling any lane's spend broke ends every lane
+        if let Some(why) = self.lane.as_ref().and_then(|(l, _)| l.ceiling_hit()) {
+            return Err(self.end_now(started, RunOutcome::Halt, why, "abort:over_budget"));
+        }
         // The order is the table's. A `None` limit is not checked.
         if let Some(max) = limits.sessions {
             if session >= max {
@@ -1808,6 +1859,33 @@ impl Relentless {
     /// The outcome the run is LATCHED to, if it has ended.
     pub fn ended(&self) -> Option<RunOutcome> {
         self.ended.get()
+    }
+
+    /// What a lane's instance takes from this one: its settings, copied, so a lane's thread needs nothing of `self`.
+    pub(crate) fn lane_template(&self) -> LaneTemplate {
+        LaneTemplate {
+            cfg: self.cfg.clone(),
+            custom_ruler: self.custom_ruler.clone(),
+            memory: self.memory,
+            user_settings: self.user_settings,
+            user_env: self.user_env.clone(),
+            system_prompt: self.system_prompt.clone(),
+        }
+    }
+
+    /// This run's project name: its folder's, or the name a lane was given.
+    pub(crate) fn project_name_of(&self) -> String {
+        self.cfg.project.clone()
+    }
+
+    /// The ceilings set on this run.
+    pub(crate) fn cfg_limits(&self) -> Limits {
+        self.cfg.sequence.limits.clone()
+    }
+
+    /// Whether this run continues an earlier one (`--resume`): its ledger replays what already ran.
+    pub fn resumes(&self) -> bool {
+        self.resume
     }
 
     /// The project root, canonicalized.

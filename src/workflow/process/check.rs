@@ -22,6 +22,11 @@ pub fn check(file: &Path) -> Vec<String> {
         Err(e) => return vec![format!("{}: {e}", file.display())],
     };
     let list = number(&process);
+    for (name, spec) in &process.rlt.agents {
+        if let Err(e) = crate::backend::register_command(name, spec.clone()) {
+            return vec![format!("{}: {e}", file.display())];
+        }
+    }
     let vars = match template::variables(&process, &list, &home, "<project>") {
         Ok(v) => v,
         Err(e) => return vec![e],
@@ -129,7 +134,8 @@ impl Ctx<'_> {
                          ("review", s.review.is_some()), ("repairs", s.repairs.is_some()), ("sections", !s.sections.is_empty()),
                          ("quality", s.quality), ("on_fail", s.on_fail.is_some()), ("prepare", s.prepare.is_some()),
                          ("doc", s.doc.is_some()), ("question", s.question.is_some()), ("owner", s.owner.is_some()),
-                         ("go_live", s.go_live), ("items", s.items.is_some()), ("steps", !s.steps.is_empty()),
+                         ("go_live", s.go_live), ("items", s.items.is_some()), ("parallel", s.parallel.is_some()),
+                         ("steps", !s.steps.is_empty()),
                          ("examinee", s.examinee.is_some()), ("answers", s.answers.is_some()), ("grader", s.grader.is_some()),
                          ("repairer", s.repairer.is_some()), ("rounds", s.rounds.is_some()), ("fresh", !s.fresh.is_empty()),
                          ("findings_ids", s.findings_ids.is_some()), ("dispute", s.dispute.is_some())]);
@@ -137,7 +143,7 @@ impl Ctx<'_> {
             Kind::Script => &["run"],
             Kind::Agent => &["prompt", "checks", "review", "repairs", "sections", "quality", "on_fail"],
             Kind::Checkpoint => &["prepare", "doc", "question", "owner", "go_live"],
-            Kind::Each => &["items", "steps"],
+            Kind::Each => &["items", "parallel", "steps"],
             Kind::Exam => &["checks", "examinee", "answers", "grader", "repairer", "rounds", "fresh", "findings_ids", "dispute", "repairs"],
             Kind::Outside | Kind::Planned => &[],
         };
@@ -205,11 +211,56 @@ impl Ctx<'_> {
         if let Some(items) = &s.items {
             self.text(at, &items.file, false);
         }
+        if let Some(par) = &s.parallel {
+            self.parallel(par, s, at);
+        }
         for child in &s.steps {
             if child.kind == Kind::Each {
                 self.out.push(format!("step `{}`: an `each` inside an `each`", child.id));
             }
             self.step(child, true);
+        }
+    }
+
+    /// What a parallel `each` can't do: no lane without room, and no human's yes inside a lane (a checkpoint ends the
+    /// run until answered, and a lane has nobody to answer it).
+    fn parallel(&mut self, par: &super::format::Parallel, s: &Step, at: &str) {
+        if par.max == 0 {
+            self.out.push(format!("{at}: `parallel.max` must be at least 1"));
+        }
+        self.target(&par.target, at);
+        let mut inside = vec![];
+        fn walk<'a>(steps: &'a [Step], out: &mut Vec<&'a Step>) {
+            for st in steps {
+                out.push(st);
+                walk(&st.steps, out);
+            }
+        }
+        walk(&s.steps, &mut inside);
+        for st in inside.iter().filter(|st| st.kind == Kind::Checkpoint) {
+            self.out.push(format!("step `{}`: a checkpoint inside a parallel `each` (`{}`): a lane has no one to answer it", st.id, s.id));
+        }
+    }
+
+    /// What each kind of target needs of its settings, and what only another kind takes.
+    fn target(&mut self, t: &super::format::Target, at: &str) {
+        use super::format::TargetKind::{Command, Container, Local, Ssh};
+        let has = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let given = [("image", has(&t.image)), ("network", has(&t.network)), ("host", has(&t.host)), ("user", has(&t.user)),
+                     ("dir", has(&t.dir)), ("rlt", has(&t.rlt)), ("ssh_options", !t.ssh_options.is_empty()), ("launch", has(&t.launch)),
+                     ("poll", has(&t.poll)), ("kill", has(&t.kill)), ("fetch", has(&t.fetch))];
+        let (needs, takes): (&[&str], &[&str]) = match t.kind {
+            Local => (&[], &[]),
+            Container => (&[], &["image", "network"]),
+            Ssh => (&["host", "dir"], &["host", "user", "dir", "rlt", "ssh_options"]),
+            Command => (&["launch", "poll", "fetch"], &["launch", "poll", "kill", "fetch"]),
+        };
+        let kind = format!("{:?}", t.kind).to_lowercase();
+        for key in needs.iter().filter(|k| !given.iter().any(|(g, on)| g == *k && *on)) {
+            self.out.push(format!("{at}: a `{kind}` target needs `{key}`"));
+        }
+        for (key, _) in given.iter().filter(|(k, on)| *on && !takes.contains(k)) {
+            self.out.push(format!("{at}: `target.{key}` doesn't belong to a `{kind}` target"));
         }
     }
 

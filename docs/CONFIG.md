@@ -1809,6 +1809,16 @@ are **not interchangeable**, and a config that asks for something an agent can't
 startup** — checked for **every** agent the sequence names. The full matrix is in the README under
 [Choosing an agent](../README.md#choosing-an-agent).
 
+### Other agents: `agents:` and the presets
+
+An agent CLI of your own goes under `agents:` (`rlt.yaml`, or `rlt: { agents }` in a process file) and is then an `agent:`
+like the shipped ones: `command` (the argv; `{brief_file}`, `{brief}`, `{workdir}`, `{model}`, `{session}` are filled in),
+`output: text | json_lines`, `fields` (where `json_lines` hold text, tokens, cost, session), `capabilities`
+(`resume`, `usage`, `cost`), `rate_limit_pattern`, `preflight`, `env`, `experimental`. It claims only what it is told, it
+is never the ruler, and `worker_args` follow its command. `gemini`, `opencode`, `qwen` and `pi` are shipped as
+**experimental presets** of it (flags from each CLI's `--help`, streams partly synthetic), each run says so, and an
+`agents:` entry of the same name replaces one. See [BACKENDS.md](BACKENDS.md#command-agents-and-the-experimental-presets).
+
 ### Agent-specific rules
 
 | | rule |

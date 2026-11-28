@@ -46,6 +46,9 @@ enum Cmd {
     /// Diagnose your setup (the agent is on PATH and can do what your config asks, config
     /// parses, conditions valid, skills installed).
     Doctor {
+        /// only the container side: the engine and which reference images are built (`rlt images build`).
+        #[arg(long)]
+        containers: bool,
         /// emit a versioned JSON report: every backend (installed, path, version, capability
         /// flags), the isolation tiers this host offers, and every problem with its config path.
         #[arg(long)]
@@ -115,6 +118,24 @@ enum Cmd {
     Cached {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
+    },
+    /// The reference container images: `rlt images build [--rlt <linux binary>] [<agent>…]` builds them (each with the agent's CLI and
+    /// `rlt`, tagged with this version); `rlt images list` says which exist.
+    Images {
+        /// `build [--rlt <path>] [<agent>…]` or `list`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// Installs `rlt` on a host over ssh (the install script goes on stdin): `rlt install-remote <host> [ssh options…]`.
+    InstallRemote {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        args: Vec<String>,
+    },
+    /// One lane of a parallel `each` of a process file, in the current folder (what a lane target starts): `rlt lane --spec <file>`.
+    #[command(hide = true)]
+    Lane {
+        #[arg(long)]
+        spec: PathBuf,
     },
     /// A scripted coding agent for `rlt process --scenario` (installed as `claude` and `codex`).
     #[command(hide = true)]
@@ -343,8 +364,12 @@ fn run_cli() -> Result<ExitCode> {
 
     match &cli.cmd {
         Cmd::Init { agent, force } => init::run(&p.dir, *force, agent.as_deref()),
-        Cmd::Doctor { json: false } => doctor::run(&p.dir, &p.config_base, &p.config),
-        Cmd::Doctor { json: true } => {
+        Cmd::Doctor { containers: true, .. } => {
+            print!("{}", relentless::images::report());
+            return Ok(ExitCode::SUCCESS);
+        }
+        Cmd::Doctor { json: false, .. } => doctor::run(&p.dir, &p.config_base, &p.config),
+        Cmd::Doctor { json: true, .. } => {
             let ok = doctor::run_json(&p.config_base, &p.config)?;
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(1) });
         }
@@ -358,6 +383,21 @@ fn run_cli() -> Result<ExitCode> {
         }
         Cmd::Process { args } => return relentless::workflow::process::command(args),
         Cmd::Cached { args } => return Ok(relentless::workflow::process::cache::command(args)),
+        Cmd::InstallRemote { args } => return Ok(relentless::images::install_remote(args)),
+        Cmd::Images { args } => {
+            return Ok(match args.first().map(String::as_str) {
+                Some("build") => relentless::images::build(&args[1..]),
+                Some("list") | None => {
+                    print!("{}", relentless::images::report());
+                    ExitCode::SUCCESS
+                }
+                Some(other) => {
+                    eprintln!("rlt images: `{other}`; use `build [--rlt <path>] [<agent>…]` or `list`");
+                    ExitCode::from(2)
+                }
+            })
+        }
+        Cmd::Lane { spec } => return Ok(relentless::workflow::process::lane_main::command(spec)),
         #[cfg(unix)]
         Cmd::ScriptedAgent { args } => return Ok(relentless::workflow::process::scripted::command(args)),
         #[cfg(not(unix))]

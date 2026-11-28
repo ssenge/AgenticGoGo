@@ -168,17 +168,15 @@ impl Handler for SessionBranchCut {
         let iso = &ctx.cfg.session_isolation;
         let br = crate::git::session_branch(&iso.branch_prefix, &ctx.cfg.project, ctx.session);
         crate::git::remove_file(&ctx.dir, &iso.red_file); // clear a stale veto
-        ctx.ext.get::<RLTState>().git.session_branch = if crate::git::create_branch(&ctx.dir, &br, &base_ref) {
-            eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", ctx.session);
-            // so a later session of this step can be told what a stopped one left (the ledger has no step before it ends)
-            if let Some(step) = &ctx.cur_step {
-                crate::git::note_branch_step(&ctx.dir, &br, &step.name);
-            }
-            Some(br)
-        } else {
-            eprintln!("  [iso] could not create session branch — running on {base_ref}");
-            None
-        };
+        // a failed cut ends the run: a worker that ran on the base would have no isolation (and, in a lane, would write
+        // where its siblings read)
+        crate::git::create_branch(&ctx.dir, &br, &base_ref).map_err(|e| anyhow::anyhow!("[iso] {e}"))?;
+        eprintln!("  [iso] session #{} on branch {br} (off {base_ref})", ctx.session);
+        // so a later session of this step can be told what a stopped one left (the ledger has no step before it ends)
+        if let Some(step) = &ctx.cur_step {
+            crate::git::note_branch_step(&ctx.dir, &br, &step.name);
+        }
+        ctx.ext.get::<RLTState>().git.session_branch = Some(br);
         Ok(Flow::Continue)
     }
     fn name(&self) -> &'static str {

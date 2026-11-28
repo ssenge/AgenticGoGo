@@ -11,6 +11,9 @@ must test against it: `docs/BACKENDS.md` ("Recorded fixtures").
 |---|---|
 | `copilot-1.0.70.jsonl` | `copilot -p "Reply with exactly: OK" --allow-all-tools --output-format json` (free tier, gpt-5-mini, 0 premium requests) |
 | `claude-2.1.296.jsonl` | `claude -p "Reply with exactly: OK" --output-format stream-json --verbose --model haiku --strict-mcp-config --setting-sources user` — reduced to the `system`/`init` (its operator-specific fields dropped), `assistant`, `rate_limit_event` and `result` lines |
+| `opencode-1.19.6.jsonl` | `opencode run --format json --dir <dir> "hello"`: **real**, its free model needs no login |
+| `qwen-0.28.7-noauth.jsonl`, `pi-0.73.1-noauth.jsonl` | **real**: the run each CLI starts without a login, up to its "no auth" error |
+| `gemini-0.71.1-synthetic.jsonl`, `qwen-0.28.7-synthetic.jsonl`, `pi-0.73.1-synthetic.jsonl` | **synthetic**, written from each CLI's documentation, not recorded: the presets built on them are experimental until a logged-in session replaces them |
 | `claude-2.1.296-oneshot.json` | the same prompt with `--output-format json`, the shape a judge or summarizer call returns |
 
 ## What `claude-2.1.296*` proves

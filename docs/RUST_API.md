@@ -456,6 +456,30 @@ Three consequences worth designing around:
   and rlt will refuse rather than guess — a call that does not match the record aborts the resume
   naming both sides.
 
+## Fan-out: lanes for a driver
+
+The items of a list that don't depend on each other run at once, each in a worktree of its own:
+
+```rust
+let reports = rlt.fan_out(&["billing", "orders", "search"], FanOut::new().max(3), |lane, key| {
+    lane.step(&Step::new(format!("port {key}")).prompt(format!("Port the {key} module.")))?;
+    Ok(())
+})?;
+for r in &reports {
+    println!("{}: {:?}", r.key, r.end);   // Joined, Done, Failed(why), Stopped, NotStarted, Conflict(files)
+}
+```
+
+`fan_out(&self, keys, opts, body)`: `body` runs on the lane's thread and gets the lane's own `Relentless` (this one's settings,
+named `<project>-fan-<key>`, in a linked worktree on its own branch): use it as the driver uses `rlt`. At most `max` run at once; the
+run's total spend counts toward its ceilings and a rate limit one lane meets holds back the others. When the lanes have ended,
+the ones that ended done are merged into the run's branch **in key order**, up to the first that did not; a conflict is aborted and
+reported with its files. A lane's failure (an `Err`, a panic) is its report, not an `Err` of `fan_out`; `Err` is for what keeps
+the lanes from starting (keys that clash, no repository, uncommitted changes) and a stop. `FanOut::new().max(n).fail_fast(true).seed(&["node_modules/"])`.
+With `Opts { resume: true }` the lanes joined before are not run again and a lane whose worktree exists resumes. The operator's
+`rlt send` commands, asks and the lanes' view reach the lanes as they do for a parallel `each`
+([PROCESS.md](PROCESS.md#parallel-lanes)). The example is `examples/fanout.rs`.
+
 ## Two rules that are easy to get wrong
 
 **A verifier's `met` must mean GOOD.** `gate()`'s regression rule is *"was met, now unmet"*, which only

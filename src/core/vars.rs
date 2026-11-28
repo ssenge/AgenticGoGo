@@ -5,25 +5,34 @@
 //! `{{ name }}` the map lacks is an error: a worker or a verifier briefed with a hole does the wrong work.
 //! Without variables nothing is touched.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::RwLock;
 
-// ponytail: process-wide, one workflow per process (the driver's `run`); per-Relentless maps if a process ever
-// drives two workflows with different variables
-static VARS: RwLock<BTreeMap<String, String>> = RwLock::new(BTreeMap::new());
+// Per thread: a run's prompts and rubrics are rendered on the thread that runs it, and a lane runs on a thread of its
+// own with the variables of its item (`Relentless::fan_out`), which must not overwrite a sibling's.
+thread_local! {
+    static VARS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
+}
 
-/// Sets the variables every prompt and rubric of this process is rendered with.
+/// Sets the variables every prompt and rubric of this thread's run is rendered with.
 pub fn set(vars: BTreeMap<String, String>) {
-    *VARS.write().unwrap_or_else(|e| e.into_inner()) = vars;
+    VARS.with(|v| *v.borrow_mut() = vars);
+}
+
+/// The variables of this thread's run: what a lane's thread starts with, to pass on to a lane it starts.
+pub fn current() -> BTreeMap<String, String> {
+    VARS.with(|v| v.borrow().clone())
 }
 
 /// `text` rendered with the variables set; unchanged when none are.
 pub fn apply(text: &str) -> Result<String, String> {
-    let vars = VARS.read().unwrap_or_else(|e| e.into_inner());
-    if vars.is_empty() {
-        return Ok(text.to_string());
-    }
-    render(text, &vars)
+    VARS.with(|v| {
+        let vars = v.borrow();
+        if vars.is_empty() {
+            return Ok(text.to_string());
+        }
+        render(text, &vars)
+    })
 }
 
 /// `text` with every `{{ name }}` (a name of letters, digits and `_`, spaces inside the braces optional)

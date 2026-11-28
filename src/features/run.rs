@@ -22,7 +22,7 @@ fn failed(outcome: &SessionOutcome) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn launch(
     ctx: &LoopState,
-    agent: &'static dyn crate::backend::AgentBackend,
+    agent: &crate::backend::BackendRef,
     model: &str,
     effort: &str,
     step: &crate::core::config::ResolvedStep,
@@ -56,9 +56,8 @@ impl Handler for LaunchWorker {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow> {
         let prompt = ctx.scratch.get::<RLTScratch>().prompt.take().expect("WriteInstructions set scratch.prompt");
         let step = ctx.cur_step.clone().expect("PickStep set cur_step");
-        // `static_backend`, not `backend`: the stream-reader thread below needs the backend to be
-        // `&'static`, which a driver's own `Arc`-held one is not (see `ResolvedStep::static_backend`).
-        let agent = match step.static_backend() {
+        // `backend_ref`: an owned handle, so the stream-reader thread can hold a driver's own backend too
+        let agent = match step.backend_ref() {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("  step `{}` names an unknown agent: {e}", step.name);
@@ -67,8 +66,8 @@ impl Handler for LaunchWorker {
                 return Ok(Flow::Continue);
             }
         };
-        let model = step.model(agent).to_string();
-        let effort = step.effort(agent).to_string();
+        let model = step.model(&*agent).to_string();
+        let effort = step.effort(&*agent).to_string();
         let isolation = step.isolation;
         // The step's own deny list, on its way to the OS wrapper. Under `Isolation::None` there is
         // no wrapper to deliver it to — say so, in the operator's terms ("the step CAN WRITE these
@@ -89,14 +88,18 @@ impl Handler for LaunchWorker {
         if let Some(why) = crate::os::disk::run_shortfall(ctx.cfg.min_free_disk, &ctx.dir) {
             return Ok(Flow::Stop(ctx.disk_halt(&why)));
         }
+        // another lane's rate limit closes the gate for this agent: no session starts before it reopens
+        if let Some((lane, _)) = &ctx.lane {
+            lane.wait_rate(&step.agent);
+        }
         crate::features::protect::before_worker(ctx, &step)?;
         crate::features::partial::note_untracked_before(ctx);
-        let mut outcome = launch(ctx, agent, &model, &effort, &step, &prompt, &denied, step.resume.as_ref());
+        let mut outcome = launch(ctx, &agent, &model, &effort, &step, &prompt, &denied, step.resume.as_ref());
         // A session the agent no longer has fails before any work: the context was only a cache, so
         // the step starts fresh rather than failing (A-33).
         if let Some((id, _)) = step.resume.as_ref().filter(|_| is_dud(&outcome) && !crate::os::signals::interrupted()) {
             eprintln!("  resuming session {id} failed (exit {:?}); starting fresh", outcome.exit_code);
-            outcome = launch(ctx, agent, &model, &effort, &step, &prompt, &denied, None);
+            outcome = launch(ctx, &agent, &model, &effort, &step, &prompt, &denied, None);
         }
         // A failure that is not the work's fault (an overload, a dropped connection, a crash, a timeout) is tried again
         // inside this session: one ledger record, no new session branch, nothing counted toward `stalled`, the repair
@@ -118,7 +121,7 @@ impl Handler for LaunchWorker {
             }
             made += 1;
             let note = format!("{prompt}\n\nAn earlier try was cut off ({}); its work is in place: continue, and change nothing that holds.", class.word());
-            outcome = launch(ctx, agent, &model, &effort, &step, &note, &denied, None);
+            outcome = launch(ctx, &agent, &model, &effort, &step, &note, &denied, None);
         }
         outcome.usage.absorb(&spent);
         outcome.attempts = made;

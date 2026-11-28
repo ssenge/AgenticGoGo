@@ -11,18 +11,55 @@
 //! REFUSES to start otherwise (see `loop_::run`) rather than degrading — isolation is the
 //! product's correctness guarantee, not an enhancement.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run a git command in `dir`, returning (success, stdout-trimmed, stderr-trimmed).
-fn git(dir: &Path, args: &[&str]) -> (bool, String, String) {
-    match Command::new("git").current_dir(dir).args(args).output() {
-        Ok(o) => (
-            o.status.success(),
-            String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            String::from_utf8_lossy(&o.stderr).trim().to_string(),
-        ),
-        Err(e) => (false, String::new(), e.to_string()),
+/// Run a git command in `dir`, returning (success, stdout-trimmed, stderr-trimmed). Another lane may hold the lock of a
+/// ref or of the config for a moment: that is tried again (5 times, 200 ms apart) before it counts as a failure.
+pub fn git(dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let mut result = (false, String::new(), String::new());
+    for attempt in 0..LOCK_TRIES {
+        result = match Command::new("git").current_dir(dir).args(args).output() {
+            Ok(o) => (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            ),
+            Err(e) => return (false, String::new(), e.to_string()),
+        };
+        if result.0 || !locked(&result.2) || attempt + 1 == LOCK_TRIES {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    result
+}
+
+/// How often a git command that met another's lock is tried.
+const LOCK_TRIES: usize = 5;
+
+/// Whether git's error says another process holds a lock (`config.lock`, a ref's `.lock`, `packed-refs.lock`).
+fn locked(stderr: &str) -> bool {
+    stderr.contains("could not lock") || (stderr.contains(".lock") && (stderr.contains("File exists") || stderr.contains("Unable to create")))
+}
+
+/// The git dir of the work tree at `dir`: a linked worktree's own (`<common>/worktrees/<name>`, where a `MERGE_MSG` and
+/// the like live), else `.git`. `<dir>/.git` where git can't say (not a repository).
+pub fn git_dir(dir: &Path) -> PathBuf {
+    match git(dir, &["rev-parse", "--absolute-git-dir"]) {
+        (true, out, _) if !out.is_empty() => PathBuf::from(out),
+        _ => dir.join(".git"),
+    }
+}
+
+/// The git dir every work tree of the repository shares (refs, config, objects, what a cache for all of them lives in).
+pub fn common_dir(dir: &Path) -> PathBuf {
+    match git(dir, &["rev-parse", "--git-common-dir"]) {
+        (true, out, _) if !out.is_empty() => {
+            let p = dir.join(out);
+            p.canonicalize().unwrap_or(p)
+        }
+        _ => dir.join(".git"),
     }
 }
 
@@ -93,7 +130,7 @@ pub fn recover_stranded_merge(dir: &Path, branch_prefix: &str) -> bool {
         return false;
     }
     // Is this rlt's merge? Check MERGE_MSG for our merge-commit signature or the session prefix.
-    let msg = std::fs::read_to_string(dir.join(".git").join("MERGE_MSG")).unwrap_or_default();
+    let msg = std::fs::read_to_string(git_dir(dir).join("MERGE_MSG")).unwrap_or_default();
     let is_ours = msg.contains("rlt: merge session") || msg.contains(branch_prefix);
     if is_ours {
         eprintln!("  [iso] found a leftover staged merge from an interrupted session — aborting it to restore a clean base");
@@ -105,15 +142,17 @@ pub fn recover_stranded_merge(dir: &Path, branch_prefix: &str) -> bool {
     }
 }
 
-/// Create + checkout `branch` from `base`. Returns true on success.
-pub fn create_branch(dir: &Path, branch: &str, base: &str) -> bool {
+/// Create + checkout `branch` from `base`; git's error when it can't (a session that went on without its branch would
+/// run on the base with no isolation, and a lane's work would land in a sibling's).
+pub fn create_branch(dir: &Path, branch: &str, base: &str) -> Result<(), String> {
     // delete a stale same-named branch first (a prior crashed session) so -b doesn't fail.
     let _ = git(dir, &["branch", "-D", branch]);
     let (ok, _, err) = git(dir, &["checkout", "-b", branch, base]);
-    if !ok {
-        eprintln!("  [git] failed to create session branch {branch} from {base}: {err}");
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("failed to create session branch {branch} from {base}: {err}"))
     }
-    ok
 }
 
 /// Checkout an existing branch. Returns true on success.

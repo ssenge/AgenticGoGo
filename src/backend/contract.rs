@@ -13,7 +13,7 @@ use std::path::Path;
 /// A `false` is not a defect to be worked around silently. It is a constraint the loop must
 /// enforce at startup (see [`crate::capability::check`]). Serialized as-is into `rlt doctor --json`,
 /// so a field name here is a stable interface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Capabilities {
     /// Reports output-token usage on its terminal event. Required by `budget.total` / `over_budget`.
     pub reports_output_tokens: bool,
@@ -56,6 +56,8 @@ pub struct Capabilities {
     /// earlier survey concluded Codex and Copilot had 'no way found' and that rubric verifiers were
     /// Claude-only. That was wrong — verified live on all three.) Script verifiers are unaffected.
     pub supports_one_shot: bool,
+    /// Built from the agent's documented output, not yet from a recorded session (a run prints a notice).
+    pub experimental: bool,
 }
 
 // ---------------- what the loop needs back from a session ----------------

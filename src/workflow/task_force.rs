@@ -3,21 +3,51 @@
 //! the earliest step whose result is wrong, with a note, and after a human's yes the run ends and [`run`]
 //! starts it again from there (A-29); or it leaves the failure to a human.
 
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
-use std::sync::OnceLock;
 
 use super::brief::with_section;
 use super::flow::{Flow, Run};
 use crate::driver::{Fatal, Step};
 
-/// Where the next run re-enters, its note, the project, and whether the note is the humans' decision: set
-/// by the task force or the driver, read by [`run`] after the run.
-static REENTRY: OnceLock<(String, String, PathBuf, bool)> = OnceLock::new();
-/// Set when the run halts because the task force's limit for the failed step is spent: [`run`] then exits with
-/// [`SPENT_EXIT`], so a supervisor can't take it for a halt a restart of that step mends (a field run restarted a
-/// spent step three times in three minutes).
-static LIMIT_SPENT: OnceLock<()> = OnceLock::new();
+/// Where the next run re-enters: the step, its note, the project, and whether the note is the humans' decision.
+pub type Reentry = (String, String, PathBuf, bool);
+
+// Per thread, because a flow is `!Send` and runs on one: a lane runs on a thread of its own and hands what it
+// asked for back to the run that started it (`take_requests`), where only the top-level [`run`] acts on it.
+thread_local! {
+    /// Where the next run re-enters: set by the task force or the driver (the first request wins), read by [`run`]
+    /// after the run.
+    static REENTRY: RefCell<Option<Reentry>> = const { RefCell::new(None) };
+    /// Set when the run halts because the task force's limit for the failed step is spent: [`run`] then exits with
+    /// [`SPENT_EXIT`], so a supervisor can't take it for a halt a restart of that step mends (a field run restarted
+    /// a spent step three times in three minutes).
+    static LIMIT_SPENT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Asks for the next run to re-enter at `request`'s step; an earlier request of this thread stays.
+fn ask_reentry(request: Reentry) {
+    REENTRY.with(|r| {
+        r.borrow_mut().get_or_insert(request);
+    });
+}
+
+/// A lane's request to re-enter, handed to the run that started the lane, on its own thread.
+pub fn ask_reentry_from_lanes(request: Reentry) {
+    ask_reentry(request);
+}
+
+/// A lane's spent task-force limit, handed to the run that started the lane.
+pub fn limit_spent_from_lanes() {
+    LIMIT_SPENT.with(|l| l.set(true));
+}
+
+/// What a flow's thread asked of the run that started it: where to re-enter and whether a task force's limit is spent.
+/// Taking it clears it, so a lane's request is handed back once.
+pub fn take_requests() -> (Option<Reentry>, bool) {
+    (REENTRY.with(|r| r.borrow_mut().take()), LIMIT_SPENT.with(|l| l.replace(false)))
+}
 /// The exit code of a halt whose step has no repairs left: only a human's change of what the step works on helps.
 pub const SPENT_EXIT: u8 = 6;
 
@@ -56,7 +86,7 @@ impl Flow {
             return Err(Fatal::Other(anyhow::anyhow!("re-entering at {at}: no step of this run")));
         }
         self.record(&self.name_for(at), "reentry", true, note);
-        let _ = REENTRY.set((at.to_string(), note.to_string(), self.project().to_path_buf(), true));
+        ask_reentry((at.to_string(), note.to_string(), self.project().to_path_buf(), true));
         self.halt(format!("re-entering at {at}: {note}"))
     }
 }
@@ -77,7 +107,7 @@ fn fail_from(flow: &Flow, name: &str, why: &str, again: Option<Again>, base: Opt
     // the limit holds per failed step: one step's early repairs leave a later step its own (a field run spent the
     // whole run's three on test fixes in Phase 6, and every failure after them halted unrepaired)
     if spent_on(flow.project(), &flow.key_of(name)) >= *max {
-        let _ = LIMIT_SPENT.set(());
+        LIMIT_SPENT.with(|l| l.set(true));
         flow.record(name, "task-force", false, &format!("spent: its {max} re-entries and repairs were used"));
         return flow.halt(format!("{reason} (the task force's {max} re-entries and repairs for {name} are spent)"));
     }
@@ -179,7 +209,7 @@ fn reentered(flow: &Flow, name: &str, reason: &str, a: Answer) -> Result<(), Fat
     flow.record(name, "task-force", true, &format!("re-enter at {at}{how}: {note}"));
     keep_spent(flow.project(), flow.run.reentries + 1, flow.fixes.get());
     spend_on(flow.project(), &flow.key_of(name));
-    let _ = REENTRY.set((at.clone(), note, flow.project().to_path_buf(), false));
+    ask_reentry((at.clone(), note, flow.project().to_path_buf(), false));
     flow.halt(format!("{reason}; re-entering at {at}"))
 }
 
@@ -265,10 +295,11 @@ pub fn run(drive: impl FnOnce() -> Result<(), Fatal>) -> ExitCode {
             super::history::ended_by(&e.to_string());
         }
     }));
-    if LIMIT_SPENT.get().is_some() {
+    let (reentry, spent) = take_requests();
+    if spent {
         return ExitCode::from(SPENT_EXIT);
     }
-    let Some((at, note, project, decided)) = REENTRY.get() else {
+    let Some((at, note, project, decided)) = reentry else {
         return code;
     };
     let calls = project.join("rlt/private/calls.jsonl");
@@ -276,7 +307,7 @@ pub fn run(drive: impl FnOnce() -> Result<(), Fatal>) -> ExitCode {
     let _ = std::fs::copy(&calls, calls.with_file_name(format!("calls.{secs}.jsonl")));
     let args: Vec<String> = std::env::args().skip(1).collect();
     let again = Command::new(std::env::current_exe().unwrap_or_else(|_| "rlt-driver".into()))
-        .args(rerun(&args, at, note, *decided)).status();
+        .args(rerun(&args, &at, &note, decided)).status();
     match again {
         Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
         Err(_) => code,

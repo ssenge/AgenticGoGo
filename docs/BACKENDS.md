@@ -214,7 +214,10 @@ JSON document (`.json`) for a one-shot that prints one object. Name it `<agent>-
 with a suffix for a variant (`claude-2.1.296-oneshot.json`, `copilot-1.0.70-tools.jsonl`). You may
 **drop** lines that carry nothing the parsers read and **remove operator-specific fields** (paths,
 account ids, MCP server lists), as the Claude fixture's README entry says it did. Never edit a value a
-parser reads, and never invent a line: a hand-written "fixture" proves nothing.
+parser reads, and never invent a line: a hand-written "fixture" proves nothing. The one exception is an
+**experimental preset** (next section): its stream may be written from the CLI's documentation, in a file named
+`<agent>-<cli version>-synthetic.jsonl` and listed as synthetic in the fixtures' README, and the agent stays
+experimental until a real recording replaces it.
 
 **How to record one.** Cheapest possible prompt, cheapest model, the exact flags `session_command` or
 `one_shot` will use, in a scratch directory:
@@ -292,6 +295,33 @@ is what caught Copilot's `auto` + `effort` conflict, which no unit test could.
       `docs/CONFIG.md`, `AGENTS.md`, the README, and a CHANGELOG entry.
 - [ ] Gate: `cargo build` with 0 warnings, `cargo test`, `cargo clippy --all-targets -- -D warnings`,
       `scripts/e2e.sh`, and one real `rlt run` against the new CLI.
+
+## Command agents and the experimental presets
+
+A CLI that needs no parser of its own is described in YAML and driven by the **command harness**
+(`src/backend/command.rs`): `agents: { <name>: { command, output, fields, capabilities, ... } }` in `rlt.yaml`, or `rlt: {
+agents }` in a process file; `agent: <name>` then picks it like a shipped one. It is honest by construction: it sets only
+the capability flags it is told, shows each output line, and the exit code decides success. `fields` says where
+`json_lines` output holds the text, tokens, cost and session (JSON pointers, `type=/pointer` to look only at lines of that
+`type`). It makes no one-shot call, so it is no ruler, and `worker_args` follow its command.
+
+Four CLIs ship as **presets** of that harness (`src/backend/presets.rs`), all `experimental: true`:
+
+| agent | CLI | how it is called |
+|---|---|---|
+| `gemini` | Gemini CLI | `gemini --approval-mode yolo --output-format stream-json --prompt <read the brief file>` |
+| `opencode` | OpenCode | `opencode run --format json --dir <project> --auto <read the brief file>` |
+| `qwen` | Qwen Code | `qwen --approval-mode yolo --output-format stream-json --prompt <read the brief file>` |
+| `pi` | Pi | `pi --print --mode json <read the brief file>` |
+
+The flags were read off each CLI's own `--help` (Gemini 0.71.1, OpenCode 1.19.6, Qwen Code 0.28.7, Pi 0.73.1). OpenCode's
+stream was **recorded** (its free model needs no login: `opencode-1.19.6.jsonl`); Qwen and Pi were recorded up to their
+"no login" error (`*-noauth.jsonl`); the rest of each stream is **synthetic**, written from the CLI's documentation
+(`*-synthetic.jsonl`). So each run prints `agent <name> is experimental` and `rlt doctor --json` reports
+`experimental: true`. None of the four resumes a session, reports a dollar cost or detects a rate limit beyond a text
+pattern. An `agents:` entry of the same name replaces a preset, so a CLI whose output changed is a one-line fix in the
+config. **Real recordings** (a logged-in session of each) are the way an agent leaves "experimental": record it as above,
+replace the synthetic file, and clear the flag.
 
 ## Investigated, not implemented
 

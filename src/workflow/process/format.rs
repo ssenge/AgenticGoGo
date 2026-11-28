@@ -199,6 +199,9 @@ pub struct RltSpec {
     /// the least free disk space the run needs (`10GB`, `5%` or `false`); below it the run stops, and resumes
     #[serde(default)]
     pub min_free_disk: Option<crate::os::disk::Floor>,
+    /// agent CLIs of your own, by name (the generic command harness); a role or a step's worker names one as its agent
+    #[serde(default)]
+    pub agents: std::collections::BTreeMap<String, crate::backend::command::CommandSpec>,
 }
 
 impl RltSpec {
@@ -216,7 +219,7 @@ impl RltSpec {
 impl Default for RltSpec {
     fn default() -> RltSpec {
         RltSpec { memory: false, user_settings: false, user_env: Default::default(), preflight: true,
-                  on_regression: RltSpec::annotate(), verifier_timeout: RltSpec::timeout(), min_free_disk: None }
+                  on_regression: RltSpec::annotate(), verifier_timeout: RltSpec::timeout(), min_free_disk: None, agents: Default::default() }
     }
 }
 
@@ -481,6 +484,9 @@ pub struct Step {
     // each
     #[serde(default)]
     pub items: Option<Items>,
+    /// run the items as lanes
+    #[serde(default)]
+    pub parallel: Option<Parallel>,
     #[serde(default)]
     pub steps: Vec<Step>,
     // exam
@@ -590,6 +596,75 @@ pub struct Section {
     pub text: Option<String>,
     pub file: Option<String>,
     pub run: Option<String>,
+}
+
+/// Where a lane runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetKind {
+    /// a thread of this process, in a linked worktree (the default)
+    #[default]
+    Local,
+    /// a container: the reference image runs `rlt lane` on a clone of the project mounted into it
+    Container,
+    /// another machine over ssh
+    Ssh,
+    /// your own launcher: four commands
+    Command,
+}
+
+/// Where the lanes of a parallel `each` run (`parallel.target`). A lane that doesn't run in this process works on a standalone
+/// clone of the project that is shipped there and fetched back; see `docs/PROCESS.md`, "Where lanes run".
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Target {
+    #[serde(default)]
+    pub kind: TargetKind,
+    /// container: the image (default `rlt-<agent of the first worker>`: build it with `rlt images build`)
+    pub image: Option<String>,
+    /// container: `--network` of the container (default: the engine's)
+    pub network: Option<String>,
+    /// ssh: the host
+    pub host: Option<String>,
+    /// ssh: the user (default: ssh's)
+    pub user: Option<String>,
+    /// ssh: the folder on the host the lanes live under
+    pub dir: Option<String>,
+    /// ssh: the `rlt` binary on the host (default `rlt`)
+    pub rlt: Option<String>,
+    /// environment variables of this process passed to the lane (by name; their values travel in a file of mode 0600, never
+    /// in a command line)
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+    /// ssh: more options of the `ssh` command
+    #[serde(default)]
+    pub ssh_options: Vec<String>,
+    /// command: starts the lane, detached, and returns; `{lane_dir}` holds the lane's clone with its spec
+    pub launch: Option<String>,
+    /// command: exits 0 when the lane has ended, 1 while it runs
+    pub poll: Option<String>,
+    /// command: ends the lane
+    pub kill: Option<String>,
+    /// command: brings the lane's clone back into `{lane_dir}` when it has ended
+    pub fetch: Option<String>,
+}
+
+/// An `each` that runs its items at once, as lanes: each in a linked worktree of its own, on a branch of its own, joined in
+/// item order.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Parallel {
+    /// how many lanes run at once (at least 1)
+    pub max: usize,
+    /// a failed lane ends the running ones and starts no more; off, the others finish
+    #[serde(default)]
+    pub fail_fast: bool,
+    /// ignored or untracked paths copied into each lane's worktree (dependencies, build caches)
+    #[serde(default)]
+    pub seed: Vec<String>,
+    /// where the lanes run (default: threads of this process)
+    #[serde(default)]
+    pub target: Target,
 }
 
 /// Where an `each` takes its items from.

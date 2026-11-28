@@ -1,0 +1,2 @@
+worker: { agent: sleeper }
+critic: { agent: claude }

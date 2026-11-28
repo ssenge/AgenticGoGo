@@ -343,7 +343,7 @@ fn rlt_ignore_entries_survive_a_rollback_on_a_base_without_a_gitignore() {
 
     // run start: the ignore entries, then session 1 does work and rlt auto-commits it.
     ensure_rlt_gitignored(&d);
-    assert!(create_branch(&d, "rlt/p/session-1", "main"));
+    assert!(create_branch(&d, "rlt/p/session-1", "main").is_ok());
     std::fs::create_dir_all(d.join("rlt/private")).unwrap();
     std::fs::write(d.join("rlt/private/state.json"), "{}").unwrap();
     std::fs::write(d.join("f.txt"), "base\nregressing work\n").unwrap();
@@ -354,7 +354,7 @@ fn rlt_ignore_entries_survive_a_rollback_on_a_base_without_a_gitignore() {
     assert!(!d.join(".gitignore").exists(), "precondition: the rollback took the untracked .gitignore with it");
 
     // session 2's worker stages EVERYTHING it can see, as a worker running git would.
-    assert!(create_branch(&d, "rlt/p/session-2", "main"));
+    assert!(create_branch(&d, "rlt/p/session-2", "main").is_ok());
     git_t(&d, &["add", "-A"]);
     let staged = Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(&d).output().unwrap();
     let staged = String::from_utf8_lossy(&staged.stdout).to_string();
@@ -502,4 +502,69 @@ fn a_long_stat_is_cut() {
     assert_eq!(cut.lines().count(), 41);
     assert!(cut.ends_with("… (5 more lines)"), "{cut}");
     assert_eq!(truncated(" a | 1 +"), " a | 1 +");
+}
+
+// ── a linked worktree: `.git` there is a file, so what lives in the git dir is looked up, not assumed ──
+
+/// A linked worktree of `main` (on a branch of its own) beside the repository `d`; its path.
+fn linked_worktree(d: &Path, tag: &str) -> std::path::PathBuf {
+    let wt = std::env::temp_dir().join(format!("rlt-git-{}-{tag}-wt", std::process::id()));
+    let _ = std::fs::remove_dir_all(&wt);
+    git_t(d, &["worktree", "add", "-q", "-b", "lane", wt.to_str().unwrap(), "main"]);
+    wt
+}
+
+/// In a linked worktree the git dir is the worktree's own, the common dir is the repository's, and a stranded rlt merge
+/// there is found and aborted (it read `.git/MERGE_MSG`, which isn't a path in a worktree).
+#[test]
+fn a_linked_worktree_has_its_own_git_dir_and_recovers_its_stranded_merge() {
+    let d = repo_with_session_branch("wt");
+    let wt = linked_worktree(&d, "wt");
+    assert!(wt.join(".git").is_file(), "a linked worktree's .git is a file");
+    assert_ne!(git_dir(&wt), common_dir(&wt));
+    assert!(git_dir(&wt).to_string_lossy().contains("worktrees"), "{:?}", git_dir(&wt));
+    assert_eq!(common_dir(&wt).canonicalize().unwrap(), d.join(".git").canonicalize().unwrap());
+    assert_eq!(git_dir(&d).canonicalize().unwrap(), d.join(".git").canonicalize().unwrap());
+    assert_eq!(stage_merge(&wt, "rlt/p/session-1"), StagedMerge::Staged);
+    assert!(recover_stranded_merge(&wt, "rlt"), "the stranded merge of a linked worktree is aborted");
+    assert!(!merge_in_progress(&wt) && is_clean(&wt));
+    let _ = std::fs::remove_dir_all(&wt);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Two threads that write git config at once both land: a held `config.lock` is waited for, not lost.
+#[test]
+fn concurrent_config_writes_all_land() {
+    let d = repo_with_session_branch("config");
+    std::thread::scope(|s| {
+        for t in 0..4 {
+            let d = &d;
+            s.spawn(move || {
+                for i in 0..10 {
+                    stopped::note_branch_step(d, &format!("b{t}-{i}"), &format!("step-{t}-{i}"));
+                }
+            });
+        }
+    });
+    let (_, out, _) = git(&d, &["config", "--get-regexp", r"^branch\..*\.rlt-step$"]);
+    assert_eq!(out.lines().count(), 40, "{out}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// What git says about a lock is recognised, other failures are not retried.
+#[test]
+fn only_a_held_lock_is_tried_again() {
+    assert!(locked("error: could not lock config file .git/config: File exists"));
+    assert!(locked("fatal: Unable to create '/r/.git/refs/heads/x.lock': File exists."));
+    assert!(!locked("fatal: not a git repository"));
+    assert!(!locked("error: pathspec 'x' did not match"));
+}
+
+/// A branch that can't be cut says why, and the caller refuses to go on unisolated.
+#[test]
+fn a_branch_that_cannot_be_cut_is_an_error_with_gits_words() {
+    let d = repo_with_session_branch("nocut");
+    let err = create_branch(&d, "rlt/p/session-9", "no-such-base").unwrap_err();
+    assert!(err.contains("failed to create session branch rlt/p/session-9 from no-such-base"), "{err}");
+    let _ = std::fs::remove_dir_all(&d);
 }

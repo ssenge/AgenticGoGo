@@ -121,7 +121,11 @@ impl Proc {
         if let Some(t) = &tmp {
             t.apply(&mut sh);
         }
-        let out = sh.output().map_err(|e| anyhow::anyhow!("running `{command}`: {e}"))?;
+        // piped and waited for here, so the script's pid is its run's own (a lane's watch ends what it leaves)
+        sh.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let child = sh.spawn().map_err(|e| anyhow::anyhow!("running `{command}`: {e}"))?;
+        super::leftovers::own(child.id());
+        let out = child.wait_with_output().map_err(|e| anyhow::anyhow!("running `{command}`: {e}"))?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).to_string());
         }
@@ -201,7 +205,7 @@ mod tests {
         let spec = super::super::format::Process::parse("version: 1\nphases:\n- id: p\n  name: P\n  steps:\n  - { id: s, name: S, kind: outside }\n").unwrap();
         Shared { spec, home: "/home".into(), project: "/proj".into(), vars: BTreeMap::new(), settings: Default::default(), hooks: Default::default(),
                  keys: Default::default(), ids: Default::default(), phases: Default::default(), constraints: Default::default(),
-                 phase: Default::default() }
+                 phase: Default::default(), watch: None }
     }
 
     /// A relative script path is made absolute against the process home, with its arguments kept; others stay.

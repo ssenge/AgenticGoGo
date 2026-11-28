@@ -80,7 +80,7 @@ impl SessionOutcome {
 #[allow(clippy::too_many_arguments)]
 pub fn run_session(
     cfg: &RelentlessConfig,
-    agent: &'static dyn backend::AgentBackend,
+    agent: &backend::BackendRef,
     model: &str,
     effort: &str,
     worker_args: &[String],
@@ -193,14 +193,15 @@ pub fn run_session(
     let pid = child.id();
     // Register the worker's process group (pgid == pid, since we set process_group(0)) so a
     // SIGINT/SIGTERM on `rlt run` kills the worker's whole tree instead of orphaning it, and lets
-    // the loop unwind through its Drop guards. Cleared right after child.wait() below.
-    crate::os::signals::set_worker_pgid(pid);
+    // the loop unwind through its Drop guards. Unregistered right after child.wait() below.
+    let group = crate::os::signals::register_worker_pgid(pid);
+    crate::workflow::process::leftovers::own(pid);   // its run's own process: a lane's watch notes what it leaves
 
     let sh = Arc::new(Shared::new());
 
     // ---- the three helper threads ----
     let stdout = child.stdout.take().expect("piped stdout");
-    let reader_rx = spawn_reader(sh.clone(), stdout, live.clone(), agent);
+    let reader_rx = spawn_reader(sh.clone(), stdout, live.clone(), agent.clone());
     let heartbeat = spawn_heartbeat(sh.clone(), live.clone(), session, cfg.heartbeat_secs, start);
     let watchdog = spawn_watchdog(sh.clone(), pid, cfg.watchdog.idle_secs, cfg.watchdog.cpu_grace);
     let timer = timeout_secs.map(|secs| spawn_timeout(sh.clone(), pid, secs));
@@ -209,7 +210,7 @@ pub fn run_session(
     let status = child.wait().ok();
     // The session's process is done — a later signal must not target this (about-to-be-recycled)
     // pgid. The loop checks signals::interrupted() after we return.
-    crate::os::signals::clear_worker_pgid();
+    drop(group);
     // The child is now reaped — its pid is free and the OS may recycle it at any moment. Set
     // BOTH flags before the post-exit group-kill below so the watchdog (which kills by pid) can
     // never fire on a recycled pid: `done` ends its loop, `reaping` is the belt-and-braces guard
@@ -349,15 +350,15 @@ fn spawn_reader(
     sh: Arc<Shared>,
     stdout: std::process::ChildStdout,
     live: LiveState,
-    agent: &'static dyn backend::AgentBackend,
+    agent: backend::BackendRef,
 ) -> std::sync::mpsc::Receiver<(Vec<String>, Option<String>)> {
     let (tx, rx) = std::sync::mpsc::channel::<(Vec<String>, Option<String>)>();
     // Throttle disk writes of the live stream so we don't rewrite state.json on every token. The
     // in-memory snapshot still updates on every event; only the atomic file write (and seq bump)
     // is rate-limited to ~once a second.
     let throttle = Duration::from_millis(800);
-    // `agent` moves into the closure: the trait is Send+Sync and every backend is a ZST unit
-    // struct, so a `&'static dyn` is Copy and costs nothing to hand to the thread.
+    // `agent` moves into the closure: the trait is Send+Sync, and a shipped backend is a static while a driver's own
+    // is shared, so a clone of the reference costs nothing to hand to the thread.
     std::thread::spawn(move || {
         let mut tracker = ActivityTracker::default();
         let mut session_id: Option<String> = None;
@@ -388,7 +389,7 @@ fn spawn_reader(
             // about where it lives. Claude reports it ONCE (on its result); Copilot reports it on
             // EVERY assistant message and puts no token count on its terminal event at all.
             // Summing handles both shapes. See AgentBackend::parse_usage.
-            note_usage(&sh, agent, &line);
+            note_usage(&sh, &*agent, &line);
             // The TERMINAL event carries the rest. Each field is an Option: `None` = THIS AGENT
             // DOES NOT REPORT IT, which is not the same as zero. We fold in only what was actually
             // reported; a config that *needs* a number the agent can't produce was already refused
@@ -421,7 +422,7 @@ fn spawn_reader(
 }
 
 /// Fold one stream line's usage into the session's: tokens add, the first model reported sticks.
-fn note_usage(sh: &Shared, agent: &'static dyn backend::AgentBackend, line: &str) {
+fn note_usage(sh: &Shared, agent: &dyn backend::AgentBackend, line: &str) {
     let tokens = agent.parse_usage(line);
     let model = agent.parse_model(line);
     if tokens.is_none() && model.is_none() {

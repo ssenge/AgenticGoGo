@@ -250,8 +250,8 @@ mod tests {
     #[test]
     fn an_unknown_agent_is_refused_and_writes_nothing() {
         let d = tmpdir("unknown");
-        let e = install("gemini", &d, false).unwrap_err().to_string();
-        assert!(e.contains("unknown agent `gemini`"), "got: {e}");
+        let e = install("kiro", &d, false).unwrap_err().to_string();
+        assert!(e.contains("unknown agent `kiro`"), "got: {e}");
         assert!(!d.join(".agents").exists(), "nothing may be written for an unknown agent");
         let _ = std::fs::remove_dir_all(&d);
     }

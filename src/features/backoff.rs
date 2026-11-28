@@ -108,6 +108,9 @@ impl Handler for RateLimitBackoff {
         }
         let partial = crate::features::partial::save_and_reset(ctx);
         let agent = ctx.cur_step.as_ref().map(|s| s.agent.clone()).unwrap_or_default();
+        if let Some((lane, _)) = &ctx.lane {
+            lane.rate_hit(&agent, until);
+        }
         let waiting = Waiting { reason: RATE_LIMIT.into(), agent, until };
         append(ctx, &WaitRow::Wait { session: ctx.session, waiting: waiting.clone(), partial, ts: since });
         ctx.dash.waiting = Some(waiting);

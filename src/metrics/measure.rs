@@ -31,7 +31,7 @@ use crate::isolation::Isolation;
 use crate::protect::sha256::{self, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The program rlt runs. Optional: rlt works without it, and a metric/score verifier refuses at
 /// startup when it is missing (`super::probe`).
@@ -81,7 +81,8 @@ struct Entry {
     project: PathBuf,
     session: Option<u32>,
     scope: String,
-    result: Result<Arc<Measured>, String>,
+    /// filled by the first caller of this key, who measures outside the cache's lock; the others wait on this cell only
+    result: Arc<OnceLock<Result<Arc<Measured>, String>>>,
 }
 
 static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
@@ -91,22 +92,28 @@ fn cache() -> std::sync::MutexGuard<'static, Vec<Entry>> {
 }
 
 /// The shared measurement of `scope` for the verifier in `c`: from the cache when this session's tree
-/// was measured already, else measured now (holding the cache, so two verifiers never measure twice).
+/// was measured already, else measured now. A key is measured once (a second caller of it waits for the first), and
+/// measurements of other keys, a lane's, run at the same time: the cache is locked only to find or add the entry.
 pub fn measure(c: &Ctx<'_>, scope: &Scope, only: Option<&[String]>, reports: Option<&Path>) -> Result<Arc<Measured>, String> {
     // where the verifiers of this tier keep their scratch — and their evidence (`features::evidence`).
     let scratch = crate::core::verifier::scratch_path(c.cwd, c.session, c.isolation);
     let base = c.base.unwrap_or("HEAD");
     let families = only.map(|o| o.join(",")).unwrap_or_else(|| "*".into());
     let key = format!("{}|{}|{families}|{base}|{}", scratch.display(), site(scope, reports), tree_key(c.cwd));
-    let mut entries = cache();
-    if let Some(e) = entries.iter().find(|e| e.key == key) {
-        return e.result.clone();
-    }
-    let result = run_measure(c, scope, only, reports, base, &scratch).map(Arc::new);
-    entries.push(Entry { key, project: canonical(c.cwd), session: c.session, scope: site(scope, reports), result: result.clone() });
-    let excess = entries.len().saturating_sub(CACHE_CAP);
-    entries.drain(..excess);
-    result
+    let cell = {
+        let mut entries = cache();
+        match entries.iter().find(|e| e.key == key) {
+            Some(e) => e.result.clone(),
+            None => {
+                let result = Arc::new(OnceLock::new());
+                entries.push(Entry { key, project: canonical(c.cwd), session: c.session, scope: site(scope, reports), result: result.clone() });
+                let excess = entries.len().saturating_sub(CACHE_CAP);
+                entries.drain(..excess);
+                result
+            }
+        }
+    };
+    cell.get_or_init(|| run_measure(c, scope, only, reports, base, &scratch).map(Arc::new)).clone()
 }
 
 /// How many measurements this process has made (cache misses) — for tests and diagnostics.
@@ -284,7 +291,7 @@ pub fn promote(cwd: &Path, session: Option<u32>) -> Vec<String> {
         let entries = cache();
         let mut seen: Vec<(String, PathBuf)> = Vec::new();
         for e in entries.iter().rev().filter(|e| e.project == project && e.session == session) {
-            if let (Ok(m), false) = (&e.result, seen.iter().any(|(s, _)| s == &e.scope)) {
+            if let (Some(Ok(m)), false) = (e.result.get(), seen.iter().any(|(s, _)| s == &e.scope)) {
                 seen.push((e.scope.clone(), m.report_path()));
             }
         }

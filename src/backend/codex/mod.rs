@@ -88,6 +88,7 @@ impl AgentBackend for Codex {
             // hoping the model behaves. (Claude gets the same property a different way: its
             // one-shot call omits `--dangerously-skip-permissions`, so tool execution is denied.)
             supports_one_shot: true,
+            experimental: false,
         }
     }
 
@@ -431,8 +432,11 @@ impl AgentBackend for Codex {
 /// The answer's JSON Schema as a temporary file for `--output-schema` (Codex reads a schema only from a
 /// file). The caller removes it after the call.
 fn schema_file(text: &str) -> Result<std::path::PathBuf, String> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("rlt-schema-{}-{nanos}.json", std::process::id()));
+    // the counter keeps two threads that read the clock at the same instant apart
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("rlt-schema-{}-{nanos}-{n}.json", std::process::id()));
     std::fs::write(&path, text).map_err(|e| format!("cannot write the answer's schema {}: {e}", path.display()))?;
     Ok(path)
 }

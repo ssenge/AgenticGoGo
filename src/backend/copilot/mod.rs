@@ -95,6 +95,7 @@ impl AgentBackend for Copilot {
             // call omits `--dangerously-skip-permissions`, so its built-in tools are denied too
             // (`--strict-mcp-config` only disables MCP servers, not Bash/Edit).
             supports_one_shot: true,
+            experimental: false,
         }
     }
 

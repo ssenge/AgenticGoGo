@@ -39,6 +39,8 @@ pub mod doctor;
 pub mod driver;
 pub mod features;
 pub mod git;
+pub mod images;
+pub mod lanes;
 pub mod hooks;
 pub mod init;
 pub mod isolation;
@@ -79,7 +81,8 @@ pub mod prelude {
     pub use crate::core::vars::render;
     pub use crate::core::asks::Ask;
     pub use crate::driver::{
-        run, Relentless, Agent, AgentSession, Effort, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, Landing,
+        run, Relentless, Agent, AgentSession, Effort, FanOut, Fatal, GateFailure, GateOutcome, Group, GroupVerdict, LaneEnd,
+        LaneReport, Landing,
         OnRegression, Opts, PosFrame, Step, StepOutcome,
     };
     pub use crate::isolation::Isolation;

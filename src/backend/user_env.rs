@@ -7,7 +7,6 @@
 //! and the keys rlt manages itself (`RLT_*`) are never taken. Only key NAMES are ever shown, never values.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use serde::Deserialize;
 
@@ -39,8 +38,10 @@ impl<S: Into<String>, const N: usize> From<[S; N]> for UserEnv {
     }
 }
 
-/// What the current run passes: process-wide, like the other overrides, and replaced whenever a run takes its setting.
-static PASSED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+thread_local! {
+    /// What the current run passes: per thread (a lane's own), and replaced whenever a run takes its setting.
+    static PASSED: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
 /// The user-scope Claude settings file: `$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`.
 pub fn settings_file() -> Option<PathBuf> {
@@ -74,13 +75,13 @@ pub fn select(block: Vec<(String, String)>, which: &UserEnv, set: impl Fn(&str) 
 pub fn take(which: &UserEnv) -> Vec<String> {
     let pairs = select(file_env(), which, |k| std::env::var_os(k).is_some());
     let names = pairs.iter().map(|(k, _)| k.clone()).collect();
-    *PASSED.lock().unwrap_or_else(|e| e.into_inner()) = pairs;
+    PASSED.with(|p| *p.borrow_mut() = pairs);
     names
 }
 
 /// What the run passes to every Claude worker and one-shot process.
 pub fn passed() -> Vec<(String, String)> {
-    PASSED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    PASSED.with(|p| p.borrow().clone())
 }
 
 /// `name` from rlt's environment, else from what the run passes: what a Claude process would see.

@@ -1,0 +1,31 @@
+# Parallel lanes: the items of an `each` run at once, each in a worktree of its own, and are joined in item order.
+# Run it:   rlt process examples/parallel/process.yaml <project>   (the project is a git repo holding plan.yaml)
+# Try it without tokens: see examples/parallel/README.md (the worker is a script that sleeps a moment).
+version: 1
+rlt:
+  agents:                            # a CLI of your own: `{brief_file}` holds the step's brief, `{workdir}` is the lane's folder
+    sleeper:
+      command: [sh, "{workdir}/agents/worker.sh", "{brief_file}"]
+      output: text
+roles: { file: tools.yaml }
+run:
+  history: reports/steps.jsonl       # every lane writes its own copy; the run takes each back when it joins the lane
+phases:
+- id: build
+  name: Build
+  steps:
+  - id: units
+    name: The units
+    kind: each
+    items: { file: plan.yaml, items: units, key: id }
+    parallel: { max: 4 }             # four lanes at once; the rest start as lanes end
+    steps:
+    - id: make
+      name: Make one unit
+      kind: agent
+      sections: [{ text: "ITEM={{ item }}" }]   # the brief names the unit this lane makes
+      checks: [verifiers/made.sh]    # runs in the lane, with RLT_ITEM set
+  - id: collect
+    name: Collect the units
+    kind: script
+    run: scripts/collect.sh

@@ -192,6 +192,12 @@ fn step_demands(cfg: &RelentlessConfig, step_name: &str, a: &mut Assessment) {
     };
     let caps = b.capabilities();
     let agent = b.name();
+    if caps.experimental {
+        problem::push_unique(&mut a.warnings, Problem::new(format!("agents.{agent}"), format!(
+            "agent `{agent}` is experimental: built from its documented output, not yet from a recorded session; \
+             read the first run's report before relying on it"
+        )));
+    }
     let model = step.model(b).to_string();
     let effort = step.effort(b).to_string();
     let effort_at = at("effort", body.effort.is_some(), cfg.defaults.effort.is_some());

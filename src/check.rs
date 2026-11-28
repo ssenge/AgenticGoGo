@@ -63,6 +63,9 @@ pub fn validate(config_base: &Path, config: &Path) -> Validation {
     let mut v = Validation::default();
     let Some(mut cfg) = parse(config, &mut v.problems) else { return v };
     cfg.finish_load();
+    if let Err(e) = cfg.register_agents() {
+        v.problems.push(Problem::new("agents", e.to_string()));
+    }
 
     let verifiers: Vec<Verifier> = match assembly::build(&cfg, config_base) {
         Ok(asm) => {

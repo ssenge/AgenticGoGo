@@ -1,0 +1,14 @@
+# Plays examples/mixed-agents/process.yaml, no tokens: the worker is the project's own script (a command agent runs for
+# real), the reviewer is scripted:
+#   rlt process examples/mixed-agents/process.yaml --scenario examples/mixed-agents/scenario.yaml --projects examples/mixed-agents/projects
+project: demo
+setup:   # the scratch copy becomes a git repo: a run needs one
+  - git init -q -b main && git add -A && git -c user.name=demo -c user.email=demo@example.com commit -qm start
+agents: []                                                             # nothing scripted for the worker: it is a command agent
+answers:
+  - { ask: 'approve', say: 'yes' }                                     # the human at the checkpoint
+expect:
+  record: ['^fix done met', '^cp-fix']
+  sessions: ['^claude verifier']
+  files: { add.py: 'print\(1 \+ 2\)' }
+  exit: 0

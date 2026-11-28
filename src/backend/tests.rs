@@ -8,10 +8,10 @@ use super::*;
 #[test]
 fn unknown_agent_is_a_loud_error_that_lists_the_known_ones() {
     // `.err()` not `.unwrap_err()`: the Ok type is `&dyn AgentBackend`, which has no Debug.
-    let e = for_name("gemini").err().expect("an unknown agent must be an error").to_string();
-    assert!(e.contains("unknown agent `gemini`"), "got: {e}");
+    let e = for_name("kiro").err().expect("an unknown agent must be an error").to_string();
+    assert!(e.contains("unknown agent `kiro`"), "got: {e}");
     // …and it must list what IS supported, so the user can fix it without reading the source.
-    for known in KNOWN {
+    for known in KNOWN.iter().chain(presets::NAMES) {
         assert!(e.contains(known), "the error must list `{known}`, got: {e}");
     }
 }

@@ -42,6 +42,9 @@ fn drive(file: &Path, project: &Path, args: &[String]) -> Result<(), Fatal> {
     let home = file.parent().map(Path::to_path_buf).unwrap_or_default();
     let spec = Process::parse(&std::fs::read_to_string(file).map_err(|e| anyhow!("{}: {e}", file.display()))?)?;
     let list = number(&spec);
+    for (name, command) in &spec.rlt.agents {
+        crate::backend::register_command(name, command.clone())?;
+    }
     let project = std::fs::canonicalize(project).map_err(|e| anyhow!("{}: {e}", project.display()))?;
     let vars = template::variables(&spec, &list, &home, &project.display().to_string()).map_err(|e| anyhow!("{e}"))?;
     remember(&project, file);
@@ -159,7 +162,7 @@ fn pinned(home: &Path) -> String {
 fn forget_stale_bases(spec: &Process, project: &Path) {
     let Some(file) = &spec.run.bases_reset_when_changed else { return };
     let now = crate::protect::sha256::hex(&std::fs::read(project.join(file)).unwrap_or_default());
-    let marker = project.join(".git").join("rlt-bases-marker");
+    let marker = crate::git::git_dir(project).join("rlt-bases-marker");
     if std::fs::read_to_string(&marker).ok().as_deref() != Some(now.as_str()) {
         bases::drop_stale(project, true);
         let _ = std::fs::write(marker, now);
@@ -206,7 +209,7 @@ pub(super) fn settings_of(spec: &Process, list: &[Numbered], home: &Path, projec
 
 /// The roles file of the project: the worker's and the critic's agent, model and effort; a critic on the worker's
 /// agent is refused (a review must be a second opinion).
-fn roles_of(spec: &Process, project: &Path) -> Result<Option<Roles>, Fatal> {
+pub(super) fn roles_of(spec: &Process, project: &Path) -> Result<Option<Roles>, Fatal> {
     let Some(r) = &spec.roles else { return Ok(None) };
     let names: Vec<&str> = r.names.iter().map(String::as_str).collect();
     let roles = Roles::load(&project.join(&r.file), &names)?;
@@ -229,7 +232,7 @@ fn reachable(rlt: &Relentless, spec: &Process, roles: Option<&Roles>) -> Result<
 }
 
 /// The task force's step: its prompt, what it may never change, the sections of its brief.
-fn task_force(spec: &Process, home: &Path, project: &Path, vars: &BTreeMap<String, String>, roles: Option<&Roles>) -> Result<Option<crate::driver::Step>, Fatal> {
+pub(super) fn task_force(spec: &Process, home: &Path, project: &Path, vars: &BTreeMap<String, String>, roles: Option<&Roles>) -> Result<Option<crate::driver::Step>, Fatal> {
     let (Some(tf), Some(roles)) = (&spec.task_force, roles) else { return Ok(None) };
     let mut deny = vec![];
     for e in &tf.deny {
@@ -266,7 +269,7 @@ fn plain_section(s: &Section, home: &Path, vars: &BTreeMap<String, String>) -> R
 }
 
 /// Runs one step of the file (for an item of its `each`, if any), by its kind.
-fn exec(p: &Proc, step: &Step, item: Option<Item>) -> Result<(), Fatal> {
+pub(super) fn exec(p: &Proc, step: &Step, item: Option<Item>) -> Result<(), Fatal> {
     let Some(num) = p.list.iter().find(|n| n.id == step.id) else { return Ok(()) };
     match step.kind {
         Kind::Outside | Kind::Planned => return Ok(()),
@@ -313,7 +316,11 @@ fn each(p: &Proc, step: &Step) -> Result<(), Fatal> {
     if before_from && !items_file(p, step).is_some_and(|f| p.project.join(f).is_file()) {
         return Ok(());
     }
-    for item in items(p, step)? {
+    let all = items(p, step)?;
+    if let Some(parallel) = &step.parallel {
+        return super::lanes::each(p, step, all, parallel);
+    }
+    for item in all {
         for child in &step.steps {
             exec(p, child, Some(item.clone()))?;
         }
@@ -327,7 +334,7 @@ fn items_file(p: &Proc, step: &Step) -> Option<String> {
 }
 
 /// The items of an `each`: in the order its `list` gives, else in file order.
-fn items(p: &Proc, step: &Step) -> Result<Vec<Item>, Fatal> {
+pub(super) fn items(p: &Proc, step: &Step) -> Result<Vec<Item>, Fatal> {
     let spec = step.items.as_ref().ok_or_else(|| anyhow!("step `{}`: an `each` needs `items`", step.id))?;
     let file = template::render(&spec.file, &p.shared.vars).map_err(|e| anyhow!("step `{}`: {e}", step.id))?;
     let text = std::fs::read_to_string(p.project.join(&file)).map_err(|e| anyhow!("step `{}`: {file}: {e}", step.id))?;

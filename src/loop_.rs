@@ -398,6 +398,7 @@ fn run_reported(
     let lifetime_base = ledger.prior_lifetime_sessions();
 
     let mut st = LoopState {
+        lane: None,
         cfg,
         ruler,
         verifier_model,

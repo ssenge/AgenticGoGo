@@ -26,11 +26,12 @@
 //! Windows has no POSIX process groups and Ctrl-C already terminates the whole console group, so
 //! this is a no-op there.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
-/// pgid of the worker whose session is currently running (0 = none). The signal thread kills
-/// this group so a Ctrl-C doesn't orphan the worker.
-static WORKER_PGID: AtomicU32 = AtomicU32::new(0);
+/// pgids of the workers whose sessions are running now (several when lanes run at once). The signal thread kills
+/// every one of these groups so a Ctrl-C doesn't orphan a worker.
+static WORKERS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 /// set once a SIGINT/SIGTERM has been received; the loop checks it at phase boundaries.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -52,10 +53,9 @@ pub fn install() {
             std::thread::spawn(move || {
                 for _ in signals.forever() {
                     INTERRUPTED.store(true, Ordering::SeqCst);
-                    let pgid = WORKER_PGID.load(Ordering::SeqCst);
-                    if pgid != 0 {
-                        // SIGKILL the worker's whole group so no tool subprocess is orphaned, and
-                        // so the loop's blocking child.wait() returns for graceful cleanup.
+                    // SIGKILL each worker's whole group so no tool subprocess is orphaned, and so the loop's
+                    // blocking child.wait() returns for graceful cleanup.
+                    for pgid in workers() {
                         crate::os::proc::kill_group(pgid);
                     }
                 }
@@ -64,14 +64,30 @@ pub fn install() {
     }
 }
 
-/// Register the pgid of the worker whose session is starting (so a signal kills its group).
-pub fn set_worker_pgid(pgid: u32) {
-    WORKER_PGID.store(pgid, Ordering::SeqCst);
+/// The registered worker groups now (what a signal kills; Windows has no groups to kill, only the tests read it there).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn workers() -> Vec<u32> {
+    WORKERS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Clear the registered worker pgid (the session ended). A signal after this only sets the flag.
-pub fn clear_worker_pgid() {
-    WORKER_PGID.store(0, Ordering::SeqCst);
+/// A worker's registered process group: a signal kills it while this lives; dropping it (the session ended)
+/// removes that group only, never another lane's.
+#[must_use = "the group is registered only while the guard lives"]
+pub struct WorkerGroup(u32);
+
+impl Drop for WorkerGroup {
+    fn drop(&mut self) {
+        let mut all = WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = all.iter().position(|p| *p == self.0) {
+            all.remove(at);
+        }
+    }
+}
+
+/// Register the pgid of the worker whose session is starting (so a signal kills its group).
+pub fn register_worker_pgid(pgid: u32) -> WorkerGroup {
+    WORKERS.lock().unwrap_or_else(|e| e.into_inner()).push(pgid);
+    WorkerGroup(pgid)
 }
 
 /// Has a SIGINT/SIGTERM been received? The loop checks this at phase boundaries and, if true,
@@ -84,15 +100,29 @@ pub fn interrupted() -> bool {
 mod tests {
     use super::*;
 
+    /// Two workers at once are both registered; one ending removes only its own group.
     #[test]
-    fn flag_and_pgid_roundtrip() {
-        // default state
-        clear_worker_pgid();
-        assert_eq!(WORKER_PGID.load(Ordering::SeqCst), 0);
-        set_worker_pgid(4242);
-        assert_eq!(WORKER_PGID.load(Ordering::SeqCst), 4242);
-        clear_worker_pgid();
-        assert_eq!(WORKER_PGID.load(Ordering::SeqCst), 0);
+    fn several_worker_groups_register_and_leave_one_by_one() {
+        let (a, b) = (register_worker_pgid(4242), register_worker_pgid(4243));
+        assert!(workers().contains(&4242) && workers().contains(&4243));
+        drop(a);
+        assert!(!workers().contains(&4242) && workers().contains(&4243), "a's end must not clear b");
+        drop(b);
+        assert!(!workers().contains(&4243));
+    }
+
+    /// A signal kills every registered group: real child processes in their own groups, both gone after one kill pass.
+    #[cfg(unix)]
+    #[test]
+    fn a_kill_pass_ends_every_registered_worker() {
+        use std::os::unix::process::CommandExt;
+        let spawn = || std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let (mut one, mut two) = (spawn(), spawn());
+        let _guards = [register_worker_pgid(one.id()), register_worker_pgid(two.id())];
+        for pgid in workers().into_iter().filter(|p| *p == one.id() || *p == two.id()) {
+            crate::os::proc::kill_group(pgid);
+        }
+        assert!(!one.wait().unwrap().success() && !two.wait().unwrap().success());
     }
 
     #[test]

@@ -1,0 +1,11 @@
+# Plays examples/parallel/process.yaml, no tokens: the worker is the project's own script (a command agent runs for real),
+# eight units at four lanes at once:
+#   rlt process examples/parallel/process.yaml --scenario examples/parallel/scenario.yaml --projects examples/parallel/projects
+project: demo
+setup:   # the scratch copy becomes a git repo: a run needs one
+  - git init -q -b main && git add -A && git -c user.name=demo -c user.email=demo@example.com commit -qm start
+agents: []
+expect:
+  record: ['^units:a lane met', '^units:h lane met', '^collect tool met']   # the lanes are joined in item order
+  files: { summary.txt: 'unit a, worked' }
+  exit: 0

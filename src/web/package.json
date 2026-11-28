@@ -1,6 +1,6 @@
 {
   "name": "rlt-web",
-  "version": "0.2.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Standalone web interface for Relentless — monitor and steer a running rlt loop. Talks to `rlt serve` over HTTP.",
   "type": "module",

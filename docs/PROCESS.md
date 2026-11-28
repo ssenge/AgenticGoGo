@@ -114,7 +114,7 @@ Every step has `id`, `name`, `kind` and optionally:
 | `script` | a script step: it does the work and gives the verdict | `run` |
 | `agent` | an agent's task, its checks, its critic, through its ladder | `prompt` (default `<dirs.prompts>/<id>.md`), `checks`, `review` (`true` = `<dirs.reviews>/<id>-review.md`, or a path), `repairs` (default 2), `sections`, `quality`, `on_fail` |
 | `checkpoint` | a human approves a document | `prepare`, `doc`, `question`, `owner`, `go_live` |
-| `each` | its child steps once per item of a file | `items: { file, list, items, key }`, `steps` |
+| `each` | its child steps once per item of a file | `items: { file, list, items, key }`, `parallel`, `steps` |
 | `exam` | an examinee, checks, a grader, a repairer, in rounds | see below |
 | `outside` | nothing: a step done outside the run, numbered and listed | — |
 | `planned` | nothing: a step not built yet, numbered, in the order (`--until` may name it) | — |
@@ -145,6 +145,111 @@ saying what waits for the humans (`run.auto_note`).
 (default `id`); `list` names the key holding the order. An item's fields are `{{ item.<field> }}`, the item as YAML
 `{{ item.yaml }}`; `{{ before }}` and `{{ base }}` are the instance's refs. A run that starts after the loop, in a project
 without the file yet, skips it.
+
+### Parallel lanes
+
+`parallel: { max: 4, fail_fast: false, seed: [node_modules/] }` on an `each` runs its items at once, as **lanes**. Without it
+nothing changes: the items run one after another. With it the `each` always runs in lanes, even at `max: 1`.
+
+```yaml
+- id: units
+  name: The units
+  kind: each
+  items: { file: plan.yaml, key: id }
+  parallel: { max: 4 }
+  steps: [ … ]
+```
+
+A lane is one item's steps, run by an instance of the engine of its own on a thread of its own:
+
+- **A worktree of its own**, `<project>/rlt/private/lanes/<each>-<key>/` (a linked worktree of the repository; the lane's project
+  folder is the worktree plus the project's path inside the repository), on a branch of its own cut from the run's `HEAD`:
+  `rlt/<project>/lane-<each>-<key>`, with its sessions as `rlt/<project>-<each>-<key>/session-N`. Item keys are made safe for
+  these names (every character that isn't a letter, a digit, `_` or `-` becomes `-`); two keys that become one are refused at the
+  start, naming both.
+- **What a lane has of the run:** the files git holds, `rlt/state/` (the workers' memory) and the `seed` paths (ignored or
+  untracked files the steps need, such as dependencies). Input files the run holds untracked are not in a lane: list them in `seed`
+  or commit them (`run.commit_inputs`). The run's tree must be clean when the lanes start; the run commits the ignore rules
+  (`.gitignore`) itself first.
+- **The append-only files** (`run.history`, `run.notes`, `run.open_points`) are private to a lane while it runs: it starts with a copy,
+  and the run appends what the lane added when it joins the lane, so the join never conflicts on them. A step that writes another
+  shared tracked file from every lane makes the join conflict: give each item files of its own.
+
+**The run while its lanes work.** It starts lanes in item order, up to `max` at once, and about every half second:
+
+- forwards `rlt send` (`stop`, `pause`, `resume`, `inject`, `wake`, …) to every lane, through each lane's own bus: a stop ends every
+  lane at its next session boundary, and the run ends stopped (exit 5); a pause also holds back lanes not yet started;
+- mirrors the lanes' asks into its own ledger as `<key>:<id>` (so `rlt answer`, `status` and `serve` see them) and sends the
+  answers back;
+- publishes the lanes (`rlt/private/lanes.json`), which `rlt status` shows as a table (key, state, step, tokens, time).
+
+A rate limit one lane meets closes the gate for that agent: no lane starts a session of it before the reset. The tokens and
+dollars every lane spends count toward the run's ceilings. A lane that fails with `fail_fast: true` stops the running lanes and
+starts no more; with `false` the others finish.
+
+**The join.** When the lanes have ended the run joins them **in item order**: for each lane up to the first that did not end
+done, `git merge --no-ff` of its branch into the run's branch (subject `rlt: join <each> <key>`; a lane whose tip the run holds
+already is only recorded), takes back what the lane kept apart, records the lane in the run's history (kind `lane`) and removes
+its worktree and branch. **A conflict** is aborted and fails the `each`, naming the lane, the files and the fix: merge the lane's
+branch by hand, then `--resume`. A lane that failed keeps its worktree for the diagnosis and the resume; the lanes after it are
+not joined yet, so the order stays strict, even when they succeeded.
+
+**Resume.** `--resume` skips the lanes already joined (`rlt/private/lanes.jsonl`), resumes a lane whose worktree exists from its own
+ledger, and starts the others. The end state is the one an uninterrupted run gives. A task force's request to re-enter, made in a lane, is
+handed to the run after the join: it ends and starts again at the step named (the earliest among the lanes' requests); a spent
+limit ends it with exit 6.
+
+**What `--check` refuses** in a parallel `each`: `max: 0`, a checkpoint (a lane has no one to answer it), and an `each` inside
+it. At the start the run refuses a project that isn't in a git repository, uncommitted changes, and keys that clash. Time and
+processes: each lane ends only the processes its own steps left running (`run.leftovers`).
+
+### Where lanes run
+
+By default a lane is a thread of the run, in a linked worktree. `parallel.target` runs the lanes somewhere else:
+
+| `kind` | where | settings |
+|---|---|---|
+| `local` | a thread of this process (the default) | |
+| `container` | a container: the reference image runs `rlt lane` on the lane's clone, mounted at `/lane` | `image` (default `rlt-claude:<version>`: `rlt images build`), `network`, `pass_env` |
+| `ssh` | another machine over ssh | `host`, `dir` (required), `user`, `rlt` (the binary there, default `rlt`), `ssh_options`, `pass_env` |
+| `command` | your own launcher: a cloud VM, a cluster job, a disposable machine | `launch`, `poll`, `fetch` (required), `kill`, `pass_env` |
+
+```yaml
+parallel:
+  max: 2
+  target: { kind: ssh, host: build-box, user: deploy, dir: /srv/rlt, rlt: ~/.local/bin/rlt, pass_env: [ANTHROPIC_API_KEY] }
+```
+
+**The contract**, which every target keeps (the `command` target is the plug-in point for anything else):
+
+- A lane that doesn't run in this process works on a **standalone clone** of the project at `rlt/private/lanes/<each>-<key>/` (the
+  project must be at the root of its repository), carrying the run's git identity, the `seed` paths, the workers' memory, a copy of
+  the process's home (`rlt/private/lane-home/`) and the lane's spec (`rlt/private/lane-spec.json`).
+- `rlt lane --spec rlt/private/lane-spec.json`, run in the clone wherever the target started it, is the lane: the same steps a thread
+  would run. It leaves `rlt/private/lane-result.json` (`ok`, `error`, `stopped`, the task force's re-entry request) and its commits.
+- The commands are templates with `{lane_dir}` (the clone, quoted), `{key}` and `{lane}` (its folder name), run by a shell in the
+  project's folder with `RLT_LANE_DIR` and `RLT_LANE_KEY` set: `launch` starts the lane **detached** and returns; `poll` exits 0
+  when it has ended and 1 while it runs (anything else is tried again, five times in a row end the lane as failed); `kill` ends it
+  (run once when the operator stops the run); `fetch` brings the clone back into `{lane_dir}` when it has ended. A resumed run does
+  not launch a lane it launched: it polls it again.
+- The run then fetches the lane's branch from the clone and joins it as it joins any lane. The operator's `stop` reaches a
+  remote lane as `kill`; `pause`, `inject` and the rate-limit gate don't cross machines, and each lane's spend counts toward the
+  run's ceilings when it has ended.
+
+**The built-in targets** write the four commands for you. `ssh` sends the clone as a tar stream, starts `rlt lane` there with
+`setsid nohup` (so a dropped connection does not end it; its log and pid are in `rlt/private/` of the remote clone), polls the
+result file, and brings the clone back as a tar stream; `rlt install-remote <host>` installs `rlt` there. `container` runs
+`docker run -d` on the image with the clone mounted; the container's state says when it ended. **Credentials** (`pass_env`) are
+passed by name: for `container` docker reads the value from this process's environment; for `ssh` the values go in a file of mode 0600
+inside the stream, which the lane's shell sources and removes; they are never on a command line or in a log. A key reaches a
+remote machine only this way or through the machine's own login. Recipes for a plain ssh launcher and for a cloud VM through a
+provider's CLI are in [recipes/](recipes/).
+
+A remote `DOCKER_HOST` is not supported for the per-session container tier (`isolation: container`): the engine must see the project's
+path. Lane targets are the supported way to run elsewhere. `rlt doctor --containers` says which engine and images there are.
+
+`examples/parallel/` runs eight units at four lanes without tokens; the same machinery is `Relentless::fan_out` for a Rust driver
+([RUST_API.md](RUST_API.md#fan-out-lanes-for-a-driver)).
 
 **`exam`** — `checks` run first each round; `examinee` (`prompt`, `sections`, `deny`) answers on a fresh copy of what it
 may read; `answers` is a check of its result; `grader` is a rubric; `repairer` fixes what the round found (and gets the

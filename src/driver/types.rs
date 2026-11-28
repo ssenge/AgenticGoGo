@@ -42,6 +42,11 @@ pub enum Fatal {
 }
 
 impl Fatal {
+    /// A failure with only a message to say.
+    pub fn from_message(message: String) -> Fatal {
+        Fatal::Other(anyhow::anyhow!(message))
+    }
+
     /// The process exit code this ending deserves.
     ///
     /// ⚠ Without this, a driver is INDISTINGUISHABLE from a panic to any wrapper. `fn main() ->
@@ -312,7 +317,8 @@ impl std::str::FromStr for Agent {
         [Agent::Claude, Agent::Codex, Agent::Copilot]
             .into_iter()
             .find(|a| a.name() == name)
-            .ok_or_else(|| format!("unknown agent `{name}`: one of claude, codex, copilot"))
+            .or_else(|| crate::backend::command_named(name).map(|b| Agent::Custom(std::sync::Arc::new(b.clone()))))
+            .ok_or_else(|| format!("unknown agent `{name}`: one of claude, codex, copilot, gemini, opencode, qwen, pi, or one under `agents:`"))
     }
 }
 

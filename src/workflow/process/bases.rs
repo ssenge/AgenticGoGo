@@ -4,7 +4,6 @@
 //! step changed counts from its base.
 
 use std::path::Path;
-use std::process::Command;
 
 /// The ref that holds step `key`'s base.
 pub fn base(key: &str) -> String {
@@ -28,10 +27,10 @@ pub fn drop_stale(project: &Path, all: bool) {
     }
 }
 
-/// Runs git in `project`; its output when it succeeds.
+/// Runs git in `project` (trying again where another lane holds a lock); its output when it succeeds.
 fn git(project: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(project).args(args).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
+    let (ok, out, _) = crate::git::git(project, args);
+    ok.then_some(out)
 }
 
 #[cfg(test)]

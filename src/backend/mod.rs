@@ -81,6 +81,8 @@
 
 pub mod claude;
 pub mod codex;
+pub mod command;
+pub mod presets;
 pub mod copilot;
 pub mod overrides;
 pub mod reach;
@@ -99,6 +101,24 @@ use std::path::Path;
 use std::process::Command;
 
 // ---------------- the backend contract ----------------
+
+/// The backend a worker session runs on: a shipped one (a static, free to copy) or one a driver implements itself
+/// (shared, so the stream-reader thread can hold it as long as the session lasts).
+#[derive(Clone)]
+pub enum BackendRef {
+    Static(&'static dyn AgentBackend),
+    Shared(std::sync::Arc<dyn AgentBackend>),
+}
+
+impl std::ops::Deref for BackendRef {
+    type Target = dyn AgentBackend;
+    fn deref(&self) -> &(dyn AgentBackend + 'static) {
+        match self {
+            BackendRef::Static(b) => *b,
+            BackendRef::Shared(b) => &**b,
+        }
+    }
+}
 
 /// One coding agent the loop can drive.
 ///
@@ -479,16 +499,50 @@ pub fn looks_rate_limited(text: &str) -> bool {
 /// Every backend rlt knows how to drive. Adding one = a new `claude.rs`-shaped module + one arm.
 pub const KNOWN: &[&str] = &["claude", "codex", "copilot"];
 
+/// The command agents a config described (`agents:`), by name; each lives as long as the process.
+static COMMANDS: std::sync::Mutex<Vec<(String, &'static command::CommandBackend)>> = std::sync::Mutex::new(Vec::new());
+
+/// Makes the command agent `name` known to [`for_name`] and `Agent::from_str`. A name a shipped agent has is refused;
+/// described again with the same words is a no-op, with others it replaces the earlier one.
+pub fn register_command(name: &str, spec: command::CommandSpec) -> Result<()> {
+    if KNOWN.contains(&name) {
+        anyhow::bail!("agents.{name}: `{name}` is a shipped agent; name the command agent something else");
+    }
+    let backend: &'static command::CommandBackend = Box::leak(Box::new(command::CommandBackend::new(name, spec)?));
+    let mut all = COMMANDS.lock().unwrap_or_else(|e| e.into_inner());
+    all.retain(|(n, _)| n != name);
+    all.push((name.to_string(), backend));
+    Ok(())
+}
+
+/// The command agent registered under `name`.
+/// A name no config described falls back to the preset of that name (`presets`), registered on first use.
+pub fn command_named(name: &str) -> Option<&'static command::CommandBackend> {
+    let found = || COMMANDS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(n, _)| n == name).map(|(_, b)| *b);
+    found().or_else(|| {
+        register_command(name, presets::spec(name)?).ok()?;
+        found()
+    })
+}
+
 /// Resolve an `agent:` name to its backend.
 pub fn for_name(name: &str) -> Result<&'static dyn AgentBackend> {
     match name {
         "claude" => Ok(&claude::Claude),
         "codex" => Ok(&codex::Codex),
         "copilot" => Ok(&copilot::Copilot),
-        other => anyhow::bail!(
-            "unknown agent `{other}` in rlt.yaml.\n  known agents: {}\n  \
-             (adding one means implementing `trait AgentBackend` — see docs/BACKENDS.md)",
-            KNOWN.join(", ")
-        ),
+        other => match command_named(other) {
+            Some(b) => Ok(b),
+            None => {
+                let configured: Vec<String> = COMMANDS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(n, _)| n.clone()).collect();
+                anyhow::bail!(
+                    "unknown agent `{other}` in rlt.yaml.\n  known agents: {}, {} (experimental){}\n  \
+                     (a CLI of your own goes under `agents:`; a new built-in one means implementing `trait AgentBackend` — see docs/BACKENDS.md)",
+                    KNOWN.join(", "),
+                    presets::NAMES.join(", "),
+                    if configured.is_empty() { String::new() } else { format!(", {} (configured)", configured.join(", ")) }
+                )
+            }
+        },
     }
 }

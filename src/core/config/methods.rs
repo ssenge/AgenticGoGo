@@ -159,7 +159,16 @@ impl RelentlessConfig {
         Self::reject_removed_keys(path)?;
         let mut cfg: RelentlessConfig = crate::util::load_yaml(path)?;
         cfg.finish_load();
+        cfg.register_agents()?;
         Ok(cfg)
+    }
+
+    /// Makes the command agents of `agents:` known by name (so a step can name one as its `agent:`).
+    pub fn register_agents(&self) -> Result<()> {
+        for (name, spec) in &self.agents {
+            crate::backend::register_command(name, spec.clone())?;
+        }
+        Ok(())
     }
 
     /// What [`Self::load`] does after serde: the env overrides, then the clock-unit warning. Shared

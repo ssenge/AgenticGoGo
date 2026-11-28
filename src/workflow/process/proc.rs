@@ -36,6 +36,8 @@ pub struct Shared {
     pub constraints: RefCell<HashMap<String, String>>,
     /// the phase the run is in
     pub phase: RefCell<Option<String>>,
+    /// what this run's steps leave running (`run.leftovers`)
+    pub watch: Option<leftovers::Watch>,
 }
 
 /// What a run needs besides rlt itself.
@@ -70,19 +72,34 @@ impl Deref for Proc {
 impl Proc {
     /// The run on `rlt`, starting and ending as `run` says, with the process's callbacks and its task force.
     pub fn new(rlt: Relentless, run: Run, init: Init) -> Proc {
+        Proc::build(rlt, run, init, None)
+    }
+
+    /// One lane of a parallel `each`: the run's engine instance in the lane's worktree. It starts in `phase` (the phase
+    /// the run was in at the `each`: its `pre` commands ran once, not once per lane), leaves the verdict cache the lanes
+    /// share alone, and ends only the processes its own steps left running.
+    pub fn new_lane(rlt: Relentless, run: Run, init: Init, phase: Option<String>) -> Proc {
+        Proc::build(rlt, run, init, Some(phase))
+    }
+
+    fn build(rlt: Relentless, run: Run, init: Init, lane: Option<Option<String>>) -> Proc {
         let project = rlt.dir().to_path_buf();
         let spec = &init.spec;
-        let _ = std::fs::remove_dir_all(project.join(".git").join("rlt-verdicts"));
-        if spec.run.leftovers {
-            let ended = leftovers::watch(&project);
+        if lane.is_none() {
+            let _ = std::fs::remove_dir_all(crate::git::common_dir(&project).join("rlt-verdicts"));
+        }
+        let roots = if lane.is_some() { leftovers::Roots::Spawned } else { leftovers::Roots::Process };
+        let watch = spec.run.leftovers.then(|| {
+            let (watch, ended) = leftovers::watch(&project, roots);
             if ended > 0 {
                 rlt.info(&format!("ended {ended} processes that earlier, stopped runs left running"));
             }
-        }
+            watch
+        });
         let hooks = spec.run.hooks.as_ref().and_then(|h| h.process.as_ref()).map(|f| hooks::read(&init.home.join(f))).unwrap_or_default();
         let shared = Rc::new(Shared { spec: init.spec.clone(), home: init.home.clone(), project: project.clone(),
             vars: init.vars, settings: init.settings.clone(), hooks, keys: RefCell::default(), ids: RefCell::default(), phases: RefCell::default(),
-            constraints: RefCell::default(), phase: RefCell::default() });
+            constraints: RefCell::default(), phase: RefCell::new(lane.flatten()), watch });
         let mut flow = Flow::new(rlt, run);
         if let Some(h) = &spec.run.history {
             flow = flow.history(h);
@@ -117,6 +134,18 @@ impl Proc {
         let wrapper = self.wrapper(&format!("{}-cached.sh", check.name),
             &format!("{} cached{ignore} -- {}", super::exec::quote(&rlt.display().to_string()), path.display()))?;
         Ok(Verifier::script(check.name.clone(), wrapper.as_str()))
+    }
+
+    /// A lane's end: what its last step left running ends and its history is written. The phase's after-hooks are the
+    /// run's, once the lanes are joined.
+    pub fn finish_lane(&self) -> Result<(), Fatal> {
+        reaped(&self.flow, &self.shared, "the lane's end");
+        self.flush()
+    }
+
+    /// The phase the run is in, which a lane starts in.
+    pub fn phase_now(&self) -> Option<String> {
+        self.shared.phase.borrow().clone()
     }
 
     /// The run's end: what the last step left running ends, and the last phase's after-hooks and commands run.
@@ -207,7 +236,7 @@ fn reaped(flow: &Flow, shared: &Shared, name: &str) {
     if !shared.spec.run.leftovers {
         return;
     }
-    let ended = leftovers::reap();
+    let ended = shared.watch.as_ref().map_or(0, leftovers::Watch::reap);
     if ended > 0 {
         flow.info(&format!("ended {ended} processes the step before {name} left running"));
     }

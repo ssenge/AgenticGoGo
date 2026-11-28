@@ -12,12 +12,21 @@ use std::path::Path;
 /// snapshot yet (the loop has never run in this dir).
 pub fn render(dir: &Path) -> String {
     match DashboardState::read(dir) {
-        Some(s) => render_state(&s) + &process_line(dir),
+        Some(s) => render_state(&s) + &process_line(dir) + &lanes_table(dir),
         None => "no run snapshot yet (rlt/private/state.json not found).\n  \
                  • `rlt run` to start the loop (it publishes state as it goes), or\n  \
                  • `rlt plan` to evaluate the verifiers once now (a dry run — this re-verifys)."
             .to_string(),
     }
+}
+
+/// The lanes of a parallel `each` that is running, as a table; nothing otherwise.
+fn lanes_table(dir: &Path) -> String {
+    let views = crate::lanes::read(dir);
+    if views.is_empty() {
+        return String::new();
+    }
+    crate::lanes::table(&views, crate::util::now_epoch())
 }
 
 /// The process run's current phase and step as one line, when the project runs a process (A-38).

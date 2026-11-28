@@ -58,6 +58,10 @@ pub struct RelentlessConfig {
     pub heartbeat_secs: u64,
     #[serde(default)]
     pub watchdog: Watchdog,
+    /// Agent CLIs of your own, by name (the generic command harness): a step names one as its `agent:`. See
+    /// [`crate::backend::command`].
+    #[serde(default)]
+    pub agents: BTreeMap<String, crate::backend::command::CommandSpec>,
     #[serde(default = "default_backoff")]
     pub ratelimit_backoff_secs: u64,
     /// The least free disk space a run needs, checked before each worker session and each round of verifiers: a size
@@ -568,6 +572,7 @@ impl Default for RelentlessConfig {
             sequence: Sequence::default(),
             heartbeat_secs: default_heartbeat(),
             watchdog: Watchdog::default(),
+            agents: BTreeMap::new(),
             ratelimit_backoff_secs: default_backoff(),
             min_free_disk: crate::os::disk::Floor::default(),
             ratelimit_min_gap_secs: default_min_gap(),
@@ -877,25 +882,13 @@ impl ResolvedStep {
         }
     }
 
-    /// [`Self::backend`] narrowed to `&'static` — for the ONE call site that hands the backend to
-    /// the worker's stream-reader thread (`worker::run_session`, whose `move` closure needs it to
-    /// outlive the session).
-    ///
-    /// ponytail: a [`CustomBackend`] lives in an `Arc`, not in static data, so it cannot satisfy
-    /// that bound and this REFUSES loudly rather than quietly running the named agent instead. The
-    /// upgrade path is `run_session`/`spawn_reader` taking `Arc<dyn AgentBackend>` (the trait is
-    /// already `Send + Sync`, and a cloned `Arc` into the thread costs one refcount) — commit 6
-    /// makes that change, when there is finally a custom backend to run.
-    pub fn static_backend(&self) -> Result<&'static dyn AgentBackend> {
-        if let Some(b) = &self.custom {
-            anyhow::bail!(
-                "step `{}` names a driver-supplied backend (`{}`), which the worker launch cannot \
-                 run yet — see `ResolvedStep::static_backend`",
-                self.name,
-                b.0.name()
-            );
+    /// The backend a worker session runs on, owned so the session's stream-reader thread can hold it: the driver's own
+    /// [`CustomBackend`] (shared) first, else the named shipped one.
+    pub fn backend_ref(&self) -> Result<crate::backend::BackendRef> {
+        match &self.custom {
+            Some(b) => Ok(crate::backend::BackendRef::Shared(b.0.clone())),
+            None => for_name(&self.agent).map(crate::backend::BackendRef::Static),
         }
-        for_name(&self.agent)
     }
 
     /// The paths this step may NOT write: `readonly` minus `writable`

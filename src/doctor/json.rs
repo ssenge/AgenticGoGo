@@ -114,7 +114,7 @@ pub fn report(config_base: &Path, config: &Path) -> DoctorReport {
             warnings.push(Problem::new("verifier.agent", missed));
         }
     }
-    let backends = KNOWN.iter().filter_map(|n| for_name(n).ok()).map(|b| backend_facts(b, used.iter().any(|u| u == b.name()))).collect();
+    let backends = KNOWN.iter().chain(crate::backend::presets::NAMES).filter_map(|n| for_name(n).ok()).map(|b| backend_facts(b, used.iter().any(|u| u == b.name()))).collect();
     let container_engine = crate::isolation::container_engine();
     DoctorReport {
         schema_version: check::SCHEMA_VERSION,
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(r["ok"], false, "no config is not ok");
         assert_eq!(r["config"]["found"], false);
         let names: Vec<&str> = r["backends"].as_array().unwrap().iter().map(|b| b["name"].as_str().unwrap()).collect();
-        assert_eq!(names, KNOWN);
+        assert_eq!(names, KNOWN.iter().chain(crate::backend::presets::NAMES).copied().collect::<Vec<_>>());
         assert!(r["backends"][0]["capabilities"]["supports_one_shot"].is_boolean());
         assert_eq!(r["isolation"]["none"]["available"], true);
         assert_eq!(r["network"]["mode"], "open");

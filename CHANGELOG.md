@@ -2,6 +2,96 @@
 
 Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; the entries below 0.1.0 keep the old names). Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.5.0 (2026-11-28)
+
+### Added
+
+- **Where lanes run.** `parallel.target` of a parallel `each`: `local` (the default), `container`, `ssh` or `command`. A lane that
+  doesn't run in this process works on a standalone clone of the project (carrying the run's git identity, the seed, the workers'
+  memory, a copy of the process's home and its spec), and **`rlt lane --spec rlt/private/lane-spec.json`** (a hidden command) runs it
+  wherever the target started it, leaving `rlt/private/lane-result.json`. A target is four commands (`launch`, `poll`, `kill`,
+  `fetch`) with `{lane_dir}`, `{key}` and `{lane}`; the run polls, brings the clone back, fetches the lane's branch and joins it as
+  any lane. `ssh` and `container` write the commands for you (tar streams over ssh with `setsid nohup`; `docker run -d` with the clone
+  mounted); `command` is the plug-in point (`docs/recipes/`: a plain ssh launcher, a disposable cloud machine). `pass_env` passes
+  credentials by name: a file of mode 0600 inside the ssh stream, or docker's own environment passing; never a command line or a log.
+  The operator's stop reaches a remote lane as `kill`; a resumed run polls a launched lane again instead of launching a second.
+  `--check` refuses a target without what its kind needs and a setting of another kind. See `docs/PROCESS.md`, "Where lanes run",
+  `examples/remote-session/`.
+- **`rlt images build [--rlt <linux binary>] [<agent>…]`** builds the reference images (`docker/claude`, `codex`, `swe-metrics`), each
+  with the agent's CLI and `rlt`, tagged `rlt-<agent>:<version>` and `:latest`; `rlt images list` and **`rlt doctor --containers`**
+  say which engine and images there are; a container target whose image is missing names the command that builds it.
+- **`rlt install-remote <host> [ssh options…]`** runs the install script on a host over ssh.
+
+### Changed
+
+- A remote `DOCKER_HOST` is not supported for the per-session container tier; lane targets are the way to run elsewhere (docs).
+
+### Not built
+
+- Shared services across machines (the rate-limit gate, `pause` and `inject`, live spend): a remote lane is stopped by `kill`, and
+  its spend counts when it has ended. A real host and a real container run of an agent session have not been tried here: the ssh,
+  container and command targets run in the tests against fake `ssh` and `docker` and a launcher that runs the lane on this machine.
+
+## 0.4.0 (2026-11-28)
+
+### Added
+
+- **Parallel lanes.** `parallel: { max, fail_fast, seed }` on an `each` of a process file runs its items at once as lanes: each in a
+  linked worktree of its own (`rlt/private/lanes/<each>-<key>/`) on a branch of its own (`rlt/<project>/lane-<each>-<key>`, its
+  sessions `rlt/<project>-<each>-<key>/session-N`), with an engine instance of its own on a thread of its own. The run joins the
+  finished lanes into its branch in item order (`rlt: join <each> <key>`), takes back the append-only files a lane kept apart
+  (`run.history`, `run.notes`, `run.open_points`) and the workers' memory, aborts and names a conflict, resumes (`--resume` skips
+  the joined lanes and resumes the others from their own ledgers), and forwards `rlt send` commands to the lanes, mirrors their asks
+  into its own ledger (`<key>:<id>`) and publishes `rlt/private/lanes.json`, which `rlt status` shows as a table. A rate limit one lane
+  meets holds back the others, and every lane's spend counts toward the run's ceilings. `--check` refuses `max: 0` and a checkpoint
+  inside. See `docs/PROCESS.md`, "Parallel lanes", and `examples/parallel/`.
+- **`Relentless::fan_out(keys, FanOut, body)`** for a Rust driver: the same lanes for a list of keys; `FanOut`, `LaneEnd`, `LaneReport`
+  in the prelude; `Relentless::project_name`, `Relentless::lanes` (what the scheduler sets). `examples/fanout.rs`, `docs/RUST_API.md`.
+- `src/lanes/` (`worktree`, `schedule`, `join`, `services`, `forward`, `record`): `LaneServices` is what an engine instance calls (stop,
+  rate-limit gate, charge and ceiling, views); `None` is an ordinary run and every call site keeps its code then.
+
+### Changed
+
+- **A failed branch cut ends the run** (it used to run the worker on the base branch without isolation after a log line).
+- Git commands that meet a held lock (`config.lock`, a ref's `.lock`) are tried again, five times 200 ms apart; the git dir of a
+  linked worktree is looked up (a stranded merge is found there; the verdict cache lives in the common dir and is written whole
+  and moved into place).
+- Process-wide state that a second run in the same process would share is per thread or per run: the worker groups a signal kills
+  (every worker's, not the last), the task force's re-entry and spent-limit marks, `vars`, `user_env`, the leftovers sampler (one thread
+  for the process; each run ends only its own steps' leftovers), the measurement cache (a lock per key, not one held across a whole
+  measurement), the temp name of Codex's answer schema.
+- The scenario harness takes a lock around choosing a scripted agent's rule and logging the call: a rule that answers `times: 1`
+  answers one of many calls made at once.
+
+### Not built
+
+- `rlt send --lane <key>` (a command reaches every running lane), a lane record in `calls.jsonl` (the run keeps `lanes.jsonl` and a
+  `lane` record in the process history), the lanes as parallel bars in `--report timeline` and as rows of the web process map,
+  and a log per lane merged in item order for `expect` in a scenario.
+
+## 0.3.0 (2026-11-28)
+
+### Added
+
+- **Any agent CLI, described in YAML: the command harness.** `agents: { <name>: { command, output, fields, capabilities,
+  rate_limit_pattern, preflight, env, experimental } }` in `rlt.yaml` (and `rlt: { agents }` in a process file) makes a CLI an
+  `agent:` like the shipped ones: `command` is the argv (`{brief_file}`, `{brief}`, `{workdir}`, `{model}`, `{session}` are
+  filled in), `output: text | json_lines` with `fields` naming where the JSON lines hold text, output tokens, cost and session
+  (JSON pointers, `type=/pointer` for one event type). It claims only the capabilities it is told, shows each output line, lets
+  the exit code decide success, and is never the ruler (no read-only one-shot call). `worker_args` follow its command. A
+  driver's own `AgentBackend` is launchable too (`Agent::Custom`); the worker takes a `BackendRef`.
+- **Four experimental presets of it: `gemini`, `opencode`, `qwen`, `pi`.** Flags read off each CLI's `--help` (Gemini CLI 0.71.1,
+  OpenCode 1.19.6, Qwen Code 0.28.7, Pi 0.73.1); the brief goes in a file and the prompt says to read it. OpenCode's stream was
+  recorded, Qwen's and Pi's up to their "no login" error, the rest is synthetic (`tests/fixtures/agent-streams/`, README).
+  Every run prints `agent <name> is experimental`, `rlt doctor --json` lists them with `experimental: true`, and an `agents:`
+  entry of the same name replaces a preset. `docs/BACKENDS.md` has the rule for synthetic fixtures. `examples/mixed-agents/`
+  works with a command agent and Claude.
+
+### Fixed
+
+- The unit tests of the command harness compile (they used `unwrap_err` on types without `Debug`); the docs of `BackendRef` and
+  of the `AgentBackend` trait are on their own items again.
+
 ## 0.2.0 (2026-11-27)
 
 ### Added

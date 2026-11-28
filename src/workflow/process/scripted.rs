@@ -42,18 +42,46 @@ fn answer(agent: &str, args: &[String]) -> Result<(), String> {
     let rules = Scenario::read(Path::new(&scenario))?.agents;
     let prompt = brief(&prompt_of(agent, args), &cwd);
     let kind = if prompt.contains(VERDICT) { "verifier" } else { "worker" };
-    let index = rule_for(&rules, &prompt, agent, kind, &log)?;
+    // the rule is chosen and the call logged under one lock: calls of parallel lanes arrive at once, and a rule that
+    // answers `times: 1` must not answer two of them
+    let index = {
+        let _lock = Lock::take(&log)?;
+        let index = rule_for(&rules, &prompt, agent, kind, &log)?;
+        let line = json!({"agent": agent, "kind": kind, "rule": index, "title": title(&prompt)});
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&log).map_err(|e| format!("{}: {e}", log.display()))?;
+        std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()).map_err(|e| format!("{}: {e}", log.display()))?;
+        index
+    };
     let rule = index.map(|i| rules[i].clone()).unwrap_or_default();
     act(&rule, &cwd, &prompt)?;
     let said = rule.say.clone().unwrap_or_else(|| if kind == "verifier" { MET.to_string() } else { "done".into() });
-    let line = json!({"agent": agent, "kind": kind, "rule": index, "title": title(&prompt)});
-    let mut text = std::fs::read_to_string(&log).unwrap_or_default();
-    text.push_str(&format!("{line}\n"));
-    std::fs::write(&log, text).map_err(|e| format!("{}: {e}", log.display()))?;
     for event in output(agent, args, &said) {
         println!("{event}");
     }
     Ok(())
+}
+
+/// A lock on the scenario's log: a file made exclusively beside it, removed when the lock drops.
+struct Lock(PathBuf);
+
+impl Lock {
+    /// Takes the lock, waiting up to 30 seconds for another call's.
+    fn take(log: &Path) -> Result<Lock, String> {
+        let file = log.with_extension("lock");
+        for _ in 0..600 {
+            if std::fs::OpenOptions::new().write(true).create_new(true).open(&file).is_ok() {
+                return Ok(Lock(file));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Err(format!("{}: held by another call for 30 seconds", file.display()))
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn env(name: &str) -> Result<String, String> {
@@ -191,6 +219,30 @@ mod tests {
         assert_eq!(ask("the verdict", "claude", "verifier"), Some(2));
         assert_eq!(ask("the verdict", "claude", "worker"), None);
         assert!(rule_for(&rules("- { when: '(' }\n"), "x", "claude", "worker", &log).is_err());
+    }
+
+    /// A rule that answers `times: 1` answers one of many calls made at once: the choice and the log line are taken under
+    /// a lock (the scenario's lanes call at the same moment).
+    #[test]
+    fn a_rule_with_one_call_left_answers_only_one_of_many_calls_at_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("calls.jsonl");
+        let rs = rules("- { when: 'x', times: 1 }\n");
+        let chosen = std::sync::Mutex::new(vec![]);
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    let _lock = Lock::take(&log).unwrap();
+                    let index = rule_for(&rs, "x", "claude", "worker", &log).unwrap();
+                    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&log).unwrap();
+                    std::io::Write::write_all(&mut f, format!("{{\"rule\": {}}}\n", index.map_or("null".to_string(), |i| i.to_string())).as_bytes()).unwrap();
+                    chosen.lock().unwrap().push(index);
+                });
+            }
+        });
+        let got = chosen.into_inner().unwrap();
+        assert_eq!(got.iter().filter(|i| i.is_some()).count(), 1, "{got:?}");
+        assert!(!log.with_extension("lock").exists(), "the lock is removed");
     }
 
     /// A call is titled by the first `# ` heading, else its first line, cut at 100 characters.

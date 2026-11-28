@@ -45,6 +45,7 @@ impl AgentBackend for Claude {
             supports_effort: true,       // --effort
             detects_rate_limits: true,   // terminal result event carries the limit error
             supports_one_shot: true,     // --strict-mcp-config + --setting-sources user
+            experimental: false,
         }
     }
 

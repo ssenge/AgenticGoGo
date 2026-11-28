@@ -75,7 +75,11 @@ pub fn cached(cwd: &Path, command: &[String], ignore: &[String]) -> (i32, String
             let why = format!("{} (cached: the same check on the same content)", v["rationale"].as_str().unwrap_or_default());
             v["rationale"] = why.into();
             let _ = p.parent().map(std::fs::create_dir_all);
-            let _ = std::fs::write(p, format!("{v}\n"));
+            // written whole and moved into place: a lane reading the same key never sees half a verdict
+            let temp = p.with_extension(format!("json.{}.tmp", std::process::id()));
+            if std::fs::write(&temp, format!("{v}\n")).is_ok() && std::fs::rename(&temp, &p).is_err() {
+                let _ = std::fs::remove_file(&temp);
+            }
         }
     }
     (code, printed)

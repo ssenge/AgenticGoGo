@@ -127,6 +127,11 @@ control flow can be tested.
 | Claude Code | `claude` | the default; usage and cost reported |
 | OpenAI Codex | `codex` | |
 | GitHub Copilot CLI | `copilot` | |
+| Gemini CLI, OpenCode, Qwen Code, Pi | `gemini`, `opencode`, `qwen`, `pi` | experimental presets of the command harness; so is any CLI you describe under `agents:` |
+
+**Parallel lanes.** The items of an `each` (or the keys of a Rust driver's `fan_out`) can run at once, each in a worktree of its own, joined
+in item order: `parallel: { max: 4 }`. They can run on another machine or in a container: `target: { kind: ssh | container | command }`.
+See [PROCESS.md](docs/PROCESS.md#parallel-lanes).
 
 A worker's confinement is one of three **isolation** tiers, set per step:
 
