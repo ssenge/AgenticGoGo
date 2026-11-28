@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/status.v1.json",
+  "$id": "https://github.com/ssenge/relentless/docs/schemas/status.v1.json",
   "title": "agg live status, schema_version 1",
   "description": "`agg status --json`: where a run stands, read from another process while it runs. Cheap: it reads the snapshot the loop publishes and never re-runs a judge. Field names match the run report (report.v2.json) wherever the two say the same thing. Any change to this shape bumps schema_version and ships a new file.",
   "type": "object",

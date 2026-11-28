@@ -16,3 +16,10 @@ typescript
 # Python bytecode cache — web_e2e.py generates scripts/__pycache__/ on every e2e run
 __pycache__/
 *.pyc
+
+# editor and OS leftovers, temporary files
+.DS_Store
+*.tmp
+*.swp
+.idea/
+.vscode/

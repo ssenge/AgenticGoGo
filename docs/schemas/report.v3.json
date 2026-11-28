@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ssenge/AgenticGoGo/docs/schemas/report.v3.json",
+  "$id": "https://github.com/ssenge/relentless/docs/schemas/report.v3.json",
   "title": "agg run report, schema_version 3",
   "description": "agg/private/report.json, written atomically when `agg run` (or a Rust driver) ends for any reason. `outcome` is authoritative. A missing report means the process was killed (SIGKILL, OOM, power loss): treat it as outcome `error`. Any change to this shape bumps schema_version and ships a new file. v2 adds per-judge `ratchet`, `options` on open asks, `detectors`, `usage`, `session_log` and `waiting`. v3 adds `session`: how the run's agent sessions were set up (the settings they load, the keys of the operator's settings `env` they got).",
   "type": "object",
