@@ -21,6 +21,14 @@ Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; t
   children; a `kind: parallel` step inside an `each` runs once per item. `--check` refuses a checkpoint, `max: 0` and anything
   parallel inside it. See `docs/PROCESS.md`, "Different steps at once", and `examples/parallel-steps/`.
 
+### Changed
+
+- **A step's `checks:` is now `verifiers:`** (the vocabulary the rest of the engine uses); the old key is still read, so existing
+  workflow files run unchanged. `task_force.checks` (commands) keeps its name.
+- **The slogan** is "Agents that don't stop until the job is truly done" (README, `rlt --help`, the social card); the README is
+  rewritten around a simple picture, the whole workflow as a diagram, and a first workflow in YAML and in Rust
+  (`examples/hello`, `examples/fix_add.rs`).
+
 ### Changed (breaking)
 
 - **`Relentless::fan_out`, `FanOut`, `LaneReport` and `LaneEnd` are gone**: fork and merge with any Rust parallelism instead. The
