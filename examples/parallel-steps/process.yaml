@@ -1,0 +1,35 @@
+# Different steps at once: the children of a `kind: parallel` step run as lanes, each in a worktree of its own, and are joined
+# in the order they are listed. Run it:   rlt process examples/parallel-steps/process.yaml <project>
+# Try it without tokens: see README.md (the writer is a script that sleeps a moment).
+version: 1
+rlt:
+  agents:                            # a CLI of your own: `{brief_file}` holds the step's brief, `{workdir}` is the lane's folder
+    writer:
+      command: [sh, "{workdir}/agents/worker.sh", "{brief_file}"]
+      output: text
+roles: { file: tools.yaml }
+run:
+  history: reports/steps.jsonl
+phases:
+- id: build
+  name: Build
+  steps:
+  - id: docs
+    name: The docs
+    kind: parallel
+    parallel: { max: 2 }             # optional: without it, every child runs at once
+    steps:
+    - id: guide
+      name: Write the guide
+      kind: agent
+      sections: [{ text: "FILE=guide.md" }]     # the brief names the file this lane writes
+      checks: [verifiers/guide-made.sh]
+    - id: slides
+      name: Write the slides
+      kind: agent
+      sections: [{ text: "FILE=slides.md" }]
+      checks: [verifiers/slides-made.sh]
+  - id: collect
+    name: Collect the docs
+    kind: script
+    run: scripts/collect.sh

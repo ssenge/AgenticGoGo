@@ -74,7 +74,7 @@ pub fn number(process: &Process) -> Vec<Numbered> {
 fn add(out: &mut Vec<Numbered>, step: &Step, phase: (usize, &str, &str), k: &mut usize, cps: &mut usize,
        parent: Option<&str>) {
     let (n, phase_id, phase_name) = phase;
-    let each = step.kind == Kind::Each;
+    let each = step.kind.is_container();
     if !each {
         *k += 1;
     }
@@ -93,7 +93,7 @@ fn add(out: &mut Vec<Numbered>, step: &Step, phase: (usize, &str, &str), k: &mut
 /// The key a `--from`/`--until` argument names: an id; an instance key (`<child id>-<item>`); a number (`3.4`)
 /// or an instance's number (`6.3-U1`), turned into the id or instance key.
 pub fn resolve(list: &[Numbered], text: &str) -> Result<String, String> {
-    if list.iter().any(|s| s.id == text && s.kind != Kind::Each && s.number.is_some()) {
+    if list.iter().any(|s| s.id == text && !s.kind.is_container() && s.number.is_some()) {
         return Ok(text.to_string());
     }
     let (number, item) = match text.split_once('-') {

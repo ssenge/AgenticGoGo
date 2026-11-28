@@ -7,17 +7,16 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::exec::Item;
 use super::format::{Target, TargetKind};
 use super::lane_files as files;
 use super::lane_main::{LaneResult, LaneSpec, RunFlags, RESULT, SPEC};
-use super::lanes::{Ended, Env};
+use super::lanes::{Ended, Env, Job};
 use crate::lanes::services::Shared;
 use crate::lanes::target::{self, Commands, Ssh};
 use crate::lanes::worktree::{self, Lane};
 
 /// The lane's clone, its spec and its variables, ready to ship; what the run takes back at the join.
-fn prepare(env: &Env, lane: &Lane, item: &Item, target: &Target) -> Result<Prepared, String> {
+fn prepare(env: &Env, lane: &Lane, job: &Job, target: &Target) -> Result<Prepared, String> {
     let existed = lane.exists();
     worktree::add_clone(env.project, lane, env.base)?;
     let private = crate::paths::private_dir(&lane.dir);
@@ -28,8 +27,9 @@ fn prepare(env: &Env, lane: &Lane, item: &Item, target: &Target) -> Result<Prepa
         worktree::copy_dir(env.home, &private.join("lane-home"));
     }
     let process = process_file_name(env.project).ok_or("the project noted no process file (rlt/private/process.json)")?;
-    let spec = LaneSpec { process, home: "rlt/private/lane-home".into(), each: env.step.id.clone(), key: item.key.clone(), vars: item.vars.clone(),
-                          last: item.last, resume: env.resume && existed, run: RunFlags::of(env.run), phase: env.phase.clone(),
+    let spec = LaneSpec { process, home: "rlt/private/lane-home".into(), each: env.step.id.clone(), key: job.key.clone(),
+                          vars: job.item.as_ref().map(|i| i.vars.clone()).unwrap_or_default(), last: job.item.as_ref().is_some_and(|i| i.last),
+                          has_item: job.item.is_some(), only: job.only.clone(), resume: env.resume && existed, run: RunFlags::of(env.run), phase: env.phase.clone(),
                           project: lane.project.clone() };
     std::fs::create_dir_all(&private).map_err(|e| e.to_string())?;
     std::fs::write(lane.dir.join(SPEC), serde_json::to_string_pretty(&spec).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -81,9 +81,9 @@ fn commands(target: &Target, lane: &Lane) -> Result<Commands, String> {
 }
 
 /// Runs the lane on `target`: the clone prepared, the commands supervised, its commits fetched; how it ended.
-pub(super) fn run(env: &Env, lane: &Lane, item: &Item, services: &Arc<Shared>, target: &Target) -> Ended {
+pub(super) fn run(env: &Env, lane: &Lane, job: &Job, services: &Arc<Shared>, target: &Target) -> Ended {
     let failed = |why: String| Ended { result: Err(why), stopped: false, reentry: None, spent: false, redirects: vec![], state_seed: vec![] };
-    let prepared = match prepare(env, lane, item, target) {
+    let prepared = match prepare(env, lane, job, target) {
         Ok(p) => p,
         Err(e) => return failed(e),
     };

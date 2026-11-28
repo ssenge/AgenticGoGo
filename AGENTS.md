@@ -309,6 +309,10 @@ src/usage.rs          what every agent call REPORTED (model, 4 token kinds, cost
                       Charge through `LoopState::charge_usage`/`charge_ruler` ONLY — they feed the ceilings,
                       the per-agent tally and the report's `session_log` together. A kind an agent does not
                       report stays `None`; never fold one kind into another (cache writes are NOT output).
+src/driver/facade/fork.rs  parallel work for a driver: `fork(&mut self)` (an instance in a worktree of its own),
+                      `merge(&mut self, fork)`, drop = discard. `Relentless` is `Send + Sync`; parallelism is plain
+                      Rust (rayon, `std::thread`). A fork shares the run's bus, asks, views and spend through
+                      `lanes::Shared`. A process file's parallel `each` / `kind: parallel` run on `workflow/process/lanes.rs`.
 src/core/calls.rs     `rlt/private/calls.jsonl` — the CALL ledger that makes `--resume` work (the driver's
                       calls; on the YAML path one `step` row per session + one `gate` row per verified one,
                       the step's label carrying the walk position — `features/resume.rs`).

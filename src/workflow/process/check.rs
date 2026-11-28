@@ -55,7 +55,7 @@ impl Ctx<'_> {
         for phase in &self.process.phases {
             self.id(&phase.id, "phase");
             collect(&phase.steps, &mut |s| {
-                if s.kind != Kind::Each {
+                if !s.kind.is_container() {
                     self.steps.insert(s.id.clone());
                 }
             });
@@ -120,6 +120,7 @@ impl Ctx<'_> {
             Kind::Agent => self.agent(s, &at, in_each),
             Kind::Checkpoint => self.checkpoint(s, &at, in_each),
             Kind::Each => self.each(s, &at),
+            Kind::Parallel => self.block(s, &at, in_each),
             Kind::Exam => self.exam(s, &at, in_each),
             Kind::Outside | Kind::Planned => {}
         }
@@ -144,6 +145,7 @@ impl Ctx<'_> {
             Kind::Agent => &["prompt", "checks", "review", "repairs", "sections", "quality", "on_fail"],
             Kind::Checkpoint => &["prepare", "doc", "question", "owner", "go_live"],
             Kind::Each => &["items", "parallel", "steps"],
+            Kind::Parallel => &["parallel", "steps"],
             Kind::Exam => &["checks", "examinee", "answers", "grader", "repairer", "rounds", "fresh", "findings_ids", "dispute", "repairs"],
             Kind::Outside | Kind::Planned => &[],
         };
@@ -154,6 +156,7 @@ impl Ctx<'_> {
             Kind::Script => &["run"],
             Kind::Checkpoint => &["doc", "question"],
             Kind::Each => &["items", "steps"],
+            Kind::Parallel => &["steps"],
             Kind::Exam => &["examinee", "answers", "grader", "repairer"],
             _ => &[],
         };
@@ -211,8 +214,8 @@ impl Ctx<'_> {
         if let Some(items) = &s.items {
             self.text(at, &items.file, false);
         }
-        if let Some(par) = &s.parallel {
-            self.parallel(par, s, at);
+        if s.parallel.is_some() {
+            self.parallel(s.parallel.as_ref(), s, at);
         }
         for child in &s.steps {
             if child.kind == Kind::Each {
@@ -222,13 +225,24 @@ impl Ctx<'_> {
         }
     }
 
-    /// What a parallel `each` can't do: no lane without room, and no human's yes inside a lane (a checkpoint ends the
-    /// run until answered, and a lane has nobody to answer it).
-    fn parallel(&mut self, par: &super::format::Parallel, s: &Step, at: &str) {
-        if par.max == 0 {
-            self.out.push(format!("{at}: `parallel.max` must be at least 1"));
+    /// A `kind: parallel` step: its children run at once as lanes.
+    fn block(&mut self, s: &Step, at: &str, in_each: bool) {
+        self.parallel(s.parallel.as_ref(), s, at);
+        for child in &s.steps {
+            self.step(child, in_each);
         }
-        self.target(&par.target, at);
+    }
+
+    /// What a parallel `each` or `parallel` step can't do: no lane without room, no human's yes inside a lane (a checkpoint
+    /// ends the run until answered, and a lane has nobody to answer it), and nothing parallel inside a lane, which runs its
+    /// steps in sequence (nesting is for a Rust driver's forks).
+    fn parallel(&mut self, par: Option<&super::format::Parallel>, s: &Step, at: &str) {
+        if let Some(par) = par {
+            if par.max == 0 {
+                self.out.push(format!("{at}: `parallel.max` must be at least 1"));
+            }
+            self.target(&par.target, at);
+        }
         let mut inside = vec![];
         fn walk<'a>(steps: &'a [Step], out: &mut Vec<&'a Step>) {
             for st in steps {
@@ -237,8 +251,12 @@ impl Ctx<'_> {
             }
         }
         walk(&s.steps, &mut inside);
+        let what = if s.kind == Kind::Each { "`each`" } else { "step" };
         for st in inside.iter().filter(|st| st.kind == Kind::Checkpoint) {
-            self.out.push(format!("step `{}`: a checkpoint inside a parallel `each` (`{}`): a lane has no one to answer it", st.id, s.id));
+            self.out.push(format!("step `{}`: a checkpoint inside a parallel {what} (`{}`): a lane has no one to answer it", st.id, s.id));
+        }
+        for st in inside.iter().filter(|st| st.kind == Kind::Parallel || st.parallel.is_some()) {
+            self.out.push(format!("step `{}`: parallel inside the parallel {what} `{}`: a lane runs its steps in sequence", st.id, s.id));
         }
     }
 

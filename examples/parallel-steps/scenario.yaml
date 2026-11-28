@@ -1,0 +1,11 @@
+# Plays examples/parallel-steps/process.yaml, no tokens: the writer is the project's own script (a command agent runs for real),
+# two different steps at once:
+#   rlt process examples/parallel-steps/process.yaml --scenario examples/parallel-steps/scenario.yaml --projects examples/parallel-steps/projects
+project: demo
+setup:   # the scratch copy becomes a git repo: a run needs one
+  - git init -q -b main && git add -A && git -c user.name=demo -c user.email=demo@example.com commit -qm start
+agents: []
+expect:
+  record: ['^docs:guide lane met', '^docs:slides lane met', '^collect tool met']   # the lanes are joined in the order they are listed
+  files: { docs.txt: 'slides.md, written' }
+  exit: 0

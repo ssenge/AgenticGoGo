@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 // Per thread: a run's prompts and rubrics are rendered on the thread that runs it, and a lane runs on a thread of its
-// own with the variables of its item (`Relentless::fan_out`), which must not overwrite a sibling's.
+// own with the variables of its item, which must not overwrite a sibling's.
 thread_local! {
     static VARS: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
 }

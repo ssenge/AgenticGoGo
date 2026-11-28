@@ -59,12 +59,22 @@ pub struct LaneSpec {
     /// the item's variables (`item`, `item.yaml`, `item.<field>`)
     pub vars: BTreeMap<String, String>,
     pub last: bool,
+    /// whether the lane has an item (a `kind: parallel` step's lane has one only inside an `each`)
+    #[serde(default = "yes")]
+    pub has_item: bool,
+    /// the id of the one child of the step this lane runs; all of them when none
+    #[serde(default)]
+    pub only: Option<String>,
     pub resume: bool,
     pub run: RunFlags,
     /// the phase the run was in at the `each`
     pub phase: Option<String>,
     /// the project name the lane's engine instance runs as
     pub project: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// How a lane ended, as the run reads it.
@@ -118,10 +128,11 @@ fn lane(spec_file: &Path) -> anyhow::Result<LaneResult> {
     let env = Env { step, spec: &process, list: &list, home: &home, project: &dir, settings: &settings, vars: &vars, roles: roles.as_ref(),
                     run: &run_flags, resume: spec.resume, phase: spec.phase.clone(), base: "", seed: &[], target: &local };
     let lane = Lane { key: spec.key.clone(), each: spec.each.clone(), worktree: dir.clone(), dir: dir.clone(), branch: String::new(), project: spec.project.clone() };
-    let item = Item { key: spec.key.clone(), vars: spec.vars.clone(), last: spec.last };
+    let item = spec.has_item.then(|| Item { key: spec.key.clone(), vars: spec.vars.clone(), last: spec.last });
+    let job = lanes::Job { key: spec.key.clone(), item, only: spec.only.clone() };
     let (lane_spec, _) = files::redirected(&process, &dir, &dir);
     let services = Shared::new(Limits::default());
-    let outcome = lanes::steps(&env, &lane, &item, &lane_spec, (&services, spec.resume));
+    let outcome = lanes::steps(&env, &lane, &job, &lane_spec, (&services, spec.resume));
     let (reentry, spent) = crate::workflow::task_force::take_requests();
     Ok(match outcome {
         Ok(()) => LaneResult { ok: true, reentry, spent, ..LaneResult::default() },

@@ -115,6 +115,7 @@ Every step has `id`, `name`, `kind` and optionally:
 | `agent` | an agent's task, its checks, its critic, through its ladder | `prompt` (default `<dirs.prompts>/<id>.md`), `checks`, `review` (`true` = `<dirs.reviews>/<id>-review.md`, or a path), `repairs` (default 2), `sections`, `quality`, `on_fail` |
 | `checkpoint` | a human approves a document | `prepare`, `doc`, `question`, `owner`, `go_live` |
 | `each` | its child steps once per item of a file | `items: { file, list, items, key }`, `parallel`, `steps` |
+| `parallel` | its child steps at once, as lanes | `parallel` (optional), `steps` |
 | `exam` | an examinee, checks, a grader, a repairer, in rounds | see below |
 | `outside` | nothing: a step done outside the run, numbered and listed | — |
 | `planned` | nothing: a step not built yet, numbered, in the order (`--until` may name it) | — |
@@ -184,7 +185,7 @@ A lane is one item's steps, run by an instance of the engine of its own on a thr
 - publishes the lanes (`rlt/private/lanes.json`), which `rlt status` shows as a table (key, state, step, tokens, time).
 
 A rate limit one lane meets closes the gate for that agent: no lane starts a session of it before the reset. The tokens and
-dollars every lane spends are added up and count toward the ceilings a Rust driver's `fan_out` has (`limits`); a process file has none. A lane that fails with `fail_fast: true` stops the running lanes and
+dollars every lane spends are added up and count toward the ceilings a Rust driver's forks share (`limits`); a process file has none. A lane that fails with `fail_fast: true` stops the running lanes and
 starts no more; with `false` the others finish.
 
 **The join.** When the lanes have ended the run joins them **in item order**: for each lane up to the first that did not end
@@ -202,6 +203,34 @@ limit ends it with exit 6.
 **What `--check` refuses** in a parallel `each`: `max: 0`, a checkpoint (a lane has no one to answer it), and an `each` inside
 it. At the start the run refuses a project that isn't in a git repository, uncommitted changes, and keys that clash. Time and
 processes: each lane ends only the processes its own steps left running (`run.leftovers`).
+
+### Different steps at once
+
+A **`kind: parallel`** step runs its children at once, each as a lane: a worktree of its own, a branch of its own, an engine
+instance of its own on a thread of its own, joined in the order the children are listed. It is the way to say "write the guide and
+the slides at the same time".
+
+```yaml
+- id: docs
+  name: The docs
+  kind: parallel
+  parallel: { max: 2 }              # optional: without it every child runs at once
+  steps:
+  - { id: guide,  name: Write the guide,  kind: agent }
+  - { id: slides, name: Write the slides, kind: agent }
+```
+
+It is a parallel `each` whose lanes are its children instead of the items of a list, and everything above holds: the lanes' files,
+the run's forwarding of `rlt send`, the join in order, a failed lane that keeps its worktree, `--resume` that runs only what is left,
+`parallel.target` for lanes elsewhere. `parallel` takes the same keys (`max`, `fail_fast`, `seed`, `target`). A child's `when:`
+is read inside its lane: a child that is skipped ends its lane done with nothing to merge. The children are numbered and listed like
+an `each`'s (`1.1`, `1.2`), and `--from` naming a child runs that child (its siblings are neither before nor after it). Inside an
+`each` (which runs sequentially) a `kind: parallel` step runs once per item, and each of its lanes has the item.
+
+`--check` refuses what a lane can't do: a checkpoint, `parallel.max: 0`, and anything parallel inside the step (a `kind: parallel`
+step or an `each` with `parallel`). **Nesting, the best of several tries and merges that depend on a result are for a Rust driver**
+([forks](RUST_API.md#forks-parallel-work)), which is the same machinery with the control flow in Rust. `examples/parallel-steps/`
+runs it without tokens.
 
 ### Where lanes run
 
@@ -248,8 +277,8 @@ provider's CLI are in [recipes/](recipes/).
 A remote `DOCKER_HOST` is not supported for the per-session container tier (`isolation: container`): the engine must see the project's
 path. Lane targets are the supported way to run elsewhere. `rlt doctor --containers` says which engine and images there are.
 
-`examples/parallel/` runs eight units at four lanes without tokens; the same machinery is `Relentless::fan_out` for a Rust driver
-([RUST_API.md](RUST_API.md#fan-out-lanes-for-a-driver)).
+`examples/parallel/` runs eight units at four lanes without tokens. For parallel work a process file can't express, a Rust driver
+forks the engine ([RUST_API.md](RUST_API.md#forks-parallel-work)).
 
 **`exam`** — `checks` run first each round; `examinee` (`prompt`, `sections`, `deny`) answers on a fresh copy of what it
 may read; `answers` is a check of its result; `grader` is a rubric; `repairer` fixes what the round found (and gets the

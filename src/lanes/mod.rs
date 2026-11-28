@@ -1,4 +1,4 @@
-//! Parallel lanes: the items of an `each` (or the keys of a driver's `fan_out`) run at once, each in a linked worktree
+//! Parallel lanes: the items of an `each` or the children of a `kind: parallel` step run at once, each in a linked worktree
 //! of its own, on a branch of its own and a thread of its own, and are joined into the run's branch in item order.
 //!
 //! * [`worktree`]: the worktrees and the names of a lane's branches;

@@ -108,11 +108,16 @@ impl Run {
     /// process lacks isn't added (the record's ids are the process's).
     fn places(&self) -> Vec<Place> {
         let mut out = vec![];
-        for n in self.list.iter().filter(|n| n.kind != Kind::Each) {
+        for n in self.list.iter().filter(|n| !n.kind.is_container()) {
             let Some(num) = &n.number else { continue };
             match &n.parent {
                 None => out.push(Place { key: n.id.clone(), number: num.clone(), name: n.name.clone(), phase: n.phase_number, kind: n.kind,
                                          parent: None, item: None }),
+                // a child of a `parallel` step is one step, not one per item
+                Some(parent) if !self.units.contains_key(parent) && self.list.iter().any(|p| &p.id == parent && p.kind == Kind::Parallel) => {
+                    out.push(Place { key: n.id.clone(), number: num.clone(), name: n.name.clone(), phase: n.phase_number, kind: n.kind,
+                                     parent: Some(parent.clone()), item: None })
+                }
                 Some(each) => out.extend(self.units.get(each).into_iter().flatten().map(|item| Place {
                     key: format!("{}-{item}", n.id), number: format!("{num}-{item}"), item: Some(item.clone()),
                     name: n.name.clone(), phase: n.phase_number, kind: n.kind, parent: Some(each.clone()) })),

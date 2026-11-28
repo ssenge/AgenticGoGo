@@ -100,7 +100,8 @@ A process file (`rlt process`) is a list of phases; each phase is a list of step
 | `script` | runs a command; its verdict is the step's |
 | `agent` | an agent's task, with `checks` (verifiers), a `review` (a critic agent) and repairs |
 | `checkpoint` | a human approves a document; their decisions go back to the step that wrote it |
-| `each` | the same steps once per item of a list |
+| `each` | the same steps once per item of a list (at once with `parallel:`) |
+| `parallel` | different steps at once, each as a lane in a worktree of its own |
 | `exam` | an examinee, a grader and a repairer, in rounds |
 
 Around the steps: **ladders** (a cheap agent first, a stronger one when the cheap one fails), a **task force** that
@@ -129,9 +130,11 @@ control flow can be tested.
 | GitHub Copilot CLI | `copilot` | |
 | Gemini CLI, OpenCode, Qwen Code, Pi | `gemini`, `opencode`, `qwen`, `pi` | experimental presets of the command harness; so is any CLI you describe under `agents:` |
 
-**Parallel lanes.** The items of an `each` (or the keys of a Rust driver's `fan_out`) can run at once, each in a worktree of its own, joined
-in item order: `parallel: { max: 4 }`. They can run on another machine or in a container: `target: { kind: ssh | container | command }`.
-See [PROCESS.md](docs/PROCESS.md#parallel-lanes).
+**Parallel work.** Items of an `each` can run at once (`parallel: { max: 4 }`), and so can different steps (`kind: parallel`): each as
+a lane in a worktree of its own, joined in order, on this machine, on another or in a container (`target: { kind: ssh | container |
+command }`). See [PROCESS.md](docs/PROCESS.md#parallel-lanes). In Rust there is no scheduler to learn: `rlt.fork()` gives you an
+instance in its own worktree, you run it with `rayon` or `std::thread`, and `rlt.merge(fork)` brings its work back
+([the Rust API](docs/RUST_API.md#forks-parallel-work)).
 
 A worker's confinement is one of three **isolation** tiers, set per step:
 
@@ -160,7 +163,18 @@ for _ in 1..=20 {
 }
 ```
 
-→ [The Rust driver API](docs/RUST_API.md) · [`examples/workflow.rs`](examples/workflow.rs)
+Work that can run at once is plain Rust too. `fork()` gives an instance of the engine in a worktree of its own, you run it with
+`rayon` or `std::thread`, and `merge()` brings its work back:
+
+```rust
+let (guide, slides) = (rlt.fork()?, rlt.fork()?);
+let (a, b) = rayon::join(|| guide.step(&write_guide), || slides.step(&write_slides));
+a?; b?;
+rlt.merge(guide)?;
+rlt.merge(slides)?;
+```
+
+→ [The Rust driver API](docs/RUST_API.md) · [`examples/workflow.rs`](examples/workflow.rs) · [`examples/forks.rs`](examples/forks.rs)
 
 ## Learn more
 

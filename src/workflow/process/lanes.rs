@@ -1,6 +1,6 @@
-//! A parallel `each` (`parallel: { max, fail_fast, seed }`): its items run at once as lanes, each in a linked worktree of
-//! its own on a thread of its own with the run's engine instance for its steps, and the finished lanes are joined into the
-//! run's branch in item order.
+//! A parallel `each` (`parallel: { max, fail_fast, seed }`: its items run at once as lanes) or a `kind: parallel` step (its
+//! children run at once as lanes): each lane in a linked worktree of its own on a thread of its own with an engine instance
+//! for its steps, and the finished lanes joined into the run's branch in the order they are listed.
 //!
 //! The run waits here while its lanes work: about every second it forwards the operator's commands to them, mirrors their
 //! asks, and keeps their views. A lane that fails keeps its worktree for the diagnosis and the resume; the lanes after it
@@ -41,6 +41,17 @@ pub(super) struct Ended {
     pub(super) state_seed: Vec<(std::path::PathBuf, u64)>,
 }
 
+/// One lane's work: an item's steps (a parallel `each`), or one child (a `kind: parallel` step), with the item of an
+/// enclosing `each` when there is one.
+#[derive(Clone)]
+pub(super) struct Job {
+    /// names the lane: the item's key, or the child's id
+    pub(super) key: String,
+    pub(super) item: Option<Item>,
+    /// the id of the one child this lane runs; every child of the step when none
+    pub(super) only: Option<String>,
+}
+
 /// What every lane's thread reads of the run.
 pub(super) struct Env<'a> {
     pub(super) step: &'a Step,
@@ -61,18 +72,37 @@ pub(super) struct Env<'a> {
 
 /// Runs the items of `step` (an `each` with `parallel`) as lanes, then joins them in item order.
 pub fn each(p: &Proc, step: &Step, items: Vec<Item>, par: &Parallel) -> Result<(), Fatal> {
-    let keys: Vec<String> = items.iter().map(|i| i.key.clone()).collect();
+    let jobs = items.into_iter().map(|i| Job { key: i.key.clone(), item: Some(i), only: None }).collect();
+    run_jobs(p, step, jobs, par)
+}
+
+/// Runs the children of `step` (a `kind: parallel` step) at once as lanes, then joins them in the order they are listed. At
+/// most `parallel.max` at a time; without `parallel`, all of them.
+pub fn block(p: &Proc, step: &Step, item: Option<Item>) -> Result<(), Fatal> {
+    let jobs: Vec<Job> = step.steps.iter().map(|c| Job { key: c.id.clone(), item: item.clone(), only: Some(c.id.clone()) }).collect();
+    let par = step.parallel.clone().unwrap_or(Parallel { max: jobs.len().max(1), fail_fast: false, seed: vec![], target: Default::default() });
+    run_jobs(p, step, jobs, &par)
+}
+
+/// The lanes of `jobs`: started `par.max` at a time, joined in the order of `jobs` up to the first that did not end done.
+fn run_jobs(p: &Proc, step: &Step, jobs: Vec<Job>, par: &Parallel) -> Result<(), Fatal> {
+    let keys: Vec<String> = jobs.iter().map(|j| j.key.clone()).collect();
     if let Some(clash) = crate::lanes::collisions(&keys).first() {
-        return Err(anyhow!("step `{}`: item keys that become one name in a lane's folder and branch: {clash}", step.id).into());
+        return Err(anyhow!("step `{}`: keys that become one name in a lane's folder and branch: {clash}", step.id).into());
     }
     let project = p.project.clone();
     if worktree::toplevel(&project).is_none() {
-        return Err(anyhow!("step `{}`: a parallel `each` needs the project in a git repository: a lane is a worktree of it", step.id).into());
+        return Err(anyhow!("step `{}`: a parallel step needs the project in a git repository: a lane is a worktree of it", step.id).into());
     }
     // the run boots here (its guard, its bus): the operator's stop and pause can reach it while the lanes work
     p.check_limits()?;
     let resume = p.resumes();
-    let joined = if resume { recorded(&project, &step.id) } else { forget(&project, &step.id) };
+    // a `parallel` step inside an `each` runs once per item: its lanes and the record of the joined ones are the item's
+    let scope = match jobs.first().and_then(|j| j.item.as_ref()).filter(|_| step.kind == super::format::Kind::Parallel) {
+        Some(item) => format!("{}@{}", step.id, item.key),
+        None => step.id.clone(),
+    };
+    let joined = if resume { recorded(&project, &scope) } else { forget(&project, &scope) };
     if !resume && !crate::git::is_clean(&project) {
         return Err(anyhow!("step `{}`: the project has uncommitted changes, which the lanes' worktrees would not hold: commit them first", step.id).into());
     }
@@ -82,7 +112,7 @@ pub fn each(p: &Proc, step: &Step, items: Vec<Item>, par: &Parallel) -> Result<(
     crate::workflow::commit(&project, &[".gitignore"], "Ignore rlt's runtime folders").map_err(Fatal::Other)?;
     let base = crate::git::git(&project, &["rev-parse", "HEAD"]).1;
     let name = project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "project".into());
-    let lanes: Vec<Lane> = keys.iter().map(|k| Lane::of(&project, &name, &step.id, k)).collect();
+    let lanes: Vec<Lane> = keys.iter().map(|k| Lane::of(&project, &name, &scope, k)).collect();
     let todo: Vec<usize> = (0..keys.len()).filter(|i| !joined.contains(&keys[*i])).collect();
     if !resume {
         // lanes a run before this one left are not this run's: each starts fresh from the run's HEAD
@@ -94,12 +124,12 @@ pub fn each(p: &Proc, step: &Step, items: Vec<Item>, par: &Parallel) -> Result<(
     let services = Shared::new(Limits::default());
     let plan = Plan { keys: todo.iter().map(|i| keys[*i].clone()).collect(), max: par.max, fail_fast: par.fail_fast };
     let forwarder = Forwarder::new(&project, &lanes, &todo, &services);
-    p.info(&format!("{}: {} item(s) as lanes, {} at once", step.id, todo.len(), par.max));
+    p.info(&format!("{}: {} lane(s), {} at once", step.id, todo.len(), par.max));
     let results = schedule::run(
         &plan,
         &services,
         &|running| forwarder.tick(running.iter().map(|r| todo[*r]).collect::<Vec<_>>().as_slice()),
-        &|n, _key| lane_body(&env, &lanes[todo[n]], &items[todo[n]], &services),
+        &|n, _key| lane_body(&env, &lanes[todo[n]], &jobs[todo[n]], &services),
         &Reading { failed: &|e: &Ended| e.result.is_err(),
                    panicked: &|why| Ended { result: Err(format!("panic: {why}")), stopped: false, reentry: None, spent: false,
                                             redirects: vec![], state_seed: vec![] } },
@@ -180,7 +210,7 @@ fn join_one(p: &Proc, step: &Step, lane: &Lane, ended: &Ended) -> Result<(), Str
         Joined::Merged(tip) | Joined::Already(tip) => {
             files::take_back(project, &lane.dir, &lane.key, &ended.redirects);
             files::take_back_state(project, &lane.dir, &lane.key, &ended.state_seed);
-            note(project, &step.id, &lane.key, &tip);
+            note(project, &lane.each, &lane.key, &tip);
             p.record(&label, "lane", true, &format!("joined at {}", &tip[..tip.len().min(10)]));
             worktree::remove(project, lane);
             Ok(())
@@ -200,10 +230,10 @@ fn join_one(p: &Proc, step: &Step, lane: &Lane, ended: &Ended) -> Result<(), Str
 }
 
 /// One lane, on its own thread: the worktree, the engine instance and the item's steps.
-fn lane_body(env: &Env, lane: &Lane, item: &Item, services: &Arc<Shared>) -> Ended {
+fn lane_body(env: &Env, lane: &Lane, job: &Job, services: &Arc<Shared>) -> Ended {
     services.view(LaneView { state: LaneState::Running, started: Some(crate::util::now_epoch()), ..LaneView::queued(&lane.key) });
     if env.target.kind != super::format::TargetKind::Local {
-        let ended = super::lane_remote::run(env, lane, item, services, env.target);
+        let ended = super::lane_remote::run(env, lane, job, services, env.target);
         let state = match (&ended.result, ended.stopped) {
             (Ok(()), _) => LaneState::Done,
             (Err(_), true) => LaneState::Stopped,
@@ -223,7 +253,7 @@ fn lane_body(env: &Env, lane: &Lane, item: &Item, services: &Arc<Shared>) -> End
         ended.state_seed = files::state_lengths_kept(env.project, &lane.dir);
         let (spec, redirects) = files::redirected(env.spec, env.project, &lane.dir);
         ended.redirects = redirects;
-        steps(env, lane, item, &spec, (services, existed))
+        steps(env, lane, job, &spec, (services, existed))
     });
     let (reentry, spent) = crate::workflow::task_force::take_requests();
     (ended.reentry, ended.spent) = (reentry, spent);
@@ -240,8 +270,8 @@ fn lane_body(env: &Env, lane: &Lane, item: &Item, services: &Arc<Shared>) -> End
     ended
 }
 
-/// The lane's engine instance, built here on the lane's thread, and the item's child steps.
-pub(super) fn steps(env: &Env, lane: &Lane, item: &Item, spec: &Process, (services, existed): (&Arc<Shared>, bool)) -> Result<(), Fatal> {
+/// The lane's engine instance, built here on the lane's thread, and the steps the job names.
+pub(super) fn steps(env: &Env, lane: &Lane, job: &Job, spec: &Process, (services, existed): (&Arc<Shared>, bool)) -> Result<(), Fatal> {
     let svc: Arc<Shared> = services.clone();
     let mut rlt = Relentless::open_with(&lane.dir, Opts { resume: env.resume && existed })?
         .project_name(&lane.project)
@@ -258,8 +288,8 @@ pub(super) fn steps(env: &Env, lane: &Lane, item: &Item, spec: &Process, (servic
     let init = Init { spec: spec.clone(), list: env.list.to_vec(), home: env.home.to_path_buf(), settings: env.settings.clone(),
                       vars: env.vars.clone(), roles: env.roles.cloned(), force };
     let p = Proc::new_lane(rlt, env.run.clone(), init, env.phase.clone());
-    for child in &env.step.steps {
-        run::exec(&p, child, Some(item.clone()))?;
+    for child in env.step.steps.iter().filter(|c| job.only.as_deref().is_none_or(|id| id == c.id)) {
+        run::exec(&p, child, job.item.clone())?;
     }
     p.finish_lane()?;
     p.finish_with(RunOutcome::GoalsMet, "the lane is done");

@@ -456,29 +456,66 @@ Three consequences worth designing around:
   and rlt will refuse rather than guess — a call that does not match the record aborts the resume
   naming both sides.
 
-## Fan-out: lanes for a driver
+## Forks: parallel work
 
-The items of a list that don't depend on each other run at once, each in a worktree of its own:
+Work that doesn't depend on each other can run at once. The parallelism is plain Rust (`rayon`, `std::thread::scope`, a thread
+pool, tokio's blocking pool: `Relentless` is `Send + Sync`); what the engine adds is the one thing Rust can't know: two agents in
+one folder overwrite each other's files and git branch. So each parallel piece of work gets **a copy of the project of its own**,
+and its result comes back through git:
+
+- `rlt.fork()?` is a new `Relentless` in a worktree of its own, on a branch of its own cut from what `rlt` has kept. It has `rlt`'s
+  settings and is a full instance: it steps, gates, verifies, and forks again.
+- `rlt.merge(fork)?` merges the fork's branch into `rlt`'s (`git merge --no-ff`, subject `rlt: merge fork <name>`) and returns the
+  merge commit. A conflict is aborted and comes back as `Fatal::Conflict { branch, files }`; `rlt` is as it was and the branch is kept.
+- A fork that is **dropped** instead of merged is **discarded**: its worktree goes, its branch stays.
 
 ```rust
-let reports = rlt.fan_out(&["billing", "orders", "search"], FanOut::new().max(3), |lane, key| {
-    lane.step(&Step::new(format!("port {key}")).prompt(format!("Port the {key} module.")))?;
-    Ok(())
-})?;
-for r in &reports {
-    println!("{}: {:?}", r.key, r.end);   // Joined, Done, Failed(why), Stopped, NotStarted, Conflict(files)
-}
+let mut rlt = Relentless::open(".")?;
+
+// different steps at once
+let (guide, slides) = (rlt.fork()?, rlt.fork()?);
+let (a, b) = rayon::join(|| guide.step(&write_guide), || slides.step(&write_slides));
+a?; b?;
+rlt.merge(guide)?;
+rlt.merge(slides)?;
+
+// the best of three tries
+let tries = [rlt.fork()?, rlt.fork()?, rlt.fork()?];
+tries.par_iter().for_each(|t| { let _ = t.step(&fix_the_bug).and_then(|_| t.gate()); });
+let best = tries.into_iter().find(|t| t.verifier(&tests_pass).met()).context("no try passed")?;
+rlt.merge(best)?;   // the other tries are dropped, so they are discarded
+
+// many items, at most 4 at once: the pool's size is the limit
+let forks: Vec<_> = units.iter().map(|_| rlt.fork()).collect::<Result<_, _>>()?;
+rayon::ThreadPoolBuilder::new().num_threads(4).build()?.install(|| {
+    forks.par_iter().zip(&units).for_each(|(f, u)| { let _ = f.step(&port(u)).and_then(|_| f.gate()); })
+});
+for f in forks { rlt.merge(f)?; }
 ```
 
-`fan_out(&self, keys, opts, body)`: `body` runs on the lane's thread and gets the lane's own `Relentless` (this one's settings,
-named `<project>-fan-<key>`, in a linked worktree on its own branch): use it as the driver uses `rlt`. At most `max` run at once; the
-run's total spend counts toward its ceilings and a rate limit one lane meets holds back the others. When the lanes have ended,
-the ones that ended done are merged into the run's branch **in key order**, up to the first that did not; a conflict is aborted and
-reported with its files. A lane's failure (an `Err`, a panic) is its report, not an `Err` of `fan_out`; `Err` is for what keeps
-the lanes from starting (keys that clash, no repository, uncommitted changes) and a stop. `FanOut::new().max(n).fail_fast(true).seed(&["node_modules/"])`.
-With `Opts { resume: true }` the lanes joined before are not run again and a lane whose worktree exists resumes. The operator's
-`rlt send` commands, asks and the lanes' view reach the lanes as they do for a parallel `each`
-([PROCESS.md](PROCESS.md#parallel-lanes)). The example is `examples/fanout.rs`.
+`examples/forks.rs` runs these with plain functions in place of agent steps. The rules:
+
+1. **`fork` and `merge` take `&mut self`**, so a driver forks and merges on the thread that owns the instance, in the order its
+   code has. A fork is named by the number its call has in the run's ledger (`4`; a fork of the fork `4` is `4-2`), which is how a
+   resumed run finds it again. The worktree is `rlt/private/lanes/fork-<name>/`, the branch `rlt/<project>/lane-fork-<name>`, its
+   sessions `rlt/<project>-fork-<name>/session-N`.
+2. **Gate first.** `fork` refuses while the instance has ungated work (a fork starts from what the run has *kept*), and `merge` refuses
+   while either side has some. The project must be a git repository, and the tree must be clean when the first fork starts.
+3. **The worktree is made at the fork's first call**, not at `fork()`: forking fifty items and running four at a time makes four at a
+   time. `Relentless::fork_seed(["node_modules/"])` names ignored or untracked paths (dependencies, build caches) that every fork's
+   worktree is given, as it starts from what git holds.
+4. **One thread at a time per instance.** The same thread may nest calls; a call from a second thread while it is busy panics
+   ("give each thread its own fork"), as two sessions in one worktree would corrupt each other. A fork carries its parent's settings
+   and variables to whichever thread runs it.
+5. **One run, seen from outside.** `rlt stop`, `pause`, `resume`, `wake` and `inject` sent to the run reach every fork (each applies
+   them at its next boundary, as a run does); a fork's `hil_*` and `block` questions are in the run's list of asks, marked
+   `[fork <name>]`, so `rlt answer` and `rlt status` see them; `rlt/private/lanes.json` (shown by `rlt status`) lists the forks. What
+   the forks spend counts toward the run's `limits` and a rate limit one meets holds back the others.
+6. **Resume.** A fork that was merged or dropped replays from its saved ledger (`rlt/private/forks/<name>/`) with no agent call; one
+   that was still running continues after its last kept gate. The forks' spend is kept in `rlt/private/forks/spend.json`, so a
+   resumed run's ceilings count what they spent before; work run again after a resume counts twice, which errs on the safe side.
+
+Not there yet: forks on another machine from Rust (use a process file's `parallel.target`), and ending one fork from code.
 
 ## Two rules that are easy to get wrong
 

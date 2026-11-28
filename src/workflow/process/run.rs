@@ -274,6 +274,7 @@ pub(super) fn exec(p: &Proc, step: &Step, item: Option<Item>) -> Result<(), Fata
     match step.kind {
         Kind::Outside | Kind::Planned => return Ok(()),
         Kind::Each => return each(p, step),
+        Kind::Parallel => return super::lanes::block(p, step, item),
         _ => {}
     }
     let ctx = p.ctx(step, num, item);
@@ -305,7 +306,7 @@ fn kind(p: &Proc, ctx: &Ctx) -> Result<(), Fatal> {
         Kind::Agent => p.agent(ctx),
         Kind::Checkpoint => p.checkpoint(ctx),
         Kind::Exam => p.exam(ctx),
-        Kind::Each | Kind::Outside | Kind::Planned => Ok(()),
+        Kind::Each | Kind::Parallel | Kind::Outside | Kind::Planned => Ok(()),
     }
 }
 

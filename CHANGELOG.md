@@ -2,6 +2,32 @@
 
 Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; the entries below 0.1.0 keep the old names). Newest first; each entry names the config keys and interfaces it touches.
 
+## 0.6.0 (2026-11-28)
+
+### Added
+
+- **Forks: parallel work the Rust way.** `Relentless` is now `Send + Sync`, and **`rlt.fork()`** gives an instance of the engine in a
+  worktree of its own, on a branch of its own cut from what the parent has kept (made at its first call); **`rlt.merge(fork)`**
+  merges its branch back (`rlt: merge fork <name>`, a conflict is `Fatal::Conflict { branch, files }`); a fork that is dropped is
+  discarded and its branch kept. The parallelism is plain Rust: `rayon::join`, `std::thread::scope`, a thread pool; the best of
+  several tries and a lane that starts lanes are ordinary code. A fork shares the run's bus (`stop`, `pause`, `resume`, `wake` and
+  `inject` reach every fork), its asks (`[fork <name>]`, answered with `rlt answer`), its lane views and its spend (the run's
+  `limits` count every fork, and survive a resume); a fork resumes from its saved ledger (`rlt/private/forks/`). One thread works on
+  an instance at a time (a second one panics and says to fork); an instance carries its variables and settings to the thread that
+  runs it. `Relentless::fork_seed` copies ignored paths into every worktree. Ledger records `fork`, `merge` and `settled`. See
+  `docs/RUST_API.md`, "Forks", and `examples/forks.rs`.
+- **`kind: parallel`**: the children of a process step run at once as lanes, in the order they are listed joined (`parallel:` is
+  optional and takes the keys of a parallel `each`'s: `max`, `fail_fast`, `seed`, `target`). Numbered and listed like an `each`'s
+  children; a `kind: parallel` step inside an `each` runs once per item. `--check` refuses a checkpoint, `max: 0` and anything
+  parallel inside it. See `docs/PROCESS.md`, "Different steps at once", and `examples/parallel-steps/`.
+
+### Changed (breaking)
+
+- **`Relentless::fan_out`, `FanOut`, `LaneReport` and `LaneEnd` are gone**: fork and merge with any Rust parallelism instead. The
+  string keys and the closure that matched on them are what went; ordering, a conflict and the choice of what to merge are now the
+  driver's own code.
+- The plugin traits `Handler` and `PreStart` and the values of the extension map are `Send + Sync`.
+
 ## 0.5.0 (2026-11-28)
 
 ### Added

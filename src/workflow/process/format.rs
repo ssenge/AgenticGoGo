@@ -420,9 +420,18 @@ pub enum Kind {
     Agent,
     Checkpoint,
     Each,
+    /// different steps at once: every child runs as a lane, in a worktree of its own (`parallel:` is optional)
+    Parallel,
     Exam,
     Outside,
     Planned,
+}
+
+impl Kind {
+    /// Whether the step only holds others (`each`, `parallel`): it has no number, and its children are what runs.
+    pub fn is_container(self) -> bool {
+        matches!(self, Kind::Each | Kind::Parallel)
+    }
 }
 
 /// A step. One struct for every kind: `check` refuses a key that doesn't fit the step's kind.
