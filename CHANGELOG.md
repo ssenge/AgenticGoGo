@@ -43,7 +43,7 @@ Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; t
   (`run.history`, `run.notes`, `run.open_points`) and the workers' memory, aborts and names a conflict, resumes (`--resume` skips
   the joined lanes and resumes the others from their own ledgers), and forwards `rlt send` commands to the lanes, mirrors their asks
   into its own ledger (`<key>:<id>`) and publishes `rlt/private/lanes.json`, which `rlt status` shows as a table. A rate limit one lane
-  meets holds back the others, and every lane's spend counts toward the run's ceilings. `--check` refuses `max: 0` and a checkpoint
+  meets holds back the others, and every lane's spend counts toward the ceilings of a driver's `fan_out` (a process file has none). `--check` refuses `max: 0` and a checkpoint
   inside. See `docs/PROCESS.md`, "Parallel lanes", and `examples/parallel/`.
 - **`Relentless::fan_out(keys, FanOut, body)`** for a Rust driver: the same lanes for a list of keys; `FanOut`, `LaneEnd`, `LaneReport`
   in the prelude; `Relentless::project_name`, `Relentless::lanes` (what the scheduler sets). `examples/fanout.rs`, `docs/RUST_API.md`.

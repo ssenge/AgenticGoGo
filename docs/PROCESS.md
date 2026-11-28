@@ -184,7 +184,7 @@ A lane is one item's steps, run by an instance of the engine of its own on a thr
 - publishes the lanes (`rlt/private/lanes.json`), which `rlt status` shows as a table (key, state, step, tokens, time).
 
 A rate limit one lane meets closes the gate for that agent: no lane starts a session of it before the reset. The tokens and
-dollars every lane spends count toward the run's ceilings. A lane that fails with `fail_fast: true` stops the running lanes and
+dollars every lane spends are added up and count toward the ceilings a Rust driver's `fan_out` has (`limits`); a process file has none. A lane that fails with `fail_fast: true` stops the running lanes and
 starts no more; with `false` the others finish.
 
 **The join.** When the lanes have ended the run joins them **in item order**: for each lane up to the first that did not end
@@ -233,8 +233,8 @@ parallel:
   (run once when the operator stops the run); `fetch` brings the clone back into `{lane_dir}` when it has ended. A resumed run does
   not launch a lane it launched: it polls it again.
 - The run then fetches the lane's branch from the clone and joins it as it joins any lane. The operator's `stop` reaches a
-  remote lane as `kill`; `pause`, `inject` and the rate-limit gate don't cross machines, and each lane's spend counts toward the
-  run's ceilings when it has ended.
+  remote lane as `kill`; `pause`, `inject` and the rate-limit gate don't cross machines, and a remote lane's spend is not counted
+  live.
 
 **The built-in targets** write the four commands for you. `ssh` sends the clone as a tar stream, starts `rlt lane` there with
 `setsid nohup` (so a dropped connection does not end it; its log and pid are in `rlt/private/` of the remote clone), polls the
