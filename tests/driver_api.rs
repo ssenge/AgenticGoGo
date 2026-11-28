@@ -1715,3 +1715,49 @@ fn a_system_prompt_reaches_the_worker_as_its_own_flag() {
     rlt.step(&work()).unwrap();
     assert!(worker_args(dir).contains("--append-system-prompt\nEnd with one line.\n"), "{}", worker_args(dir));
 }
+
+/// One thread works on an instance at a time: a second one meeting it busy panics and says to fork, where two sessions
+/// would otherwise write into one worktree.
+#[test]
+fn a_second_thread_on_a_busy_instance_panics_and_says_to_fork() {
+    let tmp = project();
+    let rlt = Relentless::open(tmp.path()).unwrap().limits(Limits { sessions: Some(9), ..Limits::default() });
+    let (up, started) = std::sync::mpsc::channel::<()>();
+    let up = std::sync::Mutex::new(up);
+    let slow = Verifier::native("slow", move |_| {
+        up.lock().unwrap().send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        Verdict::binary(true)
+    });
+    std::thread::scope(|s| {
+        let first = s.spawn(|| rlt.verifier(&slow).met());
+        started.recv().unwrap();
+        let second = s.spawn(|| rlt.info("a second thread")).join().unwrap_err();
+        let said = second.downcast_ref::<String>().cloned().or_else(|| second.downcast_ref::<&str>().map(|m| m.to_string())).unwrap();
+        assert!(said.contains("busy on another thread") && said.contains("Relentless::fork"), "{said}");
+        assert!(first.join().unwrap(), "the first thread's call is not disturbed");
+    });
+}
+
+/// An instance carries its variables to whichever thread calls it: a fork is built on one thread and runs on another.
+#[test]
+fn the_variables_of_an_instance_reach_the_thread_that_calls_it() {
+    let tmp = project();
+    let rlt = Relentless::open(tmp.path()).unwrap().vars([("who", "world")]);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let into = seen.clone();
+    let probe = Verifier::native("probe", move |_| {
+        *into.lock().unwrap() = relentless::core::vars::apply("hello {{ who }}").unwrap_or_default();
+        Verdict::binary(true)
+    });
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            assert!(rlt.verifier(&probe).met());
+            // and the thread has what it had before the call
+            assert_eq!(relentless::core::vars::apply("hello {{ who }}").unwrap(), "hello {{ who }}");
+        })
+        .join()
+        .unwrap();
+    });
+    assert_eq!(*seen.lock().unwrap(), "hello world");
+}

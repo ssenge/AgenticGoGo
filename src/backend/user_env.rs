@@ -79,6 +79,11 @@ pub fn take(which: &UserEnv) -> Vec<String> {
     names
 }
 
+/// Makes `pairs` what this thread's calls pass to Claude: a run's instance installs its own on the thread it runs on.
+pub fn install(pairs: Vec<(String, String)>) {
+    PASSED.with(|p| *p.borrow_mut() = pairs);
+}
+
 /// What the run passes to every Claude worker and one-shot process.
 pub fn passed() -> Vec<(String, String)> {
     PASSED.with(|p| p.borrow().clone())

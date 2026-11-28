@@ -100,6 +100,11 @@ pub struct Relentless {
     user_env: crate::backend::user_env::UserEnv,
     /// text every worker's agent adds to its system prompt — see [`Relentless::system_prompt`].
     system_prompt: Option<String>,
+    /// the workflow's variables — see [`Relentless::vars`]. The instance carries them, and every call installs them on
+    /// the thread it runs on: a fork is built on one thread and may run on another.
+    vars: BTreeMap<String, String>,
+    /// the thread working on this instance, and how deep its calls are nested — see [`Relentless::enter`].
+    busy: std::sync::Mutex<Option<(std::thread::ThreadId, u32)>>,
 }
 
 /// The settings a lane's instance has of the run that started it; `Send` and `Sync`, where a `Relentless` is neither.
@@ -158,6 +163,33 @@ struct Started {
     _pid: RunPidGuard,
     /// this run's report handle (`run_id`, the write latch). `Drop for Relentless` writes the report.
     report: crate::report::RunHandle,
+    /// what the run's Claude processes get of the operator's settings (`user_env`), installed on each thread that calls in
+    passed: Vec<(String, String)>,
+}
+
+/// A call in progress on an instance (see `Relentless::enter`): the instance stays this thread's until the outermost
+/// guard drops, which also puts back the variables and settings the thread had.
+struct Entered<'a> {
+    owner: &'a Relentless,
+    saved: Option<Saved>,
+}
+
+/// What a thread had of a run's variables and passed settings before the outermost call on an instance.
+type Saved = (BTreeMap<String, String>, Vec<(String, String)>);
+
+impl Drop for Entered<'_> {
+    fn drop(&mut self) {
+        let mut held = self.owner.busy.lock().unwrap_or_else(|e| e.into_inner());
+        *held = match *held {
+            Some((owner, depth)) if depth > 1 => Some((owner, depth - 1)),
+            _ => None,
+        };
+        drop(held);
+        if let Some((vars, passed)) = self.saved.take() {
+            crate::core::vars::set(vars);
+            crate::backend::user_env::install(passed);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -211,6 +243,8 @@ impl Relentless {
             user_settings: true,
             user_env: Default::default(),
             system_prompt: None,
+            vars: BTreeMap::new(),
+            busy: std::sync::Mutex::new(None),
         })
     }
 
@@ -292,6 +326,7 @@ impl Relentless {
     /// or the agent's error text, with the setting that would fix it where the operator's settings hold a gateway.
     /// Where it comes before the run's first step, an unreachable agent stops the run with its cause.
     pub fn reachable(&self, step: &Step) -> Result<String, Fatal> {
+        let _call = self.enter();
         let passed = crate::backend::user_env::take(&self.user_env);
         let agent: &dyn crate::backend::AgentBackend = match &step.agent {
             Agent::Custom(b) => &**b,
@@ -379,8 +414,10 @@ impl Relentless {
     /// The workflow's variables: `{{ name }}` in every step's prompt file (the role prompt's too) and every
     /// rubric verifier's rubric (its `inputs:` too) is filled in from `vars`; a name it lacks fails the step or
     /// the verifier. Inline prompts are not templates. One map per process: the last call wins.
-    pub fn vars(self, vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Relentless {
-        crate::core::vars::set(vars.into_iter().map(|(k, v)| (k.into(), v.into())).collect());
+    pub fn vars(mut self, vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Relentless {
+        self.vars = vars.into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+        // also this thread's own, for the code of a flow that renders a brief outside of a call of the instance
+        crate::core::vars::set(self.vars.clone());
         self
     }
 
@@ -459,6 +496,33 @@ impl Relentless {
 // ---------------------------------------------------------------------------------------------
 
 impl Relentless {
+    /// Starts a call on this instance: one thread works on it at a time (the same thread may nest calls), and the run's
+    /// variables and the operator's settings it passes are this thread's until the outermost call ends. A second thread
+    /// meeting a busy instance panics, as a `RefCell` did, instead of interleaving two sessions in one worktree.
+    fn enter(&self) -> Entered<'_> {
+        let me = std::thread::current().id();
+        let mut held = self.busy.lock().unwrap_or_else(|e| e.into_inner());
+        let depth = match *held {
+            None => 1,
+            Some((owner, depth)) if owner == me => depth + 1,
+            Some(_) => {
+                drop(held);
+                panic!("Relentless: this instance is busy on another thread; give each thread its own fork (Relentless::fork)");
+            }
+        };
+        *held = Some((me, depth));
+        drop(held);
+        let saved = (depth == 1).then(|| {
+            let saved = (crate::core::vars::current(), crate::backend::user_env::passed());
+            crate::core::vars::set(self.vars.clone());
+            if let Some(started) = self.started.get() {
+                crate::backend::user_env::install(started.passed.clone());
+            }
+            saved
+        });
+        Entered { owner: self, saved }
+    }
+
     /// The started run, performing the run-level setup on first use.
     ///
     /// Both latch checks are needed: one for a run already ended, one for a setup that ended it —
@@ -662,6 +726,7 @@ impl Relentless {
             _policy: policy_guard,
             _pid: pid_guard,
             report,
+            passed: crate::backend::user_env::passed(),
         })
     }
 }
@@ -676,6 +741,7 @@ impl Relentless {
     /// The work is COMMITTED on the session branch and STAGED on the open span; nothing merges
     /// until `gate()` says so.
     pub fn step(&self, step: &Step) -> Result<StepOutcome, Fatal> {
+        let _call = self.enter();
         // 1. the latch, before anything else.
         if let Some(o) = self.ended.get() {
             return Err(Fatal::Ended(o));
@@ -892,6 +958,7 @@ impl Relentless {
     /// including one asked for the first time long after the steps it verifiers. A gate inside `step()`
     /// could not see those, which is the reason `gate()` is a separate call at all.
     pub fn gate(&self) -> Result<GateOutcome, Fatal> {
+        let _call = self.enter();
         // 1. the latch, before anything else.
         if let Some(o) = self.ended.get() {
             return Err(Fatal::Ended(o));
@@ -1026,6 +1093,7 @@ impl Relentless {
     ///
     /// Before the run has started it is the configured seeds and nothing else.
     pub fn gate_state(&self) -> crate::core::ratchet::GateState {
+        let _call = self.enter();
         match self.started.get() {
             Some(s) => s.st.borrow().eng.gate.state.clone(),
             None => crate::core::ratchet::Gate::new(crate::core::ratchet::resolve_explicit(&self.cfg.sequence.ratchet), 0).state,
@@ -1063,6 +1131,7 @@ impl Relentless {
     /// driver. After the latch this returns a NOT-MET verdict naming the outcome; never a
     /// fabricated `met: true`.
     pub fn verifier(&self, j: &Verifier) -> Verdict {
+        let _call = self.enter();
         self.consult(j, true)
     }
 
@@ -1072,6 +1141,7 @@ impl Relentless {
     /// that exists now and didn't when the last gate landed), and the gate would take that flip for a
     /// regression and roll back the work that follows it. A verifier the span also asked by name stays held.
     pub fn condition(&self, j: &Verifier) -> Verdict {
+        let _call = self.enter();
         let held = self.span.borrow().contains_key(&j.name) || self.span_direct.borrow().contains(&j.name);
         let verdict = self.consult(j, false);
         if !held {
@@ -1088,6 +1158,7 @@ impl Relentless {
     /// one member flipping met→unmet while another goes unmet→met is not a regression. A member the
     /// driver also asked by name is held one by one. After the latch every member reads not-met.
     pub fn group(&self, g: &Group) -> GroupVerdict {
+        let _call = self.enter();
         if self.ended.get().is_none() {
             self.span_groups.borrow_mut().insert(g.name.clone(), g.member_names());
         }
@@ -1349,6 +1420,7 @@ impl Relentless {
     /// On EVERY call, breach or not, it also drains the operator bus (so `rlt stop` is seen) and
     /// checks for Ctrl-C — both end the run exactly as the shipped loop does.
     pub fn check_limits(&self) -> Result<(), Fatal> {
+        let _call = self.enter();
         let started = self.ready()?;
         self.operator_check(started)?;
 
@@ -1438,17 +1510,20 @@ impl Relentless {
 
     /// FYI. Lands in the log and the reader; nothing is expected back.
     pub fn info(&self, msg: &str) {
+        let _call = self.enter();
         self.note("info", msg);
     }
 
     /// A response would help; **the loop CONTINUES regardless**. This is `notify_if`'s non-terminal
     /// contract, made explicit and driver-invocable.
     pub fn ask(&self, msg: &str) {
+        let _call = self.enter();
         self.note("ask", msg);
     }
 
     /// A line for the log and the reader. Delivers no notification.
     pub fn log(&self, msg: &str) {
+        let _call = self.enter();
         self.note("log", msg);
     }
 
@@ -1528,6 +1603,7 @@ impl Relentless {
     /// value you did not offer. That boundary check is the reason `hil_choose` exists next to
     /// [`Relentless::hil_input`], which cannot have one.
     pub fn hil_choose(&self, question: &str, options: &[&str]) -> Result<usize, Fatal> {
+        let _call = self.enter();
         if options.len() < 2 {
             return Err(Fatal::Other(anyhow::anyhow!(
                 "hil_choose needs at least two options (got {}) — a question with one answer is not a question",
@@ -1549,6 +1625,7 @@ impl Relentless {
     /// change was made, hand a failed task over. A `false` is a legitimate outcome, not an error —
     /// the human said no, and a workflow that asked should handle it.
     pub fn hil_bool(&self, question: &str) -> Result<bool, Fatal> {
+        let _call = self.enter();
         Ok(self.hil(AskCase::Bool, question, Some(vec!["yes".into(), "no".into()]))? == "yes")
     }
 
@@ -1562,6 +1639,7 @@ impl Relentless {
     /// `rlt/private/bus/in/`. Ask the human to put the credential where credentials go and confirm
     /// with [`Relentless::hil_bool`] instead: **an answer may NAME a secret, never CONTAIN one.**
     pub fn hil_input(&self, question: &str) -> Result<String, Fatal> {
+        let _call = self.enter();
         self.hil(AskCase::Input, question, None)
     }
 
@@ -1574,6 +1652,7 @@ impl Relentless {
     /// A driver MAY choose to block on one — and that choice being the author's, at a call site, is
     /// what keeps the asymmetry above honest: the worker asked, the AUTHOR decided to wait.
     pub fn open_asks(&self) -> Vec<crate::core::asks::Ask> {
+        let _call = self.enter();
         crate::core::asks::open(&self.dir)
     }
 
@@ -1695,6 +1774,7 @@ impl Relentless {
     /// the rate-limit wait does, so `wall_time`/`over_budget` END the run rather than hanging until
     /// morning.
     pub fn block(&self, msg: &str) -> Result<(), Fatal> {
+        let _call = self.enter();
         let started = self.ready()?;
         // A recorded block replays as a no-op — it was already answered. ⚠ This is only reachable
         // for a block BEFORE the last kept gate: `truncate_to_base` drops everything after it, so a
@@ -1787,6 +1867,7 @@ impl Relentless {
 
     /// The label path as a reader sees it — `cycle 3/20 › attempt 2/3`.
     pub fn label_path(&self) -> String {
+        let _call = self.enter();
         self.pos
             .borrow()
             .iter()
@@ -1829,6 +1910,7 @@ impl Relentless {
     /// Whether a resume's next recorded call is step `name`'s: the run replays what the step did then instead of
     /// deciding again on today's files (a refresh that finds its inputs unchanged now ran a session then).
     pub fn replays_step(&self, name: &str) -> bool {
+        let _call = self.enter();
         self.resume && self.ready().is_ok_and(|s| matches!(s.replay.get(self.ord.get() as usize),
             Some(rec @ CallRecord::Step { .. }) if rec.what() == name))
     }
@@ -1849,6 +1931,7 @@ impl Relentless {
     /// The run's human-readable status — the same view `rlt status` renders, from the same
     /// published `state.json`. Spends nothing and works before the run has started.
     pub fn summary(&self) -> String {
+        let _call = self.enter();
         crate::ui::status::render(&self.dir)
     }
 
@@ -1902,6 +1985,7 @@ impl Relentless {
     /// only the run's own git state can answer, and a test that rebuilt the sentence from its own
     /// idea of the branch names would assert nothing.
     pub fn ungated_span(&self) -> Option<String> {
+        let _call = self.enter();
         let started = self.started.get()?;
         let mut st = started.st.borrow_mut();
         let git = &mut st.ext.get::<RLTState>().git;
@@ -1918,6 +2002,7 @@ impl Relentless {
     /// see whether `main` returned `Ok` or `Err` — this is how a driver that cares says which it was.
     /// Idempotent, and a no-op once a ceiling has already latched an outcome.
     pub fn finish(&self, outcome: RunOutcome) {
+        let _call = self.enter();
         self.end(outcome, None);
     }
 
@@ -1928,6 +2013,7 @@ impl Relentless {
     /// word the YAML path's. Any other outcome records the reason as given under its usual ledger
     /// tag. A blank reason records `finish`'s wording.
     pub fn finish_with(&self, outcome: RunOutcome, reason: impl Into<String>) {
+        let _call = self.enter();
         self.end(outcome, Some(reason.into()));
     }
 
@@ -1951,6 +2037,7 @@ impl Relentless {
     /// [`StepOutcome`] and the run's own view off [`Relentless::summary`]. It exists because "did the latch
     /// really stop the pipeline" is a question only the counter can answer.
     pub fn sessions(&self) -> u32 {
+        let _call = self.enter();
         self.started.get().map(|s| s.st.borrow().session).unwrap_or(0)
     }
 }
