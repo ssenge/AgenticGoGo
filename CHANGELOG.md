@@ -83,7 +83,7 @@ Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; t
 - **Four experimental presets of it: `gemini`, `opencode`, `qwen`, `pi`.** Flags read off each CLI's `--help` (Gemini CLI 0.71.1,
   OpenCode 1.19.6, Qwen Code 0.28.7, Pi 0.73.1); the brief goes in a file and the prompt says to read it. OpenCode's stream was
   recorded, Qwen's and Pi's up to their "no login" error, the rest is synthetic (`tests/fixtures/agent-streams/`, README).
-  Every run prints `agent <name> is experimental`, `rlt doctor --json` lists them with `experimental: true`, and an `agents:`
+  Every run prints `agent <name> is experimental`, `rlt --version` and `rlt doctor --json` list them (`experimental: true`), and an `agents:`
   entry of the same name replaces a preset. `docs/BACKENDS.md` has the rule for synthetic fixtures. `examples/mixed-agents/`
   works with a command agent and Claude.
 

@@ -147,3 +147,11 @@ fn the_mixed_agents_example_plays_through() {
     let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && said.contains("PASS scenario"), "{said}");
 }
+
+/// `rlt --version` names the experimental agents.
+#[test]
+fn the_version_names_the_experimental_agents() {
+    let out = Command::new(env!("CARGO_BIN_EXE_rlt")).arg("--version").output_bounded().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success() && said.contains(env!("CARGO_PKG_VERSION")) && said.contains("experimental agents: gemini, opencode, qwen, pi"), "{said}");
+}

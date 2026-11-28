@@ -24,16 +24,23 @@ pub fn redirected(spec: &Process, project: &Path, lane_dir: &Path) -> (Process, 
     let mut take = |slot: &mut Option<String>, name: &str| {
         let Some(path) = slot.clone() else { return };
         let lane_path = format!("rlt/private/lane/{name}");
-        let seed = std::fs::read(project.join(&path)).unwrap_or_default();
         let to = lane_dir.join(&lane_path);
+        let sidecar = lane_dir.join(format!("{lane_path}.seed"));
         if let Some(parent) = to.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // a resumed lane keeps what it wrote: its copy exists
-        if !to.exists() {
-            let _ = std::fs::write(&to, &seed);
-        }
-        redirects.push(Redirect { run_path: path, lane_path: lane_path.clone(), seed_len: seed.len() as u64 });
+        // a resumed lane keeps what it wrote, and the length of the run's file when it started: the run's file may have
+        // grown since (lanes joined before it)
+        let seed_len = match (to.exists(), std::fs::read_to_string(&sidecar).ok().and_then(|t| t.trim().parse::<u64>().ok())) {
+            (true, Some(n)) => n,
+            _ => {
+                let seed = std::fs::read(project.join(&path)).unwrap_or_default();
+                let _ = std::fs::write(&to, &seed);
+                let _ = std::fs::write(&sidecar, seed.len().to_string());
+                seed.len() as u64
+            }
+        };
+        redirects.push(Redirect { run_path: path, lane_path: lane_path.clone(), seed_len });
         *slot = Some(lane_path);
     };
     take(&mut spec.run.history, "history");
@@ -115,6 +122,19 @@ pub fn take_back_state(project: &Path, lane_dir: &Path, key: &str, seed: &[(Path
     }
 }
 
+/// The lengths of the run's `rlt/state/` files that the lane in `lane_dir` was seeded with: measured when it is seeded and
+/// kept with it, so a resumed lane takes back what it added after those lengths, not after the files' lengths now.
+pub fn state_lengths_kept(project: &Path, lane_dir: &Path) -> Vec<(PathBuf, u64)> {
+    let sidecar = lane_dir.join("rlt/private/lane/state.seed.json");
+    if let Some(kept) = std::fs::read_to_string(&sidecar).ok().and_then(|t| serde_json::from_str::<Vec<(PathBuf, u64)>>(&t).ok()) {
+        return kept;
+    }
+    let now = state_lengths(project);
+    let _ = sidecar.parent().map(std::fs::create_dir_all);
+    let _ = std::fs::write(&sidecar, serde_json::to_string(&now).unwrap_or_default());
+    now
+}
+
 /// The files of the run's `rlt/state/` and their lengths: what a lane is seeded with.
 pub fn state_lengths(project: &Path) -> Vec<(PathBuf, u64)> {
     let root = crate::paths::rlt_dir(project);
@@ -168,6 +188,30 @@ mod tests {
         assert_eq!(std::fs::read_to_string(run.path().join("steps.jsonl")).unwrap(), "{\"a\":1}\n{\"other\":1}\n{\"lane\":1}\n");
         let notes = std::fs::read_to_string(run.path().join("notes.md")).unwrap();
         assert_eq!(notes, "## earlier\nline\n<!-- lane U1 -->\n## build-U1\nmine\n");
+    }
+
+    /// A resumed lane keeps the length its seed had: the run's file may have grown since (lanes joined before it).
+    #[test]
+    fn a_resumed_lane_keeps_the_length_of_its_seed() {
+        let (run, lane) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(run.path().join("notes.md"), "seed\n").unwrap();
+        let (_, first) = redirected(&spec("  notes: notes.md"), run.path(), lane.path());
+        assert_eq!(first[0].seed_len, 5);
+        std::fs::write(run.path().join("notes.md"), "seed\nadded by a lane joined before\n").unwrap();
+        let (_, again) = redirected(&spec("  notes: notes.md"), run.path(), lane.path());
+        assert_eq!(again[0].seed_len, 5, "not the run's file's length now");
+    }
+
+    /// The lengths of the memory files a lane was seeded with are kept with it.
+    #[test]
+    fn the_memory_lengths_of_a_lane_are_kept_with_it() {
+        let (run, lane) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let state = crate::paths::rlt_dir(run.path());
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("STATE.md"), "base\n").unwrap();
+        assert_eq!(state_lengths_kept(run.path(), lane.path()), [(PathBuf::from("STATE.md"), 5)]);
+        std::fs::write(state.join("STATE.md"), "base\ngrown since\n").unwrap();
+        assert_eq!(state_lengths_kept(run.path(), lane.path()), [(PathBuf::from("STATE.md"), 5)], "the first measure stays");
     }
 
     /// Worker memory: new files come as they are, a shared one grows by what the lane added.

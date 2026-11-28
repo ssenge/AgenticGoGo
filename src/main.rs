@@ -16,8 +16,15 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// What `rlt --version` prints: the version and the agents that are experimental (built from documented output, not yet from a
+/// recorded session).
+fn long_version() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| format!("{}\nexperimental agents: {}", env!("CARGO_PKG_VERSION"), relentless::backend::presets::NAMES.join(", ")))
+}
+
 #[derive(Parser)]
-#[command(name = "rlt", version, about = "Relentless - The Agentic Workflow Engine")]
+#[command(name = "rlt", version, long_version = long_version(), about = "Relentless - The Agentic Workflow Engine")]
 struct Cli {
     /// project directory (defaults to current dir). `--project` is the same flag, for callers that
     /// name the project they drive from another process (`rlt stop --project <dir>`).

@@ -21,7 +21,7 @@ fn prepare(env: &Env, lane: &Lane, item: &Item, target: &Target) -> Result<Prepa
     let existed = lane.exists();
     worktree::add_clone(env.project, lane, env.base)?;
     let private = crate::paths::private_dir(&lane.dir);
-    let (_, redirects) = if existed { (env.spec.clone(), vec![]) } else { files::redirected(env.spec, env.project, &lane.dir) };
+    let (_, redirects) = files::redirected(env.spec, env.project, &lane.dir);
     if !existed {
         worktree::seed(env.project, &lane.dir, env.seed);
         files::seed_state(env.project, &lane.dir);
@@ -36,7 +36,7 @@ fn prepare(env: &Env, lane: &Lane, item: &Item, target: &Target) -> Result<Prepa
     if target.kind == TargetKind::Ssh {
         write_env_file(&private.join("lane.env"), &target.pass_env)?;
     }
-    Ok(Prepared { redirects, state_seed: files::state_lengths(env.project) })
+    Ok(Prepared { redirects, state_seed: files::state_lengths_kept(env.project, &lane.dir) })
 }
 
 struct Prepared {

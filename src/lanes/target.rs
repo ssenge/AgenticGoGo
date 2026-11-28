@@ -31,6 +31,14 @@ pub fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// `path` quoted for a POSIX shell as one word, a leading `~/` left for the shell to expand (the home of the remote user).
+pub fn quote_path(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => format!("~/{}", quote(rest)),
+        None => quote(path),
+    }
+}
+
 /// `template` with the lane's place filled in.
 pub fn expand(template: &str, lane: &Lane) -> String {
     let id = lane.worktree.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -76,11 +84,11 @@ impl Ssh {
     pub fn commands(&self, lane: &Lane) -> Commands {
         let id = lane.worktree.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let remote = format!("{}/{id}", self.dir.trim_end_matches('/'));
-        let (login, r) = (self.login(), quote(&remote));
+        let (login, r) = (self.login(), quote_path(&remote));
         let start = format!(
             "mkdir -p {r} && tar -C {r} -xf - && cd {r} && ( set -a; [ -f rlt/private/lane.env ] && . ./rlt/private/lane.env; rm -f rlt/private/lane.env; set +a; \
              S=$(command -v setsid || true); $S nohup {rlt} lane --spec rlt/private/lane-spec.json > rlt/private/lane.log 2>&1 < /dev/null & echo $! > rlt/private/lane.pid )",
-            rlt = quote(&self.rlt));
+            rlt = quote_path(&self.rlt));
         Commands {
             launch: format!("tar -C {{lane_dir}} -cf - . | {login} {}", quote(&start)),
             poll: format!("{login} {}", quote(&format!("test -f {r}/rlt/private/lane-result.json"))),
@@ -95,12 +103,15 @@ impl Ssh {
 /// named in `pass_env` come from this process's environment (docker reads their values itself).
 pub fn container_commands(image: &str, network: Option<&str>, pass_env: &[String], lane: &Lane) -> Commands {
     let id = lane.worktree.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let name = quote(&format!("rlt-lane-{}-{id}", std::process::id()));
+    // stable across a restart of the run (a resumed run finds its container again): from the lane's place, not from a pid
+    let place = lane.worktree.display().to_string().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
+    let name = quote(&format!("rlt-lane-{place:x}-{id}"));
     let net = network.map(|n| format!("--network {} ", quote(n))).unwrap_or_default();
     let env: String = pass_env.iter().map(|e| format!("-e {} ", quote(e))).collect();
     Commands {
         launch: format!("docker run -d --name {name} {net}{env}-v {{lane_dir}}:/lane -w /lane {} rlt lane --spec rlt/private/lane-spec.json", quote(image)),
-        poll: format!("test \"$(docker inspect -f '{{{{.State.Running}}}}' {name})\" = false"),
+        // a container that is gone (removed after its clone came back, before a resume) has ended
+        poll: format!("test \"$(docker inspect -f '{{{{.State.Running}}}}' {name} 2>/dev/null)\" != true"),
         kill: Some(format!("docker kill {name}")),
         fetch: format!("docker rm {name}"),
     }
@@ -193,9 +204,12 @@ mod tests {
                         options: vec!["-o".into(), "ServerAliveInterval=30".into()] };
         let c = ssh.commands(&l);
         assert!(c.launch.starts_with("tar -C {lane_dir} -cf - . | ssh -o BatchMode=yes '-o' 'ServerAliveInterval=30' 'deploy@build-box' "), "{}", c.launch);
-        assert!(c.launch.contains("rlt lane --spec rlt/private/lane-spec.json") && c.launch.contains("/srv/rlt/units-U-1") && c.launch.contains("rlt/private/lane.pid"));
+        assert!(c.launch.contains("lane --spec rlt/private/lane-spec.json") && c.launch.contains("/srv/rlt/units-U-1") && c.launch.contains("rlt/private/lane.pid"));
+        // the script is quoted once more for the local shell: the remote shell reads `~/'.local/bin/rlt'`, `~` expanded
+        assert!(c.launch.contains("nohup ~/'\\''.local/bin/rlt'\\'' lane"), "a home path is left to the remote shell: {}", c.launch);
         assert!(c.launch.contains("rm -f rlt/private/lane.env") && !c.launch.contains("ANTHROPIC"), "the values are not in a command");
-        assert!(c.poll.contains("test -f '/srv/rlt/units-U-1'/rlt/private/lane-result.json"), "{}", c.poll);
+        assert!(c.poll.contains("test -f '"), "{}", c.poll);
+        assert!(c.poll.contains("/srv/rlt/units-U-1") && c.poll.contains("rlt/private/lane-result.json"), "{}", c.poll);
         assert!(c.fetch.ends_with("| tar -C {lane_dir} -xf -") && c.kill.unwrap().contains("rlt/private/lane.pid"));
         let k = container_commands("rlt-claude:0.5.0", Some("none"), &["ANTHROPIC_API_KEY".into()], &l);
         assert!(k.launch.contains("-e 'ANTHROPIC_API_KEY' ") && k.launch.contains("--network 'none'") && k.launch.contains("-v {lane_dir}:/lane"), "{}", k.launch);

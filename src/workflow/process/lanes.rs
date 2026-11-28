@@ -220,7 +220,7 @@ fn lane_body(env: &Env, lane: &Lane, item: &Item, services: &Arc<Shared>) -> End
             worktree::seed(env.project, &lane.dir, env.seed);
             files::seed_state(env.project, &lane.dir);
         }
-        ended.state_seed = files::state_lengths(env.project);
+        ended.state_seed = files::state_lengths_kept(env.project, &lane.dir);
         let (spec, redirects) = files::redirected(env.spec, env.project, &lane.dir);
         ended.redirects = redirects;
         steps(env, lane, item, &spec, (services, existed))

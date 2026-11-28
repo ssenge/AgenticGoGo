@@ -175,6 +175,18 @@ fn end_orphans(processes: &[Process]) -> usize {
 mod tests {
     use super::*;
 
+    /// Waits (up to 5 seconds) until `pid` has been adopted by init: its shell is gone.
+    pub(super) fn orphaned(pid: u32) {
+        for _ in 0..50 {
+            let out = std::process::Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().unwrap();
+            let ppid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if ppid.is_empty() || ppid == "1" {
+                return;   // gone, or adopted
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// A background process a child started is a descendant while its parent runs and an orphan after; then
     /// it is ended, and a process that still has its parent is not.
     #[test]
@@ -188,14 +200,32 @@ mod tests {
         let seen = descendants(parent.id(), &table());
         assert_eq!(end_orphans(&seen), 0);   // its parent still runs
         parent.wait().unwrap();
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(end_orphans(&seen), 1);   // the background sleep, adopted by init now
-        assert_eq!(end_orphans(&seen), 0);
+        for (pid, _) in &seen {
+            orphaned(*pid);
+        }
+        // the background sleep, adopted by init now (tried again for a moment: on a loaded machine `ps` may not show it yet)
+        let ended = (0..25).map(|_| {
+            let n = end_orphans(&seen);
+            if n == 0 {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            n
+        }).find(|n| *n > 0);
+        assert_eq!(ended, Some(1));
+        // ended: a killed process may show as a zombie for a moment until init has reaped it
+        assert!((0..25).any(|_| {
+            let none = end_orphans(&seen) == 0;
+            if !none {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            none
+        }));
     }
 }
 
 #[cfg(all(test, unix))]
 mod lane_tests {
+    use super::tests::orphaned;
     use super::*;
 
     /// Whether process `pid` still runs (not a zombie: `ps` prints its state).
@@ -203,6 +233,17 @@ mod lane_tests {
         let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
         let stat = String::from_utf8_lossy(&out.stdout);
         !stat.trim().is_empty() && !stat.trim().starts_with('Z')
+    }
+
+    /// Whether `pid` ends within 5 seconds (a killed process takes a moment to go on a loaded machine).
+    fn gone(pid: u32) -> bool {
+        (0..50).any(|_| {
+            let ended = !alive(pid);
+            if !ended {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            ended
+        })
     }
 
     /// A background process a shell started: its pid, once it has printed it.
@@ -236,13 +277,12 @@ mod lane_tests {
         sample();
         shell_a.wait().unwrap();
         shell_b.wait().unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        orphaned(sleeper_a);
+        orphaned(sleeper_b);
         assert_eq!(mine.reap(), 1, "the sleeper its shell left");
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!alive(sleeper_a), "a's leftover ended");
+        assert!(gone(sleeper_a), "a's leftover ended");
         assert!(alive(sleeper_b), "b's leftover is b's to end");
         assert_eq!(other.reap(), 1);
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!alive(sleeper_b));
+        assert!(gone(sleeper_b));
     }
 }
