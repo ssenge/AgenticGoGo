@@ -1,6 +1,6 @@
 {
   "name": "rlt",
-  "description": "Relentless - The Agentic Workflow Engine. Runs inner Claude Code workers in a loop until a goal-based stop condition is met, with verifiers, heartbeats, watchdog, LLM summaries, and a live TUI.",
+  "description": "Relentless: agents that don't stop until the job is truly done. Runs inner Claude Code workers in a loop until a goal-based stop condition is met, with verifiers, heartbeats, watchdog, LLM summaries, and a live TUI.",
   "version": "0.5.0",
   "author": {
     "name": "Sebastian Senge"

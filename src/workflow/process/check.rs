@@ -131,7 +131,7 @@ impl Ctx<'_> {
         let set = |names: &[(&str, bool)]| -> Vec<String> {
             names.iter().filter(|(_, on)| *on).map(|(n, _)| (*n).to_string()).collect()
         };
-        let mine = set(&[("run", s.run.is_some()), ("prompt", s.prompt.is_some()), ("checks", !s.checks.is_empty()),
+        let mine = set(&[("run", s.run.is_some()), ("prompt", s.prompt.is_some()), ("verifiers", !s.checks.is_empty()),
                          ("review", s.review.is_some()), ("repairs", s.repairs.is_some()), ("sections", !s.sections.is_empty()),
                          ("quality", s.quality), ("on_fail", s.on_fail.is_some()), ("prepare", s.prepare.is_some()),
                          ("doc", s.doc.is_some()), ("question", s.question.is_some()), ("owner", s.owner.is_some()),
@@ -142,11 +142,11 @@ impl Ctx<'_> {
                          ("findings_ids", s.findings_ids.is_some()), ("dispute", s.dispute.is_some())]);
         let takes: &[&str] = match s.kind {
             Kind::Script => &["run"],
-            Kind::Agent => &["prompt", "checks", "review", "repairs", "sections", "quality", "on_fail"],
+            Kind::Agent => &["prompt", "verifiers", "review", "repairs", "sections", "quality", "on_fail"],
             Kind::Checkpoint => &["prepare", "doc", "question", "owner", "go_live"],
             Kind::Each => &["items", "parallel", "steps"],
             Kind::Parallel => &["parallel", "steps"],
-            Kind::Exam => &["checks", "examinee", "answers", "grader", "repairer", "rounds", "fresh", "findings_ids", "dispute", "repairs"],
+            Kind::Exam => &["verifiers", "examinee", "answers", "grader", "repairer", "rounds", "fresh", "findings_ids", "dispute", "repairs"],
             Kind::Outside | Kind::Planned => &[],
         };
         for key in mine.iter().filter(|k| !takes.contains(&k.as_str())) {

@@ -1,24 +1,20 @@
-# The smallest process: one agent step with a check and a review, then a checkpoint where a human decides.
-# Run it:   rlt process examples/hello/process.yaml <project>        (the project is a git repo holding task.md)
-# Try it without tokens: see examples/hello/README.md (a scenario plays scripted agents).
+# The smallest workflow: one agent step with a verifier and a review, then a checkpoint where a human decides.
+# Run it:   rlt process examples/hello/process.yaml <project>        (the project is a git repo holding add.py and tools.yaml)
+# Try it without tokens: `rlt process examples/hello/process.yaml --scenario examples/hello/scenario.yaml --projects examples/hello/projects`.
 version: 1
-roles: { file: tools.yaml }          # in the project: which agent works, which one reviews
-run:
-  history: reports/steps.jsonl       # the record of every step (default: rlt/private/steps.jsonl, which git ignores)
-  own: [task.md, tools.yaml, reports/steps.jsonl]   # files a reset never takes back
+roles: { file: tools.yaml }          # in the project: which agent works (the worker) and which one reviews (the critic)
+run: { history: reports/steps.jsonl }   # the record of what ran, kept in git
 phases:
 - id: build
   name: Build
   steps:
   - id: fix
-    name: Fix add
-    kind: agent
+    name: Fix add.py
+    kind: agent                        # the agent is told what to do by prompts/fix.md
+    verifiers: [verifiers/tests.sh]    # must be met: a script whose last output line is {"met": …, "rationale": …}
     review: true                       # a second agent grades the result against verifiers/fix-review.md
-    checks: [verifiers/tests.sh]       # a script verifier: its last line is {"met": …, "rationale": …}
-    settings: { inputs: [task.md, cp-fix-decisions.md], outputs: [add.py] }
-  - id: cp-fix
-    name: Fix approved
+  - id: approve
+    name: Human approval
     kind: checkpoint
     doc: add.py                        # what the human reads
-    question: "{{ cp.cp-fix }}: approve {{ step.fix }}?"
-    owner: fix
+    question: "Approve the fix to add.py?"

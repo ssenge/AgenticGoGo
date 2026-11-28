@@ -6,9 +6,9 @@ setup:   # the scratch copy becomes a git repo: a run needs one
 agents:
   - { when: 'Fix .add.py.', write: { add.py: "print(1 + 2)\n" } }     # the worker's session
 answers:
-  - { ask: 'approve', say: 'yes' }                                     # the human at the checkpoint
+  - { ask: 'Approve', say: 'yes' }                                     # the human at the checkpoint
 expect:
-  record: ['^fix done met', '^cp-fix']
+  record: ['^fix done met', '^approve']
   sessions: ['^claude worker', '^codex verifier']
   files: { add.py: 'print\(1 \+ 2\)' }
   exit: 0

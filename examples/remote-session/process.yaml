@@ -23,4 +23,4 @@ phases:
       name: Make the unit
       kind: agent
       sections: [{ text: "ITEM={{ item }}" }]
-      checks: [verifiers/made.sh]
+      verifiers: [verifiers/made.sh]

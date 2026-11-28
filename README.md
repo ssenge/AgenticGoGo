@@ -3,54 +3,177 @@
   Relentless
 </h1>
 
-<p align="center"><strong>The Agentic Workflow Engine</strong></p>
+<p align="center"><strong>Agents that don't stop until the job is truly done.</strong></p>
 
-Relentless runs agentic work as a process: agents do the work, verifiers they can't fool decide when it is done, and
-humans decide only where they must.
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-2a9d8f?style=flat-square"></a>
+  <img alt="Version 0.6.0" src="https://img.shields.io/badge/version-0.6.0-e76f51?style=flat-square">
+  <img alt="Built with Rust" src="https://img.shields.io/badge/built_with-Rust-264653?style=flat-square&logo=rust&logoColor=white">
+  <img alt="Workflows in YAML or Rust" src="https://img.shields.io/badge/workflows-YAML_or_Rust-e9c46a?style=flat-square&labelColor=555">
+  <img alt="Agents: Claude Code, Codex, Copilot" src="https://img.shields.io/badge/agents-Claude_Code_%2B_Codex_%2B_Copilot-f4a261?style=flat-square&labelColor=555">
+  <img alt="Platforms: macOS, Linux, Windows" src="https://img.shields.io/badge/platforms-macOS_%7C_Linux_%7C_Windows-457b9d?style=flat-square">
+</p>
 
-## Why
+**Relentless** runs agentic **workflows**: a bug fix, a migration, a whole business process, written in YAML or in Rust.
+Coding agents (Claude Code, Codex CLI, GitHub Copilot CLI, …) do the work, **verifiers** they can't fool decide when it is
+done, and humans decide only where they must. A long-running agentic job, written as a loop or, more generally, as a
+workflow, therefore ends only when the job is *truly* done.
 
-- Coding agents are stochastic, and they grade their own homework: "done" is whatever the last message said.
-- Long work stalls, runs out of context, or stops one step short, and you end up typing "continue" into a terminal.
-- Relentless puts a deterministic process around the agents: steps, **verifiers** that decide "done" (the agent never
-  runs them and can't edit them), checkpoints where a human approves, and resume from anywhere after a crash or a stop.
-- The process is a file in git, so it is reviewed, versioned and repeatable. The agents stay agents; the workflow
-  around them becomes code.
+<p align="center">
+  <img src="assets/intro.png" width="860" alt="Relentless keeps a loop going: agents do the work, verifiers decide when it is done and send it back with the reason when it is not, and humans decide only where they must">
+</p>
 
-## A first workflow
+## Why Relentless
 
-`examples/hello/` is the smallest useful process: an agent fixes a wrong program, a script verifier and a reviewing
-agent check it, and a human approves.
+- **Agents grade their own homework.** "Done" is whatever the last message said, and it is often wrong.
+- **Long work stalls.** The context fills up, the agent stops one step short, and you end up typing "continue" into a terminal.
+- **Relentless takes "done" out of the agent's hands.** The workflow around the agent is code: verifiers the agent can't run
+  or edit decide, a verifier that isn't met sends its reason back for another attempt, and a human approves only where it matters.
+
+## Features
+
+A workflow is steps in order. Inside a step, an agent works, Relentless runs the verifiers, and the work is kept only when they are all met:
+
+<p align="center">
+  <img src="assets/workflow.png" width="900" alt="A workflow is steps in order; inside a step an agent works in a fresh session, Relentless runs the verifiers, and the work is kept only when they are all met, otherwise the reason goes back and a new session starts">
+</p>
+
+- **Verifiers decide.** Scripts, rubrics for an agent to grade, metrics such as complexity and coverage, and conditions like
+  `done_if: "tests AND docs"`. They are committed in git, and a change a worker makes to one is rolled back.
+- **A loop, a workflow or a Rust program.** A loop (`rlt run`) repeats one job; a workflow file (`rlt process`) has phases,
+  steps, human checkpoints and `each` over a list; Rust allows any control flow.
+- **A fresh session for every attempt**, on its own git branch: kept when verified, rolled back when not. No context rot.
+- **Humans where they must.** A checkpoint waits for an answer (`rlt answer`, or the web UI), and what the human decides goes
+  back to the step that wrote the document.
+- **Parallel by design.** Items, or different steps, at once, each in a worktree of its own: on this machine, over ssh or in
+  containers. In Rust, `fork()` and `merge()` with rayon or plain threads.
+- **Any agent.** Claude Code, Codex and Copilot CLI; Gemini, OpenCode, Qwen Code and Pi (experimental); or any CLI you describe
+  in a few lines.
+- **Resume from anywhere.** Every call is recorded: a crash, a stop or a rate limit costs no tokens to continue from.
+- **Ladders and a task force.** A cheap agent first, a stronger one when it fails; a failed step has its cause found and
+  repaired, is re-entered at an earlier step, or goes to a human.
+- **Confined.** Per step: the agent's own permissions, an OS sandbox, or a container with an egress allow-list; paths a worker
+  may read but never change.
+- **Testable without tokens.** Scenarios play a whole workflow with scripted agents.
+- **Observable.** A live TUI, a web UI with the workflow map, reports and timelines, `rlt status --json`.
+
+## How it works
+
+**The problem.** You ask an agent to make the failing tests pass. It edits some files and says *done*, and two tests still
+fail. Or it runs out of context halfway, and you type "continue" until you give up. Nobody checks the agent's word, and nobody
+keeps it going.
+
+**The solution.** Put a workflow around the agent. Relentless starts it in a fresh session on its own git branch, then **runs
+the verifiers itself**: the agent can't run or edit them. A verifier that isn't met sends its reason back for another attempt,
+and the work is kept only when every verifier is met. Where a human should look (a design, a release), a checkpoint waits for
+an answer. Steps chain into a workflow, and the workflow ends only when it is truly done.
+
+### Your first workflow
+
+A project has a bug: `add.py` should print the sum of 1 and 2, and it prints 2. The job: have an agent fix it, **prove** that it
+is fixed, and let a human approve.
+
+```
+my-project/
+  add.py                  print(1 + 2 - 1)               # wrong on purpose
+  tools.yaml              worker: claude · critic: codex  # which agent works, which one reviews
+workflow/
+  process.yaml            the workflow, below
+  prompts/fix.md          what the agent is told: "Fix add.py so that python3 add.py prints 3. Change only add.py."
+  verifiers/tests.sh      the verifier, below
+  verifiers/fix-review.md the rubric the reviewing agent grades against
+```
+
+The verifier is a script that runs the program and prints a verdict as its last line. This is all a verifier needs to be:
+
+```sh
+#!/bin/sh
+# A script verifier: it runs the program and prints one JSON line, the verdict. Relentless runs it, never the agent.
+out=$(python3 add.py 2>&1)
+if [ "$out" = "3" ]; then
+  printf '{"met": true, "rationale": "add.py prints 3"}\n'
+else
+  printf '{"met": false, "rationale": "add.py printed: %s (expected 3)"}\n' "$out"
+fi
+```
+
+**In YAML.** One agent step that must meet the verifier and pass a review by a second agent, then a checkpoint where you
+approve (`examples/hello/process.yaml`):
 
 ```yaml
-# examples/hello/process.yaml
 version: 1
-roles: { file: tools.yaml }          # in the project: which agent works, which one reviews
+roles: { file: tools.yaml }          # in the project: which agent works (the worker) and which one reviews (the critic)
+run: { history: reports/steps.jsonl }   # the record of what ran, kept in git
 phases:
 - id: build
   name: Build
   steps:
   - id: fix
-    name: Fix add
-    kind: agent
-    review: true                     # a second agent grades the result against verifiers/fix-review.md
-    checks: [verifiers/tests.sh]     # a script verifier: its last line is {"met": …, "rationale": …}
-    settings: { inputs: [task.md, cp-fix-decisions.md], outputs: [add.py] }
-  - { id: cp-fix, name: Fix approved, kind: checkpoint, doc: add.py,
-      question: "{{ cp.cp-fix }}: approve {{ step.fix }}?", owner: fix }
+    name: Fix add.py
+    kind: agent                        # the agent is told what to do by prompts/fix.md
+    verifiers: [verifiers/tests.sh]    # must be met: a script whose last output line is {"met": …, "rationale": …}
+    review: true                       # a second agent grades the result against verifiers/fix-review.md
+  - id: approve
+    name: Human approval
+    kind: checkpoint
+    doc: add.py                        # what the human reads
+    question: "Approve the fix to add.py?"
 ```
-
-Run it on a project (a git repository holding `task.md`, `add.py` and `tools.yaml`; copy `examples/hello/projects/demo`):
 
 ```bash
-rlt process examples/hello/process.yaml path/to/project
+rlt process workflow/process.yaml my-project
 ```
 
-The agent works in a fresh session on its own branch. Then Relentless runs `verifiers/tests.sh` itself. A verifier that
-isn't met goes back to the agent with its reason, and the work is not kept until the checks pass. A second agent
-reviews. The run then stops at the checkpoint and waits for your answer (`rlt answer`, or the web UI).
+The agent works in a fresh session on its own branch. Then Relentless runs `verifiers/tests.sh` itself; if it isn't met, the
+reason goes back to the agent for another attempt, and the work is not kept until it is. A second agent reviews. Then the run
+stops at the checkpoint, shows you `add.py`, and waits for your answer (`rlt answer`, or the web UI).
 
-**Try it without tokens.** A scenario plays the same process with scripted agents:
+The simplest form is a loop: `rlt run` starts a fresh agent session per lap until the verifiers named by `done_if` are met.
+
+```yaml
+# rlt/rlt.yaml
+project: "demo"
+steps: { worker: {} }
+sequence: { steps: [worker], done_if: "tests" }     # rlt/verifiers/tests.sh, as above
+```
+
+**In Rust.** YAML is enough for most workflows: steps in order, a list of items, human checkpoints, parallel lanes, ladders.
+What it can't say is control flow that depends on results: run the slow verifier only when three cheap ones pass, try three
+approaches and keep the best, repeat until a metric stops improving. For that, write the same workflow as a Rust program
+against the same engine (`examples/fix_add.rs`):
+
+```rust
+use relentless::prelude::*;
+
+fn main() -> std::process::ExitCode {
+    relentless::driver::run(|| {
+        let rlt = Relentless::open(".")?;
+        let tests = Verifier::script("tests", "rlt/verifiers/tests.sh");
+        let fix = Step::new("fix").prompt("Read task.md and fix add.py. Change nothing else.");
+
+        let mut news = "This is the first attempt.".to_string();
+        for attempt in 1..=5 {
+            rlt.check_limits()?;
+            rlt.step(&fix.clone().news(news))?;      // a fresh agent session, staged on its own branch
+            let verdict = rlt.verifier(&tests);      // Relentless runs the verifier, never the agent
+            if verdict.met() {
+                rlt.gate()?;                         // keep the work: merge the branch
+                let approved = rlt.hil_bool("add.py is fixed. Approve?")?;   // a human decides
+                println!("approved: {approved}");
+                return Ok(());
+            }
+            news = format!("Attempt {attempt} did not pass: {}", verdict.rationale);   // the reason goes back
+        }
+        rlt.block("add.py is still wrong after five attempts: a human is needed")?;
+        Ok(())
+    })
+}
+```
+
+Same verifiers, same fresh sessions, same resume, same checkpoints and same observability: Rust adds `if`, `for`, `&&` and any
+library, and `fork()` and `merge()` for work that runs at once ([the Rust API](docs/RUST_API.md)).
+
+**Try it without tokens.** A scenario plays the YAML workflow with scripted agents:
 
 <!-- check -->
 ```bash
@@ -91,14 +214,14 @@ isolation, their verdicts are cached on the content they saw, and the agent neve
 
 → [Writing verifiers](docs/GUIDE.md#building-verifiers) · [full config reference](docs/CONFIG.md)
 
-## Process files
+## Workflow files
 
-A process file (`rlt process`) is a list of phases; each phase is a list of steps of a closed set of kinds:
+A workflow file (`rlt process`) is a list of phases; each phase is a list of steps of a closed set of kinds:
 
 | Kind | What it does |
 |---|---|
 | `script` | runs a command; its verdict is the step's |
-| `agent` | an agent's task, with `checks` (verifiers), a `review` (a critic agent) and repairs |
+| `agent` | an agent's task, with `verifiers`, a `review` (a critic agent) and repairs |
 | `checkpoint` | a human approves a document; their decisions go back to the step that wrote it |
 | `each` | the same steps once per item of a list (at once with `parallel:`) |
 | `parallel` | different steps at once, each as a lane in a worktree of its own |
@@ -106,14 +229,14 @@ A process file (`rlt process`) is a list of phases; each phase is a list of step
 
 Around the steps: **ladders** (a cheap agent first, a stronger one when the cheap one fails), a **task force** that
 finds the cause of a failed step and repairs it in place, re-enters an earlier step or asks a human, **re-entry** with
-a decision, hooks, a verdict cache, and **scenarios** that play the whole process with scripted agents (no tokens) so
+a decision, hooks, a verdict cache, and **scenarios** that play the whole workflow with scripted agents (no tokens) so
 control flow can be tested.
 
-→ [Process files](docs/PROCESS.md) · [`examples/process/`](examples/process/)
+→ [Workflow files](docs/PROCESS.md) · [`examples/process/`](examples/process/)
 
 ## Running it
 
-- `rlt dashboard`: the live TUI. `rlt serve`: a web UI with the process map, open asks, the reviews and the report.
+- `rlt dashboard`: the live TUI. `rlt serve`: a web UI with the workflow map, open asks, the reviews and the report.
 - `rlt process … --report timeline`: what ran, when, and what each step cost.
 - **Resume:** `--resume` continues an interrupted run from its call ledger without re-spending a token. A stop
   (`rlt stop`, Ctrl-C) keeps the work.
@@ -134,7 +257,7 @@ control flow can be tested.
 a lane in a worktree of its own, joined in order, on this machine, on another or in a container (`target: { kind: ssh | container |
 command }`). See [PROCESS.md](docs/PROCESS.md#parallel-lanes). In Rust there is no scheduler to learn: `rlt.fork()` gives you an
 instance in its own worktree, you run it with `rayon` or `std::thread`, and `rlt.merge(fork)` brings its work back
-([the Rust API](docs/RUST_API.md#forks-parallel-work)).
+([the Rust API](docs/RUST_API.md#forks-parallel-work), [`examples/forks.rs`](examples/forks.rs)).
 
 A worker's confinement is one of three **isolation** tiers, set per step:
 
@@ -146,45 +269,15 @@ A worker's confinement is one of three **isolation** tiers, set per step:
 
 → [Adding an agent](docs/BACKENDS.md) · [isolation](docs/CONFIG.md)
 
-## Drive it from Rust
-
-When the flow has to branch (skip a step on a verdict, or not run a slow verifier until three cheap ones pass), write
-it as a Rust program against the same engine:
-
-```rust
-let rlt = Relentless::open(".")?.limits(limits).on_regression(OnRegression::Rollback);
-for _ in 1..=20 {
-    rlt.check_limits()?;
-    rlt.step(&implement)?;                    // stages on a session branch; nothing merged yet
-    if !(rlt.verifier(&tests).met() && rlt.verifier(&load).met()) {
-        continue;                             // `&&` is the cost gate: `load` never runs on a red build
-    }
-    rlt.gate()?;                              // land the whole span, or discard it
-}
-```
-
-Work that can run at once is plain Rust too. `fork()` gives an instance of the engine in a worktree of its own, you run it with
-`rayon` or `std::thread`, and `merge()` brings its work back:
-
-```rust
-let (guide, slides) = (rlt.fork()?, rlt.fork()?);
-let (a, b) = rayon::join(|| guide.step(&write_guide), || slides.step(&write_slides));
-a?; b?;
-rlt.merge(guide)?;
-rlt.merge(slides)?;
-```
-
-→ [The Rust driver API](docs/RUST_API.md) · [`examples/workflow.rs`](examples/workflow.rs) · [`examples/forks.rs`](examples/forks.rs)
-
 ## Learn more
 
 | | |
 |---|---|
 | [docs/README.md](docs/README.md) | the map of the docs |
 | [docs/GUIDE.md](docs/GUIDE.md) | the full walkthrough |
-| [docs/PROCESS.md](docs/PROCESS.md) | process files: steps, checks, ladders, the task force, scenarios |
+| [docs/PROCESS.md](docs/PROCESS.md) | workflow files: steps, verifiers, ladders, the task force, scenarios |
 | [docs/CONFIG.md](docs/CONFIG.md) | every `rlt.yaml` key, and what a verifier may write |
-| [docs/RUST_API.md](docs/RUST_API.md) | the driver API and resume |
+| [docs/RUST_API.md](docs/RUST_API.md) | the Rust API: steps, verifiers, forks, resume |
 | [docs/BACKENDS.md](docs/BACKENDS.md) | adding an agent backend |
 | [docs/CONCEPTS.md](docs/CONCEPTS.md) | the ideas behind it |
 | [AGENTS.md](AGENTS.md) | the reference for an agent working on this repository |

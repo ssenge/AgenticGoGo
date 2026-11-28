@@ -24,7 +24,7 @@ phases:
       name: Make one unit
       kind: agent
       sections: [{ text: "ITEM={{ item }}" }]   # the brief names the unit this lane makes
-      checks: [verifiers/made.sh]    # runs in the lane, with RLT_ITEM set
+      verifiers: [verifiers/made.sh]    # runs in the lane, with RLT_ITEM set
   - id: collect
     name: Collect the units
     kind: script

@@ -1,5 +1,5 @@
 //! The verifiers a process file declares under `verifiers:` (A-38): each made into a verifier, and the problems of its
-//! shape. A step's `checks` name them as `{ verifier: <name> }`, the hooks files too.
+//! shape. A step's `verifiers` name them as `{ verifier: <name> }`, the hooks files too.
 
 use std::collections::BTreeMap;
 use std::path::Path;

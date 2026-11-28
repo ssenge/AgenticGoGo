@@ -24,7 +24,7 @@ fn long_version() -> &'static str {
 }
 
 #[derive(Parser)]
-#[command(name = "rlt", version, long_version = long_version(), about = "Relentless - The Agentic Workflow Engine")]
+#[command(name = "rlt", version, long_version = long_version(), about = "Relentless: agents that don't stop until the job is truly done")]
 struct Cli {
     /// project directory (defaults to current dir). `--project` is the same flag, for callers that
     /// name the project they drive from another process (`rlt stop --project <dir>`).

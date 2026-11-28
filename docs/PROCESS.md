@@ -1,6 +1,6 @@
 # Process files — `rlt process`
 
-A **process** is phases of steps. Each step is one of a closed set of kinds: a script, an agent's work verified by checks
+A **workflow** (a process file, run by `rlt process`) is phases of steps. Each step is one of a closed set of kinds: a script, an agent's work verified by verifiers
 and a critic, a human's approval, a loop over a list, an exam. `rlt process <file> <project>` runs it from YAML. It is the
 YAML twin of the Rust driver blocks in [`relentless::workflow`](RUST_API.md#workflow-building-blocks-aggworkflow): every entry
 becomes a call of the block that already exists. **The YAML has no logic of its own** — no expressions, no `if:`, no
@@ -70,7 +70,7 @@ run:
   commit_inputs: { branch: main, message: "Inputs at run start" }   # commit what the project folder holds, before the run
   declared: true                      # check the inputs and outputs steps declare (below)
   scripts_runnable: [scripts-out]     # scripts a step wrote under these folders can run (below)
-verifiers:                               # declared verifiers (below), named by `checks: [{ verifier: <name> }]` and hooks entries
+verifiers:                               # declared verifiers (below), named by `verifiers: [{ verifier: <name> }]` and hooks entries
   tests: { command: "pytest -q", path: [.venv/bin] }
   parse: { metric: { id: syntax.parse_errors, scope: docs }, max: 0 }
 deny: { inputs: [task.md] }           # named write-deny lists
@@ -112,11 +112,11 @@ Every step has `id`, `name`, `kind` and optionally:
 | kind | what runs | keys |
 |---|---|---|
 | `script` | a script step: it does the work and gives the verdict | `run` |
-| `agent` | an agent's task, its checks, its critic, through its ladder | `prompt` (default `<dirs.prompts>/<id>.md`), `checks`, `review` (`true` = `<dirs.reviews>/<id>-review.md`, or a path), `repairs` (default 2), `sections`, `quality`, `on_fail` |
+| `agent` | an agent's task, its verifiers, its critic, through its ladder | `prompt` (default `<dirs.prompts>/<id>.md`), `verifiers`, `review` (`true` = `<dirs.reviews>/<id>-review.md`, or a path), `repairs` (default 2), `sections`, `quality`, `on_fail` |
 | `checkpoint` | a human approves a document | `prepare`, `doc`, `question`, `owner`, `go_live` |
 | `each` | its child steps once per item of a file | `items: { file, list, items, key }`, `parallel`, `steps` |
 | `parallel` | its child steps at once, as lanes | `parallel` (optional), `steps` |
-| `exam` | an examinee, checks, a grader, a repairer, in rounds | see below |
+| `exam` | an examinee, verifiers, a grader, a repairer, in rounds | see below |
 | `outside` | nothing: a step done outside the run, numbered and listed | — |
 | `planned` | nothing: a step not built yet, numbered, in the order (`--until` may name it) | — |
 
@@ -130,9 +130,9 @@ goes through the verifier cache.
 brief is built). A step's own sections are appended to its task (the critic sees them); the run's `brief.sections`, the
 small input files and the project's note are the worker's only.
 
-**`agent`** — an agent step in order: a refresh whose `settings.inputs` didn't change is `unchanged` without a session;
+**`agent`** — (`verifiers` was called `checks` before 0.6.0; the old key is still read.) An agent step in order: a refresh whose `settings.inputs` didn't change is `unchanged` without a session;
 `settings.first` does what it can; the worker's brief gets what is new first, then the task, the sections, the critic's
-rubric and the checks; the checks, then the critic. A critic's point left after its round is kept for the next
+rubric and the verifiers; the verifiers, then the critic. A critic's point left after its round is kept for the next
 checkpoint (`run.open_points`). `quality: true` adds rlt's score verifier on the files changed since the step's base. `on_fail`
 runs when the step ends the run unmet, before the error goes on (a deployment it left up is taken down).
 
@@ -280,9 +280,9 @@ path. Lane targets are the supported way to run elsewhere. `rlt doctor --contain
 `examples/parallel/` runs eight units at four lanes without tokens. For parallel work a process file can't express, a Rust driver
 forks the engine ([RUST_API.md](RUST_API.md#forks-parallel-work)).
 
-**`exam`** — `checks` run first each round; `examinee` (`prompt`, `sections`, `deny`) answers on a fresh copy of what it
+**`exam`** — `verifiers` run first each round; `examinee` (`prompt`, `sections`, `deny`) answers on a fresh copy of what it
 may read; `answers` is a check of its result; `grader` is a rubric; `repairer` fixes what the round found (and gets the
-checks to run and a disputes file); `fresh` lists files removed before each round; `findings_ids: { file, lists }` tells
+verifiers to run and a disputes file); `fresh` lists files removed before each round; `findings_ids: { file, lists }` tells
 rounds apart by the ids a verdict names (the same set twice is a stall: the step fails); `rounds` (default 5);
 `dispute: { reenter: <id> }` sends the run to that step once when the repairer disputes a finding; a second dispute fails.
 
@@ -298,14 +298,14 @@ are errors; every id and name it uses must exist in the process.
 
 A **ladder** is the step's tiers, first to last: `{ mode: once | dcr | dccr | converge, model, effort, agent, repairs, max }`,
 `{ tool: <name> }` (runs `ladder.tool_run`; a verdict with `value: 0` means no tool applied: recorded `n/a`) or `agent`
-(a cheap agent picks the next tier). The first tier that meets the step's checks and critic ends it; the last fails into
+(a cheap agent picks the next tier). The first tier that meets the step's verifiers and critic ends it; the last fails into
 the task force. A re-entry with a note starts one tier higher.
 
 ### The task force, hooks, the cache
 
 A failed step goes to the task force (`task_force`): an agent that finds the cause, repairs it in place or proposes a
 re-entry (`reenter`, an id) or escalates. The limit holds per failed step and survives restarts; a spent limit exits **6**.
-`trust` rules let a proposal go ahead without a human. **`checks`** are commands run like a step's checks (in the project, a
+`trust` rules let a proposal go ahead without a human. **`checks`** are commands run like a step's verifiers (in the project, a
 verdict JSON as the last line) after a repair in place that met the failed step again; they get `RLT_STEP` (the failed
 step's id), `RLT_STEP_KEY`, `RLT_STEP_LABEL`, `RLT_PROCESS_HOME` and `RLT_FIX_BASE` (the commit before the repair; across
 attempts at one failure, the commit before the first). An unmet verdict means the repair is not accepted: the attempt
@@ -333,7 +333,7 @@ ref made before rlt noted the step is not found.
 ### What every run needs (A-38)
 
 - **Declared verifiers** (`verifiers:`): a check or a hooks entry names one as `{ verifier: <name> }`, next to plain commands
-  (`checks: [scripts/check.sh, { verifier: tests }]`, in a hooks file `after: [{ verifier: parse }]`). A declaration is one of
+  (`verifiers: [scripts/check.sh, { verifier: tests }]`, in a hooks file `after: [{ verifier: parse }]`). A declaration is one of
   `rlt.yaml`'s (`docs/CONFIG.md`): a `metric:` or `score:` over swe-metrics with its `max:`/`min:`, or a **`command:`**, a shell
   command run in the project and met when it exits 0 (the last four non-blank lines of its output, at most 400
   characters, are the rationale; `path:` entries go in front of `PATH`, relative to the project). `--check` refuses a

@@ -37,7 +37,7 @@ pub struct Process {
     #[serde(default)]
     pub deny: BTreeMap<String, Vec<String>>,
     /// declared verifiers (A-38): a `metric:` or `score:` over swe-metrics, or a `command:` met by its exit code, by
-    /// name; a step's `checks` and the hooks files name them as `{ verifier: <name> }`
+    /// name; a step's `verifiers` and the hooks files name them as `{ verifier: <name> }`
     #[serde(default)]
     pub verifiers: BTreeMap<String, crate::core::config::VerifierOverride>,
     #[serde(default)]
@@ -466,7 +466,8 @@ pub struct Step {
     // agent
     #[serde(default)]
     pub prompt: Option<String>,
-    #[serde(default)]
+    /// the verifiers the step must meet: scripts, or declared ones by name (`checks` is the key's old name, still read)
+    #[serde(default, rename = "verifiers", alias = "checks")]
     pub checks: Vec<Check>,
     #[serde(default)]
     pub review: Option<Review>,
@@ -744,11 +745,11 @@ mod tests {
         assert!(Process::parse(&text.replace("version: 1", "version: 2")).is_err());
     }
 
-    /// The forms of `when`, `checks` and `review`.
+    /// The forms of `when`, `verifiers` and `review`.
     #[test]
     fn the_short_forms_parse() {
         let step: Step = serde_yaml::from_str("{ id: s, name: S, kind: agent, when: [a, b], review: true, \
-            checks: [x.sh, { run: y.sh, when: last }] }").unwrap();
+            verifiers: [x.sh, { run: y.sh, when: last }] }").unwrap();
         assert_eq!(step.when.unwrap().all(), ["a", "b"]);
         assert!(matches!(step.review, Some(Review::On(true))));
         assert!(!step.checks[0].last_only() && step.checks[1].last_only() && step.checks[1].command() == Some("y.sh"));
@@ -756,12 +757,21 @@ mod tests {
         assert_eq!(one.when.unwrap().all(), ["x"]);
     }
 
+    /// `checks` is the old name of a step's `verifiers`: a file that still says it parses to the same step.
+    #[test]
+    fn checks_is_still_read_as_verifiers() {
+        let old: Step = serde_yaml::from_str("{ id: s, name: S, kind: agent, checks: [x.sh] }").unwrap();
+        let new: Step = serde_yaml::from_str("{ id: s, name: S, kind: agent, verifiers: [x.sh] }").unwrap();
+        assert_eq!((old.checks.len(), new.checks.len()), (1, 1));
+        assert!(serde_yaml::from_str::<Step>("{ id: s, name: S, kind: agent, verifiers: [x.sh], checks: [y.sh] }").is_err(), "both is a duplicate");
+    }
+
     /// A check names a declared verifier, alone or with `when: last`; an unknown key of it is refused.
     #[test]
     fn a_check_can_name_a_declared_verifier() {
-        let step: Step = serde_yaml::from_str("{ id: s, name: S, kind: agent, checks: [{ verifier: tests }, { verifier: p, when: last }] }").unwrap();
+        let step: Step = serde_yaml::from_str("{ id: s, name: S, kind: agent, verifiers: [{ verifier: tests }, { verifier: p, when: last }] }").unwrap();
         assert_eq!((step.checks[0].verifier(), step.checks[0].command()), (Some("tests"), None));
         assert!(step.checks[1].last_only() && !step.checks[0].last_only());
-        assert!(serde_yaml::from_str::<Step>("{ id: s, name: S, kind: agent, checks: [{ verifier: t, run: x }] }").is_err());
+        assert!(serde_yaml::from_str::<Step>("{ id: s, name: S, kind: agent, verifiers: [{ verifier: t, run: x }] }").is_err());
     }
 }

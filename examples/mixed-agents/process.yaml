@@ -19,7 +19,7 @@ phases:
     name: Fix add
     kind: agent
     review: true                       # a second agent grades the result against verifiers/fix-review.md
-    checks: [verifiers/tests.sh]       # a script verifier: its last line is {"met": …, "rationale": …}
+    verifiers: [verifiers/tests.sh]       # a script verifier: its last line is {"met": …, "rationale": …}
     settings: { inputs: [task.md, cp-fix-decisions.md], outputs: [add.py] }
   - id: cp-fix
     name: Fix approved

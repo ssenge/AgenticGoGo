@@ -23,12 +23,12 @@ phases:
       name: Write the guide
       kind: agent
       sections: [{ text: "FILE=guide.md" }]     # the brief names the file this lane writes
-      checks: [verifiers/guide-made.sh]
+      verifiers: [verifiers/guide-made.sh]
     - id: slides
       name: Write the slides
       kind: agent
       sections: [{ text: "FILE=slides.md" }]
-      checks: [verifiers/slides-made.sh]
+      verifiers: [verifiers/slides-made.sh]
   - id: collect
     name: Collect the docs
     kind: script
