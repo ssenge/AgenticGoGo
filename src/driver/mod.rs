@@ -32,6 +32,7 @@
 
 mod facade;
 mod fanout;
+pub(crate) mod locked;
 mod group;
 mod step;
 mod types;

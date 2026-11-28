@@ -81,17 +81,17 @@ pub enum End {
     Stop(RunOutcome),
 }
 
-/// A type-keyed bag: one value per Rust type (anymap-style). The loop is single-threaded, so no
-/// Send/Sync needed. This is the generic extension store (LOOPSTATE_REDESIGN §3): rlt's own features
+/// A type-keyed bag: one value per Rust type (anymap-style). Values are `Send + Sync`, so an
+/// instance can move between threads. This is the generic extension store (LOOPSTATE_REDESIGN §3): rlt's own features
 /// use it via `RLTState`/`RLTScratch`, and a third-party plugin stashes ITS OWN type the same way —
 /// `ctx.ext.get::<FooState>()` — without ever editing the core struct.
 #[derive(Default)]
 pub struct Extensions {
-    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any>>,
+    map: std::collections::HashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
 }
 impl Extensions {
     /// Get-or-insert-default this type's slot, typed. How a feature/plugin reads+writes its own state.
-    pub fn get<T: Default + 'static>(&mut self) -> &mut T {
+    pub fn get<T: Default + Send + Sync + 'static>(&mut self) -> &mut T {
         self.map
             .entry(std::any::TypeId::of::<T>())
             .or_insert_with(|| Box::new(T::default()))
@@ -103,7 +103,7 @@ impl Extensions {
     }
 }
 
-pub trait Handler {
+pub trait Handler: Send + Sync {
     fn run(&self, ctx: &mut LoopState) -> Result<Flow>;
     /// Whether this handler runs on a `skip_verifiers` step. Default yes; the verified-merge handlers
     /// override to `false` so a skip step bypasses them (mirrors the old `if !skip`).
@@ -122,7 +122,7 @@ pub trait Handler {
 /// A `pre_start` handler: rlt's run-start git preconditions (recover a stranded merge, require a
 /// clean git repo, ensure `rlt/{state,private}` gitignored, resolve the isolation base branch). Runs before the
 /// loop state exists, so it takes `Bootstrap`, not `LoopState`.
-pub trait PreStart {
+pub trait PreStart: Send + Sync {
     fn run(&self, boot: &mut Bootstrap) -> Result<()>;
 }
 

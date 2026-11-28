@@ -1,6 +1,6 @@
 //! The report on disk: the per-run handle, the stale-report rule, and the atomic write.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ pub struct RunHandle {
     dir: PathBuf,
     run_id: String,
     started_at: u64,
-    written: Cell<bool>,
+    written: std::sync::atomic::AtomicBool,
 }
 
 /// START a run's reporting: delete any previous report, mint a fresh `run_id`, and stamp it into
@@ -54,7 +54,7 @@ pub fn begin_as(dir: &Path, run_id: Option<String>) -> RunHandle {
     if stale > 0 {
         log_line(dir, &format!("rlt run {run_id} withdrew {stale} open ask(s) of the run before"));
     }
-    RunHandle { dir: dir.to_path_buf(), run_id, started_at: crate::util::now_epoch(), written: Cell::new(false) }
+    RunHandle { dir: dir.to_path_buf(), run_id, started_at: crate::util::now_epoch(), written: std::sync::atomic::AtomicBool::new(false) }
 }
 
 impl RunHandle {
@@ -69,13 +69,13 @@ impl RunHandle {
     }
     /// Whether this run's report is already on disk — so a fallback never overwrites a rich one.
     pub fn written(&self) -> bool {
-        self.written.get()
+        self.written.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Write this run's report and log its ending next to the start line.
     pub fn finish(&self, report: &Report) -> std::io::Result<()> {
         write(&self.dir, report)?;
-        self.written.set(true);
+        self.written.store(true, std::sync::atomic::Ordering::SeqCst);
         log_line(
             &self.dir,
             &format!("rlt run {} finished: {:?} (exit {})", self.run_id, report.outcome, report.exit_code),

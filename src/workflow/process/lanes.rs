@@ -240,7 +240,7 @@ fn lane_body(env: &Env, lane: &Lane, item: &Item, services: &Arc<Shared>) -> End
     ended
 }
 
-/// The lane's engine instance, built here on the lane's thread (it is `!Send` by design), and the item's child steps.
+/// The lane's engine instance, built here on the lane's thread, and the item's child steps.
 pub(super) fn steps(env: &Env, lane: &Lane, item: &Item, spec: &Process, (services, existed): (&Arc<Shared>, bool)) -> Result<(), Fatal> {
     let svc: Arc<dyn LaneServices> = services.clone();
     let mut rlt = Relentless::open_with(&lane.dir, Opts { resume: env.resume && existed })?

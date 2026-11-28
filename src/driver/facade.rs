@@ -11,11 +11,12 @@
 //! # Why every call takes `&self`
 //!
 //! A driver holds ONE binding and calls it from inside its own `for`/`if`. `&mut self` would force
-//! the borrow checker into the driver's control flow for no gain: the loop is single-threaded, so
-//! the interior mutability below (`Cell`/`RefCell`/`OnceCell`) is free and invisible.
+//! the borrow checker into the driver's control flow for no gain: one thread works on an instance at a time, so
+//! the interior mutability below (`Slot`/`Locked`/`OnceLock`, locks that are never contended) is free and invisible.
 
 use crate::core::asks::AskCase;
-use std::cell::{Cell, OnceCell, RefCell};
+use super::locked::{Locked, Slot};
+use std::sync::OnceLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,26 +56,26 @@ pub struct Relentless {
     /// discards a crashed session's dirty tree instead of refusing to start (§3.9 rule 2).
     resume: bool,
     /// the deferred run-level setup. `None` until the first spending call.
-    started: OnceCell<Started>,
+    started: OnceLock<Started>,
     /// THE LATCH. Once set, every call is a no-op that spends nothing (BUILD.md §3.3).
-    ended: Cell<Option<RunOutcome>>,
+    ended: Slot<Option<RunOutcome>>,
     /// the ledger cursor (Phase 1).
-    ord: Cell<u64>,
+    ord: Slot<u64>,
     /// the per-STEP lazy verdict cache — what makes `rlt.verifier(&x)` memoized and `&&` a gate.
-    verdicts: RefCell<HashMap<String, Verdict>>,
+    verdicts: Locked<HashMap<String, Verdict>>,
     /// every verdict consulted since the last `gate()`; `gate()` reads and clears it.
-    span: RefCell<HashMap<String, Verdict>>,
+    span: Locked<HashMap<String, Verdict>>,
     /// the verifiers the driver asked BY NAME (`verifier()`) since the last gate — held one by one there.
-    span_direct: RefCell<HashSet<String>>,
+    span_direct: Locked<HashSet<String>>,
     /// the groups asked (`group()`) since the last gate: a member asked only through one is verified
     /// with its group, net (`core::groups`).
-    span_groups: RefCell<BTreeMap<String, Vec<String>>>,
+    span_groups: Locked<BTreeMap<String, Vec<String>>>,
     /// the engine's goal truth as of the moment the open span began — what a rollback restores.
     ///
     /// On this path it is provably EMPTY (§3.6 item 3: the run-set is empty, so the engine has no
     /// goals), and it is carried anyway so the shared keep/rollback body gets the same argument from
     /// both callers rather than a hard-coded `&[]` that would quietly rot if a driver ever grew one.
-    span_goals: RefCell<Vec<GoalRuntime>>,
+    span_goals: Locked<Vec<GoalRuntime>>,
     /// the strongest isolation tier any step of this run has declared — the driver path's answer to
     /// `cfg.run_isolation()`.
     ///
@@ -83,9 +84,9 @@ pub struct Relentless {
     /// unconditionally, and §2.5's "verifiers take the RUN tier" silently meant "verifiers take no tier at
     /// all" — every driver verifier ran unconfined, which is the exact escape §2.5 exists to close.
     /// Proven by a real-kernel test that watched a driver's verifier write outside the project.
-    iso_seen: Cell<crate::isolation::Isolation>,
+    iso_seen: Slot<crate::isolation::Isolation>,
     /// the label path — see [`Relentless::pos`].
-    pos: RefCell<Vec<PosItem>>,
+    pos: Locked<Vec<PosItem>>,
     /// the run's lane services and this instance's lane key, when it is one of several lanes of a run (`None`: an ordinary run)
     lane: Option<(std::sync::Arc<dyn crate::lanes::LaneServices>, String)>,
     /// the name of an [`Agent::Custom`] handed to [`Relentless::verifier_agent`], refused when the run boots:
@@ -131,11 +132,11 @@ impl LaneTemplate {
 
 /// Everything that only exists once the run-level setup has run.
 ///
-/// A `OnceCell` is what makes the builder-shaped `open()` honest: before the first spending call
+/// A `OnceLock` is what makes the builder-shaped `open()` honest: before the first spending call
 /// there IS no `LoopState`, no `Lifecycle` and no guards, and the struct says so instead of
 /// declaring always-present fields that cannot be constructed until the chain is complete.
 struct Started {
-    st: RefCell<LoopState>,
+    st: Locked<LoopState>,
     lc: Lifecycle,
     /// the recorded calls a resume fast-forwards through, already truncated to the last KEPT gate.
     ///
@@ -194,16 +195,16 @@ impl Relentless {
             cfg,
             dir,
             resume: opts.resume,
-            started: OnceCell::new(),
-            ended: Cell::new(None),
-            ord: Cell::new(0),
-            verdicts: RefCell::new(HashMap::new()),
-            span: RefCell::new(HashMap::new()),
-            span_direct: RefCell::new(HashSet::new()),
-            span_groups: RefCell::new(BTreeMap::new()),
-            span_goals: RefCell::new(Vec::new()),
-            iso_seen: Cell::new(crate::isolation::Isolation::None),
-            pos: RefCell::new(Vec::new()),
+            started: OnceLock::new(),
+            ended: Slot::new(None),
+            ord: Slot::new(0),
+            verdicts: Locked::new(HashMap::new()),
+            span: Locked::new(HashMap::new()),
+            span_direct: Locked::new(HashSet::new()),
+            span_groups: Locked::new(BTreeMap::new()),
+            span_goals: Locked::new(Vec::new()),
+            iso_seen: Slot::new(crate::isolation::Isolation::None),
+            pos: Locked::new(Vec::new()),
             custom_ruler: None,
             lane: None,
             memory: true,
@@ -654,7 +655,7 @@ impl Relentless {
         }
 
         Ok(Started {
-            st: RefCell::new(st),
+            st: Locked::new(st),
             lc: lifecycle,
             replay,
             _stop: stop_hooks,
@@ -1104,7 +1105,7 @@ impl Relentless {
         if by_name {
             self.span_direct.borrow_mut().insert(j.name.clone());
         }
-        let lazy = Lazy { rlt: self, asking: RefCell::new(Vec::new()) };
+        let lazy = Lazy { rlt: self, asking: Locked::new(Vec::new()) };
         lazy.verdict_for(j)
     }
 
@@ -1297,7 +1298,7 @@ impl Relentless {
 /// intact.
 struct Lazy<'a> {
     rlt: &'a Relentless,
-    asking: RefCell<Vec<String>>,
+    asking: Locked<Vec<String>>,
 }
 
 impl VerifierSource for Lazy<'_> {
@@ -1751,7 +1752,7 @@ struct PosItem {
 /// with no `pos` shows NO counter — never a wrong one.
 pub struct PosFrame<'a> {
     id: u64,
-    frames: &'a RefCell<Vec<PosItem>>,
+    frames: &'a Locked<Vec<PosItem>>,
 }
 
 impl PosFrame<'_> {
@@ -2015,7 +2016,7 @@ fn default_wording(outcome: RunOutcome, n: u32) -> (String, &'static str) {
 impl Drop for Relentless {
     fn drop(&mut self) {
         // ⚠ ONE `eprintln!` AND NOTHING ELSE while unwinding. A panic inside `Drop` aborts the
-        // process, and the frame that panicked may well have been holding the `RefCell` — so a
+        // process, and the frame that panicked may well have been holding a `Locked` cell — so a
         // `borrow_mut()` here would BE that second panic. The ledger already carries a pessimistic
         // `crashed` end_reason from `RunLedger::begin` and stamps the end time in its own `Drop`, so
         // the run is still recorded as failed without rlt touching anything.
@@ -2028,7 +2029,7 @@ impl Drop for Relentless {
         };
         // `try_borrow_mut` and not `borrow_mut`: a Drop that panics is strictly worse than a Drop
         // that silently skips a report, and nothing else can be holding this borrow here.
-        let Ok(mut st) = started.st.try_borrow_mut() else { return };
+        let Some(mut st) = started.st.try_borrow_mut() else { return };
 
         // the ungated span, named, with the command that lands it. ⛔ Never auto-merged (rlt must not
         // make a call it was not given) and never auto-rolled-back (discarding an overnight run over a
