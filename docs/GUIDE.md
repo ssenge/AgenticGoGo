@@ -873,3 +873,8 @@ the `done_if` / `abort_if` / `notify_if` grammar are all documented in
   minute, plus a walkthrough that drives a project to "all tests pass".
 - **[`examples/p-vs-np/`](../examples/p-vs-np/)** — the showcase: every feature aimed at one famous
   problem, with a Lean proof checker as the incorruptible verifier.
+- **[`examples/mixed-agents/`](../examples/mixed-agents/)** — a process whose worker is a command agent (any CLI, described in YAML)
+  and whose reviewer is Claude; plays without tokens.
+- **[`examples/parallel/`](../examples/parallel/)** — eight units at four lanes, joined in item order; plays without tokens.
+  [`examples/fanout.rs`](../examples/fanout.rs) is the same for a Rust driver, and
+  [`examples/remote-session/`](../examples/remote-session/) runs a step on another machine over ssh.
