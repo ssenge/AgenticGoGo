@@ -12,7 +12,7 @@ Notable changes to Relentless (called AgenticGoGo, binary `agg`, up to 0.0.51; t
   discarded and its branch kept. The parallelism is plain Rust: `rayon::join`, `std::thread::scope`, a thread pool; the best of
   several tries and a lane that starts lanes are ordinary code. A fork shares the run's bus (`stop`, `pause`, `resume`, `wake` and
   `inject` reach every fork), its asks (`[fork <name>]`, answered with `rlt answer`), its lane views and its spend (the run's
-  `limits` count every fork, and survive a resume); a fork resumes from its saved ledger (`rlt/private/forks/`). One thread works on
+  `limits` count every fork, and survive a resume; the run's report adds up what they reported); a fork resumes from its saved ledger (`rlt/private/forks/`). One thread works on
   an instance at a time (a second one panics and says to fork); an instance carries its variables and settings to the thread that
   runs it. `Relentless::fork_seed` copies ignored paths into every worktree. Ledger records `fork`, `merge` and `settled`. See
   `docs/RUST_API.md`, "Forks", and `examples/forks.rs`.

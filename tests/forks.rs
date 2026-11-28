@@ -126,18 +126,14 @@ fn forks_overlap_under_rayon() {
     let d = project();
     let mut rlt = Relentless::open(d.path()).unwrap();
     let (a, b) = (rlt.fork().unwrap(), rlt.fork().unwrap());
-    let started = Instant::now();
-    rayon::join(
-        || {
-            make(&a, "a.txt");
-            std::thread::sleep(Duration::from_millis(900));
-        },
-        || {
-            make(&b, "b.txt");
-            std::thread::sleep(Duration::from_millis(900));
-        },
-    );
-    assert!(started.elapsed() < Duration::from_millis(1700), "ran at once, not one after the other: {:?}", started.elapsed());
+    let work = |fork: &Relentless, file: &str| {
+        let from = Instant::now();
+        make(fork, file);
+        std::thread::sleep(Duration::from_millis(900));
+        (from, Instant::now())
+    };
+    let (one, two) = rayon::join(|| work(&a, "a.txt"), || work(&b, "b.txt"));
+    assert!(one.0 < two.1 && two.0 < one.1, "the two pieces of work overlapped: {one:?} {two:?}");
     rlt.merge(a).unwrap();
     rlt.merge(b).unwrap();
     assert!(d.path().join("a.txt").is_file() && d.path().join("b.txt").is_file());
@@ -440,4 +436,26 @@ fn a_resumed_run_counts_what_its_forks_spent_before() {
     let mut rlt = Relentless::open_with(d.path(), Opts { resume: true }).unwrap().limits(Limits { cost: Some(0.005), ..Limits::default() });
     let _fork = rlt.fork().unwrap();
     assert!(matches!(rlt.check_limits(), Err(Fatal::Ended(RunOutcome::Halt))), "the fork's 0.01 from before is spent");
+}
+
+/// What the forks reported is in the run's report: its usage totals add up the forks' calls (found by a real run, whose root
+/// report said `unknown`).
+#[test]
+fn the_runs_report_adds_up_what_its_forks_reported() {
+    let d = project();
+    {
+        let mut rlt = Relentless::open(d.path()).unwrap();
+        let (a, b) = (rlt.fork().unwrap(), rlt.fork().unwrap());
+        a.step(&work()).unwrap();
+        a.gate().unwrap();
+        b.step(&work()).unwrap();
+        b.gate().unwrap();
+        rlt.merge(a).unwrap();
+        rlt.merge(b).unwrap();
+    }
+    let report: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.path().join("rlt/private/report.json")).unwrap()).unwrap();
+    let total = &report["usage"]["total"];
+    assert!(total["tokens"]["output"].as_u64().unwrap_or(0) >= 2, "{total}");
+    assert!(total["cost_usd"].as_f64().unwrap_or(0.0) >= 0.02 - 1e-9, "{total}");
+    assert_eq!(report["session_log"].as_array().unwrap().iter().filter(|s| s["step"] == "forks").count(), 1, "the forks are one line of the session log");
 }

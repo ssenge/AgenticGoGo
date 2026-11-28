@@ -134,7 +134,7 @@ impl LoopState {
             self.cost_spent += c;
         }
         if let Some((lane, key)) = &self.lane {
-            lane.charge(key, output, (u.cost_usd.unwrap_or(0.0).max(0.0) * 1_000_000.0).round() as u64);
+            lane.charge(key, role, agent, u);
         }
         self.charge(agent, output, u.cost_usd);
         let step = self.cur_step.as_ref().map(|s| s.name.clone()).unwrap_or_default();

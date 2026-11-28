@@ -2178,6 +2178,11 @@ impl Relentless {
             let (tokens, cost) = forks.spent();
             st.tokens_spent += tokens;
             st.cost_spent += cost;
+            // what the forks reported joins the run's usage, as a session of its own
+            let session = st.session + 1;
+            for (role, agent, usage) in forks.calls() {
+                st.ext.get::<crate::usage::Ledger>().record(session, "forks", role, &agent, &usage);
+            }
         }
         // the report, from the state the run ended in — before `on_stop` fires, as on the YAML path.
         // A driver that returns `Err` reads as `done` here; `driver::run` amends it to `error`.

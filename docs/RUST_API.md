@@ -510,7 +510,8 @@ for f in forks { rlt.merge(f)?; }
 5. **One run, seen from outside.** `rlt stop`, `pause`, `resume`, `wake` and `inject` sent to the run reach every fork (each applies
    them at its next boundary, as a run does); a fork's `hil_*` and `block` questions are in the run's list of asks, marked
    `[fork <name>]`, so `rlt answer` and `rlt status` see them; `rlt/private/lanes.json` (shown by `rlt status`) lists the forks. What
-   the forks spend counts toward the run's `limits` and a rate limit one meets holds back the others.
+   the forks spend counts toward the run's `limits`, a rate limit one meets holds back the others, and the run's report adds up what
+   the forks reported (one line, step `forks`, in its `session_log`).
 6. **Resume.** A fork that was merged or dropped replays from its saved ledger (`rlt/private/forks/<name>/`) with no agent call; one
    that was still running continues after its last kept gate. The forks' spend is kept in `rlt/private/forks/spend.json`, so a
    resumed run's ceilings count what they spent before; work run again after a resume counts twice, which errs on the safe side.

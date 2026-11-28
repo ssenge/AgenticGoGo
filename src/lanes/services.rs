@@ -70,6 +70,8 @@ pub struct Shared {
     live: Mutex<BTreeMap<String, PathBuf>>,
     /// one fork drains the run's bus at a time
     drain: Mutex<()>,
+    /// every call the forks made, summed by (role, agent, model): what the run's report adds to its own usage
+    calls: Mutex<Vec<(crate::usage::Role, String, crate::usage::Usage)>>,
     /// commands the forks drained from the run's bus that the run itself has not seen yet
     root_inbox: Mutex<Vec<crate::bus::Command>>,
     /// the run's list of asks is written by one fork at a time (an id is minted from what it holds)
@@ -90,6 +92,7 @@ impl Shared {
             root: OnceLock::new(),
             live: Mutex::new(BTreeMap::new()),
             drain: Mutex::new(()),
+            calls: Mutex::new(Vec::new()),
             root_inbox: Mutex::new(Vec::new()),
             asks: Mutex::new(()),
         })
@@ -178,9 +181,26 @@ impl Shared {
         self.opened.notify_all();
     }
 
+    /// A call lane `key` made: what it reported, for the run's totals and its report, and its spend as [`Shared::spend`].
+    pub fn charge(&self, key: &str, role: crate::usage::Role, agent: &str, usage: &crate::usage::Usage) {
+        {
+            let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+            match calls.iter_mut().find(|(r, a, u)| *r == role && a == agent && u.model == usage.model) {
+                Some((_, _, sum)) => sum.absorb(usage),
+                None => calls.push((role, agent.to_string(), usage.clone())),
+            }
+        }
+        self.spend(key, usage.tokens.output_or_zero(), (usage.cost_usd.unwrap_or(0.0).max(0.0) * 1_000_000.0).round() as u64);
+    }
+
+    /// Every call the forks made, summed by role, agent and model.
+    pub fn calls(&self) -> Vec<(crate::usage::Role, String, crate::usage::Usage)> {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// A session of lane `key` spent this much (output tokens, millionths of a dollar): the run's total, the lane's view, and
     /// the stop when a ceiling is broken.
-    pub fn charge(&self, key: &str, tokens: u64, cost_micros: u64) {
+    pub fn spend(&self, key: &str, tokens: u64, cost_micros: u64) {
         let (t, c) = {
             let mut s = self.spent.lock().unwrap_or_else(|e| e.into_inner());
             s.0 += tokens;
@@ -310,12 +330,12 @@ mod tests {
         assert_eq!(s.stop_reason().as_deref(), Some("the operator"));
         assert!(s.ceiling_hit().is_none(), "a stop of the operator's is no ceiling");
         let c = Shared::new(Limits { tokens: Some(100), cost: Some(1.0) });
-        c.charge("k", 60, 0);
+        c.spend("k", 60, 0);
         assert!(!c.stop_requested());
-        c.charge("k", 60, 0);
+        c.spend("k", 60, 0);
         assert_eq!(c.ceiling_hit().as_deref(), Some("limits.tokens: 120/100"));
         let d = Shared::new(Limits { tokens: None, cost: Some(0.5) });
-        d.charge("k", 1, 600_000);
+        d.spend("k", 1, 600_000);
         assert!(d.ceiling_hit().unwrap().starts_with("limits.cost"));
     }
 
@@ -325,7 +345,7 @@ mod tests {
         let s = Shared::new(Limits::default());
         std::thread::scope(|sc| {
             for _ in 0..8 {
-                sc.spawn(|| (0..500).for_each(|_| s.charge("k", 2, 1000)));
+                sc.spawn(|| (0..500).for_each(|_| s.spend("k", 2, 1000)));
             }
         });
         let (tokens, cost) = s.spent();
